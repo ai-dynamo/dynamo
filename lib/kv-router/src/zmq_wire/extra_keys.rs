@@ -5,16 +5,60 @@ use crate::protocols::{BlockExtraInfo, BlockMmObjectInfo};
 
 use super::types::ExtraKeyItem;
 
-/// Parse MM hash from extra_keys string:
-/// - Only accept canonical vLLM MM identifiers (64-char hex digest)
-/// - Convert by taking the first 16 hex chars as u64
+// Must match _DYNAMO_CACHE_SALT_PREFIX in components/src/dynamo/vllm/handlers.py.
+const DYNAMO_CACHE_SALT_PREFIX: &str = "dynamo-cache-salt:";
+
+/// Encode a frontend-approved routing hash in the marker form carried through
+/// vLLM `extra_keys`.
+pub fn mark_mm_hash_for_extra_key(mm_hash: u64) -> String {
+    format!("{mm_hash:016x}{}", "0".repeat(48))
+}
+
+/// Parse a frontend-issued Dynamo MM hash from a vLLM extra key.
+///
+/// The worker canonicalizes a frontend-approved routing hash to its first 16
+/// hex characters plus 48 trailing zeroes before submitting it to vLLM. Treat
+/// that padding as an enablement marker: native 64-character vLLM hashes must
+/// not enable worker-side key rewriting when the frontend disabled exact MM
+/// routing for this request.
 pub fn parse_mm_hash_from_extra_key(s: &str) -> Option<u64> {
     // extra_keys mixes MM identifiers with LoRA/cache_salt/prompt-embed metadata.
     // Only MM identifiers should be mapped into BlockExtraInfo.
-    if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+    let bytes = s.as_bytes();
+    if bytes.len() == 64
+        && bytes[..16].iter().all(u8::is_ascii_hexdigit)
+        && bytes[16..].iter().all(|&c| c == b'0')
+    {
         return u64::from_str_radix(&s[..16], 16).ok();
     }
     None
+}
+
+/// Extract a vLLM cache salt from `extra_keys` when a producer does not emit
+/// top-level `cache_salt`. vLLM aligns `extra_keys` with blocks and includes
+/// cache salt only in the first block. Dynamo tags the opaque value before
+/// passing it to vLLM because bare strings are otherwise ambiguous with LoRA
+/// names and legacy multimodal hashes. The first matching LoRA item is skipped
+/// before looking for the tag so a salt equal to the LoRA name still works.
+pub fn extra_keys_to_cache_namespace(
+    extra_keys: Option<&[Option<Vec<ExtraKeyItem>>]>,
+    lora_name: Option<&str>,
+) -> Option<String> {
+    let first_block = extra_keys?.first()?.as_ref()?;
+    let mut unmatched_lora = lora_name.filter(|name| !name.is_empty());
+    first_block.iter().find_map(|key| {
+        let ExtraKeyItem::Hash(value) = key else {
+            return None;
+        };
+        if unmatched_lora.is_some_and(|name| name == value) {
+            unmatched_lora = None;
+            return None;
+        }
+        value
+            .strip_prefix(DYNAMO_CACHE_SALT_PREFIX)
+            .filter(|namespace| !namespace.is_empty())
+            .map(str::to_owned)
+    })
 }
 
 /// Convert vLLM BlockStored extra_keys to block-level MM infos.
@@ -71,4 +115,66 @@ pub fn extra_keys_to_block_mm_infos(
     }
 
     Some(infos)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prompt_embedding_bytes_are_not_cache_namespace() {
+        let extra_keys = [Some(vec![ExtraKeyItem::Bytes(b"prompt-embed".to_vec())])];
+        assert_eq!(extra_keys_to_cache_namespace(Some(&extra_keys), None), None);
+    }
+
+    #[test]
+    fn untagged_strings_are_not_cache_namespaces() {
+        let extra_keys = [Some(vec![ExtraKeyItem::Hash("tenant-a".to_string())])];
+        assert_eq!(extra_keys_to_cache_namespace(Some(&extra_keys), None), None);
+    }
+
+    #[test]
+    fn tagged_cache_namespace_is_decoded() {
+        let extra_keys = [Some(vec![ExtraKeyItem::Hash(
+            "dynamo-cache-salt:tenant-a".to_string(),
+        )])];
+        assert_eq!(
+            extra_keys_to_cache_namespace(Some(&extra_keys), None).as_deref(),
+            Some("tenant-a")
+        );
+    }
+
+    #[test]
+    fn cache_namespace_equal_to_lora_name_is_decoded() {
+        let extra_keys = [Some(vec![
+            ExtraKeyItem::Hash("adapter-a".to_string()),
+            ExtraKeyItem::Hash("dynamo-cache-salt:adapter-a".to_string()),
+        ])];
+        assert_eq!(
+            extra_keys_to_cache_namespace(Some(&extra_keys), Some("adapter-a")).as_deref(),
+            Some("adapter-a")
+        );
+    }
+
+    #[test]
+    fn only_frontend_padded_mm_hashes_are_parsed() {
+        assert_eq!(
+            parse_mm_hash_from_extra_key(&mark_mm_hash_for_extra_key(0x0123_4567_89ab_cdef)),
+            Some(0x0123_4567_89ab_cdef)
+        );
+        assert_eq!(
+            parse_mm_hash_from_extra_key(
+                "0123456789abcdef000000000000000000000000000000000000000000000000"
+            ),
+            Some(0x0123_4567_89ab_cdef)
+        );
+        assert_eq!(
+            parse_mm_hash_from_extra_key(
+                "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210"
+            ),
+            None
+        );
+        assert_eq!(parse_mm_hash_from_extra_key("123"), None);
+        assert_eq!(parse_mm_hash_from_extra_key("not_a_hash"), None);
+    }
 }

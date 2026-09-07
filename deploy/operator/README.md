@@ -22,7 +22,7 @@ Built with [Kubebuilder](https://book.kubebuilder.io/), it follows Kubernetes be
 
 ### Pre-requisites
 
-- [Go](https://go.dev/doc/install) >= 1.25
+- [Go](https://go.dev/doc/install) >= 1.26.3
 - [Kubebuilder](https://book.kubebuilder.io/quick-start.html)
 
 ### Build
@@ -41,7 +41,7 @@ The following tools must be installed and available in your `PATH` before runnin
 
 | Tool | Version | Purpose | Install |
 |------|---------|---------|---------|
-| [Go](https://go.dev/doc/install) | ≥ 1.25 | Compiles the manager binary locally | [go.dev/doc/install](https://go.dev/doc/install) |
+| [Go](https://go.dev/doc/install) | ≥ 1.26.3 | Compiles the manager binary locally | [go.dev/doc/install](https://go.dev/doc/install) |
 | [Tilt](https://docs.tilt.dev/install.html) | latest | Live-reload dev loop orchestrator | [docs.tilt.dev/install](https://docs.tilt.dev/install.html) |
 | [Helm](https://helm.sh/docs/intro/install/) | v3 | Renders the platform Helm chart | [helm.sh/docs/intro/install](https://helm.sh/docs/intro/install/) |
 | [kubectl](https://kubernetes.io/docs/tasks/tools/) | ≥ 1.29 | Applies CRDs and creates the namespace | [kubernetes.io/docs/tasks/tools](https://kubernetes.io/docs/tasks/tools/) |
@@ -88,7 +88,7 @@ Additional settings available in `tilt-settings.yaml`:
 
 ```yaml
 # Infrastructure toggles (control which components are deployed)
-enable_nats: true              # Enable NATS messaging (default: true, required for DGD/DGDR)
+enable_nats: false             # Enable NATS-based transports/features (default: false)
 enable_etcd: false             # Enable etcd service discovery (default: false)
 enable_kai_scheduler: false    # Enable KAI GPU-aware scheduler (default: false)
 enable_grove: false            # Enable Grove orchestrator (default: false)
@@ -103,4 +103,4 @@ operator_version: "0.0.0-dev"  # Override operator version (default: from Chart.
 
 ### Install
 
-See [Dynamo Kubernetes Platform Installation Guide](/docs/kubernetes/installation-guide.md) for installation instructions.
+See [Dynamo Kubernetes Platform Installation Guide](../../docs/fern/pages/kubernetes/installation/install-dynamo.md) for installation instructions.

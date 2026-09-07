@@ -1,0 +1,949 @@
+{
+  "uid": "dynamo-failover",
+  "title": "Dynamo \u00b7 GMS Shadow-Failover",
+  "tags": [
+    "dynamo",
+    "failover",
+    "gms"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": true,
+  "refresh": "5s",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {
+          "text": "Prometheus",
+          "value": "prometheus"
+        },
+        "hide": 0
+      },
+      {
+        "name": "namespace",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "query": "label_values(dynamo_component_engine_failover_state, namespace)",
+          "refId": "ns"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": false,
+        "label": "Namespace",
+        "current": {}
+      },
+      {
+        "name": "dgd",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "query": "label_values(dynamo_component_engine_failover_state{namespace=\"$namespace\"}, dynamo_graph_deployment)",
+          "refId": "dgd"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": false,
+        "label": "DGD (failover deployment)",
+        "current": {}
+      }
+    ]
+  },
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Active engines",
+      "description": "Engines serving now. 1 = healthy, 0 = OUTAGE, >1 = SPLIT-BRAIN.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "count(dynamo_component_engine_failover_state{namespace=\"$namespace\",dynamo_graph_deployment=\"$dgd\",state=\"active\"} == 1) or vector(0)",
+          "legendFormat": "",
+          "range": false,
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 2
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Shadow ready",
+      "description": "Standby reserves. 0 = degraded (one failure from outage).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "count(dynamo_component_engine_failover_state{namespace=\"$namespace\",dynamo_graph_deployment=\"$dgd\",state=\"standby\"} == 1) or vector(0)",
+          "legendFormat": "",
+          "range": false,
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Failovers (range)",
+      "description": "Successful failovers in the selected range (history-based, so a failover by a now-dead engine still counts). Initial bootup excluded.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "round(sum(increase(dynamo_component_engine_failover_switch_success_total{namespace=\"$namespace\",dynamo_graph_deployment=\"$dgd\"}[$__range]))) or vector(0)",
+          "legendFormat": "",
+          "range": false,
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Switch failures (range)",
+      "description": "attempts - success over the range. Note: an attempt that died before its first scrape is never sampled, so pre-scrape failed wakes are seen via k8s restarts.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "clamp_min(round(sum(increase(dynamo_component_engine_failover_switch_attempts_total{namespace=\"$namespace\",dynamo_graph_deployment=\"$dgd\"}[$__range])) - sum(increase(dynamo_component_engine_failover_switch_success_total{namespace=\"$namespace\",dynamo_graph_deployment=\"$dgd\"}[$__range]))), 0) or vector(0)",
+          "legendFormat": "",
+          "range": false,
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Engine state  (0 init \u00b7 1 standby \u00b7 2 waking \u00b7 3 active; gap = dead)",
+      "description": "Per-engine failover state over time. Points show each scrape; a dropped line = a dead engine (series went stale). Read active/standby counts off the top row.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "max without(state) (\n  (dynamo_component_engine_failover_state{namespace=\"$namespace\",dynamo_graph_deployment=\"$dgd\",state=\"init\"} == 1) * 0\n  or (dynamo_component_engine_failover_state{namespace=\"$namespace\",dynamo_graph_deployment=\"$dgd\",state=\"standby\"} == 1) * 1\n  or (dynamo_component_engine_failover_state{namespace=\"$namespace\",dynamo_graph_deployment=\"$dgd\",state=\"waking\"} == 1) * 2\n  or (dynamo_component_engine_failover_state{namespace=\"$namespace\",dynamo_graph_deployment=\"$dgd\",state=\"active\"} == 1) * 3\n)",
+          "legendFormat": "engine {{engine_id}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "always",
+            "pointSize": 6,
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "min": 0,
+          "max": 3,
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "init",
+                  "color": "blue",
+                  "index": 0
+                },
+                "1": {
+                  "text": "standby",
+                  "color": "yellow",
+                  "index": 1
+                },
+                "2": {
+                  "text": "waking",
+                  "color": "orange",
+                  "index": 2
+                },
+                "3": {
+                  "text": "active",
+                  "color": "green",
+                  "index": 3
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Switch attempts vs success",
+      "description": "Failover attempts vs successful completions over the range; the gap is derived failures.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(increase(dynamo_component_engine_failover_switch_attempts_total{namespace=\"$namespace\",dynamo_graph_deployment=\"$dgd\"}[$__range]))",
+          "legendFormat": "attempts",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(increase(dynamo_component_engine_failover_switch_success_total{namespace=\"$namespace\",dynamo_graph_deployment=\"$dgd\"}[$__range]))",
+          "legendFormat": "success",
+          "range": true,
+          "instant": false,
+          "refId": "B"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "always",
+            "pointSize": 6,
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "State transitions (cumulative)",
+      "description": "Every state transition per engine (cumulative count; catches brief ones the line can't sample, e.g. a sub-second waking).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "dynamo_component_engine_failover_transitions_total{namespace=\"$namespace\",dynamo_graph_deployment=\"$dgd\"}",
+          "legendFormat": "",
+          "range": false,
+          "instant": true,
+          "refId": "A",
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "job": true,
+              "instance": true,
+              "container": true,
+              "endpoint": true,
+              "namespace": true,
+              "pod": true,
+              "dynamo_graph_deployment": true,
+              "dynamo_component": true,
+              "model": true
+            },
+            "renameByName": {
+              "engine_id": "engine",
+              "from_state": "from",
+              "to_state": "to",
+              "Value": "count"
+            },
+            "indexByName": {
+              "engine_id": 0,
+              "from_state": 1,
+              "to_state": 2,
+              "Value": 3
+            }
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "count"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 8,
+      "type": "table",
+      "title": "Engine roster  (current state, age)",
+      "description": "Which engine is in which state right now, how long it's held it, and its pod.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 19
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "dynamo_component_engine_failover_state{namespace=\"$namespace\",dynamo_graph_deployment=\"$dgd\"} == 1",
+          "legendFormat": "",
+          "range": false,
+          "instant": true,
+          "refId": "STATE",
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "time() - dynamo_component_engine_failover_state_entered_timestamp_seconds{namespace=\"$namespace\",dynamo_graph_deployment=\"$dgd\"}",
+          "legendFormat": "",
+          "range": false,
+          "instant": true,
+          "refId": "AGE",
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "Value #STATE": true,
+              "job": true,
+              "instance": true,
+              "container": true,
+              "endpoint": true,
+              "dynamo_component": true,
+              "dynamo_graph_deployment": true,
+              "namespace": true
+            },
+            "renameByName": {
+              "engine_id": "engine",
+              "state": "state",
+              "model": "model",
+              "pod": "pod",
+              "Value #AGE": "age (s)"
+            },
+            "indexByName": {
+              "engine_id": 0,
+              "state": 1,
+              "Value #AGE": 2,
+              "pod": 3,
+              "model": 4
+            }
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "age (s)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "k8s container restarts",
+      "description": "Restarts per engine container \u2014 the witness for uncaught kills / crashloops (incl. a failed wake) the engine can't self-report.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 19
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "max by (pod, container) (kube_pod_container_status_restarts_total{namespace=\"$namespace\"} and on(namespace, pod) dynamo_component_engine_failover_state{namespace=\"$namespace\",dynamo_graph_deployment=\"$dgd\"})",
+          "legendFormat": "{{pod}}/{{container}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "always",
+            "pointSize": 6,
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "type": "table",
+      "title": "k8s pod status",
+      "description": "Phase / ready / restart count per pod in the DGD (kube-state-metrics).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 26
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "kube_pod_status_phase{namespace=\"$namespace\"} == 1 and on(namespace, pod) dynamo_component_engine_failover_state{namespace=\"$namespace\",dynamo_graph_deployment=\"$dgd\"}",
+          "legendFormat": "",
+          "range": false,
+          "instant": true,
+          "refId": "PHASE",
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (pod)(kube_pod_container_status_restarts_total{namespace=\"$namespace\"} and on(namespace, pod) dynamo_component_engine_failover_state{namespace=\"$namespace\",dynamo_graph_deployment=\"$dgd\"})",
+          "legendFormat": "",
+          "range": false,
+          "instant": true,
+          "refId": "RST",
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "max by (pod)(kube_pod_container_status_ready{namespace=\"$namespace\"} and on(namespace, pod) dynamo_component_engine_failover_state{namespace=\"$namespace\",dynamo_graph_deployment=\"$dgd\"})",
+          "legendFormat": "",
+          "range": false,
+          "instant": true,
+          "refId": "RDY",
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "Value #PHASE": true,
+              "job": true,
+              "instance": true,
+              "namespace": true,
+              "uid": true,
+              "container": true,
+              "endpoint": true,
+              "service": true,
+              "dynamo_graph_deployment": true,
+              "dynamo_component": true,
+              "model": true,
+              "engine_id": true,
+              "state": true
+            },
+            "renameByName": {
+              "pod": "pod",
+              "phase": "phase",
+              "Value #RST": "restarts",
+              "Value #RDY": "ready"
+            },
+            "indexByName": {
+              "pod": 0,
+              "phase": 1,
+              "Value #RDY": 2,
+              "Value #RST": 3
+            }
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "GPU framebuffer used (DCGM)",
+      "description": "Per-pod GPU framebuffer used for the DGD's pods (device truth; the shared-weights footprint means don't sum engines).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 26
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "DCGM_FI_DEV_FB_USED and on(exported_namespace, exported_pod) label_replace(label_replace(dynamo_component_engine_failover_state{namespace=\"$namespace\",dynamo_graph_deployment=\"$dgd\"}, \"exported_pod\",\"$1\",\"pod\",\"(.+)\"), \"exported_namespace\",\"$1\",\"namespace\",\"(.+)\")",
+          "legendFormat": "{{exported_pod}} gpu{{gpu}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decmbytes",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "auto",
+            "pointSize": 6,
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

@@ -18,10 +18,16 @@ except ImportError:
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from dynamo.common.config_dump import register_encoder
+from dynamo.common.configuration.groups.router_args import (
+    WorkerRouterConfig,
+    parse_worker_router_config,
+    register_worker_router_help,
+)
 from dynamo.common.configuration.groups.runtime_args import (
     DynamoRuntimeArgGroup,
     DynamoRuntimeConfig,
 )
+from dynamo.common.configuration.utils import split_served_model_names
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.vllm.backend_args import DynamoVllmArgGroup, DynamoVllmConfig
 from dynamo.vllm.constants import DisaggregationMode
@@ -40,7 +46,13 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
     request_plane: str
     event_plane: Optional[str] = None
     enable_local_indexer: bool = True
+    # Whether this worker publishes KV events. Distinct from the router-side
+    # `use_kv_events` on `router_advertisement`, which means the router
+    # subscribes to them -- the reason the two live on separate objects.
     use_kv_events: bool
+    # Routing this worker set advertises in its model card; None inherits the
+    # frontend's configuration.
+    router_advertisement: Optional[WorkerRouterConfig] = None
 
     # GMS configuration
     gms_shadow_mode: bool = False
@@ -68,7 +80,6 @@ def parse_args(argv: list[str] | None = None) -> Config:
 
     Args:
         argv: Command-line arguments.  ``None`` means ``sys.argv[1:]``.
-
     Returns:
         Config: Parsed configuration object.
     """
@@ -97,8 +108,17 @@ def parse_args(argv: list[str] | None = None) -> Config:
             continue
         vg._group_actions.append(action)
 
+    # Router advertisement flags are parsed into their own config object rather
+    # than flattened onto Config: the router's --router-kv-events lands on
+    # `use_kv_events`, which Config already uses for "this worker publishes KV
+    # events". Registered here for --help only; parsed below.
+    register_worker_router_help(parser)
+
     args, unknown = parser.parse_known_args(argv)
     dynamo_config = Config.from_cli_args(args)
+
+    # Consume the router flags before the engine parser sees the remainder.
+    dynamo_config.router_advertisement, unknown = parse_worker_router_config(unknown)
 
     # Validate arguments
     dynamo_config.validate()
@@ -117,6 +137,9 @@ def parse_args(argv: list[str] | None = None) -> Config:
     update_engine_config_with_dynamo(dynamo_config, engine_config)
 
     dynamo_config.engine_args = engine_config
+    from .state_agent import validate_state_agent_worker
+
+    validate_state_agent_worker(dynamo_config)
     return dynamo_config
 
 
@@ -155,19 +178,32 @@ def cross_validate_config(
             "Shadow mode depends on GMS for VA-stable weight sharing."
         )
 
+    if dynamo_config.embedding_worker_processes > 1:
+        if engine_config.data_parallel_size != 1:
+            raise ValueError(
+                "--embedding-worker-processes greater than 1 currently requires "
+                "--data-parallel-size=1. The embedding process pool shares one "
+                "local EngineCore."
+            )
+        if engine_config.enable_lora:
+            raise ValueError(
+                "--embedding-worker-processes greater than 1 cannot currently be "
+                "combined with --enable-lora. Runtime LoRA state is not "
+                "synchronized across embedding endpoint processes."
+            )
+
 
 def update_dynamo_config_with_engine(
     dynamo_config: Config, engine_config: AsyncEngineArgs
 ) -> None:
     """Update dynamo_config fields from engine_config and worker flags."""
 
-    if getattr(engine_config, "served_model_name", None) is not None:
-        served = engine_config.served_model_name
-        if len(served) > 1:
-            raise ValueError("We do not support multiple model names.")
-        dynamo_config.served_model_name = served[0]
-    else:
-        dynamo_config.served_model_name = None
+    # vLLM's --served-model-name is nargs="+"; each token may itself pack
+    # several comma-separated names. The first is the primary served name; any
+    # remaining names are registered as aliases for the same worker.
+    served_names = split_served_model_names(engine_config.served_model_name)
+    dynamo_config.served_model_name = served_names[0] if served_names else None
+    dynamo_config.served_model_aliases = served_names[1:]
 
     # Capture user-provided --endpoint before defaults overwrite it
     user_endpoint = dynamo_config.endpoint
@@ -226,16 +262,61 @@ def update_dynamo_config_with_engine(
     dynamo_config.connector = []  # type: ignore[assignment]
 
 
+def _unsupported_fpm_trace_role(dynamo_config: Config) -> Optional[str]:
+    """Return the worker role when trace-based FPM activation is unsupported."""
+    if dynamo_config.embedding_worker:
+        return "embedding"
+    if dynamo_config.classify_worker:
+        return "classify"
+    if dynamo_config.headless:
+        return "headless"
+    if dynamo_config.disaggregation_mode == DisaggregationMode.ENCODE:
+        return "multimodal encode"
+    return None
+
+
+def _forward_pass_metrics_enabled(dynamo_config: Config) -> bool:
+    """Resolve FPM activation without changing the legacy explicit-port path."""
+    if envs.is_set("DYN_FORWARDPASS_METRIC_PORT"):
+        return True
+    if not dynamo_config.fpm_trace:
+        return False
+
+    unsupported_role = _unsupported_fpm_trace_role(dynamo_config)
+    if unsupported_role is None:
+        return True
+
+    logger.warning(
+        "--fpm-trace/DYN_FPM_TRACE is enabled, but vLLM %s workers do not create a Dynamo "
+        "FPM relay. Trace-based FPM activation is disabled for this worker.",
+        unsupported_role,
+    )
+    return False
+
+
 def update_engine_config_with_dynamo(
-    dynamo_config: Config, engine_config: AsyncEngineArgs
+    dynamo_config: Config,
+    engine_config: AsyncEngineArgs,
 ) -> None:
     """Update engine config based on Dynamo config."""
     if engine_config.enable_prefix_caching is None:
-        logger.debug(
-            "--enable-prefix-caching or --no-enable-prefix-caching not specified. "
-            "Defaulting to True (vLLM v1 default behavior)"
-        )
-        engine_config.enable_prefix_caching = True
+        if dynamo_config.embedding_worker or dynamo_config.classify_worker:
+            # Pooling engines never decode, so prefix caching buys nothing —
+            # and force-enabling it crashes models vLLM itself would leave it
+            # off for (e.g. ModernBERT's hybrid local/global attention dies
+            # with "HybridKVCacheCoordinator requires at least two attention
+            # groups"). Match bare `vllm serve`, which does not enable prefix
+            # caching for pooling runners.
+            logger.debug(
+                "Pooling-family worker: defaulting --enable-prefix-caching to False"
+            )
+            engine_config.enable_prefix_caching = False
+        else:
+            logger.debug(
+                "--enable-prefix-caching or --no-enable-prefix-caching not specified. "
+                "Defaulting to True (vLLM v1 default behavior)"
+            )
+            engine_config.enable_prefix_caching = True
 
     if getattr(engine_config, "block_size", None) is None:
         logger.debug(
@@ -258,7 +339,7 @@ def update_engine_config_with_dynamo(
     if hasattr(engine_config, "runner"):
         logger.debug(f"Using runner={engine_config.runner} from engine args")
 
-    kv_cfg = create_kv_events_config(dynamo_config, engine_config)
+    kv_cfg = create_kv_events_config(engine_config)
     defaults["kv_events_config"] = kv_cfg
     dynamo_config.use_kv_events = kv_cfg is not None and kv_cfg.enable_kv_cache_events
 
@@ -267,7 +348,8 @@ def update_engine_config_with_dynamo(
         f"(use_kv_events={dynamo_config.use_kv_events})"
     )
 
-    if envs.is_set("DYN_FORWARDPASS_METRIC_PORT"):
+    fpm_enabled = _forward_pass_metrics_enabled(dynamo_config)
+    if fpm_enabled:
         existing_cls = getattr(engine_config, "scheduler_cls", None)
         if existing_cls is None:
             defaults[
@@ -278,21 +360,26 @@ def update_engine_config_with_dynamo(
                 f"(port={envs.DYN_FORWARDPASS_METRIC_PORT})"
             )
         else:
+            fpm_source = (
+                "DYN_FORWARDPASS_METRIC_PORT is set"
+                if envs.is_set("DYN_FORWARDPASS_METRIC_PORT")
+                else "--fpm-trace/DYN_FPM_TRACE is enabled"
+            )
             logger.warning(
-                f"DYN_FORWARDPASS_METRIC_PORT is set but scheduler_cls "
+                f"{fpm_source} but scheduler_cls "
                 f"is already '{existing_cls}'. InstrumentedScheduler will NOT "
                 f"be injected. To use forward pass metrics, either remove "
                 f"--scheduler-cls or subclass InstrumentedScheduler."
             )
 
     if dynamo_config.benchmark_mode is not None:
-        if dynamo_config.multimodal_worker or dynamo_config.multimodal_decode_worker:
+        if dynamo_config.enable_multimodal:
             logger.warning(
                 "--benchmark-mode is not supported for multimodal workers. "
                 "Benchmark data will be collected but not served via endpoint."
             )
         existing_cls = getattr(engine_config, "scheduler_cls", None)
-        if existing_cls is None and not envs.is_set("DYN_FORWARDPASS_METRIC_PORT"):
+        if existing_cls is None and not fpm_enabled:
             defaults[
                 "scheduler_cls"
             ] = "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"
@@ -305,15 +392,64 @@ def update_engine_config_with_dynamo(
                 f"--scheduler-cls is set to '{existing_cls}'. Either remove "
                 f"--scheduler-cls or use a subclass of InstrumentedScheduler."
             )
-        dynamo_config._benchmark_additional_config = {  # type: ignore[attr-defined]
+        if os.environ.get("DYN_FPM_GC_POLICY", "").strip().lower() == "freeze":
+            # Class path as a literal, not an import: importing
+            # dynamo.vllm.gc_policy auto-starts the policy in the importing
+            # process, and this launcher process must stay untouched.
+            worker_extension_cls = "dynamo.vllm.gc_policy.FpmGcWorkerExtension"
+            existing_ext = getattr(engine_config, "worker_extension_cls", None)
+            if not existing_ext:
+                defaults["worker_extension_cls"] = worker_extension_cls
+                logger.info(
+                    "Benchmark mode: DYN_FPM_GC_POLICY set, injecting "
+                    "worker_extension_cls=%s",
+                    worker_extension_cls,
+                )
+            elif str(existing_ext) != worker_extension_cls:
+                raise ValueError(
+                    f"DYN_FPM_GC_POLICY requires "
+                    f"worker_extension_cls='{worker_extension_cls}' so model "
+                    f"workers apply the GC policy, but --worker-extension-cls "
+                    f"is set to '{existing_ext}'. Remove it or unset "
+                    f"DYN_FPM_GC_POLICY."
+                )
+        benchmark_config: Dict[str, Any] = {
             "mode": dynamo_config.benchmark_mode,
-            "prefill_isl_granularity": dynamo_config.benchmark_prefill_granularity,
-            "decode_length_granularity": dynamo_config.benchmark_decode_length_granularity,
-            "decode_batch_size_granularity": dynamo_config.benchmark_decode_batch_granularity,
             "warmup_iterations": dynamo_config.benchmark_warmup_iterations,
             "output_path": dynamo_config.benchmark_output_path,
             "timeout": dynamo_config.benchmark_timeout,
+            "collect_imbalanced": dynamo_config.benchmark_collect_imbalanced,
         }
+        explicit_points = dynamo_config._benchmark_points
+        if explicit_points is not None:
+            # exclude_none so a v1 manifest round-trips as itself: the v3
+            # optional fields (partition, rows) would otherwise be dumped as
+            # nulls the operator never wrote, into a config the scheduler
+            # re-parses and a test compares against the file it read.
+            benchmark_config["points"] = explicit_points.model_dump(
+                mode="json", exclude_none=True
+            )
+        else:
+            benchmark_config.update(
+                {
+                    "prefill_max_new_token_samples": (
+                        dynamo_config.prefill_max_new_token_samples
+                    ),
+                    "prefill_max_kv_read_token_samples": (
+                        dynamo_config.prefill_max_kv_read_token_samples
+                    ),
+                    "decode_max_kv_read_token_samples": (
+                        dynamo_config.decode_max_kv_read_token_samples
+                    ),
+                    "decode_max_batch_size_samples": (
+                        dynamo_config.decode_max_batch_size_samples
+                    ),
+                    "prefix_max_batch_size_samples": (
+                        dynamo_config.prefix_max_batch_size_samples
+                    ),
+                }
+            )
+        dynamo_config._benchmark_additional_config = benchmark_config  # type: ignore[attr-defined]
         logger.info(
             "Benchmark mode=%s configured (output=%s)",
             dynamo_config.benchmark_mode,
@@ -330,18 +466,22 @@ def update_engine_config_with_dynamo(
                 f" Skipping engine_args.{key} (not available in this vLLM version)"
             )
 
+    # DYN_GMS_USE_V1 is operator-injected (env-only, like DYN_SNAPSHOT_CONTROL_DIR).
+    if os.environ.get("DYN_GMS_USE_V1") == "true":
+        if getattr(engine_config, "load_format", None) == "gms":
+            raise ValueError(
+                "DYN_GMS_USE_V1=true cannot be combined with --load-format gms"
+            )
+        engine_config.worker_cls = (
+            "gpu_memory_service.v1.integrations.vllm.worker.GMSV1Worker"
+        )
+        engine_config.enable_sleep_mode = True
+
 
 def create_kv_events_config(
-    dynamo_config: Config, engine_config: AsyncEngineArgs
+    engine_config: AsyncEngineArgs,
 ) -> Optional[KVEventsConfig]:
     """Create KVEventsConfig for prefix caching if needed."""
-    if dynamo_config.disaggregation_mode == DisaggregationMode.DECODE:
-        logger.info(
-            "Decode worker detected (disaggregation_mode=decode): "
-            "kv_events_config disabled (decode workers don't publish KV events)"
-        )
-        return None
-
     # If prefix caching is not enabled, no events config needed
     if not engine_config.enable_prefix_caching:
         logger.info("No kv_events_config required: prefix caching is disabled")

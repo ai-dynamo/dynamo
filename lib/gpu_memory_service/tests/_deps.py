@@ -16,9 +16,15 @@ def _check_gms_usable() -> bool:
     try:
         if importlib.util.find_spec("gpu_memory_service") is None:
             return False
+        # Probe both legacy and v1 paths so tests that import v1 modules skip
+        # cleanly when only part of the package tree is present.
         if importlib.util.find_spec("gpu_memory_service.client.rpc") is None:
             return False
         if importlib.util.find_spec("gpu_memory_service.server.rpc") is None:
+            return False
+        if importlib.util.find_spec("gpu_memory_service.v1.protocol") is None:
+            return False
+        if importlib.util.find_spec("gpu_memory_service.v1.server.rpc") is None:
             return False
         if importlib.util.find_spec("msgspec") is None:
             return False
@@ -34,4 +40,7 @@ HAS_CUDA = False
 if HAS_TORCH:
     import torch
 
-    HAS_CUDA = torch.cuda.is_available()
+    try:
+        HAS_CUDA = torch.cuda.is_available()
+    except Exception:
+        HAS_CUDA = False

@@ -20,7 +20,10 @@ except ImportError:
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
-    pytest.mark.gpu_1,
+    pytest.mark.gpu_0,
+    # Building the vLLM argument parser resolves a device; on an accelerator-less
+    # host that raises unless a platform is pinned first.
+    pytest.mark.usefixtures("vllm_cpu_platform_when_no_accelerator"),
     pytest.mark.xpu_1,
     pytest.mark.pre_merge,
     pytest.mark.profiled_vram_gib(0),
@@ -54,7 +57,6 @@ def _make_omni_config(**overrides) -> OmniConfig:
         "event_plane": "nats",
         "connector": [],
         "enable_local_indexer": True,
-        "durable_kv_events": False,
         "dyn_tool_call_parser": None,
         "dyn_reasoning_parser": None,
         "custom_jinja_template": None,
@@ -99,17 +101,18 @@ def test_omni_config_invalid_video_fps(fps):
         config.validate()
 
 
+@pytest.mark.parametrize(
+    ("field", "flag"),
+    [
+        ("ulysses_degree", "--ulysses-degree"),
+        ("ring_degree", "--ring-degree"),
+        ("text_encoder_tp_size", "--text-encoder-tp-size"),
+    ],
+)
 @pytest.mark.parametrize("degree", [0, -1])
-def test_omni_config_invalid_ulysses_degree(degree):
-    config = _make_omni_config(ulysses_degree=degree)
-    with pytest.raises(ValueError, match="--ulysses-degree must be > 0"):
-        config.validate()
-
-
-@pytest.mark.parametrize("degree", [0, -1])
-def test_omni_config_invalid_ring_degree(degree):
-    config = _make_omni_config(ring_degree=degree)
-    with pytest.raises(ValueError, match="--ring-degree must be > 0"):
+def test_omni_config_invalid_parallel_degree(field, flag, degree):
+    config = _make_omni_config(**{field: degree})
+    with pytest.raises(ValueError, match=rf"{flag} must be > 0"):
         config.validate()
 
 

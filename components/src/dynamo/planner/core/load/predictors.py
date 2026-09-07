@@ -374,6 +374,8 @@ class KalmanPredictor(BasePredictor):
     def predict_next(self) -> float:
         if not self._initialized:
             return self.get_last_value()
+        if len(self.data_buffer) < self.minimum_data_points:
+            return self.get_last_value()
         if self._has_cached_pred:
             return (
                 max(0.0, math.expm1(self._cached_pred))

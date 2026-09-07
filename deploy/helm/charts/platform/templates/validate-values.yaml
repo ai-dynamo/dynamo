@@ -88,6 +88,33 @@ After:
 ` }}
 {{- end }}
 
+{{/* ---- Scheduler integration conflicts ---- */}}
+
+{{- if and
+  (and .Values.global (index .Values.global "volcano-scheduler") (index .Values.global "volcano-scheduler").enabled)
+  (or
+    (and .Values.global (index .Values.global "kai-scheduler") (index .Values.global "kai-scheduler").enabled)
+    (and .Values.global (index .Values.global "kai-scheduler") (index .Values.global "kai-scheduler").install)
+  )
+}}
+  {{- fail `
+CONFIGURATION ERROR: KAI-Scheduler and Volcano scheduler integrations are mutually exclusive.
+Both integrations set pod schedulerName for Grove-backed multinode deployments.
+
+Choose exactly one scheduler integration:
+
+KAI-Scheduler:
+  global:
+    kai-scheduler:
+      enabled: true
+
+Volcano:
+  global:
+    volcano-scheduler:
+      enabled: true
+` }}
+{{- end }}
+
 {{/*
   NOTE: dynamo-operator subchart values (e.g. dynamo-operator.nats.enabled,
   dynamo-operator.webhook.enabled) are validated in the operator subchart's

@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::future::Future;
+use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
 use super::unified_client::RequestPlaneClient;
@@ -10,7 +11,7 @@ use super::*;
 use crate::component::Instance;
 use crate::discovery::EndpointInstanceId;
 use crate::dynamo_nvtx_range;
-use crate::engine::{AsyncEngine, AsyncEngineContextProvider, Data};
+use crate::engine::{AsyncEngine, AsyncEngineContextProvider, Data, EngineContextGuard};
 use crate::error::{DynamoError, ErrorType};
 use crate::logging::inject_trace_headers_into_map;
 use crate::metrics::frontend_perf::STAGE_DURATION_SECONDS;
@@ -23,6 +24,7 @@ use crate::pipeline::network::NetworkStreamWrapper;
 use crate::pipeline::network::PendingConnections;
 use crate::pipeline::network::RegisteredStream;
 use crate::pipeline::network::RequestControlMessage;
+use crate::pipeline::network::RequestPlanePayloadCodec;
 use crate::pipeline::network::RequestType;
 use crate::pipeline::network::ResponseType;
 use crate::pipeline::network::StreamOptions;
@@ -38,10 +40,132 @@ use crate::traits::DistributedRuntimeProvider;
 
 use anyhow::{Error, Result};
 use futures::stream::Stream;
+use parking_lot::Mutex;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_stream::{StreamExt, StreamNotifyClose, wrappers::ReceiverStream};
 use tracing::Instrument;
+
+const FIRST_RESPONSE_GUARD_CONTEXT_KEY: &str = "dynamo.request_plane.first_response_guard";
+// A timeout cannot safely release registered memory while a remote read may
+// still be active. Bound the detached pre-first-response phase process-wide.
+const MAX_RETAINED_FIRST_RESPONSE_DISPATCHES: usize = 1024;
+static RETAINED_FIRST_RESPONSE_DISPATCH_PERMITS: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(MAX_RETAINED_FIRST_RESPONSE_DISPATCHES)));
+
+#[derive(Clone)]
+struct FirstResponseGuard {
+    guard: Arc<Mutex<Option<EngineContextGuard>>>,
+}
+
+impl FirstResponseGuard {
+    fn new(guard: EngineContextGuard) -> Self {
+        Self {
+            guard: Arc::new(Mutex::new(Some(guard))),
+        }
+    }
+
+    fn take(&self) -> Option<EngineContextGuard> {
+        self.guard.lock().take()
+    }
+}
+
+/// Keep a frontend-owned resource alive until the addressed worker produces
+/// its first response item or closes the response stream.
+pub fn attach_first_response_guard<T: Data>(
+    context: &mut context::Context<T>,
+    guard: EngineContextGuard,
+) {
+    context.insert(
+        FIRST_RESPONSE_GUARD_CONTEXT_KEY,
+        FirstResponseGuard::new(guard),
+    );
+}
+
+/// Share a take-once first-response guard with a derived request context.
+pub fn propagate_first_response_guard<S: Data, T: Data>(
+    source: &context::Context<S>,
+    target: &mut context::Context<T>,
+) -> Result<(), Error> {
+    if let Some(guard) = source
+        .get_optional::<FirstResponseGuard>(FIRST_RESPONSE_GUARD_CONTEXT_KEY)
+        .map_err(Error::msg)?
+    {
+        target.insert(FIRST_RESPONSE_GUARD_CONTEXT_KEY, guard.as_ref().clone());
+    }
+    Ok(())
+}
+
+fn try_acquire_retained_dispatch_permit(
+    permits: &Arc<Semaphore>,
+) -> Result<OwnedSemaphorePermit, Error> {
+    permits.clone().try_acquire_owned().map_err(|_| {
+        DynamoError::builder()
+            .error_type(ErrorType::ResourceExhausted)
+            .message("retained request dispatch limit reached")
+            .build()
+            .into()
+    })
+}
+
+// Only dispatch and the first response are detached from the caller. The tail
+// is handed back so normal stream polling and cancellation stay on the caller.
+async fn dispatch_with_first_response_guard<F, U>(
+    dispatch: F,
+    guard: EngineContextGuard,
+    permit: OwnedSemaphorePermit,
+) -> Result<ManyOut<U>, Error>
+where
+    F: Future<Output = Result<ManyOut<U>, Error>> + Send + 'static,
+    U: Data + MaybeError,
+{
+    let (dispatch_tx, dispatch_rx) = tokio::sync::oneshot::channel();
+
+    tokio::spawn(
+        async move {
+            let mut response = match dispatch.await {
+                Ok(response) => response,
+                Err(error) => {
+                    let _ = dispatch_tx.send(Err(error));
+                    return;
+                }
+            };
+
+            let response_context = response.context();
+            let (first_tx, first_rx) = tokio::sync::oneshot::channel::<(Option<U>, ManyOut<U>)>();
+            let stream = async_stream::stream! {
+                match first_rx.await {
+                    Ok((first, mut tail)) => {
+                        if let Some(first) = first {
+                            yield first;
+                        }
+                        while let Some(item) = tail.next().await {
+                            yield item;
+                        }
+                    }
+                    Err(_) => {
+                        yield U::from_err(DynamoError::msg(
+                            "retained request dispatch ended before first response handoff",
+                        ));
+                    }
+                }
+            };
+            let handoff: ManyOut<U> = ResponseStream::new(Box::pin(stream), response_context);
+            let _ = dispatch_tx.send(Ok(handoff));
+
+            let first = response.next().await;
+            drop(guard);
+            drop(permit);
+            let _ = first_tx.send((first, response));
+        }
+        .in_current_span(),
+    );
+
+    dispatch_rx
+        .await
+        .map_err(|_| anyhow::anyhow!("retained request dispatch ended before setup completed"))?
+}
 
 /// Stream transformation helper that:
 /// - decodes a response byte stream from network into the fully-shaped `ManyOut<U>`
@@ -54,6 +178,7 @@ fn decode_response_stream<U>(
     queue_start: Instant,
     tx_start: Instant,
     inflight_guard: InflightGuard,
+    payload_codec: RequestPlanePayloadCodec,
 ) -> ManyOut<U>
 where
     U: Data + for<'de> Deserialize<'de> + MaybeError,
@@ -76,7 +201,7 @@ where
                 );
                 return Some(U::from_err(err));
             }
-            match serde_json::from_slice::<NetworkStreamWrapper<U>>(&res_bytes) {
+            match payload_codec.decode::<NetworkStreamWrapper<U>>(&res_bytes) {
                 Ok(item) => {
                     is_complete_final = item.complete_final;
                     if let Some(data) = item.data {
@@ -90,8 +215,13 @@ where
                     }
                 }
                 Err(err) => {
-                    let json_str = String::from_utf8_lossy(&res_bytes);
-                    tracing::warn!(%err, %json_str, "Failed deserializing JSON to response");
+                    let response_bytes_len = res_bytes.len();
+                    tracing::warn!(
+                        %err,
+                        codec = payload_codec.name(),
+                        response_bytes_len,
+                        "failed deserializing request-plane response"
+                    );
                     Some(U::from_err(DynamoError::msg(err.to_string())))
                 }
             }
@@ -141,9 +271,10 @@ fn build_request_envelope<T>(
     recv_conn_info: ConnectionInfo,
     send_conn_info: Option<ConnectionInfo>,
     request: Option<&T>,
+    payload_codec: RequestPlanePayloadCodec,
 ) -> Result<bytes::Bytes, Error>
 where
-    T: serde::Serialize + ?Sized,
+    T: serde::Serialize,
 {
     let request_id = context.id();
     let request_type = if send_conn_info.is_some() {
@@ -155,6 +286,7 @@ where
         id: request_id.to_string(),
         request_type,
         response_type: ResponseType::ManyOut,
+        payload_codec,
         connection_info: recv_conn_info,
         metadata: context.metadata().clone(),
         frontend_send_ts_ns: None,
@@ -163,7 +295,7 @@ where
 
     let ctrl = serialize_control_message(&control_message)?;
     let data: Option<Vec<u8>> = match request {
-        Some(req) => Some(serde_json::to_vec(req)?),
+        Some(req) => Some(payload_codec.encode(req)?),
         None => None,
     };
 
@@ -192,6 +324,12 @@ where
     Ok(buffer)
 }
 
+fn payload_codec_for_worker(instance: Option<&Instance>) -> RequestPlanePayloadCodec {
+    instance
+        .and_then(|instance| instance.request_plane_codec)
+        .unwrap_or(RequestPlanePayloadCodec::Json)
+}
+
 /// Await the network request-stream dial-in (if `request_stream_provider` is `Some`)
 /// and spawn a detached task that forwards every item from `input_stream` onto
 /// the request stream. Returns once the forwarder is spawned; `Err` if request-stream
@@ -200,6 +338,7 @@ async fn spawn_request_stream_forwarder<T>(
     request_stream_provider: Option<StreamProvider<StreamSender>>,
     mut input_stream: crate::engine::DataStream<T>,
     engine_ctx: Arc<dyn crate::engine::AsyncEngineContext>,
+    payload_codec: RequestPlanePayloadCodec,
 ) -> Result<(), Error>
 where
     T: serde::Serialize + Send + 'static,
@@ -244,7 +383,7 @@ where
                     None => break,
                 },
             };
-            let bytes = match serde_json::to_vec(&item) {
+            let bytes = match payload_codec.encode(&item) {
                 Ok(b) => b,
                 Err(e) => {
                     // Stream-side framing failure: the engine sees a
@@ -253,6 +392,7 @@ where
                     // dropping frames.
                     tracing::error!(
                         error = %e,
+                        codec = payload_codec.name(),
                         "failed to serialize bidirectional request frame; killing context"
                     );
                     engine_ctx.kill();
@@ -357,11 +497,14 @@ impl<T> AddressedRequest<T> {
         Self::with_instance(request, address, instance)
     }
 
-    pub(crate) fn into_parts(self) -> (T, String, Option<Instance>) {
+    /// `(request, address, instance)` — public so an external [`StreamingDispatch`]
+    /// impl can read the routed address + instance.
+    pub fn into_parts(self) -> (T, String, Option<Instance>) {
         (self.request, self.address, self.instance)
     }
 }
 
+#[derive(Clone)]
 pub struct AddressedPushRouter {
     // Request transport (unified trait object - works with all transports)
     req_client: Arc<dyn RequestPlaneClient>,
@@ -416,10 +559,10 @@ impl AddressedPushRouter {
 
     /// Bidirectional generation. Note that it doesn't implement the AsyncEngine trait directly
     /// because there is no trivial way to wrap (instance and address) into ManyIn style.
-    /// May wrap as SingleIn<AddressedStreamRequest<T>> and unwrap here but really just syntax
+    /// May wrap as `SingleIn<AddressedStreamRequest<T>>` and unwrap here but really just syntax
     /// sugar, so we just do it inline here. Will consider only if we do want to call this from
     /// typed erased AsyncEngine impls.
-    pub async fn generate_bidirectional<T, U>(
+    pub async fn dispatch_bidirectional<T, U>(
         &self,
         instance: Instance,
         address: String,
@@ -470,6 +613,7 @@ impl AddressedPushRouter {
         let inflight_guard = InflightGuard::new();
 
         let enable_request_stream = input_stream.is_some();
+        let payload_codec = payload_codec_for_worker(instance);
 
         // Hold the `RegisteredStream` as their RAII cleanup stays armed while held,
         // which simplifies the cancellation of registration on error. Each side is
@@ -513,6 +657,7 @@ impl AddressedPushRouter {
             recv_registered.connection_info.clone(),
             send_registered.as_ref().map(|r| r.connection_info.clone()),
             request,
+            payload_codec,
         )?;
         REQUEST_PLANE_QUEUE_SECONDS.observe(queue_start.elapsed().as_secs_f64());
 
@@ -520,15 +665,15 @@ impl AddressedPushRouter {
         let request_plane_response = self.dispatch_buffer(address, buffer, context.id()).await?;
         REQUEST_PLANE_SEND_SECONDS.observe(tx_start.elapsed().as_secs_f64());
 
-        // A worker load-shed surfaces on the request-plane ACK, not the response
-        // stream. Short-circuit with ResourceExhausted before waiting on a
-        // response-plane connection the worker will never open; returning early
-        // drops `recv_registered` and `inflight_guard` (their Drop cleans up).
-        if let Some(err) = detect_worker_overload_response(&request_plane_response) {
+        // A worker rejection surfaces on the request-plane ACK, not the response
+        // stream. Short-circuit before waiting on a response-plane connection the
+        // worker will never open; returning early drops `recv_registered` and
+        // `inflight_guard` (their Drop cleans up).
+        if let Some(err) = detect_worker_rejection_response(&request_plane_response) {
             tracing::warn!(
                 request_id = context.id(),
                 worker_response = %err.to_string(),
-                "Request rejected by worker (at capacity) — returning HTTP 503"
+                "Request rejected by worker"
             );
             return Err(err.into());
         }
@@ -543,8 +688,13 @@ impl AddressedPushRouter {
                 let (_conn_info, provider) = r.into_parts();
                 provider
             });
-            spawn_request_stream_forwarder(request_stream_provider, stream, engine_ctx.clone())
-                .await?;
+            spawn_request_stream_forwarder(
+                request_stream_provider,
+                stream,
+                engine_ctx.clone(),
+                payload_codec,
+            )
+            .await?;
         }
 
         let _nvtx_wait = dynamo_nvtx_range!("transport.tcp.wait_backend");
@@ -592,6 +742,7 @@ impl AddressedPushRouter {
             queue_start,
             tx_start,
             inflight_guard,
+            payload_codec,
         ))
     }
 
@@ -644,8 +795,8 @@ impl AddressedPushRouter {
     /// request-plane client.
     ///
     /// Returns the request-plane ACK bytes (empty `TcpResponseMessage` on the
-    /// success path; an overload-marker payload when the worker load-shed the
-    /// request — see [`detect_worker_overload_response`]).
+    /// success path; a rejection-marker payload when the worker rejects the
+    /// request — see [`detect_worker_rejection_response`]).
     async fn dispatch_buffer(
         &self,
         address: String,
@@ -671,53 +822,58 @@ impl AddressedPushRouter {
     }
 }
 
-/// Map a worker load-shed ACK (prefixed by a known overload marker, see
-/// `shared_tcp_endpoint.rs`) to `ResourceExhausted` so the HTTP layer returns
-/// 503. `None` for normal responses, including the empty "queued" ACK.
-fn detect_worker_overload_response(res_bytes: &[u8]) -> Option<DynamoError> {
+/// Map a worker rejection ACK to the corresponding typed error. `None` for
+/// normal responses, including the empty "queued" ACK.
+fn detect_worker_rejection_response(res_bytes: &[u8]) -> Option<DynamoError> {
     const OVERLOAD_PREFIX: &[u8] = b"Server overloaded:";
     const UNAVAILABLE_PREFIX: &[u8] = b"Server unavailable:";
 
-    if res_bytes.starts_with(OVERLOAD_PREFIX) || res_bytes.starts_with(UNAVAILABLE_PREFIX) {
-        let msg = String::from_utf8_lossy(res_bytes).into_owned();
-        Some(
-            DynamoError::builder()
-                .error_type(ErrorType::ResourceExhausted)
-                .message(msg)
-                .build(),
-        )
+    let error_type = if res_bytes.starts_with(OVERLOAD_PREFIX) {
+        // This ACK came from the one worker addressed by this dispatch. It says
+        // nothing about capacity elsewhere in the eligible pool, so preserve
+        // worker scope for migration instead of reporting pool exhaustion.
+        ErrorType::WorkerOverloaded
+    } else if res_bytes.starts_with(UNAVAILABLE_PREFIX) {
+        ErrorType::Unavailable
     } else {
-        None
-    }
+        return None;
+    };
+
+    let msg = String::from_utf8_lossy(res_bytes).into_owned();
+    Some(
+        DynamoError::builder()
+            .error_type(error_type)
+            .message(msg)
+            .build(),
+    )
 }
 
 #[cfg(test)]
-mod overload_detection_tests {
+mod rejection_detection_tests {
     use super::*;
 
     #[test]
-    fn overload_payload_maps_to_resource_exhausted() {
-        let err = detect_worker_overload_response(b"Server overloaded: worker at capacity")
+    fn overload_payload_maps_to_worker_overloaded() {
+        let err = detect_worker_rejection_response(b"Server overloaded: worker at capacity")
             .expect("should detect overload");
-        assert_eq!(err.error_type(), ErrorType::ResourceExhausted);
+        assert_eq!(err.error_type(), ErrorType::WorkerOverloaded);
     }
 
     #[test]
     fn empty_ack_is_not_overload() {
         // The success-path ACK is empty; misreading it as overload breaks every request.
-        assert!(detect_worker_overload_response(b"").is_none());
-        assert!(detect_worker_overload_response(br#"{"data":"chunk"}"#).is_none());
+        assert!(detect_worker_rejection_response(b"").is_none());
+        assert!(detect_worker_rejection_response(br#"{"data":"chunk"}"#).is_none());
     }
 
     #[test]
-    fn detected_error_satisfies_http_503_gate() {
-        // request_was_rejected (http/service/metrics.rs) → 503 keys on ResourceExhausted.
+    fn detected_overload_preserves_worker_scope() {
         let err =
-            detect_worker_overload_response(b"Server overloaded: test").expect("should detect");
+            detect_worker_rejection_response(b"Server overloaded: test").expect("should detect");
         let any_err: anyhow::Error = err.into();
         assert!(crate::error::match_error_chain(
             any_err.as_ref(),
-            &[ErrorType::ResourceExhausted],
+            &[ErrorType::WorkerOverloaded],
             &[]
         ));
     }
@@ -733,6 +889,28 @@ where
         let (addressed_request, context) = request.transfer(());
         let (request, address, instance_info) = addressed_request.into_parts();
 
+        let first_response_guard = context
+            .get_optional::<FirstResponseGuard>(FIRST_RESPONSE_GUARD_CONTEXT_KEY)
+            .map_err(Error::msg)?;
+
+        if let Some(guard) = first_response_guard.and_then(|guard| guard.take()) {
+            let permit =
+                try_acquire_retained_dispatch_permit(&RETAINED_FIRST_RESPONSE_DISPATCH_PERMITS)?;
+            let router = self.clone();
+            let dispatch = async move {
+                router
+                    .dispatch_and_finalize::<T, U>(
+                        &context,
+                        address,
+                        instance_info.as_ref(),
+                        Some(&request),
+                        None,
+                    )
+                    .await
+            };
+            return dispatch_with_first_response_guard(dispatch, guard, permit).await;
+        }
+
         self.dispatch_and_finalize::<T, U>(
             &context,
             address,
@@ -744,19 +922,128 @@ where
     }
 }
 
+/// Transport seam beneath `PushRouter`: given an already-selected worker (typed
+/// request + resolved address), dispatch the final hop and return a typed stream.
+/// Selection, occupancy, fault detection, and migration stay in `PushRouter`
+/// above the seam; only the transport below it changes. [`AddressedPushRouter`]
+/// (the request plane) is the default impl.
+///
+/// Impls MUST surface faults as top-level [`crate::error::ErrorType`] variants
+/// (`CannotConnect` / `Disconnected` / `ConnectionTimeout` / `ResponseTimeout` /
+/// `WorkerOverloaded` / `ResourceExhausted` / `Cancelled`), or
+/// `wrap_with_fault_detection`'s
+/// report-down / overload / migration won't fire.
+///
+/// The removal watcher behind `on_instance_removed` / `on_instance_added` is
+/// one-per-endpoint, so only one dispatch per endpoint receives them; an impl
+/// holding per-instance state must share it per endpoint (the default cleans up
+/// shared per-runtime state, so it is unaffected).
+#[async_trait::async_trait]
+pub trait StreamingDispatch<T, U>: Send + Sync
+where
+    T: Data + Serialize,
+    U: Data + for<'de> Deserialize<'de> + MaybeError,
+{
+    /// Unary final hop: typed request in, typed response stream out.
+    async fn generate(&self, request: SingleIn<AddressedRequest<T>>) -> Result<ManyOut<U>, Error>;
+
+    /// Bidirectional final hop (streaming input).
+    async fn generate_bidirectional(
+        &self,
+        instance: Instance,
+        address: String,
+        input: ManyIn<T>,
+    ) -> Result<ManyOut<U>, Error>;
+
+    /// Discovery-driven cleanup when an instance leaves — the request plane
+    /// cancels its call-home streams; another transport frees per-instance state.
+    async fn on_instance_removed(&self, _id: &EndpointInstanceId) {}
+
+    /// Discovery-driven notification when an instance (re)appears — the request
+    /// plane clears its tombstone.
+    async fn on_instance_added(&self, _id: &EndpointInstanceId) {}
+}
+
+#[async_trait::async_trait]
+impl<T, U> StreamingDispatch<T, U> for AddressedPushRouter
+where
+    T: Data + Serialize,
+    U: Data + for<'de> Deserialize<'de> + MaybeError,
+{
+    async fn generate(&self, request: SingleIn<AddressedRequest<T>>) -> Result<ManyOut<U>, Error> {
+        // Delegate to the existing `AsyncEngine` impl (still used directly by the
+        // KV recovery worker-query path); behavior unchanged.
+        <Self as AsyncEngine<SingleIn<AddressedRequest<T>>, ManyOut<U>, Error>>::generate(
+            self, request,
+        )
+        .await
+    }
+
+    async fn generate_bidirectional(
+        &self,
+        instance: Instance,
+        address: String,
+        input: ManyIn<T>,
+    ) -> Result<ManyOut<U>, Error> {
+        self.dispatch_bidirectional(instance, address, input).await
+    }
+
+    async fn on_instance_removed(&self, id: &EndpointInstanceId) {
+        let n = self.cancel_instance_streams(id).await;
+        if n > 0 {
+            tracing::warn!(
+                namespace = %id.namespace,
+                component = %id.component,
+                endpoint = %id.endpoint,
+                instance_id = id.instance_id,
+                cancelled = n,
+                "Cancelled pending response streams for removed instance (discovery-driven cleanup)"
+            );
+        }
+    }
+
+    async fn on_instance_added(&self, id: &EndpointInstanceId) {
+        self.clear_instance_tombstone(id).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        CONTROL_MESSAGE_MAX_BYTES, ConnectionInfo, RequestControlMessage, RequestType,
-        ResponseType, serialize_control_message,
+        CONTROL_MESSAGE_MAX_BYTES, ConnectionInfo, FIRST_RESPONSE_GUARD_CONTEXT_KEY,
+        FirstResponseGuard, RequestControlMessage, RequestPlanePayloadCodec, RequestType,
+        ResponseType, TwoPartCodec, attach_first_response_guard, build_request_envelope,
+        dispatch_with_first_response_guard, payload_codec_for_worker,
+        propagate_first_response_guard, serialize_control_message,
+        try_acquire_retained_dispatch_permit,
     };
-    use std::collections::BTreeMap;
+    use crate::{
+        component::{Instance, TransportType},
+        error::{ErrorType, match_error_chain},
+        pipeline::{AsyncEngineContextProvider, Context, ManyOut, ResponseStream},
+        protocols::annotated::Annotated,
+    };
+    use serde::{Deserialize, Serialize};
+    use std::{collections::BTreeMap, sync::Arc, time::Duration};
+    use tokio::sync::{Semaphore, oneshot, oneshot::error::TryRecvError};
+    use tokio_stream::{StreamExt, wrappers::ReceiverStream};
+
+    struct DropSignal(Option<oneshot::Sender<()>>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
 
     fn base_control_message(metadata: BTreeMap<String, String>) -> RequestControlMessage {
         RequestControlMessage {
             id: "request-123".to_string(),
             request_type: RequestType::SingleIn,
             response_type: ResponseType::ManyOut,
+            payload_codec: RequestPlanePayloadCodec::Json,
             connection_info: ConnectionInfo {
                 transport: "tcp".to_string(),
                 info: "{}".to_string(),
@@ -765,6 +1052,49 @@ mod tests {
             frontend_send_ts_ns: None,
             request_stream_connection_info: None,
         }
+    }
+
+    #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+    struct TestRequest {
+        value: u64,
+    }
+
+    #[test]
+    fn legacy_worker_without_codec_metadata_receives_json() {
+        let worker = Instance {
+            component: "worker".to_string(),
+            endpoint: "generate".to_string(),
+            namespace: "default".to_string(),
+            instance_id: 42,
+            transport: TransportType::Nats("worker.generate".to_string()),
+            device_type: None,
+            request_plane_codec: None,
+        };
+        let payload_codec = payload_codec_for_worker(Some(&worker));
+        assert_eq!(payload_codec, RequestPlanePayloadCodec::Json);
+
+        let request = TestRequest { value: 123 };
+        let buffer = build_request_envelope(
+            &Context::new(()),
+            ConnectionInfo {
+                transport: "tcp".to_string(),
+                info: "{}".to_string(),
+            },
+            None,
+            Some(&request),
+            payload_codec,
+        )
+        .expect("legacy-worker request envelope should encode");
+        let message = TwoPartCodec::default()
+            .decode_message(buffer)
+            .expect("request envelope should decode");
+
+        let control: RequestControlMessage = serde_json::from_slice(&message.header).unwrap();
+        assert_eq!(control.payload_codec, RequestPlanePayloadCodec::Json);
+        assert_eq!(
+            serde_json::from_slice::<TestRequest>(&message.data).unwrap(),
+            request
+        );
     }
 
     #[test]
@@ -790,5 +1120,127 @@ mod tests {
             .to_string();
         assert!(err.contains("request control message too large"));
         assert!(err.contains(&CONTROL_MESSAGE_MAX_BYTES.to_string()));
+    }
+
+    #[test]
+    fn propagated_first_response_guard_is_taken_once() {
+        let (guard_dropped_tx, mut guard_dropped_rx) = oneshot::channel();
+        let mut source_context = Context::new(());
+        attach_first_response_guard(
+            &mut source_context,
+            Arc::new(DropSignal(Some(guard_dropped_tx))),
+        );
+        let mut derived_context = Context::new(());
+        propagate_first_response_guard(&source_context, &mut derived_context).unwrap();
+
+        let source_guard = source_context
+            .get::<FirstResponseGuard>(FIRST_RESPONSE_GUARD_CONTEXT_KEY)
+            .unwrap();
+        let derived_guard = derived_context
+            .get::<FirstResponseGuard>(FIRST_RESPONSE_GUARD_CONTEXT_KEY)
+            .unwrap();
+        let retained = derived_guard.take().expect("derived context should win");
+        assert!(source_guard.take().is_none());
+
+        drop(retained);
+        assert_eq!(guard_dropped_rx.try_recv(), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn first_response_guard_outlives_cancelled_dispatch_waiter() {
+        let (raw_tx, raw_rx) = tokio::sync::mpsc::channel(1);
+        let response_context = Context::new(()).context();
+        let (dispatch_started_tx, dispatch_started_rx) = oneshot::channel();
+        let (release_dispatch_tx, release_dispatch_rx) = oneshot::channel();
+        let (guard_dropped_tx, mut guard_dropped_rx) = oneshot::channel();
+        let mut source_context = Context::new(());
+        attach_first_response_guard(
+            &mut source_context,
+            Arc::new(DropSignal(Some(guard_dropped_tx))),
+        );
+        let mut derived_context = Context::new(());
+        propagate_first_response_guard(&source_context, &mut derived_context).unwrap();
+        let guard = derived_context
+            .get::<FirstResponseGuard>(FIRST_RESPONSE_GUARD_CONTEXT_KEY)
+            .unwrap()
+            .take()
+            .unwrap();
+        drop(source_context);
+        drop(derived_context);
+        let permits = Arc::new(Semaphore::new(1));
+        let permit = try_acquire_retained_dispatch_permit(&permits).unwrap();
+
+        let waiter = tokio::spawn(dispatch_with_first_response_guard(
+            async move {
+                let _ = dispatch_started_tx.send(());
+                let _ = release_dispatch_rx.await;
+                let response: ManyOut<Annotated<u64>> =
+                    ResponseStream::new(Box::pin(ReceiverStream::new(raw_rx)), response_context);
+                Ok(response)
+            },
+            guard,
+            permit,
+        ));
+
+        dispatch_started_rx.await.unwrap();
+        waiter.abort();
+        let _ = waiter.await;
+        assert_eq!(guard_dropped_rx.try_recv(), Err(TryRecvError::Empty));
+        let error = try_acquire_retained_dispatch_permit(&permits).unwrap_err();
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::ResourceExhausted],
+            &[],
+        ));
+
+        release_dispatch_tx.send(()).unwrap();
+        raw_tx.send(Annotated::from_data(1_u64)).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), guard_dropped_rx)
+            .await
+            .expect("source guard was not released after the first worker response")
+            .unwrap();
+        let released_permit = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Ok(permit) = try_acquire_retained_dispatch_permit(&permits) {
+                    break permit;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("retained dispatch permit was not released");
+        drop(released_permit);
+    }
+
+    #[tokio::test]
+    async fn dropping_handed_off_tail_closes_upstream() {
+        let (raw_tx, raw_rx) = tokio::sync::mpsc::channel(1);
+        let response_context = Context::new(()).context();
+        let (guard_dropped_tx, guard_dropped_rx) = oneshot::channel();
+        let permits = Arc::new(Semaphore::new(1));
+        let permit = try_acquire_retained_dispatch_permit(&permits).unwrap();
+        let mut response = dispatch_with_first_response_guard(
+            async move {
+                let response: ManyOut<Annotated<u64>> =
+                    ResponseStream::new(Box::pin(ReceiverStream::new(raw_rx)), response_context);
+                Ok(response)
+            },
+            Arc::new(DropSignal(Some(guard_dropped_tx))),
+            permit,
+        )
+        .await
+        .unwrap();
+
+        raw_tx.send(Annotated::from_data(1_u64)).await.unwrap();
+        assert_eq!(response.next().await.unwrap().data, Some(1));
+        tokio::time::timeout(Duration::from_secs(1), guard_dropped_rx)
+            .await
+            .expect("source guard was not released after the first worker response")
+            .unwrap();
+
+        drop(response);
+        tokio::time::timeout(Duration::from_secs(1), raw_tx.closed())
+            .await
+            .expect("dropping the caller stream did not close the upstream tail");
     }
 }

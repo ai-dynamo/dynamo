@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use dynamo_runtime::config::environment_names::llm;
 
@@ -54,6 +54,12 @@ impl LoRACache {
     /// TODO: Add support for other weight file formats supported by trtllm
     pub fn validate_cached(&self, lora_id: &str) -> Result<bool> {
         let path = self.get_cache_path(lora_id);
+        Self::validate_path(&path)
+    }
+
+    /// Validate a LoRA directory, including source-owned caches such as a
+    /// Hugging Face Hub snapshot outside `DYN_LORA_PATH`.
+    pub fn validate_path(path: &Path) -> Result<bool> {
         if !path.exists() {
             return Ok(false);
         }
@@ -127,6 +133,15 @@ mod tests {
         fs::write(lora_dir2.join("adapter_config.json"), "{}").unwrap();
 
         assert!(!cache.validate_cached("invalid-lora").unwrap());
+    }
+
+    #[test]
+    fn test_validate_external_snapshot_path() {
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(temp_dir.path().join("adapter_config.json"), "{}").unwrap();
+        fs::write(temp_dir.path().join("adapter_model.safetensors"), "").unwrap();
+
+        assert!(LoRACache::validate_path(temp_dir.path()).unwrap());
     }
 
     #[test]

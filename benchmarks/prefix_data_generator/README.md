@@ -24,7 +24,11 @@ The following tools help analyze and synthesize new data based on the [mooncake 
 {"timestamp": 3052, "input_length": 2287, "output_length": 316, "hash_ids": [0, 42, 43, 44, 45]}
 ```
 
-**Hash ID Generation:** Each new hash ID is the next consecutive integer after the last one used. Two `hash_ids` sharing the same integers represents the prefix overlap. To generate hash IDs from a list of texts, use `texts_to_hashes` from `aiperf.dataset.synthesis.rolling_hasher`.
+**Hash ID Generation:** Each new hash ID is the next consecutive integer after the last one used. Two `hash_ids` sharing the same integers represents the prefix overlap. To generate hash IDs from a list of texts, use the local entry point:
+
+```python
+from prefix_data_generator.hasher import texts_to_hashes
+```
 
 **Timestamp:** The arrival time (in milliseconds) of the request since the first request, which can be the same for multiple requests arriving simultaneously.
 

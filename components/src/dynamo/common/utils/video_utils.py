@@ -83,10 +83,15 @@ def normalize_video_frames(images: list) -> list:
 
 
 def frames_to_numpy(images: list) -> np.ndarray:
-    """Convert a list of PIL Images to a numpy array suitable for video encoding.
+    """Convert a list of video frames to a numpy array suitable for encoding.
+
+    Accepts either PIL Images or numpy arrays. Diffusion video pipelines (e.g.
+    Wan2.1 T2V) emit numpy frames — float in ``[0, 1]`` by default — while other
+    stages hand back PIL Images; this normalizes both to ``uint8`` RGB, matching
+    the conversion ``diffusers.export_to_video`` performs internally.
 
     Args:
-        images: List of PIL Image objects (video frames).
+        images: List of PIL Image objects or ``np.ndarray`` frames (H, W, 3).
 
     Returns:
         Numpy array of shape ``(num_frames, height, width, 3)`` with dtype
@@ -100,7 +105,14 @@ def frames_to_numpy(images: list) -> np.ndarray:
 
     frames = []
     for img in images:
-        arr = np.array(img.convert("RGB"))
+        if isinstance(img, np.ndarray):
+            arr = img
+            if arr.dtype != np.uint8:
+                # Diffusers convention: numpy frames are float in [0, 1].
+                arr = (arr * 255.0).round().clip(0, 255).astype(np.uint8)
+        else:
+            # PIL Image.
+            arr = np.array(img.convert("RGB"))
         frames.append(arr)
 
     # Validate consistent sizes
@@ -154,15 +166,16 @@ def encode_to_mp4(
     logger.info(f"Encoding {len(frames)} frames to {output_path} at {fps} fps")
 
     try:
-        # Use imageio to write MP4. We use h264_nvenc (NVIDIA HW encoder) instead
-        # of libx264 because the in-tree ffmpeg build is LGPL-only and libx264
-        # is GPL-licensed; see container/templates/wheel_builder.Dockerfile.
-        # Requires a CUDA-capable GPU at runtime.
+        # Encode with VP9 (libvpx-vp9). The in-tree ffmpeg build is LGPL-only and
+        # royalty-free: it carries no H.264 codec (not even the h264_nvenc HW
+        # encoder), so VP9 is the video encoder we ship. VP9-in-mp4 is valid and
+        # decodes with our VP8/VP9 decoder allowlist; see
+        # container/templates/wheel_builder.Dockerfile.
         if hasattr(iio, "imwrite"):
-            iio.imwrite(output_path, frames, fps=fps, codec="h264_nvenc")
+            iio.imwrite(output_path, frames, fps=fps, codec="libvpx-vp9")
         else:
             # Fall back to v2 API
-            writer = iio.get_writer(output_path, fps=fps, codec="h264_nvenc")  # type: ignore[attr-defined]
+            writer = iio.get_writer(output_path, fps=fps, codec="libvpx-vp9")  # type: ignore[attr-defined]
             try:
                 for frame in frames:
                     writer.append_data(frame)
@@ -213,11 +226,11 @@ def encode_to_video_bytes(
     try:
         buffer = io.BytesIO()
 
+        # VP9 (libvpx-vp9) for both containers: the in-tree ffmpeg is royalty-free
+        # and carries no H.264 encoder. VP9-in-mp4 and VP9-in-webm are both valid.
         kwargs: dict = {"fps": fps}
-        if output_format == "webm":
+        if output_format in ("webm", "mp4"):
             kwargs["codec"] = "libvpx-vp9"
-        elif output_format == "mp4":
-            kwargs["codec"] = "h264_nvenc"
         else:
             raise ValueError(f"No codec specified for response format: {output_format}")
 

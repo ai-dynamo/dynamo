@@ -29,12 +29,14 @@ from tests.utils.payload_builder import (
     chat_payload,
     chat_payload_default,
     chat_payload_with_logprobs,
+    classify_payload,
     completion_payload_default,
     completion_payload_with_logprobs,
     embedding_payload,
     embedding_payload_default,
     kv_events_metrics_payload,
     metric_payload_default,
+    pooling_payload,
     router_cached_tokens_chat_payload,
     router_selection_chat_payload_default,
 )
@@ -156,24 +158,40 @@ vllm_configs = {
             metric_payload_default(min_num_requests=6, backend="vllm"),
         ],
     ),
-    "aggregated_unified": VLLMConfig(
-        name="aggregated_unified",
+    # Speculative decoding: Llama-3.1-8B main model with an EAGLE3 draft model
+    # (see launch/agg_spec_decoding.sh). The base model is gated on HF, so this
+    # needs HF_TOKEN set and only runs where the token + VRAM are available.
+    # Nightly-only: the 8B base plus EAGLE3 draft model is intentionally outside pre-merge CI.
+    "aggregated_spec_decoding": VLLMConfig(
+        name="aggregated_spec_decoding",
         directory=vllm_dir,
-        script_name="agg.sh",
-        script_args=["--unified"],
+        script_name="agg_spec_decoding.sh",
         marks=[
-            pytest.mark.core,
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(3.8),
-            pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000),
-            pytest.mark.timeout(610),  # 3x ~203s unified, new scheduler (3d1554f)
-            pytest.mark.pre_merge,
-            pytest.mark.unified,
+            # Also predownload the EAGLE3 draft: CI workers run HF_HUB_OFFLINE=True
+            # and only the base cfg.model is auto-registered, so the draft repo
+            # can't be resolved offline without this.
+            pytest.mark.model("yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"),
+            # Profiled with a 1 GiB KV cap (peak ~18.6 GiB: 8B weights + EAGLE3
+            # draft + capped KV). The byte cap (build_vllm_gpu_mem_args) makes
+            # this GPU-size-independent, so it fits the 24 GiB parallel stage.
+            pytest.mark.profiled_vram_gib(20.0),
+            pytest.mark.requested_vllm_kv_cache_bytes(1_073_741_824),
+            pytest.mark.timeout(900),
+            pytest.mark.nightly,
         ],
-        model="Qwen/Qwen3-0.6B",
+        model="meta-llama/Meta-Llama-3.1-8B-Instruct",
+        # 8B weights leave little KV room on the 24 GiB gpu_1 lane; cap context (payloads are tiny).
+        script_args=["--max-model-len", "4096"],
         request_payloads=[
             chat_payload_default(),
-            completion_payload_default(),
+            chat_payload(
+                "What is the capital of France? Answer in one word.",
+                repeat_count=1,
+                expected_response=["Paris"],
+                temperature=0.0,
+                max_tokens=16,
+            ),
         ],
     ),
     "aggregated_logprobs": VLLMConfig(
@@ -311,8 +329,8 @@ vllm_configs = {
             pytest.mark.gpu_2,
             pytest.mark.router,
             pytest.mark.pre_merge,
-            pytest.mark.skip(reason="DYN-2263"),
-        ],  # TODO: profile to get max_vram and timeout
+            pytest.mark.timeout(600),
+        ],  # TODO: profile to get max_vram
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             router_selection_chat_payload_default(),
@@ -328,8 +346,8 @@ vllm_configs = {
             pytest.mark.gpu_2,
             pytest.mark.router,
             pytest.mark.pre_merge,
-            pytest.mark.skip(reason="DYN-2264"),
-        ],  # TODO: profile to get max_vram and timeout
+            pytest.mark.timeout(600),
+        ],  # TODO: profile to get max_vram
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             # Test approximate KV routing (--no-kv-events mode)
@@ -448,9 +466,15 @@ vllm_configs = {
             "2",
         ],
         timeout=700,
+        # Each request is bounded by BasePayload.timeout (60s, tests/utils/
+        # payloads.py), not by the readiness budget above. This deployment
+        # decodes at ~15.5 tok/s, so the 1000-token payload default needs ~65s
+        # and cannot fit; 128 tokens finishes in ~8s and leaves ~7x headroom.
+        # Keep the cap small here — a longer decode turns the read timeout back
+        # into an accidental throughput assertion.
         request_payloads=[
-            chat_payload_default(),
-            completion_payload_default(),
+            chat_payload_default(max_tokens=128),
+            completion_payload_default(max_tokens=128),
         ],
     ),
     "aggregated_toolcalling": VLLMConfig(
@@ -687,8 +711,12 @@ vllm_configs = {
                 repeat_count=1,
                 expected_response=["Generated 3 embeddings with dimension"],
             ),
-            # `dimensions` truncation (Matryoshka). Qwen3-Embedding-0.6B has a
-            # hidden dim of 1024, so the truncated vector should be exactly 128.
+            # `dimensions` reduction (Matryoshka). Qwen3-Embedding-0.6B has a
+            # hidden dim of 1024, so the reduced vector should be exactly 128.
+            # The worker forwards `dimensions` to vLLM's pooler (truncate +
+            # re-normalize); `agg_embed.sh` launches this model with
+            # `--hf-overrides '{"is_matryoshka": true}'` so vLLM accepts the
+            # request (Qwen3-Embedding's config doesn't declare Matryoshka).
             # Built inline because the `embedding_payload()` helper doesn't
             # expose an `extra_body` kwarg yet.
             EmbeddingPayload(
@@ -710,6 +738,90 @@ vllm_configs = {
                 repeat_count=1,
                 expected_log=[],
                 expected_response=["Generated 1 embeddings with dimension 128"],
+            ),
+        ],
+    ),
+    "classify_agg": VLLMConfig(
+        name="classify_agg",
+        directory=vllm_dir,
+        script_name="agg_classify.sh",
+        marks=[
+            pytest.mark.core,
+            pytest.mark.gpu_1,
+            # Small RoBERTa NLI classifier plus vLLM pooling overhead.
+            pytest.mark.profiled_vram_gib(3.0),
+            # Pooling models do not use a KV cache, but the harness requires
+            # a non-zero allocation budget.
+            pytest.mark.requested_vllm_kv_cache_bytes(559_693_824),
+            pytest.mark.timeout(360),
+            pytest.mark.pre_merge,
+        ],
+        model="cross-encoder/nli-MiniLM2-L6-H768",
+        request_payloads=[
+            classify_payload(
+                input_data=("A man is playing a sport. Some men are playing a sport."),
+            ),
+            classify_payload(
+                input_data=[
+                    "A soccer game is underway. Some men are playing a sport.",
+                    "A cat sleeps on a mat. A dog is swimming in the ocean.",
+                ],
+            ),
+            # A single token-ID prompt must be truncated through vLLM's
+            # renderer rather than bypassing truncate_prompt_tokens.
+            classify_payload(
+                input_data=[0, 101, 102, 2],
+                expected_prompt_tokens=2,
+                extra_body={"truncate_prompt_tokens": 2},
+            ),
+            pooling_payload(
+                input_data="Some men are playing a sport.",
+            ),
+            pooling_payload(
+                input_data="Some men are playing a sport.",
+                task="classify",
+            ),
+            # Token-level classification preserves the token-by-class matrix.
+            pooling_payload(
+                input_data="Some men are playing a sport.",
+                task="token_classify",
+            ),
+            # A batch of token-ID prompts covers the second pre-tokenized
+            # request shape from the vLLM completion-input contract.
+            pooling_payload(
+                input_data=[[0, 101, 102, 2], [0, 201, 202, 2]],
+                task="classify",
+                expected_prompt_tokens=4,
+                extra_body={"truncate_prompt_tokens": 2},
+            ),
+            pooling_payload(
+                input_data="Some men are playing a sport.",
+                task="classify",
+                extra_body={
+                    "encoding_format": "base64",
+                    "embed_dtype": "float16",
+                    "endianness": "big",
+                },
+            ),
+            pooling_payload(
+                input_data="Some men are playing a sport.",
+                task="classify",
+                expected_response=["Pooled 1 binary tensors"],
+                extra_body={
+                    "encoding_format": "bytes",
+                    "embed_dtype": "float16",
+                    "endianness": "big",
+                },
+            ),
+            pooling_payload(
+                input_data="Some men are playing a sport.",
+                task="classify",
+                expected_response=["Pooled bytes_only response"],
+                extra_body={
+                    "encoding_format": "bytes_only",
+                    "embed_dtype": "float16",
+                    "endianness": "big",
+                },
             ),
         ],
     ),

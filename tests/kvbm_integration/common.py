@@ -25,6 +25,7 @@ import requests
 
 from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.port_utils import allocate_port, deallocate_port
+from tests.utils.test_output import resolve_test_output_path
 
 # ============================================================================
 # Module Availability Checks
@@ -266,7 +267,10 @@ class DeterminismTester(ApiTester):
         super().__init__(base_url, model_id)
         self.server_type = server_type
 
-        self.shakespeare_file = Path("t8.shakespeare.txt")
+        self.shakespeare_file = Path(
+            resolve_test_output_path("kvbm_integration/t8.shakespeare.txt")
+        )
+        self.shakespeare_file.parent.mkdir(parents=True, exist_ok=True)
         self.max_iterations = int(os.environ.get("KVBM_MAX_ITERATIONS", "100"))
         self.word_count = int(os.environ.get("KVBM_WORD_COUNT", "200"))
 

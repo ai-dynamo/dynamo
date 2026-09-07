@@ -25,15 +25,33 @@
 **/*.libtorch_model_store/*
 **/.git
 **/.github
+# Planner test images exercise the version-stamping script without copying the
+# rest of the GitHub metadata into every Docker build context.
+!.github
+.github/*
+!.github/scripts
+.github/scripts/*
+!.github/scripts/apply_dev_version.py
 **/*backup*/
 .dockerignore
 **/target/*
 **/*safetensors
 container/Dockerfile*
 container/**/*.Dockerfile
+# The AISimulate dependency contract test reads this template from runtime test
+# images; keep every other generated/template Dockerfile excluded.
+!container/templates/wheel_builder.Dockerfile
 container/render.py
 container/context.yaml
-container/compliance/
+# container/compliance/ is now COPY'd into each image's `licenses` Dockerfile
+# stage (NOTICES generation + license-policy validation), so it must remain
+# in the build context. Old comment from prior compliance design left for
+# context: was excluded when compliance ran via a separate Dockerfile.extract
+# bind-mount; the inline-compliance refactor inverted that intent.
+# Local extraction destinations for `docker buildx build --target {legal,sboms}`.
+# Excluded from build context so they don't bloat it or leak prior outputs back in.
+legal-extract/
+sboms-extract/
 .venv
 .venv-docs
 

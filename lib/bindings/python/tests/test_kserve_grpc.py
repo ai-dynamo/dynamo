@@ -3,6 +3,7 @@
 
 import asyncio
 import contextlib
+import queue
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Optional, Tuple
 
@@ -49,11 +50,18 @@ class EchoTensorEngine:
 
     def generate(self, request, context=None):
         async def _generator():
-            yield {
+            response = {
                 "model": self._model_name,
                 "tensors": request.get("tensors", []),
                 "parameters": request.get("parameters", {}),
             }
+            if request.get("parameters", {}).get("reused_mutable"):
+                for sequence in range(64):
+                    response["model"] = f"{self._model_name}-{sequence}"
+                    yield response
+                return
+
+            yield response
 
         return _generator()
 
@@ -156,3 +164,44 @@ async def test_model_config_missing_tensor_config_errors(tensor_service):
             client.close()
 
     assert "not found" in str(excinfo.value).lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.forked
+@pytest.mark.timeout(30)
+async def test_python_async_engine_snapshots_reused_mutable_responses(tensor_service):
+    """Snapshot each typed response before polling a reused Python object again."""
+    import numpy as np
+    import tritonclient.grpc as grpcclient
+
+    model_name = "tensor-reused-mutable"
+    async with tensor_service(model_name) as (host, port):
+        client = grpcclient.InferenceServerClient(url=f"{host}:{port}")
+        completed: queue.Queue = queue.Queue()
+
+        def callback(result, error):
+            completed.put(error if error is not None else result)
+
+        input_data = np.array([1], dtype=np.int32)
+        infer_input = grpcclient.InferInput("INPUT0", input_data.shape, "INT32")
+        infer_input.set_data_from_numpy(input_data)
+
+        client.start_stream(callback=callback)
+        try:
+            client.async_stream_infer(
+                model_name=model_name,
+                inputs=[infer_input],
+                parameters={"reused_mutable": True},
+            )
+            responses = [
+                await asyncio.to_thread(completed.get, True, 5) for _ in range(64)
+            ]
+        finally:
+            client.stop_stream()
+            client.close()
+
+    errors = [response for response in responses if isinstance(response, Exception)]
+    assert not errors
+    assert [response.get_response().model_name for response in responses] == [
+        f"{model_name}-{sequence}" for sequence in range(64)
+    ]

@@ -117,10 +117,8 @@ def _flatten_args(
     request: dict[str, Any],
 ) -> dict[str, Any]:
     args: dict[str, Any] = {
-        "session_type_id": agent_context.get("session_type_id"),
         "session_id": agent_context.get("session_id"),
-        "trajectory_id": agent_context.get("trajectory_id"),
-        "parent_trajectory_id": agent_context.get("parent_trajectory_id"),
+        "parent_session_id": agent_context.get("parent_session_id"),
         "event_time_unix_ms": event.get("event_time_unix_ms"),
     }
 
@@ -189,10 +187,8 @@ def _flatten_tool_args(
     tool: dict[str, Any],
 ) -> dict[str, Any]:
     args: dict[str, Any] = {
-        "session_type_id": agent_context.get("session_type_id"),
         "session_id": agent_context.get("session_id"),
-        "trajectory_id": agent_context.get("trajectory_id"),
-        "parent_trajectory_id": agent_context.get("parent_trajectory_id"),
+        "parent_session_id": agent_context.get("parent_session_id"),
         "event_type": event.get("event_type"),
         "event_source": event.get("event_source"),
         "event_time_unix_ms": event.get("event_time_unix_ms"),
@@ -216,26 +212,28 @@ def _flatten_tool_args(
     return {key: value for key, value in args.items() if value is not None}
 
 
+def _inferred_tool_calls(request: dict[str, Any]) -> list[dict[str, Any]]:
+    finish = request.get("finish_reason_metadata")
+    tool_calls = finish.get("tool_calls") if isinstance(finish, dict) else None
+    if not isinstance(tool_calls, list):
+        return []
+    return [call for call in tool_calls if isinstance(call, dict)]
+
+
 class TrackTable:
     def __init__(self) -> None:
-        self._session_pids: dict[str, int] = {}
-        self._track_tids: dict[tuple[str, str, int, str], int] = {}
-        self._active_lanes: dict[tuple[str, str], list[tuple[int, int]]] = {}
-        self._max_lanes: dict[tuple[str, str], int] = {}
+        self._track_tids: dict[tuple[str, int, str], int] = {}
+        self._active_lanes: dict[str, list[tuple[int, int]]] = {}
+        self._max_lanes: dict[str, int] = {}
 
     def lane_for(
         self,
         session_id: str,
-        trajectory_id: str,
         *,
         start_us: int,
         end_us: int,
     ) -> int:
-        if session_id not in self._session_pids:
-            self._session_pids[session_id] = len(self._session_pids) + 1
-
-        trajectory_key = (session_id, trajectory_id)
-        active = self._active_lanes.setdefault(trajectory_key, [])
+        active = self._active_lanes.setdefault(session_id, [])
         while active and active[0][0] <= start_us:
             heapq.heappop(active)
 
@@ -243,60 +241,47 @@ class TrackTable:
         lane = 0
         while lane in active_lanes:
             lane += 1
-        self._max_lanes[trajectory_key] = max(
-            self._max_lanes.get(trajectory_key, 0), lane + 1
-        )
+        self._max_lanes[session_id] = max(self._max_lanes.get(session_id, 0), lane + 1)
         heapq.heappush(active, (end_us, lane))
         return lane
 
     def track_for(
         self,
         session_id: str,
-        trajectory_id: str,
         lane: int,
         track_kind: str,
     ) -> tuple[int, int]:
-        if session_id not in self._session_pids:
-            self._session_pids[session_id] = len(self._session_pids) + 1
-        pid = self._session_pids[session_id]
-
-        track_key = (session_id, trajectory_id, lane, track_kind)
+        track_key = (session_id, lane, track_kind)
         if track_key not in self._track_tids:
-            self._track_tids[track_key] = (
-                len([1 for existing in self._track_tids if existing[0] == session_id])
-                + 1
-            )
-        return pid, self._track_tids[track_key]
+            self._track_tids[track_key] = len(self._track_tids) + 1
+        return 1, self._track_tids[track_key]
 
     def metadata_events(self) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
-        for session_id, pid in sorted(
-            self._session_pids.items(), key=lambda item: item[1]
-        ):
+        if self._track_tids:
             events.append(
                 {
                     "name": "process_name",
                     "ph": "M",
-                    "pid": pid,
-                    "args": {"name": f"session: {session_id}"},
+                    "pid": 1,
+                    "args": {"name": "Dynamo request trace"},
                 }
             )
-        for (session_id, trajectory_id, lane, track_kind), tid in sorted(
+        for (session_id, lane, track_kind), tid in sorted(
             self._track_tids.items(),
-            key=lambda item: (self._session_pids[item[0][0]], item[1]),
+            key=lambda item: item[1],
         ):
-            pid = self._session_pids[session_id]
-            lane_count = self._max_lanes.get((session_id, trajectory_id), 1)
-            track_name = trajectory_id
+            lane_count = self._max_lanes.get(session_id, 1)
+            track_name = session_id
             if lane_count > 1:
-                track_name = f"{trajectory_id} [lane {lane + 1}]"
+                track_name = f"{session_id} [lane {lane + 1}]"
             if track_kind != "request":
                 track_name = f"{track_name} {track_kind}"
             events.append(
                 {
                     "name": "thread_name",
                     "ph": "M",
-                    "pid": pid,
+                    "pid": 1,
                     "tid": tid,
                     "args": {"name": track_name},
                 }
@@ -360,12 +345,12 @@ def _bounded_stage_duration(
 
 def _prepare_tool_items(tool_records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
-    starts: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    starts: dict[tuple[str, str], list[dict[str, Any]]] = {}
 
     for record in sorted(tool_records, key=lambda item: item["event_time_us"]):
         tool = record["tool"]
         tool_call_id = _safe_label(tool.get("tool_call_id"), "unknown-tool-call")
-        key = (record["session_id"], record["trajectory_id"], tool_call_id)
+        key = (record["session_id"], tool_call_id)
         event_type = record["event_type"]
 
         if event_type == "tool_start":
@@ -435,14 +420,115 @@ def _prepare_tool_items(tool_records: list[dict[str, Any]]) -> list[dict[str, An
     return items
 
 
+def _prepare_inferred_tool_items(
+    request_items: list[dict[str, Any]],
+    tool_records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    real_tool_keys = {
+        (
+            record["session_id"],
+            _safe_label(record["tool"].get("tool_call_id"), ""),
+        )
+        for record in tool_records
+        if record["event_type"] in {"tool_end", "tool_error"}
+        and record["tool"].get("tool_call_id")
+    }
+
+    by_session: dict[str, list[dict[str, Any]]] = {}
+    for item in request_items:
+        by_session.setdefault(item["session_id"], []).append(item)
+
+    for requests in by_session.values():
+        requests.sort(key=lambda item: item["ts_us"])
+        for index, request_item in enumerate(requests):
+            next_request_item = (
+                requests[index + 1] if index + 1 < len(requests) else None
+            )
+            tool_calls = _inferred_tool_calls(request_item["request"])
+            if not tool_calls:
+                continue
+
+            start_us = request_item["ts_us"] + request_item["dur_us"]
+            end_us = next_request_item["ts_us"] if next_request_item else start_us
+            duration_unknown = next_request_item is None or end_us <= start_us
+
+            for tool_call in tool_calls:
+                tool_call_id = tool_call.get("id")
+                if (
+                    request_item["session_id"],
+                    _safe_label(tool_call_id, ""),
+                ) in real_tool_keys:
+                    continue
+
+                tool_name = _safe_label(tool_call.get("name"), "unknown-tool")
+                args = {
+                    "session_id": request_item["session_id"],
+                    "parent_session_id": request_item["args"].get("parent_session_id"),
+                    "event_type": "inferred_tool_call",
+                    "event_source": "dynamo",
+                    "source": "request.finish_reason_metadata.tool_calls",
+                    "inferred": True,
+                    "host_execution": False,
+                    "source_request_id": request_item["request"].get("request_id"),
+                    "tool_call_id": tool_call_id,
+                    "tool_call_index": tool_call.get("tool_call_index"),
+                    "choice_index": tool_call.get("choice_index"),
+                    "tool_class": tool_name,
+                    "started_at_unix_ms": start_us / 1000.0,
+                }
+                if duration_unknown:
+                    args.update(
+                        {
+                            "duration_unknown": True,
+                            "synthetic_duration": True,
+                            "visual_duration_ms": _SYNTHETIC_TOOL_DURATION_US / 1000.0,
+                            "overlapping_request_id": (
+                                next_request_item["request"].get("request_id")
+                                if next_request_item
+                                else None
+                            ),
+                        }
+                    )
+                    dur_us = _SYNTHETIC_TOOL_DURATION_US
+                else:
+                    args.update(
+                        {
+                            "next_request_id": next_request_item["request"].get(
+                                "request_id"
+                            ),
+                            "ended_at_unix_ms": end_us / 1000.0,
+                            "duration_ms": (end_us - start_us) / 1000.0,
+                        }
+                    )
+                    dur_us = end_us - start_us
+
+                items.append(
+                    {
+                        "kind": "inferred_tool",
+                        "tool_class": tool_name,
+                        "args": {
+                            key: value
+                            for key, value in args.items()
+                            if value is not None
+                        },
+                        "ts_us": start_us,
+                        "dur_us": dur_us,
+                        "session_id": request_item["session_id"],
+                    }
+                )
+
+    return items
+
+
 def convert_records(
     records: Iterable[dict[str, Any]],
     *,
     include_stages: bool,
     include_markers: bool,
-    separate_stage_tracks: bool = False,
 ) -> tuple[dict[str, Any], int]:
     prepared: list[dict[str, Any]] = []
+    request_items: list[dict[str, Any]] = []
     tool_records: list[dict[str, Any]] = []
 
     for record in records:
@@ -460,10 +546,7 @@ def convert_records(
             request = event.get("request")
             if not isinstance(request, dict):
                 continue
-            session_id = _safe_label(agent_context.get("session_id"), "request-trace")
-            trajectory_id = _safe_label(
-                agent_context.get("trajectory_id"), "request-only"
-            )
+            session_id = _safe_label(agent_context.get("session_id"), "request-only")
 
             start_ms = _request_start_ms(event, request)
             if start_ms is None:
@@ -474,17 +557,16 @@ def convert_records(
             if ts_us is None or dur_us is None:
                 continue
 
-            prepared.append(
-                {
-                    "kind": "request",
-                    "request": request,
-                    "args": _flatten_args(event, agent_context, request),
-                    "ts_us": ts_us,
-                    "dur_us": max(1, dur_us),
-                    "session_id": session_id,
-                    "trajectory_id": trajectory_id,
-                }
-            )
+            item = {
+                "kind": "request",
+                "request": request,
+                "args": _flatten_args(event, agent_context, request),
+                "ts_us": ts_us,
+                "dur_us": max(1, dur_us),
+                "session_id": session_id,
+            }
+            prepared.append(item)
+            request_items.append(item)
             continue
 
         if event_type in _TOOL_EVENT_TYPES:
@@ -495,9 +577,6 @@ def convert_records(
             if not isinstance(tool, dict) or event_time_us is None:
                 continue
             session_id = _safe_label(agent_context.get("session_id"), "unknown-session")
-            trajectory_id = _safe_label(
-                agent_context.get("trajectory_id"), "unknown-trajectory"
-            )
 
             tool_records.append(
                 {
@@ -506,10 +585,10 @@ def convert_records(
                     "args": _flatten_tool_args(event, agent_context, tool),
                     "event_time_us": event_time_us,
                     "session_id": session_id,
-                    "trajectory_id": trajectory_id,
                 }
             )
 
+    prepared.extend(_prepare_inferred_tool_items(request_items, tool_records))
     prepared.extend(_prepare_tool_items(tool_records))
 
     tracks = TrackTable()
@@ -522,7 +601,6 @@ def convert_records(
         dur_us = item.get("dur_us", 1)
         lane = tracks.lane_for(
             item["session_id"],
-            item["trajectory_id"],
             start_us=ts_us,
             end_us=ts_us + dur_us,
         )
@@ -531,7 +609,6 @@ def convert_records(
             tool = item["tool"]
             tool_pid, tool_tid = tracks.track_for(
                 item["session_id"],
-                item["trajectory_id"],
                 lane,
                 "tools",
             )
@@ -555,7 +632,6 @@ def convert_records(
             tool = item["tool"]
             tool_pid, tool_tid = tracks.track_for(
                 item["session_id"],
-                item["trajectory_id"],
                 lane,
                 "tools",
             )
@@ -577,18 +653,33 @@ def convert_records(
             converted += 1
             continue
 
+        if item["kind"] == "inferred_tool":
+            tool_pid, tool_tid = tracks.track_for(
+                item["session_id"],
+                lane,
+                "tools",
+            )
+            trace_events.append(
+                _make_complete_event(
+                    name="Tool: " + item["tool_class"],
+                    category="dynamo.agent.tool",
+                    pid=tool_pid,
+                    tid=tool_tid,
+                    ts_us=ts_us,
+                    dur_us=dur_us,
+                    args=args,
+                )
+            )
+            converted += 1
+            continue
+
         request = item["request"]
         request_pid, request_tid = tracks.track_for(
             item["session_id"],
-            item["trajectory_id"],
             lane,
             "request",
         )
-        stage_pid, stage_tid = (
-            tracks.track_for(item["session_id"], item["trajectory_id"], lane, "stages")
-            if include_stages and separate_stage_tracks
-            else (request_pid, request_tid)
-        )
+        stage_pid, stage_tid = request_pid, request_tid
         trace_events.append(
             _make_complete_event(
                 name=(
@@ -725,14 +816,6 @@ def parse_args() -> argparse.Namespace:
         help="Emit only full LLM request slices.",
     )
     parser.add_argument(
-        "--separate-stage-tracks",
-        action="store_true",
-        help=(
-            "Place stage slices on adjacent stage tracks instead of stacking "
-            "them under the request slice."
-        ),
-    )
-    parser.add_argument(
         "--include-markers",
         action="store_true",
         help="Also emit first-token instant markers. Disabled by default to reduce clutter.",
@@ -760,7 +843,6 @@ def main() -> int:
         _iter_records(input_paths),
         include_stages=args.include_stages,
         include_markers=args.include_markers,
-        separate_stage_tracks=args.separate_stage_tracks,
     )
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)

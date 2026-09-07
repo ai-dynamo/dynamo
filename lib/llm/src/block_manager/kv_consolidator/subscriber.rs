@@ -12,7 +12,8 @@ use serde::Deserialize;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use dynamo_kv_router::zmq_wire::RawKvEvent;
+use dynamo_kv_router::protocols::StorageTier as RouterStorageTier;
+use dynamo_kv_router::zmq_wire::{KvEventOwnership, Locality, RawKvEvent};
 
 use super::SharedCacheStatusTracker;
 use super::tracker::{
@@ -152,6 +153,26 @@ fn process_event(
     data_parallel_rank: Option<i32>,
     engine_source: EventSource,
 ) {
+    // Compatibility with v1.2 framework-only producers during v1.4 rolling upgrades.
+    // TODO(v1.5): Remove with the legacy consolidator subscription after v1.2
+    // leaves N-2 and residency-v2 producers use only the versioned source.
+    if event.ownership() != Ok(KvEventOwnership::Framework) {
+        tracing::warn!("Ignoring non-framework event on the legacy consolidator stream");
+        return;
+    }
+    // G1-only ingress: this source is the engine's local device (G1) cache.
+    // Non-local events (REMOTE / unknown locality), native lower-tier media
+    // (CPU offload, vLLM STORAGE), and unrecognized media (fail-closed) belong
+    // to other systems — KVBM offload arrives via its own source — so they must
+    // not be tracked as G1 here.
+    if matches!(event.locality(), Some(Locality::Remote | Locality::Unknown))
+        || event.medium().is_some_and(|m| {
+            RouterStorageTier::from_kv_medium(m) != Some(RouterStorageTier::Device)
+        })
+    {
+        return;
+    }
+
     match event {
         RawKvEvent::BlockStored {
             block_hashes,
@@ -246,11 +267,91 @@ fn process_event(
             }
         }
 
-        RawKvEvent::AllBlocksCleared => {
+        RawKvEvent::AllBlocksCleared { .. } => {
             tracing::debug!("Processing AllBlocksCleared");
             tracker.handle_clear_all();
         }
 
         RawKvEvent::Ignored => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tracker::{ConsolidatedEvent, PassthroughCacheStatusTracker, StorageTier};
+    use super::*;
+    use dynamo_kv_router::zmq_wire::BlockHashValue;
+
+    fn stored_event(medium: Option<&str>, locality: Option<Locality>) -> RawKvEvent {
+        RawKvEvent::BlockStored {
+            block_hashes: vec![BlockHashValue::Unsigned(1)],
+            parent_block_hash: None,
+            token_ids: vec![10, 11],
+            block_size: 2,
+            medium: medium.map(str::to_owned),
+            lora_name: None,
+            cache_namespace: None,
+            block_mm_infos: None,
+            is_eagle: Some(false),
+            group_idx: None,
+            kv_cache_spec_kind: None,
+            kv_cache_spec_sliding_window: None,
+            locality,
+            ownership: None,
+        }
+    }
+
+    /// G1-only ingress contract: only local device (G1) events reach the
+    /// tracker. Native lower-tier media (vLLM STORAGE, CPU offload), unrecognized
+    /// media (FS), and non-local (REMOTE / unknown locality) events are dropped.
+    #[test]
+    fn process_event_tracks_only_g1_device_events() {
+        let mut tracker = PassthroughCacheStatusTracker::new();
+
+        process_event(
+            &mut tracker,
+            stored_event(Some("STORAGE"), None),
+            None,
+            EventSource::Vllm,
+        );
+        process_event(
+            &mut tracker,
+            stored_event(Some("CPU"), None),
+            None,
+            EventSource::Vllm,
+        );
+        process_event(
+            &mut tracker,
+            stored_event(Some("FS"), None),
+            None,
+            EventSource::Vllm,
+        );
+        process_event(
+            &mut tracker,
+            stored_event(Some("GPU"), Some(Locality::Remote)),
+            None,
+            EventSource::Vllm,
+        );
+        process_event(
+            &mut tracker,
+            stored_event(None, Some(Locality::Unknown)),
+            None,
+            EventSource::Vllm,
+        );
+        assert!(tracker.drain_events().is_empty());
+
+        process_event(
+            &mut tracker,
+            stored_event(None, None),
+            None,
+            EventSource::Vllm,
+        );
+        assert!(matches!(
+            tracker.drain_events().as_slice(),
+            [ConsolidatedEvent::Store {
+                tier: Some(StorageTier::Device),
+                ..
+            }]
+        ));
     }
 }

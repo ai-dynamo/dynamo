@@ -15,38 +15,32 @@ readme = "README.md"
 [features]
 default = []
 profile = []
-aic-forward-pass = ["dep:aiconfigurator-core"]
-# Enables G1↔G2 offload simulation via kvbm-engine.
-kvbm-offload = ["dep:kvbm-engine", "dep:kvbm-physical", "dep:kvbm-common", "dep:velo"]
+# Test/benchmark-only deterministic replay plumbing. Production replay never
+# enables this feature and keeps the existing random selector behavior.
+replay-bench = ["aisimulate-core/replay-bench", "dynamo-kv-router/bench"]
+test-support = []
+zmq-events = ["dep:tmq"]
 
 [dependencies]
 # repo
+aisimulate-core = { workspace = true }
 dynamo-data-gen = { workspace = true }
 dynamo-kv-router = { workspace = true }
 dynamo-tokens = { workspace = true }
-kvbm-logical = { workspace = true }
-
-# kvbm-offload feature dependencies (G1↔G2 transport simulation)
-kvbm-engine = { workspace = true, optional = true }
-kvbm-physical = { workspace = true, optional = true }
-kvbm-common = { workspace = true, optional = true }
-velo = { workspace = true, optional = true }
 
 # workspace
-aiconfigurator-core = { workspace = true, optional = true }
 anyhow = { workspace = true }
+blake3 = { workspace = true }
 bytes = { workspace = true }
 dashmap = { workspace = true }
 derive_builder = { workspace = true }
-derive-getters = { workspace = true }
 futures = { workspace = true }
-indicatif = "0.18"
-rand = { workspace = true }
+parking_lot = { workspace = true }
 rmp-serde = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_path_to_error = { workspace = true }
-tmq = { workspace = true }
+tmq = { workspace = true, optional = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
@@ -55,7 +49,6 @@ validator = { workspace = true }
 
 # crate-specific
 ndarray = "0.16"
-slotmap = "1"
 ndarray-npy = "0.9"
 ndarray-interp = "0.5"
 rustc-hash = "2"
@@ -64,5 +57,8 @@ rustc-hash = "2"
 tokio-timerfd = "0.2"
 
 [dev-dependencies]
+dynamo-kv-router = { workspace = true, features = ["metrics"] }
 rstest = "0.18.2"
 tempfile = { workspace = true }
+tmq = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

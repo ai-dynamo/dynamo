@@ -19,6 +19,7 @@ package v1beta1
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
 )
@@ -44,6 +45,7 @@ const (
 	DynamoGraphDeploymentConditionTypeAvailable            = "Available"
 	DynamoGraphDeploymentConditionTypeDynamoComponentReady = "DynamoComponentReady"
 
+	ConditionTypeOwnershipConflict            = "OwnershipConflict"
 	ConditionTypeTopologyLevelsAvailable      = "TopologyLevelsAvailable"
 	ConditionReasonAllTopologyLevelsAvailable = "AllTopologyLevelsAvailable"
 	ConditionReasonTopologyLevelsUnavailable  = "TopologyLevelsUnavailable"
@@ -68,6 +70,50 @@ type CompilationCacheConfig struct {
 	MountPath string `json:"mountPath,omitempty"`
 }
 
+// ProviderOverride carries a sparse provider-native fragment for its DGD context.
+// Grove support is restricted as follows:
+//   - apiVersion must be `grove.io/v1alpha1`.
+//   - target is `PodCliqueSet`, `PodCliqueTemplateSpec`, or
+//     `PodCliqueScalingGroupConfig`, according to the field location and
+//     component shape.
+//   - value may set only the target's topologyConstraint subtree.
+//
+// All other providers, versions, targets, and fields are rejected.
+type ProviderOverride struct {
+	// apiVersion is the Kubernetes API group and version of the provider schema.
+	// Grove requires `grove.io/v1alpha1`.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	APIVersion string `json:"apiVersion"`
+
+	// target identifies the provider resource kind or embedded provider schema.
+	// It may be omitted on input when the DGD location has one unambiguous target;
+	// admission resolves and persists it.
+	// +optional
+	Target string `json:"target,omitempty"`
+
+	// value is a sparse fragment of the selected provider schema. For Grove,
+	// PodCliqueSet accepts only `spec.template.topologyConstraint`; embedded
+	// PodCliqueTemplateSpec and PodCliqueScalingGroupConfig targets accept only
+	// `topologyConstraint`.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Type=object
+	Value apiextensionsv1.JSON `json:"value"`
+}
+
+// MultinodeRoleSpec configures one explicit role of a multinode component.
+// Additional role-specific settings can be added here without introducing a
+// polymorphic list keyed by generated provider resource names.
+type MultinodeRoleSpec struct {
+	// providerOverride configures the Grove PCLQ template generated for this
+	// multinode role. It uses apiVersion `grove.io/v1alpha1`, target
+	// `PodCliqueTemplateSpec`, and may set only `topologyConstraint`. It is
+	// supported only for components embedded in a DGD.
+	// +optional
+	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
+}
+
 // MultinodeSpec configures a multinode component.
 type MultinodeSpec struct {
 	// nodeCount is the number of nodes to deploy for the multinode component.
@@ -76,6 +122,14 @@ type MultinodeSpec struct {
 	// +kubebuilder:default=2
 	// +kubebuilder:validation:Minimum=2
 	NodeCount int32 `json:"nodeCount"`
+
+	// leader configures the generated multinode leader unit.
+	// +optional
+	Leader *MultinodeRoleSpec `json:"leader,omitempty"`
+
+	// worker configures the generated multinode worker unit.
+	// +optional
+	Worker *MultinodeRoleSpec `json:"worker,omitempty"`
 }
 
 // ModelReference identifies a model served by a component.
@@ -128,14 +182,19 @@ type RestartStrategy struct {
 	Order []string `json:"order,omitempty"`
 }
 
-// ScalingAdapter opts a component into using the DynamoGraphDeploymentScalingAdapter
-// (DGDSA). When `scalingAdapter` is set on a component (even as an empty
-// object, `scalingAdapter: {}`), the DGDSA is created and owns the `replicas`
-// field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via
-// the Scale subresource. Omitting the field opts the component out.
+// ScalingAdapter opts a component into the DynamoGraphDeploymentScalingAdapter (DGDSA).
+// It is a marker struct: setting `scalingAdapter` at all -- even as the empty object
+// `scalingAdapter: {}` -- creates the DGDSA, which owns the `replicas` field so that
+// external autoscalers (HPA/KEDA/Planner) can drive scaling via the Scale subresource.
+// Omit the field to opt out.
 type ScalingAdapter struct{}
 
-// EPPConfig contains configuration for EPP (Endpoint Picker Plugin) components.
+// EPPConfig contains configuration for the legacy Go EPP (Endpoint Picker Plugin).
+//
+// Deprecated: Go EPP is deprecated. New EPP components should omit `eppConfig`
+// and use the native Rust EPP (env-var configuration only). Existing DGDs that
+// still set `eppConfig` keep the Go EPP Pod contract until they migrate
+// explicitly by clearing `eppConfig` (and updating the image).
 // +kubebuilder:validation:XValidation:rule="has(self.configMapRef) != has(self.config)",message="exactly one of configMapRef or config must be specified"
 type EPPConfig struct {
 	// configMapRef references a user-provided ConfigMap containing EPP
@@ -164,6 +223,22 @@ const (
 	GMSModeInterPod GPUMemoryServiceMode = "InterPod"
 )
 
+// GroveSpec groups experimental Grove-specific rendering options.
+type GroveSpec struct {
+	// forceScalingGroup opts a single-node component into rendering as a
+	// PodCliqueScalingGroup with one single-pod PodClique per replica.
+	// Scaling changes the scaling-group replica count. The first
+	// `minAvailable` replicas join the deployment's base PodGang together
+	// with its other base workloads; each replica beyond `minAvailable`
+	// gets its own PodGang, gang-scheduled separately from the rest of the
+	// deployment. `false` or omitted means automatic selection (multi-node
+	// and inter-pod GMS components use a scaling group, other single-node
+	// components a standalone PodClique), not "force PodClique".
+	// Immutable after creation.
+	// +optional
+	ForceScalingGroup bool `json:"forceScalingGroup,omitempty"`
+}
+
 // ExperimentalSpec groups opt-in preview features whose API shape and behavior
 // may change in breaking ways between v1beta1 releases (including disappearing
 // without a name-preserving graduation path). Fields placed under
@@ -183,14 +258,18 @@ type ExperimentalSpec struct {
 	// +optional
 	Failover *FailoverSpec `json:"failover,omitempty"`
 
+	// grove groups Grove-specific rendering options.
+	// +optional
+	Grove *GroveSpec `json:"grove,omitempty"`
+
 	// checkpoint configures container-image snapshotting and restore for
 	// this component. Set `checkpoint.enabled: true` to opt in. Without
-	// checkpointRef, the DGD controller creates a DGD-scoped DynamoCheckpoint
-	// CR and later restores pods in the same DGD generation from that
-	// checkpoint. With checkpointRef, the DGD restores from that existing
-	// checkpoint instead. The user-facing shape of this field is still settling,
-	// which is why it lives under `experimental` in v1beta1 instead of at the
-	// top level.
+	// checkpointRef, the DGD controller creates a DGD-scoped SnapshotJob and
+	// later restores pods in the same DGD generation from its PodSnapshot.
+	// With checkpointRef, the DGD restores from the named
+	// PodSnapshot in the same namespace. The user-facing shape of this field is
+	// still settling, which is why it lives under `experimental` in v1beta1
+	// instead of at the top level.
 	// +optional
 	Checkpoint *ComponentCheckpointConfig `json:"checkpoint,omitempty"`
 }
@@ -215,9 +294,9 @@ type GPUMemoryServiceSpec struct {
 	DeviceClassName string `json:"deviceClassName,omitempty"`
 
 	// extraClientContainers lists additional user-declared containers that should
-	// be wired as GMS clients in service pods. Checkpoint Job clients are declared
-	// under checkpoint.job.gmsClientContainers. In each rendered pod, only
-	// matching container names are wired; absent names are ignored.
+	// be wired as GMS clients in service pods. SnapshotJob capture Pod clients are
+	// declared under checkpoint.job.gmsClientContainers. Every name must match a container
+	// in the enclosing component's podTemplate.spec.containers.
 	// +optional
 	// +listType=set
 	// +kubebuilder:validation:items:MinLength=1
@@ -276,14 +355,14 @@ type FailoverSpec struct {
 
 // Deprecated: use checkpoint.enabled instead.
 // enabled=true without checkpointRef creates a DGD-managed automatic
-// checkpoint; checkpointRef restores the named checkpoint.
+// checkpoint; checkpointRef restores the named PodSnapshot.
 // +kubebuilder:validation:Enum=Auto;Manual
 type CheckpointMode string
 
 const (
 	// Deprecated: use checkpoint.enabled=true and omit checkpointRef.
 	CheckpointModeAuto CheckpointMode = "Auto"
-	// Deprecated: use checkpointRef to restore an existing checkpoint.
+	// Deprecated: use checkpointRef to restore an existing PodSnapshot.
 	CheckpointModeManual CheckpointMode = "Manual"
 )
 
@@ -292,8 +371,8 @@ const (
 type CheckpointStartupPolicy string
 
 const (
-	// CheckpointStartupPolicyImmediate starts workers immediately. The checkpoint
-	// job runs in the background, and only pods created after the checkpoint is
+	// CheckpointStartupPolicyImmediate starts workers immediately. The SnapshotJob
+	// capture runs in the background, and only pods created after the checkpoint is
 	// Ready are restore-shaped by the pod-create mutating webhook.
 	CheckpointStartupPolicyImmediate CheckpointStartupPolicy = "Immediate"
 	// CheckpointStartupPolicyWaitForCheckpoint gates worker replicas until the
@@ -311,8 +390,8 @@ const (
 	// CRs and artifacts when the owning DGD is deleted.
 	CheckpointDeletionPolicyDelete CheckpointDeletionPolicy = "Delete"
 	// CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs
-	// and artifacts after the owning DGD is deleted. Users can reference the
-	// retained checkpoint with checkpointRef if they accept compatibility risk.
+	// and artifacts after the owning DGD is deleted. Retained automatic
+	// checkpoints are not valid checkpointRef targets.
 	CheckpointDeletionPolicyRetain CheckpointDeletionPolicy = "Retain"
 )
 
@@ -321,14 +400,14 @@ const (
 type ComponentCheckpointConfig struct {
 	// enabled indicates whether checkpointing is enabled for this component.
 	// When true, omit checkpointRef for a DGD-managed automatic checkpoint or
-	// set checkpointRef to restore an existing checkpoint. Omit the checkpoint
-	// block, or set enabled=false, to disable checkpointing.
+	// set checkpointRef to restore an existing PodSnapshot in the same namespace.
+	// Omit the checkpoint block, or set enabled=false, to disable checkpointing.
 	// +kubebuilder:validation:Required
 	Enabled bool `json:"enabled"`
 
 	// Deprecated: omit mode. Use enabled=true without checkpointRef for a
 	// DGD-managed automatic checkpoint, or use checkpointRef to restore the
-	// named checkpoint.
+	// named PodSnapshot.
 	// +optional
 	Mode CheckpointMode `json:"mode,omitempty"`
 
@@ -344,19 +423,23 @@ type ComponentCheckpointConfig struct {
 
 	// DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and
 	// artifact are deleted or retained when the owning DGD is deleted.
-	// Explicit checkpointRef checkpoints are never owned or deleted by the DGD.
+	// Explicit checkpointRef PodSnapshots are never owned or deleted by the DGD.
 	// +optional
 	// +kubebuilder:default=Delete
 	DeletionPolicy CheckpointDeletionPolicy `json:"deletionPolicy,omitempty"`
 
-	// checkpointRef references an existing DynamoCheckpoint CR by `metadata.name`.
+	// checkpointRef references an existing PodSnapshot in the same namespace by
+	// metadata.name.
 	// When set, this component's `identity` is ignored and the referenced
-	// checkpoint is used directly.
+	// PodSnapshot is used directly.
+	// Standalone worker-class (worker, prefill, or decode)
+	// DynamoComponentDeployment resources cannot set this field; configure
+	// checkpointRef on the owning DynamoGraphDeployment component.
 	// +optional
 	CheckpointRef *string `json:"checkpointRef,omitempty"`
 
-	// Deprecated: omit for DGD-managed checkpoints; no action is needed.
-	// Use checkpointRef to restore an existing checkpoint.
+	// Deprecated: omit for DGD-managed checkpoints; the operator ignores this field.
+	// Use checkpointRef to restore an existing PodSnapshot.
 	// +optional
 	Identity *DynamoCheckpointIdentity `json:"identity,omitempty"`
 
@@ -368,14 +451,14 @@ type ComponentCheckpointConfig struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	TargetContainerName string `json:"targetContainerName,omitempty"`
 
-	// job customizes the DGD-managed checkpoint Job.
+	// job customizes the DGD-managed SnapshotJob capture Pod.
 	// +optional
 	Job *ComponentCheckpointJobConfig `json:"job,omitempty"`
 }
 
-// ComponentCheckpointJobConfig customizes the checkpoint Job created for a DGD component.
+// ComponentCheckpointJobConfig customizes the SnapshotJob capture Pod created for a DGD component.
 type ComponentCheckpointJobConfig struct {
-	// gmsClientContainers lists checkpoint Job containers that should receive
+	// gmsClientContainers lists SnapshotJob capture Pod containers that should receive
 	// GMS client wiring. Requires gpuMemoryService on the component.
 	// +optional
 	// +listType=set
@@ -384,7 +467,7 @@ type ComponentCheckpointJobConfig struct {
 	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	GMSClientContainers []string `json:"gmsClientContainers,omitempty"`
 
-	// podTemplate customizes the checkpoint Job pod. The operator starts from the
+	// podTemplate customizes the SnapshotJob capture Pod. The operator starts from the
 	// selected workload container and merges this template so users can add helper
 	// containers such as gms-saver.
 	// +optional
@@ -394,9 +477,9 @@ type ComponentCheckpointJobConfig struct {
 	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 }
 
-// Deprecated: omit in DGD component checkpoint configs. Auto needs no
-// replacement; use checkpointRef for explicit restores.
-// Duplicated from v1alpha1; DynamoCheckpoint itself remains v1alpha1.
+// Deprecated: omit in DGD component checkpoint configs. Automatic capture
+// needs no replacement; use checkpointRef to restore a PodSnapshot.
+// Duplicated from v1alpha1 for conversion compatibility.
 type DynamoCheckpointIdentity struct {
 	// model is the model identifier (e.g. "meta-llama/Llama-3-70B").
 	// Deprecated: legacy identity only.
@@ -564,6 +647,53 @@ const (
 	DGDStateFailed       DGDState = "failed"
 )
 
+// PlacementScoreState describes whether placement score is available and how
+// complete the reported score is for a graph deployment.
+//
+// Every backend must set this field after the first reconciliation:
+//   - Reported:    a score is available for every scored placement unit.
+//   - Partial:     a score is available for some but not all placement units.
+//   - Unsupported: the backend does not surface a placement score at all.
+//   - Unknown:     the backend supports scores but the current value is
+//     indeterminate (e.g. read failure, not yet populated by the
+//     scheduler). When set, PlacementStatus.Score must be cleared.
+//
+// +kubebuilder:validation:Enum=Reported;Partial;Unsupported;Unknown
+type PlacementScoreState string
+
+const (
+	PlacementScoreStateReported    PlacementScoreState = "Reported"
+	PlacementScoreStatePartial     PlacementScoreState = "Partial"
+	PlacementScoreStateUnsupported PlacementScoreState = "Unsupported"
+	PlacementScoreStateUnknown     PlacementScoreState = "Unknown"
+)
+
+// PlacementStatus groups DGD-level scheduler placement fields under a single
+// status object so future placement signals (e.g. scheduler contract version,
+// last-report timestamp, per-unit reports) can be added without a schema break.
+//
+// The score source is an open question in DEP #10064 (Grove mirror, typed Grove
+// scheduler API, or unstructured provider). Until a source is selected and
+// implemented, the DGD controller does not write this field; the schema and
+// conversion are landed here so downstream consumers can rely on the shape.
+type PlacementStatus struct {
+	// score is the DGD-level scheduler placement score aggregated from
+	// relevant scheduler placement units. Normalized to [0.0, 1.0] where higher
+	// is better and 1.0 represents the best possible placement. Aggregation
+	// uses the minimum across placement units so the value is a worst-placement
+	// signal for the graph. Scores are only comparable across DGDs that share
+	// the same scheduler scoring contract and version.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1
+	Score *float64 `json:"score,omitempty"`
+
+	// state indicates placement score reporting state. See PlacementScoreState
+	// for the semantics of each value.
+	// +optional
+	State PlacementScoreState `json:"state,omitempty"`
+}
+
 // RestartPhase enumerates phases of a graph-level restart.
 type RestartPhase string
 
@@ -620,15 +750,15 @@ type RollingUpdateStatus struct {
 
 // ComponentCheckpointStatus contains checkpoint information for a single component.
 type ComponentCheckpointStatus struct {
-	// checkpointName is the name of the associated DynamoCheckpoint CR.
+	// checkpointName is the name of the active PodSnapshot.
 	// +optional
 	CheckpointName string `json:"checkpointName,omitempty"`
-	// checkpointID is the artifact ID used by the snapshot protocol.
+	// checkpointID is a deprecated legacy Dynamo artifact ID. Native standalone
+	// snapshots leave this field empty.
 	// +optional
 	CheckpointID string `json:"checkpointID,omitempty"`
-	// identityHash is the computed hash of the checkpoint identity.
-	// Deprecated: automatic checkpoints use checkpointID. This field is retained
-	// for older status consumers.
+	// identityHash is a deprecated legacy checkpoint identity hash. Native
+	// standalone snapshots leave this field empty.
 	// +optional
 	IdentityHash string `json:"identityHash,omitempty"`
 	// ready indicates the checkpoint artifact is ready for future pods to restore.
@@ -647,6 +777,31 @@ type ComponentReplicaStatus struct {
 	// name; during rolling updates it contains both old and new resource names.
 	// +optional
 	ComponentNames []string `json:"componentNames,omitempty"`
+
+	// runtimeNamespace is the effective Dynamo runtime namespace for this
+	// component. Worker components may include a generation suffix; non-workers
+	// use the base namespace. During rolling updates, worker status keeps the old
+	// active revision namespace until cutover completes.
+	// +optional
+	RuntimeNamespace string `json:"runtimeNamespace,omitempty"`
+
+	// gpusPerEngine is the number of GPUs assigned to one inference engine in a
+	// component replica, across all of its nodes. Independent auxiliary GPU
+	// allocations are excluded. A present zero means the engine itself has no
+	// GPUs; consult gpusPerReplica for auxiliary allocations.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	GPUsPerEngine *int64 `json:"gpusPerEngine,omitempty"`
+
+	// gpusPerReplica is the unique GPU allocation added when this component
+	// scales by one replica, across all nodes, application and initialization
+	// phases, and provider-owned Pods. Scalar GPUs use the Kubernetes effective
+	// Pod scheduling footprint; shared DRA claims are counted once. A present
+	// zero records a successful non-GPU resolution; omission means no current
+	// shape is available.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	GPUsPerReplica *int64 `json:"gpusPerReplica,omitempty"`
 
 	// replicas is the total number of non-terminated replicas.
 	// +kubebuilder:validation:Minimum=0
@@ -669,4 +824,19 @@ type ComponentReplicaStatus struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	AvailableReplicas *int32 `json:"availableReplicas,omitempty"`
+
+	// scheduledReplicas is the number of replicas the backend scheduler has
+	// scheduled, expressed strictly in Dynamo component-replica units (not
+	// raw backend pod counts). It is a diagnostic aid for distinguishing
+	// capacity/scheduling shortfalls from runtime readiness.
+	//
+	// It is optional and omitted (nil) when the active backend cannot derive
+	// it reliably in component-replica units — for example before the backing
+	// resource's status has been observed, or for backends that do not report
+	// a scheduling count. A nil value therefore means "not reported", never
+	// "zero scheduled"; consumers must not treat absence as a scheduling
+	// failure.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	ScheduledReplicas *int32 `json:"scheduledReplicas,omitempty"`
 }

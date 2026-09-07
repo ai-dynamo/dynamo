@@ -3,7 +3,6 @@
 
 use crate::component::{
     self, Component, ComponentBuilder, Endpoint, EndpointDiscoverySource, Instance, Namespace,
-    RoutingOccupancyState,
 };
 use crate::config::environment_names::tcp_response_stream;
 use crate::pipeline::PipelineError;
@@ -12,7 +11,7 @@ use crate::service::{ServiceClient, ServiceSet};
 use crate::storage::kv;
 use crate::{discovery, system_status_server, transports};
 use crate::{
-    discovery::Discovery,
+    discovery::{Discovery, DiscoverySpec, EndpointRegistrationLease, EndpointRegistrationManager},
     metrics::PrometheusUpdateCallback,
     metrics::{MetricsHierarchy, MetricsRegistry},
     transports::{etcd, nats, tcp},
@@ -20,6 +19,7 @@ use crate::{
 
 use super::utils::GracefulShutdownTracker;
 use crate::SystemHealth;
+use crate::routing_policy::RoutingOccupancyState;
 use crate::runtime::Runtime;
 
 // Used instead of std::cell::OnceCell because get_or_try_init there is nightly
@@ -40,8 +40,57 @@ use tokio_util::sync::CancellationToken;
 type EndpointDiscoverySourceMap = HashMap<Endpoint, Weak<EndpointDiscoverySource>>;
 type RoutingOccupancyMap = HashMap<Endpoint, Weak<RoutingOccupancyState>>;
 
-/// Distributed [Runtime] which provides access to shared resources across the cluster, this includes
-/// communication protocols and transports.
+fn parse_tcp_response_stream_port(value: Option<&str>) -> Result<u16, PipelineError> {
+    let Some(port) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(0);
+    };
+
+    port.parse::<u16>().map_err(|_| {
+        PipelineError::Generic(format!(
+            "invalid {}: '{}' is not a valid port number",
+            tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
+            port
+        ))
+    })
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::parse_tcp_response_stream_port;
+    use crate::pipeline::PipelineError;
+
+    #[test]
+    fn response_stream_port_trims_and_treats_empty_as_unset() {
+        for value in [None, Some(""), Some(" \t ")] {
+            assert_eq!(parse_tcp_response_stream_port(value).unwrap(), 0);
+        }
+        assert_eq!(
+            parse_tcp_response_stream_port(Some(" 8080 ")).unwrap(),
+            8080
+        );
+    }
+
+    #[test]
+    fn response_stream_port_rejects_invalid_values() {
+        let error = parse_tcp_response_stream_port(Some(" 65536 ")).unwrap_err();
+        assert!(matches!(
+            error,
+            PipelineError::Generic(message)
+                if message
+                    == "invalid DYN_TCP_RESPONSE_STREAM_PORT: '65536' is not a valid port number"
+        ));
+    }
+}
+
+/// Distributed [Runtime] providing cluster-wide communication, transport, and discovery resources.
+///
+/// `DistributedRuntime` is not a process singleton. Calling [`DistributedRuntime::new`] more than
+/// once creates independent DRT instances with distinct discovery connection IDs, even when they
+/// share a process. Cloning a DRT continues to share the original instance and connection ID.
+///
+/// Production services should normally treat one DRT per service replica/process as a soft
+/// invariant. Multiple DRTs in one process are primarily supported for single-process test
+/// topologies and for the mocker, which models multiple isolated workers in one process.
 #[derive(Clone)]
 pub struct DistributedRuntime {
     // local runtime
@@ -55,6 +104,7 @@ pub struct DistributedRuntime {
 
     // Service discovery client
     discovery_client: Arc<dyn discovery::Discovery>,
+    endpoint_registrations: Arc<EndpointRegistrationManager>,
 
     // Discovery metadata (only used for Kubernetes backend)
     // Shared with system status server to expose via /metadata endpoint
@@ -193,6 +243,11 @@ impl DistributedRuntime {
             request_plane,
         );
 
+        let endpoint_registrations = EndpointRegistrationManager::new(
+            discovery_client.clone(),
+            runtime.secondary(),
+            runtime.primary_token(),
+        );
         let distributed_runtime = Self {
             runtime,
             network_manager: Arc::new(network_manager),
@@ -200,6 +255,7 @@ impl DistributedRuntime {
             tcp_server: Arc::new(OnceCell::new()),
             system_status_server: Arc::new(OnceLock::new()),
             discovery_client,
+            endpoint_registrations,
             discovery_metadata,
             component_registry,
             endpoint_discovery_sources: Arc::new(Mutex::new(HashMap::new())),
@@ -342,6 +398,10 @@ impl DistributedRuntime {
         &self.metadata_artifacts
     }
 
+    /// Returns this DRT instance's discovery identity.
+    ///
+    /// This identifies the DRT, not the operating-system process. Multiple DRTs in one process
+    /// receive distinct connection IDs.
     pub fn connection_id(&self) -> u64 {
         self.discovery_client.instance_id()
     }
@@ -361,25 +421,27 @@ impl DistributedRuntime {
         self.discovery_client.clone()
     }
 
+    /// Register an endpoint until the last runtime-wide owner drops its lease.
+    pub async fn register_endpoint_lease(
+        &self,
+        spec: DiscoverySpec,
+    ) -> Result<EndpointRegistrationLease> {
+        self.endpoint_registrations.register(spec).await
+    }
+
     pub async fn tcp_server(&self) -> Result<Arc<tcp::server::TcpStreamServer>> {
         Ok(self
             .tcp_server
             .get_or_try_init(async move {
-                let port = match std::env::var(tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT) {
-                    Ok(p) => p.parse::<u16>().map_err(|_| {
-                        PipelineError::Generic(format!(
-                            "invalid {}: '{}' is not a valid port number",
-                            tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
-                            p
-                        ))
-                    })?,
-                    Err(_) => 0,
-                };
-                let interface = std::env::var(tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST)
-                    .ok()
-                    .filter(|h| !h.is_empty());
+                let port_value =
+                    std::env::var(tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT).ok();
+                let port = parse_tcp_response_stream_port(port_value.as_deref())?;
+                let host = crate::utils::ip_resolver::host_override_from_env(
+                    tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,
+                )
+                .map_err(|error| PipelineError::Generic(error.to_string()))?;
 
-                let host_suffix = interface
+                let host_suffix = host
                     .as_ref()
                     .map_or(String::new(), |h| format!(" on host {h}"));
                 if port == 0 {
@@ -392,7 +454,10 @@ impl DistributedRuntime {
                     );
                 }
 
-                let options = tcp::server::ServerOptions { port, interface };
+                let options = tcp::server::ServerOptions {
+                    port,
+                    interface: host,
+                };
                 let server = tcp::server::TcpStreamServer::new(options).await?;
                 Ok::<_, PipelineError>(server)
             })
@@ -433,12 +498,10 @@ impl DistributedRuntime {
     /// Returns the event transport kind this runtime was configured with.
     ///
     /// The value is resolved once at construction time by `DiscoveryBackend::resolve_event_transport_kind`:
-    /// if `DYN_EVENT_PLANE` is set explicitly that value wins; otherwise the discovery
-    /// backend drives the default (ZMQ for `file`/`mem`, NATS for `etcd`/`kubernetes`).
+    /// if `DYN_EVENT_PLANE` is set explicitly that value wins; otherwise the default is ZMQ.
     ///
-    /// Use this instead of [`EventTransportKind::from_env_or_default`] wherever you have
-    /// access to a `DistributedRuntime`, so that local-only workflows work without
-    /// setting `DYN_EVENT_PLANE` explicitly.
+    /// Use this instead of `EventTransportKind::from_env_or_default` wherever you have
+    /// access to a `DistributedRuntime`.
     pub fn default_event_transport_kind(&self) -> crate::discovery::EventTransportKind {
         self.event_transport_kind
     }
@@ -476,6 +539,15 @@ impl DistributedRuntime {
     pub async fn kv_router_nats_publish(
         &self,
         subject: String,
+        payload: bytes::Bytes,
+    ) -> anyhow::Result<()> {
+        self.kv_router_nats_publish_subject(subject.into(), payload)
+            .await
+    }
+
+    pub(crate) async fn kv_router_nats_publish_subject(
+        &self,
+        subject: async_nats::Subject,
         payload: bytes::Bytes,
     ) -> anyhow::Result<()> {
         let Some(nats_client) = self.nats_client.as_ref() else {
@@ -611,8 +683,6 @@ impl DiscoveryBackend {
     /// Returns true if this backend requires no external services (file or in-memory).
     ///
     /// Local backends do not need etcd, NATS, or any other infrastructure daemon.
-    /// This is used to drive smart defaults: for example, the event plane defaults to
-    /// ZMQ (not NATS) when a local backend is in use and `DYN_EVENT_PLANE` is not set.
     pub fn is_local(&self) -> bool {
         matches!(
             self,
@@ -623,10 +693,10 @@ impl DiscoveryBackend {
 
     /// Resolve the event transport kind for this backend.
     ///
-    /// This is the single authoritative mapping of `(DYN_EVENT_PLANE, backend)` →
-    /// `EventTransportKind`. When `DYN_EVENT_PLANE` is unset or empty the backend
-    /// drives the default: local backends (`file`/`mem`) → ZMQ, distributed backends
-    /// (`etcd`/`kubernetes`) → NATS.
+    /// This is the single authoritative mapping of `DYN_EVENT_PLANE` →
+    /// `EventTransportKind`. ZMQ is the default event plane for all backends
+    /// (`file`/`mem`/`etcd`/`kubernetes`); NATS is an explicit opt-in via
+    /// `DYN_EVENT_PLANE=nats`.
     ///
     /// Call this once at startup and store the result; do not call it repeatedly.
     pub fn resolve_event_transport_kind(&self) -> crate::discovery::EventTransportKind {
@@ -635,27 +705,15 @@ impl DiscoveryBackend {
         match std::env::var(DYN_EVENT_PLANE).as_deref() {
             Ok("nats") => EventTransportKind::Nats,
             Ok("zmq") => EventTransportKind::Zmq,
-            // Unset or empty: derive from backend type.
-            Ok("") | Err(_) => {
-                if self.is_local() {
-                    EventTransportKind::Zmq
-                } else {
-                    EventTransportKind::Nats
-                }
-            }
+            // Unset or empty: ZMQ is the default for every backend.
+            Ok("") | Err(_) => EventTransportKind::Zmq,
             Ok(other) => {
-                let default_kind = if self.is_local() {
-                    EventTransportKind::Zmq
-                } else {
-                    EventTransportKind::Nats
-                };
                 tracing::warn!(
                     "Invalid DYN_EVENT_PLANE value '{}'. Valid values: 'nats', 'zmq'. \
-                     Defaulting to {:?}.",
-                    other,
-                    default_kind
+                     Defaulting to ZMQ.",
+                    other
                 );
-                default_kind
+                EventTransportKind::Zmq
             }
         }
     }
@@ -704,7 +762,7 @@ impl DistributedConfig {
         let event_transport_kind = discovery_backend.resolve_event_transport_kind();
 
         // NATS is used for more than just NATS request-plane RPC:
-        // - KV router events (JetStream or NATS core + local indexer)
+        // - KV router events (NATS core event plane)
         // - inter-router replica sync (NATS core)
         //
         // Enable the NATS client when any of these hold:
@@ -813,7 +871,7 @@ impl RequestPlaneMode {
     /// Get the request plane mode from environment variable (uncached)
     /// Reads from `DYN_REQUEST_PLANE` environment variable.
     fn from_env() -> Self {
-        std::env::var("DYN_REQUEST_PLANE")
+        std::env::var(crate::config::environment_names::request_plane::DYN_REQUEST_PLANE)
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or_default()

@@ -1,0 +1,198 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Nemotron-3-Ultra"
+subtitle: "Serve Nemotron-3-Ultra with optimized Dynamo 1.4.0 and vLLM profiles on B200, GB200, and H200."
+---
+
+The Nemotron-3-Ultra recipe serves
+`nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4` with optimized aggregated and
+disaggregated Dynamo profiles. The model's native context length is 256K. The 1M profiles are an
+explicit long-context enablement that overrides the serving framework's model-length guardrail;
+they do not change the model's native context length in `config.json`. The qualified 1M settings
+are carried in separate manifests.
+
+<Info>
+All profiles use the released public `vllm-runtime:1.4.0` image pinned by digest. No NGC image pull
+secret is required.
+</Info>
+
+## Profiles
+
+The aggregated profiles run two workers behind KV-aware routing. Aggregated 256K profiles use
+five-token MTP; aggregated 1M profiles run without speculative decoding. Disaggregated profiles
+split prefill and decode, use NIXL/UCX over the qualified RDMA path, and run without MTP.
+
+All profiles enable prefix caching, asynchronous scheduling, FP8 KV cache, BF16 Mamba state, and
+hybrid KV cache management with Expert Parallelism disabled.
+
+| GPU | Context | Topology | GPU shape | Reference concurrency | Manifest |
+|---|---:|---|---|---:|---|
+| B200 | 256K | Aggregated | 2 × TP4 | 94 | `vllm/agg-b200-agentic-256K-kv-router/deploy.yaml` |
+| B200 | 1M | Aggregated | 2 × TP4 | 46 | `vllm/agg-b200-agentic-1M-kv-router/deploy.yaml` |
+| GB200 | 256K | Aggregated | 2 × TP4 | 96 | `vllm/agg-gb200-agentic-256K-kv-router/deploy.yaml` |
+| GB200 | 1M | Aggregated | 2 × TP4 | 48 | `vllm/agg-gb200-agentic-1M-kv-router/deploy.yaml` |
+| H200 | 256K | Aggregated | 2 × TP8 | 64 | `vllm/agg-h200-agentic-256K-kv-router/deploy.yaml` |
+| H200 | 1M | Aggregated | 2 × TP8 | 32 | `vllm/agg-h200-agentic-1M-kv-router/deploy.yaml` |
+| B200 | 256K | Disaggregated | 1P TP4 + 2D TP4 | 144 | `vllm/disagg-b200-agentic-256K/deploy.yaml` |
+| B200 | 1M | Disaggregated | 1P TP4 + 1D TP4 | 38 | `vllm/disagg-b200-agentic-1M/deploy.yaml` |
+| GB200 | 256K | Disaggregated | 1P TP4 + 2D TP4 | 140 | `vllm/disagg-gb200-agentic-256K/deploy.yaml` |
+| GB200 | 1M | Disaggregated | 1P TP4 + 1D TP4 | 48 | `vllm/disagg-gb200-agentic-1M/deploy.yaml` |
+| H200 | 256K | Disaggregated | 1P TP8 + 2D TP8 | 72 | `vllm/disagg-h200-agentic-256K/deploy.yaml` |
+| H200 | 1M | Disaggregated | 1P TP8 + 1D TP8 | 30 | `vllm/disagg-h200-agentic-1M/deploy.yaml` |
+
+The B200 and GB200 256K disaggregated profiles use FlashInfer attention; the H200 256K profile uses
+FlashAttention. B200 and H200 use UCX/RDMA with `rdma/ib` resources. GB200 uses GKE multi-network
+MRDMA and its four qualified RDMA interfaces.
+
+## Prerequisites
+
+- A Kubernetes cluster with the Dynamo Platform installed and the DGD CRDs available.
+- Enough GPUs for the selected profile: 8 B200/GB200 or 16 H200 for aggregated profiles; 12
+  B200/GB200 or 24 H200 for 256K disaggregated profiles; 8 B200/GB200 or 16 H200 for 1M
+  disaggregated profiles.
+- A `shared-model-cache` PVC containing the Ultra model view, or permission to create the
+  approximately 1200 GiB PVC and populate it.
+- A Hugging Face token with access to the checkpoint when populating the model cache.
+
+Create the namespace and Hugging Face secret when the model must be downloaded:
+
+```bash
+export NAMESPACE=your-namespace
+kubectl create namespace ${NAMESPACE}
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="$HF_TOKEN" \
+  -n ${NAMESPACE}
+```
+
+<Warning>
+Review the namespace, storage class, node selectors, tolerations, and cluster-specific RDMA
+placement before applying a manifest.
+</Warning>
+
+## Prepare the model cache
+
+Create and populate the model cache, then validate the model view before deployment:
+
+```bash
+# Edit storageClassName in model-cache.yaml first.
+kubectl apply -f recipes/nemotron-3-ultra/model-cache/model-cache.yaml -n ${NAMESPACE}
+
+kubectl apply -f recipes/nemotron-3-ultra/model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete \
+  job/nemotron-ultra-model-download -n ${NAMESPACE} --timeout=12h
+
+kubectl apply -f recipes/nemotron-3-ultra/model-cache/model-validate.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete \
+  job/nemotron-ultra-model-validate -n ${NAMESPACE} --timeout=30m
+```
+
+The runtime image and model weights are decoupled. The download Job writes the checkpoint to the
+PVC; the deployment pods mount that validated model view.
+
+## Deploy
+
+Deploy an aggregated profile:
+
+```bash
+GPU=h200       # b200, gb200, or h200
+CONTEXT=256K   # 256K or 1M
+PROFILE=agg-${GPU}-agentic-${CONTEXT}-kv-router
+
+kubectl apply \
+  -f recipes/nemotron-3-ultra/vllm/${PROFILE}/deploy.yaml \
+  -n ${NAMESPACE}
+```
+
+Deploy the selected disaggregated profile. The qualified 256K topology is 1P2D; the qualified 1M
+topology is 1P1D:
+
+```bash
+PROFILE=disagg-${GPU}-agentic-${CONTEXT}
+
+kubectl apply \
+  -f recipes/nemotron-3-ultra/vllm/${PROFILE}/deploy.yaml \
+  -n ${NAMESPACE}
+```
+
+Monitor the resulting deployment:
+
+```bash
+kubectl get dgd -n ${NAMESPACE}
+kubectl get pods -n ${NAMESPACE} -w
+```
+
+## Smoke test
+
+Forward the selected deployment's frontend service. For example:
+
+```bash
+kubectl port-forward \
+  svc/ultra-agg-h200-256k-kv-router-frontend 8000:8000 \
+  -n ${NAMESPACE}
+```
+
+Verify model discovery and chat completions:
+
+```bash
+MODEL_ID=nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4
+
+curl http://localhost:8000/v1/models
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d "{\"model\":\"${MODEL_ID}\",
+       \"messages\":[{\"role\":\"user\",\"content\":\"Hello!\"}],
+       \"max_tokens\":64,
+       \"chat_template_kwargs\":{
+         \"enable_thinking\":false,
+         \"force_nonempty_content\":true
+       }}"
+```
+
+## Benchmark
+
+All profiles share one AIPerf Job and runner. Edit the Job environment for the selected DGD,
+frontend endpoint, context, reference concurrency, GPU count, and worker count before applying it:
+
+```bash
+kubectl apply \
+  -f recipes/nemotron-3-ultra/perf/runner.configmap.yaml \
+  -n ${NAMESPACE}
+kubectl apply \
+  -f recipes/nemotron-3-ultra/perf/perf.yaml \
+  -n ${NAMESPACE}
+```
+
+The runner uses AIPerf 0.12.0 and the complete 15% agentic Moontrace replay with streaming chat,
+server token counts, seed 42, and `ignore_eos:true`. Benchmark artifacts are written to the
+`shared-model-cache` PVC.
+
+See the [benchmark asset guide](https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-ultra/perf/README.md)
+for the source files. Performance and release-review evidence are maintained outside the recipe
+source tree.
+
+## Known limitations
+
+- Reasoning is controlled per request with `chat_template_kwargs` (`enable_thinking` and
+  `force_nonempty_content`) and `nvext.max_thinking_tokens`. Do not send
+  `force_nonempty_content` as a top-level request parameter.
+- With the OSS vLLM version bundled in Dynamo 1.4.0, reasoning-enabled requests using
+  `response_format` with `json_object` or `json_schema` may return malformed JSON with HTTP 200.
+  The fix is available upstream in [vLLM PR #44993](https://github.com/vllm-project/vllm/pull/44993)
+  but is not included in the pinned runtime. Disable thinking for constrained output when
+  appropriate and validate structured output before consuming the response.
+- The same bundled OSS vLLM limitation affects reasoning-enabled requests using
+  `tool_choice: "required"` or a named tool choice: the response may contain plain `content` with
+  `finish_reason: "stop"` instead of structured `tool_calls`. Disable thinking for constrained
+  tool calls when appropriate and validate `tool_calls` before consuming the response.
+- Raw Moontrace replay includes over-context and pathological long-generation rows. Preserve them
+  as HTTP/error evidence rather than dropping them silently.
+- Tool calling uses the `qwen3_coder` parser. Reasoning parsing uses the model-local
+  `ultra_v3_reasoning_parser.py`, which the model-validation Job checks before deployment.
+
+## Source
+
+- [Recipe source](https://github.com/ai-dynamo/dynamo/tree/main/recipes/nemotron-3-ultra)
+- [Deployment manifests](https://github.com/ai-dynamo/dynamo/tree/main/recipes/nemotron-3-ultra/vllm)
+- [Benchmark assets](https://github.com/ai-dynamo/dynamo/tree/main/recipes/nemotron-3-ultra/perf)
+- [Model-cache assets](https://github.com/ai-dynamo/dynamo/tree/main/recipes/nemotron-3-ultra/model-cache)

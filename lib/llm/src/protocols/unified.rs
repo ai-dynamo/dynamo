@@ -37,12 +37,11 @@ use dynamo_protocols::types::anthropic::CacheControl;
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
 
-use crate::preprocessor::media::MediaDecoder;
 use dynamo_renderer::{OAIChatLikeRequest, TextInput};
 
+use crate::protocols::common::extensions::{NvExt, NvExtProvider};
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use crate::protocols::openai::common_ext::{CommonExt, CommonExtProvider};
-use crate::protocols::openai::nvext::{NvExt, NvExtProvider};
 use crate::protocols::openai::{
     OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
 };
@@ -501,7 +500,7 @@ impl OAIChatLikeRequest for UnifiedRequest {
 }
 
 impl crate::preprocessor::prompt::MediaRequestExt for UnifiedRequest {
-    fn media_io_kwargs(&self) -> Option<&MediaDecoder> {
+    fn media_io_kwargs(&self) -> Option<&serde_json::Value> {
         self.inner.media_io_kwargs.as_ref()
     }
 }
@@ -572,6 +571,7 @@ mod tests {
                     content: "Hello".to_string(),
                 },
             }],
+            nvext: None,
             system: None,
             temperature: Some(0.7),
             top_p: None,

@@ -2,7 +2,7 @@
 
 These benchmarks demonstrate the benefit the AIC Rust core (aiconfigurator #1200)
 delivers to its consumer, the Dynamo mocker: they compare the mocker driving the
-Rust crate (`RustAicCallback`, wrapping `aiconfigurator_core::AicEngine`) against
+Rust crate (`RustAicCallback`, wrapping `aisimulate_core::AicEngine`) against
 the pre-#1200 pure-Python AIC. The headline numbers:
 
 - **~1.2x** faster offline replay (end-to-end). Offline replay is a
@@ -55,12 +55,12 @@ process-global statics; the toggles are read once at session/callback build):
 - `python_opwalk`   — `+ DYNAMO_AIC_DISABLE_COMPILED_ENGINE=1`  → `PyAicCallback` + Python op-walk
 
 A discarded **warmup** replay amortises the one-time engine build
-(`build_aic_engine` → Python `compile_engine` + Rust parquet load) so the timed
+(`AicEngineBuilder::build` → Python `compile_engine` + Rust parquet load) so the timed
 runs isolate steady-state replay. Equivalence of replay metrics is asserted first
 (rel ≤ 1e-6); a divergence makes the speedup meaningless and fails the run.
 
 ```bash
-uv pip install '.[mocker]'           # plus a build with --features aic-forward-pass
+uv pip install .                     # plus a build with --features aic-forward-pass
 python benchmarks/mocker/bench_aic_rust_callback.py --warmup 1 --repeat 5
 ```
 

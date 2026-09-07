@@ -62,12 +62,14 @@ SENSITIVE_PATTERNS = (
 # modules are imported for broad marker collection. Keep this narrow until those
 # imports are made side-effect free.
 #   SGLANG_LOGGING_CONFIG_PATH / VLLM_CONFIGURE_LOGGING -- logging setup on import.
+#   VLLM_XPU_USE_SAMPLER_KERNEL -- set by vLLM XPU import path on some builds.
 #   TLLM_LOG_LEVEL / OMPI_MCA_coll_ucc_enable -- set by `import tensorrt_llm`,
 #   which the trtllm test modules import at module scope.
 ALLOWED_COLLECTION_ENV_MUTATIONS = frozenset(
     {
         "SGLANG_LOGGING_CONFIG_PATH",
         "VLLM_CONFIGURE_LOGGING",
+        "VLLM_XPU_USE_SAMPLER_KERNEL",
         "TLLM_LOG_LEVEL",
         "OMPI_MCA_coll_ucc_enable",
     }

@@ -3,12 +3,15 @@
 
 """Shared utilities for the vLLM-Omni backend."""
 
+import asyncio
 import logging
 from typing import Any, cast
 
+import torch
 from vllm.sampling_params import SamplingParams
 from vllm_omni.distributed.omni_connectors.utils.serialization import OmniSerializer
 from vllm_omni.entrypoints.stage_utils import shm_read_bytes
+from vllm_omni.entrypoints.utils import coerce_param_message_types
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
 from dynamo.common.utils.output_modalities import RequestType, parse_request_type
@@ -18,9 +21,58 @@ DEFAULT_IMAGE_SIZE = "1024x1024"
 DEFAULT_VIDEO_SIZE = "832x480"
 
 
+def streaming_sampling_params(
+    engine_client: Any, sampling_params_list: list[Any] | None = None
+) -> list[Any]:
+    """Return request parameters or engine defaults configured for streaming."""
+    source = (
+        sampling_params_list
+        if sampling_params_list is not None
+        else engine_client.default_sampling_params_list
+    )
+    return coerce_param_message_types(list(source or []), is_streaming=True)
+
+
 def shm_deserialize(shm_meta: dict) -> Any:
     """Read and deserialize an OmniRequestOutput from shared memory."""
     return OmniSerializer.deserialize(shm_read_bytes(shm_meta))
+
+
+async def ensure_awaited(value: Any) -> Any:
+    """Await a value if it is a coroutine, otherwise return it directly."""
+    if asyncio.iscoroutine(value):
+        return await value
+    return value
+
+
+def unwrap_connector_payload(payload: Any) -> Any:
+    """Unpack connector return value (some return (payload,) tuples)."""
+    return payload[0] if isinstance(payload, tuple) else payload
+
+
+def is_empty_payload(value: Any) -> bool:
+    """Check if a payload value is empty/None (tensor-aware)."""
+    if value is None:
+        return True
+    if isinstance(value, torch.Tensor):
+        return value.numel() == 0
+    if isinstance(value, (list, tuple, dict, str, bytes, bytearray, set)):
+        return len(value) == 0
+    return False
+
+
+def coerce_token_ids_to_list(token_ids: Any) -> list[Any]:
+    """Normalize token_ids (tensor, list, tuple, or other) to a Python list."""
+    if token_ids is None:
+        return []
+    if isinstance(token_ids, torch.Tensor):
+        return token_ids.detach().cpu().tolist()
+    if isinstance(token_ids, (list, tuple)):
+        return list(token_ids)
+    try:
+        return list(token_ids)
+    except TypeError:
+        return [token_ids]
 
 
 def image_generation_mm_processor_kwargs(height: int, width: int) -> dict[str, int]:

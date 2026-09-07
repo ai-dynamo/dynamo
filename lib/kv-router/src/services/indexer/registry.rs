@@ -14,17 +14,12 @@ use serde::Serialize;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
+use crate::identity::RoutingPartitionId;
 use crate::indexer::KvIndexerMetrics;
 use crate::protocols::WorkerId;
 
 use super::backend::{Indexer, create_indexer_with_metrics};
 use super::listener::spawn_zmq_listener;
-
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
-pub struct IndexerKey {
-    pub model_name: String,
-    pub tenant_id: String,
-}
 
 pub struct IndexerEntry {
     pub indexer: Indexer,
@@ -110,7 +105,7 @@ pub struct WorkerInfo {
     source: WorkerSource,
     status: ListenerStatus,
     model_name: String,
-    tenant_id: String,
+    routing_group: String,
     block_size: u32,
     endpoints: HashMap<u32, String>,
     listeners: HashMap<u32, ListenerInfo>,
@@ -198,10 +193,13 @@ impl ListenerRecord {
         self.watermark.clone()
     }
 
-    pub(super) fn start_pending(&self) -> (u64, CancellationToken) {
+    pub(super) fn start_pending(
+        &self,
+        root_cancel_token: &CancellationToken,
+    ) -> (u64, CancellationToken) {
         let mut runtime = self.runtime.lock();
         runtime.generation += 1;
-        let cancel_token = CancellationToken::new();
+        let cancel_token = root_cancel_token.child_token();
         runtime.status = ListenerStatus::Pending;
         runtime.last_error = None;
         runtime.cancel_token = Some(cancel_token.clone());
@@ -241,12 +239,13 @@ impl ListenerRecord {
         &self,
         instance_id: WorkerId,
         dp_rank: u32,
+        root_cancel_token: &CancellationToken,
     ) -> std::result::Result<(u64, CancellationToken), ListenerControlError> {
         let mut runtime = self.runtime.lock();
         match runtime.status {
             ListenerStatus::Paused | ListenerStatus::Failed => {
                 runtime.generation += 1;
-                let cancel_token = CancellationToken::new();
+                let cancel_token = root_cancel_token.child_token();
                 runtime.status = ListenerStatus::Pending;
                 runtime.last_error = None;
                 runtime.cancel_token = Some(cancel_token.clone());
@@ -305,29 +304,54 @@ impl ListenerRecord {
 }
 
 pub struct WorkerEntry {
-    key: IndexerKey,
+    key: RoutingPartitionId,
     listeners: HashMap<u32, Arc<ListenerRecord>>,
 }
 
 pub struct WorkerRegistry {
     workers: DashMap<WorkerId, WorkerEntry>,
-    indexers: DashMap<IndexerKey, IndexerEntry>,
+    indexers: DashMap<RoutingPartitionId, IndexerEntry>,
     peers: DashMap<String, ()>,
     watermarks: DashMap<(WorkerId, u32), Arc<AtomicU64>>,
     num_threads: usize,
     indexer_metrics: Arc<KvIndexerMetrics>,
     ready_tx: watch::Sender<bool>,
     ready_rx: watch::Receiver<bool>,
+    root_cancel_token: CancellationToken,
 }
 
 impl WorkerRegistry {
     pub fn new(num_threads: usize) -> Self {
-        Self::new_with_indexer_metrics(num_threads, Arc::new(KvIndexerMetrics::new_unregistered()))
+        Self::new_with_cancel_token(num_threads, CancellationToken::new())
+    }
+
+    pub fn new_with_cancel_token(num_threads: usize, root_cancel_token: CancellationToken) -> Self {
+        Self::new_inner(
+            num_threads,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            root_cancel_token,
+        )
     }
 
     pub fn new_with_indexer_metrics(
         num_threads: usize,
         indexer_metrics: Arc<KvIndexerMetrics>,
+    ) -> Self {
+        Self::new_inner(num_threads, indexer_metrics, CancellationToken::new())
+    }
+
+    pub(super) fn new_with_indexer_metrics_and_cancel_token(
+        num_threads: usize,
+        indexer_metrics: Arc<KvIndexerMetrics>,
+        root_cancel_token: CancellationToken,
+    ) -> Self {
+        Self::new_inner(num_threads, indexer_metrics, root_cancel_token)
+    }
+
+    fn new_inner(
+        num_threads: usize,
+        indexer_metrics: Arc<KvIndexerMetrics>,
+        root_cancel_token: CancellationToken,
     ) -> Self {
         let (ready_tx, ready_rx) = watch::channel(false);
         Self {
@@ -339,6 +363,7 @@ impl WorkerRegistry {
             indexer_metrics,
             ready_tx,
             ready_rx,
+            root_cancel_token,
         }
     }
 
@@ -384,21 +409,18 @@ impl WorkerRegistry {
         endpoint: String,
         dp_rank: u32,
         model_name: String,
-        tenant_id: String,
+        routing_group: String,
         block_size: u32,
         replay_endpoint: Option<String>,
     ) -> Result<()> {
-        let key = IndexerKey {
-            model_name,
-            tenant_id,
-        };
+        let key = RoutingPartitionId::new(model_name, routing_group);
 
         if let Some(entry) = self.workers.get(&instance_id) {
             if entry.key != key {
                 bail!(
-                    "instance {instance_id} is already registered for model={} tenant={}",
+                    "instance {instance_id} is already registered for model={} routing_group={}",
                     entry.key.model_name,
-                    entry.key.tenant_id
+                    entry.key.routing_group
                 );
             }
 
@@ -410,7 +432,7 @@ impl WorkerRegistry {
         let indexer_entry = self.indexers.entry(key.clone()).or_insert_with(|| {
             tracing::info!(
                 model_name = %key.model_name,
-                tenant_id = %key.tenant_id,
+                routing_group = %key.routing_group,
                 block_size,
                 "Creating new indexer"
             );
@@ -426,9 +448,9 @@ impl WorkerRegistry {
 
         if indexer_entry.block_size != block_size {
             bail!(
-                "block_size mismatch for model={} tenant={}: existing={}, requested={}",
+                "block_size mismatch for model={} routing_group={}: existing={}, requested={}",
                 key.model_name,
-                key.tenant_id,
+                key.routing_group,
                 indexer_entry.block_size,
                 block_size
             );
@@ -451,7 +473,7 @@ impl WorkerRegistry {
             indexer,
             watermark,
         ));
-        let attempt = record.start_pending();
+        let attempt = record.start_pending(&self.root_cancel_token);
 
         {
             let mut entry = self
@@ -472,19 +494,16 @@ impl WorkerRegistry {
         &self,
         instance_id: WorkerId,
         model_name: &str,
-        tenant_id: &str,
+        routing_group: &str,
     ) -> Result<()> {
-        let key = IndexerKey {
-            model_name: model_name.to_string(),
-            tenant_id: tenant_id.to_string(),
-        };
+        let key = RoutingPartitionId::new(model_name, routing_group);
 
         if let Some(entry) = self.workers.get(&instance_id) {
             if entry.key != key {
                 bail!(
-                    "instance {instance_id} is registered for model={} tenant={}",
+                    "instance {instance_id} is registered for model={} routing_group={}",
                     entry.key.model_name,
-                    entry.key.tenant_id
+                    entry.key.routing_group
                 );
             }
         } else {
@@ -514,12 +533,9 @@ impl WorkerRegistry {
         instance_id: WorkerId,
         dp_rank: u32,
         model_name: &str,
-        tenant_id: &str,
+        routing_group: &str,
     ) -> Result<()> {
-        let key = IndexerKey {
-            model_name: model_name.to_string(),
-            tenant_id: tenant_id.to_string(),
-        };
+        let key = RoutingPartitionId::new(model_name, routing_group);
 
         let (record, remove_worker) = {
             let mut entry = self
@@ -529,9 +545,9 @@ impl WorkerRegistry {
 
             if entry.key != key {
                 bail!(
-                    "instance {instance_id} is registered for model={} tenant={}",
+                    "instance {instance_id} is registered for model={} routing_group={}",
                     entry.key.model_name,
-                    entry.key.tenant_id
+                    entry.key.routing_group
                 );
             }
 
@@ -565,7 +581,7 @@ impl WorkerRegistry {
         Ok(())
     }
 
-    pub async fn deregister_all_tenants(
+    pub async fn deregister_all_routing_groups(
         &self,
         instance_id: WorkerId,
         model_name: &str,
@@ -573,9 +589,9 @@ impl WorkerRegistry {
         let key = if let Some(entry) = self.workers.get(&instance_id) {
             if entry.key.model_name != model_name {
                 bail!(
-                    "instance {instance_id} is registered for model={} tenant={}",
+                    "instance {instance_id} is registered for model={} routing_group={}",
                     entry.key.model_name,
-                    entry.key.tenant_id
+                    entry.key.routing_group
                 );
             }
             entry.key.clone()
@@ -639,7 +655,7 @@ impl WorkerRegistry {
             return Err(ListenerControlError::WorkerNotFound { instance_id });
         };
 
-        let attempt = record.resume(instance_id, dp_rank)?;
+        let attempt = record.resume(instance_id, dp_rank, &self.root_cancel_token)?;
         self.spawn_listener(instance_id, dp_rank, attempt, record);
         tracing::info!(instance_id, dp_rank, "Resumed ZMQ listener");
         Ok(())
@@ -650,7 +666,7 @@ impl WorkerRegistry {
     }
 
     /// Return registered workers, optionally filtered by `model_name` and/or
-    /// `tenant_id`.  Pass `None` for a field to skip that filter.
+    /// `routing_group`.  Pass `None` for a field to skip that filter.
     ///
     /// Workers that are mid-deregistration (listener map temporarily empty
     /// before the worker entry is removed) are silently omitted to avoid
@@ -658,7 +674,7 @@ impl WorkerRegistry {
     pub fn list_filtered(
         &self,
         model_name: Option<&str>,
-        tenant_id: Option<&str>,
+        routing_group: Option<&str>,
     ) -> Vec<WorkerInfo> {
         self.workers
             .iter()
@@ -668,7 +684,7 @@ impl WorkerRegistry {
 
                 // Apply caller-supplied filters.
                 if model_name.is_some_and(|m| key.model_name != m)
-                    || tenant_id.is_some_and(|t| key.tenant_id != t)
+                    || routing_group.is_some_and(|t| key.routing_group != t)
                 {
                     return None;
                 }
@@ -702,7 +718,7 @@ impl WorkerRegistry {
                     source: WorkerSource::Zmq,
                     status,
                     model_name: key.model_name.clone(),
-                    tenant_id: key.tenant_id.clone(),
+                    routing_group: key.routing_group.clone(),
                     block_size,
                     endpoints,
                     listeners,
@@ -711,15 +727,18 @@ impl WorkerRegistry {
             .collect()
     }
 
-    pub fn get_indexer(&self, key: &IndexerKey) -> Option<Ref<'_, IndexerKey, IndexerEntry>> {
+    pub fn get_indexer(
+        &self,
+        key: &RoutingPartitionId,
+    ) -> Option<Ref<'_, RoutingPartitionId, IndexerEntry>> {
         self.indexers.get(key)
     }
 
-    pub fn get_or_create_indexer(&self, key: IndexerKey, block_size: u32) -> Indexer {
+    pub fn get_or_create_indexer(&self, key: RoutingPartitionId, block_size: u32) -> Indexer {
         let entry = self.indexers.entry(key.clone()).or_insert_with(|| {
             tracing::info!(
                 model_name = %key.model_name,
-                tenant_id = %key.tenant_id,
+                routing_group = %key.routing_group,
                 block_size,
                 "Creating indexer from recovery dump"
             );
@@ -735,7 +754,7 @@ impl WorkerRegistry {
         if entry.block_size != block_size {
             tracing::warn!(
                 model_name = %key.model_name,
-                tenant_id = %key.tenant_id,
+                routing_group = %key.routing_group,
                 existing_block_size = entry.block_size,
                 requested_block_size = block_size,
                 "Block size mismatch for existing indexer"
@@ -744,7 +763,7 @@ impl WorkerRegistry {
         entry.indexer.clone()
     }
 
-    pub fn all_indexers_with_block_size(&self) -> Vec<(IndexerKey, Indexer, u32)> {
+    pub fn all_indexers_with_block_size(&self) -> Vec<(RoutingPartitionId, Indexer, u32)> {
         self.indexers
             .iter()
             .map(|entry| {
@@ -755,6 +774,20 @@ impl WorkerRegistry {
                 )
             })
             .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn listener_cancelled(&self, instance_id: WorkerId, dp_rank: u32) -> Option<bool> {
+        self.workers.get(&instance_id).and_then(|entry| {
+            entry.listeners.get(&dp_rank).and_then(|record| {
+                record
+                    .runtime
+                    .lock()
+                    .cancel_token
+                    .as_ref()
+                    .map(|t| t.is_cancelled())
+            })
+        })
     }
 
     fn spawn_listener(
@@ -774,7 +807,7 @@ impl WorkerRegistry {
         );
     }
 
-    fn maybe_remove_indexer(&self, key: &IndexerKey) {
+    fn maybe_remove_indexer(&self, key: &RoutingPartitionId) {
         if self.workers.iter().any(|entry| entry.value().key == *key) {
             return;
         }
@@ -873,6 +906,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn listener_cancelled_by_root() {
+        let root = CancellationToken::new();
+        let registry = WorkerRegistry::new_with_cancel_token(1, root.clone());
+
+        registry
+            .register(
+                1,
+                "tcp://127.0.0.1:15560".to_string(),
+                0,
+                "test-model".to_string(),
+                "default".to_string(),
+                1,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(registry.listener_cancelled(1, 0), Some(false));
+
+        root.cancel();
+        assert_eq!(registry.listener_cancelled(1, 0), Some(true));
+    }
+
+    #[tokio::test]
+    async fn listener_inherits_cancelled_root() {
+        let root = CancellationToken::new();
+        root.cancel();
+        let registry = WorkerRegistry::new_with_cancel_token(1, root);
+
+        registry
+            .register(
+                1,
+                "tcp://127.0.0.1:15561".to_string(),
+                0,
+                "test-model".to_string(),
+                "default".to_string(),
+                1,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(registry.listener_cancelled(1, 0), Some(true));
+    }
+
+    #[tokio::test]
     async fn re_register_gets_fresh_watermark() {
         let registry = test_registry();
         registry.signal_ready();
@@ -925,7 +1003,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deregister_all_tenants_removes_watermarks() {
+    async fn deregister_all_routing_groups_removes_watermarks() {
         let registry = test_registry();
         registry.signal_ready();
 
@@ -945,13 +1023,13 @@ mod tests {
         assert!(registry.watermarks.contains_key(&(1, 0)));
 
         registry
-            .deregister_all_tenants(1, "test-model")
+            .deregister_all_routing_groups(1, "test-model")
             .await
             .unwrap();
 
         assert!(
             !registry.watermarks.contains_key(&(1, 0)),
-            "watermark should be removed after deregister_all_tenants"
+            "watermark should be removed after deregister_all_routing_groups"
         );
     }
 
@@ -981,7 +1059,7 @@ mod tests {
                 "tcp://127.0.0.1:15571".to_string(),
                 0,
                 "mistral".to_string(),
-                "other-tenant".to_string(),
+                "other-group".to_string(),
                 8,
                 None,
             )
@@ -993,11 +1071,11 @@ mod tests {
 
         let llama = workers.iter().find(|w| w.model_name == "llama3").unwrap();
         assert_eq!(llama.block_size, 4);
-        assert_eq!(llama.tenant_id, "acme");
+        assert_eq!(llama.routing_group, "acme");
 
         let mistral = workers.iter().find(|w| w.model_name == "mistral").unwrap();
         assert_eq!(mistral.block_size, 8);
-        assert_eq!(mistral.tenant_id, "other-tenant");
+        assert_eq!(mistral.routing_group, "other-group");
 
         let filtered = registry.list_filtered(Some("llama3"), None);
         assert_eq!(filtered.len(), 1);
@@ -1005,15 +1083,15 @@ mod tests {
 
         let acme = registry.list_filtered(None, Some("acme"));
         assert_eq!(acme.len(), 1);
-        assert_eq!(acme[0].tenant_id, "acme");
+        assert_eq!(acme[0].routing_group, "acme");
 
-        let other = registry.list_filtered(None, Some("other-tenant"));
+        let other = registry.list_filtered(None, Some("other-group"));
         assert_eq!(other.len(), 1);
-        assert_eq!(other[0].tenant_id, "other-tenant");
+        assert_eq!(other[0].routing_group, "other-group");
 
         assert!(
             registry
-                .list_filtered(Some("llama3"), Some("other-tenant"))
+                .list_filtered(Some("llama3"), Some("other-group"))
                 .is_empty()
         );
         assert!(registry.list_filtered(Some("nonexistent"), None).is_empty());
@@ -1034,10 +1112,7 @@ mod tests {
         // trivially without exercising the filter.
         let registry = test_registry();
 
-        let key = IndexerKey {
-            model_name: "llama3".to_string(),
-            tenant_id: "acme".to_string(),
-        };
+        let key = RoutingPartitionId::new("llama3", "acme");
 
         // Inject the empty-listener WorkerEntry directly.
         registry.workers.insert(

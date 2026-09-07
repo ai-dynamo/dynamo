@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from typing import Any, Dict, Optional
 
 import aiohttp
@@ -28,10 +29,14 @@ from tests.router.helper import (
     get_kv_indexer_test_env,
     wait_for_indexer_workers_active,
 )
-from tests.utils.constants import DefaultPort
+from tests.utils.constants import DynamoPortRange
 from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess
-from tests.utils.port_utils import allocate_ports, deallocate_ports
+from tests.utils.port_utils import (
+    allocate_contiguous_ports,
+    allocate_ports,
+    deallocate_ports,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +50,9 @@ pytestmark = [
 ]
 SPEEDUP_RATIO = 10.0
 BLOCK_SIZE = 16
+
+WORKER_REGISTRATION_TIMEOUT_S = 180.0
+WORKER_REGISTRATION_POLL_S = 0.5
 
 # Shared vLLM configuration for all tests
 # gpu_memory_utilization limits actual VRAM allocation (required for multi-worker on same GPU)
@@ -63,11 +71,36 @@ VLLM_ARGS_NO_BLOCK_SIZE: Dict[str, Any] = {
     "enforce_eager": True,  # Disable CUDA graphs for faster startup & lower memory
 }
 
+# Twice vLLM's 165,900,288-byte minimum for TinyLlama at max_model_len=1024.
+DISAGG_KV_CACHE_MEMORY_BYTES = 331_801_000
 
-def _vllm_gpu_mem_args(gpu_memory_utilization: Optional[float]) -> list[str]:
+# Avoid device-wide profiling across the two prefill workers on GPU 0.
+VLLM_ARGS_DISAGG: Dict[str, Any] = {
+    "block_size": BLOCK_SIZE,
+    "model": MODEL_NAME,
+    "kv_cache_memory_bytes": DISAGG_KV_CACHE_MEMORY_BYTES,
+    "max_model_len": 1024,
+    "enforce_eager": True,
+}
+
+
+def _vllm_gpu_mem_args(
+    gpu_memory_utilization: Optional[float],
+    kv_cache_memory_bytes: Optional[int] = None,
+) -> list[str]:
     args = build_gpu_mem_args("build_vllm_gpu_mem_args")
-    if args or gpu_memory_utilization is None:
+    if args:
         return args
+    if kv_cache_memory_bytes is not None:
+        # vLLM checks this admission fraction before applying the byte cap.
+        return [
+            "--kv-cache-memory-bytes",
+            str(kv_cache_memory_bytes),
+            "--gpu-memory-utilization",
+            "0.01",
+        ]
+    if gpu_memory_utilization is None:
+        return []
     return ["--gpu-memory-utilization", str(gpu_memory_utilization)]
 
 
@@ -90,7 +123,6 @@ class VLLMProcess(ManagedEngineProcessMixin):
         data_parallel_size: Optional[int] = None,
         request_plane: str = "tcp",
         store_backend: str = "etcd",
-        durable_kv_events: bool = False,
         namespace: Optional[str] = None,
         gpu_start_index: int = 0,
         disaggregation_mode: Optional[str] = None,
@@ -104,6 +136,7 @@ class VLLMProcess(ManagedEngineProcessMixin):
             vllm_args: Configuration dict with keys:
                 - model: Model name/path (default: TinyLlama-1.1B)
                 - gpu_memory_utilization: Fraction of GPU memory to allocate (optional)
+                - kv_cache_memory_bytes: Per-GPU cache budget (optional)
                 - num_gpu_blocks_override: Cap on number of KV cache blocks (optional)
                 - max_model_len: Maximum sequence length (optional)
                 - enforce_eager: Disable CUDA graphs (default: False)
@@ -112,7 +145,6 @@ class VLLMProcess(ManagedEngineProcessMixin):
             data_parallel_size: If set, enables data parallelism with this many ranks (num_workers must equal data_parallel_size)
             request_plane: Request plane to use ("nats", "tcp"). Defaults to "tcp".
             store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
-            durable_kv_events: If True, use JetStream for durable KV events. Defaults to False (NATS Core mode).
         """
         # Generate unique namespace for isolation
         namespace_suffix = generate_random_suffix()
@@ -136,37 +168,60 @@ class VLLMProcess(ManagedEngineProcessMixin):
         self._indexer_process: Optional[ManagedProcess] = None
         self._indexer_b_process: Optional[ManagedProcess] = None
 
+        allocated_ports: list[int] = []
+        request.addfinalizer(lambda: deallocate_ports(allocated_ports))
+
         # Dynamically allocate unique system, KV event, and NIXL side-channel
         # ports (one of each per worker) to avoid conflicts in parallel test runs.
-        self._system_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
-        self._kv_event_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
-        self._nixl_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
+        self._system_ports = allocate_ports(num_workers, DynamoPortRange.ROUTER.value)
+        allocated_ports.extend(self._system_ports)
+        self._kv_event_ports = allocate_ports(num_workers, DynamoPortRange.ROUTER.value)
+        allocated_ports.extend(self._kv_event_ports)
+        self._nixl_ports = allocate_ports(num_workers, DynamoPortRange.NIXL.value)
+        allocated_ports.extend(self._nixl_ports)
+        # Per-worker forward-pass-metrics (FPM) base ports. Setting
+        # DYN_FORWARDPASS_METRIC_PORT makes dynamo.vllm auto-inject
+        # InstrumentedScheduler, whose ZMQ PUB binds ``base_port + dp_rank`` in
+        # every EngineCore child (see instrumented_scheduler.py). Each worker
+        # therefore needs a contiguous block of ``data_parallel_size`` ports so
+        # a second DP rank -- or another worker co-located on the same GPU --
+        # can't collide on the bind (which is fatal: there is no try/except
+        # around it). Non-DP workers use a block of 1, matching the per-worker
+        # port arrays above.
+        #
+        # The relay subscribes ``base + dp_rank`` for dp_rank in
+        # get_dp_range_for_worker() == (data_parallel_rank, dp_size). This
+        # harness launches internal-LB DP (only --data-parallel-size, no
+        # --data-parallel-rank), so data_parallel_rank == 0 and each worker owns
+        # local ranks [0, dp_size) -- fully inside its block. (The one DP test
+        # uses num_workers=1.) External/hybrid LB, where dp_start > 0, isn't used.
+        self._fpm_block = max(1, data_parallel_size or 1)
+        self._fpm_ports = allocate_contiguous_ports(
+            num_workers, self._fpm_block, DynamoPortRange.FPM.value
+        )
+        allocated_ports.extend(self._fpm_ports)
         self._replay_ports = (
-            allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
+            allocate_ports(num_workers, DynamoPortRange.ROUTER.value)
             if standalone_indexer and zmq_replay
             else []
         )
+        allocated_ports.extend(self._replay_ports)
         self._indexer_ports = (
-            allocate_ports(2, DefaultPort.SYSTEM1.value) if standalone_indexer else []
+            allocate_ports(2, DynamoPortRange.ROUTER.value)
+            if standalone_indexer
+            else []
         )
+        allocated_ports.extend(self._indexer_ports)
         if standalone_indexer:
             self._standalone_indexer_port = self._indexer_ports[0]
             self._standalone_indexer_b_port = self._indexer_ports[1]
-        request.addfinalizer(
-            lambda: deallocate_ports(
-                self._system_ports
-                + self._kv_event_ports
-                + self._nixl_ports
-                + self._replay_ports
-                + self._indexer_ports
-            )
-        )
 
         if vllm_args is None:
             vllm_args = {}
 
         model = vllm_args.get("model", MODEL_NAME)
         gpu_memory_utilization = vllm_args.get("gpu_memory_utilization")
+        kv_cache_memory_bytes = vllm_args.get("kv_cache_memory_bytes")
         num_gpu_blocks_override = vllm_args.get("num_gpu_blocks_override")
         max_model_len = vllm_args.get("max_model_len")
         enforce_eager = vllm_args.get("enforce_eager", False)
@@ -218,7 +273,9 @@ class VLLMProcess(ManagedEngineProcessMixin):
                 command.append("--enforce-eager")
 
             # Limit VRAM allocation (required for multi-worker on same GPU)
-            command.extend(_vllm_gpu_mem_args(gpu_memory_utilization))
+            command.extend(
+                _vllm_gpu_mem_args(gpu_memory_utilization, kv_cache_memory_bytes)
+            )
 
             # Add optional max_model_len if specified
             if max_model_len is not None:
@@ -242,10 +299,6 @@ class VLLMProcess(ManagedEngineProcessMixin):
                         # "--kv-transfer-config", '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',  # Required for KV transfer between DP ranks
                     ]
                 )
-
-            # Use --durable-kv-events to enable JetStream mode (local indexer disabled)
-            if durable_kv_events:
-                command.append("--durable-kv-events")
 
             # Ports are dynamically allocated for xdist-safe parallel execution.
             system_port = self._system_ports[worker_idx]
@@ -275,6 +328,13 @@ class VLLMProcess(ManagedEngineProcessMixin):
                 "DYN_REQUEST_PLANE": request_plane,
                 "DYN_SYSTEM_PORT": str(system_port),
                 "VLLM_NIXL_SIDE_CHANNEL_PORT": str(nixl_port),
+                # Enable forward-pass metrics: a unique, block-aligned base port
+                # per worker so InstrumentedScheduler's ZMQ PUB (base + dp_rank)
+                # and the FpmEventRelay run -- exercising the load-based Planner
+                # path that consumes these events.
+                "DYN_FORWARDPASS_METRIC_PORT": str(
+                    self._fpm_ports[worker_idx * self._fpm_block]
+                ),
                 "PYTHONHASHSEED": "0",  # for deterministic event id's
             }
 
@@ -378,20 +438,56 @@ class VLLMProcess(ManagedEngineProcessMixin):
                 process.__enter__()
 
                 new_worker_id = None
-                for _ in range(120):
+                started_at = time.monotonic()
+                deadline = started_at + WORKER_REGISTRATION_TIMEOUT_S
+                while True:
                     ids = set(client.instance_ids())
                     new = ids - known_ids
                     if new:
                         new_worker_id = new.pop()
                         known_ids.add(new_worker_id)
                         break
-                    await asyncio.sleep(0.5)
+                    # A dead worker never registers. Check liveness each poll so the
+                    # loop fails in one interval instead of waiting out the full
+                    # budget. Matches _check_port/_check_url/_check_func.
+                    process._check_process_alive(
+                        f"while waiting for vLLM worker {worker_idx} to register"
+                    )
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    await asyncio.sleep(min(WORKER_REGISTRATION_POLL_S, remaining))
+
+                registration_s = time.monotonic() - started_at
 
                 if new_worker_id is None:
+                    try:
+                        returncode = process.proc.poll() if process.proc else None
+                        if process.proc is None:
+                            liveness = "subprocess was never started"
+                        elif returncode is None:
+                            liveness = "subprocess still running"
+                        else:
+                            liveness = (
+                                f"subprocess already exited with code {returncode}"
+                            )
+                    except (OSError, ValueError) as diag_exc:
+                        liveness = f"subprocess liveness unavailable ({diag_exc})"
                     raise RuntimeError(
                         f"Timed out waiting for vLLM worker {worker_idx} to register "
-                        f"(known_ids={known_ids})"
+                        f"(known_ids={known_ids}) after {registration_s:.1f}s of a "
+                        f"{WORKER_REGISTRATION_TIMEOUT_S:.0f}s budget; {liveness}; "
+                        f"worker log: {process.log_path}"
                     )
+
+                logger.info(
+                    "vLLM worker %s registered as instance %s after %.1fs "
+                    "(budget %.0fs)",
+                    worker_idx,
+                    new_worker_id,
+                    registration_s,
+                    WORKER_REGISTRATION_TIMEOUT_S,
+                )
 
                 zmq_endpoint = f"tcp://127.0.0.1:{self._kv_event_ports[worker_idx]}"
                 replay_endpoint = (
@@ -574,6 +670,7 @@ def test_router_decisions_vllm_multiple_workers(
     )
 
 
+@pytest.mark.h100
 @pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
@@ -608,6 +705,7 @@ def test_router_decisions_vllm_dp(
     )
 
 
+# The parallel lane reserves one GPU per test; this case requires GPUs 0 and 1.
 @pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.timeout(600)
@@ -622,7 +720,7 @@ def test_router_decisions_vllm_disagg(
     run_disagg_router_decisions_test(
         engine_process_cls=VLLMProcess,
         engine_args_name="vllm_args",
-        engine_args=VLLM_ARGS,
+        engine_args=VLLM_ARGS_DISAGG,
         request=request,
         request_plane=request_plane,
         model_name=MODEL_NAME,
@@ -649,23 +747,15 @@ def test_router_decisions_vllm_disagg(
     331_801_000
 )  # KV cache cap (2x safety over min=165_900_288)
 @pytest.mark.timeout(690)  # 3x ~230s under new scheduler (3d1554f)
-@pytest.mark.parametrize(
-    "store_backend,durable_kv_events,request_plane",
-    [
-        ("etcd", False, "tcp"),
-    ],
-    ids=["nats_core"],
-    indirect=["durable_kv_events", "request_plane"],
-)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.parametrize("event_plane", ["nats"], indirect=True)
 def test_vllm_indexers_sync(
     request,
     runtime_services_dynamic_ports,
     predownload_models,
-    file_storage_backend,
     set_ucx_tls_no_mm,
-    store_backend,
-    durable_kv_events,
     request_plane,
+    event_plane,
 ):
     run_indexers_sync_test(
         engine_process_cls=VLLMProcess,
@@ -673,9 +763,9 @@ def test_vllm_indexers_sync(
         engine_args=VLLM_ARGS,
         request=request,
         runtime_services_dynamic_ports=runtime_services_dynamic_ports,
-        store_backend=store_backend,
-        durable_kv_events=durable_kv_events,
+        store_backend="etcd",
         request_plane=request_plane,
+        event_plane=event_plane,
         block_size=BLOCK_SIZE,
         model_name=MODEL_NAME,
         num_workers=2,

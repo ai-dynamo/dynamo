@@ -75,7 +75,8 @@
   const chart = document.getElementById("chart");
 
   const socket = io({
-    transports: ["websocket", "polling"],
+    transports: ["polling"],
+    autoConnect: !document.hidden,
     reconnection: true,
     reconnectionDelay: 500,
     reconnectionAttempts: Infinity,
@@ -95,8 +96,21 @@
   });
 
   socket.on("disconnect", function() {
-    status.textContent = "Disconnected -- reconnecting...";
+    status.textContent = document.hidden
+      ? "Paused while hidden"
+      : "Disconnected -- reconnecting...";
   });
+
+  function updateVisibilityConnection() {
+    if (document.hidden) {
+      socket.disconnect();
+      status.textContent = "Paused while hidden";
+      return;
+    }
+    socket.connect();
+  }
+
+  document.addEventListener("visibilitychange", updateVisibilityConnection);
 
   socket.on("init", function(msg) {
     state = msg;

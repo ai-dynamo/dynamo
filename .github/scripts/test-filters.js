@@ -12,6 +12,8 @@
  *
  * This validates that tj-actions/changed-files will correctly:
  * - Match backend-specific files to their respective filters (vllm, sglang, trtllm)
+ * - Route docs-artifact tests to recipe-check without core E2E checks
+ * - Route sidecar files to sidecar/Rust checks without backend or core E2E checks
  * - Exclude doc files (*.md, *.rst, *.txt) from core via negation patterns
  * - Match CI/infrastructure changes to core
  * - (with --coverage) Ensure all files in repo are covered by at least one filter
@@ -58,6 +60,19 @@ function checkFilter(file, patterns) {
 // Test cases: [file, expectations, description]
 // expectations: { filterName: expectedValue, ... }
 const testCases = [
+  // dev/local-dev templates build only the dev images -- they must NOT pull in
+  // `core` (all runtime builds + the GPU test matrix), and must not be silently
+  // uncovered the way they were when they sat in `ignore`.
+  {
+    file: 'container/templates/dev.Dockerfile',
+    expect: { dev_images: true, core: false },
+    desc: 'dev.Dockerfile triggers dev image builds only'
+  },
+  {
+    file: 'container/templates/local_dev.Dockerfile',
+    expect: { dev_images: true, core: false },
+    desc: 'local_dev.Dockerfile triggers dev image builds only'
+  },
   // Backend-specific files should only trigger their backend
   {
     file: 'examples/backends/vllm/launch/dsr1_dep.sh',
@@ -75,9 +90,71 @@ const testCases = [
     desc: 'trtllm script triggers only trtllm'
   },
   {
+    file: 'recipes/qwen3-32b/vllm/cloud-providers/.kustomize-matrix.yaml',
+    expect: { core: false, examples: true },
+    desc: 'recipe matrix dotfile triggers recipe check without core'
+  },
+  {
+    file: 'scripts/kustomize-matrix.py',
+    expect: { core: false, examples: true },
+    desc: 'recipe generator triggers recipe check without core'
+  },
+  {
+    file: 'tests/test_kustomize_matrix.py',
+    expect: { core: false, examples: true },
+    desc: 'recipe generator test triggers recipe check without core'
+  },
+  {
+    file: 'docs/tests/nested/__ci_filter_probe__',
+    expect: { core: false, docs: true, examples: true },
+    desc: 'any docs/tests descendant triggers recipe check without core'
+  },
+  {
     file: 'components/src/dynamo/vllm/worker.py',
     expect: { core: false, vllm: true },
     desc: 'vllm component triggers only vllm'
+  },
+
+  // Sidecar Rust and proto files should trigger Rust checks without unrelated E2E
+  {
+    file: 'lib/sidecar/common/src/lib.rs',
+    expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'common sidecar source avoids unrelated build and E2E filters'
+  },
+  {
+    file: 'lib/sidecar/vllm/proto/vllm_grpc.proto',
+    expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'vllm sidecar proto triggers Rust checks without backend E2E'
+  },
+  {
+    file: 'lib/sidecar/sglang/src/lib.rs',
+    expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'sglang sidecar source avoids backend E2E'
+  },
+  {
+    file: 'lib/sidecar/trtllm/src/lib.rs',
+    expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'trtllm sidecar source does not route to sglang or trtllm E2E'
+  },
+  {
+    file: 'lib/sidecar/vllm/deploy/agg.yaml',
+    expect: { sidecar: true, rust: false, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'sidecar deployment config avoids Rust and E2E checks'
+  },
+  {
+    file: 'lib/sidecar/README.md',
+    expect: { sidecar: false, ignore: true, rust: false, core: false, frontend: false, docs: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'sidecar README is classification-only and triggers no build'
+  },
+  {
+    file: '.github/workflows/shared-build-sidecar.yml',
+    expect: { sidecar: true },
+    desc: 'sidecar workflow triggers its own job'
+  },
+  {
+    file: 'container/compliance/policy/licenses.toml',
+    expect: { sidecar: true },
+    desc: 'compliance policy changes validate the sidecar image gate'
   },
 
   // Doc files should be excluded from core (negation patterns)
@@ -168,6 +245,191 @@ const testCases = [
     file: 'deploy/helm/charts/platform/values.yaml',
     expect: { core: false, deploy: true },
     desc: 'helm file triggers deploy'
+  },
+
+  // Framework snapshot lifecycle: backend filter + that framework's checkpoint filter
+  {
+    file: 'components/src/dynamo/vllm/snapshot.py',
+    expect: {
+      vllm: true,
+      snapshot: false,
+      snapshot_vllm: true,
+      snapshot_sglang: false,
+      snapshot_trtllm: false,
+    },
+    desc: 'vllm snapshot.py gates only vllm checkpoint tests'
+  },
+  {
+    file: 'components/src/dynamo/sglang/snapshot.py',
+    expect: {
+      sglang: true,
+      snapshot: false,
+      snapshot_vllm: false,
+      snapshot_sglang: true,
+      snapshot_trtllm: false,
+    },
+    desc: 'sglang snapshot.py gates only sglang checkpoint tests'
+  },
+  {
+    file: 'components/src/dynamo/trtllm/snapshot.py',
+    expect: {
+      trtllm: true,
+      snapshot: false,
+      snapshot_vllm: false,
+      snapshot_sglang: false,
+      snapshot_trtllm: true,
+    },
+    desc: 'trtllm snapshot.py gates only trtllm checkpoint tests'
+  },
+  {
+    file: 'components/src/dynamo/trtllm/tests/test_trtllm_snapshot.py',
+    expect: { trtllm: true, snapshot_trtllm: true, snapshot: false },
+    desc: 'trtllm snapshot unit test gates only trtllm checkpoint tests'
+  },
+  {
+    file: 'components/src/dynamo/common/snapshot/lifecycle.py',
+    expect: { snapshot: true, snapshot_vllm: false, core: true },
+    desc: 'shared snapshot lifecycle triggers shared snapshot filter'
+  },
+  {
+    file: 'tests/deploy/test_dynamocheckpoint.py',
+    expect: { snapshot: true, deploy: true },
+    desc: 'Checkpoint deploy test triggers shared snapshot integration'
+  },
+  {
+    file: 'deploy/operator/api/v1beta1/dynamographdeployment_types.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'Operator API changes trigger snapshot contract tests'
+  },
+  {
+    file: 'deploy/operator/config/crd/bases/nvidia.com_dynamographdeployments.yaml',
+    expect: { snapshot: true, operator: true },
+    desc: 'Operator CRD changes trigger snapshot contract tests'
+  },
+  {
+    file: 'deploy/operator/config/rbac/role.yaml',
+    expect: { snapshot: true, operator: true },
+    desc: 'Operator RBAC changes trigger snapshot contract tests'
+  },
+  {
+    file: 'deploy/operator/api/v1beta1/dynamomodel_types.go',
+    expect: { snapshot: false, operator: true },
+    desc: 'Unrelated operator APIs do not trigger snapshot integration'
+  },
+  {
+    file: 'deploy/operator/config/crd/bases/nvidia.com_dynamomodels.yaml',
+    expect: { snapshot: false, operator: true },
+    desc: 'Unrelated operator CRDs do not trigger snapshot integration'
+  },
+  {
+    file: 'deploy/operator/go.mod',
+    expect: { snapshot: true, operator: true },
+    desc: 'Operator dependency changes trigger snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/consts/consts.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'Restore protocol constants trigger snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/features/gates.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'Snapshot API feature detection triggers snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/controller/dgd_component_workloads_reconciler.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'DGD workload reconciliation changes trigger snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/controller/dynamographdeployment_controller.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'DGD controller changes trigger snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/controller/dynamocomponentdeployment_renderer.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'DCD rendering changes trigger snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/controller/gms_pod_replacement_controller.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'GMS replacement changes trigger snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/controller/failover_cascade_controller.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'Failover cascade behavior triggers snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/webhook/mutation/pod_checkpoint_restore_handler.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'Restore admission changes trigger snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/webhook/setup/setup.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'Restore webhook registration triggers snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/webhook/validation/shared_v1beta1.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'Checkpoint API validation triggers snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/podcache/transform.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'Pod cache projection changes trigger snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/gms/gms.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'GMS compatibility changes trigger snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/dynamo/hash.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'Worker compatibility hash changes trigger snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/dynamo/graph.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'Graph workload shaping changes trigger snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/dynamo/component_worker.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'Worker Pod shaping changes trigger snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/dynamo/failover.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'Failover Pod shaping changes trigger snapshot integration'
+  },
+  {
+    file: 'components/src/dynamo/vllm/handlers.py',
+    expect: { snapshot: false, snapshot_vllm: true, vllm: true },
+    desc: 'vLLM pause and resume changes trigger vLLM snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/dynamo/backend_vllm.go',
+    expect: { snapshot: false, snapshot_vllm: true, operator: true },
+    desc: 'vLLM Pod rendering changes trigger vLLM snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/dynamo/backend_sglang.go',
+    expect: { snapshot: false, snapshot_sglang: true, operator: true },
+    desc: 'SGLang Pod rendering changes trigger SGLang snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/dynamo/backend_trtllm.go',
+    expect: { snapshot: false, snapshot_trtllm: true, operator: true },
+    desc: 'TensorRT-LLM Pod rendering changes trigger TensorRT-LLM snapshot integration'
+  },
+  {
+    file: 'deploy/helm/charts/platform/components/operator/templates/deployment.yaml',
+    expect: { snapshot: true, deploy: true, operator: true },
+    desc: 'Operator Helm changes trigger snapshot integration'
   },
 ];
 

@@ -48,4 +48,3 @@ else
     --constraints "${PROTECTED_CONSTRAINTS}" \
     "vllm-omni==${VLLM_OMNI_VERSION}"
 fi
-

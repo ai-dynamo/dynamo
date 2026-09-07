@@ -61,7 +61,7 @@ def _build_aiperf_script(
 
     return f"""set -e
 apt-get update -qq && apt-get install -y -qq curl jq git procps 2>/dev/null
-# aiperf 0.8.0 pulls crick==0.0.8 which has no manylinux aarch64 wheel; on
+# aiperf 0.10.0 pulls crick==0.0.8 which has no manylinux aarch64 wheel; on
 # arm64 nodes pip falls back to sdist and needs a C compiler. python:3.12-slim
 # bundles Python headers at /usr/local/include/python3.12/, but libc headers
 # (stdlib.h, etc.) come from libc6-dev — and on Debian libc6-dev is only a
@@ -71,7 +71,7 @@ apt-get update -qq && apt-get install -y -qq curl jq git procps 2>/dev/null
 if [ "$(uname -m)" = "aarch64" ]; then
     apt-get install -y -qq gcc libc6-dev 2>/dev/null
 fi
-pip install --quiet aiperf==0.8.0
+pip install --quiet aiperf==0.10.0
 echo "aiperf installed"
 
 # Wait for model

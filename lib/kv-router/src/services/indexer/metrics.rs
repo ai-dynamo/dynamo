@@ -70,7 +70,7 @@ static METRICS: LazyLock<StandaloneIndexerMetrics> = LazyLock::new(|| Standalone
     .expect("valid counter"),
     models: IntGauge::new(
         format!("{METRICS_PREFIX}_{MODELS}"),
-        "Number of active model+tenant indexers",
+        "Number of active model+routing-group indexers",
     )
     .expect("valid gauge"),
     workers: IntGauge::new(
@@ -155,6 +155,18 @@ mod tests {
         register(&registry).expect("registration should succeed");
 
         set_worker_state(1, 2, [1, 1, 0, 0]);
+        METRICS
+            .request_duration
+            .with_label_values(&["/health"])
+            .observe(0.001);
+        METRICS
+            .requests_total
+            .with_label_values(&["/health", "GET"])
+            .inc();
+        METRICS
+            .errors_total
+            .with_label_values(&["/query", "4xx"])
+            .inc();
 
         let encoder = prometheus::TextEncoder::new();
         let mut buf = Vec::new();

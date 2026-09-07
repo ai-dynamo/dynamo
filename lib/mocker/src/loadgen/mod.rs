@@ -1,16 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-mod driver;
-mod trace;
-mod types;
+//! Dynamo composition adapters for the AISimulate workload driver.
 
-pub use driver::WorkloadDriver;
-pub use types::{
-    AgenticTrace, AgenticTurnTrace, ArrivalSpec, DelaySpec, LengthSpec, ReadyTurn,
-    ReplayRequestHashes, RouterSequence, SequenceHashMode, SessionPartitionSpec, SessionTrace,
-    SyntheticTraceSpec, Trace, TraceFileFormat, TurnTrace,
-};
+mod router;
+mod weka;
+
+pub use aisimulate_core::replay::loadgen::*;
+pub(crate) use router::local_block_hashes;
+pub use router::{DynamoTraceRouterExt, RouterSequence, SequenceHashMode, to_router_sequences};
+pub use weka::load_weka_trace;
 
 #[cfg(test)]
 mod tests;

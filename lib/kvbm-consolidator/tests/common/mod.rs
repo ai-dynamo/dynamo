@@ -57,6 +57,8 @@ pub enum EventMirror {
         block_size: i32,
         #[serde(default)]
         lora_name: Option<String>,
+        #[serde(default, rename = "cache_salt")]
+        cache_namespace: Option<String>,
         #[serde(default)]
         medium: Option<String>,
     },
@@ -205,7 +207,11 @@ pub async fn sync_pulse(
     sub_handle: &mut ZmqSubHandle,
     timeout: Duration,
 ) -> bool {
-    let sentinel = TestBatch(0.0, vec![RawKvEvent::AllBlocksCleared], None);
+    let sentinel = TestBatch(
+        0.0,
+        vec![RawKvEvent::AllBlocksCleared { ownership: None }],
+        None,
+    );
     // Keep sending until we see the response.
     let start = tokio::time::Instant::now();
     loop {

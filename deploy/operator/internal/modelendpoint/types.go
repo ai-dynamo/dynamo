@@ -19,6 +19,16 @@ package modelendpoint
 
 // Candidate represents an endpoint candidate for operations
 type Candidate struct {
-	Address string
-	PodName string
+	Address             string
+	PodName             string
+	WorkloadName        string
+	GraphDeploymentName string
+	KubernetesReady     bool
+	// AllowLoRAManagementUnavailable permits a rolling-upgrade fallback only
+	// when this endpoint explicitly reports that no LoRA lifecycle handler is
+	// registered. Capable endpoints are still called normally.
+	AllowLoRAManagementUnavailable bool
+	// LoRAFallbackGroup identifies the deployment/runtime topology in which a
+	// capable prefill may cover a legacy prefill during a rolling upgrade.
+	LoRAFallbackGroup string
 }

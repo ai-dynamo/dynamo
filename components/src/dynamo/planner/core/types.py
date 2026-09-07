@@ -23,8 +23,10 @@ class ScheduledTick:
     """Declares when the core next needs to be called, what data it needs,
     and what decisions to make.
 
-    All times are absolute seconds (wall clock for native adapter,
-    simulated clock for replay).
+    ``at_s`` is an absolute wall-clock time for the native adapter and a
+    simulated time for replay. ``at_monotonic_s`` is the matching scheduler
+    timestamp used to make observation-prefetch and plugin-dispatch cadence
+    decisions against the same clock value.
     """
 
     at_s: float
@@ -42,6 +44,7 @@ class ScheduledTick:
     traffic_metrics_duration_s: float = 0.0
     need_worker_states: bool = False
     need_worker_fpm: bool = False
+    at_monotonic_s: Optional[float] = None
 
 
 @dataclass
@@ -196,12 +199,25 @@ class EngineCapabilities:
     """Static capabilities for a single engine stage (prefill or decode)."""
 
     num_gpu: Optional[int] = None
+    gpu_cost_per_replica: Optional[int] = None
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: Optional[int] = None
     context_length: Optional[int] = None
     max_kv_tokens: Optional[int] = None
     kv_cache_block_size: Optional[int] = None
     speculative_nextn: Optional[int] = None
+    # DGD-resolved per-replica power draw (watts) for this stage: the per-GPU
+    # cap × the replica-wide GPU total. None when power awareness is off or the
+    # cap has not been resolved. The final budget clamp reads this.
+    power_watts_per_replica: Optional[int] = None
+
+    @property
+    def resolved_gpu_cost_per_replica(self) -> Optional[int]:
+        """GPU budget cost, falling back to the legacy engine width."""
+
+        if self.gpu_cost_per_replica is not None:
+            return self.gpu_cost_per_replica
+        return self.num_gpu
 
 
 @dataclass

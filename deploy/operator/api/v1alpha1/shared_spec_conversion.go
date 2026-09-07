@@ -138,6 +138,12 @@ type DynamoComponentDeploymentSharedSpecConversionContext struct {
 // ConvertFromDynamoComponentDeploymentSharedSpec converts the shared spec from
 // v1alpha1 to v1beta1.
 func ConvertFromDynamoComponentDeploymentSharedSpec(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec, restored *v1beta1.DynamoComponentDeploymentSharedSpec, save *DynamoComponentDeploymentSharedSpec, ctx DynamoComponentDeploymentSharedSpecConversionContext) error {
+	// Convert the component provider context before the remaining shared fields.
+	if src.ProviderOverride != nil {
+		dst.ProviderOverride = &v1beta1.ProviderOverride{}
+		ConvertFromProviderOverride(src.ProviderOverride, dst.ProviderOverride)
+	}
+
 	// ComponentType: v1beta1 promotes the legacy v1alpha1 worker subcomponent
 	// values to first-class component types.
 	dst.ComponentType = sharedComponentTypeToHub(src)
@@ -149,9 +155,11 @@ func ConvertFromDynamoComponentDeploymentSharedSpec(src *DynamoComponentDeployme
 	// source of truth on v1alpha1); for standalone DCDs the caller falls
 	// back to ObjectMeta.Name when src.ServiceName is empty.
 	dst.ComponentName = src.ServiceName
+	dst.RuntimeVersionOverride = src.RuntimeVersionOverride
 
 	dst.GlobalDynamoNamespace = src.GlobalDynamoNamespace
 	dst.Replicas = src.Replicas
+	dst.MinAvailable = src.MinAvailable
 
 	if src.Multinode != nil {
 		dst.Multinode = &v1beta1.MultinodeSpec{}
@@ -257,9 +265,13 @@ func restoreSharedAlphaOnlyPodFields(dst *DynamoComponentDeploymentSharedSpec, p
 	if dst.ExtraPodMetadata == nil && extraPodMetadataNeedsPreservation(preserved.ExtraPodMetadata) {
 		dst.ExtraPodMetadata = preserved.ExtraPodMetadata.DeepCopy()
 	}
-	if dst.ExtraPodSpec == nil && extraPodSpecNeedsPreservation(preserved.ExtraPodSpec) {
-		cp := *preserved.ExtraPodSpec.DeepCopy()
-		dst.ExtraPodSpec = &cp
+	if shouldRestorePreservedExtraPodSpec(dst, preserved) {
+		if dst.ExtraPodSpec == nil {
+			cp := *preserved.ExtraPodSpec.DeepCopy()
+			dst.ExtraPodSpec = &cp
+		} else {
+			restorePreservedFrontendSidecarConflict(dst.ExtraPodSpec, preserved.ExtraPodSpec)
+		}
 	}
 	restoreMainContainerFieldOrigins(dst, preserved, mainContainerPresent)
 	if dst.ExtraPodSpec != nil && dst.ExtraPodSpec.MainContainer != nil &&
@@ -267,6 +279,23 @@ func restoreSharedAlphaOnlyPodFields(dst *DynamoComponentDeploymentSharedSpec, p
 		preserved.ExtraPodSpec != nil && preserved.ExtraPodSpec.MainContainer != nil {
 		dst.ExtraPodSpec.MainContainer.Name = preserved.ExtraPodSpec.MainContainer.Name
 	}
+}
+
+func restorePreservedFrontendSidecarConflict(dst, preserved *ExtraPodSpec) {
+	if dst == nil || preserved == nil || preserved.PodSpec == nil {
+		return
+	}
+	container, found := findContainerByName(preserved.PodSpec.Containers, defaultFrontendSidecarContainerName)
+	if !found {
+		return
+	}
+	if dst.PodSpec == nil {
+		dst.PodSpec = &corev1.PodSpec{}
+	}
+	if _, found := findContainerByName(dst.PodSpec.Containers, defaultFrontendSidecarContainerName); found {
+		return
+	}
+	dst.PodSpec.Containers = append(dst.PodSpec.Containers, container)
 }
 
 func restoreSharedAlphaOnlyDisabledFeatures(dst *DynamoComponentDeploymentSharedSpec, preserved *DynamoComponentDeploymentSharedSpec) {
@@ -334,7 +363,8 @@ func saveSharedAlphaOnlySpec(src, save *DynamoComponentDeploymentSharedSpec, inc
 		save.ExtraPodMetadata = src.ExtraPodMetadata.DeepCopy()
 		hasSave = true
 	}
-	if extraPodSpecNeedsPreservation(src.ExtraPodSpec) {
+	if extraPodSpecNeedsPreservation(src.ExtraPodSpec) ||
+		alphaFrontendSidecarConflictNeedsPreservation(src.FrontendSidecar, src.ExtraPodSpec) {
 		save.ExtraPodSpec = src.ExtraPodSpec.DeepCopy()
 		hasSave = true
 	}
@@ -496,9 +526,16 @@ func extraPodMetadataNeedsPreservation(src *ExtraPodMetadata) bool {
 // ConvertToDynamoComponentDeploymentSharedSpec converts the shared spec from
 // v1beta1 to v1alpha1.
 func ConvertToDynamoComponentDeploymentSharedSpec(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst *DynamoComponentDeploymentSharedSpec, restored *DynamoComponentDeploymentSharedSpec, save *v1beta1.DynamoComponentDeploymentSharedSpec) error {
+	// Convert the component provider context before the remaining shared fields.
+	if src.ProviderOverride != nil {
+		dst.ProviderOverride = &ProviderOverride{}
+		ConvertToProviderOverride(src.ProviderOverride, dst.ProviderOverride)
+	}
+
 	dst.ComponentType, dst.SubComponentType = sharedComponentTypeFromHub(src.ComponentType)
 	dst.GlobalDynamoNamespace = src.GlobalDynamoNamespace
 	dst.Replicas = src.Replicas
+	dst.MinAvailable = src.MinAvailable
 
 	if src.Multinode != nil {
 		dst.Multinode = &MultinodeSpec{}
@@ -517,6 +554,7 @@ func ConvertToDynamoComponentDeploymentSharedSpec(src *v1beta1.DynamoComponentDe
 		ConvertToEPPConfig(src.EPPConfig, dst.EPPConfig)
 	}
 
+	dst.RuntimeVersionOverride = src.RuntimeVersionOverride
 	dst.ServiceName = src.ComponentName
 
 	// sharedMemorySize -> SharedMemorySpec.
@@ -543,8 +581,10 @@ func ConvertToDynamoComponentDeploymentSharedSpec(src *v1beta1.DynamoComponentDe
 		return err
 	}
 
-	fillSharedAlphaOnlyFromPreserved(dst, restored, sharedHasMainContainer(src))
+	// Restore lossy cache flags before field-origin reconstruction so every
+	// compilation-cache mount is excluded from main-container origin matching.
 	restoreSharedPreservedFlatVolumeMounts(dst, restored, src)
+	fillSharedAlphaOnlyFromPreserved(dst, restored, sharedHasMainContainer(src))
 	pruneEmptyExtraPodSpec(dst, restored)
 	if save != nil {
 		if err := saveSharedHubOnlySpec(src, dst, save); err != nil {
@@ -568,6 +608,10 @@ func saveSharedHubOnlySpec(src *v1beta1.DynamoComponentDeploymentSharedSpec, con
 	}
 	if experimentalIsHubOnlyShape(src.Experimental) {
 		save.Experimental = src.Experimental.DeepCopy()
+	} else if src.Experimental != nil && src.Experimental.Grove != nil {
+		// The grove block has no v1alpha1 representation; preserve it sparsely
+		// when the rest of the experimental block converts to alpha fields.
+		save.Experimental = &v1beta1.ExperimentalSpec{Grove: src.Experimental.Grove.DeepCopy()}
 	}
 	return nil
 }
@@ -782,16 +826,81 @@ func sharedHubSpecSaveIsZero(save *v1beta1.DynamoComponentDeploymentSharedSpec) 
 // Simple shared-spec structs
 // ---------------------------------------------------------------------------
 
+// ConvertFromProviderOverride converts a provider-native override from
+// v1alpha1 to v1beta1 without interpreting its raw value. src and dst must not
+// be nil.
+func ConvertFromProviderOverride(src *ProviderOverride, dst *v1beta1.ProviderOverride) {
+	*dst = v1beta1.ProviderOverride{
+		APIVersion: src.APIVersion,
+		Target:     src.Target,
+		Value:      src.Value,
+	}
+}
+
+// ConvertToProviderOverride converts a provider-native override from v1beta1
+// to v1alpha1 without interpreting its raw value. src and dst must not be nil.
+func ConvertToProviderOverride(src *v1beta1.ProviderOverride, dst *ProviderOverride) {
+	*dst = ProviderOverride{
+		APIVersion: src.APIVersion,
+		Target:     src.Target,
+		Value:      src.Value,
+	}
+}
+
 // ConvertFromMultinodeSpec converts multinode settings from v1alpha1 to
-// v1beta1.
+// v1beta1. src and dst must not be nil.
 func ConvertFromMultinodeSpec(src *MultinodeSpec, dst *v1beta1.MultinodeSpec) {
 	*dst = v1beta1.MultinodeSpec{NodeCount: src.NodeCount}
+
+	// Convert each explicit role independently to preserve its provider context.
+	if src.Leader != nil {
+		dst.Leader = &v1beta1.MultinodeRoleSpec{}
+		ConvertFromMultinodeRoleSpec(src.Leader, dst.Leader)
+	}
+	if src.Worker != nil {
+		dst.Worker = &v1beta1.MultinodeRoleSpec{}
+		ConvertFromMultinodeRoleSpec(src.Worker, dst.Worker)
+	}
 }
 
 // ConvertToMultinodeSpec converts multinode settings from v1beta1 to
-// v1alpha1.
+// v1alpha1. src and dst must not be nil.
 func ConvertToMultinodeSpec(src *v1beta1.MultinodeSpec, dst *MultinodeSpec) {
 	*dst = MultinodeSpec{NodeCount: src.NodeCount}
+
+	// Convert each explicit role independently to preserve its provider context.
+	if src.Leader != nil {
+		dst.Leader = &MultinodeRoleSpec{}
+		ConvertToMultinodeRoleSpec(src.Leader, dst.Leader)
+	}
+	if src.Worker != nil {
+		dst.Worker = &MultinodeRoleSpec{}
+		ConvertToMultinodeRoleSpec(src.Worker, dst.Worker)
+	}
+}
+
+// ConvertFromMultinodeRoleSpec converts one explicit multinode role. src and
+// dst must not be nil.
+func ConvertFromMultinodeRoleSpec(src *MultinodeRoleSpec, dst *v1beta1.MultinodeRoleSpec) {
+	*dst = v1beta1.MultinodeRoleSpec{}
+
+	// Preserve the role-level provider schema and sparse value verbatim.
+	if src.ProviderOverride != nil {
+		dst.ProviderOverride = &v1beta1.ProviderOverride{}
+		ConvertFromProviderOverride(src.ProviderOverride, dst.ProviderOverride)
+	}
+}
+
+// ConvertToMultinodeRoleSpec converts one explicit multinode role. src and dst
+// must not be nil.
+func ConvertToMultinodeRoleSpec(src *v1beta1.MultinodeRoleSpec, dst *MultinodeRoleSpec) {
+	*dst = MultinodeRoleSpec{}
+
+	// Preserve the role-level provider schema and sparse value verbatim.
+	if src.ProviderOverride != nil {
+		dst.ProviderOverride = &ProviderOverride{}
+		ConvertToProviderOverride(src.ProviderOverride, dst.ProviderOverride)
+	}
 }
 
 // ConvertFromModelReference converts model references from v1alpha1 to
@@ -922,7 +1031,8 @@ func restoreSharedPreservedFlatVolumeMounts(dst, preserved *DynamoComponentDeplo
 	if !volumeMountsEqual(dst.VolumeMounts, visiblePreservedVolumeMountProjection(src, preserved.VolumeMounts)) {
 		return
 	}
-	dst.VolumeMounts = mergePreservedCompilationCacheVolumeMounts(preserved.VolumeMounts, dst.VolumeMounts)
+	restorablePreserved := restorablePreservedCompilationCacheMounts(src, preserved)
+	dst.VolumeMounts = mergePreservedCompilationCacheVolumeMounts(restorablePreserved, dst.VolumeMounts)
 }
 
 func firstPreservedCompilationCacheMatches(compilationCache *v1beta1.CompilationCacheConfig, mounts []VolumeMount) bool {
@@ -930,11 +1040,42 @@ func firstPreservedCompilationCacheMatches(compilationCache *v1beta1.Compilation
 		if !mount.UseAsCompilationCache {
 			continue
 		}
-		return compilationCache != nil &&
-			compilationCache.PVCName == mount.Name &&
-			compilationCache.MountPath == mount.MountPoint
+		return compilationCacheMatchesVolumeMount(compilationCache, mount)
 	}
 	return compilationCache == nil
+}
+
+func compilationCacheMatchesVolumeMount(compilationCache *v1beta1.CompilationCacheConfig, mount VolumeMount) bool {
+	return compilationCache != nil &&
+		compilationCache.PVCName == mount.Name &&
+		compilationCache.MountPath == mount.MountPoint
+}
+
+func restorablePreservedCompilationCacheMounts(src *v1beta1.DynamoComponentDeploymentSharedSpec, preserved *DynamoComponentDeploymentSharedSpec) []VolumeMount {
+	main, mainPresent := sharedMainContainer(src)
+	secondaryMountsProjected := mainPresent || hasPodTemplateContent(preserved, false)
+	firstCompilationCacheSeen := false
+	live := make([]VolumeMount, 0, len(preserved.VolumeMounts))
+	for _, mount := range preserved.VolumeMounts {
+		if !mount.UseAsCompilationCache {
+			continue
+		}
+		if !firstCompilationCacheSeen {
+			firstCompilationCacheSeen = true
+			if compilationCacheMatchesVolumeMount(src.CompilationCache, mount) {
+				live = append(live, mount)
+			}
+			continue
+		}
+		// Secondary cache flags have no beta field. When alpha content creates a
+		// beta main container, its matching mount is their observable
+		// representation and absence means deletion. Cache-only alpha objects do
+		// not create a pod template, so those flags remain sparse-preserved state.
+		if !secondaryMountsProjected || nativeVolumeMountHasNamePath(main.VolumeMounts, mount.Name, mount.MountPoint) {
+			live = append(live, mount)
+		}
+	}
+	return live
 }
 
 func visiblePreservedVolumeMountProjection(src *v1beta1.DynamoComponentDeploymentSharedSpec, mounts []VolumeMount) []VolumeMount {
@@ -1290,7 +1431,7 @@ func convertExperimentalFromHub(src *v1beta1.DynamoComponentDeploymentSharedSpec
 // fields (Resources, Envs, Probes, EnvFromSecret, ExtraPodSpec,
 // ExtraPodMetadata, FrontendSidecar) following the same merge precedence the
 // v1alpha1 controller uses at reconcile time: ExtraPodSpec.MainContainer wins
-// over dedicated fields, except for env which is additive.
+// over dedicated fields, except for env and volumeMounts which are additive.
 func buildPodTemplateToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec, ctx DynamoComponentDeploymentSharedSpecConversionContext) error {
 	podTpl, err := buildSharedPodTemplateFromAlpha(src, ctx.PodTemplateOrigin, false)
 	if err != nil {
@@ -1344,12 +1485,17 @@ func mergeExtraPodSpecMainContainer(src *DynamoComponentDeploymentSharedSpec, ma
 	}
 	main := src.ExtraPodSpec.MainContainer.DeepCopy()
 	baseEnvs := mainBase.Env
+	dedicatedVolumeMounts := slices.Clone(mainBase.VolumeMounts)
 	// Name must be "main" regardless of what MainContainer carried.
 	main.Name = mainContainerName
 	if err := mergo.Merge(mainBase, *main, mergo.WithOverride); err != nil {
 		return fmt.Errorf("merge main container: %w", err)
 	}
 	mainBase.Env = mergeEnvs(baseEnvs, main.Env)
+	// The v1alpha1 renderer merged extraPodSpec.mainContainer first, then
+	// appended the dedicated service-level mounts. Preserve that ordering rather
+	// than allowing mergo to replace the VolumeMounts slice.
+	mainBase.VolumeMounts = append(slices.Clone(main.VolumeMounts), dedicatedVolumeMounts...)
 	// StartupProbe has no dedicated v1alpha1 field; take it verbatim.
 	if main.StartupProbe != nil {
 		mainBase.StartupProbe = main.StartupProbe
@@ -1366,7 +1512,8 @@ func buildSharedPodTemplateFromAlpha(src *DynamoComponentDeploymentSharedSpec, p
 	// Main container: base from dedicated fields.
 	mainBase := buildMainContainerFromDedicated(src)
 
-	// Merge ExtraPodSpec.MainContainer on top, except for Env which is additive.
+	// Merge ExtraPodSpec.MainContainer on top, except for fields with legacy
+	// additive behavior handled by mergeExtraPodSpecMainContainer.
 	if err := mergeExtraPodSpecMainContainer(src, &mainBase); err != nil {
 		return nil, err
 	}
@@ -1552,6 +1699,11 @@ func restoreSharedHubOnlyFields(dst, preserved *v1beta1.DynamoComponentDeploymen
 	restoreSharedHubOnlyFrontendSidecar(dst, preserved)
 	if dst.Experimental == nil && experimentalIsHubOnlyShape(preserved.Experimental) {
 		dst.Experimental = preserved.Experimental.DeepCopy()
+	} else if dst.Experimental != nil && preserved.Experimental != nil &&
+		dst.Experimental.Grove == nil && preserved.Experimental.Grove != nil {
+		// The experimental block was rebuilt from alpha fields (GMS, failover,
+		// checkpoint); merge back the sparsely preserved hub-only grove block.
+		dst.Experimental.Grove = preserved.Experimental.Grove.DeepCopy()
 	}
 	return nil
 }
@@ -2081,6 +2233,33 @@ func extraPodSpecNeedsPreservation(eps *ExtraPodSpec) bool {
 	return eps != nil && (extraPodSpecIsZero(eps) || extraPodSpecOnlyPreservesMainContainerName(eps))
 }
 
+func shouldRestorePreservedExtraPodSpec(dst, preserved *DynamoComponentDeploymentSharedSpec) bool {
+	return dst != nil &&
+		preserved != nil &&
+		preserved.ExtraPodSpec != nil &&
+		(extraPodSpecNeedsPreservation(preserved.ExtraPodSpec) ||
+			alphaFrontendSidecarConflictNeedsPreservation(preserved.FrontendSidecar, preserved.ExtraPodSpec))
+}
+
+func alphaFrontendSidecarConflictNeedsPreservation(frontendSidecar *FrontendSidecarSpec, eps *ExtraPodSpec) bool {
+	// Keep enough origin data for admission to preserve the v1alpha1 rule that
+	// rejects frontendSidecar when extraPodSpec already declares the generated
+	// sidecar container name.
+	return frontendSidecar != nil && extraPodSpecHasContainer(eps, defaultFrontendSidecarContainerName)
+}
+
+func extraPodSpecHasContainer(eps *ExtraPodSpec, name string) bool {
+	if eps == nil || eps.PodSpec == nil {
+		return false
+	}
+	for _, container := range eps.PodSpec.Containers {
+		if container.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 func extraPodSpecOnlyPreservesMainContainerName(eps *ExtraPodSpec) bool {
 	if eps == nil || eps.MainContainer == nil || eps.MainContainer.Name == "" || !podSpecIsZero(eps.PodSpec) {
 		return false
@@ -2166,7 +2345,8 @@ func restoreMainContainerFieldOrigins(dst, preserved *DynamoComponentDeploymentS
 		ensureExtraPodSpecMainContainer(dst).Resources = *preservedMain.Resources.DeepCopy()
 	}
 	currentVolumeMounts := withoutCompilationCacheMounts(currentMain.VolumeMounts, dst.VolumeMounts)
-	if volumeMountOriginsMatchNative(volumeMountsFromNative(preservedSemanticMain.VolumeMounts), currentVolumeMounts) &&
+	preservedVolumeMounts := withoutCompilationCacheMounts(preservedSemanticMain.VolumeMounts, preserved.VolumeMounts)
+	if volumeMountOriginsMatchNative(volumeMountsFromNative(preservedVolumeMounts), currentVolumeMounts) &&
 		(len(preserved.VolumeMounts) > 0 || len(preservedMain.VolumeMounts) > 0) {
 		dst.VolumeMounts = restorePreservedVolumeMountOrigins(preserved.VolumeMounts, dst.VolumeMounts, preservedMain.VolumeMounts)
 		ensureExtraPodSpecMainContainer(dst).VolumeMounts = cloneNativeVolumeMounts(preservedMain.VolumeMounts)

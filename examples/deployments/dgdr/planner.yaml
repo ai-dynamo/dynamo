@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: qwen-planner
+spec:
+  model: Qwen/Qwen3-0.6B
+  backend: vllm
+  searchStrategy: rapid
+  workload:
+    isl: 4000
+    osl: 1000
+    requestRate: 10
+  sla:
+    ttft: 500
+    itl: 50
+  features:
+    planner:
+      optimization_target: sla
+      enable_throughput_scaling: true
+      enable_load_scaling: false
+      pre_deployment_sweeping_mode: rapid
+      mode: disagg
+      backend: vllm
+  autoApply: true

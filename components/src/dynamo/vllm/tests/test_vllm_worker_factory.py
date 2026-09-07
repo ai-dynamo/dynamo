@@ -4,21 +4,30 @@
 """Unit tests for worker_factory.py"""
 
 import asyncio
-from unittest.mock import AsyncMock, Mock
+import json
+import logging
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.vllm.constants import DisaggregationMode
-from dynamo.vllm.worker_factory import EngineSetupResult, WorkerFactory
+from dynamo.vllm.worker_factory import (
+    EngineSetupResult,
+    SnapshotEngineSetupResult,
+    WorkerFactory,
+    _await_benchmark_then_restore_workers,
+    _DecodeWorkerLifecycle,
+    _stop_worker_gc_policy,
+    _wait_and_load_benchmark,
+)
 
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
     pytest.mark.core,
-    # gpu_1 not gpu_0: vLLM DeviceConfig(device='auto') fails on CPU-only arm64
-    # runners with "Failed to infer device type" even for mock tests.
-    pytest.mark.gpu_1,
+    pytest.mark.gpu_0,
     pytest.mark.xpu_1,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.timeout(180),  # 0-GiB unit tests, floor 180s
@@ -27,18 +36,729 @@ pytestmark = [
 
 
 def _make_config(**overrides) -> Mock:
-    """Create a mock Config with all multimodal flags defaulting to False."""
+    """Create a mock Config with canonical worker settings."""
     defaults = {
-        "multimodal_encode_worker": False,
-        "multimodal_worker": False,
-        "multimodal_decode_worker": False,
+        "enable_multimodal": False,
         "omni": False,
         "route_to_encoder": False,
         "disaggregation_mode": DisaggregationMode.AGGREGATED,
         "embedding_worker": False,
+        "embedding_frontend_tokenization": False,
+        # Pin to the real Config default: an auto-created Mock attribute is
+        # truthy, which enables the GMS shadow-mode path and imports the
+        # optional gpu_memory_service package (absent in some test images).
+        "gms_shadow_mode": False,
+        "realtime": False,
+        "classify_worker": False,
     }
     defaults.update(overrides)
     return Mock(**defaults)
+
+
+def _make_factory(**overrides) -> WorkerFactory:
+    defaults = {
+        "setup_vllm_engine_fn": Mock(),
+        "setup_kv_event_publisher_fn": Mock(return_value=None),
+        "register_vllm_model_fn": AsyncMock(),
+        "setup_fpm_relay_fn": Mock(return_value=None),
+        "setup_metrics_collection_fn": Mock(),
+    }
+    defaults.update(overrides)
+    return WorkerFactory(**defaults)
+
+
+def test_decode_worker_lifecycle_cleanup_in_reverse_construction_order():
+    calls = []
+    shutdown_event = asyncio.Event()
+    handler = Mock()
+    handler.cleanup.side_effect = lambda: calls.append("handler")
+    engine_client = Mock()
+    engine_client.shutdown.side_effect = lambda **_kwargs: calls.append("engine")
+    resources = _DecodeWorkerLifecycle(
+        engine_client=engine_client,
+        vllm_config=SimpleNamespace(shutdown_timeout=7.0),
+        handler=handler,
+        shutdown_event=shutdown_event,
+    )
+
+    resources.cleanup()
+
+    assert calls == ["handler", "engine"]
+    assert shutdown_event.is_set()
+    engine_client.shutdown.assert_called_once_with(timeout=7.0)
+
+
+def test_decode_worker_lifecycle_shutdown_engine_when_handler_cleanup_fails():
+    handler = Mock()
+    handler.cleanup.side_effect = RuntimeError("handler cleanup failed")
+    engine_client = Mock()
+    resources = _DecodeWorkerLifecycle(
+        engine_client=engine_client,
+        vllm_config=SimpleNamespace(shutdown_timeout=5.0),
+        handler=handler,
+    )
+
+    with pytest.raises(RuntimeError, match="handler cleanup failed"):
+        resources.cleanup()
+
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+
+
+def test_decode_worker_lifecycle_chains_handler_and_engine_cleanup_failures():
+    handler_error = RuntimeError("handler cleanup failed")
+    engine_error = RuntimeError("engine shutdown failed")
+    handler = Mock()
+    handler.cleanup.side_effect = handler_error
+    engine_client = Mock()
+    engine_client.shutdown.side_effect = engine_error
+    lifecycle = _DecodeWorkerLifecycle(
+        engine_client=engine_client,
+        vllm_config=SimpleNamespace(shutdown_timeout=5.0),
+        handler=handler,
+    )
+
+    with pytest.raises(RuntimeError, match="engine shutdown failed") as exc_info:
+        lifecycle.cleanup()
+
+    assert exc_info.value is engine_error
+    assert exc_info.value.__context__ is handler_error
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+
+
+@pytest.mark.asyncio
+async def test_custom_encoder_preserves_primary_error_when_cleanup_fails(caplog):
+    factory = _make_factory()
+    engine_client = Mock()
+    handler = Mock()
+    handler.cleanup.side_effect = RuntimeError("handler cleanup failed")
+    startup_error = ValueError("decode worker startup failed")
+
+    async def fail_after_resource_creation(*_args, lifecycle, **_kwargs):
+        lifecycle.engine_client = engine_client
+        lifecycle.vllm_config = SimpleNamespace(shutdown_timeout=5.0)
+        lifecycle.handler = handler
+        raise startup_error
+
+    factory._run_decode_worker = fail_after_resource_creation  # type: ignore[method-assign]
+    caplog.set_level(logging.ERROR)
+    config = SimpleNamespace(custom_encoder_class="encoder.Backend")
+
+    with pytest.raises(ValueError, match="decode worker startup failed") as exc_info:
+        await factory._create_decode_worker(Mock(), config, asyncio.Event(), [])
+
+    assert exc_info.value is startup_error
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+    assert "Failed to clean up decode worker after an earlier failure" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_decode_worker_without_custom_encoder_uses_lifecycle():
+    factory = _make_factory()
+    engine_client = Mock()
+    startup_error = ValueError("decode worker startup failed")
+
+    async def fail_after_engine_creation(*_args, lifecycle, **_kwargs):
+        lifecycle.engine_client = engine_client
+        lifecycle.vllm_config = SimpleNamespace(shutdown_timeout=5.0)
+        raise startup_error
+
+    factory._run_decode_worker = fail_after_engine_creation  # type: ignore[method-assign]
+    config = SimpleNamespace(custom_encoder_class=None)
+
+    with pytest.raises(ValueError, match="decode worker startup failed") as exc_info:
+        await factory._create_decode_worker(Mock(), config, asyncio.Event(), [])
+
+    assert exc_info.value is startup_error
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+
+
+@pytest.mark.asyncio
+async def test_decode_failure_withdraws_state_agent_before_engine_cleanup():
+    calls = []
+    state_agent_lifecycle = SimpleNamespace(
+        close=AsyncMock(side_effect=lambda: calls.append("state-agent"))
+    )
+    factory = _make_factory(state_agent_lifecycle=state_agent_lifecycle)
+    engine_client = Mock()
+    engine_client.shutdown.side_effect = lambda **_kwargs: calls.append("engine")
+    handler = Mock()
+    handler.cleanup.side_effect = lambda: calls.append("handler")
+
+    async def fail_after_setup(*_args, lifecycle, **_kwargs):
+        lifecycle.engine_client = engine_client
+        lifecycle.vllm_config = SimpleNamespace(shutdown_timeout=5.0)
+        lifecycle.handler = handler
+        raise RuntimeError("startup failed")
+
+    factory._run_decode_worker = fail_after_setup  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="startup failed"):
+        await factory._create_decode_worker(
+            Mock(), SimpleNamespace(custom_encoder_class=None), asyncio.Event(), []
+        )
+
+    assert calls == ["state-agent", "handler", "engine"]
+
+
+@pytest.mark.asyncio
+async def test_prefill_startup_failure_withdraws_state_agent_owner():
+    lifecycle = SimpleNamespace(close=AsyncMock())
+    factory = _make_factory(state_agent_lifecycle=lifecycle)
+    factory._run_prefill_worker = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError("prefill startup failed")
+    )
+
+    with pytest.raises(RuntimeError, match="prefill startup failed"):
+        await factory._create_prefill_worker(Mock(), Mock(), asyncio.Event(), [])
+
+    lifecycle.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_state_agent_setup_failure_never_falls_back_to_legacy(monkeypatch):
+    from dynamo.vllm import worker_factory
+
+    monkeypatch.setattr(
+        worker_factory, "state_agent_settings", lambda _config: object()
+    )
+    setup_legacy = Mock(return_value=["legacy"])
+    setup_owner = AsyncMock(side_effect=RuntimeError("host is unavailable"))
+    factory = _make_factory(
+        setup_kv_event_publisher_fn=setup_legacy,
+        setup_kv_state_attachment_owner_fn=setup_owner,
+    )
+
+    result = await factory._setup_kv_routing(
+        Mock(),
+        Mock(),
+        Mock(),
+        consolidator_enabled=False,
+        consolidator_port=0,
+    )
+
+    assert result is None
+    setup_owner.assert_awaited_once()
+    setup_legacy.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["configure", "handler"])
+async def test_custom_encoder_shutdown_engine_on_startup_failure(
+    monkeypatch, failure_stage, tmp_path
+):
+    engine_client = Mock()
+    vllm_config = SimpleNamespace(
+        additional_config={},
+        cache_config=SimpleNamespace(num_gpu_blocks=1),
+        model_config=SimpleNamespace(max_model_len=1024),
+        shutdown_timeout=5.0,
+    )
+    engine_setup: EngineSetupResult = (
+        engine_client,
+        vllm_config,
+        Mock(),
+        str(tmp_path / "prometheus"),
+        Mock(),
+    )
+    factory = _make_factory(setup_vllm_engine_fn=Mock(return_value=engine_setup))
+    factory._maybe_create_failover_metrics = Mock(return_value=None)  # type: ignore[method-assign]
+    factory._maybe_get_encode_worker_client = AsyncMock(return_value=None)  # type: ignore[method-assign]
+
+    stat_logger = Mock()
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.StatLoggerFactory",
+        Mock(return_value=stat_logger),
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 1)
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.per_rank_kv_blocks",
+        lambda _num_blocks, _dp_size: 1,
+    )
+
+    async def configure_block_size(*_args, **_kwargs):
+        if failure_stage == "configure":
+            raise ValueError("decode startup rejected")
+        return None
+
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.configure_kv_event_block_size",
+        configure_block_size,
+    )
+    handler_constructor = Mock(
+        side_effect=(
+            ValueError("decode startup rejected")
+            if failure_stage == "handler"
+            else None
+        )
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.DecodeWorkerHandler",
+        handler_constructor,
+    )
+
+    endpoint = Mock(connection_id=Mock(return_value="worker-id"))
+    runtime = Mock()
+    runtime.endpoint.return_value = endpoint
+    config = SimpleNamespace(
+        namespace="dynamo",
+        component="backend",
+        endpoint="generate",
+        enable_rl=False,
+        engine_args=SimpleNamespace(enable_lora=False),
+        enable_multimodal=True,
+        custom_encoder_class="encoder.Backend",
+        use_vllm_tokenizer=False,
+        frontend_decoding=False,
+    )
+
+    with pytest.raises(ValueError, match="decode startup rejected"):
+        await factory._create_decode_worker(runtime, config, asyncio.Event(), [])
+
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+    if failure_stage == "configure":
+        handler_constructor.assert_not_called()
+
+
+def _single_rank_benchmark_payload(
+    *,
+    status: str = "complete",
+    expected_points: int = 1,
+) -> dict:
+    point = {"benchmark_id": 1, "point_type": "decode"}
+    fpm = {"counter_id": 1, "dp_rank": 0, "wall_time": 0.01}
+    partial = status == "partial"
+    return {
+        "status": status,
+        "valid": not partial,
+        "usable": True,
+        "stop_reason": "timeout" if partial else None,
+        "run_id": "run-1",
+        "grid_digest": "grid-1",
+        "timing": {
+            "started_at": "2026-07-13T12:00:00Z",
+            "completed_at": "2026-07-13T12:00:01Z",
+            "benchmark_elapsed_seconds": 1.0,
+            "measured_iteration_seconds": 0.01,
+        },
+        "dp": {"rank": 0, "size": 1},
+        "coverage": {
+            "expected_points": expected_points,
+            "completed_points": 1,
+            "skipped_points": 0,
+        },
+        "results": [{"point": point, "fpms": [fpm]}],
+        "iteration_groups": [
+            {
+                "benchmark_id": 1,
+                "point": point,
+                "expected_dp_ranks": [0],
+                "complete": True,
+                "wall_time": 0.01,
+                "rank_results": [{"dp_rank": 0, "fpms": [fpm]}],
+            }
+        ],
+        "skipped_points": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_wait_and_load_benchmark_rejects_invalid_results(monkeypatch, tmp_path):
+    output_path = tmp_path / "benchmark.json"
+    output_path.write_text(
+        json.dumps(
+            {
+                "valid": False,
+                "coverage": {
+                    "expected_points": 2,
+                    "completed_points": 1,
+                    "skipped_points": 1,
+                },
+                "skipped_points": [{"reason": "seed_cache_validation_failed"}],
+                "missing_phases": ["decode"],
+            }
+        )
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 1)
+    )
+
+    with pytest.raises(RuntimeError, match="incomplete results") as exc_info:
+        await _wait_and_load_benchmark(
+            {"output_path": str(output_path), "timeout": 1}, Mock()
+        )
+    assert "missing_phases=['decode']" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_stop_worker_gc_policy_rpcs_every_worker(monkeypatch):
+    """After the benchmark wait, the launcher must stop the GC policy in
+    every model worker (workers auto-start it on extension import) and hold
+    serving until the RPC completes."""
+    monkeypatch.setenv("DYN_FPM_GC_POLICY", "freeze")
+    engine_client = SimpleNamespace(collective_rpc=AsyncMock())
+
+    await _stop_worker_gc_policy(engine_client)
+
+    engine_client.collective_rpc.assert_awaited_once_with("fpm_gc_stop")
+
+
+@pytest.mark.asyncio
+async def test_stop_worker_gc_policy_noop_when_policy_disabled(monkeypatch):
+    monkeypatch.delenv("DYN_FPM_GC_POLICY", raising=False)
+    engine_client = SimpleNamespace(collective_rpc=AsyncMock())
+
+    await _stop_worker_gc_policy(engine_client)
+
+    engine_client.collective_rpc.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stop_worker_gc_policy_failure_propagates(monkeypatch):
+    """Serving on workers that are not GC-equivalent to never-benchmarked
+    ones must not silently proceed."""
+    monkeypatch.setenv("DYN_FPM_GC_POLICY", "freeze")
+    engine_client = SimpleNamespace(
+        collective_rpc=AsyncMock(side_effect=RuntimeError("worker died"))
+    )
+
+    with pytest.raises(RuntimeError, match="worker died"):
+        await _stop_worker_gc_policy(engine_client)
+
+
+@pytest.mark.asyncio
+async def test_wait_and_load_benchmark_accepts_timeout_partial(monkeypatch, tmp_path):
+    output_path = tmp_path / "benchmark.json"
+    output_path.write_text(
+        json.dumps(_single_rank_benchmark_payload(status="partial", expected_points=2))
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 1)
+    )
+
+    merged = await _wait_and_load_benchmark(
+        {"output_path": str(output_path), "timeout": 1}, Mock()
+    )
+
+    assert merged["status"] == "partial"
+    assert merged["valid"] is False
+    assert merged["usable"] is True
+    assert merged["stop_reason"] == "timeout"
+    assert merged["coverage"] == {
+        "expected_points": 2,
+        "completed_points": 1,
+        "skipped_points": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_wait_and_load_benchmark_warns_then_waits_for_partial(
+    monkeypatch, tmp_path, caplog
+):
+    output_path = tmp_path / "benchmark.json"
+    payload = _single_rank_benchmark_payload(status="partial", expected_points=2)
+    monotonic_times = iter([0.0, 2.0])
+
+    async def finish_current_iteration(_delay):
+        output_path.write_text(json.dumps(payload))
+
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 1)
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory._time.monotonic",
+        lambda: next(monotonic_times, 2.0),
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.asyncio.sleep", finish_current_iteration
+    )
+    caplog.set_level(logging.WARNING)
+
+    merged = await _wait_and_load_benchmark(
+        {"output_path": str(output_path), "timeout": 1}, Mock()
+    )
+
+    assert merged["status"] == "partial"
+    assert "for the current profiling iteration" in caplog.text
+    assert "Engine startup will continue" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_wait_and_load_benchmark_bounds_post_timeout_grace(
+    monkeypatch, tmp_path, caplog
+):
+    output_path = tmp_path / "benchmark.json"
+    monotonic_times = iter([0.0, 2.0, 3.0])
+
+    async def no_result(_delay):
+        return None
+
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 1)
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS", 1
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory._time.monotonic",
+        lambda: next(monotonic_times, 3.0),
+    )
+    monkeypatch.setattr("dynamo.vllm.worker_factory.asyncio.sleep", no_result)
+    caplog.set_level(logging.WARNING)
+
+    with pytest.raises(TimeoutError, match="cleanup grace"):
+        await _wait_and_load_benchmark(
+            {"output_path": str(output_path), "timeout": 1}, Mock()
+        )
+
+    assert "waiting up to 1s" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mutation",
+    ["partial_valid", "partial_skipped", "complete_invalid", "complete_unusable"],
+)
+async def test_wait_and_load_benchmark_rejects_inconsistent_status(
+    monkeypatch, tmp_path, mutation
+):
+    output_path = tmp_path / "benchmark.json"
+    if mutation in {"complete_invalid", "complete_unusable"}:
+        payload = _single_rank_benchmark_payload()
+        if mutation == "complete_invalid":
+            payload["valid"] = False
+        else:
+            payload["usable"] = False
+    else:
+        payload = _single_rank_benchmark_payload(status="partial", expected_points=3)
+        if mutation == "partial_valid":
+            payload["valid"] = True
+        else:
+            payload["coverage"]["skipped_points"] = 1
+            payload["skipped_points"] = [{"reason": "shape mismatch"}]
+    output_path.write_text(json.dumps(payload))
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 1)
+    )
+
+    with pytest.raises(RuntimeError, match="incomplete results"):
+        await _wait_and_load_benchmark(
+            {"output_path": str(output_path), "timeout": 1}, Mock()
+        )
+
+
+@pytest.mark.asyncio
+async def test_wait_and_load_benchmark_aggregates_dp_coverage(monkeypatch, tmp_path):
+    base_path = tmp_path / "benchmark.json"
+    point = {"benchmark_id": 1, "point_type": "prefill"}
+    rank_results = [
+        {
+            "dp_rank": 0,
+            "fpms": [{"counter_id": 1, "dp_rank": 0, "wall_time": 0.01}],
+        },
+        {
+            "dp_rank": 1,
+            "fpms": [{"counter_id": 1, "dp_rank": 1, "wall_time": 0.02}],
+        },
+    ]
+    iteration_groups = [
+        {
+            "benchmark_id": 1,
+            "point": point,
+            "expected_dp_ranks": [0, 1],
+            "complete": True,
+            "wall_time": 0.02,
+            "rank_results": rank_results,
+        }
+    ]
+
+    def rank_payload(dp_rank: int, wall_time: float) -> dict:
+        return {
+            "valid": True,
+            "run_id": "run-1",
+            "grid_digest": "grid-1",
+            "timing": {
+                "started_at": f"2026-07-10T12:00:0{dp_rank}Z",
+                "completed_at": f"2026-07-10T12:00:1{dp_rank}Z",
+                "benchmark_elapsed_seconds": 10.0 + dp_rank,
+                "measured_iteration_seconds": 0.02,
+            },
+            "dp": {"rank": dp_rank, "size": 2},
+            "coverage": {
+                "expected_points": 1,
+                "completed_points": 1,
+                "skipped_points": 0,
+            },
+            "results": [
+                {
+                    "point": point,
+                    "fpms": [
+                        {
+                            "counter_id": 1,
+                            "dp_rank": dp_rank,
+                            "wall_time": wall_time,
+                        }
+                    ],
+                }
+            ],
+            "iteration_groups": iteration_groups,
+            "skipped_points": [],
+        }
+
+    base_path.write_text(json.dumps(rank_payload(0, 0.01)))
+    (tmp_path / "benchmark_dp1.json").write_text(json.dumps(rank_payload(1, 0.02)))
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 2)
+    )
+
+    merged = await _wait_and_load_benchmark(
+        {"output_path": str(base_path), "timeout": 1}, Mock()
+    )
+
+    assert merged["coverage"] == {
+        "expected_points": 2,
+        "completed_points": 2,
+        "skipped_points": 0,
+    }
+    assert merged["timing"] == {
+        "started_at": "2026-07-10T12:00:01Z",
+        "completed_at": "2026-07-10T12:00:11Z",
+        "benchmark_elapsed_seconds": 11.0,
+        "measured_iteration_seconds": 0.02,
+        "rank_benchmark_elapsed_seconds": {"0": 10.0, "1": 11.0},
+    }
+    assert [result["point"]["dp_rank"] for result in merged["results"]] == [0, 1]
+    assert merged["iteration_groups"] == [
+        {
+            "benchmark_id": 1,
+            "point": point,
+            "expected_dp_ranks": [0, 1],
+            "complete": True,
+            "wall_time": 0.02,
+            "rank_results": [
+                {
+                    "dp_rank": 0,
+                    "fpms": [{"counter_id": 1, "dp_rank": 0, "wall_time": 0.01}],
+                },
+                {
+                    "dp_rank": 1,
+                    "fpms": [{"counter_id": 1, "dp_rank": 1, "wall_time": 0.02}],
+                },
+            ],
+        }
+    ]
+    merged_path = tmp_path / "benchmark_merged.json"
+    assert merged_path.exists()
+    assert json.loads(merged_path.read_text()) == merged
+
+    bad_rank = rank_payload(1, 0.02)
+    bad_rank["results"][0]["fpms"][0]["counter_id"] = 2
+    (tmp_path / "benchmark_dp1.json").write_text(json.dumps(bad_rank))
+    with pytest.raises(RuntimeError, match="FPM counter mismatch"):
+        await _wait_and_load_benchmark(
+            {"output_path": str(base_path), "timeout": 1}, Mock()
+        )
+
+    partial_ranks = [rank_payload(0, 0.01), rank_payload(1, 0.02)]
+    for data in partial_ranks:
+        data.update(
+            {
+                "status": "partial",
+                "valid": False,
+                "usable": True,
+                "stop_reason": "timeout",
+            }
+        )
+        data["coverage"]["expected_points"] = 2
+    base_path.write_text(json.dumps(partial_ranks[0]))
+    (tmp_path / "benchmark_dp1.json").write_text(json.dumps(partial_ranks[1]))
+
+    partial_merged = await _wait_and_load_benchmark(
+        {"output_path": str(base_path), "timeout": 1}, Mock()
+    )
+
+    assert partial_merged["status"] == "partial"
+    assert partial_merged["coverage"] == {
+        "expected_points": 4,
+        "completed_points": 2,
+        "skipped_points": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_wait_and_load_benchmark_external_dp_keeps_global_group(
+    monkeypatch, tmp_path
+):
+    base_path = tmp_path / "benchmark.json"
+    point = {"benchmark_id": 1, "point_type": "decode"}
+    rank_results = [
+        {
+            "dp_rank": 0,
+            "fpms": [{"counter_id": 1, "dp_rank": 0, "wall_time": 0.01}],
+        },
+        {
+            "dp_rank": 1,
+            "fpms": [{"counter_id": 1, "dp_rank": 1, "wall_time": 0.02}],
+        },
+    ]
+    base_path.write_text(
+        json.dumps(
+            {
+                "valid": True,
+                "run_id": "run-1",
+                "grid_digest": "grid-1",
+                "timing": {
+                    "started_at": "2026-07-10T12:00:00Z",
+                    "completed_at": "2026-07-10T12:00:10Z",
+                    "benchmark_elapsed_seconds": 10.0,
+                    "measured_iteration_seconds": 0.02,
+                },
+                "dp": {"rank": 0, "size": 2},
+                "coverage": {
+                    "expected_points": 1,
+                    "completed_points": 1,
+                    "skipped_points": 0,
+                },
+                "results": [
+                    {
+                        "point": point,
+                        "fpms": rank_results[0]["fpms"],
+                    }
+                ],
+                "iteration_groups": [
+                    {
+                        "benchmark_id": 1,
+                        "point": point,
+                        "expected_dp_ranks": [0, 1],
+                        "complete": True,
+                        "wall_time": 0.02,
+                        "rank_results": rank_results,
+                    }
+                ],
+                "skipped_points": [],
+            }
+        )
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 1)
+    )
+
+    merged = await _wait_and_load_benchmark(
+        {"output_path": str(base_path), "timeout": 1}, Mock()
+    )
+
+    assert merged["dp"] == {
+        "ranks": [0, 1],
+        "source_ranks": [0],
+        "managed_size": 1,
+        "global_size": 2,
+    }
+    assert [result["point"]["dp_rank"] for result in merged["results"]] == [0, 1]
+    assert merged["coverage"] == {
+        "expected_points": 2,
+        "completed_points": 2,
+        "skipped_points": 0,
+    }
 
 
 @pytest.mark.asyncio
@@ -55,10 +775,11 @@ class TestCreate:
             setup_metrics_collection_fn=Mock(),
         )
         factory._create_multimodal_encode_worker = AsyncMock()  # type: ignore[assignment]
-        factory._create_multimodal_worker = AsyncMock()  # type: ignore[assignment]
         factory._create_prefill_worker = AsyncMock()  # type: ignore[assignment]
         factory._create_decode_worker = AsyncMock()  # type: ignore[assignment]
         factory._create_embedding_worker = AsyncMock()  # type: ignore[assignment]
+        factory._create_realtime_worker = AsyncMock()  # type: ignore[assignment]
+        factory._create_classify_worker = AsyncMock()  # type: ignore[assignment]
         return factory
 
     # Tests for non-legacy worker config, 'route_to_encode' is worker internal config
@@ -113,27 +834,68 @@ class TestCreate:
     async def test_embedding_worker_takes_priority(
         self, factory: WorkerFactory
     ) -> None:
-        """--embedding-worker is checked first; disaggregation_mode is ignored."""
         config = _make_config(embedding_worker=True)
         shutdown_event = asyncio.Event()
 
         await factory.create(Mock(), config, shutdown_event, [])
 
         factory._create_embedding_worker.assert_called_once()  # type: ignore[union-attr]
+        factory._create_realtime_worker.assert_not_called()  # type: ignore[union-attr]
+        factory._create_decode_worker.assert_not_called()  # type: ignore[union-attr]
+        factory._create_prefill_worker.assert_not_called()  # type: ignore[union-attr]
+        factory._create_multimodal_encode_worker.assert_not_called()  # type: ignore[union-attr]
+
+    async def test_realtime_worker_takes_priority(self, factory: WorkerFactory) -> None:
+        config = _make_config(realtime=True)
+        runtime = Mock()
+        shutdown_event = asyncio.Event()
+        shutdown_endpoints = []
+        snapshot_engine = Mock()
+
+        await factory.create(
+            runtime,
+            config,
+            shutdown_event,
+            shutdown_endpoints,
+            snapshot_engine=snapshot_engine,
+        )
+
+        factory._create_realtime_worker.assert_awaited_once_with(  # type: ignore[union-attr]
+            runtime,
+            config,
+            shutdown_event,
+            shutdown_endpoints,
+            snapshot_engine=snapshot_engine,
+        )
+        factory._create_embedding_worker.assert_not_called()  # type: ignore[union-attr]
+        factory._create_decode_worker.assert_not_called()  # type: ignore[union-attr]
+        factory._create_prefill_worker.assert_not_called()  # type: ignore[union-attr]
+        factory._create_multimodal_encode_worker.assert_not_called()  # type: ignore[union-attr]
+
+    async def test_classify_worker_takes_priority(self, factory: WorkerFactory) -> None:
+        config = _make_config(classify_worker=True)
+        shutdown_event = asyncio.Event()
+
+        await factory.create(Mock(), config, shutdown_event, [])
+
+        factory._create_classify_worker.assert_called_once()  # type: ignore[union-attr]
         factory._create_decode_worker.assert_not_called()  # type: ignore[union-attr]
         factory._create_prefill_worker.assert_not_called()  # type: ignore[union-attr]
         factory._create_multimodal_encode_worker.assert_not_called()  # type: ignore[union-attr]
 
     async def test_passes_snapshot_engine(self, factory: WorkerFactory) -> None:
-        config = _make_config(multimodal_worker=True)
+        config = _make_config(enable_multimodal=True)
         runtime = Mock()
         shutdown_event = asyncio.Event()
         shutdown_endpoints: list = []
-        snapshot_engine: EngineSetupResult = (
-            Mock(),
-            Mock(),
-            Mock(),
-            "/tmp/prometheus",
+        snapshot_engine: SnapshotEngineSetupResult = (
+            (
+                Mock(),
+                Mock(),
+                Mock(),
+                "/tmp/prometheus",
+                Mock(),
+            ),
             Mock(),
         )
 
@@ -152,6 +914,81 @@ class TestCreate:
             shutdown_endpoints,
             snapshot_engine=snapshot_engine,
         )
+
+
+@pytest.mark.asyncio
+async def test_classify_worker_registers_classify_and_pooling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    endpoint = Mock()
+    endpoint.connection_id.return_value = "worker-1"
+    endpoint.serve_endpoint = AsyncMock()
+    runtime = Mock()
+    runtime.endpoint.return_value = endpoint
+
+    engine_client = Mock()
+    vllm_config = Mock(model_config=Mock())
+    engine_tuple: EngineSetupResult = (
+        engine_client,
+        vllm_config,
+        Mock(),
+        "/tmp/prom",
+        None,
+    )
+    register_model = AsyncMock()
+    handler = Mock()
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.ClassifyWorkerHandler",
+        Mock(return_value=handler),
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.StatLoggerFactory",
+        Mock(return_value=Mock()),
+    )
+
+    factory = WorkerFactory(
+        setup_vllm_engine_fn=Mock(return_value=engine_tuple),
+        setup_kv_event_publisher_fn=Mock(),
+        register_vllm_model_fn=register_model,
+        setup_fpm_relay_fn=Mock(),
+        setup_metrics_collection_fn=Mock(),
+    )
+    config = _make_config(
+        classify_worker=True,
+        namespace="dynamo",
+        component="worker",
+        endpoint="generate",
+        served_model_name="model",
+        model="model",
+    )
+    shutdown_endpoints: list = []
+
+    await factory._create_classify_worker(
+        runtime,
+        config,
+        asyncio.Event(),
+        shutdown_endpoints,
+    )
+
+    register_model.assert_awaited_once()
+    register_args = register_model.await_args.args
+    registered_model_type = register_args[1]
+    assert register_args[0] == ModelInput.Text
+    assert registered_model_type.supports_classify()
+    assert registered_model_type.supports_pooling()
+    assert not registered_model_type.supports_embedding()
+    assert register_args[2:] == (
+        endpoint,
+        config,
+        engine_client,
+        vllm_config,
+    )
+    assert register_model.await_args.kwargs == {
+        "worker_type": WorkerType.Aggregated,
+        "needs": [],
+    }
+    assert shutdown_endpoints == [endpoint]
+    handler.cleanup.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -241,17 +1078,20 @@ class TestPrefillRegistrationContract:
             model="m",
             frontend_decoding=False,
             enable_multimodal=False,
+            enable_rl=False,
+            engine_args=SimpleNamespace(enable_lora=True),
         )
 
         runtime = Mock()
         runtime.endpoint.return_value = Mock(connection_id=Mock(return_value="cid"))
+        shutdown_endpoints: list = []
 
         with pytest.raises(RuntimeError, match="stop-after-register"):
             await factory._create_prefill_worker(
                 runtime,
                 config,
                 asyncio.Event(),
-                [],
+                shutdown_endpoints,
             )
 
         assert captured["model_input"] == ModelInput.Tokens
@@ -263,3 +1103,616 @@ class TestPrefillRegistrationContract:
         if route_to_encoder:
             expected_needs_set.append(WorkerType.Encode)
         assert captured["needs"] == [expected_needs_set]
+        endpoint_names = [call.args[0] for call in runtime.endpoint.call_args_list]
+        assert "dyn.prefill.load_lora" in endpoint_names
+        assert "dyn.prefill.unload_lora" in endpoint_names
+        assert "dyn.prefill.list_loras" in endpoint_names
+        # generate, clear, perf, and all three LoRA lifecycle endpoints.
+        assert len(shutdown_endpoints) == 6
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lora_enabled", [True, False])
+async def test_prefill_serves_lora_lifecycle_endpoints_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    lora_enabled: bool,
+) -> None:
+    engine_client = Mock()
+    vllm_config = Mock(additional_config={})
+    engine_tuple: EngineSetupResult = (
+        engine_client,
+        vllm_config,
+        Mock(),
+        "/tmp/prom",
+        Mock(),
+    )
+    factory = WorkerFactory(
+        setup_vllm_engine_fn=Mock(return_value=engine_tuple),
+        setup_kv_event_publisher_fn=Mock(return_value=None),
+        register_vllm_model_fn=AsyncMock(),
+        setup_fpm_relay_fn=Mock(return_value=None),
+        setup_metrics_collection_fn=Mock(),
+    )
+    factory._maybe_get_encode_worker_client = AsyncMock(return_value=None)  # type: ignore[assignment]
+    factory._maybe_wait_for_failover_lock = AsyncMock()  # type: ignore[assignment]
+    factory.register_engine_routes = Mock()  # type: ignore[assignment]
+
+    handler = Mock(embedding_cache_manager=None)
+    handler.cleanup = Mock()
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.PrefillWorkerHandler",
+        Mock(return_value=handler),
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.VllmPrefillHealthCheckPayload",
+        Mock(return_value=Mock(to_dict=Mock(return_value={}))),
+    )
+
+    async def _noop(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.configure_kv_event_block_size", _noop
+    )
+
+    endpoints: dict[str, Mock] = {}
+
+    def _endpoint(name: str) -> Mock:
+        endpoint = Mock(connection_id=Mock(return_value="cid"))
+        endpoint.serve_endpoint = AsyncMock(return_value=None)
+        endpoints[name] = endpoint
+        return endpoint
+
+    runtime = Mock()
+    runtime.endpoint.side_effect = _endpoint
+    config = _make_config(
+        disaggregation_mode=DisaggregationMode.PREFILL,
+        route_to_encoder=False,
+        use_vllm_tokenizer=False,
+        namespace="dyn",
+        component="prefill",
+        endpoint="generate",
+        served_model_name="m",
+        model="m",
+        frontend_decoding=False,
+        enable_multimodal=False,
+        enable_rl=False,
+        engine_args=SimpleNamespace(enable_lora=lora_enabled),
+    )
+    shutdown_endpoints: list = []
+
+    await factory._create_prefill_worker(
+        runtime,
+        config,
+        asyncio.Event(),
+        shutdown_endpoints,
+    )
+
+    lifecycle_names = {
+        "dyn.prefill.load_lora",
+        "dyn.prefill.unload_lora",
+        "dyn.prefill.list_loras",
+    }
+    if lora_enabled:
+        assert lifecycle_names <= endpoints.keys()
+        for name in lifecycle_names:
+            endpoints[name].serve_endpoint.assert_awaited_once()
+        assert len(shutdown_endpoints) == 6
+    else:
+        assert lifecycle_names.isdisjoint(endpoints)
+        assert len(shutdown_endpoints) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("embedding_frontend_tokenization", "expected_model_input"),
+    [(False, ModelInput.Text), (True, ModelInput.Tokens)],
+)
+async def test_embedding_worker_registration_and_cleanup(
+    embedding_frontend_tokenization: bool,
+    expected_model_input: ModelInput,
+) -> None:
+    cleanup_order: list[str] = []
+    endpoint = Mock()
+    endpoint.connection_id.return_value = "embedding-worker-id"
+    endpoint.serve_endpoint = AsyncMock(return_value=None)
+    runtime = Mock()
+    runtime.endpoint.return_value = endpoint
+
+    engine_client = Mock()
+    engine_client.shutdown.side_effect = lambda: cleanup_order.append("client")
+    engine_cleanup_resource = Mock()
+    engine_cleanup_resource.cleanup.side_effect = lambda: cleanup_order.append(
+        "resource"
+    )
+    setup_vllm_engine = Mock(
+        return_value=(
+            engine_client,
+            Mock(),
+            Mock(),
+            engine_cleanup_resource,
+            Mock(),
+        )
+    )
+    register_vllm_model = AsyncMock(return_value=None)
+    factory = WorkerFactory(
+        setup_vllm_engine_fn=setup_vllm_engine,
+        setup_kv_event_publisher_fn=Mock(),
+        register_vllm_model_fn=register_vllm_model,
+        setup_fpm_relay_fn=Mock(),
+        setup_metrics_collection_fn=Mock(),
+    )
+    handler = Mock()
+    handler.cleanup.side_effect = lambda: cleanup_order.append("handler")
+    config = _make_config(
+        embedding_worker=True,
+        embedding_frontend_tokenization=embedding_frontend_tokenization,
+        namespace="dynamo",
+        component="backend",
+        endpoint="generate",
+        model="test-model",
+    )
+    shutdown_event = asyncio.Event()
+    shutdown_endpoints: list = []
+
+    with patch(
+        "dynamo.vllm.worker_factory.EmbeddingWorkerHandler",
+        return_value=handler,
+    ):
+        await factory._create_embedding_worker(
+            runtime,
+            config,
+            shutdown_event,
+            shutdown_endpoints,
+        )
+
+    register_vllm_model.assert_awaited_once()
+    assert register_vllm_model.await_args.args[0] == expected_model_input
+    assert cleanup_order == ["handler", "client", "resource"]
+    assert shutdown_endpoints == [endpoint]
+
+
+@pytest.mark.asyncio
+async def test_benchmark_wait_success_stops_workers_then_returns(monkeypatch):
+    calls = []
+
+    async def fake_wait(_cfg, _vllm_config):
+        calls.append("wait")
+        return {"status": "complete"}
+
+    async def fake_stop(_client):
+        calls.append("stop")
+
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory._wait_and_load_benchmark", fake_wait
+    )
+    monkeypatch.setattr("dynamo.vllm.worker_factory._stop_worker_gc_policy", fake_stop)
+
+    results = await _await_benchmark_then_restore_workers({}, Mock(), Mock())
+
+    assert results == {"status": "complete"}
+    assert calls == ["wait", "stop"]
+
+
+@pytest.mark.asyncio
+async def test_benchmark_wait_failure_still_stops_workers_and_preserves_error(
+    monkeypatch,
+):
+    """An aborted benchmark publishes status=failed, so the wait raises during
+    validation; the worker GC stop must still run and the original error must
+    reach the caller unchanged."""
+    calls = []
+    original = RuntimeError("Self-benchmark produced incomplete results")
+
+    async def fake_wait(_cfg, _vllm_config):
+        raise original
+
+    async def fake_stop(_client):
+        calls.append("stop")
+
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory._wait_and_load_benchmark", fake_wait
+    )
+    monkeypatch.setattr("dynamo.vllm.worker_factory._stop_worker_gc_policy", fake_stop)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await _await_benchmark_then_restore_workers({}, Mock(), Mock())
+
+    assert exc_info.value is original
+    assert calls == ["stop"]
+
+
+@pytest.mark.asyncio
+async def test_benchmark_wait_failure_logs_stop_failure_and_keeps_original(
+    monkeypatch, caplog
+):
+    original = TimeoutError("Self-benchmark did not publish results")
+
+    async def fake_wait(_cfg, _vllm_config):
+        raise original
+
+    async def fake_stop(_client):
+        raise RuntimeError("worker died")
+
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory._wait_and_load_benchmark", fake_wait
+    )
+    monkeypatch.setattr("dynamo.vllm.worker_factory._stop_worker_gc_policy", fake_stop)
+    caplog.set_level(logging.ERROR)
+
+    with pytest.raises(TimeoutError) as exc_info:
+        await _await_benchmark_then_restore_workers({}, Mock(), Mock())
+
+    assert exc_info.value is original
+    assert "Failed to stop the FPM GC policy" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_benchmark_wait_success_fails_closed_when_stop_fails(monkeypatch):
+    async def fake_wait(_cfg, _vllm_config):
+        return {"status": "complete"}
+
+    async def fake_stop(_client):
+        raise RuntimeError("worker died")
+
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory._wait_and_load_benchmark", fake_wait
+    )
+    monkeypatch.setattr("dynamo.vllm.worker_factory._stop_worker_gc_policy", fake_stop)
+
+    with pytest.raises(RuntimeError, match="worker died"):
+        await _await_benchmark_then_restore_workers({}, Mock(), Mock())
+
+
+@pytest.mark.asyncio
+async def test_worker_gc_restore_completes_before_model_registration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Serving must not start on workers that still run the benchmark GC
+    policy: the launcher awaits the worker stop RPC after the benchmark wait
+    and before register_model publishes the worker as ready."""
+    order: list[str] = []
+    stop_after_register = RuntimeError("stop-after-register")
+
+    async def fake_wait(_cfg, _vllm_config):
+        order.append("wait")
+        return {"status": "complete"}
+
+    async def fake_stop(_client):
+        order.append("stop")
+
+    async def fake_register_vllm_model(*_args, **_kwargs) -> None:
+        order.append("register")
+        raise stop_after_register
+
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory._wait_and_load_benchmark", fake_wait
+    )
+    monkeypatch.setattr("dynamo.vllm.worker_factory._stop_worker_gc_policy", fake_stop)
+
+    engine_client = Mock()
+    vllm_config = Mock()
+    vllm_config.additional_config = {
+        "benchmark": {"output_path": "/tmp/bench.json", "timeout": 1}
+    }
+    engine_tuple: EngineSetupResult = (
+        engine_client,
+        vllm_config,
+        Mock(),
+        "/tmp/prom",
+        Mock(),
+    )
+    factory = WorkerFactory(
+        setup_vllm_engine_fn=Mock(return_value=engine_tuple),
+        setup_kv_event_publisher_fn=Mock(return_value=None),
+        register_vllm_model_fn=fake_register_vllm_model,
+        setup_fpm_relay_fn=Mock(return_value=None),
+        setup_metrics_collection_fn=Mock(),
+    )
+    factory._maybe_get_encode_worker_client = AsyncMock(return_value=None)  # type: ignore[assignment]
+    factory._maybe_wait_for_failover_lock = AsyncMock()  # type: ignore[assignment]
+    factory.register_engine_routes = Mock()  # type: ignore[assignment]
+    mock_handler = Mock(embedding_cache_manager=None)
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.PrefillWorkerHandler",
+        Mock(return_value=mock_handler),
+    )
+
+    async def _noop(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.configure_kv_event_block_size", _noop
+    )
+    config = _make_config(
+        disaggregation_mode=DisaggregationMode.PREFILL,
+        use_vllm_tokenizer=False,
+        namespace="dyn",
+        component="prefill",
+        endpoint="generate",
+        served_model_name="m",
+        model="m",
+        frontend_decoding=False,
+        enable_multimodal=False,
+        enable_rl=False,
+        engine_args=SimpleNamespace(enable_lora=False),
+    )
+    runtime = Mock()
+    runtime.endpoint.return_value = Mock(connection_id=Mock(return_value="cid"))
+
+    with pytest.raises(RuntimeError, match="stop-after-register"):
+        await factory._create_prefill_worker(runtime, config, asyncio.Event(), [])
+
+    assert order == ["wait", "stop", "register"]
+    assert mock_handler._benchmark_results == {"status": "complete"}
+
+
+@pytest.mark.asyncio
+async def test_aborted_benchmark_artifact_still_stops_workers(monkeypatch, tmp_path):
+    """The real abort chain: ``_bench_abort`` publishes a ``status="failed"``
+    rank artifact, ``_wait_and_load_benchmark`` rejects it during validation,
+    and the worker GC stop must still be issued with the validation error
+    propagating unchanged. Only the RPC is faked; the wait and validation
+    are the production code paths."""
+    output_path = tmp_path / "benchmark.json"
+    output_path.write_text(
+        json.dumps({"status": "failed", "valid": False, "error": "benchmark aborted"})
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 1)
+    )
+    stop = AsyncMock()
+    monkeypatch.setattr("dynamo.vllm.worker_factory._stop_worker_gc_policy", stop)
+
+    with pytest.raises(RuntimeError, match="incomplete results"):
+        await _await_benchmark_then_restore_workers(
+            {"output_path": str(output_path), "timeout": 1}, Mock(), Mock()
+        )
+
+    stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_failure_path_stop_is_time_boxed_and_original_error_wins(
+    monkeypatch, caplog
+):
+    """If the engine died, the stop RPC never answers; the launcher must not
+    hang on the error path -- the wait times out, is logged, and the original
+    benchmark error propagates."""
+    original = RuntimeError("Self-benchmark produced incomplete results")
+
+    async def fake_wait(_cfg, _vllm_config):
+        raise original
+
+    async def hanging_stop(_client):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory._wait_and_load_benchmark", fake_wait
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory._stop_worker_gc_policy", hanging_stop
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.WORKER_GC_STOP_TIMEOUT_SECONDS", 0.05
+    )
+    caplog.set_level(logging.ERROR)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await _await_benchmark_then_restore_workers({}, Mock(), Mock())
+
+    assert exc_info.value is original
+    assert "Failed to stop the FPM GC policy" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_success_path_stop_timeout_fails_closed(monkeypatch):
+    async def fake_wait(_cfg, _vllm_config):
+        return {"status": "complete"}
+
+    async def hanging_stop(_client):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory._wait_and_load_benchmark", fake_wait
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory._stop_worker_gc_policy", hanging_stop
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.WORKER_GC_STOP_TIMEOUT_SECONDS", 0.05
+    )
+
+    with pytest.raises(asyncio.TimeoutError):
+        await _await_benchmark_then_restore_workers({}, Mock(), Mock())
+
+
+@pytest.mark.asyncio
+async def test_prefill_call_site_stops_workers_when_benchmark_wait_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard for the call site itself: with the old two-line
+    form (wait, then stop) a raising wait skips the stop. Drive the real
+    prefill startup path with a raising wait and require the stop."""
+    order: list[str] = []
+    benchmark_error = RuntimeError("Self-benchmark produced incomplete results")
+
+    async def fake_wait(_cfg, _vllm_config):
+        order.append("wait")
+        raise benchmark_error
+
+    async def fake_stop(_client):
+        order.append("stop")
+
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory._wait_and_load_benchmark", fake_wait
+    )
+    monkeypatch.setattr("dynamo.vllm.worker_factory._stop_worker_gc_policy", fake_stop)
+
+    engine_client = Mock()
+    vllm_config = Mock()
+    vllm_config.additional_config = {
+        "benchmark": {"output_path": "/tmp/bench.json", "timeout": 1}
+    }
+    engine_tuple: EngineSetupResult = (
+        engine_client,
+        vllm_config,
+        Mock(),
+        "/tmp/prom",
+        Mock(),
+    )
+    register = AsyncMock()
+    factory = WorkerFactory(
+        setup_vllm_engine_fn=Mock(return_value=engine_tuple),
+        setup_kv_event_publisher_fn=Mock(return_value=None),
+        register_vllm_model_fn=register,
+        setup_fpm_relay_fn=Mock(return_value=None),
+        setup_metrics_collection_fn=Mock(),
+    )
+    factory._maybe_get_encode_worker_client = AsyncMock(return_value=None)  # type: ignore[assignment]
+    factory._maybe_wait_for_failover_lock = AsyncMock()  # type: ignore[assignment]
+    factory.register_engine_routes = Mock()  # type: ignore[assignment]
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.PrefillWorkerHandler",
+        Mock(return_value=Mock(embedding_cache_manager=None)),
+    )
+
+    async def _noop(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.configure_kv_event_block_size", _noop
+    )
+    config = _make_config(
+        disaggregation_mode=DisaggregationMode.PREFILL,
+        use_vllm_tokenizer=False,
+        namespace="dyn",
+        component="prefill",
+        endpoint="generate",
+        served_model_name="m",
+        model="m",
+        frontend_decoding=False,
+        enable_multimodal=False,
+        enable_rl=False,
+        engine_args=SimpleNamespace(enable_lora=False),
+    )
+    runtime = Mock()
+    runtime.endpoint.return_value = Mock(connection_id=Mock(return_value="cid"))
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await factory._create_prefill_worker(runtime, config, asyncio.Event(), [])
+
+    assert exc_info.value is benchmark_error
+    assert order == ["wait", "stop"]
+    register.assert_not_awaited()
+
+
+def _decode_benchmark_factory(monkeypatch, tmp_path, register_fn):
+    """Decode-path harness with a benchmark config: engine setup, handler,
+    stat logger, KV sizing, and encode/failover collaborators are stubbed so
+    the run reaches the benchmark wait (the stop-before-registration ordering
+    is pinned on the prefill path, which shares the same wrapper call)."""
+    engine_client = Mock()
+    vllm_config = SimpleNamespace(
+        additional_config={
+            "benchmark": {"output_path": str(tmp_path / "bench.json"), "timeout": 1}
+        },
+        cache_config=SimpleNamespace(num_gpu_blocks=1),
+        model_config=SimpleNamespace(max_model_len=1024),
+        shutdown_timeout=5.0,
+    )
+    engine_setup: EngineSetupResult = (
+        engine_client,
+        vllm_config,
+        Mock(),
+        str(tmp_path / "prometheus"),
+        Mock(),
+    )
+    factory = _make_factory(
+        setup_vllm_engine_fn=Mock(return_value=engine_setup),
+        register_vllm_model_fn=register_fn,
+    )
+    factory._maybe_create_failover_metrics = Mock(return_value=None)  # type: ignore[method-assign]
+    factory._maybe_get_encode_worker_client = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    factory._maybe_wait_for_failover_lock = AsyncMock()  # type: ignore[method-assign]
+    factory.register_engine_routes = Mock()  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.StatLoggerFactory", Mock(return_value=Mock())
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 1)
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.per_rank_kv_blocks",
+        lambda _num_blocks, _dp_size: 1,
+    )
+
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.configure_kv_event_block_size", _noop
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.DecodeWorkerHandler",
+        Mock(return_value=Mock(embedding_cache_manager=None)),
+    )
+    runtime = Mock()
+    runtime.endpoint.return_value = Mock(connection_id=Mock(return_value="worker-id"))
+    # Mock-backed config (as in the prefill registration tests) so attributes
+    # read after the benchmark wait resolve instead of raising AttributeError.
+    config = _make_config(
+        namespace="dynamo",
+        component="backend",
+        endpoint="generate",
+        disaggregation_mode=DisaggregationMode.AGGREGATED,
+        enable_rl=False,
+        engine_args=SimpleNamespace(enable_lora=False),
+        enable_multimodal=False,
+        route_to_encoder=False,
+        custom_encoder_class=None,
+        use_vllm_tokenizer=False,
+        frontend_decoding=False,
+        served_model_name="m",
+        model="m",
+        endpoint_types="chat,completions",
+        dyn_endpoint_types="chat,completions",
+        custom_jinja_template=None,
+    )
+    return factory, runtime, config, engine_client
+
+
+@pytest.mark.asyncio
+async def test_decode_call_site_stops_workers_when_benchmark_wait_raises(
+    monkeypatch, tmp_path
+):
+    """Regression guard on the decode call site: a raising wait must still
+    reach the worker stop (the old two-line form skipped it), the original
+    error must propagate, registration must not happen, and the lifecycle
+    must still tear the engine down afterwards."""
+    order: list[str] = []
+    benchmark_error = RuntimeError("Self-benchmark produced incomplete results")
+
+    async def fake_wait(_cfg, _vllm_config):
+        order.append("wait")
+        raise benchmark_error
+
+    async def fake_stop(_client):
+        order.append("stop")
+
+    register = AsyncMock()
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory._wait_and_load_benchmark", fake_wait
+    )
+    monkeypatch.setattr("dynamo.vllm.worker_factory._stop_worker_gc_policy", fake_stop)
+    factory, runtime, config, engine_client = _decode_benchmark_factory(
+        monkeypatch, tmp_path, register
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await factory._create_decode_worker(runtime, config, asyncio.Event(), [])
+
+    assert exc_info.value is benchmark_error
+    assert order == ["wait", "stop"]
+    register.assert_not_awaited()
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)

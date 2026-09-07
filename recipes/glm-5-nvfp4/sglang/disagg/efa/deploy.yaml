@@ -58,7 +58,6 @@ spec:
           args:
             - -m
             - dynamo.frontend
-            - --enforce-disagg
           env:
             - name: POD_UID
               valueFrom:

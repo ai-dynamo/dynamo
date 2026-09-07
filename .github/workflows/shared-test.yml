@@ -30,6 +30,16 @@ on:
         description: 'Target platforms to test as a JSON array'
         required: true
         type: string
+      container_workspace:
+        description: 'Workspace path inside the container where pytest should run'
+        required: false
+        type: string
+        default: '/workspace'
+      kvbm_mla_backend:
+        description: 'KVBM MLA attention backend exported for KVBM tests'
+        required: false
+        type: string
+        default: ''
       enable_coverage:
         description: 'Enable coverage collection (true/false)'
         required: false
@@ -59,6 +69,20 @@ on:
         required: false
         type: string
         default: 'auto'
+      run_cpu_e2e_tests:
+        description: 'Whether to run CPU end-to-end tests in a separate, non-retrying stage'
+        required: false
+        type: boolean
+        default: false
+      cpu_e2e_test_markers:
+        description: 'CPU end-to-end pytest markers'
+        required: false
+        type: string
+      cpu_e2e_test_timeout_minutes:
+        description: 'Timeout in minutes for the isolated CPU end-to-end test stage'
+        required: false
+        type: number
+        default: 10
       run_gpu_tests:
         description: 'Whether to run GPU tests'
         required: false
@@ -129,7 +153,7 @@ jobs:
     name: ${{ inputs.test_type }} ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}, ${{ matrix.platform }}
     runs-on: ${{ matrix.platform == 'amd64' && inputs.amd_runner || 'prod-tester-arm-v2' }}
     container:
-      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ inputs.target_tag_plain }}${{ (matrix.cuda_version != '' && !startsWith(matrix.cuda_version, '13.')) && format('-cuda{0}', startsWith(matrix.cuda_version, '12.') && '12' || matrix.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
+      image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ inputs.target_tag_plain }}${{ (matrix.cuda_version != '' && !startsWith(matrix.cuda_version, '13.')) && format('-cuda{0}', startsWith(matrix.cuda_version, '12.') && '12' || matrix.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
       env:
         # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
         # executes the job pod as uid 1001 (runner's uid). Overriding HOME and
@@ -139,26 +163,38 @@ jobs:
         HOME: /__w/dynamo/dynamo
         USER: dynamo
         # Datadog Test Optimization scoping (settings are per service+env).
+        DD_SERVICE: ai-dynamo
         DD_ENV: ${{ inputs.dd_env }}
+        DD_TAGS: 'team:dynamo'
         DD_CIVISIBILITY_FLAKY_RETRY_ENABLED: ${{ inputs.dd_flaky_retry_enabled }}
+        DD_CIVISIBILITY_FLAKY_RETRY_COUNT: '2'
+        # dynamo tests run product code in subprocesses, so ddtrace's in-process
+        # coverage.py collects nothing ("No data was collected" warnings) and TIA
+        # gets no signal. Disable ITR (skips the settings API, coverage, skipping).
+        DD_CIVISIBILITY_ITR_ENABLED: 'false'
     permissions:
       contents: read
     services:
       minio:
-        image: ${{ vars.RUNNERS_REGISTRY }}/quay/minio/minio:latest
+        image: ${{ vars.ECR_REGISTRY }}/quay/minio/minio:latest
         env:
           MINIO_ROOT_USER: minioadmin
           MINIO_ROOT_PASSWORD: minioadmin
           MINIO_VOLUMES: /tmp/minio-data
           MINIO_CONSOLE_ADDRESS: ':9001'
-        ports:
-          - 9000:9000
-          - 9001:9001
     steps:
       - name: Checkout repository
+        id: checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
+      - name: Export KVBM MLA backend
+        if: ${{ inputs.kvbm_mla_backend != '' }}
+        shell: bash
+        env:
+          KVBM_MLA_BACKEND: ${{ inputs.kvbm_mla_backend }}
+        run: |
+          echo "KVBM_MLA_BACKEND=${KVBM_MLA_BACKEND}" >> "$GITHUB_ENV"
       # Experimental: trialing Datadog Test Visibility. Remove if not kept.
       - name: Configure Datadog Test Visibility
         continue-on-error: true
@@ -166,7 +202,7 @@ jobs:
         with:
           languages: python
           api_key: ${{ secrets.DD_API_KEY }}
-          site: us3.datadoghq.com
+          site: datadoghq.com
       - name: Run Sanity Check on Runtime Image
         if: ${{ inputs.run_sanity_check }}
         shell: bash
@@ -187,9 +223,9 @@ jobs:
       - name: Run CPU-only tests (parallelized)
         if: ${{ inputs.run_cpu_only_tests }}
         timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
-        uses: ./.github/actions/pytest-local
+        uses: $/.github/actions/pytest-local
         with:
-          container_workspace: /workspace
+          container_workspace: ${{ inputs.container_workspace }}
           pytest_marks: ${{ inputs.cpu_only_test_markers }}
           test_suite_name: ${{ inputs.test_suite_name }}
           test_type: "pre_merge_cpu"
@@ -198,12 +234,29 @@ jobs:
           parallel_mode: ${{ inputs.cpu_parallel_mode }}
           enable_coverage: ${{ inputs.enable_coverage }}
           gpu_tests: 'false'
+      - name: Run CPU end-to-end tests (isolated)
+        # Long-lived deployment tests should not compete with the xdist unit
+        # pool or retry until the parent step kills the runner container.
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && inputs.run_cpu_e2e_tests }}
+        timeout-minutes: ${{ inputs.cpu_e2e_test_timeout_minutes }}
+        uses: $/.github/actions/pytest-local
+        with:
+          container_workspace: ${{ inputs.container_workspace }}
+          pytest_marks: ${{ inputs.cpu_e2e_test_markers }}
+          test_suite_name: ${{ inputs.test_suite_name }}
+          test_type: "pre_merge_cpu_e2e"
+          platform_arch: ${{ matrix.platform }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          parallel_mode: 'none'
+          enable_coverage: ${{ inputs.enable_coverage }}
+          gpu_tests: 'false'
+          dd_flaky_retry_enabled: 'false'
       - name: Run GPU tests (parallel)
         timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
         if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests && inputs.run_gpu_parallel_tests }}
-        uses: ./.github/actions/pytest-local
+        uses: $/.github/actions/pytest-local
         with:
-          container_workspace: /workspace
+          container_workspace: ${{ inputs.container_workspace }}
           pytest_marks: ${{ inputs.gpu_test_markers }}
           test_suite_name: ${{ inputs.test_suite_name }}
           test_type: "pre_merge_gpu_parallel"
@@ -217,11 +270,14 @@ jobs:
           gpu_tests: 'true'
       - name: Run GPU tests (sequential)
         timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
-        # !cancelled() so a parallel-stage failure doesn't hide sequential results.
-        if: ${{ !cancelled() && matrix.platform == 'amd64' && inputs.run_gpu_tests }}
-        uses: ./.github/actions/pytest-local
+        # !cancelled() so a parallel-stage failure doesn't hide sequential results,
+        # but require checkout to have succeeded so an infra/prereq failure (e.g. the
+        # container/pod never coming online) skips this step cleanly instead of trying
+        # to run the local pytest-local action against an un-checked-out workspace.
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && matrix.platform == 'amd64' && inputs.run_gpu_tests }}
+        uses: $/.github/actions/pytest-local
         with:
-          container_workspace: /workspace
+          container_workspace: ${{ inputs.container_workspace }}
           # When the parallel stage runs, exclude profiled tests here so they don't run twice.
           pytest_marks: ${{ inputs.run_gpu_parallel_tests && format('({0}) and not profiled_vram_gib', inputs.gpu_test_markers) || inputs.gpu_test_markers }}
           test_suite_name: ${{ inputs.test_suite_name }}

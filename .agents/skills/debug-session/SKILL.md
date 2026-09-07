@@ -1,8 +1,16 @@
 ---
 name: debug-session
-description: Start a debugging session with worklog file
+description: Sets up a structured debugging session for a Dynamo bug — pull the report from a Linear ticket, GitHub issue, or pasted text, capture the environment, create a persistent worklog markdown file, and walk through rebuild, reproduction, and investigation steps. Use when starting to investigate a reported Dynamo bug or regression and the investigation should be tracked in a worklog.
+license: Apache-2.0
 user-invocable: true
 disable-model-invocation: true
+metadata:
+  author: NVIDIA
+  tags:
+    - dynamo
+    - debugging
+    - worklog
+    - dev-workflow
 ---
 
 # Start Debug Session
@@ -100,7 +108,7 @@ If a framework change is required (sglang, vllm, trtllm), check the user's `~/.c
 
 ### Running Examples
 
-Examples are located at: `/home/ubuntu/dynamo/examples/backends/`
+Examples are located at the repository-relative path `examples/backends/`.
 
 Available backends:
 - `sglang/launch/` - SGLang backend examples

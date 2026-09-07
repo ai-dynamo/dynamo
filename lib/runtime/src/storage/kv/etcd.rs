@@ -8,7 +8,7 @@ use std::time::Duration;
 use crate::transports::etcd;
 use async_stream::stream;
 use async_trait::async_trait;
-use etcd_client::{Compare, CompareOp, EventType, PutOptions, Txn, TxnOp, WatchOptions};
+use etcd_client::PutOptions;
 
 use super::{Bucket, Key, KeyValue, Store, StoreError, StoreOutcome, WatchEvent};
 
@@ -79,6 +79,25 @@ impl Bucket for EtcdBucket {
         }
     }
 
+    async fn compare_and_replace(
+        &self,
+        key: &Key,
+        expected: bytes::Bytes,
+        value: bytes::Bytes,
+    ) -> Result<StoreOutcome, StoreError> {
+        let k = make_key(&self.bucket_name, key);
+        match self
+            .client
+            .kv_compare_and_put(k, expected, value, None)
+            .await
+            .map_err(|error| StoreError::EtcdError(error.to_string()))?
+        {
+            etcd::CompareAndPutOutcome::Updated => Ok(StoreOutcome::Created(0)),
+            etcd::CompareAndPutOutcome::Missing => Err(StoreError::MissingKey(key.to_string())),
+            etcd::CompareAndPutOutcome::Conflict => Err(StoreError::Retry),
+        }
+    }
+
     async fn get(&self, key: &Key) -> Result<Option<bytes::Bytes>, StoreError> {
         let k = make_key(&self.bucket_name, key);
         tracing::trace!("etcd get: {k}");
@@ -113,7 +132,7 @@ impl Bucket for EtcdBucket {
         tracing::trace!("etcd watch: {prefix}");
         let watcher = self
             .client
-            .kv_watch_prefix(&prefix)
+            .kv_get_and_watch_prefix(&prefix)
             .await
             .map_err(|e| StoreError::EtcdError(e.to_string()))?;
         let (_, mut watch_stream) = watcher.dissolve();
@@ -142,6 +161,21 @@ impl Bucket for EtcdBucket {
                             }
                         };
                         yield WatchEvent::Delete(key);
+                    }
+                    etcd::WatchEvent::Resync(kvs) => {
+                        let mut snapshot = HashMap::with_capacity(kvs.len());
+                        for kv in kvs {
+                            let (k, v) = kv.into_key_value();
+                            let key = match String::from_utf8(k) {
+                                Ok(k) => Key::new(k),
+                                Err(err) => {
+                                    tracing::error!(%err, prefix, "Invalid UTF8 in etcd resync key");
+                                    continue;
+                                }
+                            };
+                            snapshot.insert(key, v.into());
+                        }
+                        yield WatchEvent::Resync(snapshot);
                     }
                 }
             }
@@ -270,6 +304,54 @@ mod concurrent_create_tests {
                     .unwrap();
             let storage = crate::storage::kv::Manager::etcd(etcd_client);
             test_concurrent_create(&storage).await.unwrap();
+        });
+    }
+
+    #[test]
+    fn delete_wins_race_with_compare_and_replace() {
+        let rt = Runtime::single_threaded().unwrap();
+        let rt_clone = rt.clone();
+
+        rt_clone.primary().block_on(async move {
+            let etcd_client =
+                etcd_transport::Client::new(etcd_transport::ClientOptions::default(), rt)
+                    .await
+                    .unwrap();
+            let storage = crate::storage::kv::Manager::etcd(etcd_client);
+            let bucket = Arc::new(
+                storage
+                    .get_or_create_bucket("test_compare_and_replace_bucket", None)
+                    .await
+                    .unwrap(),
+            );
+            let key = Key::new(format!("model_{}", uuid::Uuid::new_v4()));
+            bucket.insert(&key, "old".into(), 0).await.unwrap();
+
+            let barrier = Arc::new(Barrier::new(3));
+            let task_bucket = bucket.clone();
+            let task_key = key.clone();
+            let task_barrier = barrier.clone();
+            let update = tokio::spawn(async move {
+                task_barrier.wait().await;
+                task_bucket
+                    .compare_and_replace(&task_key, "old".into(), "new".into())
+                    .await
+            });
+            let task_bucket = bucket.clone();
+            let task_key = key.clone();
+            let task_barrier = barrier.clone();
+            let delete = tokio::spawn(async move {
+                task_barrier.wait().await;
+                task_bucket.delete(&task_key).await
+            });
+
+            barrier.wait().await;
+            let update_result = update.await.unwrap();
+            delete.await.unwrap().unwrap();
+            assert!(
+                update_result.is_ok() || matches!(update_result, Err(StoreError::MissingKey(_)))
+            );
+            assert_eq!(bucket.get(&key).await.unwrap(), None);
         });
     }
 

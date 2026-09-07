@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Regression: right-trim (`-}}`) on silent validateTerminationGracePeriod
+# include ate the newline before `apiVersion`, gluing it onto the SPDX
+# comment:
+#
+#   # SPDX-License-Identifier: Apache-2.0apiVersion: apps/v1
+#
+# helm template / helm lint both exit 0 on that broken render; only
+# install/apply fails with "apiVersion not set". The existing suite
+# (including grace_period_test.yaml) also stayed green because nothing
+# asserted apiVersion / isAPIVersion. This suite is the gate that
+# would have caught it.
+
+suite: apiVersion survives whitespace-trim around grace validation
+release:
+  name: power-agent
+  namespace: dynamo-system
+
+tests:
+  - it: DaemonSet default path keeps apiVersion as a document key
+    templates:
+      - templates/daemonset.yaml
+    set:
+      image.tag: v1.4.0
+    asserts:
+      - isKind:
+          of: DaemonSet
+      - isAPIVersion:
+          of: apps/v1
+      - equal:
+          path: apiVersion
+          value: apps/v1
+
+  - it: dev pod path keeps apiVersion as a document key
+    templates:
+      - templates/dev-pod.yaml
+    set:
+      daemonset.enabled: false
+      dev.enabled: true
+      dev.nodeName: gpu-node-0
+    asserts:
+      - isKind:
+          of: Pod
+      - isAPIVersion:
+          of: v1
+      - equal:
+          path: apiVersion
+          value: v1

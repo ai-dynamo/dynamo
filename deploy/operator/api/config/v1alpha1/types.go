@@ -21,14 +21,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// Checkpoint storage type constants retained for compatibility with older
-// operator configuration files.
-const (
-	CheckpointStorageTypePVC = "pvc"
-	CheckpointStorageTypeS3  = "s3"
-	CheckpointStorageTypeOCI = "oci"
-)
-
 // +kubebuilder:object:root=true
 
 // OperatorConfiguration is the Schema for the operator configuration.
@@ -152,15 +144,14 @@ type LeaderElectionConfiguration struct {
 
 // NamespaceConfiguration determines operator namespace mode.
 type NamespaceConfiguration struct {
-	// Deprecated: Namespace-restricted mode is deprecated and will be removed in a future release.
-	// Use cluster-wide mode (leave Restricted empty) instead.
+	// Restricted enables namespace-restricted mode for development and testing.
+	// Namespace-restricted mode is not supported for production.
 	Restricted string `json:"restricted"`
-	// Deprecated: Scope is only used in namespace-restricted mode, which is deprecated.
+	// Scope configures the namespace ownership claim in namespace-restricted mode.
 	Scope NamespaceScopeConfiguration `json:"scope"`
 }
 
-// Deprecated: NamespaceScopeConfiguration is used only by the deprecated namespace-restricted
-// mode and will be removed in a future release.
+// NamespaceScopeConfiguration configures the development/test namespace ownership claim.
 type NamespaceScopeConfiguration struct {
 	// LeaseDuration is the duration of namespace scope marker lease before expiration
 	// +kubebuilder:default="30s"
@@ -178,6 +169,8 @@ type OrchestratorConfiguration struct {
 	LWS LWSConfiguration `json:"lws"`
 	// KaiScheduler configuration
 	KaiScheduler KaiSchedulerConfiguration `json:"kaiScheduler"`
+	// VolcanoScheduler configuration
+	VolcanoScheduler VolcanoSchedulerConfiguration `json:"volcanoScheduler"`
 }
 
 // GroveConfiguration holds Grove orchestrator settings.
@@ -198,6 +191,12 @@ type LWSConfiguration struct {
 // KaiSchedulerConfiguration holds Kai-scheduler settings.
 type KaiSchedulerConfiguration struct {
 	// Enabled overrides auto-detection. nil = auto-detect.
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
+// VolcanoSchedulerConfiguration holds Volcano scheduler settings.
+type VolcanoSchedulerConfiguration struct {
+	// EXPERIMENTAL: Enabled controls Volcano scheduler integration for Grove PodCliqueSets.
 	Enabled *bool `json:"enabled,omitempty"`
 }
 
@@ -229,6 +228,28 @@ type InfrastructureConfiguration struct {
 	ModelExpressURL string `json:"modelExpressURL"`
 	// PrometheusEndpoint is the URL of the Prometheus endpoint to use for metrics
 	PrometheusEndpoint string `json:"prometheusEndpoint"`
+	// NATSTLSCAPath is the CA certificate path for verifying the NATS server
+	NATSTLSCAPath string `json:"natsTLSCAPath,omitempty"`
+	// NATSTLSClientCertPath is the client certificate path for NATS mTLS
+	NATSTLSClientCertPath string `json:"natsTLSClientCertPath,omitempty"`
+	// NATSTLSClientKeyPath is the client private key path for NATS mTLS
+	NATSTLSClientKeyPath string `json:"natsTLSClientKeyPath,omitempty"`
+	// TCPTLSCertPath is the server certificate path for TCP TLS
+	TCPTLSCertPath string `json:"tcpTLSCertPath,omitempty"`
+	// TCPTLSKeyPath is the server private key path for TCP TLS
+	TCPTLSKeyPath string `json:"tcpTLSKeyPath,omitempty"`
+	// TCPTLSCAPath is the CA certificate path for verifying TCP peers
+	TCPTLSCAPath string `json:"tcpTLSCAPath,omitempty"`
+	// TCPTLSClientCertPath is the client certificate path for TCP mTLS
+	TCPTLSClientCertPath string `json:"tcpTLSClientCertPath,omitempty"`
+	// TCPTLSClientKeyPath is the client private key path for TCP mTLS
+	TCPTLSClientKeyPath string `json:"tcpTLSClientKeyPath,omitempty"`
+	// TCPTLSClientCAPath is the CA certificate path for verifying TCP client certificates (mTLS)
+	TCPTLSClientCAPath string `json:"tcpTLSClientCAPath,omitempty"`
+	// TCPTLSServerName overrides the TLS SNI hostname used by TCP clients when
+	// verifying the server certificate. Useful when dialing by IP (pod address)
+	// to a server whose certificate has a DNS SAN.
+	TCPTLSServerName string `json:"tcpTLSServerName,omitempty"`
 }
 
 // IngressConfiguration holds ingress settings.
@@ -261,6 +282,8 @@ const (
 // DestinationRules) for EPP components so that sidecar proxies connect
 // correctly without double-TLS issues.
 type ServiceMeshConfiguration struct {
+	// Enabled overrides service mesh auto-detection. nil = auto-detect.
+	Enabled *bool `json:"enabled,omitempty"`
 	// Provider selects the service mesh implementation. Supported: "istio", "".
 	// Empty string disables service mesh resource generation.
 	Provider string `json:"provider"`
@@ -268,8 +291,12 @@ type ServiceMeshConfiguration struct {
 	Istio *IstioMeshConfiguration `json:"istio,omitempty"`
 }
 
-// IsEnabled returns true if a supported service mesh provider is configured.
+// IsEnabled returns true if service mesh resources should be created or updated.
+// Cleanup of previously owned resources is handled separately during reconcile.
 func (s *ServiceMeshConfiguration) IsEnabled() bool {
+	if s.Enabled != nil && !*s.Enabled {
+		return false
+	}
 	return ServiceMeshProvider(s.Provider) == ServiceMeshProviderIstio
 }
 
@@ -327,15 +354,6 @@ type CheckpointConfiguration struct {
 	// restore pods. A nil value means "use the default profile"; set
 	// Seccomp.Disabled=true to disable seccomp injection entirely.
 	Seccomp *CheckpointSeccompConfiguration `json:"seccomp,omitempty"`
-	// Storage optionally configures the namespace-local checkpoint PVC that
-	// workload pods mount. When omitted, the operator preserves the legacy
-	// behavior of discovering storage from a snapshot-agent DaemonSet in the
-	// workload namespace.
-	Storage CheckpointStorageConfiguration `json:"storage"`
-	// CleanupImage is the image used by best-effort artifact cleanup Jobs for
-	// automatically-created checkpoints. It must provide a POSIX shell and `rm`.
-	// +kubebuilder:default="busybox:1.36"
-	CleanupImage string `json:"cleanupImage,omitempty"`
 }
 
 // CheckpointSeccompConfiguration controls the localhost seccomp profile applied
@@ -369,55 +387,6 @@ func (c *CheckpointConfiguration) EffectiveSeccompProfile() string {
 		return DefaultSeccompProfile
 	}
 	return c.Seccomp.Profile
-}
-
-// CheckpointStorageConfiguration configures checkpoint storage for operator
-// pod mutations. Only PVC storage is implemented today.
-type CheckpointStorageConfiguration struct {
-	// Type is the storage backend type. Only pvc is implemented today.
-	Type string `json:"type"`
-	// PVC configuration for pvc-based settings.
-	PVC CheckpointPVCConfig `json:"pvc"`
-	// Deprecated: S3 is retained for compatibility and ignored.
-	S3 CheckpointS3Config `json:"s3"`
-	// Deprecated: OCI is retained for compatibility and ignored.
-	OCI CheckpointOCIConfig `json:"oci"`
-}
-
-// CheckpointPVCConfig configures the namespace-local PVC mounted into
-// checkpoint and restore workload pods.
-type CheckpointPVCConfig struct {
-	// PVCName is the PVC name in each workload namespace.
-	PVCName string `json:"pvcName"`
-	// BasePath is the mount path inside checkpoint and restore workload pods.
-	BasePath string `json:"basePath"`
-	// Create tells the operator to create the PVC in workload namespaces when
-	// it is missing. When false, the PVC must already exist.
-	Create bool `json:"create"`
-	// Size is the storage request used when Create is true.
-	Size string `json:"size"`
-	// StorageClassName is the optional StorageClass name used when Create is true.
-	StorageClassName string `json:"storageClassName"`
-	// AccessMode is the PVC access mode used when Create is true.
-	AccessMode string `json:"accessMode"`
-}
-
-// Deprecated: CheckpointS3Config is retained for compatibility and ignored by
-// the current snapshot flow.
-type CheckpointS3Config struct {
-	// URI is the legacy S3 URI (s3://[endpoint/]bucket/prefix).
-	URI string `json:"uri"`
-	// CredentialsSecretRef is the legacy credentials secret name.
-	CredentialsSecretRef string `json:"credentialsSecretRef"`
-}
-
-// Deprecated: CheckpointOCIConfig is retained for compatibility and ignored by
-// the current snapshot flow.
-type CheckpointOCIConfig struct {
-	// URI is the legacy OCI URI (oci://registry/repository).
-	URI string `json:"uri"`
-	// CredentialsSecretRef is the legacy docker config secret name.
-	CredentialsSecretRef string `json:"credentialsSecretRef"`
 }
 
 // DiscoveryConfiguration holds discovery backend settings.

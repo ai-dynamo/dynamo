@@ -5,8 +5,7 @@
 use std::sync::Arc;
 #[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
 use std::sync::OnceLock;
-#[cfg(feature = "bench")]
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(feature = "runtime-protocols")]
 use dynamo_runtime::component::Component;
@@ -15,7 +14,9 @@ use dynamo_runtime::metrics::MetricsHierarchy;
 #[cfg(feature = "metrics")]
 use prometheus::{IntCounter, IntCounterVec, Opts};
 
-use crate::protocols::{KvCacheEventData, KvCacheEventError};
+use crate::protocols::{KvCacheEventData, KvCacheEventError, RouterEvent};
+
+static IGNORED_RESIDENCY_EVENT_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Lightweight, `Copy` discriminant for [`KvCacheEventData`].
 ///
@@ -41,15 +42,41 @@ impl EventKind {
             KvCacheEventData::Cleared => Self::Cleared,
         }
     }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stored => METRIC_EVENT_STORED,
+            Self::Removed => METRIC_EVENT_REMOVED,
+            Self::Cleared => METRIC_EVENT_CLEARED,
+        }
+    }
 }
 
 impl std::fmt::Display for EventKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Stored => f.write_str(METRIC_EVENT_STORED),
-            Self::Removed => f.write_str(METRIC_EVENT_REMOVED),
-            Self::Cleared => f.write_str(METRIC_EVENT_CLEARED),
-        }
+        f.write_str(self.label())
+    }
+}
+
+/// Record and rate-limit diagnostics for a wire event that cannot enter the
+/// canonical residency model. The metric label has fixed cardinality.
+pub fn record_unsupported_residency_event(metrics: Option<&KvIndexerMetrics>, event: &RouterEvent) {
+    if let Some(metrics) = metrics {
+        metrics.increment_event_applied(
+            EventKind::of(&event.event.data).label(),
+            Err(KvCacheEventError::UnsupportedResidencyDomain),
+        );
+    }
+
+    let ignored_count = IGNORED_RESIDENCY_EVENT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    if ignored_count.is_power_of_two() {
+        tracing::warn!(
+            ignored_count,
+            worker_id = event.worker_id,
+            dp_rank = event.event.dp_rank,
+            storage_tier = ?event.storage_tier,
+            "Ignoring KV event with unsupported residency domain"
+        );
     }
 }
 
@@ -57,6 +84,21 @@ impl std::fmt::Display for EventKind {
 #[derive(Debug, Clone, Copy)]
 pub enum EventWarningKind {
     DuplicateStore,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum CkfMutationKind {
+    UnknownRemove,
+    CapacityExhausted,
+}
+
+impl std::fmt::Display for CkfMutationKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownRemove => f.write_str(METRIC_CKF_MUTATION_UNKNOWN_REMOVE),
+            Self::CapacityExhausted => f.write_str(METRIC_CKF_MUTATION_CAPACITY_EXHAUSTED),
+        }
+    }
 }
 
 impl std::fmt::Display for EventWarningKind {
@@ -133,6 +175,9 @@ pub struct KvIndexerMetrics {
     /// Counter of suspicious-but-valid KV events.
     #[cfg(feature = "metrics")]
     pub kv_cache_event_warnings: IntCounterVec,
+    /// Counters for CKF mutation outcomes that are finer-grained than event status.
+    #[cfg(feature = "metrics")]
+    pub ckf_mutation: IntCounterVec,
 }
 
 /// Metric status labels.
@@ -140,6 +185,11 @@ pub const METRIC_STATUS_OK: &str = "ok";
 pub const METRIC_STATUS_PARENT_NOT_FOUND: &str = "parent_block_not_found";
 pub const METRIC_STATUS_BLOCK_NOT_FOUND: &str = "block_not_found";
 pub const METRIC_STATUS_INVALID_BLOCK: &str = "invalid_block";
+pub const METRIC_STATUS_CAPACITY_EXHAUSTED: &str = "capacity_exhausted";
+pub const METRIC_STATUS_ALLOCATION_FAILED: &str = "allocation_failed";
+pub const METRIC_STATUS_OWNERSHIP_DEGREE_OVERFLOW: &str = "ownership_degree_overflow";
+pub const METRIC_STATUS_INDEXER_INVARIANT_VIOLATION: &str = "indexer_invariant_violation";
+pub const METRIC_STATUS_UNSUPPORTED_RESIDENCY_DOMAIN: &str = "unsupported_residency_domain";
 
 /// Metric event labels.
 pub const METRIC_EVENT_STORED: &str = "stored";
@@ -148,6 +198,10 @@ pub const METRIC_EVENT_CLEARED: &str = "cleared";
 
 /// Metric warning labels.
 pub const METRIC_WARNING_DUPLICATE_STORE: &str = "duplicate_store";
+
+/// CKF mutation metric labels.
+pub const METRIC_CKF_MUTATION_UNKNOWN_REMOVE: &str = "unknown_remove";
+pub const METRIC_CKF_MUTATION_CAPACITY_EXHAUSTED: &str = "capacity_exhausted";
 
 /// Metric name for KV cache events applied counter.
 #[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
@@ -167,16 +221,29 @@ const KV_CACHE_EVENT_WARNINGS_HELP: &str =
     "Total number of suspicious KV cache events seen by the router indexer";
 #[cfg(feature = "metrics")]
 const KV_CACHE_EVENT_WARNINGS_LABELS: &[&str] = &["warning_kind"];
+#[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
+const CKF_MUTATION_SUFFIX: &str = "ckf_mutation_total";
+#[cfg(feature = "metrics")]
+const CKF_MUTATION_NAME: &str = "dynamo_kvrouter_ckf_mutation_total";
+#[cfg(feature = "metrics")]
+const CKF_MUTATION_HELP: &str = "Total number of CKF block-level mutation outcomes";
+#[cfg(feature = "metrics")]
+const CKF_MUTATION_LABELS: &[&str] = &["outcome"];
 
 #[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
 static KV_INDEXER_METRICS: OnceLock<Arc<KvIndexerMetrics>> = OnceLock::new();
 
 impl KvIndexerMetrics {
     #[cfg(feature = "metrics")]
-    fn new(kv_cache_events_applied: IntCounterVec, kv_cache_event_warnings: IntCounterVec) -> Self {
+    fn new(
+        kv_cache_events_applied: IntCounterVec,
+        kv_cache_event_warnings: IntCounterVec,
+        ckf_mutation: IntCounterVec,
+    ) -> Self {
         Self {
             kv_cache_events_applied,
             kv_cache_event_warnings,
+            ckf_mutation,
         }
     }
 
@@ -191,6 +258,10 @@ impl KvIndexerMetrics {
                 Opts::new(KV_CACHE_EVENT_WARNINGS_NAME, KV_CACHE_EVENT_WARNINGS_HELP),
                 KV_CACHE_EVENT_WARNINGS_LABELS,
             )?,
+            IntCounterVec::new(
+                Opts::new(CKF_MUTATION_NAME, CKF_MUTATION_HELP),
+                CKF_MUTATION_LABELS,
+            )?,
         ))
     }
 
@@ -200,6 +271,7 @@ impl KvIndexerMetrics {
         let metrics = Arc::new(Self::new_prometheus()?);
         registry.register(Box::new(metrics.kv_cache_events_applied.clone()))?;
         registry.register(Box::new(metrics.kv_cache_event_warnings.clone()))?;
+        registry.register(Box::new(metrics.ckf_mutation.clone()))?;
         Ok(metrics)
     }
 
@@ -224,11 +296,23 @@ impl KvIndexerMetrics {
                             KV_CACHE_EVENT_WARNINGS_LABELS,
                             &[],
                         ),
-                    ) {
-                        (Ok(kv_cache_events_applied), Ok(kv_cache_event_warnings)) => Arc::new(
-                            Self::new(kv_cache_events_applied, kv_cache_event_warnings),
+                        component.metrics().create_intcountervec(
+                            CKF_MUTATION_SUFFIX,
+                            CKF_MUTATION_HELP,
+                            CKF_MUTATION_LABELS,
+                            &[],
                         ),
-                        (Err(e), _) | (_, Err(e)) => {
+                    ) {
+                        (
+                            Ok(kv_cache_events_applied),
+                            Ok(kv_cache_event_warnings),
+                            Ok(ckf_mutation),
+                        ) => Arc::new(Self::new(
+                            kv_cache_events_applied,
+                            kv_cache_event_warnings,
+                            ckf_mutation,
+                        )),
+                        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
                             tracing::warn!("Failed to create kv indexer metrics from component: {}. Using unregistered metrics as fallback.", e);
                             Arc::new(Self::new_unregistered())
                         }
@@ -275,6 +359,17 @@ impl KvIndexerMetrics {
                         KvCacheEventError::ParentBlockNotFound => METRIC_STATUS_PARENT_NOT_FOUND,
                         KvCacheEventError::BlockNotFound => METRIC_STATUS_BLOCK_NOT_FOUND,
                         KvCacheEventError::InvalidBlockSequence => METRIC_STATUS_INVALID_BLOCK,
+                        KvCacheEventError::CapacityExhausted => METRIC_STATUS_CAPACITY_EXHAUSTED,
+                        KvCacheEventError::AllocationFailed => METRIC_STATUS_ALLOCATION_FAILED,
+                        KvCacheEventError::OwnershipDegreeOverflow => {
+                            METRIC_STATUS_OWNERSHIP_DEGREE_OVERFLOW
+                        }
+                        KvCacheEventError::IndexerInvariantViolation => {
+                            METRIC_STATUS_INDEXER_INVARIANT_VIOLATION
+                        }
+                        KvCacheEventError::UnsupportedResidencyDomain => {
+                            METRIC_STATUS_UNSUPPORTED_RESIDENCY_DOMAIN
+                        }
                     };
                     self.kv_cache_events_applied
                         .with_label_values(&[event_type, error_label])
@@ -322,6 +417,13 @@ struct PreBoundMetricCounters {
     removed: ResultCounters,
     cleared: ResultCounters,
     duplicate_store_warning: IntCounter,
+    ckf_mutation: CkfMutationCounters,
+}
+
+#[cfg(feature = "metrics")]
+struct CkfMutationCounters {
+    unknown_remove: IntCounter,
+    capacity_exhausted: IntCounter,
 }
 
 #[cfg(feature = "metrics")]
@@ -330,6 +432,11 @@ struct ResultCounters {
     parent_not_found: IntCounter,
     block_not_found: IntCounter,
     invalid_block: IntCounter,
+    capacity_exhausted: IntCounter,
+    allocation_failed: IntCounter,
+    ownership_degree_overflow: IntCounter,
+    indexer_invariant_violation: IntCounter,
+    unsupported_residency_domain: IntCounter,
 }
 
 #[cfg(feature = "metrics")]
@@ -342,6 +449,16 @@ impl ResultCounters {
             block_not_found: counters
                 .with_label_values(&[event_type, METRIC_STATUS_BLOCK_NOT_FOUND]),
             invalid_block: counters.with_label_values(&[event_type, METRIC_STATUS_INVALID_BLOCK]),
+            capacity_exhausted: counters
+                .with_label_values(&[event_type, METRIC_STATUS_CAPACITY_EXHAUSTED]),
+            allocation_failed: counters
+                .with_label_values(&[event_type, METRIC_STATUS_ALLOCATION_FAILED]),
+            ownership_degree_overflow: counters
+                .with_label_values(&[event_type, METRIC_STATUS_OWNERSHIP_DEGREE_OVERFLOW]),
+            indexer_invariant_violation: counters
+                .with_label_values(&[event_type, METRIC_STATUS_INDEXER_INVARIANT_VIOLATION]),
+            unsupported_residency_domain: counters
+                .with_label_values(&[event_type, METRIC_STATUS_UNSUPPORTED_RESIDENCY_DOMAIN]),
         }
     }
 
@@ -351,6 +468,13 @@ impl ResultCounters {
             Err(KvCacheEventError::ParentBlockNotFound) => &self.parent_not_found,
             Err(KvCacheEventError::BlockNotFound) => &self.block_not_found,
             Err(KvCacheEventError::InvalidBlockSequence) => &self.invalid_block,
+            Err(KvCacheEventError::CapacityExhausted) => &self.capacity_exhausted,
+            Err(KvCacheEventError::AllocationFailed) => &self.allocation_failed,
+            Err(KvCacheEventError::OwnershipDegreeOverflow) => &self.ownership_degree_overflow,
+            Err(KvCacheEventError::IndexerInvariantViolation) => &self.indexer_invariant_violation,
+            Err(KvCacheEventError::UnsupportedResidencyDomain) => {
+                &self.unsupported_residency_domain
+            }
         }
     }
 }
@@ -368,6 +492,14 @@ impl PreBoundEventCounters {
                     cleared: ResultCounters::new(cv, METRIC_EVENT_CLEARED),
                     duplicate_store_warning: warnings
                         .with_label_values(&[METRIC_WARNING_DUPLICATE_STORE]),
+                    ckf_mutation: CkfMutationCounters {
+                        unknown_remove: metrics
+                            .ckf_mutation
+                            .with_label_values(&[METRIC_CKF_MUTATION_UNKNOWN_REMOVE]),
+                        capacity_exhausted: metrics
+                            .ckf_mutation
+                            .with_label_values(&[METRIC_CKF_MUTATION_CAPACITY_EXHAUSTED]),
+                    },
                 },
             }
         }
@@ -407,5 +539,21 @@ impl PreBoundEventCounters {
         }
         #[cfg(not(feature = "metrics"))]
         let _ = (self, kind);
+    }
+
+    pub fn inc_ckf_mutation(&self, kind: CkfMutationKind, count: u64) {
+        #[cfg(feature = "metrics")]
+        {
+            if count == 0 {
+                return;
+            }
+            let counter = match kind {
+                CkfMutationKind::UnknownRemove => &self.inner.ckf_mutation.unknown_remove,
+                CkfMutationKind::CapacityExhausted => &self.inner.ckf_mutation.capacity_exhausted,
+            };
+            counter.inc_by(count);
+        }
+        #[cfg(not(feature = "metrics"))]
+        let _ = (self, kind, count);
     }
 }

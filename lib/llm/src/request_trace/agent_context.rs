@@ -15,11 +15,11 @@ use parking_lot::Mutex;
 
 use crate::local_model::LocalModel;
 use crate::protocols::common::FinishReason as BackendFinishReason;
+use crate::protocols::common::extensions::AgentContext;
 use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::timing::RequestTracker;
 use crate::protocols::openai::{
-    chat_completions::NvCreateChatCompletionStreamResponse,
-    completions::NvCreateCompletionResponse, nvext::AgentContext,
+    chat_completions::NvCreateChatCompletionStreamResponse, completions::NvCreateCompletionResponse,
 };
 use crate::request_trace::{
     DEFAULT_TOOL_EVENTS_TOPIC, FinishReasonMetadata, RequestReplayMetrics, RequestTraceMetrics,
@@ -529,7 +529,7 @@ mod tests {
     };
     use crate::protocols::openai::{
         chat_completions::NvCreateChatCompletionStreamResponse,
-        completions::NvCreateCompletionResponse, nvext::AgentContext,
+        completions::NvCreateCompletionResponse,
     };
     use dynamo_protocols::types::{
         ChatChoiceStream, ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta,
@@ -543,6 +543,7 @@ mod tests {
         record_chat_finish_reason_metadata, record_completion_finish_reason_metadata,
         request_metrics, request_metrics_from_agent_state,
     };
+    use crate::protocols::common::extensions::AgentContext;
 
     #[test]
     fn test_request_metrics_from_tracker() {
@@ -631,11 +632,12 @@ mod tests {
 
         let trace_state = AgentContextTraceState {
             agent_context: AgentContext {
-                session_type_id: "agent_harness".to_string(),
-                session_id: "run-finish".to_string(),
-                trajectory_id: "run-finish:agent".to_string(),
-                parent_trajectory_id: None,
-                trajectory_final: None,
+                session_id: "run-finish:agent".to_string(),
+                parent_session_id: None,
+                session_final: None,
+                compaction: None,
+                kv_hints: None,
+                input_trigger: None,
             },
             request_model: "test-model".to_string(),
             request_tracker: None,
@@ -676,6 +678,7 @@ mod tests {
                     usage: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             }),
             Annotated::from_data(NvCreateChatCompletionStreamResponse {
                 inner: CreateChatCompletionStreamResponse {
@@ -701,6 +704,7 @@ mod tests {
                     usage: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             }),
         ];
         for response in &responses {
@@ -747,11 +751,12 @@ mod tests {
 
         let trace_state = AgentContextTraceState {
             agent_context: AgentContext {
-                session_type_id: "agent_harness".to_string(),
-                session_id: "run-completion-finish".to_string(),
-                trajectory_id: "run-completion-finish:agent".to_string(),
-                parent_trajectory_id: None,
-                trajectory_final: None,
+                session_id: "run-completion-finish:agent".to_string(),
+                parent_session_id: None,
+                session_final: None,
+                compaction: None,
+                kv_hints: None,
+                input_trigger: None,
             },
             request_model: "test-model".to_string(),
             request_tracker: None,

@@ -1,8 +1,32 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::LazyLock;
+
 use axum::http::StatusCode;
+use dynamo_runtime::config::environment_names::llm as env_llm;
+use dynamo_runtime::error::{DynamoError, ErrorType as DynamoErrorType};
 use thiserror::Error;
+
+fn parse_overload_status_code(value: Option<&str>) -> StatusCode {
+    let default = StatusCode::from_u16(529).expect("529 is a valid HTTP status code");
+    value
+        .and_then(|s| s.trim().parse::<u16>().ok())
+        .and_then(|n| StatusCode::from_u16(n).ok())
+        .filter(|status| !status.is_informational())
+        .unwrap_or(default)
+}
+
+/// Overload / admission-control rejection status. Reads
+/// `DYN_HTTP_OVERLOAD_STATUS_CODE` (default 529) on first use; cached since the
+/// environment is fixed at runtime and this is on the rejection path.
+pub(crate) fn overload_status_code() -> StatusCode {
+    static CODE: LazyLock<StatusCode> = LazyLock::new(|| {
+        let value = std::env::var(env_llm::DYN_HTTP_OVERLOAD_STATUS_CODE).ok();
+        parse_overload_status_code(value.as_deref())
+    });
+    *CODE
+}
 
 /// Implementation of the Completion Engines served by the HTTP service should
 /// map their custom errors to to this error type if they wish to return error
@@ -14,6 +38,15 @@ pub struct HttpError {
     pub message: String,
 }
 
+/// Construct a typed invalid-argument error for validation performed at an
+/// HTTP protocol adapter boundary.
+pub(crate) fn invalid_argument(message: impl Into<String>) -> DynamoError {
+    DynamoError::builder()
+        .error_type(DynamoErrorType::InvalidArgument)
+        .message(message)
+        .build()
+}
+
 /// Canonical sanitized error responses returned at the HTTP boundary.
 ///
 /// Each variant fixes the `(status, public message, protocol error_type)`
@@ -22,12 +55,14 @@ pub struct HttpError {
 /// `Display` impl that produces the user-safe message all live on this
 /// enum — clients see exactly what the enum says, never a backend error
 /// chain, file path, or panic stack.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SanitizedError {
     /// 499 Client Closed Request.
     Cancelled,
-    /// 503 Service Unavailable.
+    /// 529 Site Is Overloaded.
     Overloaded,
+    /// 503 Service Unavailable.
+    Unavailable,
     /// 500 Internal Server Error.
     Internal,
     /// Preserve a backend-reported 5xx status code while replacing the
@@ -67,7 +102,8 @@ impl SanitizedError {
         match self {
             // 499 is not IANA-registered but is widely used (nginx).
             SanitizedError::Cancelled => StatusCode::from_u16(499).unwrap(),
-            SanitizedError::Overloaded => StatusCode::SERVICE_UNAVAILABLE,
+            SanitizedError::Overloaded => overload_status_code(),
+            SanitizedError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
             SanitizedError::Internal => StatusCode::INTERNAL_SERVER_ERROR,
             SanitizedError::PreserveServerError(code) => {
                 debug_assert!(
@@ -87,6 +123,7 @@ impl SanitizedError {
         match self {
             SanitizedError::Cancelled => "request_cancelled",
             SanitizedError::Overloaded => "overloaded_error",
+            SanitizedError::Unavailable => "overloaded_error",
             SanitizedError::Internal => "api_error",
             SanitizedError::PreserveServerError(status) => match status.as_u16() {
                 503 | 529 => "overloaded_error",
@@ -100,6 +137,7 @@ impl SanitizedError {
         match self {
             SanitizedError::Cancelled => "request_cancelled",
             SanitizedError::Overloaded => "service_unavailable",
+            SanitizedError::Unavailable => "service_unavailable",
             SanitizedError::Internal => "internal_server_error",
             SanitizedError::PreserveServerError(status) => match status.as_u16() {
                 503 | 529 => "service_unavailable",
@@ -116,11 +154,66 @@ impl SanitizedError {
     }
 }
 
+/// Whether a worker-asserted 5xx keeps its own status on the wire.
+///
+/// Only 503 and the configured overload code (`DYN_HTTP_OVERLOAD_STATUS_CODE`,
+/// 529 by default) do. Dynamo already generates and documents both, so
+/// forwarding them tells a client nothing it could not already receive; any
+/// other 5xx becomes a 500. Reading the overload code from the env rather than
+/// hard-coding 529 keeps one overload status whether the signal came from the
+/// router or from the worker.
+///
+/// This only decides what goes on the wire. Retrying a worker-local overload
+/// against another replica is
+/// <https://github.com/ai-dynamo/dynamo/issues/12383>.
+fn keeps_retry_semantics(status: StatusCode) -> bool {
+    status == StatusCode::SERVICE_UNAVAILABLE || status == overload_status_code()
+}
+
+/// What to do with a status a backend worker asserted for itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendStatusAction {
+    /// Non-499 4xx. Forward the backend's status and message verbatim.
+    ForwardClientError,
+    /// Answer with this sanitized variant, keeping the status it carries.
+    Sanitize(SanitizedError),
+    /// Answer 500. The inner status is what the engine asserted; callers put it
+    /// in the response body so it survives for debugging.
+    CoerceToInternal(StatusCode),
+}
+
+impl BackendStatusAction {
+    /// Triage a worker-asserted status, applying [`keeps_retry_semantics`] on
+    /// top of [`SanitizedError::for_backend_status`].
+    ///
+    /// `DYN_HTTP_OVERLOAD_STATUS_CODE` is not restricted to 5xx (see
+    /// [`parse_overload_status_code`]), so a configured non-5xx overload code
+    /// (e.g. 429) would otherwise fall through
+    /// [`SanitizedError::for_backend_status`]'s 4xx branch and be forwarded
+    /// as a plain client error instead of sanitized and preserved as the
+    /// overload response. Check it first, before that classification runs.
+    pub fn triage(status: StatusCode) -> Self {
+        if status == overload_status_code() && !status.is_server_error() {
+            return BackendStatusAction::Sanitize(SanitizedError::Overloaded);
+        }
+        match SanitizedError::for_backend_status(status) {
+            None => BackendStatusAction::ForwardClientError,
+            Some(SanitizedError::PreserveServerError(asserted))
+                if !keeps_retry_semantics(asserted) =>
+            {
+                BackendStatusAction::CoerceToInternal(asserted)
+            }
+            Some(variant) => BackendStatusAction::Sanitize(variant),
+        }
+    }
+}
+
 impl std::fmt::Display for SanitizedError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SanitizedError::Cancelled => f.write_str("Request cancelled"),
             SanitizedError::Overloaded => f.write_str("Service temporarily overloaded"),
+            SanitizedError::Unavailable => f.write_str("Service temporarily unavailable"),
             SanitizedError::Internal | SanitizedError::PreserveServerError(_) => {
                 f.write_str("Internal server error")
             }
@@ -131,6 +224,43 @@ impl std::fmt::Display for SanitizedError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_configured_overload_status_code() {
+        for value in [
+            None,
+            Some(""),
+            Some("not-a-code"),
+            Some("99"),
+            Some("100"),
+            Some("199"),
+            Some("1000"),
+        ] {
+            assert_eq!(
+                parse_overload_status_code(value).as_u16(),
+                529,
+                "expected {value:?} to fall back to 529"
+            );
+        }
+
+        for value in [200_u16, 503, 529, 600, 999] {
+            let configured = value.to_string();
+            assert_eq!(
+                parse_overload_status_code(Some(&configured)).as_u16(),
+                value,
+                "expected {value} to be preserved"
+            );
+        }
+    }
+
+    #[test]
+    fn local_statuses_distinguish_overload_from_unavailable() {
+        assert_eq!(SanitizedError::Overloaded.status().as_u16(), 529);
+        assert_eq!(
+            SanitizedError::Unavailable.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
 
     #[test]
     fn preserve_server_error_503_maps_to_overload_types() {
@@ -178,5 +308,49 @@ mod tests {
             SanitizedError::for_backend_status(StatusCode::from_u16(399).unwrap()),
             Some(SanitizedError::Internal)
         ));
+    }
+
+    #[test]
+    fn triage_keeps_only_retry_bearing_5xx_on_the_status_line() {
+        for status in [StatusCode::SERVICE_UNAVAILABLE, overload_status_code()] {
+            assert_eq!(
+                BackendStatusAction::triage(status),
+                BackendStatusAction::Sanitize(SanitizedError::PreserveServerError(status)),
+                "{status} should keep its status line"
+            );
+        }
+    }
+
+    #[test]
+    fn triage_coerces_other_5xx_and_reports_the_asserted_status() {
+        for code in [500u16, 501, 502, 504, 507, 599] {
+            let status = StatusCode::from_u16(code).unwrap();
+            assert_eq!(
+                BackendStatusAction::triage(status),
+                BackendStatusAction::CoerceToInternal(status),
+                "{code} should be coerced to 500 with the asserted status reported"
+            );
+        }
+    }
+
+    #[test]
+    fn triage_leaves_client_errors_and_cancellation_alone() {
+        assert_eq!(
+            BackendStatusAction::triage(StatusCode::BAD_REQUEST),
+            BackendStatusAction::ForwardClientError
+        );
+        assert_eq!(
+            BackendStatusAction::triage(StatusCode::UNSUPPORTED_MEDIA_TYPE),
+            BackendStatusAction::ForwardClientError
+        );
+        assert_eq!(
+            BackendStatusAction::triage(StatusCode::from_u16(499).unwrap()),
+            BackendStatusAction::Sanitize(SanitizedError::Cancelled)
+        );
+        // A non-error status from a backend is nonsense, so it sanitizes too.
+        assert_eq!(
+            BackendStatusAction::triage(StatusCode::from_u16(399).unwrap()),
+            BackendStatusAction::Sanitize(SanitizedError::Internal)
+        );
     }
 }

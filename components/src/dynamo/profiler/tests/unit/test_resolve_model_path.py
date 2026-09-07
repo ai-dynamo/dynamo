@@ -4,6 +4,7 @@
 """Unit tests for resolve_model_path() and the rapid.py / thorough.py call
 sites that feed its result into aiconfigurator."""
 
+import copy
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
@@ -22,11 +23,17 @@ try:
         _run_autoscale_sim,
         _run_default_sim,
     )
-    from dynamo.profiler.thorough import run_thorough
+    from dynamo.profiler.thorough import (
+        _normalize_candidate_model_identity,
+        run_thorough,
+    )
+    from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
+    from dynamo.profiler.utils.dgd_materialization import DGDMaterializationPurpose
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         DynamoGraphDeploymentRequestSpec,
         HardwareSpec,
         ModelCacheSpec,
+        OverridesSpec,
         SLASpec,
         WorkloadSpec,
     )
@@ -138,6 +145,13 @@ class TestResolveModelPath:
         dgdr = _make_dgdr(modelCache=_pvc_model_cache(f"{tmp_path}/", "/model"))
         assert resolve_model_path(dgdr) == str(local_dir)
 
+    def test_absolute_pvc_model_path_inside_mount_is_not_doubled(self, tmp_path):
+        """An already container-visible pvcModelPath should not be joined again."""
+        local_dir = tmp_path / "model"
+        _make_model_dir(local_dir)
+        dgdr = _make_dgdr(modelCache=_pvc_model_cache(str(tmp_path), str(local_dir)))
+        assert resolve_model_path(dgdr) == str(local_dir)
+
     def test_returns_hf_id_when_local_path_is_a_file(self, tmp_path):
         """The resolved path exists but is a file, not a directory -> the HF id."""
         (tmp_path / "model").write_text("not a directory")
@@ -164,23 +178,23 @@ class TestRapidResolvesModelPath:
 
     @staticmethod
     def _execute_return(chosen="disagg"):
-        """A fake _execute_task_configs return value (chosen, configs, _, _, latencies)."""
+        """A fake _execute_tasks return value."""
         best_df = pd.DataFrame([{"tp(p)": 1}])
         latencies = {"ttft": 100.0, "tpot": 10.0, "request_latency": 0.0}
-        return chosen, {chosen: best_df}, None, None, {chosen: latencies}
+        return chosen, {chosen: best_df}, None, None, {chosen: latencies}, {}
 
     def test_default_sim_uses_local_path_when_pvc_mounted(self, tmp_path):
-        """_run_default_sim -> build_default_task_configs gets the local PVC path."""
+        """_run_default_sim -> build_default_tasks gets the local PVC path."""
         local_dir = tmp_path / "model"
         _make_model_dir(local_dir)
         dgdr = _make_dgdr(modelCache=_pvc_model_cache(str(tmp_path), "model"))
 
         with (
             patch(
-                "dynamo.profiler.rapid.build_default_task_configs", return_value={}
+                "dynamo.profiler.rapid.build_default_tasks", return_value={}
             ) as mock_build,
             patch(
-                "dynamo.profiler.rapid._execute_task_configs",
+                "dynamo.profiler.rapid._execute_tasks",
                 return_value=self._execute_return(),
             ),
             patch("dynamo.profiler.rapid._generate_dgd_from_pick", return_value=None),
@@ -202,15 +216,15 @@ class TestRapidResolvesModelPath:
         assert mock_build.call_args.kwargs["model_path"] == str(local_dir)
 
     def test_default_sim_uses_hf_id_when_no_pvc(self):
-        """_run_default_sim -> build_default_task_configs gets the HF id when no PVC."""
+        """_run_default_sim -> build_default_tasks gets the HF id when no PVC."""
         dgdr = _make_dgdr()
 
         with (
             patch(
-                "dynamo.profiler.rapid.build_default_task_configs", return_value={}
+                "dynamo.profiler.rapid.build_default_tasks", return_value={}
             ) as mock_build,
             patch(
-                "dynamo.profiler.rapid._execute_task_configs",
+                "dynamo.profiler.rapid._execute_tasks",
                 return_value=self._execute_return(),
             ),
             patch("dynamo.profiler.rapid._generate_dgd_from_pick", return_value=None),
@@ -232,40 +246,38 @@ class TestRapidResolvesModelPath:
         assert mock_build.call_args.kwargs["model_path"] == _HF_ID
 
     def test_autoscale_sim_uses_local_path_when_pvc_mounted(self, tmp_path):
-        """_run_autoscale_sim -> TaskConfig gets the local PVC path."""
+        """_run_autoscale_sim -> Task gets the local PVC path."""
         local_dir = tmp_path / "model"
         _make_model_dir(local_dir)
         dgdr = _make_dgdr(modelCache=_pvc_model_cache(str(tmp_path), "model"))
 
-        runner = MagicMock()
-        runner.run.return_value = {"pareto_df": pd.DataFrame()}
         with (
-            patch("dynamo.profiler.rapid.TaskConfig") as mock_task_config,
-            patch("dynamo.profiler.rapid.TaskRunner", return_value=runner),
+            patch("dynamo.profiler.rapid.Task") as mock_task,
             patch("dynamo.profiler.rapid._generate_dgd_from_pick", return_value=None),
         ):
+            mock_task.return_value.run.return_value = pd.DataFrame()
             _run_autoscale_sim(
                 dgdr, _HF_ID, "h200_sxm", "trtllm", 8, 4000, 1000, 2000.0, 50.0, None
             )
 
-        assert mock_task_config.call_args.kwargs["model_path"] == str(local_dir)
+        assert mock_task.call_args.kwargs["prefill_model_path"] == str(local_dir)
+        assert mock_task.call_args.kwargs["decode_model_path"] == str(local_dir)
 
     def test_autoscale_sim_uses_hf_id_when_no_pvc(self):
-        """_run_autoscale_sim -> TaskConfig gets the HF id when no PVC."""
+        """_run_autoscale_sim -> Task gets the HF id when no PVC."""
         dgdr = _make_dgdr()
 
-        runner = MagicMock()
-        runner.run.return_value = {"pareto_df": pd.DataFrame()}
         with (
-            patch("dynamo.profiler.rapid.TaskConfig") as mock_task_config,
-            patch("dynamo.profiler.rapid.TaskRunner", return_value=runner),
+            patch("dynamo.profiler.rapid.Task") as mock_task,
             patch("dynamo.profiler.rapid._generate_dgd_from_pick", return_value=None),
         ):
+            mock_task.return_value.run.return_value = pd.DataFrame()
             _run_autoscale_sim(
                 dgdr, _HF_ID, "h200_sxm", "trtllm", 8, 4000, 1000, 2000.0, 50.0, None
             )
 
-        assert mock_task_config.call_args.kwargs["model_path"] == _HF_ID
+        assert mock_task.call_args.kwargs["prefill_model_path"] == _HF_ID
+        assert mock_task.call_args.kwargs["decode_model_path"] == _HF_ID
 
 
 # ---------------------------------------------------------------------------
@@ -293,8 +305,8 @@ class TestGenerateDgdKeepsServedModelName:
     def _task_config() -> MagicMock:
         tc = MagicMock()
         tc.total_gpus = 8
-        tc.backend_name = "trtllm"
-        tc.backend_version = None
+        tc.primary_backend_name = "trtllm"
+        tc.primary_backend_version = None
         return tc
 
     def _capture_generate(self, dgdr, cfg) -> MagicMock:
@@ -393,6 +405,20 @@ class TestThoroughResolvesModelPath:
 
         assert mock_enumerate.call_args.kwargs["model_path"] == str(local_dir)
 
+    async def test_enumerate_uses_relative_pvc_path_for_absolute_model_path(
+        self, tmp_path
+    ):
+        """run_thorough passes AIC a PVC-relative path for mounted model paths."""
+        pvc_root = tmp_path / "pvc"
+        local_dir = pvc_root / "model"
+        _make_model_dir(local_dir)
+        dgdr = _make_dgdr(modelCache=_pvc_model_cache(str(pvc_root), str(local_dir)))
+
+        mock_enumerate = await self._capture_enumerate(dgdr, tmp_path)
+
+        assert mock_enumerate.call_args.kwargs["model_path"] == str(local_dir)
+        assert mock_enumerate.call_args.kwargs["k8s_model_path_in_pvc"] == "model"
+
     async def test_enumerate_uses_hf_id_when_no_pvc(self, tmp_path):
         """run_thorough -> enumerate_profiling_configs gets the HF id when no PVC."""
         dgdr = _make_dgdr()
@@ -400,6 +426,246 @@ class TestThoroughResolvesModelPath:
         mock_enumerate = await self._capture_enumerate(dgdr, tmp_path)
 
         assert mock_enumerate.call_args.kwargs["model_path"] == _HF_ID
+
+    async def test_enumerate_preserves_unset_pvc_model_path(self, tmp_path):
+        """run_thorough keeps missing pvcModelPath as None for AIC."""
+        dgdr = _make_dgdr(
+            modelCache=ModelCacheSpec(
+                pvcName="model-cache",
+                pvcMountPath="/opt/model-cache",
+            )
+        )
+
+        mock_enumerate = await self._capture_enumerate(dgdr, tmp_path)
+
+        assert mock_enumerate.call_args.kwargs["model_path"] == _HF_ID
+        assert mock_enumerate.call_args.kwargs["k8s_model_path_in_pvc"] is None
+
+    async def test_materializes_each_candidate_once_with_resolved_model_path(
+        self, tmp_path
+    ):
+        dgdr = _make_dgdr()
+        prefill = MagicMock(dgd_config={"candidate": "prefill"})
+        decode = MagicMock(dgd_config={"candidate": "decode"})
+
+        def _materialize(config, **_kwargs):
+            return {"materialized": config["candidate"]}
+
+        with (
+            patch(
+                "dynamo.profiler.thorough.enumerate_profiling_configs",
+                return_value=([prefill], [decode]),
+            ),
+            patch(
+                "dynamo.profiler.thorough.materialize_dgd",
+                side_effect=_materialize,
+            ) as materialize,
+            patch(
+                "dynamo.profiler.thorough._benchmark_prefill_candidates",
+                new=AsyncMock(return_value=pd.DataFrame()),
+            ),
+            patch(
+                "dynamo.profiler.thorough._benchmark_decode_candidates",
+                new=AsyncMock(return_value=pd.DataFrame()),
+            ),
+        ):
+            await run_thorough(
+                dgdr,
+                ProfilerOperationalConfig(output_dir=str(tmp_path)),
+                "default",
+                _HF_ID,
+                "h200_sxm",
+                "trtllm",
+                8,
+                4000,
+                1000,
+                2000.0,
+                50.0,
+                None,
+                [],
+            )
+
+        assert materialize.call_count == 2
+        assert [call.args[0] for call in materialize.call_args_list] == [
+            {"candidate": "prefill"},
+            {"candidate": "decode"},
+        ]
+        assert all(
+            call.kwargs
+            == {
+                "purpose": DGDMaterializationPurpose.BENCHMARK_CANDIDATE,
+                "override": None,
+                "tolerations": [],
+                "runtime_backend": "trtllm",
+                "model_name_or_path": _HF_ID,
+            }
+            for call in materialize.call_args_list
+        )
+        assert prefill.dgd_config == {"materialized": "prefill"}
+        assert decode.dgd_config == {"materialized": "decode"}
+
+    def test_cache_only_pvc_does_not_rewrite_candidate_model(self):
+        """A PVC without pvcModelPath remains an HF_HOME-style cache mount."""
+        dgdr = _make_dgdr(
+            modelCache=ModelCacheSpec(
+                pvcName="model-cache",
+                pvcMountPath="/opt/model-cache",
+            )
+        )
+        candidate_config = {"sentinel": "unchanged"}
+        candidate = MagicMock(dgd_config=candidate_config)
+        modifier = MagicMock()
+
+        _normalize_candidate_model_identity(
+            [candidate], dgdr, dgdr.modelCache, modifier
+        )
+
+        modifier.update_model_from_pvc.assert_not_called()
+        assert candidate.dgd_config is candidate_config
+
+    async def test_candidates_keep_hf_name_and_pvc_runtime_path(self, tmp_path):
+        """Every sweep candidate separates API identity from PVC load path."""
+        pvc_root = tmp_path / "pvc"
+        local_dir = pvc_root / "model"
+        _make_model_dir(local_dir)
+        modifier = CONFIG_MODIFIERS["vllm"]
+        candidate_config = modifier.build_dgd_config(
+            mode="agg",
+            model_name=str(local_dir),
+            image="example/vllm:base",
+            agg_cli_args=[],
+            agg_replicas=1,
+            agg_gpus=1,
+            pvc_name="model-cache",
+            pvc_mount_path=str(pvc_root),
+            model_path=str(local_dir),
+        )
+        worker_name = next(
+            component["name"]
+            for component in candidate_config["spec"]["components"]
+            if component["name"] not in {"Frontend", "Planner"}
+        )
+        dgdr = _make_dgdr(
+            backend="vllm",
+            modelCache=_pvc_model_cache(str(pvc_root), "model"),
+            overrides=OverridesSpec(
+                # Keep an unversioned v1alpha1-shaped override to exercise the
+                # compatibility path against a generated v1beta1 blueprint.
+                dgd={
+                    "spec": {
+                        "services": {
+                            worker_name: {
+                                "extraPodSpec": {
+                                    "mainContainer": {
+                                        "image": "example/vllm:override",
+                                        "args": [
+                                            "--model=/stale/path",
+                                            "--served-model-name=stale/model",
+                                        ],
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            ),
+        )
+        prefill = MagicMock(dgd_config=copy.deepcopy(candidate_config))
+        decode = MagicMock(dgd_config=copy.deepcopy(candidate_config))
+        ops = ProfilerOperationalConfig(output_dir=str(tmp_path))
+
+        def _apply_override(config, _override):
+            result = copy.deepcopy(config)
+            worker = next(
+                component
+                for component in result["spec"]["components"]
+                if component["name"] == worker_name
+            )
+            main_container = worker["podTemplate"]["spec"]["containers"][0]
+            main_container["image"] = "example/vllm:override"
+            main_container["args"] = [
+                "--model=/stale/path",
+                "--served-model-name=stale/model",
+            ]
+            return result
+
+        with (
+            patch(
+                "dynamo.profiler.thorough.enumerate_profiling_configs",
+                return_value=([prefill], [decode], True, 1),
+            ),
+            patch(
+                "dynamo.profiler.utils.dgd_materialization.apply_dgd_overrides",
+                side_effect=_apply_override,
+            ) as apply_override,
+            patch(
+                "dynamo.profiler.thorough._benchmark_prefill_candidates",
+                new=AsyncMock(return_value=pd.DataFrame()),
+            ),
+            patch(
+                "dynamo.profiler.thorough._benchmark_decode_candidates",
+                new=AsyncMock(return_value=pd.DataFrame()),
+            ),
+        ):
+            await run_thorough(
+                dgdr,
+                ops,
+                "default",
+                _HF_ID,
+                "h200_sxm",
+                "vllm",
+                8,
+                4000,
+                1000,
+                2000.0,
+                50.0,
+                None,
+                [],
+            )
+
+        assert apply_override.call_count == 2
+        assert all(
+            call.args[1] == dgdr.overrides.dgd for call in apply_override.call_args_list
+        )
+        for candidate in (prefill, decode):
+            assert modifier.get_model_name(candidate.dgd_config) == (
+                _HF_ID,
+                str(local_dir),
+            )
+            components = {
+                component["name"]: component
+                for component in candidate.dgd_config["spec"]["components"]
+            }
+            worker_container = components[worker_name]["podTemplate"]["spec"][
+                "containers"
+            ][0]
+            args = worker_container["args"]
+            assert worker_container["image"] == "example/vllm:override"
+            assert [
+                arg for arg in args if arg == "--model" or arg.startswith("--model=")
+            ] == ["--model"]
+            assert [
+                arg
+                for arg in args
+                if arg == "--served-model-name"
+                or arg.startswith("--served-model-name=")
+            ] == ["--served-model-name"]
+            frontend_args = components["Frontend"]["podTemplate"]["spec"]["containers"][
+                0
+            ]["args"]
+            assert frontend_args[frontend_args.index("--model-name") + 1] == _HF_ID
+            assert frontend_args[frontend_args.index("--model-path") + 1] == str(
+                local_dir
+            )
+            assert all(
+                any(
+                    volume_mount.get("name") == "model-cache"
+                    for volume_mount in component["podTemplate"]["spec"]["containers"][
+                        0
+                    ]["volumeMounts"]
+                )
+                for component in components.values()
+            )
 
     async def _capture_task_config(self, dgdr, output_dir) -> MagicMock:
         """The benchmark stages return non-empty DataFrames so run_thorough gets
@@ -424,7 +690,7 @@ class TestThoroughResolvesModelPath:
                 "dynamo.profiler.thorough._pick_thorough_best_config",
                 return_value={"best_config_df": pd.DataFrame()},
             ),
-            patch("dynamo.profiler.thorough.TaskConfig") as mock_task_config,
+            patch("dynamo.profiler.thorough.Task") as mock_task,
             patch(
                 "dynamo.profiler.thorough._generate_dgd_from_pick",
                 return_value=None,
@@ -445,23 +711,25 @@ class TestThoroughResolvesModelPath:
                 None,
                 [],
             )
-        return mock_task_config
+        return mock_task
 
-    async def test_taskconfig_uses_local_path_when_pvc_mounted(self, tmp_path):
-        """run_thorough -> TaskConfig gets the local PVC path."""
+    async def test_task_uses_local_path_when_pvc_mounted(self, tmp_path):
+        """run_thorough -> Task gets the local PVC path."""
         pvc_root = tmp_path / "pvc"
         local_dir = pvc_root / "model"
         _make_model_dir(local_dir)
         dgdr = _make_dgdr(modelCache=_pvc_model_cache(str(pvc_root), "model"))
 
-        mock_task_config = await self._capture_task_config(dgdr, tmp_path)
+        mock_task = await self._capture_task_config(dgdr, tmp_path)
 
-        assert mock_task_config.call_args.kwargs["model_path"] == str(local_dir)
+        assert mock_task.call_args.kwargs["prefill_model_path"] == str(local_dir)
+        assert mock_task.call_args.kwargs["decode_model_path"] == str(local_dir)
 
-    async def test_taskconfig_uses_hf_id_when_no_pvc(self, tmp_path):
-        """run_thorough -> TaskConfig gets the HF id when no PVC."""
+    async def test_task_uses_hf_id_when_no_pvc(self, tmp_path):
+        """run_thorough -> Task gets the HF id when no PVC."""
         dgdr = _make_dgdr()
 
-        mock_task_config = await self._capture_task_config(dgdr, tmp_path)
+        mock_task = await self._capture_task_config(dgdr, tmp_path)
 
-        assert mock_task_config.call_args.kwargs["model_path"] == _HF_ID
+        assert mock_task.call_args.kwargs["prefill_model_path"] == _HF_ID
+        assert mock_task.call_args.kwargs["decode_model_path"] == _HF_ID

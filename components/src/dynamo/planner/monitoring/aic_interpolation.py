@@ -46,7 +46,7 @@ from dynamo.planner.config.parallelization import (
     picked_to_aic_model_config_kwargs,
 )
 
-# aic_estimator itself lazy-imports aiconfigurator, so importing the wrapper
+# aic_estimator itself lazy-imports aiconfigurator-core, so importing the wrapper
 # class at module load time does NOT pull in the optional dependency —
 # ImportError only materialises when the class is instantiated.
 from dynamo.planner.monitoring.aic_estimator import AIConfiguratorPerfEstimator
@@ -62,7 +62,7 @@ def run_aic_interpolation(
 ) -> list[ForwardPassMetrics]:
     """Run the AIC interpolation sweep and return synthetic FPMs.
 
-    Lazy-imports ``aiconfigurator`` — callers should catch ``ImportError``
+    Lazy-imports ``aiconfigurator_core`` — callers should catch ``ImportError``
     and fall back to the file-based loader if the dependency is missing.
     """
     from dynamo.planner.monitoring.aic_estimator import AIConfiguratorPerfEstimator

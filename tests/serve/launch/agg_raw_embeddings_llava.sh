@@ -213,7 +213,7 @@ CUDA_VISIBLE_DEVICES=$PD_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --encode-endpoint "$ENCODE_ENDPOINT" \
   --allowed-local-media-path "$ALLOWED_LOCAL_MEDIA_PATH" \
   --max-file-size-mb "$MAX_FILE_SIZE_MB" \
-  --disaggregation-mode prefill_and_decode \
+  --disaggregation-mode pd \
   --custom-jinja-template "$CUSTOM_TEMPLATE" \
   "${EXTRA_PD_ARGS[@]}" &
 PD_PID=$!

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use socket2::{Domain, SockAddr, Socket, Type};
+use socket2::{Domain, SockAddr, SockRef, Socket, Type};
 use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, SocketAddr, TcpListener},
@@ -9,8 +9,9 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tokio::sync::Mutex;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::Instant;
+use tokio_rustls::TlsAcceptor;
 
 /// Tombstone lifetime. Bridges the `register()` → `associate_instance()`
 /// window (sub-millisecond in practice); 5s bounds the set by recent worker
@@ -21,7 +22,8 @@ const TOMBSTONE_TTL: Duration = Duration::from_secs(5);
 use bytes::Bytes;
 use derive_builder::Builder;
 use futures::{SinkExt, StreamExt};
-use local_ip_address::{Error, list_afinet_netifas, local_ip, local_ipv6};
+use local_ip_address::Error;
+use parking_lot::Mutex;
 
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -45,26 +47,10 @@ use crate::pipeline::{
         tcp::StreamType,
     },
 };
+use crate::utils::ip_resolver::resolve_host_or_interface;
 use anyhow::{Context, Result, anyhow as error};
 
-// Trait for IP address resolution - allows dependency injection for testing
-pub trait IpResolver {
-    fn local_ip(&self) -> Result<std::net::IpAddr, Error>;
-    fn local_ipv6(&self) -> Result<std::net::IpAddr, Error>;
-}
-
-// Default implementation using the real local_ip_address crate
-pub struct DefaultIpResolver;
-
-impl IpResolver for DefaultIpResolver {
-    fn local_ip(&self) -> Result<std::net::IpAddr, Error> {
-        local_ip()
-    }
-
-    fn local_ipv6(&self) -> Result<std::net::IpAddr, Error> {
-        local_ipv6()
-    }
-}
+pub use crate::utils::ip_resolver::{DefaultIpResolver, IpResolver};
 
 #[allow(dead_code)]
 type ResponseType = TwoPartMessage;
@@ -74,6 +60,8 @@ pub struct ServerOptions {
     #[builder(default = "0")]
     pub port: u16,
 
+    /// IP literal or exact network interface name used to bind and advertise the server.
+    /// When unset, Dynamo selects a local address automatically.
     #[builder(default)]
     pub interface: Option<String>,
 }
@@ -88,7 +76,7 @@ impl ServerOptions {
 /// A Response connection is a connection that is established by a client with the intention of sending
 /// specific data back to the server.
 pub struct TcpStreamServer {
-    local_ip: String,
+    local_ip: IpAddr,
     local_port: u16,
     state: Arc<Mutex<State>>,
 }
@@ -103,11 +91,30 @@ pub struct TcpStreamServer {
 struct RequestedSendConnection {
     context: Arc<dyn AsyncEngineContext>,
     connection: oneshot::Sender<Result<StreamSender, String>>,
+    /// Capacity of the per-stream mpsc buffer between the socket task and the
+    /// engine producer; carried from the registration [`StreamOptions`].
+    send_buffer_count: usize,
 }
 
 struct RequestedRecvConnection {
     context: Arc<dyn AsyncEngineContext>,
     connection: oneshot::Sender<Result<StreamReceiver, String>>,
+    /// Capacity of the per-stream mpsc buffer between the socket task and the
+    /// engine consumer; carried from the registration [`StreamOptions`].
+    send_buffer_count: usize,
+}
+
+/// Build the per-stream data-plane mpsc channel that bridges the socket task
+/// and the engine producer/consumer. The capacity is driven by the
+/// registration options ([`StreamOptions::send_buffer_count`]) rather than a
+/// hard-coded constant; both `process_request_stream` and
+/// `process_response_stream` size their channel through this helper. See #10293.
+fn data_plane_channel<T>(send_buffer_count: usize) -> (mpsc::Sender<T>, mpsc::Receiver<T>) {
+    // `tokio::sync::mpsc::channel` panics on a capacity of 0. Now that the value
+    // is caller-configurable via `StreamOptions::send_buffer_count`, clamp to at
+    // least 1 so a misconfigured `0` degrades to a minimal buffer instead of
+    // panicking the connection handler task.
+    mpsc::channel(send_buffer_count.max(1))
 }
 
 // /// When registering a new TcpStream on the server, the registration method will return a [`Connections`] object.
@@ -164,19 +171,12 @@ impl TcpStreamServer {
         options: ServerOptions,
         resolver: R,
     ) -> Result<Arc<Self>, PipelineError> {
-        let local_ip = match options.interface {
-            Some(interface) => {
-                let interfaces: HashMap<String, std::net::IpAddr> =
-                    list_afinet_netifas()?.into_iter().collect();
-
-                interfaces
-                    .get(&interface)
-                    .ok_or(PipelineError::Generic(format!(
-                        "Interface not found: {}",
-                        interface
-                    )))?
-                    .to_string()
-            }
+        let local_ip = match options.interface.as_deref() {
+            Some(host) => resolve_host_or_interface(host, &resolver).map_err(|error| {
+                PipelineError::Generic(format!(
+                    "Failed to resolve configured TCP host '{host}': {error}"
+                ))
+            })?,
             None => {
                 let resolved_ip = resolver.local_ip().or_else(|err| match err {
                     Error::LocalIpAddressNotFound => resolver.local_ipv6(),
@@ -201,19 +201,24 @@ impl TcpStreamServer {
                         )));
                     }
                 }
-                .to_string()
             }
         };
 
         let state = Arc::new(Mutex::new(State::default()));
 
-        let local_port = Self::start(local_ip.clone(), options.port, state.clone())
+        // Build TLS acceptor from environment if cert+key paths are configured.
+        let tls_acceptor = Self::build_tls_acceptor().map_err(|e| {
+            PipelineError::Generic(format!("Failed to build TCP TLS acceptor: {}", e))
+        })?;
+
+        let local_port = Self::start(local_ip, options.port, state.clone(), tls_acceptor)
             .await
             .map_err(|e| {
                 PipelineError::Generic(format!("Failed to start TcpStreamServer: {}", e))
             })?;
 
-        tracing::debug!("tcp transport service on {local_ip}:{local_port}");
+        let local_addr = SocketAddr::new(local_ip, local_port);
+        tracing::debug!("tcp transport service on {local_addr}");
 
         Ok(Arc::new(Self {
             local_ip,
@@ -240,7 +245,7 @@ impl TcpStreamServer {
         send_subject: Option<&str>,
         id: &EndpointInstanceId,
     ) -> bool {
-        let mut state = self.state.lock().await;
+        let mut state = self.state.lock();
         let now = Instant::now();
         prune_tombstones(&mut state.removed_instances, now);
         if state.removed_instances.contains_key(id) {
@@ -277,7 +282,7 @@ impl TcpStreamServer {
     /// Cancel one pending response-stream registration. Drops the
     /// `oneshot::Sender` so the waiting receiver resolves with `RecvError`.
     pub async fn cancel_recv_stream(&self, subject: &str) {
-        let mut state = self.state.lock().await;
+        let mut state = self.state.lock();
         state.rx_subjects.remove(subject);
         if let Some(key) = state.subject_instance.remove(subject)
             && let Some(subjects) = state.instance_subjects.get_mut(&key)
@@ -295,7 +300,7 @@ impl TcpStreamServer {
     /// `(StreamType::Request, _)` tag from `instance_subjects` so the per-
     /// instance bookkeeping stays consistent.
     pub async fn cancel_send_stream(&self, subject: &str) {
-        let mut state = self.state.lock().await;
+        let mut state = self.state.lock();
         state.tx_subjects.remove(subject);
         if let Some(key) = state.subject_instance.remove(subject)
             && let Some(subjects) = state.instance_subjects.get_mut(&key)
@@ -312,7 +317,7 @@ impl TcpStreamServer {
     /// `associate_instance` — and tombstone the id so any racing associate
     /// for the same id cancels too. Returns the number of streams cancelled.
     pub async fn cancel_instance_streams(&self, id: &EndpointInstanceId) -> usize {
-        let mut state = self.state.lock().await;
+        let mut state = self.state.lock();
         let now = Instant::now();
         prune_tombstones(&mut state.removed_instances, now);
         state.removed_instances.insert(id.clone(), now);
@@ -338,24 +343,90 @@ impl TcpStreamServer {
     /// Drop the tombstone for an instance that has reappeared in discovery,
     /// so future subjects for that identity are tracked normally.
     pub async fn clear_instance_tombstone(&self, id: &EndpointInstanceId) {
-        let mut state = self.state.lock().await;
+        let mut state = self.state.lock();
         state.removed_instances.remove(id);
     }
 
-    #[allow(clippy::await_holding_lock)]
-    async fn start(local_ip: String, local_port: u16, state: Arc<Mutex<State>>) -> Result<u16> {
-        let addr = format!("{}:{}", local_ip, local_port);
+    /// Build a TLS acceptor from env vars if `DYN_TCP_TLS_CERT_PATH` and
+    /// `DYN_TCP_TLS_KEY_PATH` are set. Validation and diagnostics are shared with
+    /// the request-plane server via
+    /// [`crate::tls_utils::server_tls_acceptor_config`]; a client CA enables mTLS.
+    fn build_tls_acceptor() -> anyhow::Result<Option<TlsAcceptor>> {
+        use crate::config::environment_names::tcp_response_stream::tls as env;
+        let cert_path = std::env::var(env::DYN_TCP_TLS_CERT_PATH).ok();
+        let key_path = std::env::var(env::DYN_TCP_TLS_KEY_PATH).ok();
+        let client_ca = std::env::var(env::DYN_TCP_TLS_CLIENT_CA_CERT_PATH).ok();
+        Ok(crate::tls_utils::server_tls_acceptor_config(
+            "TCP server",
+            cert_path.as_deref().map(std::path::Path::new),
+            key_path.as_deref().map(std::path::Path::new),
+            client_ca.as_deref().map(std::path::Path::new),
+        )?
+        .map(|config| TlsAcceptor::from(Arc::new(config))))
+    }
+
+    async fn start(
+        local_ip: IpAddr,
+        local_port: u16,
+        state: Arc<Mutex<State>>,
+        tls_acceptor: Option<TlsAcceptor>,
+    ) -> Result<u16> {
+        let addr = SocketAddr::new(local_ip, local_port);
         let state_clone = state.clone();
-        let mut guard = state.lock().await;
-        if guard.handle.is_some() {
-            panic!("TcpStreamServer already started");
-        }
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<u16>>();
-        let handle = tokio::spawn(tcp_listener(addr, state_clone, ready_tx));
-        guard.handle = Some(handle);
-        drop(guard);
+        {
+            let mut guard = state.lock();
+            if guard.handle.is_some() {
+                panic!("TcpStreamServer already started");
+            }
+            guard.handle = Some(tokio::spawn(tcp_listener(
+                addr,
+                state_clone,
+                tls_acceptor,
+                ready_tx,
+            )));
+        }
         let local_port = ready_rx.await??;
         Ok(local_port)
+    }
+
+    fn insert_request_stream(&self, subject: String, connection: RequestedSendConnection) {
+        self.state.lock().tx_subjects.insert(subject, connection);
+    }
+
+    fn insert_response_stream(&self, subject: String, connection: RequestedRecvConnection) {
+        self.state.lock().rx_subjects.insert(subject, connection);
+    }
+
+    fn take_request_stream(state: &Mutex<State>, subject: &str) -> Option<RequestedSendConnection> {
+        let mut state = state.lock();
+        let connection = state.tx_subjects.remove(subject);
+        if let Some(key) = state.subject_instance.remove(subject)
+            && let Some(subjects) = state.instance_subjects.get_mut(&key)
+        {
+            subjects.remove(&(StreamType::Request, subject.to_string()));
+            if subjects.is_empty() {
+                state.instance_subjects.remove(&key);
+            }
+        }
+        connection
+    }
+
+    fn take_response_stream(
+        state: &Mutex<State>,
+        subject: &str,
+    ) -> Option<RequestedRecvConnection> {
+        let mut state = state.lock();
+        let connection = state.rx_subjects.remove(subject);
+        if let Some(key) = state.subject_instance.remove(subject)
+            && let Some(subjects) = state.instance_subjects.get_mut(&key)
+        {
+            subjects.remove(&(StreamType::Response, subject.to_string()));
+            if subjects.is_empty() {
+                state.instance_subjects.remove(&key);
+            }
+        }
+        connection
     }
 }
 
@@ -385,23 +456,20 @@ impl ResponseService for TcpStreamServer {
     async fn register(&self, options: StreamOptions) -> PendingConnections {
         // oneshot channels to pass back the sender and receiver objects
 
-        let address = format!("{}:{}", self.local_ip, self.local_port);
+        let address = SocketAddr::new(self.local_ip, self.local_port).to_string();
         tracing::debug!("Registering new TcpStream on {address}");
 
         let send_stream = if options.enable_request_stream {
             let sender_subject = uuid::Uuid::new_v4().to_string();
+            let registry_subject = sender_subject.clone();
 
             let (pending_sender_tx, pending_sender_rx) = oneshot::channel();
 
             let connection_info = RequestedSendConnection {
                 context: options.context.clone(),
                 connection: pending_sender_tx,
+                send_buffer_count: options.send_buffer_count,
             };
-
-            let mut state = self.state.lock().await;
-            state
-                .tx_subjects
-                .insert(sender_subject.clone(), connection_info);
 
             let cleanup_subject = sender_subject.clone();
             let cleanup_state = self.state.clone();
@@ -418,7 +486,7 @@ impl ResponseService for TcpStreamServer {
             .with_cleanup(move || {
                 // Drop is sync; fire-and-forget the lock acquisition.
                 tokio::spawn(async move {
-                    let mut state = cleanup_state.lock().await;
+                    let mut state = cleanup_state.lock();
                     state.tx_subjects.remove(&cleanup_subject);
                     if let Some(key) = state.subject_instance.remove(&cleanup_subject)
                         && let Some(subjects) = state.instance_subjects.get_mut(&key)
@@ -431,6 +499,8 @@ impl ResponseService for TcpStreamServer {
                 });
             });
 
+            self.insert_request_stream(registry_subject, connection_info);
+
             Some(registered_stream)
         } else {
             None
@@ -439,16 +509,13 @@ impl ResponseService for TcpStreamServer {
         let recv_stream = if options.enable_response_stream {
             let (pending_recver_tx, pending_recver_rx) = oneshot::channel();
             let receiver_subject = uuid::Uuid::new_v4().to_string();
+            let registry_subject = receiver_subject.clone();
 
             let connection_info = RequestedRecvConnection {
                 context: options.context.clone(),
                 connection: pending_recver_tx,
+                send_buffer_count: options.send_buffer_count,
             };
-
-            let mut state = self.state.lock().await;
-            state
-                .rx_subjects
-                .insert(receiver_subject.clone(), connection_info);
 
             let cleanup_subject = receiver_subject.clone();
             let cleanup_state = self.state.clone();
@@ -465,7 +532,7 @@ impl ResponseService for TcpStreamServer {
             .with_cleanup(move || {
                 // Drop is sync; fire-and-forget the lock acquisition.
                 tokio::spawn(async move {
-                    let mut state = cleanup_state.lock().await;
+                    let mut state = cleanup_state.lock();
                     state.rx_subjects.remove(&cleanup_subject);
                     if let Some(key) = state.subject_instance.remove(&cleanup_subject)
                         && let Some(subjects) = state.instance_subjects.get_mut(&key)
@@ -477,6 +544,8 @@ impl ResponseService for TcpStreamServer {
                     }
                 });
             });
+
+            self.insert_response_stream(registry_subject, connection_info);
 
             Some(registered_stream)
         } else {
@@ -490,6 +559,188 @@ impl ResponseService for TcpStreamServer {
     }
 }
 
+/// First retry delay applied after an `AcceptFailure::Exhaustion`.
+const ACCEPT_BACKOFF_INITIAL_DELAY: Duration = Duration::from_millis(5);
+/// Ceiling the retry delay saturates at, so the listener keeps polling often
+/// enough to notice recovery while no longer spinning.
+const ACCEPT_BACKOFF_MAX_DELAY: Duration = Duration::from_secs(1);
+/// Minimum wall-clock interval between two emitted exhaustion summaries.
+const ACCEPT_BACKOFF_LOG_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How the listener loop must treat a failed `accept()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AcceptFailure {
+    /// The process or the host is out of file descriptors or kernel memory
+    /// — see `AcceptBackoff::classify` for the exact errno set. Retrying
+    /// immediately cannot succeed, so the loop must back off.
+    Exhaustion,
+    /// Anything else — a per-connection error that the client is expected to
+    /// retry. Keeps the historical warn-and-retry-immediately behavior.
+    Ordinary,
+}
+
+/// What the caller should do about one exhaustion failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AcceptBackoffAction {
+    /// How long to sleep before calling `accept()` again.
+    delay: Duration,
+    /// `Some(n)` when the caller should emit one summary line, where `n` is the
+    /// number of failures suppressed since the previous emission. `None` means
+    /// this failure is inside the current rate-limit window and must stay silent.
+    log_suppressed: Option<u64>,
+}
+
+/// Bounded exponential retry policy for the accept loop, kept deliberately pure:
+/// it reads no clock, performs no I/O and never sleeps. The caller supplies the
+/// current `Instant` and performs the sleep, which is what lets the retry
+/// schedule and the log-rate decision be unit-tested without reproducing the
+/// host's file-descriptor limit. Vocabulary mirrors `transports::etcd::connector`'s
+/// `BackoffState`.
+#[derive(Debug)]
+struct AcceptBackoff {
+    initial_delay: Duration,
+    max_delay: Duration,
+    log_interval: Duration,
+    current_delay: Duration,
+    suppressed: u64,
+    last_log_at: Option<std::time::Instant>,
+    /// Whether the loop is currently inside an exhaustion episode — the flag
+    /// `record_success` checks to tell a real recovery from an ordinary
+    /// steady-state accept.
+    in_backoff: bool,
+}
+
+impl Default for AcceptBackoff {
+    fn default() -> Self {
+        Self {
+            initial_delay: ACCEPT_BACKOFF_INITIAL_DELAY,
+            max_delay: ACCEPT_BACKOFF_MAX_DELAY,
+            log_interval: ACCEPT_BACKOFF_LOG_INTERVAL,
+            current_delay: ACCEPT_BACKOFF_INITIAL_DELAY,
+            suppressed: 0,
+            last_log_at: None,
+            in_backoff: false,
+        }
+    }
+}
+
+impl AcceptBackoff {
+    /// Classify an `accept()` error. Only descriptor or kernel-memory exhaustion
+    /// gets the backoff treatment; everything else stays on the pre-existing
+    /// path so genuinely unexpected failures are not hidden or slowed down.
+    fn classify(err: &std::io::Error) -> AcceptFailure {
+        #[cfg(unix)]
+        {
+            // `std::io::ErrorKind` has no stable variant for these errnos, so
+            // the raw value is the portable-with-cfg way to recognize them.
+            // `EMFILE`/`ENFILE` are descriptor exhaustion; `ENOBUFS`/`ENOMEM`
+            // are kernel out-of-memory for the socket. All four make an
+            // immediate retry deterministic, so they get the backoff path.
+            if matches!(
+                err.raw_os_error(),
+                Some(libc::EMFILE) | Some(libc::ENFILE) | Some(libc::ENOBUFS) | Some(libc::ENOMEM)
+            ) {
+                return AcceptFailure::Exhaustion;
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = err;
+        }
+        AcceptFailure::Ordinary
+    }
+
+    /// Record one exhaustion failure and return the delay to sleep plus the
+    /// rate-limited logging decision. The delay doubles per consecutive failure
+    /// and saturates at `max_delay`.
+    fn record_exhaustion(&mut self, now: std::time::Instant) -> AcceptBackoffAction {
+        self.in_backoff = true;
+
+        let delay = self.current_delay;
+        self.current_delay = self.current_delay.saturating_mul(2).min(self.max_delay);
+
+        let due = match self.last_log_at {
+            None => true,
+            Some(prev) => now.saturating_duration_since(prev) >= self.log_interval,
+        };
+
+        let log_suppressed = if due {
+            self.last_log_at = Some(now);
+            Some(std::mem::take(&mut self.suppressed))
+        } else {
+            self.suppressed += 1;
+            None
+        };
+
+        AcceptBackoffAction {
+            delay,
+            log_suppressed,
+        }
+    }
+
+    /// Record a successful accept. `Some(suppressed)` only when this success
+    /// both ended an exhaustion episode and the shared log-rate window allows
+    /// a line — so a listener flapping at the descriptor ceiling cannot emit
+    /// an unbounded stream of recovery lines, and a suppressed recovery keeps
+    /// its count for the next emission rather than discarding it. The clock
+    /// arrives as a closure, not an `Instant`, so the steady-state accept
+    /// (every ordinary connection) hits the early return below without
+    /// reading a clock at all.
+    fn record_success(&mut self, now: impl FnOnce() -> std::time::Instant) -> Option<u64> {
+        if !self.in_backoff {
+            return None;
+        }
+        self.current_delay = self.initial_delay;
+        self.in_backoff = false;
+        let now = now();
+
+        let due = match self.last_log_at {
+            None => true,
+            Some(prev) => now.saturating_duration_since(prev) >= self.log_interval,
+        };
+        if !due {
+            return None;
+        }
+        self.last_log_at = Some(now);
+        Some(std::mem::take(&mut self.suppressed))
+    }
+}
+
+/// Apply the accept-loop error policy to one failed `accept()`. Returns the
+/// delay that was actually slept — `Duration::ZERO` for ordinary errors, which
+/// keep the historical immediate-retry behavior.
+async fn handle_accept_error(err: &std::io::Error, backoff: &mut AcceptBackoff) -> Duration {
+    match AcceptBackoff::classify(err) {
+        AcceptFailure::Ordinary => {
+            // the client should retry, so we don't need to abort
+            tracing::warn!(error = %err, "failed to accept tcp connection");
+            // Gated like the sibling in `handle_connection`: an unconditional
+            // stderr write here doubles the log volume of any accept-error storm.
+            #[cfg(debug_assertions)]
+            eprintln!("failed to accept tcp connection: {}", err);
+            Duration::ZERO
+        }
+        AcceptFailure::Exhaustion => {
+            crate::metrics::transport_metrics::TCP_ACCEPT_BACKOFF_TOTAL.inc();
+            let action = backoff.record_exhaustion(std::time::Instant::now());
+            if let Some(suppressed) = action.log_suppressed {
+                tracing::warn!(
+                    error = %err,
+                    retry_delay_ms = action.delay.as_millis() as u64,
+                    suppressed_failures = suppressed,
+                    "tcp accept failed: out of file descriptors or kernel memory; backing off before retry"
+                );
+            }
+            time::sleep(action.delay).await;
+            action.delay
+        }
+    }
+}
+
+// Type aliases for boxed split halves used throughout the nested handlers below.
+type BoxRead = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
+type BoxWrite = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
+
 // this method listens on a tcp port for incoming connections
 // new connections are expected to send a protocol specific handshake
 // for us to determine the subject they are interested in, in this case,
@@ -497,11 +748,12 @@ impl ResponseService for TcpStreamServer {
 // the sender, then we spawn a task to forward all bytes from the tcp stream
 // to the sender
 async fn tcp_listener(
-    addr: String,
+    addr: SocketAddr,
     state: Arc<Mutex<State>>,
+    tls_acceptor: Option<TlsAcceptor>,
     read_tx: tokio::sync::oneshot::Sender<Result<u16>>,
 ) -> Result<()> {
-    let listener = tokio::net::TcpListener::bind(&addr)
+    let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to start TcpListender on {}: {}", addr, e));
 
@@ -524,6 +776,8 @@ async fn tcp_listener(
         }
     };
 
+    let mut accept_backoff = AcceptBackoff::default();
+
     loop {
         // todo - add instrumentation
         // todo - add counter for all accepted connections
@@ -531,11 +785,17 @@ async fn tcp_listener(
         // todo - add counter for incoming bytes
         // todo - add counter for outgoing bytes
         let (stream, _addr) = match listener.accept().await {
-            Ok((stream, _addr)) => (stream, _addr),
+            Ok((stream, _addr)) => {
+                if let Some(suppressed) = accept_backoff.record_success(std::time::Instant::now) {
+                    tracing::warn!(
+                        suppressed_failures = suppressed,
+                        "tcp accept recovered from resource exhaustion"
+                    );
+                }
+                (stream, _addr)
+            }
             Err(e) => {
-                // the client should retry, so we don't need to abort
-                tracing::warn!("failed to accept tcp connection: {e}");
-                eprintln!("failed to accept tcp connection: {}", e);
+                handle_accept_error(&e, &mut accept_backoff).await;
                 continue;
             }
         };
@@ -547,20 +807,50 @@ async fn tcp_listener(
             }
         }
 
-        match stream.set_linger(Some(std::time::Duration::from_secs(0))) {
+        match SockRef::from(&stream).set_linger(Some(std::time::Duration::from_secs(0))) {
             Ok(_) => (),
             Err(e) => {
                 tracing::warn!("failed to set tcp stream to linger: {e}");
             }
         }
 
-        tokio::spawn(handle_connection(stream, state.clone()));
+        // Spawn per-connection so the accept loop is never blocked by a slow
+        // TLS handshake. The handshake is bounded by DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS (default 3s).
+        let state_clone = state.clone();
+        let tls_acceptor_clone = tls_acceptor.clone();
+        tokio::spawn(async move {
+            let (reader, writer) = if let Some(ref tls) = tls_acceptor_clone {
+                match tokio::time::timeout(
+                    crate::tls_utils::handshake_timeout(),
+                    tls.accept(stream),
+                )
+                .await
+                {
+                    Ok(Ok(tls_stream)) => {
+                        let (r, w) = tokio::io::split(tls_stream);
+                        (Box::new(r) as BoxRead, Box::new(w) as BoxWrite)
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!("TLS handshake failed: {e}");
+                        return;
+                    }
+                    Err(_) => {
+                        tracing::warn!("TLS handshake timed out");
+                        return;
+                    }
+                }
+            } else {
+                let (r, w) = tokio::io::split(stream);
+                (Box::new(r) as BoxRead, Box::new(w) as BoxWrite)
+            };
+            handle_connection(reader, writer, state_clone).await;
+        });
     }
 
     // #[instrument(level = "trace"), skip(state)]
     // todo - clone before spawn and trace process_stream
-    async fn handle_connection(stream: tokio::net::TcpStream, state: Arc<Mutex<State>>) {
-        let result = process_stream(stream, state).await;
+    async fn handle_connection(reader: BoxRead, writer: BoxWrite, state: Arc<Mutex<State>>) {
+        let result = process_stream(reader, writer, state).await;
         match result {
             Ok(_) => tracing::trace!("successfully processed tcp connection"),
             Err(e) => {
@@ -573,20 +863,22 @@ async fn tcp_listener(
 
     /// This method is responsible for the internal tcp stream handshake
     /// The handshake will specialize the stream as a request/sender or response/receiver stream
-    async fn process_stream(stream: tokio::net::TcpStream, state: Arc<Mutex<State>>) -> Result<()> {
-        // split the socket in to a reader and writer
-        let (read_half, write_half) = tokio::io::split(stream);
-
+    async fn process_stream(
+        read_half: BoxRead,
+        write_half: BoxWrite,
+        state: Arc<Mutex<State>>,
+    ) -> Result<()> {
         // attach the codec to the reader and writer to get framed readers and writers
         let mut framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
         let framed_writer = FramedWrite::new(write_half, TwoPartCodec::default());
 
         // the internal tcp [`CallHomeHandshake`] connects the socket to the requester
         // here we await this first message as a raw bytes two part message
-        let first_message = framed_reader
-            .next()
-            .await
-            .ok_or(error!("Connection closed without a ControlMessage"))??;
+        let first_message =
+            tokio::time::timeout(std::time::Duration::from_secs(10), framed_reader.next())
+                .await
+                .map_err(|_| error!("Timed out waiting for CallHomeHandshake"))?
+                .ok_or(error!("Connection closed without a ControlMessage"))??;
 
         // we await on the raw bytes which should come in as a header only message
         // todo - improve error handling - check for no data
@@ -626,37 +918,29 @@ async fn tcp_listener(
     async fn process_request_stream(
         subject: String,
         state: Arc<Mutex<State>>,
-        reader: FramedRead<tokio::io::ReadHalf<tokio::net::TcpStream>, TwoPartCodec>,
-        writer: FramedWrite<tokio::io::WriteHalf<tokio::net::TcpStream>, TwoPartCodec>,
+        reader: FramedRead<BoxRead, TwoPartCodec>,
+        writer: FramedWrite<BoxWrite, TwoPartCodec>,
     ) -> Result<()> {
         // Request stream is unidirectional; we don't read from the downstream.
         drop(reader);
 
-        let request_stream = {
-            let mut guard = state.lock().await;
-            let conn = guard.tx_subjects.remove(&subject).ok_or(error!(
+        let request_stream = TcpStreamServer::take_request_stream(&state, &subject).ok_or_else(|| {
+            error!(
                 "Subject not found: {}; downstream subscriber specified a subject unknown to the upstream publisher",
                 subject
-            ))?;
-            if let Some(key) = guard.subject_instance.remove(&subject)
-                && let Some(subjects) = guard.instance_subjects.get_mut(&key)
-            {
-                subjects.remove(&(StreamType::Request, subject.clone()));
-                if subjects.is_empty() {
-                    guard.instance_subjects.remove(&key);
-                }
-            }
-            conn
-        };
+            )
+        })?;
 
         let RequestedSendConnection {
             context,
             connection,
+            send_buffer_count,
         } = request_stream;
 
-        // Buffer size matches `process_response_stream`; both should be driven
-        // by the registration options rather than hard-coded. See #10293.
-        let (request_tx, request_rx) = mpsc::channel(64);
+        // Buffer size is driven by the registration options
+        // ([`StreamOptions::send_buffer_count`]) rather than hard-coded; the
+        // same applies to `process_response_stream`. See #10293.
+        let (request_tx, request_rx) = data_plane_channel(send_buffer_count);
 
         if connection
             .send(Ok(crate::pipeline::network::StreamSender {
@@ -686,20 +970,26 @@ async fn tcp_listener(
     /// The downstream `handle_request_reader` matches on the received variant
     /// and reacts accordingly.
     async fn request_stream_send_handler(
-        mut framed_writer: FramedWrite<tokio::io::WriteHalf<tokio::net::TcpStream>, TwoPartCodec>,
+        mut framed_writer: FramedWrite<BoxWrite, TwoPartCodec>,
         mut request_rx: mpsc::Receiver<TwoPartMessage>,
         context: Arc<dyn AsyncEngineContext>,
     ) {
+        // Construct the cancellation futures once. Recreating them for every frame clones
+        // the context's watch receivers and repeatedly registers/drops Tokio notifications.
+        let killed = context.killed();
+        let stopped = context.stopped();
+        tokio::pin!(killed, stopped);
+
         let closing_msg: Option<ControlMessage> = loop {
             tokio::select! {
                 biased;
 
-                _ = context.killed() => {
+                _ = &mut killed => {
                     tracing::trace!("context kill received in request-stream send handler");
                     break Some(ControlMessage::Kill);
                 }
 
-                _ = context.stopped() => {
+                _ = &mut stopped => {
                     tracing::trace!("context stop received in request-stream send handler");
                     break Some(ControlMessage::Stop);
                 }
@@ -745,34 +1035,24 @@ async fn tcp_listener(
     async fn process_response_stream(
         subject: String,
         state: Arc<Mutex<State>>,
-        mut reader: FramedRead<tokio::io::ReadHalf<tokio::net::TcpStream>, TwoPartCodec>,
-        writer: FramedWrite<tokio::io::WriteHalf<tokio::net::TcpStream>, TwoPartCodec>,
+        mut reader: FramedRead<BoxRead, TwoPartCodec>,
+        writer: FramedWrite<BoxWrite, TwoPartCodec>,
     ) -> Result<()> {
-        let response_stream = {
-            let mut guard = state.lock().await;
-            let conn = guard
-                .rx_subjects
-                .remove(&subject)
-                .ok_or(error!("Subject not found: {}; upstream publisher specified a subject unknown to the downsteam subscriber", subject))?;
-            if let Some(key) = guard.subject_instance.remove(&subject)
-                && let Some(subjects) = guard.instance_subjects.get_mut(&key)
-            {
-                subjects.remove(&(StreamType::Response, subject.clone()));
-                if subjects.is_empty() {
-                    guard.instance_subjects.remove(&key);
-                }
-            }
-            conn
-        };
+        let response_stream = TcpStreamServer::take_response_stream(&state, &subject).ok_or_else(|| {
+            error!("Subject not found: {}; upstream publisher specified a subject unknown to the downsteam subscriber", subject)
+        })?;
 
         // unwrap response_stream
         let RequestedRecvConnection {
             context,
             connection,
+            send_buffer_count,
         } = response_stream;
 
         // the [`Prologue`]
         // there must be a second control message it indicate the other segment's generate method was successful
+        // No timeout here: the worker sends the prologue only after generate() setup completes,
+        // which can take arbitrarily long (model load, queue delay, cold start).
         let prologue = reader
             .next()
             .await
@@ -807,9 +1087,10 @@ async fn tcp_listener(
             return Err(error!("Received error prologue: {}", error));
         }
 
-        // Buffer size should be driven by the registration options rather than
-        // hard-coded; the same applies to `process_request_stream`. See #10293.
-        let (response_tx, response_rx) = mpsc::channel(64);
+        // Buffer size is driven by the registration options
+        // ([`StreamOptions::send_buffer_count`]) rather than hard-coded; the
+        // same applies to `process_request_stream`. See #10293.
+        let (response_tx, response_rx) = data_plane_channel(send_buffer_count);
 
         if connection
             .send(Ok(crate::pipeline::network::StreamReceiver {
@@ -847,31 +1128,40 @@ async fn tcp_listener(
     }
 
     async fn network_receive_handler(
-        mut framed_reader: FramedRead<tokio::io::ReadHalf<tokio::net::TcpStream>, TwoPartCodec>,
+        mut framed_reader: FramedRead<BoxRead, TwoPartCodec>,
         response_tx: mpsc::Sender<Bytes>,
         control_tx: mpsc::Sender<ControlMessage>,
         context: Arc<dyn AsyncEngineContext>,
     ) {
+        // These futures stay pending across frames. Constructing them inside the loop clones
+        // watch receivers and registers/drops notifications for every streamed token.
+        let response_closed = response_tx.closed();
+        let killed = context.killed();
+        let stopped = context.stopped();
+        tokio::pin!(response_closed, killed, stopped);
+
         // loop over reading the tcp stream and checking if the writer is closed
         let mut can_stop = true;
         loop {
             tokio::select! {
                 biased;
 
-                _ = response_tx.closed() => {
+                _ = &mut response_closed => {
                     tracing::trace!("response channel closed before the client finished writing data");
                     let _ = control_tx.send(ControlMessage::Kill).await;
                     break;
                 }
 
-                _ = context.killed() => {
+                _ = &mut killed => {
                     tracing::trace!("context kill signal received; shutting down");
                     let _ = control_tx.send(ControlMessage::Kill).await;
                     break;
                 }
 
-                _ = context.stopped(), if can_stop => {
+                _ = &mut stopped, if can_stop => {
                     tracing::trace!("context stop signal received; shutting down");
+                    // `stopped` is now complete; keep this branch disabled because polling
+                    // the same completed async future again would panic.
                     can_stop = false;
                     let _ = control_tx.send(ControlMessage::Stop).await;
                 }
@@ -941,7 +1231,7 @@ async fn tcp_listener(
     }
 
     async fn network_send_handler(
-        socket_tx: FramedWrite<tokio::io::WriteHalf<tokio::net::TcpStream>, TwoPartCodec>,
+        socket_tx: FramedWrite<BoxWrite, TwoPartCodec>,
         control_rx: mpsc::Receiver<ControlMessage>,
     ) {
         let mut socket_tx = socket_tx;
@@ -1010,8 +1300,111 @@ mod tests {
     use super::*;
     use crate::engine::AsyncEngineContextProvider;
     use crate::pipeline::Context;
+    use crate::pipeline::network::DEFAULT_SEND_BUFFER_COUNT;
+    use crate::pipeline::network::tcp::client::TcpClient;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
     use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
     use tokio::net::TcpStream;
+
+    fn make_cert_files() -> (NamedTempFile, NamedTempFile) {
+        let key_pair = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+            .unwrap()
+            .self_signed(&key_pair)
+            .unwrap();
+        let mut cert_file = NamedTempFile::new().unwrap();
+        cert_file.write_all(cert.pem().as_bytes()).unwrap();
+        let mut key_file = NamedTempFile::new().unwrap();
+        key_file
+            .write_all(key_pair.serialize_pem().as_bytes())
+            .unwrap();
+        (cert_file, key_file)
+    }
+
+    #[test]
+    fn build_tls_acceptor_no_env_vars_is_plaintext() {
+        // Also clear the client-CA var: ambient it would turn this into an error
+        // (client CA without a server cert/key) instead of plaintext.
+        temp_env::with_vars_unset(
+            [
+                "DYN_TCP_TLS_CERT_PATH",
+                "DYN_TCP_TLS_KEY_PATH",
+                "DYN_TCP_TLS_CLIENT_CA_CERT_PATH",
+            ],
+            || {
+                assert!(TcpStreamServer::build_tls_acceptor().unwrap().is_none());
+            },
+        );
+    }
+
+    #[test]
+    fn build_tls_acceptor_partial_config_errors() {
+        let (cert, key) = make_cert_files();
+        let cert_str = cert.path().to_str().unwrap();
+        let key_str = key.path().to_str().unwrap();
+        // only cert
+        temp_env::with_vars(
+            [
+                ("DYN_TCP_TLS_CERT_PATH", Some(cert_str)),
+                ("DYN_TCP_TLS_KEY_PATH", None),
+            ],
+            || assert!(TcpStreamServer::build_tls_acceptor().is_err()),
+        );
+        // only key
+        temp_env::with_vars(
+            [
+                ("DYN_TCP_TLS_CERT_PATH", None),
+                ("DYN_TCP_TLS_KEY_PATH", Some(key_str)),
+            ],
+            || assert!(TcpStreamServer::build_tls_acceptor().is_err()),
+        );
+    }
+
+    #[test]
+    fn build_tls_acceptor_both_paths_is_tls() {
+        let (cert, key) = make_cert_files();
+        temp_env::with_vars(
+            [
+                ("DYN_TCP_TLS_CERT_PATH", Some(cert.path().to_str().unwrap())),
+                ("DYN_TCP_TLS_KEY_PATH", Some(key.path().to_str().unwrap())),
+            ],
+            || assert!(TcpStreamServer::build_tls_acceptor().unwrap().is_some()),
+        );
+    }
+
+    #[test]
+    fn build_tls_acceptor_with_client_ca_is_mtls() {
+        // A client CA turns the response-stream server into an mTLS acceptor.
+        let (cert, key) = make_cert_files();
+        temp_env::with_vars(
+            [
+                ("DYN_TCP_TLS_CERT_PATH", Some(cert.path().to_str().unwrap())),
+                ("DYN_TCP_TLS_KEY_PATH", Some(key.path().to_str().unwrap())),
+                (
+                    "DYN_TCP_TLS_CLIENT_CA_CERT_PATH",
+                    Some(cert.path().to_str().unwrap()),
+                ),
+            ],
+            || assert!(TcpStreamServer::build_tls_acceptor().unwrap().is_some()),
+        );
+    }
+
+    #[test]
+    fn build_tls_acceptor_client_ca_without_server_identity_errors() {
+        let (cert, _key) = make_cert_files();
+        temp_env::with_vars(
+            [
+                ("DYN_TCP_TLS_CERT_PATH", None),
+                ("DYN_TCP_TLS_KEY_PATH", None),
+                (
+                    "DYN_TCP_TLS_CLIENT_CA_CERT_PATH",
+                    Some(cert.path().to_str().unwrap()),
+                ),
+            ],
+            || assert!(TcpStreamServer::build_tls_acceptor().is_err()),
+        );
+    }
 
     // Mock resolver that always fails to simulate the fallback scenario
     struct FailingIpResolver;
@@ -1074,6 +1467,57 @@ mod tests {
         );
     }
 
+    /// The data-plane channel helper sizes the mpsc buffer from
+    /// `send_buffer_count` — this is the value `process_request_stream` /
+    /// `process_response_stream` feed it. `max_capacity()` reflects the
+    /// channel's configured buffer, so a custom value and the default both
+    /// reach the channel. Guards against regressing back to a hard-coded 64.
+    #[test]
+    fn data_plane_channel_capacity_matches_send_buffer_count() {
+        let (tx, _rx) = data_plane_channel::<()>(7);
+        assert_eq!(tx.max_capacity(), 7);
+
+        let (tx, _rx) = data_plane_channel::<()>(DEFAULT_SEND_BUFFER_COUNT);
+        assert_eq!(tx.max_capacity(), 64);
+
+        // A misconfigured 0 must clamp to 1, not panic (mpsc::channel(0) panics).
+        let (tx, _rx) = data_plane_channel::<()>(0);
+        assert_eq!(tx.max_capacity(), 1);
+    }
+
+    /// `register` must thread `StreamOptions::send_buffer_count` through to the
+    /// stored `RequestedSendConnection` / `RequestedRecvConnection` (the
+    /// registration structs `process_*_stream` later destructure to size the
+    /// channel). Verified here against the real registration path.
+    #[tokio::test]
+    async fn register_threads_send_buffer_count_into_connection_structs() {
+        let server = TcpStreamServer::new(ServerOptions::default())
+            .await
+            .expect("server");
+        let context = Context::new(());
+        let options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(true)
+            .enable_response_stream(true)
+            .send_buffer_count(7)
+            .build()
+            .unwrap();
+
+        let _pending = server.register(options).await;
+
+        let state = server.state.lock();
+        assert_eq!(state.tx_subjects.len(), 1, "one request stream registered");
+        assert_eq!(state.rx_subjects.len(), 1, "one response stream registered");
+        assert!(
+            state.tx_subjects.values().all(|c| c.send_buffer_count == 7),
+            "send_buffer_count must reach RequestedSendConnection"
+        );
+        assert!(
+            state.rx_subjects.values().all(|c| c.send_buffer_count == 7),
+            "send_buffer_count must reach RequestedRecvConnection"
+        );
+    }
+
     #[tokio::test]
     async fn test_tcp_stream_server_fallback_to_loopback() {
         // Test fallback behavior using a mock resolver that always fails
@@ -1129,6 +1573,51 @@ mod tests {
 
         // The server should work with the fallback IP
         assert!(socket_addr.port() > 0, "Server should have a valid port");
+    }
+
+    #[tokio::test]
+    async fn configured_ip_literals_bind_and_format_addresses() {
+        let ipv6_available = TcpListener::bind("[::1]:0").is_ok();
+
+        for (host, expected_ip) in [
+            ("127.0.0.1", "127.0.0.1".parse::<IpAddr>().unwrap()),
+            ("::1", "::1".parse::<IpAddr>().unwrap()),
+        ] {
+            if expected_ip.is_ipv6() && !ipv6_available {
+                eprintln!("skipping IPv6 bind because this host does not support IPv6 loopback");
+                continue;
+            }
+
+            let server = TcpStreamServer::new_with_resolver(
+                ServerOptions {
+                    port: 0,
+                    interface: Some(host.to_string()),
+                },
+                FailingIpResolver,
+            )
+            .await
+            .unwrap();
+            let context = Context::new(());
+            let pending = server
+                .register(
+                    StreamOptions::builder()
+                        .context(context.context())
+                        .enable_request_stream(false)
+                        .enable_response_stream(true)
+                        .build()
+                        .unwrap(),
+                )
+                .await;
+            let connection_info = pending.recv_stream.unwrap().connection_info;
+            let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
+            let address = tcp_info.address.parse::<SocketAddr>().unwrap();
+
+            assert_eq!(address.ip(), expected_ip);
+            assert_ne!(address.port(), 0);
+            if expected_ip.is_ipv6() {
+                assert!(tcp_info.address.starts_with('['));
+            }
+        }
     }
 
     /// Create a test server using the failing IP resolver (falls back to loopback).
@@ -1362,7 +1851,7 @@ mod tests {
 
         // Verify it's in rx_subjects
         {
-            let state = server.state.lock().await;
+            let state = server.state.lock();
             assert!(state.rx_subjects.contains_key(&subject));
         }
 
@@ -1374,7 +1863,7 @@ mod tests {
 
         // Verify it's been removed from rx_subjects
         {
-            let state = server.state.lock().await;
+            let state = server.state.lock();
             assert!(
                 !state.rx_subjects.contains_key(&subject),
                 "RAII cleanup should have removed the rx_subjects entry"
@@ -1409,7 +1898,7 @@ mod tests {
 
         // The entry should still be in rx_subjects (cleanup was disarmed)
         {
-            let state = server.state.lock().await;
+            let state = server.state.lock();
             assert!(
                 state.rx_subjects.contains_key(&subject),
                 "into_parts() should disarm the RAII cleanup"
@@ -1566,7 +2055,7 @@ mod tests {
         // Tombstone the identity.
         server.cancel_instance_streams(&id).await;
         {
-            let state = server.state.lock().await;
+            let state = server.state.lock();
             assert!(state.removed_instances.contains_key(&id));
         }
 
@@ -1584,7 +2073,7 @@ mod tests {
         // The expired tombstone must have been pruned (lazy pruning fires on
         // every associate_instance/cancel_instance_streams call).
         {
-            let state = server.state.lock().await;
+            let state = server.state.lock();
             assert!(
                 !state.removed_instances.contains_key(&id),
                 "expired tombstone should be pruned, not retained"
@@ -1625,7 +2114,7 @@ mod tests {
         tokio::time::advance(TOMBSTONE_TTL + Duration::from_secs(1)).await;
         server.cancel_instance_streams(&id_new).await;
 
-        let state = server.state.lock().await;
+        let state = server.state.lock();
         assert!(
             !state.removed_instances.contains_key(&id_old),
             "old tombstone should be pruned by the next cancel_instance_streams call"
@@ -1651,7 +2140,7 @@ mod tests {
         server.cancel_instance_streams(&id_a).await;
         server.clear_instance_tombstone(&id_b).await;
 
-        let state = server.state.lock().await;
+        let state = server.state.lock();
         assert!(
             state.removed_instances.contains_key(&id_a),
             "clearing a different identity must not remove id_a's tombstone"
@@ -1880,6 +2369,63 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_concurrent_response_registration_and_call_home() {
+        const STREAMS: usize = 128;
+
+        let result = time::timeout(Duration::from_secs(20), async {
+            let server = test_server().await;
+            let mut pending_streams = Vec::with_capacity(STREAMS);
+            let mut client_tasks = Vec::with_capacity(STREAMS);
+
+            for idx in 0..STREAMS {
+                let context = Context::new(());
+                let options = StreamOptions::builder()
+                    .context(context.context())
+                    .enable_request_stream(false)
+                    .enable_response_stream(true)
+                    .build()
+                    .unwrap();
+
+                let pending = server.register(options).await;
+                let registered_stream = pending.recv_stream.unwrap();
+                let (connection_info, stream_provider) = registered_stream.into_parts();
+                let client_context =
+                    Context::with_id_and_metadata((), context.id().to_string(), Default::default());
+                let payload = Bytes::from(format!("payload-{idx}"));
+
+                pending_streams.push((idx, payload.clone(), stream_provider));
+                client_tasks.push(tokio::spawn(async move {
+                    let mut sender = TcpClient::create_response_stream(
+                        client_context.context(),
+                        connection_info,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                    sender.send_prologue(None).await.unwrap();
+                    sender.send(payload).await.unwrap();
+                }));
+            }
+
+            for task in client_tasks {
+                task.await.unwrap();
+            }
+
+            for (idx, expected, stream_provider) in pending_streams {
+                let mut stream = stream_provider.await.unwrap().unwrap();
+                let actual = stream.rx.recv().await.unwrap();
+                assert_eq!(actual, expected, "payload mismatch for stream {idx}");
+            }
+        })
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "concurrent response registration and call-home timed out"
+        );
+    }
+
     // ==================== request_stream_send_handler integration tests ====================
     //
     // These exercise the closing-message contract of `request_stream_send_handler`
@@ -1997,6 +2543,139 @@ mod tests {
         assert!(
             matches!(ctrl, ControlMessage::Stop),
             "context.stop() should emit Stop, got {ctrl:?}"
+        );
+    }
+
+    // ---- accept-loop backoff under resource exhaustion (issue #11822) ----
+
+    #[cfg(unix)]
+    fn emfile_error() -> std::io::Error {
+        std::io::Error::from_raw_os_error(libc::EMFILE)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn accept_backoff_classifies_all_exhaustion_errnos() {
+        for errno in [libc::EMFILE, libc::ENFILE, libc::ENOBUFS, libc::ENOMEM] {
+            let err = std::io::Error::from_raw_os_error(errno);
+            assert_eq!(
+                AcceptBackoff::classify(&err),
+                AcceptFailure::Exhaustion,
+                "errno {errno} must classify as exhaustion"
+            );
+        }
+        // Ordinary errors stay on the immediate-retry path.
+        let ordinary = std::io::Error::from(std::io::ErrorKind::ConnectionAborted);
+        assert_eq!(AcceptBackoff::classify(&ordinary), AcceptFailure::Ordinary,);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn accept_backoff_grows_resets_and_rate_limits() {
+        let mut backoff = AcceptBackoff::default();
+        let now = std::time::Instant::now();
+
+        // Delay doubles per consecutive failure and saturates at the ceiling.
+        let delays: Vec<Duration> = (0..12)
+            .map(|_| backoff.record_exhaustion(now).delay)
+            .collect();
+        assert!(delays[0] > Duration::ZERO);
+        let sat = delays
+            .iter()
+            .position(|d| *d == ACCEPT_BACKOFF_MAX_DELAY)
+            .expect("delay reaches the ceiling");
+        for pair in delays[..=sat].windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "delay must grow: {:?} -> {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+        assert!(delays[sat..].iter().all(|d| *d == ACCEPT_BACKOFF_MAX_DELAY));
+
+        // A successful accept resets the schedule to the initial delay.
+        backoff.record_success(|| now);
+        assert_eq!(
+            backoff.record_exhaustion(now).delay,
+            ACCEPT_BACKOFF_INITIAL_DELAY,
+        );
+
+        // The summary is rate-limited: one emission per interval, carrying the
+        // count of failures suppressed since the previous one.
+        let t0 = std::time::Instant::now();
+        let mut backoff = AcceptBackoff::default();
+        let emitted: Vec<Option<u64>> = (0..50)
+            .map(|_| backoff.record_exhaustion(t0).log_suppressed)
+            .collect();
+        assert_eq!(emitted.iter().filter(|e| e.is_some()).count(), 1);
+        assert_eq!(emitted[0], Some(0));
+
+        let t1 = t0 + ACCEPT_BACKOFF_LOG_INTERVAL + Duration::from_millis(1);
+        assert_eq!(
+            backoff.record_exhaustion(t1).log_suppressed,
+            Some(49),
+            "next emission reports every failure suppressed since the last one",
+        );
+
+        // Recovery shares the rate-limit window with the failure summary, so a
+        // flapping listener cannot emit a recovery line per accept.
+        let mut backoff = AcceptBackoff::default();
+        let t0 = std::time::Instant::now();
+        assert_eq!(backoff.record_exhaustion(t0).log_suppressed, Some(0));
+        backoff.record_exhaustion(t0);
+        backoff.record_exhaustion(t0);
+        assert_eq!(
+            backoff.record_success(|| t0),
+            None,
+            "recovery inside the log window must not emit",
+        );
+        backoff.record_exhaustion(t0);
+        assert_eq!(
+            backoff.record_success(|| t0 + ACCEPT_BACKOFF_LOG_INTERVAL),
+            Some(3),
+            "after the window elapses the recovery emits with the rolled-forward count",
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn accept_backoff_socket_recovers_after_injected_exhaustion() {
+        use crate::metrics::transport_metrics::TCP_ACCEPT_BACKOFF_TOTAL;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral listener");
+        let addr = listener.local_addr().expect("local_addr");
+
+        let mut backoff = AcceptBackoff::default();
+        let counter_before = TCP_ACCEPT_BACKOFF_TOTAL.get();
+
+        let started = std::time::Instant::now();
+        let mut expected_total = Duration::ZERO;
+        for _ in 0..3 {
+            expected_total += handle_accept_error(&emfile_error(), &mut backoff).await;
+        }
+        assert!(expected_total >= ACCEPT_BACKOFF_INITIAL_DELAY * 3);
+        assert!(
+            started.elapsed() >= expected_total,
+            "the accept loop must sleep, not spin; elapsed {:?}",
+            started.elapsed(),
+        );
+        assert!(TCP_ACCEPT_BACKOFF_TOTAL.get() >= counter_before + 3.0);
+
+        let client = tokio::spawn(async move { tokio::net::TcpStream::connect(addr).await });
+        let (accepted, _peer) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .expect("listener should still accept after backing off")
+            .expect("accept should succeed");
+        let _client = client.await.expect("client task").expect("client connect");
+        drop(accepted);
+
+        backoff.record_success(std::time::Instant::now);
+        assert_eq!(
+            backoff.record_exhaustion(std::time::Instant::now()).delay,
+            ACCEPT_BACKOFF_INITIAL_DELAY,
         );
     }
 }

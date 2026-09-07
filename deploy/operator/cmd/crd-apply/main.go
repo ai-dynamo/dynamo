@@ -31,6 +31,16 @@ const (
 func main() {
 	crdsDir := flag.String("crds-dir", "/opt/dynamo-operator/crds/", "Directory containing CRD YAML files")
 	version := flag.String("version", "", "Operator version to stamp on CRDs")
+	conversionWebhookServiceName := flag.String(
+		"conversion-webhook-service-name",
+		"",
+		"Service name for CRD conversion webhooks",
+	)
+	conversionWebhookServiceNamespace := flag.String(
+		"conversion-webhook-service-namespace",
+		"",
+		"Service namespace for CRD conversion webhooks",
+	)
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
@@ -81,6 +91,14 @@ func main() {
 			}
 			crd.Annotations[versionAnnotation] = *version
 		}
+		if err := configureConversionWebhookService(
+			crd,
+			*conversionWebhookServiceName,
+			*conversionWebhookServiceNamespace,
+		); err != nil {
+			log.Error(err, "unable to configure CRD conversion webhook service", "crd", crd.Name)
+			os.Exit(1)
+		}
 
 		patchData, err := yaml.Marshal(crd)
 		if err != nil {
@@ -113,4 +131,31 @@ func main() {
 	}
 
 	log.Info("CRD apply complete", "applied", applied)
+}
+
+func configureConversionWebhookService(
+	crd *apiextensionsv1.CustomResourceDefinition,
+	serviceName string,
+	serviceNamespace string,
+) error {
+	if crd.Spec.Conversion == nil ||
+		crd.Spec.Conversion.Webhook == nil ||
+		crd.Spec.Conversion.Webhook.ClientConfig == nil ||
+		crd.Spec.Conversion.Webhook.ClientConfig.Service == nil {
+		return nil
+	}
+	if serviceName == "" {
+		return fmt.Errorf("conversion webhook service name is required")
+	}
+	if serviceNamespace == "" {
+		return fmt.Errorf("conversion webhook service namespace is required")
+	}
+
+	// Override service coordinates because these might be customized through Helm values.
+	crd.Spec.Conversion.Webhook.ClientConfig.Service.Name = serviceName
+	crd.Spec.Conversion.Webhook.ClientConfig.Service.Namespace = serviceNamespace
+
+	// The main operator process patches caBundle after certificate setup.
+	crd.Spec.Conversion.Webhook.ClientConfig.CABundle = nil
+	return nil
 }

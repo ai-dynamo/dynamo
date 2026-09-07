@@ -19,6 +19,34 @@ fn get_text(content: &ChatCompletionMessageContent) -> &str {
 }
 use dynamo_llm::protocols::openai::DeltaGeneratorExt;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+use dynamo_parsers::tool_calling::jail::{Annotated as JailAnnotated, JailedStream};
+
+// The jail moved to dynamo-parsers, where it operates on the shared
+// CreateChatCompletionStreamResponse. Drive it with dynamo `Nv` stream
+// responses by unwrapping to `inner` on the way in and re-wrapping on the way
+// out (mirrors OpenAIPreprocessor::apply_tool_calling_jail).
+fn drive_moved_jail(
+    jail: JailedStream,
+    nv_inputs: Vec<NvCreateChatCompletionStreamResponse>,
+) -> impl futures::Stream<Item = NvCreateChatCompletionStreamResponse> {
+    use futures::StreamExt;
+    let input = futures::stream::iter(nv_inputs.into_iter().map(|nv| JailAnnotated {
+        data: Some(nv.inner),
+        id: None,
+        event: None,
+        comment: None,
+        error: None,
+    }));
+    jail.apply_with_finish_reason(input)
+        .filter_map(|a| async move {
+            a.data.map(|inner| NvCreateChatCompletionStreamResponse {
+                inner,
+                nvext: None,
+                llm_metrics: None,
+            })
+        })
+}
 
 fn create_test_request() -> NvCreateChatCompletionRequest {
     let messages = vec![ChatCompletionRequestMessage::User(
@@ -50,18 +78,7 @@ async fn apply_jail_transformation(
     raw_response: dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse,
     tool_choice: Option<ChatCompletionToolChoiceOption>,
 ) -> dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse {
-    use dynamo_llm::protocols::openai::chat_completions::jail::JailedStream;
-    use dynamo_runtime::protocols::annotated::Annotated;
     use futures::StreamExt;
-    use futures::stream;
-
-    let input_stream = stream::iter(vec![Annotated {
-        data: Some(raw_response),
-        id: None,
-        event: None,
-        comment: None,
-        error: None,
-    }]);
 
     let mut builder = JailedStream::builder();
 
@@ -76,10 +93,10 @@ async fn apply_jail_transformation(
     }
 
     let jail = builder.build();
-    let output_stream = jail.apply_with_finish_reason(input_stream);
+    let output_stream = drive_moved_jail(jail, vec![raw_response]);
 
     tokio::pin!(output_stream);
-    output_stream.next().await.unwrap().data.unwrap()
+    output_stream.next().await.unwrap()
 }
 
 async fn apply_jail_transformation_streaming(
@@ -88,18 +105,7 @@ async fn apply_jail_transformation_streaming(
     >,
     tool_choice: Option<ChatCompletionToolChoiceOption>,
 ) -> Vec<dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse> {
-    use dynamo_llm::protocols::openai::chat_completions::jail::JailedStream;
-    use dynamo_runtime::protocols::annotated::Annotated;
     use futures::StreamExt;
-    use futures::stream;
-
-    let input_stream = stream::iter(raw_responses.into_iter().map(|r| Annotated {
-        data: Some(r),
-        id: None,
-        event: None,
-        comment: None,
-        error: None,
-    }));
 
     let mut builder = JailedStream::builder();
 
@@ -114,13 +120,7 @@ async fn apply_jail_transformation_streaming(
     }
 
     let jail = builder.build();
-    let output_stream = jail.apply_with_finish_reason(input_stream);
-
-    tokio::pin!(output_stream);
-    output_stream
-        .filter_map(|ann| async move { ann.data })
-        .collect()
-        .await
+    drive_moved_jail(jail, raw_responses).collect().await
 }
 
 fn build_backend_output(text: &str) -> BackendOutput {
@@ -136,6 +136,7 @@ fn build_backend_output(text: &str) -> BackendOutput {
         index: Some(0),
         completion_usage: None,
         disaggregated_params: None,
+        encoder_result: None,
         worker_trace_link: None,
         engine_data: None,
         routing_data: None,
@@ -307,6 +308,7 @@ async fn test_streaming_named_tool_buffers_until_finish() {
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
+            encoder_result: None,
             worker_trace_link: None,
             engine_data: None,
             routing_data: None,
@@ -377,6 +379,7 @@ async fn test_streaming_required_tool_parallel() {
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
+            encoder_result: None,
             worker_trace_link: None,
             engine_data: None,
             routing_data: None,
@@ -449,6 +452,7 @@ fn test_no_tool_choice_outputs_normal_text() {
         index: Some(0),
         completion_usage: None,
         disaggregated_params: None,
+        encoder_result: None,
         worker_trace_link: None,
         engine_data: None,
         routing_data: None,
@@ -510,6 +514,7 @@ fn make_text_chunk(
             service_tier: None,
         },
         nvext: None,
+        llm_metrics: None,
     }
 }
 
@@ -521,28 +526,13 @@ async fn apply_jail_named_with_parser(
     parser: &str,
     named_tool: &str,
 ) -> Vec<dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse> {
-    use dynamo_llm::protocols::openai::chat_completions::jail::JailedStream;
-    use dynamo_runtime::protocols::annotated::Annotated;
     use futures::StreamExt;
-    use futures::stream;
-
-    let input = stream::iter(chunks.into_iter().map(|r| Annotated {
-        data: Some(r),
-        id: None,
-        event: None,
-        comment: None,
-        error: None,
-    }));
 
     let jail = JailedStream::builder()
         .tool_call_parser(parser)
         .named_tool_filter(named_tool)
         .build();
-    let out = jail.apply_with_finish_reason(input);
-    tokio::pin!(out);
-    out.filter_map(|ann| async move { ann.data })
-        .collect()
-        .await
+    drive_moved_jail(jail, chunks).collect().await
 }
 
 /// When tool_choice=named, a tool_call_parser is configured, and the model emits
@@ -599,39 +589,18 @@ async fn test_named_tool_with_parser_wrong_tool_is_filtered() {
 
     let responses = apply_jail_named_with_parser(chunks, "hermes", "get_weather").await;
 
-    // No response should contain a tool call for the wrong tool
-    for r in &responses {
-        if let Some(choice) = r.inner.choices.first()
-            && let Some(tool_calls) = &choice.delta.tool_calls
-        {
-            for tc in tool_calls {
-                let name = tc
-                    .function
-                    .as_ref()
-                    .and_then(|f| f.name.as_deref())
-                    .unwrap_or("");
-                assert_ne!(
-                    name, "search",
-                    "wrong tool 'search' should have been filtered by named_tool_filter"
-                );
-            }
-        }
-    }
+    assert!(
+        collect_tool_calls(&responses).is_empty(),
+        "the named-tool filter must drop every call when the model selects a different tool"
+    );
 }
 
 // ---------------------------------------------------------------------------
 // TOOLCALLING.11 — tool_choice × parser-name parametrisation (cross-parser tool_choice parametrisation work-item (tracked separately))
 //
 // The hermes tests above exercise TOOLCALLING.11 only for the hermes parser. These
-// tests exercise the same auto / required / named-correct / named-wrong axis
-// against `kimi_k2` and `deepseek_v4` so the chart cells move from `~`/`—`
-// to ✓ at the integration layer.
-//
-// Goal: hit the code path with a real parser-format payload regardless of
-// whether the resulting behavior is "correct" — and pin whatever comes out.
-// Where the jail today routes a parser+immediate-mode combo through a path
-// that drops the parser payload, the assertion records that fact rather
-// than expecting a specific outcome.
+// tests cover auto and named choices across the model-specific parser formats.
+// Kimi's native structural tags also provide a supported required-choice contract.
 // ---------------------------------------------------------------------------
 
 /// Helper: send a single text payload through the jail with both a parser
@@ -641,20 +610,9 @@ async fn apply_jail_with_parser_and_choice(
     parser: &str,
     tool_choice: Option<ChatCompletionToolChoiceOption>,
 ) -> Vec<dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse> {
-    use dynamo_llm::protocols::openai::chat_completions::jail::JailedStream;
-    use dynamo_runtime::protocols::annotated::Annotated;
     use futures::StreamExt;
-    use futures::stream;
 
     let chunks = vec![make_text_chunk(payload, false), make_text_chunk("", true)];
-
-    let input = stream::iter(chunks.into_iter().map(|r| Annotated {
-        data: Some(r),
-        id: None,
-        event: None,
-        comment: None,
-        error: None,
-    }));
 
     let mut builder = JailedStream::builder().tool_call_parser(parser);
     match tool_choice {
@@ -668,11 +626,42 @@ async fn apply_jail_with_parser_and_choice(
     }
     let jail = builder.build();
 
-    let out = jail.apply_with_finish_reason(input);
-    tokio::pin!(out);
-    out.filter_map(|ann| async move { ann.data })
-        .collect()
-        .await
+    drive_moved_jail(jail, chunks).collect().await
+}
+
+/// Parse a model-native payload with structural-tag response handling enabled.
+async fn apply_structural_tag_jail_with_parser_and_choice(
+    payload: &str,
+    parser: &str,
+    tool_choice: Option<ChatCompletionToolChoiceOption>,
+) -> Vec<dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse> {
+    use futures::StreamExt;
+
+    let chunks = vec![make_text_chunk(payload, false), make_text_chunk("", true)];
+    let input = futures::stream::iter(chunks.into_iter().map(|nv| JailAnnotated {
+        data: Some(nv.inner),
+        id: None,
+        event: None,
+        comment: None,
+        error: None,
+    }));
+
+    dynamo_parsers::tool_calling::jail::apply_tool_calling_jail(
+        Some(parser.to_string()),
+        tool_choice,
+        None,
+        true,
+        input,
+    )
+    .filter_map(|a| async move {
+        a.data.map(|inner| NvCreateChatCompletionStreamResponse {
+            inner,
+            nvext: None,
+            llm_metrics: None,
+        })
+    })
+    .collect()
+    .await
 }
 
 /// Collect every emitted tool call across all chunks in the response stream.
@@ -739,33 +728,30 @@ async fn test_kimi_k2_tool_choice_auto() {
     assert_eq!(calls[0].1, r#"{"location":"Paris"}"#);
 }
 
-/// `TOOLCALLING.11` — Kimi K2 + tool_choice=required. Today this combination puts
-/// the jail in `Immediate{ ArrayOfTools }` mode which expects a raw JSON
-/// array of tools rather than the kimi envelope. Pin whatever the
-/// integration layer actually produces today so a future fix is intentional.
-///
-/// TODO(TOOLCALLING.11) — required + parser path is ill-defined: the immediate jail
-/// expects raw JSON while the parser expects its own envelope. cross-parser parametrisation work-item
-/// work-item #1 should reconcile these paths so `tool_choice=required` works
-/// uniformly across all top-7 parsers. Flip this assertion once reconciled.
+/// `TOOLCALLING.11` — Kimi K2 + tool_choice=required uses Kimi's native
+/// structural-tag envelope, so the response must stay on the marker parser
+/// instead of the legacy raw JSON-array immediate path.
 #[tokio::test]
-async fn test_kimi_k2_tool_choice_required_pins_current_behavior() {
-    let responses = apply_jail_with_parser_and_choice(
+async fn test_kimi_k2_tool_choice_required_parses_native_structural_tag() {
+    let responses = apply_structural_tag_jail_with_parser_and_choice(
         KIMI_K2_GET_WEATHER,
         "kimi_k2",
         Some(ChatCompletionToolChoiceOption::Required),
     )
     .await;
     let calls = collect_tool_calls(&responses);
-    // Pin: today the immediate-required path can't read kimi envelope, so
-    // either zero calls or the parser path overrides. Either is buggy
-    // relative to the OpenAI semantics. Just assert the run completed.
-    assert!(
-        calls.len() <= 1,
-        "required + parser path should produce at most one call until the \
-         immediate-vs-parser conflict is resolved; got {:?}",
-        calls
+    assert_eq!(
+        calls.len(),
+        1,
+        "required Kimi call must be parsed; got {calls:?}"
     );
+    assert_eq!(calls[0].0, "get_weather");
+    assert_eq!(calls[0].1, r#"{"location":"Paris"}"#);
+    assert!(responses.iter().any(|response| {
+        response.inner.choices.first().is_some_and(|choice| {
+            choice.finish_reason == Some(dynamo_protocols::types::FinishReason::ToolCalls)
+        })
+    }));
 }
 
 /// `TOOLCALLING.11` — Kimi K2 + tool_choice=named with the **correct** tool name.
@@ -796,13 +782,10 @@ async fn test_kimi_k2_tool_choice_named_wrong_tool_filtered() {
         apply_jail_with_parser_and_choice(KIMI_K2_SEARCH, "kimi_k2", named_choice("get_weather"))
             .await;
     let calls = collect_tool_calls(&responses);
-    for (name, _) in &calls {
-        assert_ne!(
-            name, "search",
-            "wrong tool must be filtered by named_tool_filter; got {:?}",
-            calls
-        );
-    }
+    assert!(
+        calls.is_empty(),
+        "wrong tool must be filtered by named_tool_filter; got {calls:?}"
+    );
 }
 
 // --- DSv4 × tool_choice variants ---
@@ -822,28 +805,6 @@ async fn test_deepseek_v4_tool_choice_auto() {
     assert_eq!(calls[0].0, "get_weather");
     let args: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
     assert_eq!(args["location"], "Paris");
-}
-
-/// `TOOLCALLING.11` — DSv4 + tool_choice=required. Same parser-vs-immediate
-/// conflict as Kimi above. Pin current behavior.
-///
-/// TODO(TOOLCALLING.11) — see kimi_k2 counterpart. Flip when cross-parser tool_choice parametrisation work-item (tracked separately)
-/// reconciles parser path with immediate-jail mode.
-#[tokio::test]
-async fn test_deepseek_v4_tool_choice_required_pins_current_behavior() {
-    let responses = apply_jail_with_parser_and_choice(
-        DSV4_GET_WEATHER,
-        "deepseek_v4",
-        Some(ChatCompletionToolChoiceOption::Required),
-    )
-    .await;
-    let calls = collect_tool_calls(&responses);
-    assert!(
-        calls.len() <= 1,
-        "required + parser path should produce at most one call until the \
-         immediate-vs-parser conflict is resolved; got {:?}",
-        calls
-    );
 }
 
 /// `TOOLCALLING.11` — DSv4 + tool_choice=named with the **correct** tool name.
@@ -872,13 +833,10 @@ async fn test_deepseek_v4_tool_choice_named_wrong_tool_filtered() {
         apply_jail_with_parser_and_choice(DSV4_SEARCH, "deepseek_v4", named_choice("get_weather"))
             .await;
     let calls = collect_tool_calls(&responses);
-    for (name, _) in &calls {
-        assert_ne!(
-            name, "search",
-            "wrong tool must be filtered by named_tool_filter; got {:?}",
-            calls
-        );
-    }
+    assert!(
+        calls.is_empty(),
+        "wrong tool must be filtered by named_tool_filter; got {calls:?}"
+    );
 }
 
 // --- glm47 × tool_choice variants ---
@@ -905,28 +863,6 @@ async fn test_glm47_tool_choice_auto() {
     assert_eq!(args["location"], "Paris");
 }
 
-/// `TOOLCALLING.11` — glm47 + tool_choice=required. Same parser-vs-immediate
-/// conflict as the kimi_k2 / deepseek_v4 counterparts. Pin current behavior.
-///
-/// TODO(TOOLCALLING.11) — required + parser path is ill-defined; reconciled by
-/// the cross-parser tool_choice parametrisation work-item. Flip when fixed.
-#[tokio::test]
-async fn test_glm47_tool_choice_required_pins_current_behavior() {
-    let responses = apply_jail_with_parser_and_choice(
-        GLM47_GET_WEATHER,
-        "glm47",
-        Some(ChatCompletionToolChoiceOption::Required),
-    )
-    .await;
-    let calls = collect_tool_calls(&responses);
-    assert!(
-        calls.len() <= 1,
-        "required + parser path should produce at most one call until the \
-         immediate-vs-parser conflict is resolved; got {:?}",
-        calls
-    );
-}
-
 /// `TOOLCALLING.11` — glm47 + tool_choice=named with the **correct** tool name.
 #[tokio::test]
 async fn test_glm47_tool_choice_named_correct_tool_passes() {
@@ -949,13 +885,10 @@ async fn test_glm47_tool_choice_named_wrong_tool_filtered() {
     let responses =
         apply_jail_with_parser_and_choice(GLM47_SEARCH, "glm47", named_choice("get_weather")).await;
     let calls = collect_tool_calls(&responses);
-    for (name, _) in &calls {
-        assert_ne!(
-            name, "search",
-            "wrong tool must be filtered by named_tool_filter; got {:?}",
-            calls
-        );
-    }
+    assert!(
+        calls.is_empty(),
+        "wrong tool must be filtered by named_tool_filter; got {calls:?}"
+    );
 }
 
 // --- minimax_m2 × tool_choice variants ---
@@ -977,24 +910,6 @@ async fn test_minimax_m2_tool_choice_auto() {
     assert_eq!(calls[0].0, "get_weather");
     let args: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
     assert_eq!(args["location"], "Paris");
-}
-
-/// TODO(TOOLCALLING.11) — see kimi_k2 counterpart. Flip when cross-parser
-/// tool_choice parametrisation work-item reconciles paths.
-#[tokio::test]
-async fn test_minimax_m2_tool_choice_required_pins_current_behavior() {
-    let responses = apply_jail_with_parser_and_choice(
-        MINIMAX_M2_GET_WEATHER,
-        "minimax_m2",
-        Some(ChatCompletionToolChoiceOption::Required),
-    )
-    .await;
-    let calls = collect_tool_calls(&responses);
-    assert!(
-        calls.len() <= 1,
-        "required + parser path should produce at most one call; got {:?}",
-        calls
-    );
 }
 
 #[tokio::test]
@@ -1024,13 +939,10 @@ async fn test_minimax_m2_tool_choice_named_wrong_tool_filtered() {
     )
     .await;
     let calls = collect_tool_calls(&responses);
-    for (name, _) in &calls {
-        assert_ne!(
-            name, "search",
-            "wrong tool must be filtered; got {:?}",
-            calls
-        );
-    }
+    assert!(
+        calls.is_empty(),
+        "wrong tool must be filtered; got {calls:?}"
+    );
 }
 
 // --- qwen3_coder × tool_choice variants ---
@@ -1051,23 +963,6 @@ async fn test_qwen3_coder_tool_choice_auto() {
     assert_eq!(calls[0].0, "get_weather");
     let args: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
     assert_eq!(args["location"], "Paris");
-}
-
-/// TODO(TOOLCALLING.11) — see kimi_k2 counterpart.
-#[tokio::test]
-async fn test_qwen3_coder_tool_choice_required_pins_current_behavior() {
-    let responses = apply_jail_with_parser_and_choice(
-        QWEN3_GET_WEATHER,
-        "qwen3_coder",
-        Some(ChatCompletionToolChoiceOption::Required),
-    )
-    .await;
-    let calls = collect_tool_calls(&responses);
-    assert!(
-        calls.len() <= 1,
-        "required + parser path should produce at most one call; got {:?}",
-        calls
-    );
 }
 
 #[tokio::test]
@@ -1094,13 +989,10 @@ async fn test_qwen3_coder_tool_choice_named_wrong_tool_filtered() {
         apply_jail_with_parser_and_choice(QWEN3_SEARCH, "qwen3_coder", named_choice("get_weather"))
             .await;
     let calls = collect_tool_calls(&responses);
-    for (name, _) in &calls {
-        assert_ne!(
-            name, "search",
-            "wrong tool must be filtered; got {:?}",
-            calls
-        );
-    }
+    assert!(
+        calls.is_empty(),
+        "wrong tool must be filtered; got {calls:?}"
+    );
 }
 
 // --- nemotron_deci × tool_choice variants ---
@@ -1124,23 +1016,6 @@ async fn test_nemotron_deci_tool_choice_auto() {
     assert_eq!(calls[0].0, "get_weather");
     let args: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
     assert_eq!(args["location"], "Paris");
-}
-
-/// TODO(TOOLCALLING.11) — see kimi_k2 counterpart.
-#[tokio::test]
-async fn test_nemotron_deci_tool_choice_required_pins_current_behavior() {
-    let responses = apply_jail_with_parser_and_choice(
-        NEMOTRON_DECI_GET_WEATHER,
-        "nemotron_deci",
-        Some(ChatCompletionToolChoiceOption::Required),
-    )
-    .await;
-    let calls = collect_tool_calls(&responses);
-    assert!(
-        calls.len() <= 1,
-        "required + parser path should produce at most one call; got {:?}",
-        calls
-    );
 }
 
 #[tokio::test]
@@ -1170,13 +1045,10 @@ async fn test_nemotron_deci_tool_choice_named_wrong_tool_filtered() {
     )
     .await;
     let calls = collect_tool_calls(&responses);
-    for (name, _) in &calls {
-        assert_ne!(
-            name, "search",
-            "wrong tool must be filtered; got {:?}",
-            calls
-        );
-    }
+    assert!(
+        calls.is_empty(),
+        "wrong tool must be filtered; got {calls:?}"
+    );
 }
 
 // --- harmony (gpt-oss) × tool_choice variants ---
@@ -1197,23 +1069,6 @@ async fn test_harmony_tool_choice_auto() {
     assert_eq!(calls[0].0, "get_weather");
     let args: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
     assert_eq!(args["location"], "Paris");
-}
-
-/// TODO(TOOLCALLING.11) — see kimi_k2 counterpart.
-#[tokio::test]
-async fn test_harmony_tool_choice_required_pins_current_behavior() {
-    let responses = apply_jail_with_parser_and_choice(
-        HARMONY_GET_WEATHER,
-        "harmony",
-        Some(ChatCompletionToolChoiceOption::Required),
-    )
-    .await;
-    let calls = collect_tool_calls(&responses);
-    assert!(
-        calls.len() <= 1,
-        "required + parser path should produce at most one call; got {:?}",
-        calls
-    );
 }
 
 #[tokio::test]
@@ -1240,11 +1095,8 @@ async fn test_harmony_tool_choice_named_wrong_tool_filtered() {
         apply_jail_with_parser_and_choice(HARMONY_SEARCH, "harmony", named_choice("get_weather"))
             .await;
     let calls = collect_tool_calls(&responses);
-    for (name, _) in &calls {
-        assert_ne!(
-            name, "search",
-            "wrong tool must be filtered; got {:?}",
-            calls
-        );
-    }
+    assert!(
+        calls.is_empty(),
+        "wrong tool must be filtered; got {calls:?}"
+    );
 }

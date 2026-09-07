@@ -27,6 +27,17 @@ def pad_value_for_mm_hash(mm_hash: int) -> int:
     return MM_PAD_SHIFT_VALUE + (mm_hash & MM_PAD_HASH_MASK)
 
 
+def _is_embed_mask(mm_position: Any) -> list[bool] | None:
+    is_embed = getattr(mm_position, "is_embed", None)
+    if is_embed is None:
+        return None
+    if hasattr(is_embed, "detach"):
+        is_embed = is_embed.detach().cpu().tolist()
+    elif hasattr(is_embed, "tolist"):
+        is_embed = is_embed.tolist()
+    return [bool(value) for value in is_embed]
+
+
 def build_mm_routing_info_from_features(
     mm_features: list[Any],
     prompt_token_ids: list[int],
@@ -62,9 +73,16 @@ def build_mm_routing_info_from_features(
         pad = pad_value_for_mm_hash(mm_hash)
         start = f.mm_position.offset
         end = min(start + f.mm_position.length, n_tokens)
-        for i in range(start, end):
-            routing_token_ids[i] = pad
-        found = True
+        is_embed = _is_embed_mask(f.mm_position)
+        if is_embed is None:
+            for i in range(start, end):
+                routing_token_ids[i] = pad
+                found = True
+        else:
+            for rel_idx, use_pad in enumerate(is_embed[: end - start]):
+                if use_pad:
+                    routing_token_ids[start + rel_idx] = pad
+                    found = True
 
     if not found:
         return None
@@ -72,4 +90,5 @@ def build_mm_routing_info_from_features(
     return {
         "routing_token_ids": routing_token_ids,
         "block_mm_infos": [],
+        "expanded_prompt_len": n_tokens,
     }

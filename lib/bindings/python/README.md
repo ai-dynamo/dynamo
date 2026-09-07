@@ -38,7 +38,7 @@ apt install protobuf-compiler
 ```
 uv venv
 source .venv/bin/activate
-uv pip install maturin
+uv pip install 'maturin[patchelf]'
 ```
 
 4. Build and install dynamo wheel
@@ -50,7 +50,7 @@ maturin develop --uv
 
 ### Prerequisite
 
-See [README.md](../../../docs/development/runtime-guide.md#prerequisites).
+See [README.md](../../../docs/fern/pages/developer-guide/additional-resources/runtime-development-guide.md#prerequisites).
 
 ### Hello World Example
 

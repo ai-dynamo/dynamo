@@ -29,7 +29,9 @@ from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
 from dynamo.profiler.utils.dgdr_v1beta1_types import (
     DynamoGraphDeploymentRequestSpec,
     ProfilingPhase,
+    SearchStrategy,
 )
+from dynamo.profiler.utils.model_cache_paths import normalize_model_cache_path
 
 logger = logging.getLogger(__name__)
 
@@ -158,9 +160,10 @@ def resolve_model_path(dgdr: DynamoGraphDeploymentRequestSpec) -> str:
         and dgdr.modelCache.pvcMountPath
         and dgdr.modelCache.pvcModelPath
     ):
-        mount = dgdr.modelCache.pvcMountPath.rstrip("/")
-        sub = dgdr.modelCache.pvcModelPath.strip("/")
-        local_path = f"{mount}/{sub}"
+        local_path = normalize_model_cache_path(
+            dgdr.modelCache.pvcMountPath,
+            dgdr.modelCache.pvcModelPath,
+        )
         if os.path.isfile(os.path.join(local_path, "config.json")):
             return local_path
     return dgdr.model
@@ -199,28 +202,55 @@ def is_mocker_enabled(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
     )
 
 
+def is_kv_router_enabled(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
+    """True when the DGDR spec explicitly enables KV-cache-aware routing."""
+    return (
+        dgdr.features is not None
+        and dgdr.features.kvRouter is not None
+        and dgdr.features.kvRouter.enabled is True
+    )
+
+
+def needs_mocker_aic_perf_model(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
+    """True when mocker workers should load performance data from AIC.
+
+    Requests with Planner configuration use its pre-deployment sweep mode. For
+    mocker-only requests there is no Planner mode, so the DGDR search strategy
+    determines whether the profiler uses rapid AIC data or thorough NPZ data.
+    """
+    if not is_mocker_enabled(dgdr):
+        return False
+    if dgdr.features is not None and dgdr.features.planner is not None:
+        return (
+            dgdr.features.planner.pre_deployment_sweeping_mode
+            == PlannerPreDeploymentSweepMode.Rapid
+        )
+    return dgdr.searchStrategy == SearchStrategy.Rapid
+
+
 def needs_profile_data(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
     """True when the DGDR requires profiling interpolation data *at this stage*.
 
     Profile data (NPZ/JSON on disk) is consumed by:
 
-    * **Mocker workers** for latency simulation — required for thorough
-      mode. In rapid mode the mocker pulls latency data directly from the
-      AIConfigurator SDK via ``--aic-perf-model`` flags injected by the
-      profiler, so no NPZ is emitted.
+    * **Mocker workers** for latency simulation — required for thorough mode.
+      Requests with Planner configuration use its sweep mode; mocker-only
+      requests use the DGDR search strategy. In rapid mode the mocker pulls
+      latency data directly from the AIConfigurator SDK via
+      ``--aic-perf-model`` flags injected by the profiler, so no NPZ is
+      emitted.
     * **Planner** when thorough-mode bootstrap data is requested. In rapid
       mode the planner receives ``aic_perf_model`` and can also run AIC
       interpolation in-process at bootstrap; in none mode it starts from
       native AIC or live FPM regression warmup.
     """
+    if is_mocker_enabled(dgdr):
+        return not needs_mocker_aic_perf_model(dgdr)
     sweep_mode = (
         dgdr.features.planner.pre_deployment_sweeping_mode
         if dgdr.features is not None and dgdr.features.planner is not None
         else None
     )
-    is_rapid = sweep_mode == PlannerPreDeploymentSweepMode.Rapid
-    if is_mocker_enabled(dgdr):
-        return not is_rapid
     if (
         dgdr.features is not None
         and dgdr.features.planner is not None
@@ -301,18 +331,21 @@ def get_profiling_job_tolerations(dgdr: DynamoGraphDeploymentRequestSpec) -> lis
 
 
 def inject_tolerations_into_dgd(dgd_config: dict, tolerations: list) -> dict:
-    """Add tolerations to every service's extraPodSpec in a DGD config dict.
+    """Add tolerations to every component pod template in a DGD config.
 
-    Tolerations already present in a service are preserved; only new entries
+    Tolerations already present in a component are preserved; only new entries
     (by identity) are appended.  Returns a deep copy with tolerations applied.
     """
     result = copy.deepcopy(dgd_config)
-    for _svc_name, svc in result.get("spec", {}).get("services", {}).items():
-        if not isinstance(svc, dict):
+    components = result.get("spec", {}).get("components", [])
+    if not isinstance(components, list):
+        return result
+    for component in components:
+        if not isinstance(component, dict):
             continue
-        eps = svc.setdefault("extraPodSpec", {})
-        existing = eps.get("tolerations", [])
+        pod_spec = component.setdefault("podTemplate", {}).setdefault("spec", {})
+        existing = pod_spec.get("tolerations") or []
         new_entries = [t for t in tolerations if t not in existing]
         if new_entries:
-            eps["tolerations"] = list(existing) + new_entries
+            pod_spec["tolerations"] = list(existing) + new_entries
     return result

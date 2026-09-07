@@ -7,11 +7,6 @@
 # the per-hardware ones (${HW_NODE_SELECTOR}, ${HW_TOLERATIONS}) and
 # pipes this file through `envsubst` before `kubectl apply`.
 #
-# AIPERF_GIT_REF must include https://github.com/ai-dynamo/aiperf/pull/824
-# ("add session_id to single-turn for causal ordering"). Our
-# sliding-window jsonl writes session_id=user_<N> per row; PR 824 is
-# what makes single_turn mode honor that ordering so prefix-cache
-# hits across the 8 turns of a given user actually land.
 apiVersion: v1
 kind: Pod
 metadata:
@@ -42,13 +37,12 @@ spec:
           ulimit -n 1048576
           ulimit -u 65536
 
-          apt update && apt install -y --no-install-recommends curl jq git
+          # aiperf>=0.8.0 depends on crick, which has no Linux aarch64 wheel.
+          # GB200 benchmark pods need build tools to compile it from source.
+          apt update && apt install -y --no-install-recommends curl jq git build-essential
 
-          # Pin to a recent aiperf main SHA that includes PR 824
-          # (session_id for single-turn) + PR 903 (HF image-byte-dict fix).
-          # Bump AIPERF_GIT_REF to roll forward.
-          pip install --no-cache-dir "aiperf @ git+https://github.com/ai-dynamo/aiperf.git@${AIPERF_GIT_REF}"
-          python -c "import aiperf, sys; print('aiperf', aiperf.__version__ if hasattr(aiperf,'__version__') else 'sha-pinned', 'OK')"
+          pip install --no-cache-dir "aiperf==0.10.0"
+          python -c "import aiperf; print('aiperf', aiperf.__version__, 'OK')"
 
           echo "Waiting for model '${MODEL_NAME}' at http://${FRONTEND}:8000/v1/models ..."
           until curl -s "http://${FRONTEND}:8000/v1/models" \
@@ -109,11 +103,6 @@ spec:
           value: ${BENCH_FRONTEND}
         - name: RUN_LABEL
           value: ${BENCH_RUN_LABEL}
-        # Pin to current aiperf main HEAD; includes PR 824 + PR 903.
-        # To roll back to PR 824's exact merge commit:
-        #   fd7c2ad4abc43cc0c73079d27c016513e29309e7
-        - name: AIPERF_GIT_REF
-          value: "79de74ece808"
         - name: MAX_TOKENS
           value: "1024"
         - name: REQUEST_COUNT

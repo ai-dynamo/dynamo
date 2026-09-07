@@ -1,0 +1,462 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Kimi-K3 GB200 — Disaggregated Prefill/Decode + KV-prefix cache
+# Nodes: 8 × GB200 nodes (4 prefill + 4 decode, TP=16 each, 32 GPUs total)
+# Platform: GCP / GKE — hostPath model mount is GKE-specific; adapt for other platforms.
+#
+---
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: kimi-k3-prefill-compute-domain
+spec:
+  numNodes: 0
+  channel:
+    allocationMode: Single
+    resourceClaimTemplate:
+      name: kimi-k3-prefill-compute-domain-channel
+---
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: kimi-k3-decode-compute-domain
+spec:
+  numNodes: 0
+  channel:
+    allocationMode: Single
+    resourceClaimTemplate:
+      name: kimi-k3-decode-compute-domain-channel
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  labels:
+    app.kubernetes.io/name: kimi-k3-disagg
+  name: kimi-k3-disagg
+spec:
+  backendFramework: vllm
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --http-host
+          - 0.0.0.0
+          - --http-port
+          - '8000'
+          - --dyn-chat-processor
+          - dynamo
+          - --router-mode
+          - kv
+          - --router-kv-events
+          - --kv-cache-block-size
+          - '64'
+          - --router-prefill-load-scale
+          - '8'
+          command:
+          - python3
+          - -m
+          - dynamo.frontend
+          env:
+          - name: HF_HUB_OFFLINE
+            value: '1'
+          - name: TRANSFORMERS_OFFLINE
+            value: '1'
+          - name: VLLM_USE_V2_MODEL_RUNNER
+            value: '0'
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-kimi-k3-dev.1
+          imagePullPolicy: IfNotPresent
+          name: main
+          resources:
+            requests:
+              cpu: '4'
+              memory: 16Gi
+            limits:
+              cpu: '8'
+              memory: 32Gi
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+          volumeMounts:
+          - mountPath: /models
+            name: models
+            readOnly: true
+        imagePullSecrets:
+        - name: acr-token-secret
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-GB200
+        tolerations:
+        - effect: NoSchedule
+          key: kubernetes.io/arch
+          operator: Equal
+          value: arm64
+        volumes:
+        - hostPath:
+            path: /mnt/stateful_partition/kube-ephemeral-ssd/models
+            type: Directory
+          name: models
+    replicas: 1
+    type: frontend
+
+  - multinode:
+      nodeCount: 4
+    name: Prefill
+    podTemplate:
+      metadata:
+        annotations:
+          nvidia.com/vllm-distributed-executor-backend: mp
+      spec:
+        containers:
+        - args:
+          - |
+            set -euo pipefail
+            exec python3 -m dynamo.vllm \
+              --model "${MODEL_PATH}" \
+              --served-model-name "${SERVED_MODEL_NAME}" \
+              --load-format fastsafetensors \
+              --safetensors-load-strategy lazy \
+              --trust-remote-code \
+              --tensor-parallel-size 16 \
+              --gpu-memory-utilization 0.90 \
+              --kv-cache-dtype fp8 \
+              --mm-encoder-tp-mode data \
+              --mm-encoder-attn-backend TORCH_SDPA \
+              --attention-backend FLASHINFER_MLA \
+              --attention-config '{"mla_prefill_backend":"TRTLLM_RAGGED","use_prefill_query_quantization":true}' \
+              --moe-backend flashinfer_trtllm \
+              --kernel-config '{"enable_cutedsl_warmup":true}' \
+              --kda-prefill-backend flashkda \
+              --max-num-seqs 4 \
+              --max-num-batched-tokens 16384 \
+              --block-size 64 \
+              --no-enable-flashinfer-autotune \
+              --enable-multimodal \
+              --skip-mm-profiling \
+              --disable-custom-all-reduce \
+              --enable-prefix-caching \
+              --no-disable-hybrid-kv-cache-manager \
+              --no-enable-log-requests \
+              --cpu-distributed-timeout-seconds 3600 \
+              --scheduler-cls vllm.v1.core.sched.async_scheduler.AsyncScheduler \
+              --dyn-tool-call-parser kimi_k3 \
+              --reasoning-parser kimi_k3 \
+              --dyn-reasoning-parser kimi_k3 \
+              --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}' \
+              --disaggregation-mode prefill \
+              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          command:
+          - /bin/bash
+          - -lc
+          env:
+          - name: MODEL_PATH
+            value: /models/model_weight
+          - name: SERVED_MODEL_NAME
+            value: moonshotai/Kimi-K3
+          - name: HF_HUB_OFFLINE
+            value: '1'
+          - name: TRANSFORMERS_OFFLINE
+            value: '1'
+          - name: FLASHINFER_WORKSPACE_BASE
+            value: /tmp/flashinfer
+          - name: XDG_CACHE_HOME
+            value: /tmp/.cache
+          - name: GP_DISABLE_CUDNN
+            value: '1'
+          - name: VLLM_ENGINE_READY_TIMEOUT_S
+            value: '7200'
+          - name: VLLM_SSM_CONV_STATE_LAYOUT
+            value: DS
+          - name: VLLM_USE_V2_MODEL_RUNNER
+            value: '0'
+          - name: VLLM_USE_NCCL_SYMM_MEM
+            value: '0'
+          - name: VLLM_DEEP_GEMM_WARMUP
+            value: skip
+          - name: VLLM_FASTSAFETENSORS_QUEUE_SIZE
+            value: '1'
+          - name: TILELANG_CLEANUP_TEMP_FILES
+            value: '1'
+          - name: DYN_REQUEST_PLANE
+            value: tcp
+          - name: ETCD_LEASE_TTL
+            value: '120'
+          - name: PYTORCH_CUDA_ALLOC_CONF
+            value: expandable_segments:False
+          - name: UCX_MEMTYPE_CACHE
+            value: 'n'
+          - name: UCX_TLS
+            value: '^cuda_ipc'
+          - name: UCX_CUDA_IPC_ENABLE_MNNVL
+            value: 'y'
+          - name: UCX_RCACHE_MAX_UNRELEASED
+            value: '1024'
+          - name: UCX_MEMTYPE_REG_WHOLE
+            value: 'n'
+          - name: NCCL_CUMEM_ENABLE
+            value: '1'
+          - name: NCCL_MNNVL_ENABLE
+            value: '1'
+          - name: NCCL_NVLS_ENABLE
+            value: '1'
+          - name: NCCL_P2P_LEVEL
+            value: NVL
+          - name: NCCL_STORE_TIMEOUT
+            value: '7200'
+          - name: NCCL_SOCKET_IFNAME
+            value: eth0
+          - name: GLOO_SOCKET_IFNAME
+            value: eth0
+          - name: NVIDIA_GDRCOPY
+            value: '1'
+          - name: TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC
+            value: '1800'
+          - name: VLLM_RPC_TIMEOUT
+            value: '600000'
+          - name: VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
+            value: '1800'
+          - name: VLLM_CONNECTOR_PREFETCH_DEPTH
+            value: '8'
+          - name: VLLM_CONNECTOR_PREFETCH_KV_CAP
+            value: '0.65'
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-kimi-k3-dev.1
+          imagePullPolicy: IfNotPresent
+          name: main
+          resources:
+            claims:
+            - name: compute-domain-channel
+            limits:
+              nvidia.com/gpu: '4'
+              networking.gke.io.networks/rdma-0: '1'
+              networking.gke.io.networks/rdma-1: '1'
+              networking.gke.io.networks/rdma-2: '1'
+              networking.gke.io.networks/rdma-3: '1'
+            requests:
+              cpu: '32'
+              memory: 700Gi
+              nvidia.com/gpu: '4'
+              networking.gke.io.networks/rdma-0: '1'
+              networking.gke.io.networks/rdma-1: '1'
+              networking.gke.io.networks/rdma-2: '1'
+              networking.gke.io.networks/rdma-3: '1'
+
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              add: [IPC_LOCK, SYS_RESOURCE]
+          startupProbe:
+            failureThreshold: 720
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+          volumeMounts:
+          - mountPath: /models
+            name: models
+            readOnly: true
+        imagePullSecrets:
+        - name: acr-token-secret
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-GB200
+        resourceClaims:
+        - name: compute-domain-channel
+          resourceClaimTemplateName: kimi-k3-prefill-compute-domain-channel
+        terminationGracePeriodSeconds: 60
+        tolerations:
+        - effect: NoSchedule
+          key: kubernetes.io/arch
+          operator: Equal
+          value: arm64
+        volumes:
+        - hostPath:
+            path: /mnt/stateful_partition/kube-ephemeral-ssd/models
+            type: Directory
+          name: models
+    replicas: 1
+    sharedMemorySize: 256Gi
+    type: prefill
+
+  - multinode:
+      nodeCount: 4
+    name: Decode
+    podTemplate:
+      metadata:
+        annotations:
+          nvidia.com/vllm-distributed-executor-backend: mp
+      spec:
+        containers:
+        - args:
+          - |
+            set -euo pipefail
+            exec python3 -m dynamo.vllm \
+              --model "${MODEL_PATH}" \
+              --served-model-name "${SERVED_MODEL_NAME}" \
+              --load-format fastsafetensors \
+              --safetensors-load-strategy lazy \
+              --trust-remote-code \
+              --tensor-parallel-size 16 \
+              --gpu-memory-utilization 0.90 \
+              --kv-cache-dtype fp8 \
+              --mm-encoder-tp-mode data \
+              --mm-encoder-attn-backend TORCH_SDPA \
+              --attention-backend FLASHINFER_MLA \
+              --attention-config '{"mla_prefill_backend":"FLASHINFER"}' \
+              --moe-backend flashinfer_trtllm \
+              --kernel-config '{"enable_cutedsl_warmup":true}' \
+              --kda-prefill-backend flashkda \
+              --max-num-seqs 256 \
+              --max-num-batched-tokens 2048 \
+              --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":2048,"cudagraph_capture_sizes":[1,2,4,8,12,16,24,32,64,128,256,512,1024,2048]}' \
+              --block-size 64 \
+              --no-enable-flashinfer-autotune \
+              --enable-multimodal \
+              --skip-mm-profiling \
+              --disable-custom-all-reduce \
+              --enable-prefix-caching \
+              --no-disable-hybrid-kv-cache-manager \
+              --no-enable-log-requests \
+              --cpu-distributed-timeout-seconds 3600 \
+              --scheduler-cls vllm.v1.core.sched.async_scheduler.AsyncScheduler \
+              --dyn-tool-call-parser kimi_k3 \
+              --reasoning-parser kimi_k3 \
+              --dyn-reasoning-parser kimi_k3 \
+              --disaggregation-mode decode \
+              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          command:
+          - /bin/bash
+          - -lc
+          env:
+          - name: MODEL_PATH
+            value: /models/model_weight
+          - name: SERVED_MODEL_NAME
+            value: moonshotai/Kimi-K3
+          - name: HF_HUB_OFFLINE
+            value: '1'
+          - name: TRANSFORMERS_OFFLINE
+            value: '1'
+          - name: FLASHINFER_WORKSPACE_BASE
+            value: /tmp/flashinfer
+          - name: XDG_CACHE_HOME
+            value: /tmp/.cache
+          - name: GP_DISABLE_CUDNN
+            value: '1'
+          - name: VLLM_ENGINE_READY_TIMEOUT_S
+            value: '7200'
+          - name: VLLM_SSM_CONV_STATE_LAYOUT
+            value: DS
+          - name: VLLM_USE_V2_MODEL_RUNNER
+            value: '0'
+          - name: VLLM_USE_NCCL_SYMM_MEM
+            value: '0'
+          - name: VLLM_DEEP_GEMM_WARMUP
+            value: skip
+          - name: VLLM_FASTSAFETENSORS_QUEUE_SIZE
+            value: '1'
+          - name: TILELANG_CLEANUP_TEMP_FILES
+            value: '1'
+          - name: DYN_REQUEST_PLANE
+            value: tcp
+          - name: ETCD_LEASE_TTL
+            value: '120'
+          - name: PYTORCH_CUDA_ALLOC_CONF
+            value: expandable_segments:False
+          - name: UCX_MEMTYPE_CACHE
+            value: 'n'
+          - name: UCX_TLS
+            value: '^cuda_ipc'
+          - name: UCX_CUDA_IPC_ENABLE_MNNVL
+            value: 'y'
+          - name: UCX_RCACHE_MAX_UNRELEASED
+            value: '1024'
+          - name: UCX_MEMTYPE_REG_WHOLE
+            value: 'n'
+          - name: NCCL_CUMEM_ENABLE
+            value: '1'
+          - name: NCCL_MNNVL_ENABLE
+            value: '1'
+          - name: NCCL_NVLS_ENABLE
+            value: '1'
+          - name: NCCL_P2P_LEVEL
+            value: NVL
+          - name: NCCL_STORE_TIMEOUT
+            value: '7200'
+          - name: NCCL_SOCKET_IFNAME
+            value: eth0
+          - name: GLOO_SOCKET_IFNAME
+            value: eth0
+          - name: NVIDIA_GDRCOPY
+            value: '1'
+          - name: TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC
+            value: '1800'
+          - name: VLLM_RPC_TIMEOUT
+            value: '600000'
+          - name: VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
+            value: '1800'
+          - name: VLLM_CONNECTOR_PREFETCH_DEPTH
+            value: '8'
+          - name: VLLM_CONNECTOR_PREFETCH_KV_CAP
+            value: '0.65'
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-kimi-k3-dev.1
+          imagePullPolicy: IfNotPresent
+          name: main
+          resources:
+            claims:
+            - name: compute-domain-channel
+            limits:
+              nvidia.com/gpu: '4'
+              networking.gke.io.networks/rdma-0: '1'
+              networking.gke.io.networks/rdma-1: '1'
+              networking.gke.io.networks/rdma-2: '1'
+              networking.gke.io.networks/rdma-3: '1'
+            requests:
+              cpu: '32'
+              memory: 700Gi
+              nvidia.com/gpu: '4'
+              networking.gke.io.networks/rdma-0: '1'
+              networking.gke.io.networks/rdma-1: '1'
+              networking.gke.io.networks/rdma-2: '1'
+              networking.gke.io.networks/rdma-3: '1'
+
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              add: [IPC_LOCK, SYS_RESOURCE]
+          startupProbe:
+            failureThreshold: 720
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+          volumeMounts:
+          - mountPath: /models
+            name: models
+            readOnly: true
+        imagePullSecrets:
+        - name: acr-token-secret
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-GB200
+        resourceClaims:
+        - name: compute-domain-channel
+          resourceClaimTemplateName: kimi-k3-decode-compute-domain-channel
+        terminationGracePeriodSeconds: 60
+        tolerations:
+        - effect: NoSchedule
+          key: kubernetes.io/arch
+          operator: Equal
+          value: arm64
+        volumes:
+        - hostPath:
+            path: /mnt/stateful_partition/kube-ephemeral-ssd/models
+            type: Directory
+          name: models
+    replicas: 1
+    sharedMemorySize: 256Gi
+    type: decode

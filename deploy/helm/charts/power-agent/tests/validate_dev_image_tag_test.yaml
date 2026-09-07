@@ -1,0 +1,111 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Template-time validation of dev.image.tag when dev-pod mode is enabled.
+# Pins the power-agent.validateDevImageTag helper in templates/_helpers.tpl.
+#
+# The helper's error text promises ":latest is not supported", so it must
+# actually enforce it. PR9790 review found the pre-hardening helper only
+# checked non-empty, accepting dev.image.tag=latest and whitespace while
+# claiming otherwise. These cases lock the hardened behaviour (mirrors the
+# production validateImageTag guards):
+#
+#   1. dev.image.tag unset/empty (with dev.enabled) — required.
+#   2. dev.image.tag set to "latest" in any case — rejected.
+#   3. dev.image.tag with leading/trailing/internal whitespace — rejected.
+#
+# Happy paths verify:
+#   * a pinned release tag renders `{repo}:{tag}` on the dev pod image.
+#   * a release-tag string that *contains* "latest" (e.g.
+#     `v1.0.0-latest-rc`) is accepted — the guard compares the canonical
+#     lowercased form against the literal "latest", not a substring.
+
+suite: dev.image.tag validation
+templates:
+  - templates/dev-pod.yaml
+release:
+  name: power-agent
+  namespace: dynamo-system
+
+tests:
+  # ---------------------------------------------------------------
+  # Validation failures
+  # ---------------------------------------------------------------
+
+  - it: should reject empty dev.image.tag when dev.enabled
+    set:
+      daemonset.enabled: false
+      dev.enabled: true
+      dev.nodeName: gpu-node-0
+      dev.image.tag: ""
+    asserts:
+      - failedTemplate:
+          errorPattern: "dev.image.tag is required"
+
+  - it: should reject dev.image.tag=latest (lowercase)
+    set:
+      daemonset.enabled: false
+      dev.enabled: true
+      dev.nodeName: gpu-node-0
+      dev.image.tag: latest
+    asserts:
+      - failedTemplate:
+          errorPattern: "dev.image.tag=\"latest\" is not supported"
+
+  - it: should reject dev.image.tag=LATEST (uppercase — case-insensitive guard)
+    set:
+      daemonset.enabled: false
+      dev.enabled: true
+      dev.nodeName: gpu-node-0
+      dev.image.tag: LATEST
+    asserts:
+      - failedTemplate:
+          errorPattern: "is not supported"
+
+  - it: should reject dev.image.tag with leading/trailing whitespace
+    set:
+      daemonset.enabled: false
+      dev.enabled: true
+      dev.nodeName: gpu-node-0
+      dev.image.tag: " v1.2.0 "
+    asserts:
+      - failedTemplate:
+          errorPattern: "contains whitespace"
+
+  - it: should reject dev.image.tag with internal whitespace
+    set:
+      daemonset.enabled: false
+      dev.enabled: true
+      dev.nodeName: gpu-node-0
+      dev.image.tag: "v1 .2.0"
+    asserts:
+      - failedTemplate:
+          errorPattern: "contains whitespace"
+
+  # ---------------------------------------------------------------
+  # Happy paths
+  # ---------------------------------------------------------------
+
+  - it: should accept a pinned release tag and render repo:tag
+    set:
+      daemonset.enabled: false
+      dev.enabled: true
+      dev.nodeName: gpu-node-0
+      dev.image.repository: nvcr.io/nvidia/ai-dynamo/power-agent
+      dev.image.tag: v1.2.0
+    asserts:
+      - equal:
+          path: spec.containers[0].image
+          value: nvcr.io/nvidia/ai-dynamo/power-agent:v1.2.0
+
+  - it: should accept a release tag that merely contains 'latest' as a substring
+    set:
+      daemonset.enabled: false
+      dev.enabled: true
+      dev.nodeName: gpu-node-0
+      dev.image.repository: nvcr.io/nvidia/ai-dynamo/power-agent
+      dev.image.tag: v1.0.0-latest-rc
+    asserts:
+      - equal:
+          path: spec.containers[0].image
+          value: nvcr.io/nvidia/ai-dynamo/power-agent:v1.0.0-latest-rc

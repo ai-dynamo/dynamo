@@ -14,19 +14,34 @@ use crate::discovery::EventTransportKind;
 
 pub struct NatsTransport {
     drt: DistributedRuntime,
+    publish_subject: Option<async_nats::Subject>,
 }
 
 impl NatsTransport {
     pub fn new(drt: DistributedRuntime) -> Self {
-        Self { drt }
+        Self {
+            drt,
+            publish_subject: None,
+        }
+    }
+
+    pub fn new_publisher(drt: DistributedRuntime, subject: String) -> Self {
+        Self {
+            drt,
+            publish_subject: Some(subject.into()),
+        }
     }
 }
 
 #[async_trait]
 impl EventTransportTx for NatsTransport {
     async fn publish(&self, subject: &str, envelope_bytes: Bytes) -> Result<()> {
+        let subject = self
+            .publish_subject
+            .clone()
+            .unwrap_or_else(|| subject.into());
         self.drt
-            .kv_router_nats_publish(subject.to_string(), envelope_bytes)
+            .kv_router_nats_publish_subject(subject, envelope_bytes)
             .await
     }
 

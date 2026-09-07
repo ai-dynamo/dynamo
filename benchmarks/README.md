@@ -20,7 +20,7 @@ This directory contains benchmarking tools and scripts for Dynamo deployments. B
 ## Quick Start
 
 ### Benchmark a Dynamo Deployment
-First, deploy your DynamoGraphDeployment using the [deployment documentation](../docs/kubernetes/), then:
+First, deploy your DynamoGraphDeployment using the [deployment documentation](../docs/fern/pages/kubernetes/getting-started/quickstart.mdx), then:
 
 ```bash
 # Port-forward your deployment to http://localhost:8000
@@ -54,9 +54,10 @@ aiperf plot artifacts/my-benchmark
 ## Directory Contents
 
 - **`incluster/`** — Kubernetes Job manifest for running benchmarks inside the cluster
+- **`multimodal/`** — Media and multimodal benchmarks, including frontend media decoding
 - **`router/`** — KV Router benchmarking scripts (prefix ratio, trace replay, agent, priority queue)
 - **`prefix_data_generator/`** — Tools for analyzing and synthesizing prefix-structured data
 
 ## Comprehensive Guide
 
-For detailed documentation including server-side benchmarking, Pareto analysis, and advanced AIPerf features, see the [complete benchmarking guide](../docs/benchmarks/benchmarking.md).
+For detailed documentation including server-side benchmarking, Pareto analysis, and advanced AIPerf features, see the [complete benchmarking guide](../docs/fern/pages/recipes/feature-benchmarks/benchmarking-guide.md).

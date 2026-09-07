@@ -580,21 +580,20 @@ impl WorkerPruneManagerInner {
         let mut expired = Vec::new();
 
         loop {
-            let Some((Reverse(expiry), worker)) = ({
-                let mut expiries = self
-                    .next_expiries
-                    .lock()
-                    .expect("worker expiry index mutex poisoned");
-                let Some((Reverse(expiry), _)) = expiries.peek().copied() else {
-                    break;
-                };
-                if expiry > now {
-                    break;
-                }
-                expiries.pop()
-            }) else {
+            let mut expiries = self
+                .next_expiries
+                .lock()
+                .expect("worker expiry index mutex poisoned");
+            let Some((Reverse(expiry), _)) = expiries.peek().copied() else {
                 break;
             };
+            if expiry > now {
+                break;
+            }
+            let Some((Reverse(expiry), worker)) = ({ expiries.pop() }) else {
+                break;
+            };
+            drop(expiries);
 
             let (mut worker_expired, next_expiry) = {
                 let Some(state) = self.workers.get(&worker) else {
@@ -759,26 +758,6 @@ mod tests {
 
         let expired_after = pm.pop_expired(second_expiry);
         assert_eq!(expired_after, vec![42]);
-    }
-
-    /// Test that BlockEntry ordering prioritizes sequence position.
-    #[test]
-    fn test_block_entry_ordering() {
-        let worker = WorkerWithDpRank::from_worker_id(0);
-
-        let entry1 = BlockEntry {
-            key: ExternalSequenceBlockHash(100),
-            worker,
-            seq_position: 0,
-        };
-        let entry2 = BlockEntry {
-            key: ExternalSequenceBlockHash(50),
-            worker,
-            seq_position: 1,
-        };
-
-        // entry1 < entry2 because seq_position 0 < 1
-        assert!(entry1 < entry2);
     }
 
     #[test]

@@ -4,37 +4,43 @@
 """Worker initialization factory for vLLM workers."""
 
 import asyncio
+import copy
 import json
 import logging
+import math
 import os
 import time as _time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
+from types import TracebackType
 from typing import Any, Optional
 
 from vllm.config import VllmConfig
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo import prometheus_names
+from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.rl import first_endpoint_response, register_rl_routes
+from dynamo.common.snapshot.lifecycle import elect_and_wake
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
     register_embedding_cache_metrics,
 )
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
-from dynamo.runtime import DistributedRuntime
+from dynamo.runtime import DistributedRuntime, Endpoint
 
 from .args import Config
 from .cache_info import configure_kv_event_block_size
 from .capacity import per_rank_kv_blocks
 from .constants import DisaggregationMode
+from .dp_topology import get_dp_range_for_worker
 from .handlers import (
     BaseWorkerHandler,
     DecodeWorkerHandler,
     EmbeddingWorkerHandler,
     PrefillWorkerHandler,
-    get_dp_range_for_worker,
 )
 from .health_check import (
     VllmEmbeddingHealthCheckPayload,
@@ -43,15 +49,421 @@ from .health_check import (
 )
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
 from .multimodal_handlers import EncodeWorkerHandler
+from .pooling_handlers import ClassifyWorkerHandler
 from .publisher import StatLoggerFactory
+from .realtime import RealtimeHandler, RealtimeTranscriptionHandler
+from .state_agent import StateAgentLifecycle, state_agent_settings
 
 logger = logging.getLogger(__name__)
 
-# (engine_client, vllm_config, default_sampling_params, prometheus_temp_dir, component_gauges)
+# The active point has an 8s FPM deadline. ADP schedule/result, decision/commit,
+# boundary, and final cleanup phases each have a 10s bound. Their worst-case
+# healthy stop path is about 70s, with the remainder reserved for JSON writing
+# and scheduler-loop slack before failing closed.
+BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS = 90
+
+# Bound for the post-benchmark worker GC stop RPC. Restoring GC in a healthy
+# worker is sub-second; a longer wait means the engine is gone, and neither
+# serving nor error propagation may hang on it.
+WORKER_GC_STOP_TIMEOUT_SECONDS = 30.0
+
+# (engine_client, vllm_config, default_sampling_params, cleanup_resource, component_gauges)
 # component_gauges is None on the embedding-worker path: pooling engines
 # have no KV cache / scheduler gauges, so setup_vllm_engine() skips the
 # LLMBackendMetrics registration there.
 EngineSetupResult = tuple[AsyncLLM, VllmConfig, Any, Any, Optional[LLMBackendMetrics]]
+SnapshotEngineSetupResult = tuple[EngineSetupResult, StatLoggerFactory]
+
+
+def _benchmark_rank_path(base_path: Path, dp_rank: int) -> Path:
+    if dp_rank == 0:
+        return base_path
+    stem, ext = os.path.splitext(str(base_path))
+    return Path(f"{stem}_dp{dp_rank}{ext}")
+
+
+def _benchmark_merged_path(base_path: Path, dp_start: int) -> Path:
+    stem, ext = os.path.splitext(str(base_path))
+    rank_suffix = "" if dp_start == 0 else f"_dp{dp_start}"
+    return Path(f"{stem}{rank_suffix}_merged{ext}")
+
+
+def _validate_benchmark_rank_payload(data: dict, path: Path) -> str:
+    """Validate status/coverage invariants before accepting a rank artifact."""
+    status = data.get("status", "complete" if data.get("valid") is True else "failed")
+
+    def invalid(reason: str) -> RuntimeError:
+        return RuntimeError(
+            f"Self-benchmark produced incomplete results at {path}: {reason}; "
+            f"coverage={data.get('coverage')} "
+            f"skipped_points={data.get('skipped_points')} "
+            f"missing_phases={data.get('missing_phases')}"
+        )
+
+    if status not in {"complete", "partial"}:
+        raise invalid(f"status={status!r}")
+
+    coverage = data.get("coverage")
+    if not isinstance(coverage, dict):
+        raise invalid("missing coverage")
+    expected = coverage.get("expected_points")
+    completed = coverage.get("completed_points")
+    skipped = coverage.get("skipped_points")
+    if (
+        not isinstance(expected, int)
+        or not isinstance(completed, int)
+        or not isinstance(skipped, int)
+        or min(expected, completed, skipped) < 0
+        or completed + skipped > expected
+    ):
+        raise invalid("invalid coverage arithmetic")
+
+    skipped_points = data.get("skipped_points", [])
+    missing_phases = data.get("missing_phases", [])
+    results = data.get("results")
+    iteration_groups = data.get("iteration_groups")
+    if not isinstance(skipped_points, list) or len(skipped_points) != skipped:
+        raise invalid("skipped point count mismatch")
+    if not isinstance(missing_phases, list):
+        raise invalid("invalid missing phases")
+    if not isinstance(results, list) or len(results) != completed:
+        raise invalid("result count does not match completed coverage")
+    if not isinstance(iteration_groups, list) or len(iteration_groups) != completed:
+        raise invalid("iteration group count does not match completed coverage")
+
+    if status == "complete":
+        if (
+            data.get("valid") is not True
+            or ("usable" in data and data.get("usable") is not True)
+            or data.get("stop_reason") is not None
+            or completed != expected
+            or skipped != 0
+            or missing_phases
+            or data.get("error") is not None
+        ):
+            raise invalid("inconsistent complete status")
+    elif (
+        data.get("valid") is not False
+        or data.get("usable") is not True
+        or data.get("stop_reason") != "timeout"
+        or completed >= expected
+        or skipped != 0
+        or missing_phases
+        or data.get("error") is not None
+    ):
+        raise invalid("inconsistent partial status")
+    return status
+
+
+def _merge_benchmark_rank_results(
+    rank_data: list[tuple[int, Path, dict]],
+    merged_path: Path,
+) -> dict:
+    """Validate and flatten globally synchronized benchmark iterations."""
+    if not rank_data:
+        raise RuntimeError("No self-benchmark rank results were loaded")
+
+    source_ranks = [rank for rank, _, _ in rank_data]
+    reference_rank, reference_path, reference = rank_data[0]
+    run_id = reference.get("run_id")
+    grid_digest = reference.get("grid_digest")
+    if not isinstance(run_id, str) or not run_id:
+        raise RuntimeError("Self-benchmark rank results are missing run_id")
+    if not isinstance(grid_digest, str) or not grid_digest:
+        raise RuntimeError("Self-benchmark rank results are missing grid_digest")
+
+    reference_status = _validate_benchmark_rank_payload(reference, reference_path)
+
+    reference_coverage = reference.get("coverage")
+    if not isinstance(reference_coverage, dict):
+        raise RuntimeError("Self-benchmark rank results are missing coverage")
+    expected_points_per_rank = reference_coverage.get("expected_points")
+    completed_points_per_rank = reference_coverage.get("completed_points")
+    skipped_points_per_rank = reference_coverage.get("skipped_points")
+    if (
+        not isinstance(expected_points_per_rank, int)
+        or not isinstance(completed_points_per_rank, int)
+        or not isinstance(skipped_points_per_rank, int)
+        or expected_points_per_rank < completed_points_per_rank
+        or min(completed_points_per_rank, skipped_points_per_rank) < 0
+    ):
+        raise RuntimeError("Self-benchmark rank results have invalid coverage")
+
+    global_size = reference.get("dp", {}).get("size")
+    if not isinstance(global_size, int) or global_size < 1:
+        raise RuntimeError("Self-benchmark results have invalid global DP size")
+    global_ranks = list(range(global_size))
+
+    reference_groups = reference.get("iteration_groups")
+    if not isinstance(reference_groups, list) or not reference_groups:
+        raise RuntimeError(
+            "Self-benchmark rank results are missing synchronized iteration groups"
+        )
+
+    groups_by_id: dict[int, dict] = {}
+    for group in reference_groups:
+        benchmark_id = group.get("benchmark_id")
+        if not isinstance(benchmark_id, int) or benchmark_id < 1:
+            raise RuntimeError(
+                f"Self-benchmark rank {reference_rank} has invalid benchmark_id "
+                f"{benchmark_id}"
+            )
+        if benchmark_id in groups_by_id:
+            raise RuntimeError(
+                f"Self-benchmark rank {reference_rank} has duplicate "
+                f"benchmark_id={benchmark_id}"
+            )
+        if group.get("point", {}).get("benchmark_id") != benchmark_id:
+            raise RuntimeError(
+                "Self-benchmark iteration group point id mismatch for "
+                f"benchmark_id={benchmark_id}"
+            )
+        if group.get("expected_dp_ranks") != global_ranks or not group.get("complete"):
+            raise RuntimeError(
+                "Self-benchmark iteration group is incomplete for "
+                f"benchmark_id={benchmark_id}: "
+                f"expected={global_ranks} "
+                f"actual={group.get('expected_dp_ranks')}"
+            )
+
+        rank_results = group.get("rank_results")
+        if not isinstance(rank_results, list):
+            raise RuntimeError(
+                f"Self-benchmark iteration group {benchmark_id} has no rank results"
+            )
+        actual_ranks = [result.get("dp_rank") for result in rank_results]
+        if actual_ranks != global_ranks:
+            raise RuntimeError(
+                "Self-benchmark iteration group rank mismatch for "
+                f"benchmark_id={benchmark_id}: "
+                f"expected={global_ranks} actual={actual_ranks}"
+            )
+
+        wall_times: list[float] = []
+        for rank_result in rank_results:
+            dp_rank = rank_result["dp_rank"]
+            fpms = rank_result.get("fpms")
+            if not isinstance(fpms, list) or len(fpms) != 1:
+                raise RuntimeError(
+                    "Each self-benchmark rank-point must contain exactly one FPM: "
+                    f"rank={dp_rank} benchmark_id={benchmark_id}"
+                )
+            fpm = fpms[0]
+            if fpm.get("counter_id") != benchmark_id:
+                raise RuntimeError(
+                    "Self-benchmark FPM counter mismatch: "
+                    f"rank={dp_rank} benchmark_id={benchmark_id} "
+                    f"counter_id={fpm.get('counter_id')}"
+                )
+            if fpm.get("dp_rank") != dp_rank:
+                raise RuntimeError(
+                    "Self-benchmark FPM rank mismatch: "
+                    f"result_rank={dp_rank} fpm_rank={fpm.get('dp_rank')}"
+                )
+            wall_times.append(float(fpm.get("wall_time", 0.0)))
+        expected_wall_time = max(wall_times, default=0.0)
+        if group.get("wall_time") != expected_wall_time:
+            raise RuntimeError(
+                "Self-benchmark iteration wall time mismatch for "
+                f"benchmark_id={benchmark_id}: "
+                f"expected={expected_wall_time} actual={group.get('wall_time')}"
+            )
+        groups_by_id[benchmark_id] = group
+
+    expected_ids = sorted(groups_by_id)
+    if expected_ids != list(range(1, len(expected_ids) + 1)):
+        raise RuntimeError(
+            f"Self-benchmark ids are not a contiguous 1-based sequence: {expected_ids}"
+        )
+    if completed_points_per_rank != len(expected_ids):
+        raise RuntimeError(
+            "Self-benchmark completed coverage does not match iteration groups: "
+            f"coverage={completed_points_per_rank} groups={len(expected_ids)}"
+        )
+
+    measured_iteration_seconds = sum(
+        float(group.get("wall_time", 0.0)) for group in reference_groups
+    )
+    rank_timings: list[tuple[int, dict]] = []
+
+    for dp_rank, path, data in rank_data:
+        data_status = _validate_benchmark_rank_payload(data, path)
+        if data_status != reference_status:
+            raise RuntimeError(
+                f"Self-benchmark status mismatch at {path}: "
+                f"expected={reference_status} actual={data_status}"
+            )
+        if data.get("coverage") != reference_coverage:
+            raise RuntimeError(
+                f"Self-benchmark coverage mismatch at {path}: "
+                f"expected={reference_coverage} actual={data.get('coverage')}"
+            )
+        if data.get("stop_reason") != reference.get("stop_reason"):
+            raise RuntimeError(f"Self-benchmark stop reason mismatch at {path}")
+        if data.get("run_id") != run_id:
+            raise RuntimeError(
+                f"Self-benchmark run_id mismatch at {path}: "
+                f"expected={run_id} actual={data.get('run_id')}"
+            )
+        if data.get("grid_digest") != grid_digest:
+            raise RuntimeError(
+                f"Self-benchmark grid mismatch at {path}: "
+                f"expected={grid_digest} actual={data.get('grid_digest')}"
+            )
+        recorded_rank = data.get("dp", {}).get("rank")
+        if recorded_rank != dp_rank:
+            raise RuntimeError(
+                f"Self-benchmark rank metadata mismatch at {path}: "
+                f"expected={dp_rank} actual={recorded_rank}"
+            )
+        if data.get("dp", {}).get("size") != global_size:
+            raise RuntimeError(
+                f"Self-benchmark global DP size mismatch at {path}: "
+                f"expected={global_size} actual={data.get('dp', {}).get('size')}"
+            )
+        if data.get("iteration_groups") != reference_groups:
+            raise RuntimeError(
+                f"Self-benchmark synchronized iteration groups differ at {path}"
+            )
+
+        timing = data.get("timing")
+        if not isinstance(timing, dict):
+            raise RuntimeError(f"Self-benchmark rank {dp_rank} is missing timing")
+        started_at = timing.get("started_at")
+        completed_at = timing.get("completed_at")
+        elapsed_seconds = timing.get("benchmark_elapsed_seconds")
+        measured_seconds = timing.get("measured_iteration_seconds")
+        if not isinstance(started_at, str) or not isinstance(completed_at, str):
+            raise RuntimeError(
+                f"Self-benchmark rank {dp_rank} has invalid timing timestamps"
+            )
+        if (
+            not isinstance(elapsed_seconds, (int, float))
+            or not math.isfinite(elapsed_seconds)
+            or elapsed_seconds < 0
+        ):
+            raise RuntimeError(
+                f"Self-benchmark rank {dp_rank} has invalid elapsed timing"
+            )
+        if (
+            not isinstance(measured_seconds, (int, float))
+            or not math.isfinite(measured_seconds)
+            or not math.isclose(
+                measured_seconds,
+                measured_iteration_seconds,
+                rel_tol=1e-9,
+                abs_tol=1e-12,
+            )
+        ):
+            raise RuntimeError(
+                f"Self-benchmark rank {dp_rank} measured timing does not match "
+                "the synchronized iteration groups"
+            )
+        if measured_seconds > elapsed_seconds + 1e-12:
+            raise RuntimeError(
+                f"Self-benchmark rank {dp_rank} measured timing exceeds elapsed timing"
+            )
+        rank_timings.append((dp_rank, timing))
+
+        results_by_id: dict[int, dict] = {}
+        for result in data.get("results", []):
+            point = result.get("point", {})
+            benchmark_id = point.get("benchmark_id")
+            if benchmark_id in results_by_id:
+                raise RuntimeError(
+                    f"Self-benchmark rank {dp_rank} has duplicate "
+                    f"benchmark_id={benchmark_id}"
+                )
+            results_by_id[benchmark_id] = result
+        if sorted(results_by_id) != expected_ids:
+            raise RuntimeError(
+                f"Self-benchmark rank {dp_rank} has a different id set: "
+                f"expected={expected_ids} actual={sorted(results_by_id)}"
+            )
+
+        for benchmark_id in expected_ids:
+            result = results_by_id[benchmark_id]
+            group = groups_by_id[benchmark_id]
+            if result.get("point") != group.get("point"):
+                raise RuntimeError(
+                    "Self-benchmark point mismatch for "
+                    f"benchmark_id={benchmark_id} on rank {dp_rank}"
+                )
+            fpms = result.get("fpms") or []
+            if len(fpms) != 1:
+                raise RuntimeError(
+                    f"Self-benchmark rank {dp_rank} must have exactly one FPM for "
+                    f"benchmark_id={benchmark_id}"
+                )
+            fpm = fpms[0]
+            if fpm.get("counter_id") != benchmark_id:
+                raise RuntimeError(
+                    "Self-benchmark FPM counter mismatch: "
+                    f"rank={dp_rank} benchmark_id={benchmark_id} "
+                    f"counter_id={fpm.get('counter_id')}"
+                )
+            if fpm.get("dp_rank") != dp_rank:
+                raise RuntimeError(
+                    "Self-benchmark FPM rank mismatch: "
+                    f"file_rank={dp_rank} fpm_rank={fpm.get('dp_rank')}"
+                )
+            group_fpms = group["rank_results"][dp_rank]["fpms"]
+            if fpms != group_fpms:
+                raise RuntimeError(
+                    "Self-benchmark local result differs from synchronized group: "
+                    f"rank={dp_rank} benchmark_id={benchmark_id}"
+                )
+
+    flattened_results: list[dict] = []
+    for benchmark_id in expected_ids:
+        group = groups_by_id[benchmark_id]
+        canonical_point = group["point"]
+        for rank_result in group["rank_results"]:
+            dp_rank = rank_result["dp_rank"]
+            fpms = copy.deepcopy(rank_result["fpms"])
+            point = copy.deepcopy(canonical_point)
+            point["dp_rank"] = dp_rank
+            flattened_results.append({"point": point, "fpms": fpms})
+
+    merged = copy.deepcopy(reference)
+    merged["artifact_type"] = "merged"
+    merged["dp"] = {
+        "ranks": global_ranks,
+        "source_ranks": source_ranks,
+        "managed_size": len(source_ranks),
+        "global_size": global_size,
+    }
+    merged["rank_files"] = [str(path) for _, path, _ in rank_data]
+    merged["merged_output_path"] = str(merged_path)
+    merged["results"] = flattened_results
+    merged["iteration_groups"] = copy.deepcopy(reference_groups)
+    _, slowest_timing = max(
+        rank_timings,
+        key=lambda item: float(item[1]["benchmark_elapsed_seconds"]),
+    )
+    merged["timing"] = copy.deepcopy(slowest_timing)
+    merged["timing"]["benchmark_elapsed_seconds"] = max(
+        float(timing["benchmark_elapsed_seconds"]) for _, timing in rank_timings
+    )
+    merged["timing"]["measured_iteration_seconds"] = measured_iteration_seconds
+    merged["timing"]["rank_benchmark_elapsed_seconds"] = {
+        str(rank): float(timing["benchmark_elapsed_seconds"])
+        for rank, timing in rank_timings
+    }
+    merged["coverage"] = {
+        "expected_points": expected_points_per_rank * global_size,
+        "completed_points": completed_points_per_rank * global_size,
+        "skipped_points": skipped_points_per_rank * global_size,
+    }
+    merged["skipped_points"] = copy.deepcopy(reference.get("skipped_points", []))
+    return merged
+
+
+def _write_json_atomic(path: Path, data: dict) -> None:
+    tmp_path = Path(f"{path}.tmp")
+    with open(tmp_path, "w") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp_path, path)
 
 
 async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> dict:
@@ -59,24 +471,17 @@ async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> 
     base_path = Path(
         os.environ.get(ENV_FPM_BENCHMARK_OUTPUT_PATH, bench_cfg["output_path"])
     )
-    timeout = int(bench_cfg.get("timeout", 300))
+    timeout = int(bench_cfg.get("timeout", 900))
 
+    dp_start, dp_size = get_dp_range_for_worker(vllm_config)
+
+    dp_ranks = list(range(dp_start, dp_start + dp_size))
+    rank_paths = [_benchmark_rank_path(base_path, dp_rank) for dp_rank in dp_ranks]
+    merged_path = _benchmark_merged_path(base_path, dp_start)
     try:
-        dp_start, dp_size = get_dp_range_for_worker(vllm_config)
-    except Exception:
-        logger.warning(
-            "Could not determine DP range, assuming single rank",
-            exc_info=True,
-        )
-        dp_start, dp_size = 0, 1
-
-    rank_paths = []
-    for dp_rank in range(dp_start, dp_start + dp_size):
-        if dp_rank == 0:
-            rank_paths.append(base_path)
-        else:
-            stem, ext = os.path.splitext(str(base_path))
-            rank_paths.append(Path(f"{stem}_dp{dp_rank}{ext}"))
+        merged_path.unlink()
+    except FileNotFoundError:
+        pass
 
     logger.info(
         "Waiting for benchmark to complete (files: %s, timeout: %ds)...",
@@ -85,41 +490,162 @@ async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> 
     )
 
     deadline = _time.monotonic() + timeout
-    for p in rank_paths:
-        while not p.exists():
-            if _time.monotonic() > deadline:
-                raise TimeoutError(
-                    f"Benchmark did not complete within {timeout}s. Missing: {p}"
+    hard_deadline = deadline + BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS
+    timeout_warning_emitted = False
+    while True:
+        missing_paths = [path for path in rank_paths if not path.exists()]
+        if not missing_paths:
+            break
+        now = _time.monotonic()
+        if now > deadline:
+            if not timeout_warning_emitted:
+                logger.warning(
+                    "Self-benchmark exceeded the %ds soft timeout; waiting up to "
+                    "%ds for the current profiling iteration, rank cleanup, and "
+                    "partial result write. Missing: %s",
+                    timeout,
+                    BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS,
+                    missing_paths,
                 )
-            await asyncio.sleep(0.1)
+                timeout_warning_emitted = True
+            if now > hard_deadline:
+                raise TimeoutError(
+                    "Self-benchmark did not publish results within the soft "
+                    f"timeout plus {BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS}s cleanup "
+                    f"grace. Missing: {missing_paths}"
+                )
+        await asyncio.sleep(0.1)
 
-    merged: dict = {}
-    for i, p in enumerate(rank_paths):
+    rank_data: list[tuple[int, Path, dict]] = []
+    for dp_rank, p in zip(dp_ranks, rank_paths):
         with open(p) as f:
             data = json.load(f)
-        if i == 0:
-            merged = data
-            for r in merged.get("results", []):
-                r["point"]["dp_rank"] = dp_start
-        else:
-            dp_rank = dp_start + i
-            for r in data.get("results", []):
-                r["point"]["dp_rank"] = dp_rank
-            merged.setdefault("results", []).extend(data.get("results", []))
+        _validate_benchmark_rank_payload(data, p)
+        rank_data.append((dp_rank, p, data))
+
+    merged = _merge_benchmark_rank_results(rank_data, merged_path)
+    _write_json_atomic(merged_path, merged)
+
+    if merged.get("status") == "partial":
+        logger.warning(
+            "Self-benchmark soft timeout returned partial results: coverage=%s. "
+            "Engine startup will continue.",
+            merged.get("coverage"),
+        )
 
     logger.info(
-        "Benchmark complete, %d points across %d rank(s)",
+        "Benchmark complete, %d rank-points across %d rank(s); merged results: %s",
         len(merged.get("results", [])),
         len(rank_paths),
+        merged_path,
     )
     return merged
 
 
+async def _stop_worker_gc_policy(engine_client: AsyncLLM) -> None:
+    """Restore worker-process GC once the self-benchmark has finished.
+
+    Model workers auto-start the FPM freeze policy when
+    ``worker_extension_cls`` resolves (importing ``dynamo.vllm.gc_policy``
+    starts it), while ``InstrumentedScheduler`` only restores the
+    engine-core process. Without this symmetric stop the workers would keep
+    serving real traffic with automatic gen2 collection disabled and the
+    freeze daemon alive, so cyclic garbage would never be reclaimed.
+    Awaiting the RPC holds serving until every worker has restored its
+    thresholds and collected the previously frozen heap; both normal
+    completion and benchmark abort funnel through the same benchmark-wait
+    call sites. A failure here must propagate: serving on a worker that is
+    not GC-equivalent to a never-benchmarked one is worse than failing
+    startup.
+    """
+    if os.environ.get("DYN_FPM_GC_POLICY", "").strip().lower() != "freeze":
+        return
+    await engine_client.collective_rpc("fpm_gc_stop")
+    logger.info("FPM GC policy stopped in all model workers")
+
+
+async def _await_benchmark_then_restore_workers(
+    bench_cfg: dict, vllm_config: VllmConfig, engine_client: AsyncLLM
+) -> dict:
+    """Wait for the self-benchmark and restore worker GC on every exit path.
+
+    The worker stop must not depend on the wait succeeding: ``_bench_abort``
+    publishes ``status="failed"`` artifacts, so an aborted benchmark makes
+    ``_wait_and_load_benchmark`` raise during validation, and the workers
+    would otherwise keep automatic gen2 collection disabled through teardown
+    or, if a caller survives the error, into serving. On the success path a
+    stop failure fails closed; on the failure path it is logged and the
+    original error propagates unchanged.
+    """
+    try:
+        results = await _wait_and_load_benchmark(bench_cfg, vllm_config)
+    except BaseException:
+        # The failure may be the engine dying; an unbounded RPC would then
+        # hang the launcher on the very path that is supposed to surface the
+        # error, so the cleanup stop is time-boxed and the original error
+        # always wins.
+        try:
+            await asyncio.wait_for(
+                _stop_worker_gc_policy(engine_client),
+                timeout=WORKER_GC_STOP_TIMEOUT_SECONDS,
+            )
+        except BaseException:
+            logger.exception(
+                "Failed to stop the FPM GC policy in model workers while "
+                "handling a self-benchmark failure"
+            )
+        raise
+    await asyncio.wait_for(
+        _stop_worker_gc_policy(engine_client),
+        timeout=WORKER_GC_STOP_TIMEOUT_SECONDS,
+    )
+    return results
+
+
 SetupVllmEngineFn = Callable[..., EngineSetupResult]
 SetupKvEventPublisherFn = Callable[..., Optional[Any]]
+SetupKvStateAttachmentOwnerFn = Callable[..., Awaitable[Optional[Any]]]
 RegisterVllmModelFn = Callable[..., Awaitable[None]]
 SetupFpmRelayFn = Callable[..., Optional[list]]
 SetupMetricsCollectionFn = Callable[..., None]
+
+
+@dataclass
+class _DecodeWorkerLifecycle:
+    engine_client: Optional[AsyncLLM] = None
+    vllm_config: Optional[VllmConfig] = None
+    handler: Optional[BaseWorkerHandler] = None
+    shutdown_event: asyncio.Event | None = None
+
+    def __enter__(self) -> "_DecodeWorkerLifecycle":
+        return self
+
+    def __exit__(
+        self,
+        _exc_type: type[BaseException] | None,
+        original_error: BaseException | None,
+        _traceback: TracebackType | None,
+    ) -> None:
+        try:
+            self.cleanup()
+        except Exception:
+            if original_error is None:
+                raise
+            logger.exception(
+                "Failed to clean up decode worker after an earlier failure"
+            )
+
+    def cleanup(self) -> None:
+        """Release resources in reverse construction order."""
+        logger.debug("Cleaning up decode worker")
+        if self.shutdown_event is not None:
+            self.shutdown_event.set()
+        try:
+            if self.handler is not None:
+                self.handler.cleanup()
+        finally:
+            if self.engine_client is not None and self.vllm_config is not None:
+                self.engine_client.shutdown(timeout=self.vllm_config.shutdown_timeout)
 
 
 class WorkerFactory:
@@ -132,12 +658,51 @@ class WorkerFactory:
         register_vllm_model_fn: RegisterVllmModelFn,
         setup_fpm_relay_fn: SetupFpmRelayFn,
         setup_metrics_collection_fn: SetupMetricsCollectionFn,
+        setup_kv_state_attachment_owner_fn: SetupKvStateAttachmentOwnerFn | None = None,
+        state_agent_lifecycle: StateAgentLifecycle | None = None,
     ):
         self.setup_vllm_engine = setup_vllm_engine_fn
         self.setup_kv_event_publisher = setup_kv_event_publisher_fn
+        self.setup_kv_state_attachment_owner = setup_kv_state_attachment_owner_fn
         self.register_vllm_model = register_vllm_model_fn
         self.setup_fpm_relay = setup_fpm_relay_fn
         self.setup_metrics_collection = setup_metrics_collection_fn
+        self.state_agent_lifecycle = state_agent_lifecycle or StateAgentLifecycle()
+
+    async def _setup_kv_routing(
+        self,
+        config: Config,
+        generate_endpoint: Endpoint,
+        vllm_config: VllmConfig,
+        *,
+        consolidator_enabled: bool,
+        consolidator_port: int | None,
+    ) -> Optional[Any]:
+        if state_agent_settings(config) is None:
+            return self.setup_kv_event_publisher(
+                config,
+                generate_endpoint,
+                vllm_config,
+                consolidator_enabled=consolidator_enabled,
+                consolidator_port=consolidator_port,
+            )
+
+        # NOTE: Source mode is immutable for one worker lifecycle. An opted-in
+        # worker never falls back to, or concurrently starts, the ordinary KV
+        # publisher; setup failure disables KV routing while serving continues.
+        try:
+            if self.setup_kv_state_attachment_owner is None:
+                raise RuntimeError("KV state-agent attachment setup is unavailable")
+            owner = await self.setup_kv_state_attachment_owner(
+                config, generate_endpoint, vllm_config
+            )
+            if owner is not None:
+                await self.state_agent_lifecycle.install(owner)
+        except Exception:
+            logger.exception(
+                "KV state-agent attachment setup failed; KV routing remains disabled"
+            )
+        return None
 
     async def create(
         self,
@@ -145,9 +710,19 @@ class WorkerFactory:
         config: Config,
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,
-        snapshot_engine: Optional[EngineSetupResult] = None,
+        snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
         """Create the appropriate multimodal worker based on config flags."""
+
+        if config.realtime:
+            await self._create_realtime_worker(
+                runtime,
+                config,
+                shutdown_event,
+                shutdown_endpoints,
+                snapshot_engine=snapshot_engine,
+            )
+            return
 
         # Embedding worker is selected first because it crosses worker shapes
         # (pooling AsyncLLM, ModelType.Embedding) rather than being a variant
@@ -155,6 +730,12 @@ class WorkerFactory:
         # enforced earlier in DynamoVllmConfig._validate_embedding_worker_exclusivity.
         if config.embedding_worker:
             await self._create_embedding_worker(
+                runtime, config, shutdown_event, shutdown_endpoints
+            )
+            return
+
+        if config.classify_worker:
+            await self._create_classify_worker(
                 runtime, config, shutdown_event, shutdown_endpoints
             )
             return
@@ -185,6 +766,101 @@ class WorkerFactory:
             )
         return
 
+    async def _create_realtime_worker(
+        self,
+        runtime: DistributedRuntime,
+        config: Config,
+        shutdown_event: asyncio.Event,
+        shutdown_endpoints: list,
+        snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
+    ) -> None:
+        """Initialize an aggregated vLLM realtime worker."""
+        del shutdown_event  # Connection cancellation is carried by Dynamo Context.
+
+        generate_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.{config.endpoint}"
+        )
+        shutdown_endpoints[:] = [generate_endpoint]
+
+        fpm_worker_id = str(generate_endpoint.connection_id())
+        if snapshot_engine is not None:
+            engine_setup, factory = snapshot_engine
+            (
+                engine_client,
+                vllm_config,
+                _default_sampling_params,
+                prometheus_temp_dir,
+                _component_gauges,
+            ) = engine_setup
+            os.environ[ENV_FPM_WORKER_ID] = fpm_worker_id
+            factory.bind_endpoint(generate_endpoint)
+        else:
+            factory = StatLoggerFactory(endpoint=generate_endpoint)
+            (
+                engine_client,
+                vllm_config,
+                _default_sampling_params,
+                prometheus_temp_dir,
+                _component_gauges,
+            ) = self.setup_vllm_engine(
+                config,
+                factory,
+                fpm_worker_id=fpm_worker_id,
+            )
+        await configure_kv_event_block_size(engine_client, vllm_config)
+        _, dp_size = get_dp_range_for_worker(vllm_config)
+        num_gpu_blocks = per_rank_kv_blocks(
+            vllm_config.cache_config.num_gpu_blocks,
+            dp_size,
+        )
+        factory.set_num_gpu_blocks_all(num_gpu_blocks or 0)
+        factory.init_publish()
+
+        model_name = config.served_model_name or config.model
+        handler = RealtimeHandler(
+            {
+                "transcription": RealtimeTranscriptionHandler.from_engine(
+                    engine_client=engine_client,
+                    model_name=model_name,
+                    model_path=config.model,
+                )
+            }
+        )
+        self.setup_metrics_collection(config, generate_endpoint, logger)
+
+        await self.register_vllm_model(
+            ModelInput.Text,
+            ModelType.Realtime,
+            generate_endpoint,
+            config,
+            engine_client,
+            vllm_config,
+            worker_type=WorkerType.Aggregated,
+            needs=[],
+        )
+        register_model_taint_route(runtime, generate_endpoint)
+
+        metrics_labels = [
+            (prometheus_names.labels.MODEL, model_name),
+            (prometheus_names.labels.MODEL_NAME, model_name),
+        ]
+        logger.info(
+            "Starting realtime worker endpoint for model: %s",
+            model_name,
+        )
+        try:
+            await generate_endpoint.serve_bidirectional_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                metrics_labels=metrics_labels,
+            )
+        except Exception as exc:
+            logger.error("Realtime worker failed: %s", exc)
+            raise
+        finally:
+            if prometheus_temp_dir is not None:
+                prometheus_temp_dir.cleanup()
+
     async def _create_multimodal_encode_worker(
         self,
         runtime: DistributedRuntime,
@@ -201,6 +877,7 @@ class WorkerFactory:
         handler = EncodeWorkerHandler(
             config.engine_args,
             config.embedding_transfer_mode,  # type: ignore[arg-type]
+            enable_frontend_decoding=config.frontend_decoding,
         )
         await handler.async_init(runtime)
 
@@ -221,6 +898,7 @@ class WorkerFactory:
                 [WorkerType.Aggregated],
             ],
         )
+        register_model_taint_route(runtime, generate_endpoint)
         logger.info("Starting to serve the encode worker endpoint...")
 
         try:
@@ -298,7 +976,7 @@ class WorkerFactory:
             engine_client,
             vllm_config,
             _default_sampling_params,
-            _prometheus_temp_dir,
+            engine_cleanup_resource,
             _component_gauges,
         ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
 
@@ -313,6 +991,7 @@ class WorkerFactory:
             model_name=config.served_model_name or config.model
         ).to_dict()
 
+        register_model_taint_route(runtime, generate_endpoint)
         logger.info("Starting to serve the embedding worker endpoint...")
         try:
             await asyncio.gather(
@@ -322,7 +1001,11 @@ class WorkerFactory:
                     health_check_payload=embedding_health_check_payload,
                 ),
                 self.register_vllm_model(
-                    ModelInput.Text,
+                    (
+                        ModelInput.Tokens
+                        if config.embedding_frontend_tokenization
+                        else ModelInput.Text
+                    ),
                     ModelType.Embedding,
                     generate_endpoint,
                     config,
@@ -340,36 +1023,137 @@ class WorkerFactory:
             raise
         finally:
             handler.cleanup()
+            # Attached multi-client AsyncLLMs do not own EngineCore. Close all
+            # clients first, then let the parent cleanup resource terminate
+            # child endpoints and finally the shared EngineCore.
+            try:
+                engine_client.shutdown()
+            except Exception:
+                logger.exception("Failed to shut down embedding AsyncLLM client")
+            if engine_cleanup_resource is not None:
+                try:
+                    engine_cleanup_resource.cleanup()
+                except Exception:
+                    logger.exception("Failed to clean up embedding engine resources")
+
+    async def _create_classify_worker(
+        self,
+        runtime: DistributedRuntime,
+        config: Config,
+        shutdown_event: asyncio.Event,
+        shutdown_endpoints: list,  # mutated in place
+    ) -> None:
+        """Initialize an aggregated sequence-classification worker.
+
+        Like the embeddings worker, this uses a pooling ``AsyncLLM`` and skips
+        the generation-only KV-cache and scheduler machinery. The combined
+        model type advertises both pooling-family endpoints.
+        """
+        generate_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.{config.endpoint}"
+        )
+        shutdown_endpoints[:] = [generate_endpoint]
+
+        fpm_worker_id = str(generate_endpoint.connection_id())
+        factory = StatLoggerFactory(
+            endpoint=generate_endpoint,
+            embedding_worker=True,
+        )
+        (
+            engine_client,
+            vllm_config,
+            _default_sampling_params,
+            _prometheus_temp_dir,
+            _component_gauges,
+        ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
+
+        handler = ClassifyWorkerHandler(
+            runtime=runtime,
+            engine=engine_client,
+            config=config,
+            model_config=getattr(vllm_config, "model_config", None),
+            shutdown_event=shutdown_event,
+        )
+
+        classify_health_check_payload = VllmEmbeddingHealthCheckPayload(
+            model_name=config.served_model_name or config.model
+        ).to_dict()
+
+        logger.info("Starting to serve the classify worker endpoint...")
+        try:
+            await asyncio.gather(
+                generate_endpoint.serve_endpoint(
+                    handler.generate,
+                    metrics_labels=[("model", config.model)],
+                    health_check_payload=classify_health_check_payload,
+                ),
+                self.register_vllm_model(
+                    ModelInput.Text,
+                    ModelType.Classify | ModelType.Pooling,
+                    generate_endpoint,
+                    config,
+                    engine_client,
+                    vllm_config,
+                    worker_type=WorkerType.Aggregated,
+                    needs=[],
+                ),
+            )
+        except Exception as e:
+            logger.error(f"Failed to serve classify worker endpoint: {e}")
+            raise
+        finally:
+            handler.cleanup()
+
+    def _maybe_create_failover_metrics(self, config: Config, generate_endpoint):
+        """Create + register per-engine failover metrics (shadow mode only).
+
+        Called before the model loads so ``init`` spans the load and a restarted
+        engine re-exposes its persisted switch counters within seconds. Uses a
+        dedicated registry surfaced on ``generate_endpoint``'s system /metrics.
+        """
+        if config.gms_shadow_mode is not True:
+            return None
+        from gpu_memory_service.failover_lock.failover_metrics import (
+            create_failover_metrics,
+        )
+
+        persist_dir = os.path.dirname(
+            os.path.abspath(
+                os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
+            )
+        )
+        failover_metrics = create_failover_metrics(
+            endpoint=generate_endpoint,
+            engine_id=os.environ.get("ENGINE_ID", "0"),
+            model_name=config.served_model_name or config.model,
+            component_name=config.component,
+            persist_dir=persist_dir,
+        )
+        failover_metrics.set_state("init")
+        return failover_metrics
 
     async def _maybe_wait_for_failover_lock(
         self,
         handler,
         runtime: DistributedRuntime,
         config: Config,
-    ) -> None:
-        # Shadow mode: lock-driven activation.
-        # Flow: sleep → startup probe passes → block on lock → wake → register.
-        if not config.gms_shadow_mode:
-            return
+        failover_metrics=None,
+    ) -> bool:
+        # Shadow mode: sleep → probe → block on lock → wake. True only for a real
+        # (contended) failover, not the initial bootup. The election itself is
+        # shared with the snapshot restore path, which arrives already paused;
+        # a cold-start engine is awake, so it sleeps here first.
+        if config.gms_shadow_mode is not True:
+            return False
 
         await handler._pause_controller.pause(1)
-
-        runtime.set_health_status(True)
-        logger.info(
-            "[Shadow] Engine sleeping, startup probe now passing, waiting for lock"
+        lock = await elect_and_wake(
+            handler._pause_controller,
+            runtime,
+            lock_path=os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock"),
+            failover_metrics=failover_metrics,
         )
-
-        from gpu_memory_service.failover_lock.flock import FlockFailoverLock
-
-        lock_path = os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
-        engine_id = os.environ.get("ENGINE_ID", "0")
-        lock = FlockFailoverLock(lock_path)
-        await lock.acquire(engine_id=f"engine-{engine_id}")
-        logger.info("[Shadow] Lock acquired, waking engine")
-
-        await handler._pause_controller.resume()
-        handler._pause_controller.mark_resumed()
-        logger.info("[Shadow] Engine awake, registering with discovery")
+        return lock is not None and lock.was_contended
 
     async def _create_decode_worker(
         self,
@@ -377,11 +1161,34 @@ class WorkerFactory:
         config: Config,
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,  # mutated in place
-        snapshot_engine: Optional[EngineSetupResult] = None,
+        snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
         """
         Instantiate and serve
         """
+        with _DecodeWorkerLifecycle(shutdown_event=shutdown_event) as lifecycle:
+            try:
+                await self._run_decode_worker(
+                    runtime,
+                    config,
+                    shutdown_event,
+                    shutdown_endpoints,
+                    snapshot_engine=snapshot_engine,
+                    lifecycle=lifecycle,
+                )
+            finally:
+                await self.state_agent_lifecycle.close()
+
+    async def _run_decode_worker(
+        self,
+        runtime: DistributedRuntime,
+        config: Config,
+        shutdown_event: asyncio.Event,
+        shutdown_endpoints: list,  # mutated in place
+        snapshot_engine: Optional[SnapshotEngineSetupResult],
+        lifecycle: _DecodeWorkerLifecycle,
+    ) -> None:
+        """Initialize and serve a decode worker."""
 
         generate_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
@@ -422,22 +1229,24 @@ class WorkerFactory:
                 ]
             )
 
+        # Shadow mode: create metrics + enter 'init' before load, so 'init' spans it.
+        failover_metrics = self._maybe_create_failover_metrics(
+            config, generate_endpoint
+        )
+
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
         fpm_worker_id = str(generate_endpoint.connection_id())
         if snapshot_engine is not None:
+            engine_setup, factory = snapshot_engine
             (
                 engine_client,
                 vllm_config,
                 default_sampling_params,
                 prometheus_temp_dir,
-                component_gauges,
-            ) = snapshot_engine
+                _component_gauges,
+            ) = engine_setup
             os.environ[ENV_FPM_WORKER_ID] = fpm_worker_id
-            # Factory is created after unpack so component_gauges is available
-            factory = StatLoggerFactory(
-                endpoint=generate_endpoint,
-                component_gauges=component_gauges,
-            )
+            factory.bind_endpoint(generate_endpoint)
         else:
             # Factory is created without component_gauges; setup_vllm_engine() will
             # create the gauges after setup_multiprocess_prometheus() and set them
@@ -450,8 +1259,10 @@ class WorkerFactory:
                 vllm_config,
                 default_sampling_params,
                 prometheus_temp_dir,
-                component_gauges,
+                _component_gauges,
             ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
+        lifecycle.engine_client = engine_client
+        lifecycle.vllm_config = vllm_config
         await configure_kv_event_block_size(engine_client, vllm_config)
 
         # TODO Hack to get data, move this to registering in TBD
@@ -484,6 +1295,7 @@ class WorkerFactory:
             enable_frontend_decoding=config.frontend_decoding,
             encode_worker_client=encode_worker_client,
         )
+        lifecycle.handler = handler
         handler.add_temp_dir(prometheus_temp_dir)
 
         # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
@@ -500,7 +1312,7 @@ class WorkerFactory:
 
         # Set up KV event publisher for prefix caching if enabled
         # If kv event consolidator is enabled, publisher will subscribe to kv event consolidator's output
-        kv_publishers = self.setup_kv_event_publisher(
+        kv_publishers = await self._setup_kv_routing(
             config,
             generate_endpoint,
             vllm_config,
@@ -513,7 +1325,7 @@ class WorkerFactory:
         # Set up forward pass metrics relay (child ZMQ -> event plane).
         # In checkpoint mode the engine was created before the runtime, so
         # ForwardPassMetrics.worker_id will be empty (relay still works).
-        fpm_relays = self.setup_fpm_relay(generate_endpoint, vllm_config)
+        fpm_relays = self.setup_fpm_relay(config, generate_endpoint, vllm_config)
         if fpm_relays:
             handler.fpm_relays = fpm_relays
 
@@ -529,7 +1341,12 @@ class WorkerFactory:
             )
 
         # Register engine routes
-        self.register_engine_routes(runtime, handler, lora_enabled=lora_enabled)
+        self.register_engine_routes(
+            runtime,
+            generate_endpoint,
+            handler,
+            lora_enabled=lora_enabled,
+        )
 
         # Parse endpoint types from --endpoint-types flag
         model_type = parse_endpoint_types(config.endpoint_types)
@@ -546,13 +1363,17 @@ class WorkerFactory:
                 "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
             )
 
-        await self._maybe_wait_for_failover_lock(handler, runtime, config)
+        was_failover = False
+        if snapshot_engine is None:
+            was_failover = await self._maybe_wait_for_failover_lock(
+                handler, runtime, config, failover_metrics
+            )
 
         # Wait for self-benchmark to complete before registering.
         bench_cfg = vllm_config.additional_config.get("benchmark")
         if bench_cfg:
-            handler._benchmark_results = await _wait_and_load_benchmark(
-                bench_cfg, vllm_config
+            handler._benchmark_results = await _await_benchmark_then_restore_workers(
+                bench_cfg, vllm_config, handler.engine_client
             )
 
         # Model-serving-readiness role.
@@ -571,6 +1392,10 @@ class WorkerFactory:
             needs_set.append(WorkerType.Encode)
         needs: list[list[WorkerType]] = [needs_set] if needs_set else []
 
+        handler._first_token_source = await generate_endpoint.first_token_source(
+            worker_type
+        )
+
         await self.register_vllm_model(
             model_input,
             model_type,
@@ -581,6 +1406,12 @@ class WorkerFactory:
             worker_type=worker_type,
             needs=needs,
         )
+        # Serving now: a failover that got here succeeded. Gated on was_failover
+        # (same as the attempt) so bootup isn't counted and success pairs with attempt.
+        if failover_metrics is not None:
+            failover_metrics.set_state("active")
+            if was_failover:
+                failover_metrics.record_switch_success()
 
         health_check_payload = VllmHealthCheckPayload(
             engine_client, use_text_input=config.use_vllm_tokenizer
@@ -655,18 +1486,34 @@ class WorkerFactory:
         except Exception as e:
             logger.error(f"Failed to serve endpoints: {e}")
             raise
-        finally:
-            logger.debug("Cleaning up decode worker")
-            # Cleanup background tasks
-            handler.cleanup()
 
     async def _create_prefill_worker(
         self,
         runtime: DistributedRuntime,
         config: Config,
         shutdown_event: asyncio.Event,
+        shutdown_endpoints: list,
+        snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
+    ) -> None:
+        try:
+            await self._run_prefill_worker(
+                runtime,
+                config,
+                shutdown_event,
+                shutdown_endpoints,
+                snapshot_engine,
+            )
+        except BaseException:
+            await self.state_agent_lifecycle.close()
+            raise
+
+    async def _run_prefill_worker(
+        self,
+        runtime: DistributedRuntime,
+        config: Config,
+        shutdown_event: asyncio.Event,
         shutdown_endpoints: list,  # mutated in place
-        snapshot_engine: Optional[EngineSetupResult] = None,
+        snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
         """
         Instantiate and serve
@@ -682,17 +1529,36 @@ class WorkerFactory:
             if config.enable_rl
             else None
         )
+        lora_enabled = config.engine_args.enable_lora
+        if lora_enabled:
+            load_lora_endpoint = runtime.endpoint(
+                f"{config.namespace}.{config.component}.load_lora"
+            )
+            unload_lora_endpoint = runtime.endpoint(
+                f"{config.namespace}.{config.component}.unload_lora"
+            )
+            list_loras_endpoint = runtime.endpoint(
+                f"{config.namespace}.{config.component}.list_loras"
+            )
+
+        # Shadow mode: create metrics + enter 'init' before load, so 'init' spans it.
+        failover_metrics = self._maybe_create_failover_metrics(
+            config, generate_endpoint
+        )
 
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
         fpm_worker_id = str(generate_endpoint.connection_id())
+        snapshot_factory: Optional[StatLoggerFactory] = None
         if snapshot_engine is not None:
+            engine_setup, snapshot_factory = snapshot_engine
             (
                 engine_client,
                 vllm_config,
                 default_sampling_params,
                 prometheus_temp_dir,
                 _component_gauges,
-            ) = snapshot_engine
+            ) = engine_setup
+            snapshot_factory.bind_endpoint(generate_endpoint)
             # TODO: The scheduler in the child process still has worker_id=""
             # because the engine was forked before the runtime existed.
             # Propagating the new ID to the child requires shared memory or
@@ -707,6 +1573,15 @@ class WorkerFactory:
                 _component_gauges,
             ) = self.setup_vllm_engine(config, fpm_worker_id=fpm_worker_id)
         await configure_kv_event_block_size(engine_client, vllm_config)
+
+        if snapshot_factory is not None:
+            _, dp_size = get_dp_range_for_worker(vllm_config)
+            per_rank_num_gpu_blocks = per_rank_kv_blocks(
+                vllm_config.cache_config.num_gpu_blocks,
+                dp_size,
+            )
+            snapshot_factory.set_num_gpu_blocks_all(per_rank_num_gpu_blocks or 0)
+            snapshot_factory.init_publish()
 
         encode_worker_client = await self._maybe_get_encode_worker_client(
             runtime, config
@@ -742,7 +1617,7 @@ class WorkerFactory:
 
         # Set up KV event publishers for prefix caching if enabled (one per dp_rank)
         # If kv event consolidator is enabled, publisher will subscribe to kv event consolidator's output
-        kv_publishers = self.setup_kv_event_publisher(
+        kv_publishers = await self._setup_kv_routing(
             config,
             generate_endpoint,
             vllm_config,
@@ -755,7 +1630,7 @@ class WorkerFactory:
         # Set up forward pass metrics relay (child ZMQ -> event plane).
         # In checkpoint mode the engine was created before the runtime, so
         # ForwardPassMetrics.worker_id will be empty (relay still works).
-        fpm_relays = self.setup_fpm_relay(generate_endpoint, vllm_config)
+        fpm_relays = self.setup_fpm_relay(config, generate_endpoint, vllm_config)
         if fpm_relays:
             handler.fpm_relays = fpm_relays
 
@@ -772,16 +1647,23 @@ class WorkerFactory:
 
         # Register engine routes
         self.register_engine_routes(
-            runtime, handler, lora_enabled=config.engine_args.enable_lora
+            runtime,
+            generate_endpoint,
+            handler,
+            lora_enabled=config.engine_args.enable_lora,
         )
 
-        await self._maybe_wait_for_failover_lock(handler, runtime, config)
+        was_failover = False
+        if snapshot_engine is None:
+            was_failover = await self._maybe_wait_for_failover_lock(
+                handler, runtime, config, failover_metrics
+            )
 
         # Wait for self-benchmark to complete before registering.
         bench_cfg = vllm_config.additional_config.get("benchmark")
         if bench_cfg:
-            handler._benchmark_results = await _wait_and_load_benchmark(
-                bench_cfg, vllm_config
+            handler._benchmark_results = await _await_benchmark_then_restore_workers(
+                bench_cfg, vllm_config, handler.engine_client
             )
 
         perf_endpoint = runtime.endpoint(
@@ -790,6 +1672,10 @@ class WorkerFactory:
         shutdown_endpoints[:] = [generate_endpoint, clear_endpoint, perf_endpoint]
         if rl_endpoint is not None:
             shutdown_endpoints.append(rl_endpoint)
+        if lora_enabled:
+            shutdown_endpoints.extend(
+                [load_lora_endpoint, unload_lora_endpoint, list_loras_endpoint]
+            )
 
         # Prefill workers expose no OpenAI surface — the role is carried by
         # `worker_type=Prefill`. We register the legacy `ModelType.Prefill`
@@ -816,6 +1702,12 @@ class WorkerFactory:
             worker_type=WorkerType.Prefill,
             needs=[prefill_needs_set],
         )
+        # Serving now: a failover that got here succeeded. Gated on was_failover
+        # (same as the attempt) so bootup isn't counted and success pairs with attempt.
+        if failover_metrics is not None:
+            failover_metrics.set_state("active")
+            if was_failover:
+                failover_metrics.record_switch_success()
 
         health_check_payload = VllmPrefillHealthCheckPayload(
             engine_client, use_text_input=config.use_vllm_tokenizer
@@ -857,6 +1749,23 @@ class WorkerFactory:
                         metrics_labels=prefill_metrics_labels,
                     )
                 )
+            if lora_enabled:
+                serve_tasks.extend(
+                    [
+                        load_lora_endpoint.serve_endpoint(
+                            handler.load_lora,
+                            metrics_labels=prefill_metrics_labels,
+                        ),
+                        unload_lora_endpoint.serve_endpoint(
+                            handler.unload_lora,
+                            metrics_labels=prefill_metrics_labels,
+                        ),
+                        list_loras_endpoint.serve_endpoint(
+                            handler.list_loras,
+                            metrics_labels=prefill_metrics_labels,
+                        ),
+                    ]
+                )
             await asyncio.gather(*serve_tasks)
             logger.debug("serve_endpoint completed for prefill worker")
         except Exception as e:
@@ -864,6 +1773,7 @@ class WorkerFactory:
             raise
         finally:
             logger.debug("Cleaning up prefill worker")
+            await self.state_agent_lifecycle.close()
             handler.cleanup()
 
     async def _maybe_get_encode_worker_client(
@@ -884,6 +1794,7 @@ class WorkerFactory:
     def register_engine_routes(
         self,
         runtime: DistributedRuntime,
+        generate_endpoint: Endpoint,
         handler: BaseWorkerHandler,
         lora_enabled: bool = False,
     ) -> None:
@@ -891,7 +1802,9 @@ class WorkerFactory:
 
         Args:
             runtime: The DistributedRuntime instance to register routes on.
+            generate_endpoint: Worker endpoint whose model taints can be updated.
         """
+        register_model_taint_route(runtime, generate_endpoint)
         runtime.register_engine_route("control/start_profile", handler.start_profile)
         runtime.register_engine_route("control/stop_profile", handler.stop_profile)
         runtime.register_engine_route("control/sleep", handler.sleep)
@@ -899,6 +1812,7 @@ class WorkerFactory:
         runtime.register_engine_route(
             "control/scale_elastic_ep", handler.scale_elastic_ep
         )
+        runtime.register_engine_route("control/ep_capacity", handler.get_ep_capacity)
 
         rl_routes: dict = {
             "liveness_probe": handler.liveness_probe,
@@ -934,7 +1848,8 @@ class WorkerFactory:
 
         logger.info(
             "Registered engine routes: control/sleep, control/wake_up, "
-            "control/scale_elastic_ep, control/start_profile, control/stop_profile, "
+            "control/scale_elastic_ep, control/ep_capacity, "
+            "control/start_profile, control/stop_profile, "
             "and RL admin routes: %s%s",
             ", ".join(sorted(rl_routes)),
             " (LoRA routes: load_lora, unload_lora)" if lora_enabled else "",

@@ -823,8 +823,8 @@
     {
       "id": 14,
       "type": "timeseries",
-      "title": "Inflight vs Queued Requests",
-      "description": "DYN: dynamo_frontend_inflight_requests / queued_requests gauges. Inflight = currently being processed (dispatched to a worker, awaiting completion). Queued = received by the frontend but not yet dispatched (waiting on router scheduling / worker permit). Inflight pinned at the worker concurrency limit while queued grows means workers are saturated and the gateway is buffering.",
+      "title": "Active vs Queued Requests",
+      "description": "DYN: dynamo_frontend_active_requests / stage_requests gauges. Active = currently being processed (dispatched to a worker, awaiting completion). Queued = sum of stage_requests across the preprocess, route, and dispatch stages (requests received but not yet sent to a worker). Active pinned at the worker concurrency limit while queued grows means workers are saturated and the gateway is buffering.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -895,8 +895,8 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(dynamo_frontend_inflight_requests)",
-          "legendFormat": "inflight",
+          "expr": "sum(dynamo_frontend_active_requests)",
+          "legendFormat": "active",
           "range": true,
           "refId": "A"
         },
@@ -906,7 +906,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(dynamo_frontend_queued_requests)",
+          "expr": "sum(dynamo_frontend_stage_requests{stage=~\"preprocess|route|dispatch\"})",
           "legendFormat": "queued",
           "range": true,
           "refId": "B"

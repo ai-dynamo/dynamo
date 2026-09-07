@@ -15,10 +15,12 @@ pub struct Frontend<In: PipelineIO, Out: PipelineIO> {
 /// A [`ServiceFrontend`] is the interface for an [`AsyncEngine<SingleIn<Context<In>>, ManyOut<Annotated<Out>>, Error>`]
 pub struct ServiceFrontend<In: PipelineIO, Out: PipelineIO> {
     inner: Frontend<In, Out>,
+    self_weak: Weak<Self>,
 }
 
 pub struct SegmentSource<In: PipelineIO, Out: PipelineIO> {
     inner: Frontend<In, Out>,
+    self_weak: Weak<Self>,
 }
 
 // impl<In: DataType, Out: PipelineIO> Frontend<In, Out> {

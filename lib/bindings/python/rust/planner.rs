@@ -295,6 +295,16 @@ impl VirtualConnectorCoordinator {
             Ok(())
         })
     }
+
+    /// Return whether the client has acknowledged the current scaling decision.
+    #[pyo3(signature = ())]
+    pub fn is_scaling_ready<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let inner = self.0.clone();
+        pyo3_async_runtimes::tokio::future_into_py(
+            py,
+            async move { Ok(inner.is_scaling_ready().await) },
+        )
+    }
 }
 
 impl InnerConnector {
@@ -349,7 +359,7 @@ impl InnerConnector {
     async fn is_scaling_ready(&self) -> bool {
         let current = load(&self.decision_id);
         // If this is the first decision, it's always ready
-        if current == NONE_SENTINEL {
+        if scaling_decision_is_ready(current, None) {
             return true;
         }
         let Some(kv_cache) = self.kv_cache.lock().as_ref().cloned() else {
@@ -361,9 +371,7 @@ impl InnerConnector {
         if let Some(scaled_decision_id_bytes) = kv_cache.get("scaled_decision_id").await {
             match String::from_utf8_lossy(&scaled_decision_id_bytes).parse::<usize>() {
                 Ok(scaled_decision_id) => {
-                    // Success case
-                    // We checked for NONE_SENTINEL earlier
-                    return scaled_decision_id >= current;
+                    return scaling_decision_is_ready(current, Some(scaled_decision_id));
                 }
                 Err(err) => {
                     tracing::warn!(%err, "Failed to parse scaled_decision_id");
@@ -373,6 +381,10 @@ impl InnerConnector {
         // If no scaled_decision_id exists, assume not ready
         false
     }
+}
+
+fn scaling_decision_is_ready(current: usize, scaled: Option<usize>) -> bool {
+    current == NONE_SENTINEL || scaled.is_some_and(|scaled| scaled >= current)
 }
 
 #[pyclass]
@@ -523,4 +535,34 @@ fn load(a: &AtomicUsize) -> usize {
 
 fn root_key(namespace: &str) -> String {
     format!("v1/{namespace}/planner/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NONE_SENTINEL, scaling_decision_is_ready};
+
+    #[test]
+    fn scaling_is_ready_before_first_decision() {
+        assert!(scaling_decision_is_ready(NONE_SENTINEL, None));
+    }
+
+    #[test]
+    fn scaling_is_not_ready_without_acknowledgement() {
+        assert!(!scaling_decision_is_ready(3, None));
+    }
+
+    #[test]
+    fn scaling_is_not_ready_with_stale_acknowledgement() {
+        assert!(!scaling_decision_is_ready(3, Some(2)));
+    }
+
+    #[test]
+    fn scaling_is_ready_with_matching_acknowledgement() {
+        assert!(scaling_decision_is_ready(3, Some(3)));
+    }
+
+    #[test]
+    fn scaling_is_ready_with_newer_acknowledgement() {
+        assert!(scaling_decision_is_ready(3, Some(4)));
+    }
 }

@@ -1,0 +1,128 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: dsv4-pro-agg-b200-agentic
+spec:
+  backendFramework: vllm
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+          workingDir: /workspace
+          command:
+          - /bin/bash
+          - -lc
+          args:
+          - |
+            DYN_ROUTER_MODE=kv python3 -m dynamo.frontend --trust-remote-code
+          name: main
+          volumeMounts:
+          - name: model-cache
+            mountPath: /model-cache
+            readOnly: true
+        schedulerName: default-scheduler
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+            readOnly: true
+  - name: VllmDecodeWorker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-B200
+        containers:
+        - image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+          workingDir: /workspace
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          env:
+          - name: HF_HOME
+            value: /model-cache
+          - name: HF_HUB_CACHE
+            value: /model-cache/hub
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: TRANSFORMERS_OFFLINE
+            value: "1"
+          - name: VLLM_SKIP_P2P_CHECK
+            value: "1"
+          - name: NCCL_CUMEM_ENABLE
+            value: "1"
+          - name: VLLM_ALLREDUCE_USE_FLASHINFER
+            value: "1"
+          command:
+          - /bin/bash
+          - -lc
+          args:
+          - |
+            python3 -m dynamo.vllm \
+              --model nvidia/DeepSeek-V4-Pro-NVFP4 \
+              --served-model-name nvidia/DeepSeek-V4-Pro-NVFP4 \
+              --trust-remote-code \
+              --kv-cache-dtype fp8 \
+              --block-size 256 \
+              --tensor-parallel-size 8 \
+              --gpu-memory-utilization 0.9348 \
+              --max-model-len 1048576 \
+              --tokenizer-mode deepseek_v4 \
+              --dyn-reasoning-parser deepseek_v4 \
+              --dyn-tool-call-parser deepseek_v4 \
+              --reasoning-config '{
+                  "reasoning_start_str": "<think>",
+                  "reasoning_end_str": "</think>"
+                }' \
+              --attention-config '{
+                  "use_fp4_indexer_cache": true
+                }' \
+              --compilation-config '{
+                  "cudagraph_mode": "FULL_AND_PIECEWISE",
+                  "custom_ops": [
+                    "all"
+                  ]
+                }' \
+              --moe-backend flashinfer_trtllm \
+              --kv-events-config '{
+                  "publisher": "zmq",
+                  "topic": "kv-events",
+                  "endpoint": "tcp://*:5571",
+                  "enable_kv_cache_events": true
+                }' \
+              --enable-expert-parallel \
+              --enable-prefix-caching \
+              --enable-chunked-prefill \
+              --no-scheduler-reserve-full-isl \
+              --speculative-config '{
+                  "method": "mtp",
+                  "num_speculative_tokens": 2
+                }'
+          name: main
+          volumeMounts:
+          - name: model-cache
+            mountPath: /model-cache
+            readOnly: true
+          resources:
+            requests:
+              nvidia.com/gpu: "8"
+            limits:
+              nvidia.com/gpu: "8"
+        schedulerName: default-scheduler
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+            readOnly: true
+        runtimeClassName: nvidia
+        tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule

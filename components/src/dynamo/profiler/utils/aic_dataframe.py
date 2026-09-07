@@ -24,8 +24,8 @@ are actually accessed; this module populates exactly those columns.
 from __future__ import annotations
 
 import pandas as pd
-from aiconfigurator.sdk import common
 from aiconfigurator.sdk.picking import _build_disagg_summary_dict
+from aiconfigurator_core.sdk import common
 
 
 def make_parallel_label(tp: int, pp: int, dp: int, moe_tp: int, moe_ep: int) -> str:

@@ -67,34 +67,50 @@ async def _python_realtime_echo(request_stream, context):
             audio = client_event.get("audio", "")
             response_id = f"resp_{uuid.uuid4().hex}"
             item_id = f"item_{uuid.uuid4().hex}"
-
-            yield {
+            # Intentionally reuse this mutable dict across yields. The Rust
+            # network engine must serialize each frame before polling us again,
+            # otherwise queued PyObject handles would all observe later updates.
+            response_event = {
                 "type": "response.created",
                 "event_id": _event_id(),
                 "response": _response_payload(response_id, "in_progress"),
             }
-            yield {
-                "type": "response.output_audio.delta",
-                "event_id": _event_id(),
-                "response_id": response_id,
-                "item_id": item_id,
-                "output_index": 0,
-                "content_index": 0,
-                "delta": audio,
-            }
-            yield {
-                "type": "response.output_audio.done",
-                "event_id": _event_id(),
-                "response_id": response_id,
-                "item_id": item_id,
-                "output_index": 0,
-                "content_index": 0,
-            }
-            yield {
-                "type": "response.done",
-                "event_id": _event_id(),
-                "response": _response_payload(response_id, "completed"),
-            }
+
+            yield response_event
+            response_event.clear()
+            response_event.update(
+                {
+                    "type": "response.output_audio.delta",
+                    "event_id": _event_id(),
+                    "response_id": response_id,
+                    "item_id": item_id,
+                    "output_index": 0,
+                    "content_index": 0,
+                    "delta": audio,
+                }
+            )
+            yield response_event
+            response_event.clear()
+            response_event.update(
+                {
+                    "type": "response.output_audio.done",
+                    "event_id": _event_id(),
+                    "response_id": response_id,
+                    "item_id": item_id,
+                    "output_index": 0,
+                    "content_index": 0,
+                }
+            )
+            yield response_event
+            response_event.clear()
+            response_event.update(
+                {
+                    "type": "response.done",
+                    "event_id": _event_id(),
+                    "response": _response_payload(response_id, "completed"),
+                }
+            )
+            yield response_event
         else:
             yield {
                 "type": "error",

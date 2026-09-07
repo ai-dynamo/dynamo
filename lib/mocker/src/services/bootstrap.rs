@@ -1,282 +1,391 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Bootstrap rendezvous for disaggregated mocker testing.
+//! Framed transport for mocker prefill/decode handoff sessions.
 //!
-//! Simulates the SGLang disaggregated serving handshake for KV transfer coordination.
-//! Either prefill or decode can arrive first; prefill waits for decode metadata before
-//! emitting output, and decode waits for prefill completion before generating.
-//!
-//! - Prefill: waits for decode metadata, then calls `complete_room(room_id)` after first token
-//! - Decode: connects to prefill's bootstrap server, sends metadata, then waits for completion
-//!
-//! Wire protocol:
-//! - Decode -> Prefill: room_id (8 bytes, little-endian u64)
-//! - Prefill -> Decode: ACK (1 byte, 0x01) after prefill completes
+//! Session and request ownership live in `dynamo-llm`. This module only
+//! validates framed connections and hands them to that owner.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Result, bail};
-use dashmap::DashMap;
-use dashmap::mapref::entry::Entry;
+use anyhow::{Context, Result, anyhow, bail};
+use bytes::Bytes;
+use futures::{FutureExt, SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::oneshot;
+use tokio::sync::{Semaphore, mpsc, watch};
+use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
+use uuid::Uuid;
 
-/// Timeout for bootstrap rendezvous operations.
+use crate::common::handoff::{
+    HandoffActionId, HandoffActionOutcome, HandoffFact, HandoffId, HandoffOrder,
+    IssuedHandoffAction,
+};
+use crate::common::protocols::EngineType;
+
+pub const BOOTSTRAP_PROTOCOL_VERSION: u16 = 1;
+pub const MAX_BOOTSTRAP_FRAME_BYTES: usize = 64 * 1024;
+const MAGIC: [u8; 4] = *b"DMHF";
+const HEADER_BYTES: usize = 8;
 const RENDEZVOUS_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// ACK byte sent from server to decode after prefill completes.
-const ACK_BYTE: u8 = 0x01;
-
-/// State for a room in the rendezvous.
-struct RoomState {
-    /// True if decode has sent receiver metadata for this room
-    decode_ready: bool,
-    /// True if prefill has completed (KV cache ready)
-    prefill_completed: bool,
-    /// Channel to notify prefill when decode metadata arrives
-    prefill_waiting: Option<oneshot::Sender<()>>,
-    /// Channel to notify decode when prefill completes (if decode is waiting)
-    decode_waiting: Option<oneshot::Sender<()>>,
+#[derive(Clone, Debug)]
+pub struct BootstrapServerConfig {
+    pub max_pending_connections: usize,
+    pub registration_timeout: Duration,
 }
 
-/// Bootstrap server for prefill mockers.
-/// Handles rendezvous between prefill and decode for KV transfer coordination.
+impl Default for BootstrapServerConfig {
+    fn default() -> Self {
+        Self {
+            max_pending_connections: 256,
+            registration_timeout: RENDEZVOUS_TIMEOUT,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum BootstrapParticipantRole {
+    Destination,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BootstrapIdentity {
+    pub handoff_id: HandoffId,
+    pub bootstrap_room: u64,
+    pub request_id: Uuid,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ParticipantRegistration {
+    pub role: BootstrapParticipantRole,
+    pub dp_rank: u32,
+    pub order: HandoffOrder,
+    pub engine_type: EngineType,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum BootstrapMessage {
+    Register(ParticipantRegistration),
+    Registered,
+    Action(IssuedHandoffAction),
+    ActionAck {
+        action_id: HandoffActionId,
+        outcome: HandoffActionOutcome,
+    },
+    Fact(HandoffFact),
+    Complete,
+    Abort {
+        message: String,
+    },
+    Overloaded,
+    ProtocolError {
+        message: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct BootstrapWireFrame {
+    identity: BootstrapIdentity,
+    message: BootstrapMessage,
+}
+
+pub struct IncomingBootstrapConnection {
+    pub identity: BootstrapIdentity,
+    pub registration: ParticipantRegistration,
+    pub connection: BootstrapConnection,
+}
+
+pub struct BootstrapConnection {
+    identity: BootstrapIdentity,
+    framed: Framed<TcpStream, LengthDelimitedCodec>,
+}
+
+impl BootstrapConnection {
+    pub fn identity(&self) -> &BootstrapIdentity {
+        &self.identity
+    }
+
+    pub async fn send(&mut self, message: BootstrapMessage) -> Result<()> {
+        let payload = serde_json::to_vec(&BootstrapWireFrame {
+            identity: self.identity.clone(),
+            message,
+        })?;
+        if payload.is_empty() || payload.len() > MAX_BOOTSTRAP_FRAME_BYTES {
+            bail!(
+                "bootstrap frame length {} is outside 1..={MAX_BOOTSTRAP_FRAME_BYTES}",
+                payload.len()
+            );
+        }
+        tokio::time::timeout(RENDEZVOUS_TIMEOUT, self.framed.send(Bytes::from(payload)))
+            .await
+            .map_err(|_| anyhow!("bootstrap send timed out"))??;
+        Ok(())
+    }
+
+    pub async fn recv(&mut self) -> Result<Option<BootstrapMessage>> {
+        let Some(frame) = self.framed.next().await.transpose()? else {
+            return Ok(None);
+        };
+        if frame.is_empty() {
+            bail!("bootstrap received an empty frame");
+        }
+        let frame: BootstrapWireFrame =
+            serde_json::from_slice(&frame).context("bootstrap frame contains malformed JSON")?;
+        if frame.identity != self.identity {
+            bail!("bootstrap frame changed session identity");
+        }
+        Ok(Some(frame.message))
+    }
+
+    pub fn peer_closed_now(&self) -> Result<bool> {
+        let mut byte = [0u8; 1];
+        match self.framed.get_ref().peek(&mut byte).now_or_never() {
+            Some(Ok(0)) => Ok(true),
+            Some(Ok(_)) | None => Ok(false),
+            Some(Err(error)) => Err(error.into()),
+        }
+    }
+}
+
 pub struct BootstrapServer {
     port: u16,
-    rooms: Arc<DashMap<u64, RoomState>>,
+    incoming_rx: Mutex<Option<mpsc::Receiver<IncomingBootstrapConnection>>>,
+    closed_rx: watch::Receiver<bool>,
+    #[cfg(test)]
+    accepted_with_slot_rx: watch::Receiver<u64>,
 }
 
 impl BootstrapServer {
-    /// Start the bootstrap server on the specified port.
-    pub async fn start(port: u16, cancel_token: CancellationToken) -> Result<Arc<Self>> {
+    pub async fn start(
+        port: u16,
+        cancel: CancellationToken,
+        config: BootstrapServerConfig,
+    ) -> Result<Arc<Self>> {
+        if config.max_pending_connections == 0 {
+            bail!("bootstrap max_pending_connections must be at least one");
+        }
         let listener = TcpListener::bind(format!("0.0.0.0:{port}")).await?;
         let actual_port = listener.local_addr()?.port();
-
-        tracing::info!("Bootstrap server started on port {actual_port}");
-
-        let rooms: Arc<DashMap<u64, RoomState>> = Arc::new(DashMap::new());
+        let (incoming_tx, incoming_rx) = mpsc::channel(config.max_pending_connections);
+        let permits = Arc::new(Semaphore::new(config.max_pending_connections));
+        let overload_permits = Arc::new(Semaphore::new(1));
+        let (closed_tx, closed_rx) = watch::channel(false);
+        #[cfg(test)]
+        let (accepted_with_slot_tx, accepted_with_slot_rx) = watch::channel(0_u64);
         let server = Arc::new(Self {
             port: actual_port,
-            rooms: rooms.clone(),
+            incoming_rx: Mutex::new(Some(incoming_rx)),
+            closed_rx,
+            #[cfg(test)]
+            accepted_with_slot_rx,
         });
 
-        // Spawn accept loop
         tokio::spawn(async move {
+            let connections = TaskTracker::new();
+            #[cfg(test)]
+            let mut accepted_with_slot = 0_u64;
             loop {
-                tokio::select! {
-                    result = listener.accept() => {
-                        match result {
-                            Ok((stream, addr)) => {
-                                tracing::debug!("Bootstrap: accepted connection from {addr}");
-                                let rooms_clone = rooms.clone();
-                                tokio::spawn(async move {
-                                    if let Err(e) = Self::handle_connection(stream, rooms_clone).await {
-                                        tracing::warn!("Bootstrap: connection error: {e}");
-                                    }
-                                });
-                            }
-                            Err(e) => {
-                                tracing::warn!("Bootstrap: accept failed: {e}");
-                            }
-                        }
+                let accepted = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => break,
+                    accepted = listener.accept() => accepted,
+                };
+                let Ok((stream, _)) = accepted else {
+                    tokio::select! {
+                        _ = cancel.cancelled() => break,
+                        _ = tokio::time::sleep(Duration::from_millis(10)) => {}
                     }
-                    _ = cancel_token.cancelled() => {
-                        tracing::debug!("Bootstrap server shutting down");
-                        break;
-                    }
+                    continue;
+                };
+                let Ok(permit) = permits.clone().try_acquire_owned() else {
+                    let Ok(overload_permit) = overload_permits.clone().try_acquire_owned() else {
+                        drop(stream);
+                        continue;
+                    };
+                    let registration_timeout = config.registration_timeout;
+                    let connection_cancel = cancel.clone();
+                    connections.spawn(async move {
+                        let _permit = overload_permit;
+                        let incoming = tokio::select! {
+                            biased;
+                            _ = connection_cancel.cancelled() => return,
+                            incoming = tokio::time::timeout(
+                                registration_timeout,
+                                accept_connection(stream),
+                            ) => incoming,
+                        };
+                        let Ok(Ok(mut incoming)) = incoming else {
+                            return;
+                        };
+                        let _ = incoming.connection.send(BootstrapMessage::Overloaded).await;
+                    });
+                    continue;
+                };
+                #[cfg(test)]
+                {
+                    accepted_with_slot = accepted_with_slot
+                        .checked_add(1)
+                        .expect("bootstrap accepted-connection test counter overflow");
+                    let _ = accepted_with_slot_tx.send(accepted_with_slot);
                 }
+                let incoming_tx = incoming_tx.clone();
+                let registration_timeout = config.registration_timeout;
+                let connection_cancel = cancel.clone();
+                connections.spawn(async move {
+                    let _permit = permit;
+                    let incoming = tokio::select! {
+                        biased;
+                        _ = connection_cancel.cancelled() => return,
+                        incoming = tokio::time::timeout(
+                            registration_timeout,
+                            accept_connection(stream),
+                        ) => incoming,
+                    };
+                    let Ok(incoming) = incoming else {
+                        return;
+                    };
+                    let Ok(mut incoming) = incoming else {
+                        return;
+                    };
+                    if let Err(error) = incoming_tx.try_send(incoming) {
+                        incoming = error.into_inner();
+                        let _ = incoming.connection.send(BootstrapMessage::Overloaded).await;
+                    }
+                });
             }
+            connections.close();
+            connections.wait().await;
+            let _ = closed_tx.send(true);
         });
 
         Ok(server)
     }
 
-    /// Handle a connection from decode. Marks decode ready, then blocks until prefill completes.
-    async fn handle_connection(
-        mut stream: TcpStream,
-        rooms: Arc<DashMap<u64, RoomState>>,
-    ) -> Result<()> {
-        // Read room_id (8 bytes, little-endian)
-        let mut buf = [0u8; 8];
-        stream.read_exact(&mut buf).await?;
-        let room_id = u64::from_le_bytes(buf);
-
-        tracing::debug!("Bootstrap: decode connected for room {room_id}");
-
-        // Register decode metadata, wake prefill if it is waiting, then wait for prefill completion.
-        let rx = match rooms.entry(room_id) {
-            Entry::Occupied(mut entry) => {
-                entry.get_mut().decode_ready = true;
-                if let Some(sender) = entry.get_mut().prefill_waiting.take() {
-                    let _ = sender.send(());
-                    tracing::debug!("Bootstrap: room {room_id} decode metadata unblocked prefill");
-                }
-
-                if entry.get().prefill_completed {
-                    // Prefill already done, immediate ACK
-                    entry.remove();
-                    tracing::debug!("Bootstrap: room {room_id} already completed, immediate ACK");
-                    None
-                } else {
-                    // Decode metadata is registered, but prefill has not completed yet.
-                    let (tx, rx) = oneshot::channel();
-                    entry.get_mut().decode_waiting = Some(tx);
-                    tracing::debug!("Bootstrap: room {room_id} decode waiting for prefill");
-                    Some(rx)
-                }
-            }
-            Entry::Vacant(entry) => {
-                // Decode arrived first, record metadata and wait for prefill completion.
-                let (tx, rx) = oneshot::channel();
-                entry.insert(RoomState {
-                    decode_ready: true,
-                    prefill_completed: false,
-                    prefill_waiting: None,
-                    decode_waiting: Some(tx),
-                });
-                tracing::debug!("Bootstrap: room {room_id} decode arrived first");
-                Some(rx)
-            }
-        };
-
-        // Wait for prefill to complete if needed
-        if let Some(rx) = rx {
-            match tokio::time::timeout(RENDEZVOUS_TIMEOUT, rx).await {
-                Ok(Ok(())) => {
-                    tracing::debug!("Bootstrap: room {room_id} prefill completed, sending ACK");
-                }
-                Ok(Err(_)) => {
-                    bail!("Bootstrap: room {room_id} sender dropped");
-                }
-                Err(_) => {
-                    rooms.remove(&room_id);
-                    bail!("Bootstrap: room {room_id} timeout waiting for prefill");
-                }
-            }
-        }
-
-        // Send ACK
-        stream.write_all(&[ACK_BYTE]).await?;
-        Ok(())
+    pub fn take_incoming_receiver(&self) -> Option<mpsc::Receiver<IncomingBootstrapConnection>> {
+        self.incoming_rx
+            .lock()
+            .expect("bootstrap incoming receiver mutex poisoned")
+            .take()
     }
 
-    /// Wait until decode has sent receiver metadata for this room.
-    pub async fn wait_for_decode_ready(&self, room_id: u64) -> Result<()> {
-        let rx = match self.rooms.entry(room_id) {
-            Entry::Occupied(mut entry) => {
-                if entry.get().decode_ready {
-                    tracing::debug!("Bootstrap: room {room_id} decode already ready");
-                    None
-                } else {
-                    let (tx, rx) = oneshot::channel();
-                    entry.get_mut().prefill_waiting = Some(tx);
-                    tracing::debug!(
-                        "Bootstrap: room {room_id} prefill waiting for decode metadata"
-                    );
-                    Some(rx)
-                }
-            }
-            Entry::Vacant(entry) => {
-                let (tx, rx) = oneshot::channel();
-                entry.insert(RoomState {
-                    decode_ready: false,
-                    prefill_completed: false,
-                    prefill_waiting: Some(tx),
-                    decode_waiting: None,
-                });
-                tracing::debug!("Bootstrap: room {room_id} prefill arrived first");
-                Some(rx)
-            }
-        };
-
-        if let Some(rx) = rx {
-            match tokio::time::timeout(RENDEZVOUS_TIMEOUT, rx).await {
-                Ok(Ok(())) => {
-                    tracing::debug!("Bootstrap: room {room_id} decode metadata received");
-                }
-                Ok(Err(_)) => {
-                    bail!("Bootstrap: room {room_id} decode metadata waiter dropped");
-                }
-                Err(_) => {
-                    self.rooms.remove(&room_id);
-                    bail!("Bootstrap: room {room_id} timeout waiting for decode metadata");
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Mark a room as completed (prefill finished, KV cache ready).
-    /// If decode is already waiting, unblocks it.
-    pub fn complete_room(&self, room_id: u64) {
-        match self.rooms.entry(room_id) {
-            Entry::Occupied(mut entry) => {
-                if let Some(sender) = entry.get_mut().decode_waiting.take() {
-                    // Decode is waiting, unblock it
-                    let _ = sender.send(());
-                    entry.remove();
-                    tracing::debug!("Bootstrap: room {room_id} completed, decode unblocked");
-                } else {
-                    // Decode not connected yet, mark completed
-                    entry.get_mut().prefill_completed = true;
-                    tracing::debug!("Bootstrap: room {room_id} completed, awaiting decode");
-                }
-            }
-            Entry::Vacant(entry) => {
-                // Decode hasn't connected yet
-                entry.insert(RoomState {
-                    decode_ready: false,
-                    prefill_completed: true,
-                    prefill_waiting: None,
-                    decode_waiting: None,
-                });
-                tracing::debug!("Bootstrap: room {room_id} completed (no decode yet)");
-            }
-        }
-    }
-
-    /// Get the port the server is listening on.
     pub fn port(&self) -> u16 {
         self.port
     }
-}
 
-/// Send decode receiver metadata to a prefill worker, then wait for KV to be ready.
-pub async fn connect_to_prefill(host: &str, port: u16, room_id: u64) -> Result<()> {
-    let host = host.trim_matches(|c| c == '[' || c == ']');
-    let addr = format!("{host}:{port}");
-
-    tracing::debug!("Bootstrap: decode connecting to {addr} for room {room_id}");
-
-    // Connect with timeout
-    let mut stream = tokio::time::timeout(RENDEZVOUS_TIMEOUT, TcpStream::connect(&addr))
-        .await
-        .map_err(|_| anyhow::anyhow!("Bootstrap: connect timeout to {addr}"))?
-        .map_err(|e| anyhow::anyhow!("Bootstrap: connect failed to {addr}: {e}"))?;
-
-    // Send room_id
-    stream.write_all(&room_id.to_le_bytes()).await?;
-
-    // Wait for ACK (blocks until prefill completes)
-    let mut ack = [0u8; 1];
-    tokio::time::timeout(RENDEZVOUS_TIMEOUT, stream.read_exact(&mut ack))
-        .await
-        .map_err(|_| anyhow::anyhow!("Bootstrap: ACK timeout for room {room_id}"))?
-        .map_err(|e| anyhow::anyhow!("Bootstrap: read ACK failed: {e}"))?;
-
-    if ack[0] != ACK_BYTE {
-        bail!(
-            "Bootstrap: invalid ACK byte {:02x} for room {room_id}",
-            ack[0]
-        );
+    pub async fn wait_closed(&self) {
+        let mut closed_rx = self.closed_rx.clone();
+        if *closed_rx.borrow() {
+            return;
+        }
+        let _ = closed_rx.wait_for(|closed| *closed).await;
     }
 
-    tracing::debug!("Bootstrap: decode received ACK for room {room_id}");
+    #[cfg(test)]
+    async fn wait_for_accepted_with_slot(&self, expected: u64) {
+        let mut accepted = self.accepted_with_slot_rx.clone();
+        let _ = accepted.wait_for(|count| *count >= expected).await;
+    }
+}
+
+pub async fn connect_to_prefill(
+    host: &str,
+    port: u16,
+    identity: BootstrapIdentity,
+    registration: ParticipantRegistration,
+) -> Result<BootstrapConnection> {
+    let addr = bootstrap_addr(host, port);
+    let mut stream = tokio::time::timeout(RENDEZVOUS_TIMEOUT, TcpStream::connect(&addr))
+        .await
+        .map_err(|_| anyhow!("bootstrap connect timeout to {addr}"))??;
+    tokio::time::timeout(RENDEZVOUS_TIMEOUT, write_header(&mut stream))
+        .await
+        .map_err(|_| anyhow!("bootstrap header send timed out"))??;
+    let mut connection = BootstrapConnection {
+        identity,
+        framed: framed(stream),
+    };
+    connection
+        .send(BootstrapMessage::Register(registration))
+        .await?;
+    Ok(connection)
+}
+
+fn bootstrap_addr(host: &str, port: u16) -> String {
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+async fn accept_connection(mut stream: TcpStream) -> Result<IncomingBootstrapConnection> {
+    read_header(&mut stream).await?;
+    let mut connection = BootstrapConnection {
+        identity: BootstrapIdentity {
+            handoff_id: HandoffId::default(),
+            bootstrap_room: 0,
+            request_id: Uuid::nil(),
+        },
+        framed: framed(stream),
+    };
+    let Some(frame) = connection.framed.next().await.transpose()? else {
+        bail!("bootstrap connection closed before registration");
+    };
+    let frame: BootstrapWireFrame =
+        serde_json::from_slice(&frame).context("bootstrap registration contains malformed JSON")?;
+    let BootstrapMessage::Register(registration) = frame.message else {
+        bail!("bootstrap first frame must register a participant");
+    };
+    if registration.role != BootstrapParticipantRole::Destination {
+        bail!("bootstrap server accepts only destination participants");
+    }
+    connection.identity = frame.identity.clone();
+    Ok(IncomingBootstrapConnection {
+        identity: frame.identity,
+        registration,
+        connection,
+    })
+}
+
+fn framed(stream: TcpStream) -> Framed<TcpStream, LengthDelimitedCodec> {
+    LengthDelimitedCodec::builder()
+        .little_endian()
+        .length_field_type::<u32>()
+        .max_frame_length(MAX_BOOTSTRAP_FRAME_BYTES)
+        .new_framed(stream)
+}
+
+async fn write_header(stream: &mut TcpStream) -> Result<()> {
+    let mut header = [0u8; HEADER_BYTES];
+    header[..4].copy_from_slice(&MAGIC);
+    header[4..6].copy_from_slice(&BOOTSTRAP_PROTOCOL_VERSION.to_le_bytes());
+    stream.write_all(&header).await?;
+    Ok(())
+}
+
+async fn read_header(stream: &mut TcpStream) -> Result<()> {
+    let mut header = [0u8; HEADER_BYTES];
+    stream.read_exact(&mut header).await?;
+    if header[..4] != MAGIC {
+        bail!("bootstrap protocol magic mismatch");
+    }
+    let version = u16::from_le_bytes([header[4], header[5]]);
+    if version != BOOTSTRAP_PROTOCOL_VERSION {
+        bail!("unsupported bootstrap protocol version {version}");
+    }
+    let flags = u16::from_le_bytes([header[6], header[7]]);
+    if flags != 0 {
+        bail!("bootstrap protocol flags must be zero");
+    }
     Ok(())
 }
 
@@ -284,201 +393,251 @@ pub async fn connect_to_prefill(host: &str, port: u16, room_id: u64) -> Result<(
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_prefill_completes_first() {
-        let cancel_token = CancellationToken::new();
-        let server = BootstrapServer::start(0, cancel_token.clone())
-            .await
-            .unwrap();
+    fn identity(value: u128) -> BootstrapIdentity {
+        BootstrapIdentity {
+            handoff_id: HandoffId::from(Uuid::from_u128(value)),
+            bootstrap_room: value as u64,
+            request_id: Uuid::from_u128(value + 100),
+        }
+    }
 
-        let port = server.port();
-        let room_id = 1001u64;
+    fn registration() -> ParticipantRegistration {
+        ParticipantRegistration {
+            role: BootstrapParticipantRole::Destination,
+            dp_rank: 0,
+            order: HandoffOrder::SourceFirst,
+            engine_type: EngineType::Vllm,
+        }
+    }
 
-        // Prefill completes first
-        server.complete_room(room_id);
-
-        // Decode connects - should get immediate ACK
-        let result = connect_to_prefill("127.0.0.1", port, room_id).await;
-        assert!(result.is_ok(), "Decode should succeed: {result:?}");
-
-        cancel_token.cancel();
+    #[test]
+    fn bootstrap_address_preserves_ipv6_literals() {
+        assert_eq!(bootstrap_addr("[::1]", 1234), "[::1]:1234");
+        assert_eq!(bootstrap_addr("::1", 1234), "[::1]:1234");
+        assert_eq!(bootstrap_addr("127.0.0.1", 1234), "127.0.0.1:1234");
     }
 
     #[tokio::test]
-    async fn test_decode_connects_first() {
-        let cancel_token = CancellationToken::new();
-        let server = BootstrapServer::start(0, cancel_token.clone())
+    async fn send_rejects_oversized_frame_before_codec_allocation() {
+        let cancel = CancellationToken::new();
+        let server = BootstrapServer::start(0, cancel.clone(), BootstrapServerConfig::default())
             .await
             .unwrap();
-
-        let port = server.port();
-        let room_id = 1002u64;
-
-        // Spawn decode (will block waiting for prefill)
-        let decode_handle =
-            tokio::spawn(async move { connect_to_prefill("127.0.0.1", port, room_id).await });
-
-        // Give decode time to connect and register
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        // Prefill completes - should unblock decode
-        server.complete_room(room_id);
-
-        let result = decode_handle.await.unwrap();
-        assert!(result.is_ok(), "Decode should succeed: {result:?}");
-
-        cancel_token.cancel();
+        let mut client =
+            connect_to_prefill("127.0.0.1", server.port(), identity(2), registration())
+                .await
+                .unwrap();
+        let error = client
+            .send(BootstrapMessage::ProtocolError {
+                message: "x".repeat(MAX_BOOTSTRAP_FRAME_BYTES),
+            })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("outside"));
+        cancel.cancel();
     }
 
     #[tokio::test]
-    async fn test_prefill_waits_for_decode_metadata_before_completion() {
-        let cancel_token = CancellationToken::new();
-        let server = BootstrapServer::start(0, cancel_token.clone())
+    async fn bad_magic_never_enters_the_incoming_queue() {
+        let cancel = CancellationToken::new();
+        let server = BootstrapServer::start(0, cancel.clone(), BootstrapServerConfig::default())
             .await
             .unwrap();
-
-        let port = server.port();
-        let room_id = 1004u64;
-
-        let (prefill_entered_tx, prefill_entered_rx) = tokio::sync::oneshot::channel();
-        let mut prefill_ready = tokio::spawn({
-            let server = server.clone();
-            async move {
-                let _ = prefill_entered_tx.send(());
-                server.wait_for_decode_ready(room_id).await
-            }
-        });
-
-        prefill_entered_rx.await.unwrap();
-        assert!(
-            !prefill_ready.is_finished(),
-            "Prefill should wait until decode metadata arrives"
-        );
-
-        let decode_handle =
-            tokio::spawn(async move { connect_to_prefill("127.0.0.1", port, room_id).await });
-
-        let result = tokio::time::timeout(Duration::from_secs(1), &mut prefill_ready)
+        let mut incoming_rx = server.take_incoming_receiver().unwrap();
+        let mut stream = TcpStream::connect(("127.0.0.1", server.port()))
             .await
-            .unwrap()
             .unwrap();
-        assert!(
-            result.is_ok(),
-            "Prefill should see decode metadata: {result:?}"
-        );
-
-        assert!(
-            !decode_handle.is_finished(),
-            "Decode should wait until prefill marks the room complete"
-        );
-
-        server.complete_room(room_id);
-
-        let result = tokio::time::timeout(Duration::from_secs(1), decode_handle)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(result.is_ok(), "Decode should succeed: {result:?}");
-
-        cancel_token.cancel();
+        stream.write_all(b"NOPE\x01\x00\x00\x00").await.unwrap();
+        let mut byte = [0_u8; 1];
+        let _ = stream.read(&mut byte).await;
+        assert!(matches!(
+            incoming_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        cancel.cancel();
     }
 
     #[tokio::test]
-    async fn test_interleaved_ordering() {
-        let cancel_token = CancellationToken::new();
-        let server = BootstrapServer::start(0, cancel_token.clone())
+    async fn invalid_headers_and_frames_never_enter_session_ownership() {
+        let cancel = CancellationToken::new();
+        let server = BootstrapServer::start(0, cancel.clone(), BootstrapServerConfig::default())
             .await
             .unwrap();
+        let mut incoming_rx = server.take_incoming_receiver().unwrap();
 
-        let port = server.port();
-        let room_id = 1003u64;
-
-        // Spawn decode
-        let server_clone = server.clone();
-        let decode_handle = tokio::spawn(async move {
-            // Small delay so prefill can "register" conceptually first
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            connect_to_prefill("127.0.0.1", port, room_id).await
-        });
-
-        // Prefill completes after decode starts connecting
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        server_clone.complete_room(room_id);
-
-        let result = decode_handle.await.unwrap();
-        assert!(result.is_ok(), "Decode should succeed: {result:?}");
-
-        cancel_token.cancel();
-    }
-
-    #[tokio::test]
-    async fn test_multiple_rooms_concurrent() {
-        let cancel_token = CancellationToken::new();
-        let server = BootstrapServer::start(0, cancel_token.clone())
-            .await
-            .unwrap();
-
-        let port = server.port();
-
-        let mut handles = vec![];
-
-        // Room 1: prefill first
-        let server1 = server.clone();
-        handles.push(tokio::spawn(async move {
-            server1.complete_room(2001);
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            connect_to_prefill("127.0.0.1", port, 2001).await
-        }));
-
-        // Room 2: decode first
-        let server2 = server.clone();
-        handles.push(tokio::spawn(async move {
-            let decode = tokio::spawn(connect_to_prefill("127.0.0.1", port, 2002));
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            server2.complete_room(2002);
-            decode.await.unwrap()
-        }));
-
-        // Room 3: simultaneous
-        let server3 = server.clone();
-        handles.push(tokio::spawn(async move {
-            let decode = tokio::spawn(connect_to_prefill("127.0.0.1", port, 2003));
-            server3.complete_room(2003);
-            decode.await.unwrap()
-        }));
-
-        for (i, handle) in handles.into_iter().enumerate() {
-            let result = handle.await.unwrap();
-            assert!(
-                result.is_ok(),
-                "Room {} should succeed: {result:?}",
-                2001 + i
-            );
+        for header in [
+            [MAGIC[0], MAGIC[1], MAGIC[2], MAGIC[3], 2, 0, 0, 0],
+            [MAGIC[0], MAGIC[1], MAGIC[2], MAGIC[3], 1, 0, 1, 0],
+        ] {
+            let mut stream = TcpStream::connect(("127.0.0.1", server.port()))
+                .await
+                .unwrap();
+            stream.write_all(&header).await.unwrap();
+            let mut byte = [0_u8; 1];
+            let _ = stream.read(&mut byte).await;
         }
 
-        cancel_token.cancel();
+        let mut malformed = TcpStream::connect(("127.0.0.1", server.port()))
+            .await
+            .unwrap();
+        write_header(&mut malformed).await.unwrap();
+        malformed.write_all(&1u32.to_le_bytes()).await.unwrap();
+        malformed.write_all(b"{").await.unwrap();
+        let mut byte = [0_u8; 1];
+        let _ = malformed.read(&mut byte).await;
+
+        let mut oversized = TcpStream::connect(("127.0.0.1", server.port()))
+            .await
+            .unwrap();
+        write_header(&mut oversized).await.unwrap();
+        oversized
+            .write_all(&((MAX_BOOTSTRAP_FRAME_BYTES + 1) as u32).to_le_bytes())
+            .await
+            .unwrap();
+        let _ = oversized.read(&mut byte).await;
+
+        assert!(matches!(
+            incoming_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        cancel.cancel();
+        server.wait_closed().await;
     }
 
     #[tokio::test]
-    async fn test_decode_timeout_no_prefill() {
-        let cancel_token = CancellationToken::new();
-        let server = BootstrapServer::start(0, cancel_token.clone())
+    async fn changed_identity_is_rejected_after_registration() {
+        let cancel = CancellationToken::new();
+        let server = BootstrapServer::start(0, cancel.clone(), BootstrapServerConfig::default())
             .await
             .unwrap();
+        let mut incoming_rx = server.take_incoming_receiver().unwrap();
+        let mut client =
+            connect_to_prefill("127.0.0.1", server.port(), identity(3), registration())
+                .await
+                .unwrap();
+        let mut incoming = incoming_rx.recv().await.unwrap();
 
-        let port = server.port();
-        let room_id = 9999u64;
+        client.identity = identity(4);
+        client.send(BootstrapMessage::Complete).await.unwrap();
+        let error = incoming.connection.recv().await.unwrap_err();
+        assert!(error.to_string().contains("changed session identity"));
+        cancel.cancel();
+    }
 
-        // Decode connects but prefill never completes - use short timeout
-        let result = tokio::time::timeout(
-            Duration::from_millis(100),
-            connect_to_prefill("127.0.0.1", port, room_id),
+    #[tokio::test]
+    async fn first_frame_must_be_registration() {
+        let cancel = CancellationToken::new();
+        let server = BootstrapServer::start(0, cancel.clone(), BootstrapServerConfig::default())
+            .await
+            .unwrap();
+        let mut incoming_rx = server.take_incoming_receiver().unwrap();
+        let mut stream = TcpStream::connect(("127.0.0.1", server.port()))
+            .await
+            .unwrap();
+        write_header(&mut stream).await.unwrap();
+        let frame = serde_json::to_vec(&BootstrapWireFrame {
+            identity: identity(5),
+            message: BootstrapMessage::Registered,
+        })
+        .unwrap();
+        let mut framed_stream = framed(stream);
+        framed_stream.send(Bytes::from(frame)).await.unwrap();
+        let _ = framed_stream.next().await;
+
+        assert!(matches!(
+            incoming_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn full_incoming_queue_returns_overloaded() {
+        let cancel = CancellationToken::new();
+        let server = BootstrapServer::start(
+            0,
+            cancel.clone(),
+            BootstrapServerConfig {
+                max_pending_connections: 1,
+                ..BootstrapServerConfig::default()
+            },
         )
-        .await;
+        .await
+        .unwrap();
+        let _incoming_rx = server.take_incoming_receiver().unwrap();
+        let _first = connect_to_prefill("127.0.0.1", server.port(), identity(6), registration())
+            .await
+            .unwrap();
+        server.wait_for_accepted_with_slot(1).await;
+        let mut second =
+            connect_to_prefill("127.0.0.1", server.port(), identity(7), registration())
+                .await
+                .unwrap();
 
-        // Should timeout (outer timeout, not inner RENDEZVOUS_TIMEOUT)
-        assert!(result.is_err(), "Should timeout waiting for prefill");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), second.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            Some(BootstrapMessage::Overloaded)
+        );
+        cancel.cancel();
+    }
 
-        cancel_token.cancel();
+    #[tokio::test]
+    async fn half_open_registration_saturation_returns_overloaded() {
+        let cancel = CancellationToken::new();
+        let server = BootstrapServer::start(
+            0,
+            cancel.clone(),
+            BootstrapServerConfig {
+                max_pending_connections: 1,
+                ..BootstrapServerConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        let _incoming_rx = server.take_incoming_receiver().unwrap();
+        let _half_open = TcpStream::connect(("127.0.0.1", server.port()))
+            .await
+            .unwrap();
+        server.wait_for_accepted_with_slot(1).await;
+
+        let mut rejected =
+            connect_to_prefill("127.0.0.1", server.port(), identity(8), registration())
+                .await
+                .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), rejected.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            Some(BootstrapMessage::Overloaded)
+        );
+        cancel.cancel();
+        server.wait_closed().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_closes_half_open_registration() {
+        let cancel = CancellationToken::new();
+        let server = BootstrapServer::start(0, cancel.clone(), BootstrapServerConfig::default())
+            .await
+            .unwrap();
+        let mut stream = TcpStream::connect(("127.0.0.1", server.port()))
+            .await
+            .unwrap();
+        server.wait_for_accepted_with_slot(1).await;
+        cancel.cancel();
+
+        let mut byte = [0u8; 1];
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), stream.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        server.wait_closed().await;
     }
 }

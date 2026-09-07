@@ -22,7 +22,7 @@ hit rate on long or repeated prompts without adding GPUs.
 
 Same as the sibling recipes in this directory:
 
-1. **Dynamo Platform installed** — see the [Kubernetes Deployment Guide](../../../../docs/kubernetes/README.md).
+1. **Dynamo Platform installed** — see the [Kubernetes Deployment Guide](../../../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx).
 2. **Pre-existing `model-cache` and `compilation-cache` PVCs** — see
    [`../../model-cache/cache.yaml`](../../model-cache/cache.yaml) and
    [`../../model-cache/model-download.yaml`](../../model-cache/model-download.yaml).

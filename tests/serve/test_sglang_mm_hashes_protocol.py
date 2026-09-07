@@ -17,11 +17,10 @@ routing:
      sglang bump that shifts the formula fails-closed at PR time.
 
   2. ``GenerateReqInput.mm_hashes`` field is present. Added by
-     sgl-project/sglang#25300 and currently shipped via the vendored
-     patch at ``container/deps/sglang/patches/<ver>/``. A dynamo sglang
-     image built without the patch — or a future upstream rename —
-     would silently break MM-aware routing (workers recompute hashes
-     internally, diverging from the router's pad_value substitution).
+     sgl-project/sglang#25300 and upstream in SGLang v0.5.13. A dynamo sglang
+     image built with older SGLang — or a future upstream rename — would
+     silently break MM-aware routing (workers recompute hashes internally,
+     diverging from the router's pad_value substitution).
 """
 from __future__ import annotations
 
@@ -64,8 +63,7 @@ def test_sglang_generate_req_input_has_mm_hashes_field() -> None:
     fields = {f.name for f in dataclasses.fields(GenerateReqInput)}
     assert "mm_hashes" in fields, (
         "GenerateReqInput.mm_hashes is missing. The dynamo sglang image "
-        "was built without the vendored sgl-project/sglang#25300 patch "
-        "(see container/deps/sglang/patches/), or upstream renamed the "
-        "field. Without it, sglang ignores caller-supplied hashes and "
+        "was built with an older SGLang than v0.5.13, or upstream renamed "
+        "the field. Without it, sglang ignores caller-supplied hashes and "
         "MM-aware KV routing silently degrades to text-prefix fallback."
     )

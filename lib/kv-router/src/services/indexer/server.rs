@@ -6,23 +6,23 @@ use std::sync::Arc;
 
 use axum::extract::{DefaultBodyLimit, Query, State};
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 #[cfg(feature = "metrics")]
 use prometheus::Encoder;
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 
+use crate::identity::{RoutingPartitionId, default_routing_group};
 #[cfg(feature = "metrics")]
 use crate::indexer::KvIndexerMetrics;
 use crate::indexer::TieredMatchDetails;
-#[cfg(test)]
-use crate::protocols::StorageTier;
 use crate::protocols::{BlockHashOptions, LocalBlockHash, WorkerId, compute_block_hash_for_seq};
 use crate::services::overlap::{MooncakeOverlapSummary, build_mooncake_overlap_summaries};
 
 use super::backend::Indexer;
-use super::registry::{IndexerKey, ListenerControlError, WorkerRegistry};
+use super::registry::{ListenerControlError, WorkerRegistry};
 
 /// We need to fit one million tokens as JSON text, this should do it.
 const QUERY_REQUEST_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
@@ -32,102 +32,114 @@ const QUERY_REQUEST_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 const DYN_KV_INDEXER_TEST_ENDPOINTS: &str = "DYN_KV_INDEXER_TEST_ENDPOINTS";
 
 fn test_endpoints_enabled() -> bool {
-    matches!(
-        std::env::var(DYN_KV_INDEXER_TEST_ENDPOINTS)
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str(),
-        "1" | "true" | "yes" | "on"
-    )
+    dynamo_truthy::env_is_truthy(DYN_KV_INDEXER_TEST_ENDPOINTS)
 }
+
+use super::logging::{AccessLogModel, AccessLogSink};
 
 pub struct AppState {
     pub registry: Arc<WorkerRegistry>,
+    pub access_log_sink: Option<Arc<AccessLogSink>>,
     #[cfg(feature = "metrics")]
     pub prom_registry: prometheus::Registry,
 }
 
 impl AppState {
     pub fn new(indexer_threads: usize) -> anyhow::Result<Self> {
+        Self::new_with_cancel_token(indexer_threads, CancellationToken::new())
+    }
+
+    pub(super) fn new_with_cancel_token(
+        indexer_threads: usize,
+        root_cancel_token: CancellationToken,
+    ) -> anyhow::Result<Self> {
         #[cfg(feature = "metrics")]
         {
             let prom_registry = prometheus::Registry::new();
             super::metrics::register(&prom_registry)?;
             let indexer_metrics = KvIndexerMetrics::new_registered(&prom_registry)?;
-            return Ok(Self {
-                registry: Arc::new(WorkerRegistry::new_with_indexer_metrics(
+            Ok(Self {
+                registry: Arc::new(WorkerRegistry::new_with_indexer_metrics_and_cancel_token(
                     indexer_threads,
                     indexer_metrics,
+                    root_cancel_token,
                 )),
+                access_log_sink: None,
                 prom_registry,
-            });
+            })
         }
 
         #[cfg(not(feature = "metrics"))]
         Ok(Self {
-            registry: Arc::new(WorkerRegistry::new(indexer_threads)),
+            registry: Arc::new(WorkerRegistry::new_with_cancel_token(
+                indexer_threads,
+                root_cancel_token,
+            )),
+            access_log_sink: None,
         })
     }
 }
 
-fn default_tenant() -> String {
-    "default".to_string()
-}
-
 #[derive(Deserialize)]
-pub struct RegisterRequest {
-    pub instance_id: WorkerId,
-    pub endpoint: String,
-    pub model_name: String,
-    #[serde(default = "default_tenant")]
-    pub tenant_id: String,
-    pub block_size: u32,
+struct RegisterRequest {
+    instance_id: WorkerId,
+    endpoint: String,
+    model_name: String,
+    #[serde(default = "default_routing_group")]
+    routing_group: String,
+    #[serde(default = "default_routing_group", rename = "tenant_id")]
+    _tenant_id: String,
+    block_size: u32,
     #[serde(default)]
-    pub dp_rank: Option<u32>,
+    dp_rank: Option<u32>,
     #[serde(default)]
-    pub replay_endpoint: Option<String>,
+    replay_endpoint: Option<String>,
     /// Optional per-tenant salt (Mooncake RFC #1403 `additionalsalt`).
     /// Currently accepted but not yet mixed into hashes — engines apply
     /// their own salt internally. Plumbed for forward compatibility.
-    #[serde(default, alias = "additionalsalt")]
-    pub additional_salt: Option<String>,
+    #[serde(default, alias = "additionalsalt", rename = "additional_salt")]
+    _additional_salt: Option<String>,
 }
 
 #[derive(Deserialize)]
-pub struct UnregisterRequest {
-    pub instance_id: WorkerId,
-    pub model_name: String,
+struct UnregisterRequest {
+    instance_id: WorkerId,
+    model_name: String,
     #[serde(default)]
-    pub tenant_id: Option<String>,
+    routing_group: Option<String>,
+    #[serde(default, rename = "tenant_id")]
+    _tenant_id: Option<String>,
     #[serde(default)]
-    pub dp_rank: Option<u32>,
+    dp_rank: Option<u32>,
 }
 
 #[derive(Deserialize)]
-pub struct QueryRequest {
-    pub token_ids: Vec<u32>,
-    pub model_name: String,
-    #[serde(default = "default_tenant")]
-    pub tenant_id: String,
+struct QueryRequest {
+    token_ids: Vec<u32>,
+    model_name: String,
+    #[serde(default = "default_routing_group")]
+    routing_group: String,
+    #[serde(default = "default_routing_group", rename = "tenant_id")]
+    _tenant_id: String,
     #[serde(default)]
-    pub lora_name: Option<String>,
-    /// Optional per-request cache salt (Mooncake RFC #1403). Currently accepted
-    /// but not yet mixed into hashes — engines apply their own internally.
+    lora_name: Option<String>,
+    /// Optional per-request cache salt (Mooncake RFC #1403), mixed into `/query` hashes.
     #[serde(default)]
-    pub cache_salt: Option<String>,
+    cache_salt: Option<String>,
 }
 
 #[derive(Deserialize)]
-pub struct QueryByHashRequest {
-    pub block_hashes: Vec<i64>,
-    pub model_name: String,
-    #[serde(default = "default_tenant")]
-    pub tenant_id: String,
-    /// Optional per-request cache salt (Mooncake RFC #1403). Currently accepted
-    /// but not yet mixed into hashes — engines apply their own internally.
+struct QueryByHashRequest {
+    block_hashes: Vec<i64>,
+    model_name: String,
+    #[serde(default = "default_routing_group")]
+    routing_group: String,
+    #[serde(default = "default_routing_group", rename = "tenant_id")]
+    _tenant_id: String,
+    /// Invalid for `/query_by_hash`. Callers must precompute `block_hashes` with the intended
+    /// cache salt and omit this field; a non-null value is rejected.
     #[serde(default)]
-    pub cache_salt: Option<String>,
+    cache_salt: Option<String>,
 }
 
 /// Response shape for `/query` and `/query_by_hash`.
@@ -148,24 +160,28 @@ struct ScoreResponse {
 async fn register(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RegisterRequest>,
-) -> impl IntoResponse {
+) -> Response {
+    let model = req.model_name.clone();
     if let Err(error) =
         super::validate_listener_endpoints(&req.endpoint, req.replay_endpoint.as_deref())
     {
-        return (
+        let mut resp = (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": error.to_string()})),
-        );
+        )
+            .into_response();
+        resp.extensions_mut().insert(AccessLogModel(model));
+        return resp;
     }
 
-    match state
+    let resp = match state
         .registry
         .register(
             req.instance_id,
             req.endpoint,
             req.dp_rank.unwrap_or(0),
             req.model_name,
-            req.tenant_id,
+            req.routing_group,
             req.block_size,
             req.replay_endpoint,
         )
@@ -174,68 +190,78 @@ async fn register(
         Ok(()) => (
             StatusCode::CREATED,
             Json(serde_json::json!({"status": "ok"})),
-        ),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::CONFLICT,
             Json(serde_json::json!({"error": e.to_string()})),
-        ),
-    }
+        )
+            .into_response(),
+    };
+    let mut resp = resp;
+    resp.extensions_mut().insert(AccessLogModel(model));
+    resp
 }
 
 async fn unregister(
     State(state): State<Arc<AppState>>,
     Json(req): Json<UnregisterRequest>,
-) -> impl IntoResponse {
-    let result = match req.tenant_id {
-        Some(tenant_id) => match req.dp_rank {
+) -> Response {
+    let model = req.model_name.clone();
+    let result = match req.routing_group {
+        Some(routing_group) => match req.dp_rank {
             Some(dp_rank) => {
                 state
                     .registry
-                    .deregister_dp_rank(req.instance_id, dp_rank, &req.model_name, &tenant_id)
+                    .deregister_dp_rank(req.instance_id, dp_rank, &req.model_name, &routing_group)
                     .await
             }
             None => {
                 state
                     .registry
-                    .deregister(req.instance_id, &req.model_name, &tenant_id)
+                    .deregister(req.instance_id, &req.model_name, &routing_group)
                     .await
             }
         },
         None => {
             state
                 .registry
-                .deregister_all_tenants(req.instance_id, &req.model_name)
+                .deregister_all_routing_groups(req.instance_id, &req.model_name)
                 .await
         }
     };
-    match result {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
+    let mut resp = match result {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))).into_response(),
         Err(e) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": e.to_string()})),
-        ),
-    }
+        )
+            .into_response(),
+    };
+    resp.extensions_mut().insert(AccessLogModel(model));
+    resp
 }
 
 /// Optional query parameters for `GET /workers`.
 ///
 /// Both fields are independent filters; omitting one skips that dimension.
-/// Example: `GET /workers?model_name=llama3&tenant_id=acme`
+/// Example: `GET /workers?model_name=llama3&routing_group=acme`
 #[derive(Deserialize)]
 struct WorkersQuery {
     model_name: Option<String>,
-    tenant_id: Option<String>,
+    routing_group: Option<String>,
+    #[serde(default, rename = "tenant_id")]
+    _tenant_id: Option<String>,
 }
 
 async fn list_workers(
     State(state): State<Arc<AppState>>,
     Query(params): Query<WorkersQuery>,
 ) -> impl IntoResponse {
-    Json(
-        state
-            .registry
-            .list_filtered(params.model_name.as_deref(), params.tenant_id.as_deref()),
-    )
+    Json(state.registry.list_filtered(
+        params.model_name.as_deref(),
+        params.routing_group.as_deref(),
+    ))
 }
 
 /// Build the [`ScoreResponse`] in both the flat (legacy) and per-instance
@@ -285,21 +311,22 @@ async fn run_tiered_query(
     }
 }
 
-async fn query(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<QueryRequest>,
-) -> impl IntoResponse {
-    let key = IndexerKey {
-        model_name: req.model_name,
-        tenant_id: req.tenant_id,
-    };
+async fn query(State(state): State<Arc<AppState>>, Json(req): Json<QueryRequest>) -> Response {
+    let model = req.model_name.clone();
+    let key = RoutingPartitionId::new(req.model_name, req.routing_group);
     let Some(ie) = state.registry.get_indexer(&key) else {
-        return (
+        let mut resp = (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
-                "error": format!("no indexer for model={} tenant={}", key.model_name, key.tenant_id)
+                "error": format!(
+                    "no indexer for model={} routing_group={}",
+                    key.model_name, key.routing_group
+                )
             })),
-        );
+        )
+            .into_response();
+        resp.extensions_mut().insert(AccessLogModel(model));
+        return resp;
     };
     let block_size = ie.block_size;
     let indexer = ie.indexer.clone();
@@ -310,27 +337,47 @@ async fn query(
         block_size,
         BlockHashOptions {
             lora_name: req.lora_name.as_deref(),
+            cache_namespace: req.cache_salt.as_deref(),
             ..Default::default()
         },
     );
-    run_tiered_query(&indexer, block_hashes, block_size).await
+    let (status, json) = run_tiered_query(&indexer, block_hashes, block_size).await;
+    let mut resp = (status, json).into_response();
+    resp.extensions_mut().insert(AccessLogModel(model));
+    resp
 }
 
 async fn query_by_hash(
     State(state): State<Arc<AppState>>,
     Json(req): Json<QueryByHashRequest>,
-) -> impl IntoResponse {
-    let key = IndexerKey {
-        model_name: req.model_name,
-        tenant_id: req.tenant_id,
-    };
+) -> Response {
+    let model = req.model_name.clone();
+    if req.cache_salt.is_some() {
+        let mut resp = (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "cache_salt is not accepted by /query_by_hash; block_hashes must already include the intended cache salt"
+            })),
+        )
+            .into_response();
+        resp.extensions_mut().insert(AccessLogModel(model));
+        return resp;
+    }
+
+    let key = RoutingPartitionId::new(req.model_name, req.routing_group);
     let Some(ie) = state.registry.get_indexer(&key) else {
-        return (
+        let mut resp = (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
-                "error": format!("no indexer for model={} tenant={}", key.model_name, key.tenant_id)
+                "error": format!(
+                    "no indexer for model={} routing_group={}",
+                    key.model_name, key.routing_group
+                )
             })),
-        );
+        )
+            .into_response();
+        resp.extensions_mut().insert(AccessLogModel(model));
+        return resp;
     };
     let block_size = ie.block_size;
     let indexer = ie.indexer.clone();
@@ -341,7 +388,10 @@ async fn query_by_hash(
         .iter()
         .map(|h| LocalBlockHash(*h as u64))
         .collect();
-    run_tiered_query(&indexer, block_hashes, block_size).await
+    let (status, json) = run_tiered_query(&indexer, block_hashes, block_size).await;
+    let mut resp = (status, json).into_response();
+    resp.extensions_mut().insert(AccessLogModel(model));
+    resp
 }
 
 #[derive(Deserialize)]
@@ -446,7 +496,7 @@ pub(crate) async fn dump_registry(registry: &WorkerRegistry) -> serde_json::Valu
     for handle in handles {
         match handle.await {
             Ok((key, Ok(events), block_size)) => {
-                let map_key = format!("{}:{}", key.model_name, key.tenant_id);
+                let map_key = format!("{}:{}", key.model_name, key.routing_group);
                 result.insert(
                     map_key,
                     serde_json::json!({
@@ -456,7 +506,7 @@ pub(crate) async fn dump_registry(registry: &WorkerRegistry) -> serde_json::Valu
                 );
             }
             Ok((key, Err(e), _)) => {
-                let map_key = format!("{}:{}", key.model_name, key.tenant_id);
+                let map_key = format!("{}:{}", key.model_name, key.routing_group);
                 result.insert(map_key, serde_json::json!({"error": e.to_string()}));
             }
             Err(e) => {
@@ -469,6 +519,20 @@ pub(crate) async fn dump_registry(registry: &WorkerRegistry) -> serde_json::Valu
 
 async fn handle_health() -> StatusCode {
     StatusCode::OK
+}
+
+async fn reopen_logs(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    if let Some(ref sink) = state.access_log_sink {
+        match sink.reopen() {
+            Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            ),
+        }
+    } else {
+        (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
+    }
 }
 
 #[cfg(feature = "metrics")]
@@ -496,6 +560,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 /// Mounts the listener-control test endpoints only when `test_endpoints` is
 /// true; the explicit parameter lets tests exercise both states.
 fn build_router(state: Arc<AppState>, test_endpoints: bool) -> Router {
+    let access_log_sink = state.access_log_sink.clone();
+
     let router = Router::new()
         .route("/register", post(register))
         .route("/unregister", post(unregister))
@@ -509,7 +575,8 @@ fn build_router(state: Arc<AppState>, test_endpoints: bool) -> Router {
         .route("/register_peer", post(register_peer))
         .route("/deregister_peer", post(deregister_peer))
         .route("/peers", get(list_peers))
-        .route("/health", get(handle_health));
+        .route("/health", get(handle_health))
+        .route("/reopen_logs", post(reopen_logs));
 
     let mut router = router;
     if test_endpoints {
@@ -523,6 +590,11 @@ fn build_router(state: Arc<AppState>, test_endpoints: bool) -> Router {
             .route("/test/resume_listener", post(test_resume_listener));
     }
     let router = router.with_state(state.clone());
+
+    let router = router.layer(axum::middleware::from_fn_with_state(
+        access_log_sink,
+        super::logging::access_log_middleware,
+    ));
 
     #[cfg(feature = "metrics")]
     let router = {
@@ -542,117 +614,9 @@ fn build_router(state: Arc<AppState>, test_endpoints: bool) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indexer::KvIndexerInterface;
-    use crate::services::indexer::backend::create_indexer;
-    use crate::services::indexer::backend::test_util::store_event;
     use axum::body::Body;
     use axum::http::{Request, StatusCode, header};
     use tower::ServiceExt;
-
-    /// Drive a tiered query through `build_score_response` after feeding
-    /// mixed-tier events. The response must carry both shapes:
-    /// - flat `scores`/`tree_sizes` (legacy; used by existing callers), and
-    /// - `instances` map keyed by stringified `worker_id` with per-tier
-    ///   counts plus `longest_matched`, matching Mooncake RFC #1403.
-    #[tokio::test]
-    async fn build_score_response_contains_per_instance_tier_breakdown() {
-        let block_size: u32 = 4;
-        let indexer = create_indexer(block_size, 1);
-
-        // Worker 7 owns 2 device blocks and a 3rd anchored on host-pinned.
-        // Worker 8 owns the same 2 device blocks with no lower tier.
-        for &worker_id in &[7u64, 8] {
-            indexer
-                .apply_event_routed(store_event(
-                    worker_id,
-                    0,
-                    1,
-                    &[],
-                    &[11, 12],
-                    StorageTier::Device,
-                ))
-                .await;
-        }
-        indexer
-            .apply_event_routed(store_event(
-                7,
-                0,
-                2,
-                &[11, 12],
-                &[13],
-                StorageTier::HostPinned,
-            ))
-            .await;
-
-        // Flush primary + lower tiers.
-        if let Indexer::Single {
-            primary,
-            lower_tier,
-        } = &indexer
-        {
-            let _ = primary.flush().await;
-            for inner in lower_tier.all() {
-                let _ = inner.dump_events().await.unwrap();
-            }
-        }
-
-        let sequence = vec![LocalBlockHash(11), LocalBlockHash(12), LocalBlockHash(13)];
-        let tiered = indexer.find_tiered_matches(sequence).await.unwrap();
-        let response = build_score_response(&tiered, block_size);
-
-        // Flat shape (legacy callers) carries device-tier overlap scaled by block_size.
-        assert_eq!(
-            response
-                .scores
-                .get("7")
-                .and_then(|by_dp| by_dp.get("0").copied()),
-            Some(2 * block_size),
-            "legacy `scores` must still reflect device-tier hits"
-        );
-
-        // Per-instance breakdown (Mooncake RFC #1403 alignment).
-        // Tier counts are CUMULATIVE through each tier's walk: cpu includes
-        // device's reach plus the host-pinned extension; disk includes
-        // everything below it. Without a disk extension, disk == cpu.
-        let inst_7 = response
-            .instances
-            .get("7")
-            .expect("instance 7 must appear with tier breakdown");
-        assert_eq!(inst_7.gpu, 2 * block_size, "instance 7 device count");
-        assert_eq!(
-            inst_7.cpu,
-            3 * block_size,
-            "instance 7 host-pinned cumulative count = device + host extension"
-        );
-        assert_eq!(
-            inst_7.disk,
-            3 * block_size,
-            "instance 7 disk cumulative falls back to cpu when no disk extension exists"
-        );
-        assert_eq!(
-            inst_7.dp.get("0").copied(),
-            Some(2 * block_size),
-            "instance 7 dp_rank=0 device count"
-        );
-        assert_eq!(
-            inst_7.longest_matched,
-            3 * block_size,
-            "longest_matched should be the max across device/host/disk"
-        );
-
-        let inst_8 = response
-            .instances
-            .get("8")
-            .expect("instance 8 must appear with tier breakdown");
-        assert_eq!(inst_8.gpu, 2 * block_size);
-        assert_eq!(
-            inst_8.cpu,
-            2 * block_size,
-            "instance 8 cpu falls back to device when no host extension exists"
-        );
-        assert_eq!(inst_8.disk, 2 * block_size);
-        assert_eq!(inst_8.longest_matched, 2 * block_size);
-    }
 
     fn oversized_query_body() -> String {
         let mut body = String::from(r#"{"token_ids":["#);
@@ -674,6 +638,7 @@ mod tests {
     async fn query_rejects_request_bodies_over_limit() {
         let app = create_router(Arc::new(AppState {
             registry: Arc::new(WorkerRegistry::new(1)),
+            access_log_sink: None,
             #[cfg(feature = "metrics")]
             prom_registry: prometheus::Registry::new(),
         }));
@@ -697,6 +662,7 @@ mod tests {
         build_router(
             Arc::new(AppState {
                 registry: Arc::new(WorkerRegistry::new(1)),
+                access_log_sink: None,
                 #[cfg(feature = "metrics")]
                 prom_registry: prometheus::Registry::new(),
             }),
@@ -774,14 +740,14 @@ mod tests {
             .await
             .unwrap();
 
-        // Worker 21: mistral / acme, block_size=8
+        // Worker 21: mistral / other, block_size=8
         registry
             .register(
                 21,
                 "tcp://127.0.0.1:15591".to_string(),
                 0,
                 "mistral".to_string(),
-                "acme".to_string(),
+                "other".to_string(),
                 8,
                 None,
             )
@@ -790,6 +756,7 @@ mod tests {
 
         let app = create_router(Arc::new(AppState {
             registry,
+            access_log_sink: None,
             #[cfg(feature = "metrics")]
             prom_registry: prometheus::Registry::new(),
         }));
@@ -826,7 +793,43 @@ mod tests {
             .find(|w| w["model_name"] == "llama3")
             .unwrap();
         assert_eq!(llama["block_size"], 4);
-        assert_eq!(llama["tenant_id"], "acme");
+        assert_eq!(llama["routing_group"], "acme");
+        assert!(llama.get("tenant_id").is_none());
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/workers?tenant_id=acme")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let legacy_filtered: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(legacy_filtered.len(), 2);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/workers?routing_group=acme")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let filtered_by_group: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(filtered_by_group.len(), 1);
+        assert_eq!(filtered_by_group[0]["routing_group"], "acme");
 
         // Filtered by model_name=llama3: only one result
         let response = app
@@ -867,5 +870,96 @@ mod tests {
             .unwrap();
         let empty: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
         assert!(empty.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reopen_logs_returns_ok_without_writers() {
+        let app = empty_indexer_router(false);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/reopen_logs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn access_log_middleware_records_fields_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("access.log");
+        let sink = Arc::new(
+            super::super::logging::AccessLogSink::new(
+                &log_path,
+                axum::http::header::HeaderName::from_static("x-trace-id"),
+                false,
+            )
+            .unwrap(),
+        );
+
+        let registry = Arc::new(WorkerRegistry::new(1));
+        registry.signal_ready();
+        registry
+            .register(
+                1,
+                "tcp://127.0.0.1:5557".to_string(),
+                0,
+                "test-model".to_string(),
+                "default".to_string(),
+                4,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let state = Arc::new(AppState {
+            registry,
+            access_log_sink: Some(sink),
+            #[cfg(feature = "metrics")]
+            prom_registry: prometheus::Registry::new(),
+        });
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/query")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-trace-id", "test-trace-123")
+                    .body(Body::from(
+                        r#"{"token_ids":[1,2,3,4],"model_name":"test-model"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 1, "expected exactly one access log entry");
+
+        let entry: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(entry["trace_id"], "test-trace-123");
+        assert_eq!(entry["method"], "POST");
+        assert_eq!(entry["path"], "/query");
+        assert_eq!(entry["model"], "test-model");
+        assert_eq!(entry["status"], 200);
+        assert!(entry["ts"].as_str().unwrap().contains("Z"));
+        assert!(entry["duration_ms"].as_f64().unwrap() >= 0.0);
     }
 }

@@ -1,69 +1,125 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! CLI entrypoint over the modules in [`dynamo_bench::request_trace`].
+//! Convert Dynamo request traces to Mooncake replay JSONL.
 
-use anyhow::Result;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Result, bail};
 use clap::Parser;
-use dynamo_bench::coding::common::expand_user_path;
-use dynamo_bench::request_trace::{
-    agentic::{build_agentic_mooncake_rows, summarize_tools},
-    load::load_request_trace_records,
-    mooncake::build_mooncake_rows,
+use dynamo_data_gen::{
+    AGENTIC_MOONCAKE_SCHEMA, AGENTIC_MOONCAKE_VERSION, AgenticHashIdScope, AgenticMooncakeHeader,
+    AgenticSourceProvenance, MooncakeJsonlWriter,
+    request_trace::{
+        agentic::lower_agentic_mooncake_rows,
+        load::{RequestTraceMode, load_request_trace_records},
+        mooncake::lower_mooncake_rows,
+    },
 };
-use dynamo_data_gen::MooncakeJsonlWriter;
+use tempfile::TempDir;
 
 #[derive(Parser, Debug)]
 #[command(name = "request_trace_to_mooncake")]
-#[command(about = "Convert Dynamo request trace JSONL/JSONL.GZ records to Mooncake replay JSONL")]
+#[command(about = "Convert Dynamo request-trace JSONL shards to Mooncake replay JSONL")]
 struct Args {
     #[arg(long, action = clap::ArgAction::Append, required = true, num_args = 1..)]
-    input_path: Vec<String>,
+    input_path: Vec<PathBuf>,
 
     #[arg(long)]
-    output_file: String,
+    output_file: PathBuf,
 
     #[arg(long)]
     agentic: bool,
 }
 
+struct TemporaryOutput {
+    _directory: TempDir,
+    path: PathBuf,
+}
+
+impl AsRef<Path> for TemporaryOutput {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl TemporaryOutput {
+    fn persist(self, output_path: &Path) -> Result<()> {
+        std::fs::rename(&self.path, output_path)?;
+        Ok(())
+    }
+}
+
+fn temporary_output_path(output_path: &Path) -> Result<TemporaryOutput> {
+    let parent = output_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let directory = tempfile::tempdir_in(parent)?;
+    let path = directory.path().join(
+        output_path
+            .file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("mooncake.jsonl")),
+    );
+    Ok(TemporaryOutput {
+        _directory: directory,
+        path,
+    })
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
-    let input_paths = args
-        .input_path
-        .iter()
-        .map(|path| expand_user_path(path))
-        .collect::<Vec<_>>();
-    let output_path = expand_user_path(&args.output_file);
-
-    let loaded = load_request_trace_records(&input_paths)?;
-    let tool_summary = summarize_tools(&loaded.tools);
-
-    let (kind, trace_block_size, stats) = if args.agentic {
-        let (trace_block_size, rows) = build_agentic_mooncake_rows(loaded)?;
-        let mut writer = MooncakeJsonlWriter::create(&output_path, None)?;
-        for row in &rows {
-            writer.write_agentic_row(row)?;
+    let loaded = load_request_trace_records(&args.input_path)?;
+    let temporary_output = temporary_output_path(&args.output_file)?;
+    let mut writer = MooncakeJsonlWriter::create(temporary_output.as_ref(), None)?;
+    if let Ok(metadata) = std::fs::metadata(&args.output_file) {
+        std::fs::set_permissions(temporary_output.as_ref(), metadata.permissions())?;
+    }
+    let (kind, trace_block_size) = match (loaded.mode()?, args.agentic) {
+        (RequestTraceMode::Agentic, true) => {
+            let mut rows = Vec::new();
+            let trace_block_size = lower_agentic_mooncake_rows(loaded, |_, row| {
+                rows.push(row);
+                Ok(())
+            })?;
+            let digest = blake3::hash(&serde_json::to_vec(&rows)?)
+                .to_hex()
+                .to_string();
+            writer.write_agentic_header(&AgenticMooncakeHeader {
+                schema: AGENTIC_MOONCAKE_SCHEMA.to_string(),
+                version: AGENTIC_MOONCAKE_VERSION,
+                block_size: trace_block_size,
+                hash_id_scope: AgenticHashIdScope::Local,
+                source: AgenticSourceProvenance {
+                    format: "dynamo_request_trace".to_string(),
+                    digest,
+                },
+            })?;
+            for row in rows {
+                writer.write_agentic_row(&row)?;
+            }
+            ("Agentic Mooncake", trace_block_size)
         }
-        ("Agentic Mooncake", trace_block_size, writer.finish()?)
-    } else {
-        let (trace_block_size, rows) = build_mooncake_rows(loaded.requests)?;
-        let mut writer = MooncakeJsonlWriter::create(&output_path, None)?;
-        for row in &rows {
-            writer.write_row(row)?;
+        (RequestTraceMode::Standard, false) => (
+            "Mooncake",
+            lower_mooncake_rows(loaded.requests, |_, row| writer.write_row(&row))?,
+        ),
+        (RequestTraceMode::Agentic, false) => {
+            bail!("agentic request traces require --agentic")
         }
-        ("Mooncake", trace_block_size, writer.finish()?)
+        (RequestTraceMode::Standard, true) => {
+            bail!("--agentic requires request traces with agent_context")
+        }
     };
+    let stats = writer.finish()?;
+    temporary_output.persist(&args.output_file)?;
 
     println!(
         "Wrote {} {kind} rows to {}",
         stats.row_count,
-        output_path.display()
+        args.output_file.display()
     );
     println!("Trace block size: {trace_block_size}");
-    if tool_summary.total_spans > 0 {
-        println!();
-        print!("{}", tool_summary.render());
-    }
     Ok(())
 }

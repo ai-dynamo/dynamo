@@ -7,28 +7,36 @@
 //! Connections are Arc-wrapped and shared across concurrent requests.
 //! The hot path (per-request) is fully lock-free: ArcSwap + atomic round-robin + SegQueue push.
 //! The cold path (connect/prune) uses a Mutex on the LRU cache.
-//! Writer tasks batch requests into a reusable BytesMut buffer for a single write_all()
-//! syscall per drain, avoiding the fixed-size cap and double-copy of BufWriter.
+//! Writer tasks batch request header/body chunks with vectored writes, preserving
+//! large request payloads as Bytes instead of copying them into flattened buffers.
 
 use super::unified_client::{ClientStats, Headers, RequestPlaneClient};
 use crate::metrics::transport_metrics::{
     TCP_BYTES_RECEIVED_TOTAL, TCP_BYTES_SENT_TOTAL, TCP_ERRORS_TOTAL,
 };
+use crate::pipeline::network::codec::TcpRequestFrame;
 use crate::pipeline::network::get_tcp_max_message_size;
 use anyhow::Result;
 use async_trait::async_trait;
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use crossbeam_queue::SegQueue;
 use dashmap::DashMap;
-use futures::StreamExt;
+use futures::{StreamExt, future::poll_fn};
 use lru::LruCache;
+use std::collections::VecDeque;
+use std::io::{self, IoSlice};
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio_rustls::TlsConnector;
+
+type BoxRead = Box<dyn AsyncRead + Unpin + Send>;
+type BoxWrite = Box<dyn AsyncWrite + Unpin + Send>;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_util::codec::FramedRead;
@@ -46,7 +54,7 @@ const DEFAULT_POOL_SIZE: usize = 100;
 /// Raised from 256 to 1024 for high-throughput frontends (1M+ RPS across ~100 backends).
 /// At 1ms round-trip a single connection already supports ~1,000 concurrent requests,
 /// so deeper pipelining avoids unnecessary connection proliferation and lets the
-/// the writer task drain larger batches per write_all (fewer syscalls at high rate).
+/// writer task keep byte-bounded batches in flight at high rate.
 /// Head-of-line blocking stays acceptable because the TCP transport layer targets
 /// sub-ms latency; later requests rarely wait long behind earlier ones.
 /// Per-host ceiling: DEFAULT_POOL_SIZE(100) x REQUEST_CHANNEL_BUFFER(1024) = 102,400.
@@ -64,16 +72,18 @@ const DEFAULT_HOST_IDLE_TTL_SECS: u64 = 300;
 /// Spin loop limit before falling back to async Notify in writer task
 const WRITER_SPIN_LIMIT: u32 = 64;
 
-/// Initial capacity of the per-writer BytesMut send buffer (256 KB).
-/// The buffer grows automatically beyond this if a batch exceeds it, then
-/// stays at the high-water mark for subsequent batches (amortised zero allocation).
-const WRITER_INITIAL_BUF_CAPACITY: usize = 256 * 1024;
+/// Soft limit for queued bytes in the TCP writer buffer.
+const WRITER_SOFT_WRITE_BUF_LIMIT: usize = 65_535;
+
+/// Buffers smaller than this are coalesced into the writer's flattened buffer.
+const WRITE_FLATTEN_THRESHOLD: usize = 4096;
+
+/// Number of chunks passed to one vectored write call.
+const WRITE_VECTORED_CHUNKS: usize = 64;
 
 /// Check if latency tracing is enabled via environment
 fn latency_trace_enabled() -> bool {
-    std::env::var("DYN_TCP_LATENCY_TRACE")
-        .ok()
-        .is_some_and(|v| v == "1" || v == "true")
+    crate::config::env_is_truthy("DYN_TCP_LATENCY_TRACE")
 }
 
 /// TCP request plane configuration
@@ -139,10 +149,139 @@ impl TcpRequestConfig {
 
 /// Pending request in the lock-free submit queue
 struct PendingRequest {
-    /// Pre-encoded request data ready to send (zero-copy Bytes)
-    encoded_data: Bytes,
+    /// Request frame split into header and payload chunks.
+    frame: TcpRequestFrame,
     /// Oneshot channel to send response back to caller
     response_tx: oneshot::Sender<Result<Bytes>>,
+}
+
+/// Buffered TCP writer for header coalescing and chunked payload writes.
+///
+/// Protocol headers and payloads smaller than `WRITE_FLATTEN_THRESHOLD` are
+/// coalesced into `flattened_writes`, while larger payloads stay as `Bytes`
+/// chunks in `write_buf`. This preserves the large-payload zero-copy path
+/// without turning deep drains into a heap-allocated iovec list or an
+/// unbounded all-available-request batch.
+struct TcpWriteBuffer {
+    // Moving or relocating these Bytes handles does not copy their backing buffers.
+    write_buf: VecDeque<Bytes>,
+    flattened_writes: BytesMut,
+    write_buf_len: usize,
+}
+
+impl TcpWriteBuffer {
+    fn new() -> Self {
+        Self {
+            write_buf: VecDeque::with_capacity(WRITE_VECTORED_CHUNKS),
+            flattened_writes: BytesMut::new(),
+            write_buf_len: 0,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.write_buf_len == 0
+    }
+
+    fn is_full(&self) -> bool {
+        self.write_buf_len >= WRITER_SOFT_WRITE_BUF_LIMIT
+    }
+
+    fn queued_len(&self) -> usize {
+        self.write_buf_len
+    }
+
+    fn clear(&mut self) {
+        self.write_buf.clear();
+        self.flattened_writes.clear();
+        self.write_buf_len = 0;
+    }
+
+    fn push_frame(&mut self, frame: TcpRequestFrame) {
+        self.write(frame.header);
+        self.write(frame.payload);
+    }
+
+    fn write(&mut self, buf: Bytes) {
+        if buf.is_empty() {
+            return;
+        }
+
+        self.write_buf_len += buf.len();
+        if buf.len() < WRITE_FLATTEN_THRESHOLD {
+            // One bounded copy coalesces small chunks and limits writev fragmentation.
+            self.flattened_writes.extend_from_slice(&buf);
+        } else {
+            self.flush_flattened();
+            self.write_buf.push_back(buf);
+        }
+    }
+
+    fn flush_flattened(&mut self) {
+        if !self.flattened_writes.is_empty() {
+            self.write_buf
+                .push_back(self.flattened_writes.split().freeze());
+        }
+    }
+
+    async fn write_all<W>(&mut self, writer: &mut W) -> io::Result<usize>
+    where
+        W: AsyncWrite + Unpin,
+    {
+        self.flush_flattened();
+
+        let mut total_written = 0usize;
+        while !self.write_buf.is_empty() {
+            let n = {
+                let mut writes = [IoSlice::new(b""); WRITE_VECTORED_CHUNKS];
+                let mut writes_len = 0usize;
+                for buf in self.write_buf.iter().take(WRITE_VECTORED_CHUNKS) {
+                    writes[writes_len] = IoSlice::new(buf.as_ref());
+                    writes_len += 1;
+                }
+
+                poll_fn(|cx| Pin::new(&mut *writer).poll_write_vectored(cx, &writes[..writes_len]))
+                    .await?
+            };
+
+            if n == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "failed to write TCP request chunks",
+                ));
+            }
+
+            total_written += n;
+            self.advance(n);
+        }
+
+        Ok(total_written)
+    }
+
+    fn advance(&mut self, mut n: usize) {
+        debug_assert!(
+            n <= self.write_buf_len,
+            "TCP writer advanced {n} bytes but only {} bytes are queued",
+            self.write_buf_len
+        );
+        self.write_buf_len = self.write_buf_len.saturating_sub(n);
+        while n > 0 {
+            let Some(front) = self.write_buf.front_mut() else {
+                debug_assert_eq!(
+                    n, 0,
+                    "TCP writer advanced {n} bytes past the end of the chunk queue"
+                );
+                break;
+            };
+
+            if n < front.len() {
+                front.advance(n);
+                break;
+            }
+
+            n -= front.len();
+            self.write_buf.pop_front();
+        }
+    }
 }
 
 /// RAII guard that decrements the inflight counter on drop.
@@ -205,7 +344,7 @@ impl Drop for ConnectingGuard<'_> {
 ///
 /// Design: SegQueue submit → batched writer task → reader task → oneshot response
 /// - Callers push to SegQueue (lock-free, ~20-40ns)
-/// - Writer task drains queue into a reusable BytesMut, single write_all per batch
+/// - Writer task drains queue into chunk vectors, preserving payload Bytes
 /// - Reader task uses framed codec, pops response_tx from SegQueue
 /// - FIFO ordering: writer pushes ALL response_txs AFTER write_all succeeds
 struct TcpConnection {
@@ -241,9 +380,102 @@ struct TcpConnection {
     post_enqueue_barrier: Option<Arc<tokio::sync::Barrier>>,
 }
 
+/// Cached TLS connector for the request plane. Built once from env vars.
+static REQUEST_PLANE_TLS_CONNECTOR: once_cell::sync::OnceCell<Option<TlsConnector>> =
+    once_cell::sync::OnceCell::new();
+
+fn get_request_plane_tls_connector() -> anyhow::Result<&'static Option<TlsConnector>> {
+    REQUEST_PLANE_TLS_CONNECTOR.get_or_try_init(build_request_plane_tls_connector_from_env)
+}
+
+/// Build the request-plane client TLS connector from the `DYN_TCP_TLS_*`
+/// environment. Returns `None` when no TLS is requested (no CA, not insecure,
+/// no client identity). Split out from the `OnceCell` init so the env parsing
+/// can be unit-tested directly.
+fn build_request_plane_tls_connector_from_env() -> anyhow::Result<Option<TlsConnector>> {
+    use crate::config::environment_names::tcp_response_stream::tls as env;
+    let ca_cert_path = std::env::var(env::DYN_TCP_TLS_CA_CERT_PATH).ok();
+    let insecure = crate::config::env_is_truthy(env::DYN_TCP_TLS_INSECURE);
+    let client_cert = std::env::var(env::DYN_TCP_TLS_CLIENT_CERT_PATH).ok();
+    let client_key = std::env::var(env::DYN_TCP_TLS_CLIENT_KEY_PATH).ok();
+    build_request_plane_tls_connector(
+        ca_cert_path.as_deref().map(std::path::Path::new),
+        insecure,
+        client_cert.as_deref().map(std::path::Path::new),
+        client_key.as_deref().map(std::path::Path::new),
+    )
+}
+
+/// Build the request-plane client TLS connector from explicit paths. Presents
+/// the client certificate/key for mTLS and fails closed on incomplete TLS
+/// settings. Returns `None` when no TLS is requested.
+fn build_request_plane_tls_connector(
+    ca_cert_path: Option<&std::path::Path>,
+    insecure: bool,
+    client_cert: Option<&std::path::Path>,
+    client_key: Option<&std::path::Path>,
+) -> anyhow::Result<Option<TlsConnector>> {
+    let tls_requested =
+        ca_cert_path.is_some() || insecure || client_cert.is_some() || client_key.is_some();
+    if !tls_requested {
+        return Ok(None);
+    }
+    use crate::config::environment_names::tcp_response_stream::tls as env;
+    // Validate the client identity pair before the CA check so a lone cert/key
+    // produces the accurate "set both" error rather than a misleading CA error.
+    if client_cert.is_some() != client_key.is_some() {
+        anyhow::bail!(
+            "both {} and {} must be set together to present a client identity",
+            env::DYN_TCP_TLS_CLIENT_CERT_PATH,
+            env::DYN_TCP_TLS_CLIENT_KEY_PATH,
+        );
+    }
+    if !insecure && ca_cert_path.is_none() {
+        anyhow::bail!(
+            "Request plane TLS is enabled but {} is not set and {} is not true; \
+             provide a CA cert or set insecure mode for development",
+            env::DYN_TCP_TLS_CA_CERT_PATH,
+            env::DYN_TCP_TLS_INSECURE,
+        );
+    }
+    let tls_config =
+        crate::tls_utils::client_tls_config(ca_cert_path, insecure, client_cert, client_key)?;
+    Ok(Some(TlsConnector::from(std::sync::Arc::new(tls_config))))
+}
+
+impl Drop for TcpConnection {
+    fn drop(&mut self) {
+        self.healthy.store(false, Ordering::Relaxed);
+        self.closed.store(true, Ordering::Release);
+        self.admission.close();
+        self.writer_notify.notify_one();
+        self.writer_handle.abort();
+        self.reader_handle.abort();
+    }
+}
+
 impl TcpConnection {
     /// Create a new connection with lock-free submit and batched write/read tasks
     async fn connect(addr: SocketAddr, timeout: Duration, channel_buffer: usize) -> Result<Self> {
+        Self::connect_with_connector(
+            addr,
+            timeout,
+            channel_buffer,
+            get_request_plane_tls_connector()?.as_ref(),
+        )
+        .await
+    }
+
+    /// Like [`TcpConnection::connect`], but with an explicitly supplied TLS
+    /// connector instead of the process-global `REQUEST_PLANE_TLS_CONNECTOR`.
+    /// This lets tests drive the real connect/handshake/reader/writer path with a
+    /// per-test connector, without initializing (and poisoning) the cached one.
+    async fn connect_with_connector(
+        addr: SocketAddr,
+        timeout: Duration,
+        channel_buffer: usize,
+        connector: Option<&TlsConnector>,
+    ) -> Result<Self> {
         let stream = tokio::time::timeout(timeout, TcpStream::connect(addr))
             .await
             .map_err(|_| anyhow::anyhow!("TCP connect timeout to {}", addr))??;
@@ -251,7 +483,26 @@ impl TcpConnection {
         // Configure socket for lower latency
         Self::configure_socket(&stream)?;
 
-        let (read_half, write_half) = tokio::io::split(stream);
+        let (read_half, write_half): (BoxRead, BoxWrite) = if let Some(connector) = connector {
+            use crate::config::environment_names::tcp_response_stream::tls as env;
+            let server_name = match std::env::var(env::DYN_TCP_TLS_SERVER_NAME) {
+                Ok(name) => rustls::pki_types::ServerName::try_from(name)
+                    .map_err(|e| anyhow::anyhow!("invalid TLS server name: {e}"))?,
+                Err(_) => rustls::pki_types::ServerName::IpAddress(addr.ip().into()),
+            };
+            let tls_stream = tokio::time::timeout(
+                crate::tls_utils::handshake_timeout(),
+                connector.connect(server_name, stream),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("Request plane TLS handshake timed out to {}", addr))?
+            .map_err(|e| anyhow::anyhow!("Request plane TLS handshake failed to {}: {e}", addr))?;
+            let (r, w) = tokio::io::split(tls_stream);
+            (Box::new(r), Box::new(w))
+        } else {
+            let (r, w) = tokio::io::split(stream);
+            (Box::new(r), Box::new(w))
+        };
 
         let submit_queue = Arc::new(SegQueue::new());
         let response_queue = Arc::new(SegQueue::new());
@@ -261,7 +512,7 @@ impl TcpConnection {
         let inflight = Arc::new(AtomicU64::new(0));
         let admission = Arc::new(tokio::sync::Semaphore::new(channel_buffer));
 
-        // Spawn writer task (batches into BytesMut, single write_all per drain)
+        // Spawn writer task (vectored writes over header/body chunks)
         let writer_handle = {
             let submit_q = submit_queue.clone();
             let response_q = response_queue.clone();
@@ -404,38 +655,33 @@ impl TcpConnection {
         }
     }
 
-    /// Writer task: drains SegQueue into a reusable BytesMut, then issues a single
-    /// write_all() per drain cycle — one syscall regardless of batch size.
+    /// Writer task: drains SegQueue into header/body chunks, then writes them
+    /// with vectored IO. This preserves large request payloads as `Bytes` rather
+    /// than copying each body into a flattened batch buffer.
     ///
-    /// Why BytesMut instead of BufWriter:
-    /// - BufWriter has a fixed internal cap (256 KB); batches larger than that trigger
-    ///   implicit mid-batch partial flushes, breaking the one-syscall-per-batch guarantee.
-    ///   With channel_buffer=1024 this happens routinely under moderate load.
-    /// - BufWriter copies each Bytes into its internal Vec<u8> and then the kernel
-    ///   copies again on flush — two copies per request. BytesMut collapses this to
-    ///   one extend_from_slice + one write_all (single kernel copy).
-    /// - BytesMut grows to the batch HWM and stays there; after warm-up there are
-    ///   zero allocations per batch.
+    /// Small header chunks are coalesced, large payload chunks stay as `Bytes`,
+    /// and each drain is bounded by queued bytes before polling
+    /// the socket. The protocol wire format is unchanged: each request is still
+    /// `[header][payload]`.
     ///
     /// Flush-boundary tracking: response_txs are held locally during the write
-    /// phase and only pushed to response_queue AFTER write_all succeeds. This way:
+    /// phase and only pushed to response_queue after the batch write succeeds.
     /// - On write error, callers in the current batch get immediate errors
     ///   (not "Connection closed" via drain_pending)
     /// - Previously written batches stay in response_queue for the reader to
     ///   deliver -- they are NOT erroneously killed by drain_pending
-    /// - The server cannot respond before write_all returns, so the reader will
-    ///   never see a response before its response_tx is in the queue
+    /// - If a response races back before waiters are queued, the reader's
+    ///   existing spin-wait covers that small handoff window
     async fn writer_task(
-        mut write_half: tokio::io::WriteHalf<TcpStream>,
+        mut write_half: BoxWrite,
         submit_queue: Arc<SegQueue<PendingRequest>>,
         response_queue: Arc<SegQueue<oneshot::Sender<Result<Bytes>>>>,
         notify: Arc<tokio::sync::Notify>,
         healthy: Arc<AtomicBool>,
         closed: Arc<AtomicBool>,
     ) -> Result<()> {
-        let mut send_buf = BytesMut::with_capacity(WRITER_INITIAL_BUF_CAPACITY);
         // Hoisted outside the loop to reuse allocations across drain cycles.
-        let mut encoded_batch: Vec<Bytes> = Vec::with_capacity(64);
+        let mut write_buf = TcpWriteBuffer::new();
         let mut response_batch: Vec<oneshot::Sender<Result<Bytes>>> = Vec::with_capacity(64);
         let trace = latency_trace_enabled();
 
@@ -462,22 +708,26 @@ impl TcpConnection {
                     std::hint::spin_loop();
                 }
 
-                // Drain all available requests (reuse pre-allocated Vecs)
-                encoded_batch.clear();
+                // Drain a byte-bounded batch: avoid one unbounded
+                // all-available-request drain, but always
+                // accept at least one request even if it exceeds the soft limit.
+                write_buf.clear();
                 response_batch.clear();
+                let mut count = 0usize;
                 while let Some(req) = submit_queue.pop() {
-                    encoded_batch.push(req.encoded_data);
+                    count += 1;
+                    write_buf.push_frame(req.frame);
                     response_batch.push(req.response_tx);
+                    if write_buf.is_full() {
+                        break;
+                    }
                 }
 
-                let count = encoded_batch.len();
                 if count == 0 {
                     continue; // spurious wakeup
                 }
 
-                // Phase 1: Gather all encoded payloads into the send buffer.
-                // A single extend_from_slice per item — no intermediate BufWriter
-                // copy, no implicit partial flushes if the batch exceeds a cap.
+                // Phase 1: write request chunks without flattening payload bodies.
                 // response_txs stay local — they are NOT in response_queue yet.
                 let write_start = if trace {
                     Some(std::time::Instant::now())
@@ -485,31 +735,39 @@ impl TcpConnection {
                     None
                 };
 
-                for data in &encoded_batch {
-                    send_buf.extend_from_slice(data);
-                }
-
-                // Phase 2: Single write_all = one syscall for the entire batch.
-                // The socket send buffer is 2 MB; batches that fit go out in one
-                // writev(). Larger batches loop inside write_all but still hit
-                // the kernel only as fast as it drains the socket buffer.
-                if let Err(e) = write_half.write_all(&send_buf).await {
+                let bytes_to_write = write_buf.queued_len();
+                if let Err(e) = write_buf.write_all(&mut write_half).await {
                     // Data may be partially on the wire — the connection is in an
                     // unrecoverable state (broken framing). Fail the entire batch,
-                    // clear the buffer defensively so stale data can never be
+                    // clear the write buffer defensively so stale data can never be
                     // re-sent if reconnect-and-retry is ever added, then exit.
-                    send_buf.clear();
+                    write_buf.clear();
                     let err_msg = format!("Write failed: {}", e);
                     for tx in response_batch.drain(..) {
                         let _ = tx.send(Err(anyhow::anyhow!("{}", err_msg)));
                     }
                     return Err(e.into());
                 }
-                TCP_BYTES_SENT_TOTAL.inc_by(send_buf.len() as f64);
-                send_buf.clear(); // reset length, keep allocation for next batch
+                // Flush after the batch write. `write_half` may be a tokio-rustls
+                // TLS stream, whose `poll_write` copies plaintext into the session
+                // buffer and can return Ready(Ok(n)) with encrypted records still
+                // buffered when the socket would block; without this flush the batch
+                // can stall under write back-pressure until the next request is
+                // written, hanging its callers until the request timeout. For a
+                // plaintext TCP write half this is a no-op.
+                if let Err(e) = write_half.flush().await {
+                    write_buf.clear();
+                    let err_msg = format!("Flush failed: {}", e);
+                    for tx in response_batch.drain(..) {
+                        let _ = tx.send(Err(anyhow::anyhow!("{}", err_msg)));
+                    }
+                    return Err(e.into());
+                }
+                TCP_BYTES_SENT_TOTAL.inc_by(bytes_to_write as f64);
+                debug_assert!(write_buf.is_empty());
 
-                // Phase 3: write_all succeeded — data is committed to the wire.
-                // NOW push response_txs to response_queue so the reader can
+                // Phase 3: write_all + flush succeeded — data is committed to the
+                // wire. NOW push response_txs to response_queue so the reader can
                 // match them with incoming responses.
                 for tx in response_batch.drain(..) {
                     response_queue.push(tx);
@@ -531,16 +789,9 @@ impl TcpConnection {
                     total_batch_size += count as u64;
 
                     if last_report.elapsed() >= Duration::from_secs(5) {
-                        let avg_batch = if batch_count > 0 {
-                            total_batch_size / batch_count
-                        } else {
-                            0
-                        };
-                        let avg_write_ns = if batch_count > 0 {
-                            total_batch_write_ns / batch_count
-                        } else {
-                            0
-                        };
+                        let avg_batch = total_batch_size.checked_div(batch_count).unwrap_or(0);
+                        let avg_write_ns =
+                            total_batch_write_ns.checked_div(batch_count).unwrap_or(0);
                         tracing::info!(
                             batches = batch_count,
                             avg_batch_size = avg_batch,
@@ -553,8 +804,6 @@ impl TcpConnection {
                         last_report = std::time::Instant::now();
                     }
                 }
-
-                encoded_batch.clear();
             }
         }
         .await;
@@ -580,7 +829,7 @@ impl TcpConnection {
     /// On exit (clean close or error), sets `healthy=false` and wakes the writer
     /// via `writer_notify` so it can detect reader death and drain pending callers.
     async fn reader_task(
-        read_half: tokio::io::ReadHalf<TcpStream>,
+        read_half: BoxRead,
         response_queue: Arc<SegQueue<oneshot::Sender<Result<Bytes>>>>,
         healthy: Arc<AtomicBool>,
         writer_notify: Arc<tokio::sync::Notify>,
@@ -672,10 +921,11 @@ impl TcpConnection {
             .await
             .map_err(|_| anyhow::anyhow!("Connection closed (admission gate shut)"))?;
 
-        // encode() called here — after admission is granted — so the frame is
-        // only allocated once we have capacity to process it.
+        // Header framing happens after admission is granted so callers blocked
+        // on the semaphore do not hold queued frame state. The payload remains
+        // a Bytes chunk and is not copied into a flattened request frame.
         let request_msg = TcpRequestMessage::with_headers(endpoint_path, headers.clone(), payload);
-        let encoded_data = request_msg.encode()?;
+        let frame = request_msg.into_frame()?;
 
         let (response_tx, response_rx) = oneshot::channel();
 
@@ -700,10 +950,8 @@ impl TcpConnection {
         let _inflight_guard = InflightGuard(self.inflight.clone());
 
         // Lock-free submit: ~20-40ns
-        self.submit_queue.push(PendingRequest {
-            encoded_data,
-            response_tx,
-        });
+        self.submit_queue
+            .push(PendingRequest { frame, response_tx });
 
         #[cfg(test)]
         if let Some(barrier) = &self.post_enqueue_barrier {
@@ -752,6 +1000,19 @@ impl TcpConnection {
         let inflight = self.inflight.load(Ordering::Acquire) as usize;
         self.channel_buffer.saturating_sub(inflight)
     }
+}
+
+fn cannot_connect_error(addr: SocketAddr, error: anyhow::Error) -> anyhow::Error {
+    let cause = crate::error::DynamoError::from(
+        error.into_boxed_dyn_error() as Box<dyn std::error::Error + 'static>
+    );
+    anyhow::anyhow!(
+        crate::error::DynamoError::builder()
+            .error_type(crate::error::ErrorType::CannotConnect)
+            .message(format!("TCP connection to {addr} failed"))
+            .cause(cause)
+            .build()
+    )
 }
 
 /// Per-host connection pool with LRU lifecycle and ArcSwap-based snapshot.
@@ -970,7 +1231,7 @@ impl HostPool {
                     }
                     Err(e) => {
                         self.connect_notify.notify_waiters();
-                        return Err(e);
+                        return Err(cannot_connect_error(self.addr, e));
                     }
                 }
             }
@@ -1323,7 +1584,7 @@ impl TcpRequestClient {
     /// Start a background task that eagerly warms TCP connections for
     /// newly-discovered backends.
     ///
-    /// Delegates to [`TcpConnectionPool::start_warmup_watcher`].
+    /// Delegates to `TcpConnectionPool::start_warmup_watcher`.
     pub fn start_warmup(
         &self,
         instance_rx: tokio::sync::watch::Receiver<Vec<crate::component::Instance>>,
@@ -1383,8 +1644,14 @@ impl RequestPlaneClient for TcpRequestClient {
             headers.insert("x-endpoint-path".to_string(), endpoint_name.clone());
         }
 
-        // Get shared connection from pool (Arc, not exclusive borrow)
-        let conn = self.pool.get_connection(addr).await?;
+        // Get shared connection from pool (Arc, not exclusive borrow). Actual connection
+        // failures are classified at the dial site; local pool errors retain their type.
+        let conn = self.pool.get_connection(addr).await.map_err(|e| {
+            self.stats.errors.fetch_add(1, Ordering::Relaxed);
+            TCP_ERRORS_TOTAL.inc();
+            tracing::warn!(%addr, error = %e, "TCP connection unavailable");
+            e
+        })?;
 
         let result = tokio::time::timeout(
             self.config.request_timeout,
@@ -1467,9 +1734,144 @@ impl RequestPlaneClient for TcpRequestClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::pin::Pin;
     use std::sync::atomic::AtomicUsize;
-    use tokio::io::AsyncReadExt;
-    use tokio::net::TcpListener;
+    use std::task::{Context, Poll};
+    use tokio::io::{AsyncReadExt, AsyncWrite};
+    use tokio::net::{TcpListener, TcpStream};
+
+    fn make_cert_files() -> (tempfile::NamedTempFile, tempfile::NamedTempFile) {
+        use std::io::Write as _;
+        let key_pair = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+            .unwrap()
+            .self_signed(&key_pair)
+            .unwrap();
+        let mut cert_file = tempfile::NamedTempFile::new().unwrap();
+        cert_file.write_all(cert.pem().as_bytes()).unwrap();
+        let mut key_file = tempfile::NamedTempFile::new().unwrap();
+        key_file
+            .write_all(key_pair.serialize_pem().as_bytes())
+            .unwrap();
+        (cert_file, key_file)
+    }
+
+    // CA + server leaf (SAN=localhost) + client leaf, both signed by the CA.
+    // Returns PEM temp files: (ca, server_cert, server_key, client_cert, client_key).
+    fn make_mtls_cert_files() -> (
+        tempfile::NamedTempFile,
+        tempfile::NamedTempFile,
+        tempfile::NamedTempFile,
+        tempfile::NamedTempFile,
+        tempfile::NamedTempFile,
+    ) {
+        use std::io::Write as _;
+        fn write_pem(contents: &str) -> tempfile::NamedTempFile {
+            let mut f = tempfile::NamedTempFile::new().unwrap();
+            f.write_all(contents.as_bytes()).unwrap();
+            f
+        }
+
+        // Certificate Authority (self-signed, CA:TRUE).
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let mut ca_params = rcgen::CertificateParams::new(Vec::new()).unwrap();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca_params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "Dynamo Test CA");
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+
+        // Server leaf (SAN=localhost) signed by the CA, with serverAuth EKU.
+        let server_key = rcgen::KeyPair::generate().unwrap();
+        let mut server_params =
+            rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+        server_params
+            .extended_key_usages
+            .push(rcgen::ExtendedKeyUsagePurpose::ServerAuth);
+        let server_cert = server_params
+            .signed_by(&server_key, &ca_cert, &ca_key)
+            .unwrap();
+
+        // Client leaf signed by the CA, with clientAuth EKU.
+        let client_key = rcgen::KeyPair::generate().unwrap();
+        let mut client_params =
+            rcgen::CertificateParams::new(vec!["dynamo-client".to_string()]).unwrap();
+        client_params
+            .extended_key_usages
+            .push(rcgen::ExtendedKeyUsagePurpose::ClientAuth);
+        let client_cert = client_params
+            .signed_by(&client_key, &ca_cert, &ca_key)
+            .unwrap();
+
+        (
+            write_pem(&ca_cert.pem()),
+            write_pem(&server_cert.pem()),
+            write_pem(&server_key.serialize_pem()),
+            write_pem(&client_cert.pem()),
+            write_pem(&client_key.serialize_pem()),
+        )
+    }
+
+    // mTLS enforcement: a server built with a client CA must reject a client
+    // that presents no certificate and one whose certificate is signed by an
+    // untrusted CA. The accepted case is covered by `request_plane_mtls_end_to_end`.
+    // Assertions are made server-side because a TLS 1.3 client may finish its
+    // flight before observing the server's rejection.
+    #[tokio::test]
+    async fn request_plane_mtls_rejects_untrusted_clients() {
+        let (ca, server_cert, server_key, _client_cert, _client_key) = make_mtls_cert_files();
+        let server_config = crate::tls_utils::server_tls_config(
+            server_cert.path(),
+            server_key.path(),
+            Some(ca.path()),
+        )
+        .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server_config));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (no_cert, _) = listener.accept().await.unwrap();
+            let no_cert_ok = acceptor.accept(no_cert).await.is_ok();
+            let (wrong_ca, _) = listener.accept().await.unwrap();
+            let wrong_ca_ok = acceptor.accept(wrong_ca).await.is_ok();
+            (no_cert_ok, wrong_ca_ok)
+        });
+
+        let sni = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+
+        // No client identity presented.
+        let no_identity =
+            crate::tls_utils::client_tls_config(Some(ca.path()), false, None, None).unwrap();
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let _ = tokio_rustls::TlsConnector::from(std::sync::Arc::new(no_identity))
+            .connect(sni.clone(), stream)
+            .await;
+
+        // Client cert signed by an untrusted (self-signed) CA, not the server's.
+        let (wrong_cert, wrong_key) = make_cert_files();
+        let untrusted = crate::tls_utils::client_tls_config(
+            Some(ca.path()),
+            false,
+            Some(wrong_cert.path()),
+            Some(wrong_key.path()),
+        )
+        .unwrap();
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let _ = tokio_rustls::TlsConnector::from(std::sync::Arc::new(untrusted))
+            .connect(sni, stream)
+            .await;
+
+        let (no_cert_ok, wrong_ca_ok) = server.await.unwrap();
+        assert!(
+            !no_cert_ok,
+            "server must reject a client that presents no cert"
+        );
+        assert!(
+            !wrong_ca_ok,
+            "server must reject a client cert signed by an untrusted CA"
+        );
+    }
 
     #[test]
     fn test_tcp_config_default() {
@@ -1526,6 +1928,113 @@ mod tests {
         assert!(client.is_healthy());
     }
 
+    #[tokio::test]
+    async fn test_cold_connection_failure_is_cannot_connect() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let client = TcpRequestClient::with_config(TcpRequestConfig {
+            request_timeout: Duration::from_secs(1),
+            connect_timeout: Duration::from_secs(1),
+            pool_size: 1,
+            channel_buffer: 1,
+        })
+        .unwrap();
+
+        let err = client
+            .send_request(
+                format!("{addr}/generate"),
+                Bytes::from_static(b"ping"),
+                Headers::new(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(crate::error::match_error_chain(
+            err.as_ref(),
+            &[crate::error::ErrorType::CannotConnect],
+            &[],
+        ));
+        assert!(
+            err.chain().count() > 1,
+            "cold connection failure must retain its cause"
+        );
+        assert_eq!(client.stats.errors.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn test_closed_connect_limiter_is_not_cannot_connect() {
+        let client = TcpRequestClient::with_config(TcpRequestConfig {
+            request_timeout: Duration::from_secs(1),
+            connect_timeout: Duration::from_secs(1),
+            pool_size: 1,
+            channel_buffer: 1,
+        })
+        .unwrap();
+        client.pool.connect_limiter.close();
+
+        let err = client
+            .send_request(
+                "127.0.0.1:1/generate".to_string(),
+                Bytes::from_static(b"ping"),
+                Headers::new(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(!crate::error::match_error_chain(
+            err.as_ref(),
+            &[crate::error::ErrorType::CannotConnect],
+            &[],
+        ));
+        assert!(err.to_string().contains("Global connect limiter closed"));
+        assert_eq!(client.stats.errors.load(Ordering::Relaxed), 1);
+    }
+
+    async fn echo_requests(stream: TcpStream) {
+        let (mut read_half, mut write_half) = tokio::io::split(stream);
+        loop {
+            let mut len_buf = [0u8; 2];
+            if read_half.read_exact(&mut len_buf).await.is_err() {
+                break;
+            }
+            let path_len = u16::from_be_bytes(len_buf) as usize;
+            let mut path_buf = vec![0u8; path_len];
+            if read_half.read_exact(&mut path_buf).await.is_err() {
+                break;
+            }
+
+            let mut headers_len_buf = [0u8; 2];
+            if read_half.read_exact(&mut headers_len_buf).await.is_err() {
+                break;
+            }
+            let headers_len = u16::from_be_bytes(headers_len_buf) as usize;
+            let mut headers_buf = vec![0u8; headers_len];
+            if read_half.read_exact(&mut headers_buf).await.is_err() {
+                break;
+            }
+
+            let mut payload_len_buf = [0u8; 4];
+            if read_half.read_exact(&mut payload_len_buf).await.is_err() {
+                break;
+            }
+            let payload_len = u32::from_be_bytes(payload_len_buf) as usize;
+            let mut payload = vec![0u8; payload_len];
+            if read_half.read_exact(&mut payload).await.is_err() {
+                break;
+            }
+
+            use crate::pipeline::network::codec::TcpResponseMessage;
+            let encoded = TcpResponseMessage::new(Bytes::from(payload))
+                .encode()
+                .unwrap();
+            if write_half.write_all(&encoded).await.is_err() {
+                break;
+            }
+        }
+    }
+
     /// Helper: spawn a mock TCP server that echoes requests.
     /// Returns (listener_addr, connection_count_tracker).
     async fn spawn_echo_server() -> (SocketAddr, Arc<AtomicUsize>) {
@@ -1543,55 +2052,462 @@ mod tests {
                 let (stream, _) = result.unwrap();
                 conn_count_clone.fetch_add(1, Ordering::SeqCst);
 
-                tokio::spawn(async move {
-                    let (mut read_half, mut write_half) = tokio::io::split(stream);
-                    loop {
-                        // Read path length
-                        let mut len_buf = [0u8; 2];
-                        if read_half.read_exact(&mut len_buf).await.is_err() {
-                            break;
-                        }
-                        let path_len = u16::from_be_bytes(len_buf) as usize;
-                        let mut path_buf = vec![0u8; path_len];
-                        if read_half.read_exact(&mut path_buf).await.is_err() {
-                            break;
-                        }
-
-                        // Read headers length
-                        let mut headers_len_buf = [0u8; 2];
-                        if read_half.read_exact(&mut headers_len_buf).await.is_err() {
-                            break;
-                        }
-                        let headers_len = u16::from_be_bytes(headers_len_buf) as usize;
-                        let mut headers_buf = vec![0u8; headers_len];
-                        if read_half.read_exact(&mut headers_buf).await.is_err() {
-                            break;
-                        }
-
-                        // Read payload length + payload
-                        let mut len_buf = [0u8; 4];
-                        if read_half.read_exact(&mut len_buf).await.is_err() {
-                            break;
-                        }
-                        let payload_len = u32::from_be_bytes(len_buf) as usize;
-                        let mut payload_buf = vec![0u8; payload_len];
-                        if read_half.read_exact(&mut payload_buf).await.is_err() {
-                            break;
-                        }
-
-                        // Send response
-                        use crate::pipeline::network::codec::TcpResponseMessage;
-                        let response = TcpResponseMessage::new(Bytes::from(payload_buf));
-                        let encoded = response.encode().unwrap();
-                        if write_half.write_all(&encoded).await.is_err() {
-                            break;
-                        }
-                    }
-                });
+                tokio::spawn(echo_requests(stream));
             }
         });
 
         (addr, conn_count)
+    }
+
+    /// Env parsing for the request-plane client connector (independent of the
+    /// process-global `OnceCell`): no TLS env → no connector; CA or insecure →
+    /// connector built.
+    #[test]
+    fn request_plane_tls_connector_from_env_parses() {
+        let (cert, key) = make_cert_files();
+        // Clear every var the builder reads (incl. the client-identity vars) so
+        // ambient mTLS settings can't flip the "no TLS -> plaintext" assertion.
+        temp_env::with_vars_unset(
+            [
+                "DYN_TCP_TLS_CA_CERT_PATH",
+                "DYN_TCP_TLS_INSECURE",
+                "DYN_TCP_TLS_CLIENT_CERT_PATH",
+                "DYN_TCP_TLS_CLIENT_KEY_PATH",
+            ],
+            || {
+                assert!(
+                    build_request_plane_tls_connector_from_env()
+                        .unwrap()
+                        .is_none()
+                );
+            },
+        );
+        // CA only -> TLS.
+        temp_env::with_vars(
+            [
+                (
+                    "DYN_TCP_TLS_CA_CERT_PATH",
+                    Some(cert.path().to_str().unwrap()),
+                ),
+                ("DYN_TCP_TLS_INSECURE", None),
+                ("DYN_TCP_TLS_CLIENT_CERT_PATH", None),
+                ("DYN_TCP_TLS_CLIENT_KEY_PATH", None),
+            ],
+            || {
+                assert!(
+                    build_request_plane_tls_connector_from_env()
+                        .unwrap()
+                        .is_some()
+                );
+            },
+        );
+        // Insecure only -> TLS.
+        temp_env::with_vars(
+            [
+                ("DYN_TCP_TLS_CA_CERT_PATH", None),
+                ("DYN_TCP_TLS_INSECURE", Some("1")),
+                ("DYN_TCP_TLS_CLIENT_CERT_PATH", None),
+                ("DYN_TCP_TLS_CLIENT_KEY_PATH", None),
+            ],
+            || {
+                assert!(
+                    build_request_plane_tls_connector_from_env()
+                        .unwrap()
+                        .is_some()
+                );
+            },
+        );
+        // CA + client identity -> mTLS connector.
+        temp_env::with_vars(
+            [
+                (
+                    "DYN_TCP_TLS_CA_CERT_PATH",
+                    Some(cert.path().to_str().unwrap()),
+                ),
+                ("DYN_TCP_TLS_INSECURE", None),
+                (
+                    "DYN_TCP_TLS_CLIENT_CERT_PATH",
+                    Some(cert.path().to_str().unwrap()),
+                ),
+                (
+                    "DYN_TCP_TLS_CLIENT_KEY_PATH",
+                    Some(key.path().to_str().unwrap()),
+                ),
+            ],
+            || {
+                assert!(
+                    build_request_plane_tls_connector_from_env()
+                        .unwrap()
+                        .is_some()
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn request_plane_tls_connector_rejects_client_identity_without_ca() {
+        let (cert, key) = make_cert_files();
+        // A client identity without a server CA (and not insecure) must fail closed.
+        let error =
+            build_request_plane_tls_connector(None, false, Some(cert.path()), Some(key.path()))
+                .err()
+                .expect("a client identity without a server CA must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("DYN_TCP_TLS_CA_CERT_PATH is not set")
+        );
+    }
+
+    // Accept one TLS connection, read a single request-plane frame, and echo its
+    // payload back as a response frame. Shared by the TLS and mTLS e2e tests.
+    async fn tls_echo_one_request(listener: TcpListener, acceptor: tokio_rustls::TlsAcceptor) {
+        use crate::pipeline::network::codec::TcpResponseMessage;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let (tcp, _) = listener.accept().await.unwrap();
+        let tls = acceptor.accept(tcp).await.expect("server TLS handshake");
+        let (mut r, mut w) = tokio::io::split(tls);
+        let mut path_len = [0u8; 2];
+        r.read_exact(&mut path_len).await.unwrap();
+        let mut path = vec![0u8; u16::from_be_bytes(path_len) as usize];
+        r.read_exact(&mut path).await.unwrap();
+        let mut headers_len = [0u8; 2];
+        r.read_exact(&mut headers_len).await.unwrap();
+        let mut headers = vec![0u8; u16::from_be_bytes(headers_len) as usize];
+        r.read_exact(&mut headers).await.unwrap();
+        let mut payload_len = [0u8; 4];
+        r.read_exact(&mut payload_len).await.unwrap();
+        let mut payload = vec![0u8; u32::from_be_bytes(payload_len) as usize];
+        r.read_exact(&mut payload).await.unwrap();
+        let resp = TcpResponseMessage::new(Bytes::from(payload));
+        w.write_all(&resp.encode().unwrap()).await.unwrap();
+        w.flush().await.unwrap();
+    }
+
+    /// End-to-end encrypted request through the **real** request-plane client
+    /// path: `TcpConnection::connect_with_connector` performs the TLS handshake
+    /// (SNI from `DYN_TCP_TLS_SERVER_NAME`), spawns the reader/writer tasks over
+    /// boxed TLS I/O, and `send_request` frames a request that a TLS-wrapped echo
+    /// server reads and replies to. Exercises handshake + SNI + boxed I/O +
+    /// reader/writer + framing, not just a `tls_utils` round-trip.
+    #[tokio::test]
+    async fn request_plane_tls_end_to_end() {
+        // Self-signed cert (SAN=localhost), trusted as the CA by the client.
+        let (cert, key) = make_cert_files();
+        let server_config =
+            crate::tls_utils::server_tls_config(cert.path(), key.path(), None).unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server_config));
+        let client_config =
+            crate::tls_utils::client_tls_config(Some(cert.path()), false, None, None).unwrap();
+        let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(client_config));
+
+        // TLS-wrapped echo server speaking the request-plane wire framing.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(tls_echo_one_request(listener, acceptor));
+
+        // Drive the real client path with an explicit connector (no OnceCell) and
+        // SNI supplied via env so it matches the cert's `localhost` SAN.
+        let payload = Bytes::from_static(b"encrypted-request-plane-payload");
+        let expected = payload.clone();
+        let response = temp_env::async_with_vars(
+            [("DYN_TCP_TLS_SERVER_NAME", Some("localhost"))],
+            async move {
+                let conn = TcpConnection::connect_with_connector(
+                    addr,
+                    Duration::from_secs(5),
+                    10,
+                    Some(&connector),
+                )
+                .await
+                .expect("client connect + TLS handshake");
+                let mut headers = Headers::new();
+                headers.insert("x-endpoint-path".to_string(), "test".to_string());
+                conn.send_request(payload, &headers)
+                    .await
+                    .expect("send_request over TLS")
+            },
+        )
+        .await;
+
+        assert_eq!(
+            response, expected,
+            "payload should round-trip through the encrypted request plane"
+        );
+    }
+
+    /// Same production path as `request_plane_tls_end_to_end`, but mutually
+    /// authenticated: the server requires a client certificate (built with a
+    /// client CA) and the real client path presents a CA-signed identity. Proves
+    /// `TcpConnection::connect_with_connector` + `send_request` work end-to-end
+    /// when the server enforces mTLS.
+    #[tokio::test]
+    async fn request_plane_mtls_end_to_end() {
+        let (ca, server_cert, server_key, client_cert, client_key) = make_mtls_cert_files();
+        let server_config = crate::tls_utils::server_tls_config(
+            server_cert.path(),
+            server_key.path(),
+            Some(ca.path()),
+        )
+        .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server_config));
+        let client_config = crate::tls_utils::client_tls_config(
+            Some(ca.path()),
+            false,
+            Some(client_cert.path()),
+            Some(client_key.path()),
+        )
+        .unwrap();
+        let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(client_config));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(tls_echo_one_request(listener, acceptor));
+
+        let payload = Bytes::from_static(b"encrypted-mtls-request-plane-payload");
+        let expected = payload.clone();
+        let response = temp_env::async_with_vars(
+            [("DYN_TCP_TLS_SERVER_NAME", Some("localhost"))],
+            async move {
+                let conn = TcpConnection::connect_with_connector(
+                    addr,
+                    Duration::from_secs(5),
+                    10,
+                    Some(&connector),
+                )
+                .await
+                .expect("client connect + mTLS handshake");
+                let mut headers = Headers::new();
+                headers.insert("x-endpoint-path".to_string(), "test".to_string());
+                conn.send_request(payload, &headers)
+                    .await
+                    .expect("send_request over mTLS")
+            },
+        )
+        .await;
+
+        assert_eq!(
+            response, expected,
+            "payload should round-trip through the mutually-authenticated request plane"
+        );
+    }
+
+    async fn spawn_active_echo_server() -> (SocketAddr, Arc<AtomicUsize>) {
+        struct ActiveConnection(Arc<AtomicUsize>);
+
+        impl Drop for ActiveConnection {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let active_connections = Arc::new(AtomicUsize::new(0));
+        let tracker = active_connections.clone();
+
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tracker.fetch_add(1, Ordering::SeqCst);
+                let active = ActiveConnection(tracker.clone());
+                tokio::spawn(async move {
+                    let _active = active;
+                    echo_requests(stream).await;
+                });
+            }
+        });
+
+        (addr, active_connections)
+    }
+
+    #[tokio::test]
+    async fn dropping_client_closes_pooled_connections() {
+        let (addr, active_connections) = spawn_active_echo_server().await;
+        let client = TcpRequestClient::with_config(TcpRequestConfig {
+            request_timeout: Duration::from_secs(5),
+            connect_timeout: Duration::from_secs(5),
+            pool_size: 1,
+            channel_buffer: 1,
+        })
+        .unwrap();
+        let mut headers = Headers::new();
+        headers.insert("x-endpoint-path".to_string(), "test".to_string());
+
+        client
+            .send_request(addr.to_string(), Bytes::from_static(b"test"), headers)
+            .await
+            .unwrap();
+        assert_eq!(active_connections.load(Ordering::SeqCst), 1);
+
+        drop(client);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while active_connections.load(Ordering::SeqCst) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping the TCP client left its pooled connection open");
+    }
+
+    struct RecordingWriter {
+        written: Vec<u8>,
+        max_per_write: Option<usize>,
+        error_after_calls: Option<usize>,
+        write_zero: bool,
+        calls: usize,
+    }
+
+    impl RecordingWriter {
+        fn new(max_per_write: Option<usize>) -> Self {
+            Self {
+                written: Vec::new(),
+                max_per_write,
+                error_after_calls: None,
+                write_zero: false,
+                calls: 0,
+            }
+        }
+
+        fn write_zero() -> Self {
+            Self {
+                write_zero: true,
+                ..Self::new(None)
+            }
+        }
+
+        fn error_after_calls(max_per_write: usize, error_after_calls: usize) -> Self {
+            Self {
+                max_per_write: Some(max_per_write),
+                error_after_calls: Some(error_after_calls),
+                ..Self::new(None)
+            }
+        }
+
+        fn write_slices(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+            if self.write_zero {
+                return Ok(0);
+            }
+            if self
+                .error_after_calls
+                .is_some_and(|limit| self.calls >= limit)
+            {
+                return Err(io::Error::other("injected write error"));
+            }
+            self.calls += 1;
+
+            let available: usize = bufs.iter().map(|buf| buf.len()).sum();
+            let to_write = self.max_per_write.unwrap_or(available).min(available);
+            let mut remaining = to_write;
+            for buf in bufs {
+                if remaining == 0 {
+                    break;
+                }
+                let n = remaining.min(buf.len());
+                self.written.extend_from_slice(&buf[..n]);
+                remaining -= n;
+            }
+            Ok(to_write)
+        }
+    }
+
+    impl AsyncWrite for RecordingWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.poll_write_vectored(_cx, &[IoSlice::new(buf)])
+        }
+
+        fn poll_write_vectored(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            bufs: &[IoSlice<'_>],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(self.get_mut().write_slices(bufs))
+        }
+
+        fn is_write_vectored(&self) -> bool {
+            true
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tcp_write_buffer_coalesces_small_chunks_and_preserves_large_payload() {
+        let payload = Bytes::from(vec![b'p'; WRITE_FLATTEN_THRESHOLD]);
+        let payload_ptr = payload.as_ptr();
+        let mut write_buf = TcpWriteBuffer::new();
+
+        write_buf.write(Bytes::from_static(b"header"));
+        write_buf.write(payload.clone());
+        write_buf.write(Bytes::from_static(b"tail"));
+
+        assert_eq!(write_buf.write_buf.len(), 2);
+        assert_eq!(write_buf.write_buf.get(1).unwrap().as_ptr(), payload_ptr);
+        assert_eq!(write_buf.flattened_writes.as_ref(), b"tail");
+
+        let expected = [b"header".as_slice(), payload.as_ref(), b"tail".as_slice()].concat();
+        let queued_len = write_buf.queued_len();
+        let mut writer = RecordingWriter::new(None);
+        let written = write_buf.write_all(&mut writer).await.unwrap();
+
+        assert_eq!(written, queued_len);
+        assert_eq!(writer.written, expected);
+        assert!(write_buf.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_tcp_write_buffer_handles_partial_writes_across_chunk_boundaries() {
+        let payload = Bytes::from(vec![b'x'; WRITE_FLATTEN_THRESHOLD + 11]);
+        let mut write_buf = TcpWriteBuffer::new();
+        write_buf.write(Bytes::from_static(b"abc"));
+        write_buf.write(payload.clone());
+        write_buf.write(Bytes::from_static(b"xyz"));
+
+        let expected = [b"abc".as_slice(), payload.as_ref(), b"xyz".as_slice()].concat();
+        let mut writer = RecordingWriter::new(Some(7));
+        let written = write_buf.write_all(&mut writer).await.unwrap();
+
+        assert_eq!(written, expected.len());
+        assert_eq!(writer.written, expected);
+        assert!(writer.calls > 1);
+        assert!(write_buf.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_tcp_write_buffer_write_zero_errors() {
+        let mut write_buf = TcpWriteBuffer::new();
+        write_buf.write(Bytes::from_static(b"abc"));
+
+        let err = write_buf
+            .write_all(&mut RecordingWriter::write_zero())
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::WriteZero);
+    }
+
+    #[tokio::test]
+    async fn test_tcp_write_buffer_mid_batch_error_surfaces() {
+        let payload = Bytes::from(vec![b'x'; WRITE_FLATTEN_THRESHOLD + 11]);
+        let mut write_buf = TcpWriteBuffer::new();
+        write_buf.write(Bytes::from_static(b"abc"));
+        write_buf.write(payload);
+
+        let mut writer = RecordingWriter::error_after_calls(5, 1);
+        let err = write_buf.write_all(&mut writer).await.unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert_eq!(writer.written.len(), 5);
     }
 
     #[tokio::test]
@@ -2446,6 +3362,7 @@ mod tests {
                 instance_id: 1,
                 transport: TransportType::Tcp(tcp_addr),
                 device_type: None,
+                request_plane_codec: None,
             }])
             .unwrap();
 

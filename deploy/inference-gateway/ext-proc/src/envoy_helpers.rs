@@ -15,14 +15,15 @@ use crate::proto::envoy::service::ext_proc::v3::{
 };
 use crate::proto::envoy::r#type::v3::{HttpStatus, StatusCode};
 
-/// EPP protocol constants from proposal 004-endpoint-picker-protocol.
-/// These match both the full EPP and the LW-EPP from GAIE (issue #2834[https://github.com/kubernetes-sigs/gateway-api-inference-extension/issues/2834]).
+/// EPP protocol constants from GAIE proposal 004-endpoint-picker-protocol
+/// (<https://github.com/kubernetes-sigs/gateway-api-inference-extension>).
 pub mod metadata {
     pub const SUBSET_FILTER_NAMESPACE: &str = "envoy.lb.subset_hint";
     pub const SUBSET_FILTER_KEY: &str = "x-gateway-destination-endpoint-subset";
     pub const DESTINATION_ENDPOINT_NAMESPACE: &str = "envoy.lb";
     pub const DESTINATION_ENDPOINT_KEY: &str = "x-gateway-destination-endpoint";
     pub const DESTINATION_ENDPOINT_SERVED_KEY: &str = "x-gateway-destination-endpoint-served";
+    pub const PREFILLER_HOST_PORT_KEY: &str = "x-prefiller-host-port";
     pub const REQUEST_ID_HEADER_KEY: &str = "x-request-id";
 }
 
@@ -38,6 +39,7 @@ const SYSTEM_OWNED_HEADERS: &[&str] = &[
     "x-gateway-destination-endpoint-subset",
     "x-gateway-destination-endpoint",
     "x-gateway-destination-endpoint-served",
+    metadata::PREFILLER_HOST_PORT_KEY,
     "content-length",
 ];
 
@@ -64,7 +66,13 @@ const STRIPPED_REQUEST_HEADERS: &[&str] = &[
     "x-gateway-model-name-rewrite",
     "x-gateway-destination-endpoint-subset",
     "x-gateway-destination-endpoint-served",
+    metadata::PREFILLER_HOST_PORT_KEY,
 ];
+
+/// Return whether this is the client-spoofable prefill endpoint header.
+pub fn is_prefiller_host_port_header(key: &str) -> bool {
+    key.eq_ignore_ascii_case(metadata::PREFILLER_HOST_PORT_KEY)
+}
 
 /// Build a `HeaderValueOption` that **replaces** any existing value for the key.
 fn header_overwrite(key: &str, raw_value: &[u8]) -> HeaderValueOption {
@@ -129,6 +137,7 @@ pub fn build_request_header_response(
     target_endpoint: &str,
     content_length: Option<usize>,
     extra_headers: &[(String, String)],
+    selected_prefill_endpoint: Option<&str>,
 ) -> ProcessingResponse {
     let mut set_headers: Vec<HeaderValueOption> = vec![header_overwrite(
         metadata::DESTINATION_ENDPOINT_KEY,
@@ -150,12 +159,19 @@ pub fn build_request_header_response(
         }
         tracing::debug!(key = %key, value = %value, "Adding header to ext_proc mutation");
         // OverwriteIfExistsOrAdd: these are gateway-owned routing headers
-        // (x-worker-instance-id, x-prefill-instance-id, x-dp-rank,
+        // (x-dynamo-worker-instance-id, x-dynamo-prefill-instance-id, x-dynamo-dp-rank,
         // x-dynamo-routing-mode, nvext.token_data, ...). The backend must
         // treat the EPP's value as authoritative; appending to a
         // client-supplied value would corrupt routing and let clients
         // smuggle in spoofed routing intent.
         set_headers.push(header_overwrite(key, value.as_bytes()));
+    }
+
+    if let Some(endpoint) = selected_prefill_endpoint {
+        set_headers.push(header_overwrite(
+            metadata::PREFILLER_HOST_PORT_KEY,
+            endpoint.as_bytes(),
+        ));
     }
 
     tracing::debug!(
@@ -179,6 +195,11 @@ pub fn build_request_header_response(
     // endpoint is set above and intentionally not in this list.
     let remove_headers: Vec<String> = STRIPPED_REQUEST_HEADERS
         .iter()
+        // When a trusted value is present, OverwriteIfExistsOrAdd replaces the
+        // client value. Avoid a set/remove ordering dependency in Envoy.
+        .filter(|header| {
+            selected_prefill_endpoint.is_none() || **header != metadata::PREFILLER_HOST_PORT_KEY
+        })
         .map(|h| h.to_string())
         .collect();
 

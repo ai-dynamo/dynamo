@@ -1,7 +1,16 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Mocker engine
 
-The canonical user-facing documentation for the mocker lives at
-[`docs/dynosim/mocker.md`](../../../../docs/dynosim/mocker.md).
+Run `python3 -m dynamo.mocker` to launch live Mocker workers that register with the Dynamo runtime.
+The command does not generate traffic or run virtual-clock replay. Use `aisimulate predict` or
+`aisimulate recommend` for offline simulation.
+
+The user-facing live deployment guide lives at
+[Simulate a Kubernetes Deployment with Mocker](../../../../docs/fern/pages/kubernetes/operations/simulation-with-dynosim/mocker-live-simulation.mdx).
 
 Useful adjacent references:
 

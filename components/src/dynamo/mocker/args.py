@@ -7,6 +7,10 @@ import os
 import tempfile
 from pathlib import Path
 
+from dynamo.common.configuration.groups.router_args import (
+    WorkerRouterConfig,
+    add_worker_router_arguments,
+)
 from dynamo.common.utils.namespace import get_worker_namespace
 
 from . import __version__
@@ -18,23 +22,13 @@ DEFAULT_PREFILL_ENDPOINT = f"dyn://{DYN_NAMESPACE}.prefill.generate"
 logger = logging.getLogger(__name__)
 
 
-def non_negative_int(value: str) -> int:
+def positive_int(value: str) -> int:
     try:
         parsed = int(value)
     except ValueError as error:
         raise argparse.ArgumentTypeError(str(error)) from error
-    if parsed < 0:
-        raise argparse.ArgumentTypeError(f"must be non-negative, got {parsed}")
-    return parsed
-
-
-def non_negative_float(value: str) -> float:
-    try:
-        parsed = float(value)
-    except ValueError as error:
-        raise argparse.ArgumentTypeError(str(error)) from error
-    if parsed < 0:
-        raise argparse.ArgumentTypeError(f"must be non-negative, got {parsed}")
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(f"must be positive, got {parsed}")
     return parsed
 
 
@@ -201,8 +195,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         dest="num_gpu_blocks",  # Maps to num_gpu_blocks in MockEngineArgs
         default=None,
-        help="Explicit number of GPU blocks for KV cache. When unset, AIC-backed "
-        "mocker estimates the value; non-AIC mocker uses 16384.",
+        help="Explicit usable GPU-block capacity per data-parallel rank for the mock "
+        "KV cache. When unset, AIC-backed mocker estimates the value; non-AIC "
+        "mocker uses 16384.",
     )
     parser.add_argument(
         "--block-size",
@@ -210,6 +205,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Token block size for KV cache blocks. When unset, the default "
         "depends on engine: vLLM 64, SGLang 1, TRTLLM 32.",
+    )
+    parser.add_argument(
+        "--max-model-len",
+        type=positive_int,
+        default=None,
+        help="Maximum vLLM sequence length, including prompt and generated tokens. "
+        "When omitted, no model-length limit is enforced.",
     )
     parser.add_argument(
         "--max-num-seqs",
@@ -298,8 +300,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--aic-perf-model",
         action="store_true",
         default=False,
-        help="Use direct AIC SDK calls for latency prediction. "
-        "Requires aiconfigurator SDK installed.",
+        help="Use AISimulate's AIC perf model directly for latency prediction. "
+        "Requires aisimulate installed.",
     )
     parser.add_argument(
         "--gpu-memory-utilization",
@@ -411,6 +413,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "start_thinking_token_id (u32), end_thinking_token_id (u32), thinking_ratio (0.0-1.0). "
         'Example: \'{"start_thinking_token_id": 123, "end_thinking_token_id": 456, "thinking_ratio": 0.6}\'',
     )
+    parser.add_argument(
+        "--response-replay-trace-path",
+        type=str,
+        default=None,
+        help=(
+            "Optional Mooncake JSONL trace containing output_token_ids for "
+            "output_replay_id annotation lookup."
+        ),
+    )
 
     # Engine type selection
     parser.add_argument(
@@ -502,12 +513,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "Mark this as a decode worker which does not publish KV events (default: False)",
     )
     parser.add_argument(
-        "--durable-kv-events",
-        action="store_true",
-        default=os.environ.get("DYN_DURABLE_KV_EVENTS", "false").lower() == "true",
-        help="[Deprecated] Enable durable KV events using NATS JetStream. This option will be removed in a future release. The event-plane subscriber (local_indexer mode) is now the recommended path.",
-    )
-    parser.add_argument(
         "--zmq-kv-events-ports",
         type=str,
         default=None,
@@ -545,6 +550,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "For intra-node NVLink, typical value is ~450.",
     )
     parser.add_argument(
+        "--kv-transfer-timing-mode",
+        choices=("full_prompt", "destination_missing"),
+        default="full_prompt",
+        help="Physical KV footprint used for coordinated disaggregated transfer timing.",
+    )
+    parser.add_argument(
         "--kv-cache-dtype",
         type=str,
         default="auto",
@@ -567,69 +578,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="KV cache bytes per token. If not specified, auto-computed from model config "
         "using: num_layers * 2 * num_kv_heads * head_dim * dtype_bytes.",
     )
-    parser.add_argument(
-        "--num-g2-blocks",
-        type=non_negative_int,
-        default=None,
-        help="Enable KVBM mock offload with this many per-worker G2 host blocks. "
-        "Set to 0 to disable.",
-    )
-    parser.add_argument(
-        "--num-g3-blocks",
-        type=non_negative_int,
-        default=None,
-        help="Enable shared KVBM mock G3 with this many process-local shared blocks. "
-        "Set to 0 to disable.",
-    )
-    parser.add_argument(
-        "--enable-g4-storage",
-        action="store_true",
-        default=False,
-        help="Enable shared KVBM mock G4 object-storage simulation.",
-    )
-    parser.add_argument(
-        "--offload-batch-size",
-        type=non_negative_int,
-        default=None,
-        help="Batch size for the mock G1->G2 offload pipeline. Set to 0 to use the default.",
-    )
-    parser.add_argument(
-        "--bandwidth-g1-to-g2-gbps",
-        type=non_negative_float,
-        default=None,
-        help="Mock G1->G2 offload bandwidth in GB/s.",
-    )
-    parser.add_argument(
-        "--bandwidth-g2-to-g1-gbps",
-        type=non_negative_float,
-        default=None,
-        help="Mock G2->G1 onboard bandwidth in GB/s.",
-    )
-    parser.add_argument(
-        "--bandwidth-g2-to-g3-gbps",
-        type=non_negative_float,
-        default=None,
-        help="Mock shared G2->G3 offload bandwidth in GB/s.",
-    )
-    parser.add_argument(
-        "--bandwidth-g3-to-g2-gbps",
-        type=non_negative_float,
-        default=None,
-        help="Mock shared G3->G2 staging bandwidth in GB/s.",
-    )
-    parser.add_argument(
-        "--bandwidth-g2-to-g4-gbps",
-        type=non_negative_float,
-        default=None,
-        help="Mock shared G2->G4 object offload bandwidth in GB/s.",
-    )
-    parser.add_argument(
-        "--bandwidth-g4-to-g2-gbps",
-        type=non_negative_float,
-        default=None,
-        help="Mock shared G4->G2 object staging bandwidth in GB/s.",
-    )
-
     parser.add_argument(
         "--stagger-delay",
         type=float,
@@ -665,7 +613,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "for etcd/kubernetes).",
     )
 
+    # Same flags the frontend and engine backends expose, so a mocker can stand
+    # in for a real worker set when exercising per-role routing.
+    add_worker_router_arguments(parser)
+
     args = parser.parse_args(argv)
+    # Collect them into their own config object, matching the backends.
+    args.router_advertisement = WorkerRouterConfig.from_cli_args(args)
+
     validate_worker_type_args(args)
 
     # Validate num_workers

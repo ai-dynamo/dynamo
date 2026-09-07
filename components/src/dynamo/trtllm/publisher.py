@@ -22,14 +22,17 @@ Event Flow:
 import asyncio
 import concurrent.futures
 import logging
+import os
+import re
 import threading
 import time
 import traceback
 import weakref
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from enum import Enum
 from queue import Queue
-from typing import Any, Awaitable, Callable, Dict, Optional, Union
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Optional, Union, cast
 
 import msgspec
 import zmq
@@ -37,6 +40,10 @@ from prometheus_client import CollectorRegistry
 
 from dynamo.common.utils.prometheus import LLMBackendMetrics
 from dynamo.llm import FpmDirectPublisher, KvEventPublisher, WorkerMetricsPublisher
+from dynamo.trtllm.utils.request_utils import stored_event_cache_salt
+
+if TYPE_CHECKING:
+    from dynamo._core import KvRemovedEventInput, KvStoredEventInput
 
 logger = logging.getLogger(__name__)
 
@@ -51,9 +58,131 @@ _KV_EVENTS_TIMEOUT_SEC = 0.0
 _PUBLISH_MIN_SLEEP_SEC = 0.01
 _PUBLISH_MAX_SLEEP_SEC = 0.1
 _PUBLISH_BACKOFF_FACTOR = 2.0
+# Keep a continuously ready TRT-LLM iterator from starving its batch handler.
+_POLLING_BATCH_MAX_ITEMS = 256
 _KV_EVENTS_MIN_SLEEP_SEC = 0.005
 _KV_EVENTS_MAX_SLEEP_SEC = 0.02
 _KV_EVENTS_BACKOFF_FACTOR = 1.5
+_STREAMING_KV_EVENT_HOSTS_ENV = "DYN_TRTLLM_KV_EVENT_HOSTS"
+
+
+class KvEventPublicationMode(str, Enum):
+    """The source Dynamo uses to publish TensorRT-LLM KV cache events."""
+
+    DISABLED = "disabled"
+    POLLING = "polling"
+    STREAMING = "streaming"
+
+
+def _offset_endpoint_port(endpoint: str, rank: int) -> str:
+    """Apply TensorRT-LLM's base-port-plus-rank endpoint convention."""
+    if rank == 0:
+        return endpoint
+    if endpoint.startswith(("inproc://", "ipc://")):
+        return f"{endpoint}_dp{rank}"
+    if endpoint.startswith("tcp://"):
+        host_port = endpoint.removeprefix("tcp://")
+        if ":" not in host_port:
+            raise ValueError(f"TCP KV event endpoint must include a port: {endpoint!r}")
+        last_colon_idx = endpoint.rfind(":")
+        base_addr = endpoint[:last_colon_idx]
+        port_text = endpoint[last_colon_idx + 1 :]
+        if not (port_text.isdigit() and 1 <= int(port_text) <= 65_535):
+            raise ValueError(
+                f"TCP KV event endpoint must have a port in [1, 65535]: {endpoint!r}"
+            )
+        new_port = int(port_text) + rank
+        if new_port > 65_535:
+            raise ValueError(f"KV event endpoint port exceeds 65535 for rank {rank}")
+        return f"{base_addr}:{new_port}"
+    raise ValueError(
+        "Invalid KV event endpoint: must start with 'inproc://', 'ipc://', or 'tcp://'"
+    )
+
+
+def _expand_slurm_nodelist(nodelist: str) -> list[str]:
+    """Expand the numeric bracket syntax used by SLURM_STEP_NODELIST."""
+    groups: list[str] = []
+    start = 0
+    depth = 0
+    for index, character in enumerate(nodelist):
+        if character == "[":
+            depth += 1
+        elif character == "]":
+            depth -= 1
+        elif character == "," and depth == 0:
+            groups.append(nodelist[start:index])
+            start = index + 1
+    groups.append(nodelist[start:])
+
+    hosts: list[str] = []
+    for group in groups:
+        match = re.fullmatch(r"([^\[]*)\[([^\]]+)\](.*)", group)
+        if match is None:
+            hosts.append(group)
+            continue
+        prefix, ranges, suffix = match.groups()
+        for item in ranges.split(","):
+            if "-" not in item:
+                hosts.append(f"{prefix}{item}{suffix}")
+                continue
+            first, last = item.split("-", 1)
+            width = max(len(first), len(last))
+            hosts.extend(
+                f"{prefix}{value:0{width}d}{suffix}"
+                for value in range(int(first), int(last) + 1)
+            )
+    return hosts
+
+
+def _streaming_kv_event_hosts(
+    attention_dp_size: int, gpus_per_node: Optional[int]
+) -> list[str]:
+    """Map each attention-DP rank to the host running its streaming publisher."""
+    if attention_dp_size < 1:
+        raise ValueError(f"attention_dp_size must be positive, got {attention_dp_size}")
+    if not gpus_per_node or gpus_per_node < 1:
+        raise ValueError(
+            "gpus_per_node must be positive for streaming TRT-LLM KV events"
+        )
+    if attention_dp_size <= gpus_per_node:
+        return ["127.0.0.1"] * attention_dp_size
+
+    raw_hosts = os.environ.get(_STREAMING_KV_EVENT_HOSTS_ENV)
+    if raw_hosts:
+        nodes = [host.strip() for host in raw_hosts.split(",") if host.strip()]
+        source = _STREAMING_KV_EVENT_HOSTS_ENV
+    else:
+        slurm_nodelist = os.environ.get("SLURM_STEP_NODELIST")
+        if not slurm_nodelist:
+            raise RuntimeError(
+                "Streaming TRT-LLM KV event subscribers require either "
+                f"{_STREAMING_KV_EVENT_HOSTS_ENV} or SLURM_STEP_NODELIST for a "
+                "multi-node distributed worker"
+            )
+        nodes = _expand_slurm_nodelist(slurm_nodelist)
+        source = "SLURM_STEP_NODELIST"
+
+    required_nodes = (attention_dp_size + gpus_per_node - 1) // gpus_per_node
+    if len(nodes) < required_nodes:
+        raise RuntimeError(
+            "Streaming TRT-LLM KV event subscriber discovery expected "
+            f"at least {required_nodes} worker nodes from {source}, got {len(nodes)}: {nodes}"
+        )
+    return [nodes[rank // gpus_per_node] for rank in range(attention_dp_size)]
+
+
+def _streaming_kv_event_connect_endpoint(endpoint: str, rank: int, host: str) -> str:
+    endpoint = _offset_endpoint_port(endpoint, rank)
+    if not endpoint.startswith("tcp://"):
+        if host != "127.0.0.1":
+            raise ValueError("Multi-node streaming KV events require a TCP endpoint")
+        return endpoint
+    address, port = endpoint.removeprefix("tcp://").rsplit(":", 1)
+    if address in {"*", "0.0.0.0", "[::]"}:
+        address = host
+    return f"tcp://{address}:{port}"
+
 
 # InflightBatchingStats fields the FPM publisher consumes. As of
 # NVIDIA/TensorRT-LLM#13199 (merged 2026-04-27) all 11 fields live nested
@@ -160,6 +289,7 @@ class ZmqKvEventPublisher:
         block_mm_infos: Optional[list[dict | None]] = None,
         attention_dp_rank: int = 0,
         lora_name: Optional[str] = None,
+        cache_salt: Optional[str] = None,
     ) -> None:
         """Publish a BlockStored event.
 
@@ -182,6 +312,8 @@ class ZmqKvEventPublisher:
         }
         if lora_name is not None:
             event["lora_name"] = lora_name
+        if cache_salt is not None:
+            event["cache_salt"] = cache_salt
 
         # Add multimodal info if present
         if block_mm_infos is not None:
@@ -206,10 +338,10 @@ class ZmqKvEventPublisher:
 
         self._publish_event(event, attention_dp_rank)
 
-    def publish_all_cleared(self) -> None:
-        """Publish an AllBlocksCleared event."""
+    def publish_all_cleared(self, attention_dp_rank: int = 0) -> None:
+        """Publish an AllBlocksCleared event for one attention DP rank."""
         event = {"type": "AllBlocksCleared"}
-        self._publish_event(event)
+        self._publish_event(event, attention_dp_rank)
 
     def _publish_event(self, event: dict, attention_dp_rank: int = 0):
         """Publish a single event to ZMQ in vLLM batch format."""
@@ -371,6 +503,10 @@ class Publisher:
     Note: The ZmqKvEventPublisher used here is the pure Python ZMQ publisher defined
     in this module, not the Rust-based KvEventPublisher from dynamo.llm (which is
     used in main.py as the worker-side subscriber from consolidator to NATS).
+
+    ``kv_state_endpoint`` selects the exact Dynamo endpoint that owns the published
+    KV event and recovery state. ``None`` maps KV state to the serving endpoint; it
+    does not change the endpoint used for request routing.
     """
 
     def __init__(
@@ -386,6 +522,12 @@ class Publisher:
         zmq_endpoint: Optional[str] = None,
         enable_local_indexer: bool = False,
         metrics_collector: Any = None,
+        kv_state_endpoint: Optional[str] = None,
+        image_token_id: Optional[int] = None,
+        publish_metrics: bool = True,
+        kv_event_publication_mode: KvEventPublicationMode = KvEventPublicationMode.DISABLED,
+        streaming_kv_events_config: Optional[dict[str, Any]] = None,
+        streaming_kv_events_gpus_per_node: Optional[int] = None,
     ) -> None:
         self.endpoint = endpoint
         self.engine = engine
@@ -399,6 +541,12 @@ class Publisher:
             self.additional_metrics.set_kv_event_buffer_capacity(event_buffer_max_size)
         self.enable_local_indexer = enable_local_indexer
         self.metrics_collector = metrics_collector
+        self.kv_state_endpoint = kv_state_endpoint
+        self.image_token_id = image_token_id
+        self.publish_metrics = publish_metrics
+        self.kv_event_publication_mode = kv_event_publication_mode
+        self.streaming_kv_events_config = streaming_kv_events_config
+        self.streaming_kv_events_gpus_per_node = streaming_kv_events_gpus_per_node
         self.attention_dp_size = engine.get_attention_dp_size()
 
         # The first few kv events from the model engine are always "created" type events.
@@ -432,8 +580,11 @@ class Publisher:
         # independent rank-local sequences before gathering them on rank 0.
         self._last_engine_event_id_by_rank: dict[int, int] = {}
 
-        # Initialize ZMQ publisher if endpoint is provided (consolidator enabled)
-        if zmq_endpoint:
+        # The consolidator is part of the polling path only.
+        if (
+            zmq_endpoint
+            and self.kv_event_publication_mode is KvEventPublicationMode.POLLING
+        ):
             logging.info(
                 f"TensorRT-LLM: Initializing ZMQ KV event publisher with endpoint={zmq_endpoint}"
             )
@@ -453,66 +604,112 @@ class Publisher:
         await self.metrics_publisher.create_endpoint(self.endpoint)
 
     def initialize(self) -> None:
-        # Setup the metrics publisher
-        self.metrics_publisher = WorkerMetricsPublisher()
-        self._init_publish_metrics_thread()
-        task = asyncio.create_task(self._create_metrics_publisher_endpoint())
-        task.add_done_callback(
-            lambda _: logging.debug("metrics publisher endpoint created")
-        )
+        if self.publish_metrics:
+            self.metrics_publisher = WorkerMetricsPublisher()
+            self._init_publish_metrics_thread()
+            task = asyncio.create_task(self._create_metrics_publisher_endpoint())
+            task.add_done_callback(
+                lambda _: logging.debug("metrics publisher endpoint created")
+            )
 
         # Setup the ForwardPassMetrics publisher with one internal channel per
         # attention-DP rank. Non-attention-DP engines report size 1. Under
         # attention-DP, TRT-LLM emits one IterationStats row per rank and
         # Dynamo forwards attentionDpRank as the FPM dp_rank.
-        try:
-            fpm_dp_size = max(1, int(self.attention_dp_size or 1))
-            self.fpm_publisher = FpmDirectPublisher(
-                endpoint=self.endpoint,
-                worker_id=str(self.worker_id),
-                dp_size=fpm_dp_size,
-            )
-            logging.info(f"FpmDirectPublisher initialized with dp_size={fpm_dp_size}")
-        except RuntimeError as e:
-            # PyO3 surfaces all FpmDirectPublisher::new failures as
-            # PyRuntimeError (Endpoint missing, tokio runtime missing,
-            # etc.). Catch only that — any other exception here would
-            # signal a programming error worth surfacing.
-            logging.warning(
-                f"Failed to initialize FpmDirectPublisher; FPM emission disabled: {e}"
-            )
-            self.fpm_publisher = None
+        if self.publish_metrics:
+            try:
+                fpm_dp_size = max(1, int(self.attention_dp_size or 1))
+                self.fpm_publisher = FpmDirectPublisher(
+                    endpoint=self.endpoint,
+                    worker_id=str(self.worker_id),
+                    dp_size=fpm_dp_size,
+                )
+                logging.info(
+                    f"FpmDirectPublisher initialized with dp_size={fpm_dp_size}"
+                )
+            except RuntimeError as e:
+                logging.warning(
+                    f"Failed to initialize FpmDirectPublisher; FPM emission disabled: {e}"
+                )
+                self.fpm_publisher = None
 
-        # Setup the kv cache events publisher
-        # Publisher selection based on consolidator configuration:
-        # - With consolidator: Use ZmqKvEventPublisher (this module) → ZMQ → Consolidator → NATS → Router
-        # - Without consolidator: Use KvEventPublisher → NATS → Router (direct)
-        # Note: The worker-side KvEventPublisher (from dynamo.llm) that subscribes from
-        # consolidator and publishes to NATS is created separately in main.py, not here.
-        if self.zmq_kv_event_publisher:
-            logging.info(
-                "KV Event Consolidator enabled - using ZMQ publisher only. "
-                "Consolidator will publish consolidated events to NATS."
-            )
-            self.kv_event_publishers = None
-        else:
-            # No consolidator: use NATS publisher (router subscribes directly)
-            # Create one KvEventPublisher per attention_dp_rank (similar to vLLM's DP pattern)
+        # Select exactly one KV-event path. Metrics above remain independent of
+        # this choice.
+        #
+        # - STREAMING: TRT-LLM publishes ZMQ batches; Dynamo subscribes and
+        #   forwards them to its event pipeline.
+        # - POLLING: Dynamo reads events from the engine, then publishes them
+        #   directly or through the consolidator.
+        # - DISABLED: no KV events are passed through this worker.
+        if self.kv_event_publication_mode is KvEventPublicationMode.STREAMING:
+            # TensorRT-LLM's streaming event manager publishes ZMQ batches itself;
+            # Dynamo subscribes directly and does not poll the engine or use a consolidator.
+            #
+            # NOTE: This is currently a live, best-effort subscription. The Dynamo
+            # ZMQ relay forwards every batch it receives, but does not yet detect
+            # source-sequence gaps or recover them through TRT-LLM's optional
+            # replay_endpoint. A missed batch can therefore leave routing KV state
+            # temporarily stale.
+            if self.streaming_kv_events_config is None:
+                raise ValueError(
+                    "Streaming KV event publication requires its configuration"
+                )
             self.kv_event_publishers = {}
+            base_endpoint = self.streaming_kv_events_config["endpoint"]
+            topic = self.streaming_kv_events_config.get("topic", "")
+            rank_hosts = _streaming_kv_event_hosts(
+                self.attention_dp_size, self.streaming_kv_events_gpus_per_node
+            )
             for rank in range(self.attention_dp_size):
+                zmq_endpoint = _streaming_kv_event_connect_endpoint(
+                    base_endpoint, rank, rank_hosts[rank]
+                )
                 self.kv_event_publishers[rank] = KvEventPublisher(
                     endpoint=self.endpoint,
-                    worker_id=self.worker_id,
                     kv_block_size=self.kv_block_size,
-                    dp_rank=rank,
+                    zmq_endpoint=zmq_endpoint,
+                    zmq_topic=topic,
                     enable_local_indexer=self.enable_local_indexer,
+                    dp_rank=rank,
+                    kv_state_endpoint=self.kv_state_endpoint,
+                    image_token_id=self.image_token_id,
                 )
             logging.info(
-                f"Created {self.attention_dp_size} KV event publisher(s) for attention DP ranks"
+                "Streaming TRT-LLM KV events enabled with %d direct subscriber(s); "
+                "polling is disabled",
+                self.attention_dp_size,
             )
+        elif self.kv_event_publication_mode is KvEventPublicationMode.POLLING:
+            # Publisher selection based on consolidator configuration:
+            # - With consolidator: ZmqKvEventPublisher → ZMQ → Consolidator → NATS → Router
+            # - Without consolidator: KvEventPublisher → NATS → Router (direct)
+            if self.zmq_kv_event_publisher:
+                logging.info(
+                    "KV Event Consolidator enabled - using ZMQ publisher only. "
+                    "Consolidator will publish consolidated events to NATS."
+                )
+                self.kv_event_publishers = None
+            else:
+                # No consolidator: use NATS publisher (router subscribes directly).
+                self.kv_event_publishers = {}
+                for rank in range(self.attention_dp_size):
+                    self.kv_event_publishers[rank] = KvEventPublisher(
+                        endpoint=self.endpoint,
+                        worker_id=self.worker_id,
+                        kv_block_size=self.kv_block_size,
+                        dp_rank=rank,
+                        enable_local_indexer=self.enable_local_indexer,
+                        kv_state_endpoint=self.kv_state_endpoint,
+                        image_token_id=self.image_token_id,
+                    )
+                logging.info(
+                    f"Created {self.attention_dp_size} KV event publisher(s) for attention DP ranks"
+                )
 
-        # Always initialize the thread - it routes to either ZMQ or NATS publisher
-        self._init_publish_kv_cache_events_thread()
+            # Polling is the only mode that needs a worker polling thread.
+            self._init_publish_kv_cache_events_thread()
+        else:
+            assert self.kv_event_publication_mode is KvEventPublicationMode.DISABLED
 
     def _init_publish_metrics_thread(self):
         # Need to publish stats once so that worker can be selected.
@@ -550,7 +747,7 @@ class Publisher:
     async def _polling_loop(
         self,
         fetch_fn,
-        handler_fn,
+        batch_handler_fn,
         min_sleep: float,
         max_sleep: float,
         backoff_factor: float,
@@ -558,23 +755,43 @@ class Publisher:
     ):
         sleep_s = min_sleep
         while not self._stop_event.is_set():
-            had_data = False
-            batch_size = 0
+            batch = []
+            fetch_error = None
             try:
                 async for item in fetch_fn():
-                    had_data = True
-                    batch_size += 1
-                    handler_fn(item)
+                    batch.append(item)
+                    if len(batch) >= _POLLING_BATCH_MAX_ITEMS:
+                        break
             except (asyncio.TimeoutError, TimeoutError, asyncio.QueueEmpty):
                 pass
             except Exception as e:
-                logging.warning(f"Publisher polling loop error: {e}", exc_info=True)
-                raise
+                fetch_error = e
 
-            if batch_size and batch_size_handler_fn is not None:
-                batch_size_handler_fn(batch_size)
+            if batch:
+                try:
+                    batch_handler_fn(batch)
+                except Exception as e:
+                    logger.warning("Publisher polling loop error: %s", e, exc_info=True)
+                    if fetch_error is not None:
+                        raise e from fetch_error
+                    raise
 
-            if not had_data:
+            if fetch_error is not None:
+                logger.warning(
+                    "Publisher polling loop error: %s",
+                    fetch_error,
+                    exc_info=(
+                        type(fetch_error),
+                        fetch_error,
+                        fetch_error.__traceback__,
+                    ),
+                )
+                raise fetch_error
+
+            if batch and batch_size_handler_fn is not None:
+                batch_size_handler_fn(len(batch))
+
+            if not batch:
                 await asyncio.sleep(sleep_s)
                 sleep_s = min(max_sleep, sleep_s * backoff_factor)
             else:
@@ -744,9 +961,13 @@ class Publisher:
                     # stat shape.
                     logging.warning(f"FPM publish failed: {e}")
 
+        def handle_stats(stats):
+            for stat in stats:
+                handle_stat(stat)
+
         await self._polling_loop(
             lambda: self.engine.llm.get_stats_async(timeout=_STATS_TIMEOUT_SEC),
-            handle_stat,
+            handle_stats,
             _PUBLISH_MIN_SLEEP_SEC,
             _PUBLISH_MAX_SLEEP_SEC,
             _PUBLISH_BACKOFF_FACTOR,
@@ -771,19 +992,25 @@ class Publisher:
             lambda: self.engine.llm.get_kv_cache_events_async(
                 timeout=_KV_EVENTS_TIMEOUT_SEC
             ),
-            self._handle_kv_event,
+            self._handle_kv_event_drain,
             _KV_EVENTS_MIN_SLEEP_SEC,
             _KV_EVENTS_MAX_SLEEP_SEC,
             _KV_EVENTS_BACKOFF_FACTOR,
-            self._record_kv_event_drain_batch,
+            batch_size_handler_fn=self._record_kv_event_drain_batch,
         )
         return True
+
+    def _handle_kv_event_drain(self, events):
+        if self.zmq_kv_event_publisher:
+            self._handle_zmq_kv_event_batch(events)
+        else:
+            self._handle_kv_event_batch(events)
 
     def _record_kv_event_drain_batch(self, batch_size: int) -> None:
         if self.additional_metrics is not None:
             self.additional_metrics.record_kv_event_drain_batch(batch_size)
 
-    def _handle_kv_event(self, event):
+    def _normalize_kv_event(self, event):
         event_id = event["event_id"]
         attention_dp_rank = event.get("attention_dp_rank", 0)
 
@@ -868,49 +1095,40 @@ class Publisher:
                     block_mm_infos.append(None)
 
             lora_name = data.get("lora_name")
+            try:
+                cache_salt = stored_event_cache_salt(data)
+            except ValueError as error:
+                logger.warning(
+                    "Dropping stored KV event with invalid cache namespace: "
+                    "engine_event_id=%s attention_dp_rank=%s error=%s",
+                    event_id,
+                    attention_dp_rank,
+                    error,
+                )
+                return
 
             logger.debug(
                 "Publishing stored KV event: engine_event_id=%s "
-                "attention_dp_rank=%s blocks=%s tokens=%s lora_name=%s "
+                "attention_dp_rank=%s blocks=%s tokens=%s lora_name=%s has_cache_salt=%s "
                 "has_parent=%s",
                 event_id,
                 attention_dp_rank,
                 len(block_hashes),
                 len(token_ids),
                 lora_name,
+                cache_salt is not None,
                 parent_hash is not None,
             )
-            # Publish to ZMQ if consolidator is enabled, otherwise publish to NATS
-            # Note: event_id is managed internally by the publisher (monotonic counter per dp_rank)
-            if self.zmq_kv_event_publisher:
-                # Consolidator enabled: publish to ZMQ only
-                self.zmq_kv_event_publisher.publish_stored(
-                    token_ids,
-                    num_block_tokens,
-                    block_hashes,
-                    parent_hash,
-                    block_mm_infos,
-                    attention_dp_rank,
-                    lora_name,
-                )
-            elif self.kv_event_publishers:
-                # No consolidator: publish to NATS (router subscribes directly)
-                # Route to correct publisher based on attention_dp_rank
-                publisher = self.kv_event_publishers.get(attention_dp_rank)
-                if publisher:
-                    publisher.publish_stored(
-                        token_ids,
-                        num_block_tokens,
-                        block_hashes,
-                        parent_hash,
-                        block_mm_infos,
-                        lora_name=lora_name,
-                    )
-                else:
-                    logging.warning(
-                        f"No publisher for attention_dp_rank={attention_dp_rank}, "
-                        f"available ranks: {list(self.kv_event_publishers.keys())}"
-                    )
+            return attention_dp_rank, {
+                "type": "stored",
+                "token_ids": token_ids,
+                "num_block_tokens": num_block_tokens,
+                "block_hashes": block_hashes,
+                "parent_hash": parent_hash,
+                "block_mm_infos": block_mm_infos,
+                "lora_name": lora_name,
+                "cache_salt": cache_salt,
+            }
         elif data["type"] == "removed":
             self.processing_initial_created_events = False
             removed_block_hashes: list[int] = []
@@ -936,26 +1154,68 @@ class Publisher:
             if not removed_block_hashes:
                 return
 
-            # Publish to ZMQ if consolidator is enabled, otherwise publish to NATS
-            # Note: event_id is managed internally by the publisher (monotonic counter per dp_rank)
-            if self.zmq_kv_event_publisher:
-                # Consolidator enabled: publish to ZMQ only
-                self.zmq_kv_event_publisher.publish_removed(
-                    removed_block_hashes, attention_dp_rank
-                )
-            elif self.kv_event_publishers:
-                # No consolidator: publish to NATS (router subscribes directly)
-                # Route to correct publisher based on attention_dp_rank
-                publisher = self.kv_event_publishers.get(attention_dp_rank)
-                if publisher:
-                    publisher.publish_removed(removed_block_hashes)
-                else:
-                    logging.warning(
-                        f"No publisher for attention_dp_rank={attention_dp_rank}, "
-                        f"available ranks: {list(self.kv_event_publishers.keys())}"
-                    )
+            return attention_dp_rank, {
+                "type": "removed",
+                "block_hashes": removed_block_hashes,
+            }
         elif data["type"] == "created" and self.processing_initial_created_events:
             self.update_max_window_size(event)
+        return None
+
+    def _handle_zmq_kv_event(self, event):
+        normalized = self._normalize_kv_event(event)
+        if normalized is None:
+            return
+        attention_dp_rank, normalized_event = normalized
+        zmq_publisher = self.zmq_kv_event_publisher
+        assert zmq_publisher is not None
+
+        if normalized_event["type"] == "stored":
+            zmq_publisher.publish_stored(
+                normalized_event["token_ids"],
+                normalized_event["num_block_tokens"],
+                normalized_event["block_hashes"],
+                normalized_event["parent_hash"],
+                normalized_event["block_mm_infos"],
+                attention_dp_rank,
+                normalized_event["lora_name"],
+                normalized_event["cache_salt"],
+            )
+        else:
+            zmq_publisher.publish_removed(
+                normalized_event["block_hashes"], attention_dp_rank
+            )
+
+    def _handle_zmq_kv_event_batch(self, events):
+        """Preserve singleton publication for the optional ZMQ consolidator."""
+        for event in events:
+            self._handle_zmq_kv_event(event)
+
+    def _handle_kv_event_batch(self, events):
+        events_by_rank: dict[int, list["KvStoredEventInput | KvRemovedEventInput"]] = {}
+        for event in events:
+            normalized = self._normalize_kv_event(event)
+            if normalized is not None:
+                attention_dp_rank, normalized_event = normalized
+                if (
+                    normalized_event["type"] == "stored"
+                    and not normalized_event["block_hashes"]
+                ):
+                    continue
+                events_by_rank.setdefault(attention_dp_rank, []).append(
+                    cast("KvStoredEventInput | KvRemovedEventInput", normalized_event)
+                )
+
+        for attention_dp_rank, normalized_events in events_by_rank.items():
+            publisher = (self.kv_event_publishers or {}).get(attention_dp_rank)
+            if publisher:
+                publisher.publish_batch(normalized_events)
+            else:
+                logger.warning(
+                    "No publisher for attention_dp_rank=%s, available ranks: %s",
+                    attention_dp_rank,
+                    list((self.kv_event_publishers or {}).keys()),
+                )
 
     def start(self) -> None:
         # Each ManagedThread owns its own asyncio loop now, so we no longer
@@ -1064,6 +1324,12 @@ async def get_publisher(
     zmq_endpoint: Optional[str] = None,
     enable_local_indexer: bool = False,
     metrics_collector: Any = None,
+    kv_state_endpoint: Optional[str] = None,
+    image_token_id: Optional[int] = None,
+    publish_metrics: bool = True,
+    kv_event_publication_mode: KvEventPublicationMode = KvEventPublicationMode.DISABLED,
+    streaming_kv_events_config: Optional[dict[str, Any]] = None,
+    streaming_kv_events_gpus_per_node: Optional[int] = None,
 ) -> AsyncGenerator[Publisher, None]:
     publisher = Publisher(
         endpoint,
@@ -1077,6 +1343,12 @@ async def get_publisher(
         zmq_endpoint=zmq_endpoint,
         enable_local_indexer=enable_local_indexer,
         metrics_collector=metrics_collector,
+        kv_state_endpoint=kv_state_endpoint,
+        image_token_id=image_token_id,
+        publish_metrics=publish_metrics,
+        kv_event_publication_mode=kv_event_publication_mode,
+        streaming_kv_events_config=streaming_kv_events_config,
+        streaming_kv_events_gpus_per_node=streaming_kv_events_gpus_per_node,
     )
     try:
         publisher.initialize()

@@ -7,12 +7,13 @@
 //! KV cache management, request scheduling, and token generation timing without
 //! requiring actual GPU resources or a full distributed runtime.
 
-pub mod cache;
 pub mod common;
 pub mod engine;
-pub mod kv_manager;
-#[cfg(feature = "kvbm-offload")]
-pub mod kvbm_offload;
+pub(crate) mod engine_adapter;
+pub(crate) mod engine_observations;
+pub(crate) mod generalized_live;
+pub mod grouped_scheduler;
+pub mod live;
 pub mod loadgen;
 pub mod replay;
 pub mod scheduler;

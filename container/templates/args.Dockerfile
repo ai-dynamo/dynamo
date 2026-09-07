@@ -15,11 +15,8 @@
 # ARCH_ALT (x86_64 / aarch64) is computed inline in RUN steps:
 #   ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64")
 ARG DEVICE={{ device }}
-{% if device == "cuda" -%}
-{% set device_key = device + cuda_version -%}
-{% else -%}
-{% set device_key = device -%}
-{% endif %}
+{# device_key (e.g. "cuda12.9", "xpu") is provided by render.py so it
+   propagates to every included template, not just this one. #}
 
 # Python/CUDA configuration
 ARG PYTHON_VERSION={{ context.dynamo.python_version }}
@@ -55,7 +52,6 @@ ARG ETCD_VERSION={{ context.dynamo.etcd_version }}
 
 ARG ENABLE_MEDIA_FFMPEG={{ context[framework].enable_media_ffmpeg }}
 ARG FFMPEG_VERSION={{ context.dynamo.ffmpeg_version }}
-ARG NV_CODEC_HEADERS_REF={{ context.dynamo.nv_codec_headers_ref }}
 ARG LIBVPX_REF={{ context.dynamo.libvpx_ref }}
 {% if device == "cuda" -%}
 ARG ENABLE_GPU_MEMORY_SERVICE={{ context[framework].enable_gpu_memory_service }}
@@ -69,7 +65,10 @@ ARG SCCACHE_REGION=""
 
 # NIXL configuration
 ARG NIXL_UCX_REF={{ context.dynamo.nixl_ucx_ref }}
-{% if "nixl_ref" in context[framework].get(device_key, {}) -%}
+{# Resolved most-specific first: per-target, then per-device, then framework. #}
+{% if "nixl_ref" in context[framework].get(target, {}) -%}
+ARG NIXL_REF={{ context[framework][target].nixl_ref }}
+{% elif "nixl_ref" in context[framework].get(device_key, {}) -%}
 ARG NIXL_REF={{ context[framework][device_key].nixl_ref }}
 {% elif "nixl_ref" in context[framework] -%}
 ARG NIXL_REF={{ context[framework].nixl_ref }}
@@ -99,11 +98,8 @@ ARG PLANNER_RUNTIME_IMAGE_TAG={{ context.dynamo.planner_runtime_image_tag }}
 
 {% if framework == "vllm" -%}
 ARG MAX_JOBS={{ context.vllm.max_jobs }}
-{% if device == "cuda" -%}
-# FlashInfer cubin/jit-cache version used by the vLLM installer.
-ARG FLASHINF_REF={{ context.vllm.flashinf_ref }}
-{% endif %}
-ARG VLLM_OMNI_REF={{ context.vllm.vllm_omni_ref }}
+ARG TRANSFORMERS_VERSION={{ context.vllm.transformers_version }}
+ARG VLLM_OMNI_REF={{ context.vllm[device_key].get("vllm_omni_ref", context.vllm.vllm_omni_ref) }}
 
 {% if device == "cuda" -%}
 # If left blank, then we will fallback to vLLM defaults

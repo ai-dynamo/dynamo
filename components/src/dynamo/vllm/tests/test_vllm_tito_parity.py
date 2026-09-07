@@ -84,7 +84,7 @@ class TestSerializePromptLogprobs:
 
 
 class TestCacheSaltWiring:
-    """Verify cache_salt is extracted from extra_args and placed on the prompt."""
+    """Verify cache_salt is extracted and tagged for vLLM's prompt."""
 
     @staticmethod
     def _build_token_mode_request(cache_salt=None, token_ids=None):
@@ -100,7 +100,7 @@ class TestCacheSaltWiring:
         return req
 
     def test_cache_salt_attached_to_prompt(self):
-        """When extra_args.nvext.cache_salt is set, the prompt dict gets it."""
+        """The prompt receives an internal tag around the public cache salt."""
         from vllm.inputs import TokensPrompt
 
         from dynamo.vllm.handlers import _apply_nvext_cache_salt
@@ -109,7 +109,7 @@ class TestCacheSaltWiring:
         prompt = TokensPrompt(prompt_token_ids=req["token_ids"])
         _apply_nvext_cache_salt(req, prompt)
 
-        assert prompt.get("cache_salt") == "step_42"
+        assert prompt.get("cache_salt") == "dynamo-cache-salt:step_42"
 
     def test_no_cache_salt_when_absent(self):
         """When extra_args has no cache_salt, prompt should not gain the key."""
@@ -134,8 +134,8 @@ class TestCacheSaltWiring:
         _apply_nvext_cache_salt(req, prefill_prompt)
         _apply_nvext_cache_salt(req, decode_prompt)
 
-        assert prefill_prompt["cache_salt"] == "step_43"
-        assert decode_prompt["cache_salt"] == "step_43"
+        assert prefill_prompt["cache_salt"] == "dynamo-cache-salt:step_43"
+        assert decode_prompt["cache_salt"] == "dynamo-cache-salt:step_43"
 
     def test_cache_salt_from_top_level_nvext(self):
         """cache_salt under the raw request["nvext"] shape is also honored,
@@ -146,7 +146,25 @@ class TestCacheSaltWiring:
         prompt = {"prompt_token_ids": req["token_ids"]}
         _apply_nvext_cache_salt(req, prompt)
 
-        assert prompt["cache_salt"] == "top_level"
+        assert prompt["cache_salt"] == "dynamo-cache-salt:top_level"
+
+    def test_empty_cache_salt_is_absent(self):
+        from dynamo.vllm.handlers import _apply_nvext_cache_salt
+
+        req = self._build_token_mode_request(cache_salt="")
+        prompt = {"prompt_token_ids": req["token_ids"]}
+        _apply_nvext_cache_salt(req, prompt)
+
+        assert "cache_salt" not in prompt
+
+    def test_cache_salt_prefix_is_escaped_by_reprefixing(self):
+        from dynamo.vllm.handlers import _apply_nvext_cache_salt
+
+        req = self._build_token_mode_request(cache_salt="dynamo-cache-salt:tenant-a")
+        prompt = {"prompt_token_ids": req["token_ids"]}
+        _apply_nvext_cache_salt(req, prompt)
+
+        assert prompt["cache_salt"] == ("dynamo-cache-salt:dynamo-cache-salt:tenant-a")
 
 
 class TestTokenInSamplingDefaults:
@@ -191,6 +209,41 @@ class TestTokenInSamplingDefaults:
     def test_token_data_skips_generation_defaults_when_rl_enabled(self):
         sp = self._build(nvext={"token_data": [1, 2, 3]}, enable_rl=True)
         assert sp.top_p == pytest.approx(1.0)
+
+
+class TestLogprobTokenIds:
+    """Explicit `logprob_token_ids` must null the top-k width, as vLLM's own
+    OpenAI adapters do, so `SamplingParams.verify()` accepts the pair."""
+
+    @staticmethod
+    def _build(output_options, sampling_options=None):
+        from dynamo.vllm.handlers import build_sampling_params
+
+        return build_sampling_params(
+            {
+                "token_ids": [1, 2, 3],
+                "sampling_options": sampling_options or {},
+                "stop_conditions": {},
+                "output_options": output_options,
+            },
+            {},
+        )
+
+    def test_explicit_ids_null_requested_width(self):
+        sp = self._build(
+            {"logprobs": 5}, sampling_options={"logprob_token_ids": [5000]}
+        )
+        assert sp.logprob_token_ids == [5000]
+        assert sp.logprobs is None
+        assert sp.num_logprobs == 1
+
+    def test_requested_width_kept_without_explicit_ids(self):
+        sp = self._build({"logprobs": 5})
+        assert sp.logprobs == 5
+
+    def test_empty_id_list_falls_through_to_top_k(self):
+        sp = self._build({"logprobs": 5}, sampling_options={"logprob_token_ids": []})
+        assert sp.logprobs == 5
 
 
 class TestFlattenLogprobs:

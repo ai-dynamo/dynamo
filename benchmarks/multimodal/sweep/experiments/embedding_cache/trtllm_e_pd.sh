@@ -57,7 +57,7 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.trtllm \
   --extra-engine-args "$PD_ENGINE_ARGS" \
   --modality "$MODALITY" \
   --encode-endpoint "$ENCODE_ENDPOINT" \
-  --disaggregation-mode prefill_and_decode \
+  --disaggregation-mode pd \
   --custom-jinja-template "$CUSTOM_TEMPLATE" \
   "${EXTRA_PD_ARGS[@]}" &
 PD_PID_1=$!

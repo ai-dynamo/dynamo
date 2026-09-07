@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use anyhow::Context;
 use derive_builder::Builder;
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
@@ -14,8 +15,10 @@ use super::{
     OpenAIStopConditionsProvider,
     common::{self, OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
     common_ext::{CommonExt, CommonExtProvider},
-    nvext::{NvExt, NvExtProvider},
     validate,
+};
+use crate::protocols::common::extensions::{
+    NvExt, NvExtProvider, validate_completion_token_ids_single_choice,
 };
 
 mod aggregator;
@@ -34,13 +37,14 @@ pub struct NvCreateCompletionRequest {
     pub common: CommonExt,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
     pub nvext: Option<NvExt>,
 
     // metadata - passthrough parameter without restrictions
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
 
-    /// When true, logprob token fields are returned as "token_id:<id>"
+    /// When true, logprob token fields are returned as `"token_id:<id>"`
     /// instead of the decoded text.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub return_tokens_as_token_ids: Option<bool>,
@@ -355,15 +359,15 @@ impl TryFrom<NvCreateCompletionRequest> for common::CompletionRequest {
 
         let stop_conditions = request
             .extract_stop_conditions()
-            .map_err(|e| anyhow::anyhow!("Failed to extract stop conditions: {}", e))?;
+            .context("Failed to extract stop conditions")?;
 
         let sampling_options = request
             .extract_sampling_options()
-            .map_err(|e| anyhow::anyhow!("Failed to extract sampling options: {}", e))?;
+            .context("Failed to extract sampling options")?;
 
         let output_options = request
             .extract_output_options()
-            .map_err(|e| anyhow::anyhow!("Failed to extract output options: {}", e))?;
+            .context("Failed to extract output options")?;
 
         let prompt = common::PromptType::Completion(common::CompletionContext {
             prompt: prompt_to_string(&request.inner.prompt),
@@ -460,7 +464,7 @@ impl ValidateRequest for NvCreateCompletionRequest {
         validate::validate_temperature(self.inner.temperature)?;
         validate::validate_top_p(self.inner.top_p)?;
         validate::validate_n(self.inner.n)?;
-        super::nvext::validate_completion_token_ids_single_choice(
+        validate_completion_token_ids_single_choice(
             get_prompt_batch_size(&self.inner.prompt) * self.inner.n.unwrap_or(1) as usize,
             self.nvext.as_ref(),
         )?;
@@ -488,7 +492,40 @@ impl ValidateRequest for NvCreateCompletionRequest {
             get_prompt_batch_size(&self.inner.prompt),
             self.inner.n.unwrap_or(1),
         )?;
+        validate::validate_chat_only_generation_flags(
+            self.common.add_generation_prompt,
+            self.common.continue_final_message,
+        )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod conversion_error_tests {
+    use super::*;
+
+    /// `anyhow!("{e}")` builds a fresh error with no source, which drops the
+    /// `DynamoError` and sends a caller error to `ErrorMessage::from_anyhow` as a 500.
+    /// `.context()` keeps the chain, so the conflict still maps to 400 here.
+    #[test]
+    fn guided_decoding_conflict_stays_typed_through_conversion() {
+        let request: NvCreateCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "prompt": "hi",
+            "guided_json": {"type": "object"},
+            "guided_regex": "a+",
+        }))
+        .expect("request should deserialize");
+
+        let error = common::CompletionRequest::try_from(request).unwrap_err();
+        let dynamo_error = error
+            .chain()
+            .find_map(|source| source.downcast_ref::<dynamo_runtime::error::DynamoError>())
+            .expect("conversion must preserve the HTTP error type");
+        assert_eq!(
+            dynamo_error.error_type(),
+            dynamo_runtime::error::ErrorType::InvalidArgument
+        );
     }
 }
 
@@ -536,6 +573,30 @@ mod tests {
                 .expect("Failed to extract output options");
 
             assert_eq!(output_options.skip_special_tokens, Some(skip_value));
+        }
+    }
+
+    #[test]
+    fn test_validate_rejects_chat_only_generation_flags() {
+        for extra in [
+            json!({"add_generation_prompt": false}),
+            json!({"continue_final_message": true}),
+        ] {
+            let mut body = json!({
+                "model": "test-model",
+                "prompt": "Hello, world!"
+            });
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let request: NvCreateCompletionRequest =
+                serde_json::from_value(body).expect("Failed to deserialize request");
+            let err = ValidateRequest::validate(&request)
+                .expect_err("chat-only generation flags must be rejected on completions");
+            assert!(
+                err.to_string().contains("/v1/chat/completions"),
+                "unexpected error: {err}"
+            );
         }
     }
 

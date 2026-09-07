@@ -6,16 +6,23 @@
 //! This crate provides the core radix tree implementation and protocols for
 //! efficient KV cache lookup and routing in distributed LLM inference systems.
 
+use std::sync::Arc;
+
 mod active_set;
 pub(crate) mod cleanup;
+pub mod conditional_disagg;
 mod lookup_update;
 
+pub mod identity;
 pub mod indexer;
 pub mod protocols;
 pub mod recovery;
+pub mod router_hint;
 pub mod scheduling;
 pub mod sequences;
 pub mod services;
+pub mod tracking_hash;
+pub mod worker_type;
 pub mod zmq_wire;
 
 // Backward-compat re-exports: old top-level module paths still work
@@ -36,17 +43,18 @@ pub mod test_utils;
 
 // Re-export key types for convenience
 pub use self::multi_worker_sequence::{
-    ActiveSequencesMultiWorker, ReplicaWorkerPolicy, SequenceError, SequencePublisher,
-    SequenceRequest, SequenceSubscriber,
+    ActiveSequencesMultiWorker, NoopSequencePublisher, ReplicaWorkerPolicy, SequenceError,
+    SequencePublisher, SequenceRequest, SequenceSubscriber,
 };
 pub use self::sequence::{ActiveSequences, RequestId};
 pub use self::sequences::{PrefillTokenDeltas, WorkerLoadProjection};
 pub use concurrent_radix_tree::ConcurrentRadixTree;
 pub use concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 pub use config::{
-    KvRouterConfig, RouterConfigOverride, RouterPrefillLoadModel, RouterQueuePolicy,
-    SharedCacheType,
+    ConditionalDisaggPolicyKind, KvRouterConfig, RouterConfigOverride, RouterPrefillLoadModel,
+    RouterQueuePolicy, SharedCacheType,
 };
+pub use identity::{DEFAULT_ROUTING_GROUP, DcId, RoutingPartitionId, RoutingPartitionRef};
 #[allow(deprecated)]
 pub use indexer::{
     AnchorAwareBranchShardedIndexer, AnchorRef, AnchorTask, BranchShardedIndexer,
@@ -63,5 +71,21 @@ pub use radix_tree::RadixTree;
 pub use scheduling::LocalScheduler;
 pub use scheduling::PrefillLoadEstimator;
 pub use scheduling::policy::{FcfsPolicy, RouterSchedulingPolicy, SchedulingPolicy, WsptPolicy};
-pub use scheduling::{KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse};
-pub use selector::{DefaultWorkerSelector, WorkerSelector};
+pub use scheduling::{
+    KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse, SessionContext,
+    WorkerSelectionInputTrigger, WorkerSelectionKvHints, WorkerSelectionPolicyError,
+};
+pub use selector::{
+    DefaultWorkerSelector, ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerFilter,
+    WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer,
+    WorkerSelectionContext, WorkerSelectionInput, WorkerSelectionPolicy, WorkerSelector,
+};
+pub use tracking_hash::{TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope};
+pub use worker_type::WorkerType;
+
+/// Factory that creates one worker-selection policy per routing partition.
+pub type WorkerSelectionPolicyFactory = Arc<
+    dyn for<'a> Fn(&KvRouterConfig, WorkerType, RoutingPartitionRef<'a>) -> WorkerSelectionPolicy
+        + Send
+        + Sync,
+>;

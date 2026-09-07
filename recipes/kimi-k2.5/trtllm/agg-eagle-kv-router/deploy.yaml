@@ -32,7 +32,6 @@ spec:
             - dynamo.frontend
             - --router-mode
             - kv
-            - --router-reset-states
             - --request-plane
             - nats
           env:
@@ -175,7 +174,6 @@ data:
         - cutlass
         - cublaslt
         - cuda_core
-    num_postprocess_workers: 8
     print_iter_log: true
     stream_interval: 10
     tensor_parallel_size: 8

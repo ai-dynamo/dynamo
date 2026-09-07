@@ -34,6 +34,12 @@ enum SnapEvent {
         block_size: i32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         lora_name: Option<String>,
+        #[serde(
+            default,
+            rename = "cache_salt",
+            skip_serializing_if = "Option::is_none"
+        )]
+        cache_namespace: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         medium: Option<String>,
     },
@@ -62,11 +68,14 @@ fn make_synthetic_payload_blobs() -> Vec<Vec<u8>> {
                 block_size: 4,
                 lora_name: None,
                 medium: None,
+                cache_namespace: None,
                 block_mm_infos: None,
                 is_eagle: None,
                 group_idx: None,
                 kv_cache_spec_kind: None,
                 kv_cache_spec_sliding_window: None,
+                locality: None,
+                ownership: None,
             }],
             Some(0),
         ),
@@ -80,11 +89,14 @@ fn make_synthetic_payload_blobs() -> Vec<Vec<u8>> {
                 block_size: 4,
                 lora_name: None,
                 medium: None,
+                cache_namespace: None,
                 block_mm_infos: None,
                 is_eagle: None,
                 group_idx: None,
                 kv_cache_spec_kind: None,
                 kv_cache_spec_sliding_window: None,
+                locality: None,
+                ownership: None,
             }],
             Some(0),
         ),
@@ -97,6 +109,8 @@ fn make_synthetic_payload_blobs() -> Vec<Vec<u8>> {
                 group_idx: None,
                 kv_cache_spec_kind: None,
                 kv_cache_spec_sliding_window: None,
+                locality: None,
+                ownership: None,
             }],
             Some(0),
         ),
@@ -166,6 +180,7 @@ fn convert_event(e: common::EventMirror) -> SnapEvent {
             token_ids,
             block_size,
             lora_name,
+            cache_namespace,
             medium,
         } => SnapEvent::BlockStored {
             block_hashes,
@@ -173,6 +188,7 @@ fn convert_event(e: common::EventMirror) -> SnapEvent {
             token_ids,
             block_size,
             lora_name,
+            cache_namespace,
             medium,
         },
         common::EventMirror::BlockRemoved {
@@ -226,9 +242,19 @@ async fn run_replay(fixture_path: &str, engine_source: EventSource, snapshot_nam
         pub_handle.send_frames(frames).await.expect("send frame");
     }
 
-    let collected = collect_until_quiescent(&mut sub, 500).await;
+    let batches = collect_until_quiescent(&mut sub, 500).await;
 
     consolidator.shutdown().await;
+
+    assert!(
+        batches.iter().all(|b| b.2 == Some(0)),
+        "every egress batch must carry dp_rank Some(0), got {:?}",
+        batches.iter().map(|b| b.2).collect::<Vec<_>>()
+    );
+
+    // There is no guarantee about how events are batched, which depends on the publisher's poll interval.
+    // Therefore, only the order of events is tested.
+    let collected: Vec<SnapEvent> = batches.into_iter().flat_map(|b| b.1).collect();
 
     insta::assert_yaml_snapshot!(snapshot_name, collected);
 }

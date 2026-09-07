@@ -42,15 +42,15 @@ impl ServiceClient {
 /// Tree structure:
 /// Structure:
 /// - ServiceSet
-///   - services: Vec<ServiceInfo>
+///   - services: `Vec<ServiceInfo>`
 ///     - name: String
 ///     - id: String
 ///     - version: String
 ///     - started: String
-///     - endpoints: Vec<EndpointInfo>
+///     - endpoints: `Vec<EndpointInfo>`
 ///       - name: String
 ///       - subject: String
-///       - data: Option<NatsStatsMetrics>
+///       - data: `Option<NatsStatsMetrics>`
 ///         - average_processing_time: f64
 ///         - last_error: String
 ///         - num_errors: u64
@@ -123,7 +123,7 @@ impl EndpointInfo {
 // for easy deserialization. Ideally, this type already exists or can
 // be exposed in the library somewhere.
 /// Stats structure returned from NATS service API
-/// https://github.com/nats-io/nats.rs/blob/main/async-nats/src/service/endpoint.rs
+/// <https://github.com/nats-io/nats.rs/blob/main/async-nats/src/service/endpoint.rs>
 #[derive(Debug, Clone, Serialize, Deserialize, Dissolve)]
 pub struct NatsStatsMetrics {
     // Standard NATS Stats Service API fields from $SRV.STATS.<service_name> requests

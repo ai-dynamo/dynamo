@@ -20,6 +20,11 @@ max_seq_len: 8192
 backend: pytorch
 enable_chunked_prefill: true
 
+model_kwargs:
+  torch_dtype: bfloat16
+  text_config:
+    torch_dtype: bfloat16
+
 kv_cache_config:
   free_gpu_memory_fraction: 0.30
   enable_block_reuse: false

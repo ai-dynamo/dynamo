@@ -10,11 +10,12 @@
 # Trade-off: prefill does vision encoding internally (no dedicated encoder),
 # which uses more GPU memory on the prefill worker.
 set -e
-trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+
+WORKER_MODULE="dynamo.vllm"
 
 # Default values
 MODEL_NAME="Qwen/Qwen3-VL-2B-Instruct"
@@ -49,6 +50,8 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+trap dynamo_exit_trap EXIT
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 if [[ "$SINGLE_GPU" == "true" ]]; then
@@ -102,7 +105,7 @@ echo "Starting prefill worker on GPU $DYN_PREFILL_WORKER_GPU (${PREFILL_GPU_MEM_
 VLLM_NIXL_SIDE_CHANNEL_PORT=20098 \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-${DYN_SYSTEM_PORT:-8081}} \
 CUDA_VISIBLE_DEVICES=$DYN_PREFILL_WORKER_GPU \
-python -m dynamo.vllm \
+python -m "$WORKER_MODULE" \
   --disaggregation-mode prefill \
   --enable-multimodal \
   --model $MODEL_NAME \
@@ -117,7 +120,7 @@ echo "Starting decode worker on GPU $DYN_DECODE_WORKER_GPU (${DECODE_GPU_MEM_ARG
 VLLM_NIXL_SIDE_CHANNEL_PORT=20099 \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 CUDA_VISIBLE_DEVICES=$DYN_DECODE_WORKER_GPU \
-python -m dynamo.vllm \
+python -m "$WORKER_MODULE" \
   --disaggregation-mode decode \
   --enable-multimodal \
   --enable-mm-embeds \

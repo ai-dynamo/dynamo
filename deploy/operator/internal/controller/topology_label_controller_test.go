@@ -18,7 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -86,9 +86,9 @@ func TestTopologyLabelReconciler_CopiesClusterTopologyLevelsToDynamoPodLabels(t 
 			},
 		},
 	}
-	ct := &grovev1alpha1.ClusterTopology{
+	ct := &grovev1alpha1.ClusterTopologyBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "grove-topology"},
-		Spec: grovev1alpha1.ClusterTopologySpec{
+		Spec: grovev1alpha1.ClusterTopologyBindingSpec{
 			Levels: []grovev1alpha1.TopologyLevel{
 				{Domain: grovev1alpha1.TopologyDomainZone, Key: "topology.kubernetes.io/zone"},
 				{Domain: grovev1alpha1.TopologyDomainRack, Key: "nvidia.com/rack"},
@@ -207,7 +207,7 @@ func TestTopologyLabelReconciler_SkipsIfNodeMissingLabel(t *testing.T) {
 	}
 
 	cl := fake.NewClientBuilder().WithObjects(node, pod).Build()
-	recorder := record.NewFakeRecorder(1)
+	recorder := events.NewFakeRecorder(1)
 	r := &TopologyLabelReconciler{Client: cl, NodeReader: cl, Recorder: recorder}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{

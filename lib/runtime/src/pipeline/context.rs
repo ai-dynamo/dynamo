@@ -6,7 +6,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex};
 
 use super::{AsyncEngineContext, AsyncEngineContextProvider, Data};
-use crate::engine::AsyncEngineController;
+use crate::engine::{AsyncEngineController, EngineContextGuard};
 use async_trait::async_trait;
 
 use super::registry::Registry;
@@ -45,22 +45,6 @@ impl<T: Send + Sync + 'static> Context<T> {
         Context {
             current,
             controller: Arc::new(controller),
-            registry: Registry::new(),
-            stages: Vec::new(),
-            metadata: BTreeMap::new(),
-        }
-    }
-
-    #[deprecated(
-        since = "1.1.2",
-        note = "Use `Context::with_id_and_metadata` instead; pass `Default::default()` \
-                when you have no metadata to propagate. `with_id` will be removed once \
-                all call sites have been migrated."
-    )]
-    pub fn with_id(current: T, id: String) -> Self {
-        Context {
-            current,
-            controller: Arc::new(Controller::new(id)),
             registry: Registry::new(),
             stages: Vec::new(),
             metadata: BTreeMap::new(),
@@ -124,6 +108,14 @@ impl<T: Send + Sync + 'static> Context<T> {
     /// Retrieve an object from the registry by key and type.
     pub fn get<V: Send + Sync + 'static>(&self, key: &str) -> Result<Arc<V>, String> {
         self.registry.get_shared(key)
+    }
+
+    /// Retrieve an optional object from the registry by key and type.
+    pub fn get_optional<V: Send + Sync + 'static>(
+        &self,
+        key: &str,
+    ) -> Result<Option<Arc<V>>, String> {
+        self.registry.get_shared_optional(key)
     }
 
     /// Clone a unique object from the registry by key and type.
@@ -337,6 +329,10 @@ impl AsyncEngineContext for StreamContext {
     fn link_child(&self, child: Arc<dyn AsyncEngineContext>) {
         self.controller.link_child(child);
     }
+
+    fn retain(&self, guard: EngineContextGuard) {
+        self.controller.retain(guard);
+    }
 }
 
 impl AsyncEngineContextProvider for StreamContext {
@@ -369,6 +365,17 @@ pub struct Controller {
     tx: Sender<State>,
     rx: Receiver<State>,
     child_context: Mutex<Vec<Arc<dyn AsyncEngineContext>>>,
+    retained: Mutex<Vec<RetainedGuard>>,
+}
+
+struct RetainedGuard {
+    _guard: EngineContextGuard,
+}
+
+impl std::fmt::Debug for RetainedGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RetainedGuard")
+    }
 }
 
 impl Controller {
@@ -379,6 +386,7 @@ impl Controller {
             tx,
             rx,
             child_context: Mutex::new(Vec::new()),
+            retained: Mutex::new(Vec::new()),
         }
     }
 
@@ -480,6 +488,13 @@ impl AsyncEngineContext for Controller {
             .lock()
             .expect("Failed to lock child context")
             .push(child);
+    }
+
+    fn retain(&self, guard: EngineContextGuard) {
+        self.retained
+            .lock()
+            .expect("Failed to lock retained engine state")
+            .push(RetainedGuard { _guard: guard });
     }
 }
 

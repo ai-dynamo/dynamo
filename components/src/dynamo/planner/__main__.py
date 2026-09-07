@@ -16,17 +16,11 @@
 import argparse
 import asyncio
 import logging
-from typing import Union
 
 from pydantic import BaseModel
 
 from dynamo.planner.config.planner_config import PlannerConfig
-from dynamo.planner.core.adapters import (
-    AggPlanner,
-    DecodePlanner,
-    DisaggPlanner,
-    PrefillPlanner,
-)
+from dynamo.planner.core.planner_factory import construct_planner
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 logger = logging.getLogger(__name__)
@@ -37,19 +31,7 @@ class RequestType(BaseModel):
 
 
 async def start_planner(runtime: DistributedRuntime, config: PlannerConfig):
-    mode = config.mode
-    planner: Union[DisaggPlanner, PrefillPlanner, DecodePlanner, AggPlanner]
-    if mode == "disagg":
-        planner = DisaggPlanner(runtime, config)
-    elif mode == "prefill":
-        planner = PrefillPlanner(runtime, config)
-    elif mode == "decode":
-        planner = DecodePlanner(runtime, config)
-    elif mode == "agg":
-        planner = AggPlanner(runtime, config)
-    else:
-        raise ValueError(f"Invalid planner mode: {mode}")
-
+    planner = construct_planner(runtime=runtime, config=config)
     await planner._async_init()
 
     async def generate(request: RequestType):

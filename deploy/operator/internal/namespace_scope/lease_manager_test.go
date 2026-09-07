@@ -43,14 +43,12 @@ func TestLeaseManager_CreateOrUpdateLease(t *testing.T) {
 		namespace       string
 		operatorVersion string
 		existingLease   *coordinationv1.Lease
-		wantRenewTime   bool // Whether RenewTime should be set
 	}{
 		{
 			name:            "creates lease when it doesn't exist",
 			namespace:       testNamespace,
 			operatorVersion: testOperatorVersion,
 			existingLease:   nil,
-			wantRenewTime:   false, // RenewTime should be nil on creation
 		},
 		{
 			name:            "updates existing lease",
@@ -68,7 +66,6 @@ func TestLeaseManager_CreateOrUpdateLease(t *testing.T) {
 					RenewTime:            &metav1.MicroTime{Time: time.Now().Add(-1 * time.Minute)},
 				},
 			},
-			wantRenewTime: true, // RenewTime should be set on update
 		},
 	}
 
@@ -133,29 +130,23 @@ func TestLeaseManager_CreateOrUpdateLease(t *testing.T) {
 				t.Errorf("lease duration = %v, want %v", *lease.Spec.LeaseDurationSeconds, 30)
 			}
 
-			// Verify renew time and acquire time based on operation
-			if tt.wantRenewTime {
-				// Update case: RenewTime should be set and newer than before
-				if lease.Spec.RenewTime == nil {
-					t.Error("lease renew time should be set on update")
-				} else if tt.existingLease != nil && !lease.Spec.RenewTime.After(tt.existingLease.Spec.RenewTime.Time) {
+			if lease.Spec.RenewTime == nil {
+				t.Fatal("lease renew time should be set")
+			}
+			if tt.existingLease != nil {
+				if !lease.Spec.RenewTime.After(tt.existingLease.Spec.RenewTime.Time) {
 					t.Error("renew time was not updated")
 				}
-				// AcquireTime should be preserved from existing lease
-				if tt.existingLease != nil && tt.existingLease.Spec.AcquireTime != nil {
-					if lease.Spec.AcquireTime == nil {
-						t.Error("acquire time should be preserved on update")
-					} else if !lease.Spec.AcquireTime.Equal(tt.existingLease.Spec.AcquireTime) {
-						t.Error("acquire time should not change on update")
-					}
+				if lease.Spec.AcquireTime == nil {
+					t.Error("acquire time should be preserved on update")
+				} else if !lease.Spec.AcquireTime.Equal(tt.existingLease.Spec.AcquireTime) {
+					t.Error("acquire time should not change on update")
 				}
 			} else {
-				// Create case: RenewTime should be nil, AcquireTime should be set
-				if lease.Spec.RenewTime != nil {
-					t.Error("lease renew time should be nil on initial creation")
-				}
 				if lease.Spec.AcquireTime == nil {
 					t.Error("lease acquire time should be set on initial creation")
+				} else if !lease.Spec.RenewTime.Equal(lease.Spec.AcquireTime) {
+					t.Error("initial renew time should match acquire time")
 				}
 			}
 		})
@@ -264,17 +255,17 @@ func TestLeaseManager_StartAndStop_CompleteLifecycle(t *testing.T) {
 		t.Errorf("lease name = %v, want %v", lease.Name, LeaseName)
 	}
 
-	// Verify initial lease has no renew time (since it was just created)
-	if lease.Spec.RenewTime != nil {
-		t.Error("initial lease should not have renew time set on creation")
+	if lease.Spec.RenewTime == nil {
+		t.Fatal("initial lease should have renew time set on creation")
 	}
+	initialRenewTime := lease.Spec.RenewTime.Time
 
 	// Poll for renewal with timeout (more robust than fixed sleep)
 	renewalDetected := false
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		updatedLease, err := client.CoordinationV1().Leases(namespace).Get(ctx, LeaseName, metav1.GetOptions{})
-		if err == nil && updatedLease.Spec.RenewTime != nil {
+		if err == nil && updatedLease.Spec.RenewTime != nil && updatedLease.Spec.RenewTime.After(initialRenewTime) {
 			renewalDetected = true
 			break
 		}

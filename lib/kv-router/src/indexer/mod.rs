@@ -31,6 +31,7 @@
 //!
 //! This module provides a scalable and efficient way to manage and retrieve data blocks for LLM inference, leveraging a global KV cache to optimize performance.
 
+mod approximate_lru;
 mod branch_sharded;
 mod compressed_radix;
 mod shard_handle;
@@ -63,12 +64,15 @@ mod local;
 mod lower_tier;
 mod lower_tier_indexers;
 mod metrics;
+#[cfg(feature = "bench")]
+mod observation;
 mod thread_pool;
 mod traits;
 mod types;
 
 pub mod concurrent_radix_tree;
 pub mod concurrent_radix_tree_compressed;
+pub mod cuckoo;
 pub mod positional;
 pub mod pruning;
 pub mod radix_tree;
@@ -77,12 +81,15 @@ pub mod radix_tree;
 mod tests;
 
 // Re-export everything that was public in the old single-file module.
+pub use approximate_lru::*;
 pub use branch_sharded::*;
 pub use kv_indexer::*;
 pub use local::*;
 pub use lower_tier::*;
 pub use lower_tier_indexers::*;
 pub use metrics::*;
+#[cfg(feature = "bench")]
+pub use observation::*;
 pub use thread_pool::*;
 pub use traits::*;
 pub use types::*;

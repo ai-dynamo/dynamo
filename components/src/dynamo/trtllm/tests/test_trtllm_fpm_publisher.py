@@ -30,6 +30,7 @@ in ``test_invoke_handler_matches_publisher_keyword_set``.
 from __future__ import annotations
 
 import asyncio
+import logging
 import queue
 import threading
 from unittest.mock import MagicMock
@@ -290,7 +291,14 @@ def test_iter_latency_ms_to_wall_time_secs_conversion():
 # ---------------------------------------------------------------------------
 
 
-def _build_publisher_stub(monkeypatch, *, attention_dp_size: int, fpm_enabled: bool):
+def _build_publisher_stub(
+    monkeypatch,
+    *,
+    attention_dp_size: int,
+    fpm_enabled: bool,
+    publish_metrics: bool = True,
+    kv_event_publication_mode: publisher_mod.KvEventPublicationMode = publisher_mod.KvEventPublicationMode.POLLING,
+):
     """Bypass Publisher.__init__ (heavy deps) and seed only the attributes
     initialize() reads or writes. All side-effecty subsystems are stubbed
     via ``monkeypatch`` so initialize() reaches the FPM gate cleanly without
@@ -309,6 +317,12 @@ def _build_publisher_stub(monkeypatch, *, attention_dp_size: int, fpm_enabled: b
     pub.component_gauges = MagicMock()
     pub.enable_local_indexer = False
     pub.metrics_collector = None
+    pub.kv_state_endpoint = None
+    pub.image_token_id = None
+    pub.publish_metrics = publish_metrics
+    pub.kv_event_publication_mode = kv_event_publication_mode
+    pub.streaming_kv_events_config = None
+    pub.streaming_kv_events_gpus_per_node = None
     pub.attention_dp_size = attention_dp_size
     pub.fpm_enabled = fpm_enabled
     pub.processing_initial_created_events = True
@@ -352,6 +366,56 @@ def _build_publisher_stub(monkeypatch, *, attention_dp_size: int, fpm_enabled: b
     return pub, publisher_mod, fake_fpm_cls
 
 
+def test_streaming_kv_events_create_direct_subscribers_without_engine_polling(
+    monkeypatch,
+):
+    pub, module, _ = _build_publisher_stub(
+        monkeypatch,
+        attention_dp_size=2,
+        fpm_enabled=True,
+    )
+    pub.kv_event_publication_mode = publisher_mod.KvEventPublicationMode.STREAMING
+    pub.streaming_kv_events_config = {
+        "endpoint": "tcp://*:5557",
+        "topic": "kv-events",
+    }
+    pub.streaming_kv_events_gpus_per_node = 1
+    monkeypatch.setenv("DYN_TRTLLM_KV_EVENT_HOSTS", "worker01,worker02")
+
+    pub.initialize()
+
+    calls = module.KvEventPublisher.call_args_list
+    assert [call.kwargs["zmq_endpoint"] for call in calls] == [
+        "tcp://worker01:5557",
+        "tcp://worker02:5558",
+    ]
+    pub._init_publish_kv_cache_events_thread.assert_not_called()
+
+
+def test_streaming_kv_events_fall_back_to_slurm_hosts(monkeypatch):
+    monkeypatch.delenv("DYN_TRTLLM_KV_EVENT_HOSTS", raising=False)
+    monkeypatch.setenv("SLURM_STEP_NODELIST", "worker[01-03]")
+
+    assert publisher_mod._streaming_kv_event_hosts(2, 1) == [
+        "worker01",
+        "worker02",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "rank", "expected"),
+    [
+        ("ipc:///tmp/kv-events", 1, "ipc:///tmp/kv-events_dp1"),
+        ("inproc://kv-events", 2, "inproc://kv-events_dp2"),
+        ("tcp://127.0.0.1:5557", 2, "tcp://127.0.0.1:5559"),
+    ],
+)
+def test_streaming_kv_event_endpoint_offset_matches_trtllm_streaming_manager(
+    endpoint, rank, expected
+):
+    assert publisher_mod._offset_endpoint_port(endpoint, rank) == expected
+
+
 def test_publisher_initialize_constructs_fpm_direct_publisher_when_fpm_enabled(
     monkeypatch,
 ):
@@ -366,6 +430,170 @@ def test_publisher_initialize_constructs_fpm_direct_publisher_when_fpm_enabled(
     assert kwargs["worker_id"] == "worker-abc"
     assert kwargs["dp_size"] == 1
     assert pub.fpm_publisher is not None
+
+
+def test_publisher_initialize_metrics_only_does_not_start_kv_events(monkeypatch):
+    pub, _publisher_mod, fake_fpm_cls = _build_publisher_stub(
+        monkeypatch,
+        attention_dp_size=1,
+        fpm_enabled=True,
+        publish_metrics=True,
+        kv_event_publication_mode=publisher_mod.KvEventPublicationMode.DISABLED,
+    )
+    pub.initialize()
+
+    fake_fpm_cls.assert_called_once()
+    pub._init_publish_metrics_thread.assert_called_once()
+    pub._init_publish_kv_cache_events_thread.assert_not_called()
+
+
+def test_publisher_initialize_kv_events_only_does_not_start_metrics(monkeypatch):
+    pub, _publisher_mod, fake_fpm_cls = _build_publisher_stub(
+        monkeypatch,
+        attention_dp_size=1,
+        fpm_enabled=True,
+        publish_metrics=False,
+    )
+    pub.initialize()
+
+    fake_fpm_cls.assert_not_called()
+    pub._init_publish_metrics_thread.assert_not_called()
+    pub._init_publish_kv_cache_events_thread.assert_called_once()
+
+
+def _publisher_for_kv_event_test():
+    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
+    pub.additional_metrics = None
+    pub._last_engine_event_id_by_rank = {}
+    pub.processing_initial_created_events = False
+    pub.partial_block_hashes = set()
+    pub.kv_block_size = 4
+    pub.max_window_size = None
+    return pub
+
+
+def _stored_kv_event(cache_salt="tenant-a"):
+    return {
+        "event_id": 1,
+        "attention_dp_rank": 0,
+        "data": {
+            "type": "stored",
+            "parent_hash": None,
+            "blocks": [
+                {
+                    "block_hash": 123,
+                    "cache_salt": cache_salt,
+                    "tokens": [
+                        {"token_id": 1},
+                        {"token_id": 2},
+                        {"token_id": 3},
+                        {"token_id": 4},
+                    ],
+                }
+            ],
+        },
+    }
+
+
+def test_handle_kv_event_forwards_cache_salt_to_direct_publisher():
+    pub = _publisher_for_kv_event_test()
+    publisher = MagicMock()
+    pub.zmq_kv_event_publisher = None
+    pub.kv_event_publishers = {0: publisher}
+
+    pub._handle_kv_event_batch([_stored_kv_event()])
+
+    publisher.publish_batch.assert_called_once()
+    events = publisher.publish_batch.call_args.args[0]
+    assert len(events) == 1
+    assert events[0]["cache_salt"] == "tenant-a"
+
+
+def test_handle_kv_event_forwards_cache_salt_to_zmq_publisher():
+    pub = _publisher_for_kv_event_test()
+    pub.zmq_kv_event_publisher = MagicMock()
+    pub.kv_event_publishers = None
+
+    pub._handle_zmq_kv_event(_stored_kv_event())
+
+    pub.zmq_kv_event_publisher.publish_stored.assert_called_once()
+    assert pub.zmq_kv_event_publisher.publish_stored.call_args.args[-1] == "tenant-a"
+
+
+def test_handle_zmq_kv_event_batch_preserves_singleton_publication():
+    pub = _publisher_for_kv_event_test()
+    pub.zmq_kv_event_publisher = MagicMock()
+    pub.kv_event_publishers = None
+    removed = {
+        "event_id": 2,
+        "attention_dp_rank": 0,
+        "data": {"type": "removed", "block_hashes": [123]},
+    }
+
+    pub._handle_kv_event_drain([_stored_kv_event(), removed])
+
+    pub.zmq_kv_event_publisher.publish_stored.assert_called_once()
+    pub.zmq_kv_event_publisher.publish_removed.assert_called_once_with([123], 0)
+
+
+def test_handle_zmq_kv_event_batch_stops_on_malformed_event():
+    pub = _publisher_for_kv_event_test()
+    pub.zmq_kv_event_publisher = MagicMock()
+    pub.kv_event_publishers = None
+    removed = {
+        "event_id": 2,
+        "attention_dp_rank": 0,
+        "data": {"type": "removed", "block_hashes": [123]},
+    }
+
+    with pytest.raises(KeyError, match="event_id"):
+        pub._handle_zmq_kv_event_batch([_stored_kv_event(), {}, removed])
+
+    pub.zmq_kv_event_publisher.publish_stored.assert_called_once()
+    pub.zmq_kv_event_publisher.publish_removed.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_polling_loop_drops_conflicting_salts_and_processes_next_event(caplog):
+    pub = _publisher_for_kv_event_test()
+    pub._stop_event = threading.Event()
+    pub.zmq_kv_event_publisher = None
+    publisher = MagicMock()
+    pub.kv_event_publishers = {0: publisher}
+
+    conflicting = _stored_kv_event("tenant-a")
+    conflicting["data"]["blocks"].append(
+        {
+            **conflicting["data"]["blocks"][0],
+            "block_hash": 456,
+            "cache_salt": "tenant-b",
+        }
+    )
+    valid = _stored_kv_event("tenant-c")
+    valid["event_id"] = 2
+
+    async def fetch_events():
+        yield conflicting
+        yield valid
+
+    def handle_events(events):
+        pub._handle_kv_event_batch(events)
+        pub._stop_event.set()
+
+    with caplog.at_level(logging.WARNING):
+        await pub._polling_loop(
+            fetch_events,
+            handle_events,
+            min_sleep=0.001,
+            max_sleep=0.001,
+            backoff_factor=1.0,
+        )
+
+    publisher.publish_batch.assert_called_once()
+    events = publisher.publish_batch.call_args.args[0]
+    assert len(events) == 1
+    assert events[0]["cache_salt"] == "tenant-c"
+    assert "Dropping stored KV event with invalid cache namespace" in caplog.text
 
 
 def test_publisher_initializes_fpm_publisher_under_attention_dp(monkeypatch):
@@ -388,50 +616,168 @@ def test_publisher_initializes_fpm_publisher_under_attention_dp(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_kv_event_polling_loop_records_drained_batch_size():
+async def test_stats_polling_processes_complete_drain_through_batch_handler():
+    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
+    pub._stop_event = threading.Event()
+    pub.engine = MagicMock()
+    pub.metrics_publisher = MagicMock()
+    pub.component_gauges = MagicMock()
+    pub.metrics_collector = None
+    pub.fpm_publisher = None
+    pub._fpm_schema_checked = False
+
+    async def fetch_stats(timeout):
+        assert timeout == publisher_mod._STATS_TIMEOUT_SEC
+        yield _build_fake_stat(attentionDpRank=0)
+        yield _build_fake_stat(attentionDpRank=1)
+
+    def publish_metric(*_args, **_kwargs):
+        if pub.metrics_publisher.publish.call_count == 2:
+            pub._stop_event.set()
+
+    pub.engine.llm.get_stats_async = fetch_stats
+    pub.metrics_publisher.publish.side_effect = publish_metric
+
+    assert await pub._publish_stats_task() is True
+
+    assert [call.args[0] for call in pub.metrics_publisher.publish.call_args_list] == [
+        0,
+        1,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_polling_loop_bounds_and_resumes_continuously_ready_producer():
+    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
+    pub._stop_event = threading.Event()
+    batches = []
+    drained_batches = []
+    handler_called = False
+
+    async def continuously_ready_events():
+        event_id = 0
+        while not handler_called:
+            yield {"event_id": event_id}
+            event_id += 1
+            await asyncio.sleep(0)
+        yield {"event_id": event_id}
+
+    events = continuously_ready_events()
+
+    def handle_batch(batch):
+        nonlocal handler_called
+        batches.append(batch)
+        handler_called = True
+        if len(batches) == 2:
+            pub._stop_event.set()
+
+    await asyncio.wait_for(
+        pub._polling_loop(
+            lambda: events,
+            handle_batch,
+            min_sleep=0.001,
+            max_sleep=0.001,
+            backoff_factor=1.0,
+            batch_size_handler_fn=drained_batches.append,
+        ),
+        timeout=1.0,
+    )
+
+    event_count = publisher_mod._POLLING_BATCH_MAX_ITEMS + 1
+    assert [event["event_id"] for batch in batches for event in batch] == list(
+        range(event_count)
+    )
+    assert [len(batch) for batch in batches] == [
+        publisher_mod._POLLING_BATCH_MAX_ITEMS,
+        1,
+    ]
+    assert drained_batches == [publisher_mod._POLLING_BATCH_MAX_ITEMS, 1]
+
+
+@pytest.mark.asyncio
+async def test_polling_loop_backs_off_without_calling_handler_for_empty_drains(
+    monkeypatch,
+):
+    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
+    pub._stop_event = threading.Event()
+    handler = MagicMock()
+    sleeps = []
+
+    async def fetch_events():
+        if False:
+            yield None
+
+    async def record_sleep(delay):
+        sleeps.append(delay)
+        if len(sleeps) == 3:
+            pub._stop_event.set()
+
+    monkeypatch.setattr(asyncio, "sleep", record_sleep)
+
+    await pub._polling_loop(
+        fetch_events,
+        handler,
+        min_sleep=0.1,
+        max_sleep=0.2,
+        backoff_factor=2.0,
+    )
+
+    assert sleeps == [0.1, 0.2, 0.2]
+    handler.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_polling_loop_delivers_partial_drain_before_fetch_error():
+    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
+    pub._stop_event = threading.Event()
+    batches = []
+    drained_batches = []
+
+    async def fetch_events():
+        yield {"event_id": 0}
+        yield {"event_id": 1}
+        raise RuntimeError("fetch failed")
+
+    with pytest.raises(RuntimeError, match="fetch failed"):
+        await pub._polling_loop(
+            fetch_events,
+            batches.append,
+            min_sleep=0.001,
+            max_sleep=0.001,
+            backoff_factor=1.0,
+            batch_size_handler_fn=drained_batches.append,
+        )
+
+    assert batches == [[{"event_id": 0}, {"event_id": 1}]]
+    assert drained_batches == []
+
+
+@pytest.mark.asyncio
+async def test_polling_loop_chains_handler_failure_from_fetch_failure():
     pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
     pub._stop_event = threading.Event()
     drained_batches = []
 
     async def fetch_events():
-        for event_id in range(3):
-            yield {"event_id": event_id}
-
-    def handle_event(event):
-        if event["event_id"] == 2:
-            pub._stop_event.set()
-
-    await pub._polling_loop(
-        fetch_events,
-        handle_event,
-        min_sleep=0.001,
-        max_sleep=0.001,
-        backoff_factor=1.0,
-        batch_size_handler_fn=drained_batches.append,
-    )
-
-    assert drained_batches == [3]
-
-
-@pytest.mark.asyncio
-async def test_polling_loop_reraises_unexpected_handler_error():
-    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
-    pub._stop_event = threading.Event()
-
-    async def fetch_events():
         yield {"event_id": 0}
+        raise RuntimeError("fetch failed")
 
-    def handle_event(_event):
-        raise RuntimeError("handler failed")
+    def handle_batch(_events):
+        raise ValueError("handler failed")
 
-    with pytest.raises(RuntimeError, match="handler failed"):
+    with pytest.raises(ValueError, match="handler failed") as exc_info:
         await pub._polling_loop(
             fetch_events,
-            handle_event,
+            handle_batch,
             min_sleep=0.001,
             max_sleep=0.001,
             backoff_factor=1.0,
+            batch_size_handler_fn=drained_batches.append,
         )
+
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert str(exc_info.value.__cause__) == "fetch failed"
+    assert drained_batches == []
 
 
 def test_managed_thread_stops_after_task_error():
@@ -459,23 +805,31 @@ def test_kv_event_id_gap_records_missing_event_count():
     pub.max_window_size = None
     pub._last_engine_event_id_by_rank = {0: 10}
 
-    pub._handle_kv_event({"event_id": 14, "data": {"type": "created"}})
+    pub._handle_kv_event_batch([{"event_id": 14, "data": {"type": "created"}}])
 
     pub.additional_metrics.record_kv_event_id_gap.assert_called_once_with(3)
 
 
 def test_filtered_kv_events_do_not_create_false_event_id_gaps():
     pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
+    publisher = MagicMock()
     pub.additional_metrics = MagicMock()
     pub._last_engine_event_id_by_rank = {0: 10}
     pub.should_drop_event = MagicMock(side_effect=[True, False])
     pub.processing_initial_created_events = True
     pub.max_window_size = None
+    pub.zmq_kv_event_publisher = None
+    pub.kv_event_publishers = {0: publisher}
 
-    pub._handle_kv_event({"event_id": 11, "data": {"type": "stored"}})
-    pub._handle_kv_event({"event_id": 12, "data": {"type": "created"}})
+    pub._handle_kv_event_batch(
+        [
+            {"event_id": 11, "data": {"type": "stored"}},
+            {"event_id": 12, "data": {"type": "created"}},
+        ]
+    )
 
     pub.additional_metrics.record_kv_event_id_gap.assert_not_called()
+    publisher.publish_batch.assert_not_called()
 
 
 def test_partial_only_removed_event_does_not_publish_empty_batch():
@@ -489,12 +843,87 @@ def test_partial_only_removed_event_does_not_publish_empty_batch():
     pub.zmq_kv_event_publisher = None
     pub.kv_event_publishers = {0: kv_event_publisher}
 
-    pub._handle_kv_event(
-        {"event_id": 1, "data": {"type": "removed", "block_hashes": [123]}}
+    pub._handle_kv_event_batch(
+        [{"event_id": 1, "data": {"type": "removed", "block_hashes": [123]}}]
     )
 
     assert pub.partial_block_hashes == set()
-    kv_event_publisher.publish_removed.assert_not_called()
+    kv_event_publisher.publish_batch.assert_not_called()
+
+
+def test_handle_kv_event_batch_groups_mixed_events_per_rank_in_order():
+    pub = _publisher_for_kv_event_test()
+    rank_0 = MagicMock()
+    rank_1 = MagicMock()
+    pub.zmq_kv_event_publisher = None
+    pub.kv_event_publishers = {0: rank_0, 1: rank_1}
+
+    first = _stored_kv_event("tenant-a")
+    first["data"]["lora_name"] = "adapter-a"
+    first["data"]["blocks"][0]["mm_keys"] = [
+        {"type": "mm_key", "hash": "00000000000000ff"}
+    ]
+    second = {
+        "event_id": 1,
+        "attention_dp_rank": 1,
+        "data": {"type": "removed", "block_hashes": [200]},
+    }
+    third = {
+        "event_id": 2,
+        "attention_dp_rank": 0,
+        "data": {"type": "removed", "block_hashes": [123]},
+    }
+
+    pub._handle_kv_event_drain([first, second, third])
+
+    rank_0.publish_batch.assert_called_once()
+    rank_0_events = rank_0.publish_batch.call_args.args[0]
+    assert [event["type"] for event in rank_0_events] == ["stored", "removed"]
+    assert rank_0_events[0]["lora_name"] == "adapter-a"
+    assert rank_0_events[0]["block_mm_infos"] == [
+        {"mm_objects": [{"mm_hash": 255, "offsets": []}]}
+    ]
+    rank_1.publish_batch.assert_called_once_with(
+        [{"type": "removed", "block_hashes": [200]}]
+    )
+
+
+def test_handle_kv_event_batch_preserves_unknown_rank_warning(caplog):
+    pub = _publisher_for_kv_event_test()
+    publisher = MagicMock()
+    pub.zmq_kv_event_publisher = None
+    pub.kv_event_publishers = {0: publisher}
+    event = _stored_kv_event()
+    event["attention_dp_rank"] = 1
+
+    with caplog.at_level(logging.WARNING):
+        pub._handle_kv_event_batch([event])
+
+    publisher.publish_batch.assert_not_called()
+    assert "No publisher for attention_dp_rank=1, available ranks: [0]" in caplog.text
+
+
+def test_handle_kv_event_batch_propagates_malformed_event():
+    pub = _publisher_for_kv_event_test()
+    publisher = MagicMock()
+    pub.zmq_kv_event_publisher = None
+    pub.kv_event_publishers = {0: publisher}
+
+    with pytest.raises(KeyError, match="event_id"):
+        pub._handle_kv_event_batch([{}])
+
+    publisher.publish_batch.assert_not_called()
+
+
+def test_handle_kv_event_batch_propagates_publish_failure():
+    pub = _publisher_for_kv_event_test()
+    publisher = MagicMock()
+    publisher.publish_batch.side_effect = RuntimeError("publish failed")
+    pub.zmq_kv_event_publisher = None
+    pub.kv_event_publishers = {0: publisher}
+
+    with pytest.raises(RuntimeError, match="publish failed"):
+        pub._handle_kv_event_batch([_stored_kv_event()])
 
 
 def test_interleaved_attention_dp_ranks_do_not_create_false_event_id_gaps():
@@ -503,13 +932,14 @@ def test_interleaved_attention_dp_ranks_do_not_create_false_event_id_gaps():
     pub._last_engine_event_id_by_rank = {}
     pub.should_drop_event = MagicMock(return_value=True)
 
-    for event in [
-        {"event_id": 10, "attention_dp_rank": 0},
-        {"event_id": 3, "attention_dp_rank": 1},
-        {"event_id": 11, "attention_dp_rank": 0},
-        {"event_id": 4, "attention_dp_rank": 1},
-    ]:
-        pub._handle_kv_event(event)
+    pub._handle_kv_event_batch(
+        [
+            {"event_id": 10, "attention_dp_rank": 0},
+            {"event_id": 3, "attention_dp_rank": 1},
+            {"event_id": 11, "attention_dp_rank": 0},
+            {"event_id": 4, "attention_dp_rank": 1},
+        ]
+    )
 
     pub.additional_metrics.record_kv_event_id_gap.assert_not_called()
 

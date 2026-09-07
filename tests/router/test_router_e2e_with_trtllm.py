@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Timing notes (measured in a TRT-LLM-enabled container):
-# - GPU-1 subset (`-m "gpu_1"`): 136.36s total for 3 tests.
+# Timing notes (nightly run 33193163913, H100 GPU-parallel stage, 2 slots):
+# - Two-worker GPU-1 router cases: kv_router_basic 137s, indexers_sync 129s,
+#   router_decisions_multiple_workers 120s, including process teardown.
 # These tests load a real model and can be slow/flaky when GPU resources are contended,
 # so we set explicit pytest timeouts to fail fast on hangs (see per-test markers below).
 import logging
@@ -19,9 +20,9 @@ from tests.router.e2e_harness import (
     run_router_decisions_test,
 )
 from tests.router.helper import generate_random_suffix
-from tests.utils.constants import DefaultPort
-from tests.utils.gpu_args import build_trtllm_override_args
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.constants import DynamoPortRange
+from tests.utils.gpu_args import build_trtllm_override_args, map_cuda_visible_devices
+from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.port_utils import allocate_ports, deallocate_ports
 
 logger = logging.getLogger(__name__)
@@ -75,7 +76,6 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
         single_gpu: bool = False,
         request_plane: str = "tcp",
         store_backend: str = "etcd",
-        durable_kv_events: bool = False,
         namespace: Optional[str] = None,
         gpu_start_index: int = 0,
         disaggregation_mode: Optional[str] = None,
@@ -98,7 +98,6 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
             single_gpu: If True, all workers share GPU 0
             request_plane: Request plane to use ("nats", "tcp"). Defaults to "tcp".
             store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
-            durable_kv_events: If True, use JetStream for durable KV events. Defaults to False (NATS Core mode).
 
         Note: TRT-LLM supports two forms of parallelism for routing:
               1. Multiple workers (num_workers > 1): Each worker is a separate routing target
@@ -118,7 +117,7 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
 
         # Dynamically allocate unique system ports (one per worker) to avoid
         # conflicts when tests run in parallel via pytest-xdist.
-        self._system_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
+        self._system_ports = allocate_ports(num_workers, DynamoPortRange.ROUTER.value)
         request.addfinalizer(lambda: deallocate_ports(self._system_ports))
 
         if trtllm_args is None:
@@ -136,16 +135,20 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
             # Calculate GPU device for this process
             if single_gpu:
                 # Force all processes to GPU 0 (for single-GPU testing)
-                gpu_device = str(gpu_start_index)
+                logical_devices = [gpu_start_index]
             elif enable_attention_dp and tensor_parallel_size:
                 # For attention DP, TRT-LLM spawns tensor_parallel_size internal MPI workers.
                 # So one process = two attention DP ranks = visibility in to both GPUs.
-                gpu_device = ",".join(
-                    str(gpu_start_index + i) for i in range(tensor_parallel_size)
-                )
+                logical_devices = [
+                    gpu_start_index + i for i in range(tensor_parallel_size)
+                ]
             else:
                 # Each worker sees one GPU
-                gpu_device = str(gpu_start_index + worker_idx)
+                logical_devices = [gpu_start_index + worker_idx]
+
+            gpu_device = map_cuda_visible_devices(
+                logical_devices, os.environ.get("CUDA_VISIBLE_DEVICES")
+            )
 
             # Single-node TRT-LLM workers use python3 -m dynamo.trtllm directly
             # (trtllm-llmapi-launch is only needed for multi-node MPI deployments)
@@ -158,7 +161,7 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
                 "--kv-block-size",
                 str(TRTLLM_BLOCK_SIZE),
                 # Enable KV events publishing for router integration
-                "--publish-events-and-metrics",
+                "--publish-kv-events",
             ]
 
             if disaggregation_mode is not None:
@@ -179,10 +182,6 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
             # Add optional max_seq_len if specified
             if max_seq_len is not None:
                 command.extend(["--max-seq-len", str(max_seq_len)])
-
-            # Use --durable-kv-events to enable JetStream mode (local indexer disabled)
-            if durable_kv_events:
-                command.append("--durable-kv-events")
 
             # Set tensor parallel size if specified (needed for attention DP)
             if tensor_parallel_size is not None:
@@ -220,7 +219,12 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
                 timeout=180,  # Allow time for model loading (TRT-LLM may take longer)
                 display_output=True,
                 health_check_ports=[],
-                health_check_urls=[],
+                health_check_urls=[
+                    (
+                        f"http://localhost:{system_port}/health",
+                        check_health_ready,
+                    )
+                ],
                 log_dir=request.node.name,
                 terminate_all_matching_process_names=False,
             )
@@ -240,7 +244,7 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
 @pytest.mark.profiled_vram_gib(7.8)
 @pytest.mark.requested_trtllm_kv_tokens(2592)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
-@pytest.mark.timeout(300)
+@pytest.mark.timeout(420)  # 3x slowest two-worker run (137s, nightly 33193163913)
 def test_trtllm_kv_router_basic(
     request,
     runtime_services_dynamic_ports,
@@ -261,6 +265,7 @@ def test_trtllm_kv_router_basic(
     )
 
 
+@pytest.mark.h100
 @pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
@@ -303,7 +308,7 @@ def test_router_decisions_trtllm_attention_dp(
 @pytest.mark.profiled_vram_gib(7.8)
 @pytest.mark.requested_trtllm_kv_tokens(2592)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
-@pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
+@pytest.mark.timeout(420)  # 3x slowest two-worker run (137s, nightly 33193163913)
 def test_router_decisions_trtllm_multiple_workers(
     request,
     runtime_services_dynamic_ports,
@@ -364,24 +369,16 @@ def test_router_decisions_trtllm_disagg(
 @pytest.mark.nightly
 @pytest.mark.profiled_vram_gib(7.8)
 @pytest.mark.requested_trtllm_kv_tokens(2592)
-@pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
-@pytest.mark.parametrize(
-    "store_backend,durable_kv_events,request_plane",
-    [
-        ("etcd", False, "tcp"),
-    ],
-    ids=["nats_core"],
-    indirect=["durable_kv_events", "request_plane"],
-)
+@pytest.mark.timeout(420)  # 3x slowest two-worker run (137s, nightly 33193163913)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.parametrize("event_plane", ["nats"], indirect=True)
 def test_trtllm_indexers_sync(
     request,
     runtime_services_dynamic_ports,
     predownload_models,
-    file_storage_backend,
     set_ucx_tls_no_mm,
-    store_backend,
-    durable_kv_events,
     request_plane,
+    event_plane,
 ):
     run_indexers_sync_test(
         engine_process_cls=TRTLLMProcess,
@@ -389,9 +386,9 @@ def test_trtllm_indexers_sync(
         engine_args=TRTLLM_ARGS,
         request=request,
         runtime_services_dynamic_ports=runtime_services_dynamic_ports,
-        store_backend=store_backend,
-        durable_kv_events=durable_kv_events,
+        store_backend="etcd",
         request_plane=request_plane,
+        event_plane=event_plane,
         block_size=TRTLLM_BLOCK_SIZE,
         model_name=MODEL_NAME,
         num_workers=2,

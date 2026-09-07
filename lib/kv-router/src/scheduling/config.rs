@@ -3,16 +3,21 @@
 
 use std::env::{self, VarError};
 use std::fmt;
+use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use derive_builder::Builder;
-use rand::Rng;
 use serde::{Deserialize, Serialize};
-use validator::{Validate, ValidationError};
 
+use crate::WorkerType;
 use crate::protocols::{
-    BlockHashOptions, LocalBlockHash, compute_block_hash_for_seq, compute_seq_hash_for_block,
+    BlockHashOptions, LocalBlockHash, complete_block_count, compute_block_hash_for_seq,
+    compute_seq_hash_for_block,
+};
+use crate::tracking_hash::{
+    TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope, validate_tracking_hash_options,
 };
 
 const fn default_track_prefill_tokens() -> bool {
@@ -20,6 +25,42 @@ const fn default_track_prefill_tokens() -> bool {
 }
 
 pub const DYN_ROUTER_MIN_INITIAL_WORKERS: &str = "DYN_ROUTER_MIN_INITIAL_WORKERS";
+
+/// Selects a configured custom worker-selection policy instance.
+///
+/// The reserved value `default` selects Dynamo's built-in worker selector.
+pub const DYN_ROUTER_WORKER_SELECTION_POLICY: &str = "DYN_ROUTER_WORKER_SELECTION_POLICY";
+
+/// Selects a configured custom worker-selection policy instance for prefill workers.
+pub const DYN_ROUTER_PREFILL_POLICY: &str = "DYN_ROUTER_PREFILL_POLICY";
+
+/// Selects a configured custom worker-selection policy instance for decode workers.
+pub const DYN_ROUTER_DECODE_POLICY: &str = "DYN_ROUTER_DECODE_POLICY";
+
+/// Selects the process-local retention policy for a primary approximate indexer.
+pub const DYN_ROUTER_APPROXIMATE_CACHE_POLICY: &str = "DYN_ROUTER_APPROXIMATE_CACHE_POLICY";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkerSelectionPolicySelections {
+    pub(crate) aggregated: Option<String>,
+    pub(crate) prefill: Option<String>,
+    pub(crate) decode: Option<String>,
+    pub(crate) encode: Option<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum WorkerSelectionPolicyConfigError {
+    #[error("could not read {DYN_ROUTER_WORKER_SELECTION_POLICY}: {source}")]
+    Environment {
+        #[source]
+        source: VarError,
+    },
+    #[error("could not load worker_selection from router_policy_config: {source}")]
+    Config {
+        #[source]
+        source: super::policy_config::RouterPolicyConfigError,
+    },
+}
 
 pub fn min_initial_workers_from_env() -> anyhow::Result<usize> {
     match env::var(DYN_ROUTER_MIN_INITIAL_WORKERS) {
@@ -47,36 +88,51 @@ const fn default_prefill_load_scale() -> f64 {
     1.0
 }
 
+const fn default_decode_active_request_weight() -> f64 {
+    0.0
+}
+
+// Default-valued post-v1.3 fields are omitted so v1.3 frontends can read v1.4 MDCs during
+// rolling upgrades. Non-default values still serialize and fail closed on the older frontend.
+// TODO(v1.5): Remove these compatibility skips when v1.3 falls outside the N-1 window.
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    value == &T::default()
+}
+
 const fn default_overlap_score_credit_decay() -> f64 {
     0.0
 }
 
 pub const OVERLAP_SCORE_CREDIT_RANGE_ERROR: &str =
-    "overlap_score_credit must be between 0.0 and 1.0";
-pub const OVERLAP_SCORE_CREDIT_MIGRATION_ERROR: &str = concat!(
-    "overlap_score_credit must be between 0.0 and 1.0; values above 1.0 are probably not what ",
-    "you intended. If you want to weigh TTFT/prompt-side prefill load more heavily, keep ",
-    "overlap_score_credit <= 1.0 and use that larger value for prefill_load_scale instead; ",
-    "prefill_load_scale is applied after overlap credits."
-);
+    "overlap_score_credit must be a finite, non-negative number";
 
 pub fn overlap_score_credit_error_message(value: f64) -> Option<&'static str> {
-    if (0.0..=1.0).contains(&value) {
+    if value.is_finite() && value >= 0.0 {
         None
-    } else if value > 1.0 {
-        Some(OVERLAP_SCORE_CREDIT_MIGRATION_ERROR)
     } else {
         Some(OVERLAP_SCORE_CREDIT_RANGE_ERROR)
     }
 }
 
-fn validate_overlap_score_credit(value: f64) -> Result<(), ValidationError> {
+fn validate_overlap_score_credit(value: f64) -> Result<(), String> {
     let Some(message) = overlap_score_credit_error_message(value) else {
         return Ok(());
     };
-    let mut error = ValidationError::new("overlap_score_credit_out_of_range");
-    error.message = Some(message.into());
-    Err(error)
+    Err(message.to_string())
+}
+
+fn validate_min(field: &str, value: f64, min: f64) -> Result<(), String> {
+    if value >= min {
+        return Ok(());
+    }
+    Err(format!("{field} must be greater than or equal to {min}"))
+}
+
+fn validate_range(field: &str, value: f64, min: f64, max: f64) -> Result<(), String> {
+    if value >= min && value <= max {
+        return Ok(());
+    }
+    Err(format!("{field} must be between {min} and {max}"))
 }
 
 pub fn apply_deprecated_overlap_score_weight_override(
@@ -91,37 +147,81 @@ pub fn apply_deprecated_overlap_score_weight_override(
 }
 
 /// Build a [`KvRouterConfig`] from defaults and standard Dynamo environment variables.
+///
+/// # Panics
+///
+/// Panics when `DYN_ROUTER_TRACKING_HASH` is not a supported algorithm. Startup
+/// paths should use [`try_kv_router_config_from_dynamo_env`] to report the error.
 pub fn kv_router_config_from_dynamo_env() -> KvRouterConfig {
-    let config = kv_router_config_from_lookup(|key| env::var(key).ok());
+    try_kv_router_config_from_dynamo_env()
+        .unwrap_or_else(|error| panic!("invalid Dynamo router environment configuration: {error}"))
+}
+
+/// Build a [`KvRouterConfig`] from standard Dynamo environment variables.
+pub fn try_kv_router_config_from_dynamo_env() -> Result<KvRouterConfig, String> {
+    let config = kv_router_config_from_lookup(|key| env::var(key).ok())?;
+    log_env_config(&config);
+    Ok(config)
+}
+
+fn log_env_config(config: &KvRouterConfig) {
     tracing::info!(
         overlap_score_credit = config.overlap_score_credit,
         overlap_score_credit_decay = config.overlap_score_credit_decay,
         prefill_load_scale = config.prefill_load_scale,
+        decode_active_request_weight = config.decode_active_request_weight,
         router_temperature = config.router_temperature,
         use_kv_events = config.use_kv_events,
         router_replica_sync = config.router_replica_sync,
         router_track_active_blocks = config.router_track_active_blocks,
         router_track_output_blocks = config.router_track_output_blocks,
+        router_assume_kv_reuse = config.router_assume_kv_reuse,
         router_track_prefill_tokens = config.router_track_prefill_tokens,
+        router_tracking_hash = %config.router_tracking_hash,
+        router_tracking_key_id = ?config.router_tracking_key_id,
         router_queue_threshold = ?config.router_queue_threshold,
+        router_policy_config = ?config.router_policy_config,
+        router_prefill_policy = ?config.router_prefill_policy,
+        router_decode_policy = ?config.router_decode_policy,
+        conditional_disagg_enabled = config.conditional_disagg_enabled,
+        conditional_disagg_policy = ?config.conditional_disagg_policy,
+        conditional_disagg_eff_isl_threshold = config.conditional_disagg_eff_isl_threshold,
+        conditional_disagg_eff_isl_ratio_threshold = config.conditional_disagg_eff_isl_ratio_threshold,
+        conditional_disagg_prefill_busy_threshold = ?config.conditional_disagg_prefill_busy_threshold,
+        conditional_disagg_decode_busy_threshold = ?config.conditional_disagg_decode_busy_threshold,
         router_predicted_ttl_secs = ?config.router_predicted_ttl_secs,
-        queue_depth_tiers_unbounded = config.router_queue_by_incoming_missing_isl.is_unbounded(),
+        router_ttl_secs = config.router_ttl_secs,
+        router_event_threads = config.router_event_threads,
+        router_queue_policy = %config.router_queue_policy,
+        use_remote_indexer = config.use_remote_indexer,
+        shared_cache_multiplier = config.shared_cache_multiplier,
+        shared_cache_type = %config.shared_cache_type,
+        host_cache_hit_weight = config.host_cache_hit_weight,
+        disk_cache_hit_weight = config.disk_cache_hit_weight,
+        router_prefill_load_model = %config.router_prefill_load_model,
+        router_approximate_cache_policy = %config.router_approximate_cache_policy,
         "KvRouterConfig initialized (DYN_* env overrides applied)"
     );
-    config
 }
 
-fn kv_router_config_from_lookup(get_env: impl Fn(&str) -> Option<String>) -> KvRouterConfig {
+fn kv_router_config_from_lookup(
+    get_env: impl Fn(&str) -> Option<String>,
+) -> Result<KvRouterConfig, String> {
     fn parse_f64(get_env: &impl Fn(&str) -> Option<String>, key: &str) -> Option<f64> {
         get_env(key).and_then(|value| value.parse().ok())
     }
 
+    fn parse_usize(get_env: &impl Fn(&str) -> Option<String>, key: &str) -> Option<usize> {
+        get_env(key).and_then(|value| value.parse().ok())
+    }
+
+    fn parse_u32(get_env: &impl Fn(&str) -> Option<String>, key: &str) -> Option<u32> {
+        get_env(key).and_then(|value| value.parse().ok())
+    }
+
     fn parse_bool(get_env: &impl Fn(&str) -> Option<String>, key: &str) -> Option<bool> {
-        get_env(key).and_then(|value| match value.to_ascii_lowercase().as_str() {
-            "true" | "1" | "yes" | "on" => Some(true),
-            "false" | "0" | "no" | "off" => Some(false),
-            _ => None,
-        })
+        // Empty or unrecognized values yield None so the default is preserved.
+        get_env(key).and_then(|value| dynamo_truthy::parse_bool_opt(&value))
     }
 
     let mut config = KvRouterConfig::default();
@@ -134,6 +234,9 @@ fn kv_router_config_from_lookup(get_env: impl Fn(&str) -> Option<String>) -> KvR
     }
     if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_PREFILL_LOAD_SCALE") {
         config.prefill_load_scale = value;
+    }
+    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT") {
+        config.decode_active_request_weight = value;
     }
     for key in [
         "DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT",
@@ -152,7 +255,10 @@ fn kv_router_config_from_lookup(get_env: impl Fn(&str) -> Option<String>) -> KvR
     if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_TEMPERATURE") {
         config.router_temperature = value;
     }
-    if let Some(value) = parse_bool(&get_env, "DYN_USE_KV_EVENTS") {
+    // Read the canonical name first, then the Rust-only alias for backward compatibility.
+    let use_kv_events = parse_bool(&get_env, "DYN_ROUTER_USE_KV_EVENTS")
+        .or_else(|| parse_bool(&get_env, "DYN_USE_KV_EVENTS"));
+    if let Some(value) = use_kv_events {
         config.use_kv_events = value;
     }
     if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_REPLICA_SYNC") {
@@ -164,17 +270,102 @@ fn kv_router_config_from_lookup(get_env: impl Fn(&str) -> Option<String>) -> KvR
     if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_TRACK_OUTPUT_BLOCKS") {
         config.router_track_output_blocks = value;
     }
+    if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_ASSUME_KV_REUSE") {
+        config.router_assume_kv_reuse = value;
+    }
     if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_TRACK_PREFILL_TOKENS") {
         config.router_track_prefill_tokens = value;
+    }
+    if let Some(value) = get_env("DYN_ROUTER_TRACKING_HASH") {
+        config.router_tracking_hash = value.parse()?;
+    }
+    if let Some(value) = get_env("DYN_ROUTER_TRACKING_KEY_FILE") {
+        config.router_tracking_key_file = Some(value.into());
+    }
+    if let Some(value) = get_env("DYN_ROUTER_TRACKING_KEY_ID") {
+        config.router_tracking_key_id = Some(value);
     }
     if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_QUEUE_THRESHOLD") {
         config.router_queue_threshold = Some(value);
     }
+    if let Some(value) = get_env("DYN_ROUTER_POLICY_CONFIG") {
+        config.router_policy_config = Some(value);
+    }
+    if let Some(value) = get_env(DYN_ROUTER_PREFILL_POLICY) {
+        config.router_prefill_policy = Some(value);
+    }
+    if let Some(value) = get_env(DYN_ROUTER_DECODE_POLICY) {
+        config.router_decode_policy = Some(value);
+    }
+    if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_CONDITIONAL_DISAGG") {
+        config.conditional_disagg_enabled = value;
+    }
+    if let Some(value) = get_env("DYN_ROUTER_CONDITIONAL_DISAGG_POLICY")
+        && let Ok(policy) = value.parse()
+    {
+        config.conditional_disagg_policy = policy;
+    }
+    if let Some(value) = parse_usize(&get_env, "DYN_ROUTER_CONDITIONAL_DISAGG_EFF_ISL_THRESHOLD") {
+        config.conditional_disagg_eff_isl_threshold = value;
+    }
+    if let Some(value) = parse_f64(
+        &get_env,
+        "DYN_ROUTER_CONDITIONAL_DISAGG_EFF_ISL_RATIO_THRESHOLD",
+    ) {
+        config.conditional_disagg_eff_isl_ratio_threshold = value;
+    }
+    if let Some(value) = parse_f64(
+        &get_env,
+        "DYN_ROUTER_CONDITIONAL_DISAGG_PREFILL_BUSY_THRESHOLD",
+    ) {
+        config.conditional_disagg_prefill_busy_threshold = Some(value);
+    }
+    if let Some(value) = parse_f64(
+        &get_env,
+        "DYN_ROUTER_CONDITIONAL_DISAGG_DECODE_BUSY_THRESHOLD",
+    ) {
+        config.conditional_disagg_decode_busy_threshold = Some(value);
+    }
     if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_PREDICTED_TTL_SECS") {
         config.router_predicted_ttl_secs = Some(value);
     }
+    if let Some(value) = get_env(DYN_ROUTER_APPROXIMATE_CACHE_POLICY) {
+        config.router_approximate_cache_policy = value.parse()?;
+    }
+    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_TTL_SECS") {
+        config.router_ttl_secs = value;
+    }
+    if let Some(value) = parse_u32(&get_env, "DYN_ROUTER_EVENT_THREADS") {
+        config.router_event_threads = value;
+    }
+    if let Some(value) = get_env("DYN_ROUTER_QUEUE_POLICY") {
+        config.router_queue_policy = value.parse()?;
+    }
+    if let Some(value) = parse_bool(&get_env, "DYN_USE_REMOTE_INDEXER") {
+        config.use_remote_indexer = value;
+    }
+    let mut shared_cache_multiplier_set = false;
+    if let Some(value) = parse_f64(&get_env, "DYN_SHARED_CACHE_MULTIPLIER") {
+        config.shared_cache_multiplier = value;
+        shared_cache_multiplier_set = true;
+    }
+    if let Some(value) = get_env("DYN_SHARED_CACHE_TYPE") {
+        config.shared_cache_type = value.parse()?;
+    }
+    if config.shared_cache_type != SharedCacheType::None && !shared_cache_multiplier_set {
+        config.shared_cache_multiplier = 0.5;
+    }
+    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_HOST_CACHE_HIT_WEIGHT") {
+        config.host_cache_hit_weight = value;
+    }
+    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_DISK_CACHE_HIT_WEIGHT") {
+        config.disk_cache_hit_weight = value;
+    }
+    if let Some(value) = get_env("DYN_ROUTER_PREFILL_LOAD_MODEL") {
+        config.router_prefill_load_model = value.parse()?;
+    }
 
-    config
+    Ok(config)
 }
 
 fn apply_deprecated_overlap_score_weight_override_option(
@@ -188,18 +379,6 @@ fn apply_deprecated_overlap_score_weight_override_option(
     }
 }
 
-fn validate_and_return<T: Validate>(config: T) -> Result<T, String> {
-    config.validate().map_err(|error| error.to_string())?;
-    Ok(config)
-}
-
-fn validate_router_config_override(config: &RouterConfigOverride) -> Result<(), ValidationError> {
-    if let Some(credit) = config.overlap_score_credit {
-        validate_overlap_score_credit(credit)?;
-    }
-    Ok(())
-}
-
 /// Type of external shared KV cache to query during routing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -209,6 +388,42 @@ pub enum SharedCacheType {
     None,
     /// HiCache L3 shared cache — queries sglang workers via the request plane.
     Hicache,
+}
+
+/// Retention policy for a router-local primary approximate indexer.
+///
+/// This selector is intentionally process-local. Workers do not advertise it in
+/// model cards because request lifetime and release ownership live in the router.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ApproximateCachePolicyKind {
+    /// Expire predicted entries after `router_ttl_secs`.
+    #[default]
+    Ttl,
+    /// Retain predicted entries until per-rank KV capacity requires LRU eviction.
+    Lru,
+}
+
+impl fmt::Display for ApproximateCachePolicyKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ttl => f.write_str("ttl"),
+            Self::Lru => f.write_str("lru"),
+        }
+    }
+}
+
+impl FromStr for ApproximateCachePolicyKind {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "ttl" => Ok(Self::Ttl),
+            "lru" => Ok(Self::Lru),
+            _ => Err(format!(
+                "unknown approximate cache policy {value:?}, expected 'ttl' or 'lru'"
+            )),
+        }
+    }
 }
 
 impl fmt::Display for SharedCacheType {
@@ -231,134 +446,6 @@ impl FromStr for SharedCacheType {
                 "unknown shared_cache_type: {s:?}, expected 'none' or 'hicache'"
             )),
         }
-    }
-}
-
-/// One row of the cache-miss-keyed pending ISL token cap table.
-///
-/// Requests whose best-case cache-miss tokens (ISL minus best cached tokens
-/// across eligible workers) meet `missing_cache_tokens_floor` are subject to
-/// this tier's `max_queue_depth` cap. A request matches every tier whose
-/// floor it clears; the tier with the highest matched floor wins (i.e. the
-/// most expensive bucket the request falls into determines the cap).
-///
-/// `max_queue_depth` is a per-worker pending ISL token cap — the effective cap
-/// is `max_queue_depth * worker_count` where worker_count is the total
-/// number of registered workers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Validate)]
-pub struct RouterQueueDepthByMissingIslTier {
-    /// Minimum cache-miss tokens (ISL minus best cached tokens across eligible
-    /// workers) for this tier to apply. Tier 0 matches all requests.
-    pub missing_cache_tokens_floor: usize,
-    /// Per-worker pending ISL token cap. Effective cap is `max_queue_depth * worker_count`.
-    #[validate(range(min = 1, message = "max_queue_depth must be > 0"))]
-    pub max_queue_depth: usize,
-}
-
-/// Validated, sorted pending ISL token cap tiers keyed by cache-miss tokens.
-///
-/// Guarantees:
-/// - Non-empty vec starts with `missing_cache_tokens_floor == 0`
-/// - Floors are strictly ascending
-/// - All `max_queue_depth > 0`
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    try_from = "Vec<RouterQueueDepthByMissingIslTier>",
-    into = "Vec<RouterQueueDepthByMissingIslTier>"
-)]
-pub struct RouterQueueDepthTiers(Vec<RouterQueueDepthByMissingIslTier>);
-
-impl RouterQueueDepthTiers {
-    /// Disable capping entirely (unbounded queue).
-    pub fn unbounded_cap() -> Self {
-        Self(Vec::new())
-    }
-
-    /// Check if capping is disabled (unbounded queue).
-    pub fn is_unbounded(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    /// Get effective cap for a request's cache-miss tokens, scaled by worker count.
-    pub fn cap_for(&self, cache_miss_tokens: usize, worker_count: usize) -> Option<usize> {
-        if self.0.is_empty() {
-            return None;
-        }
-        self.0
-            .iter()
-            .rev()
-            .find(|tier| cache_miss_tokens >= tier.missing_cache_tokens_floor)
-            .map(|tier| tier.max_queue_depth.saturating_mul(worker_count))
-    }
-
-    /// Create from tuples `[(floor, cap), ...]`.
-    pub fn from_tuples(tuples: Vec<(usize, usize)>) -> Result<Self, String> {
-        let tiers: Vec<RouterQueueDepthByMissingIslTier> = tuples
-            .into_iter()
-            .map(
-                |(missing_cache_tokens_floor, max_queue_depth)| RouterQueueDepthByMissingIslTier {
-                    missing_cache_tokens_floor,
-                    max_queue_depth,
-                },
-            )
-            .collect();
-        Self::try_from(tiers)
-    }
-}
-
-impl TryFrom<Vec<RouterQueueDepthByMissingIslTier>> for RouterQueueDepthTiers {
-    type Error = String;
-
-    fn try_from(tiers: Vec<RouterQueueDepthByMissingIslTier>) -> Result<Self, Self::Error> {
-        if tiers.is_empty() {
-            return Ok(Self::unbounded_cap());
-        }
-
-        // Must start with floor 0
-        if tiers[0].missing_cache_tokens_floor != 0 {
-            return Err("router_queue_by_incoming_missing_isl: first tier must have missing_cache_tokens_floor == 0".to_string());
-        }
-
-        // Floors must be strictly ascending
-        for window in tiers.windows(2) {
-            if window[1].missing_cache_tokens_floor <= window[0].missing_cache_tokens_floor {
-                return Err(
-                    "router_queue_by_incoming_missing_isl: floors must be strictly ascending"
-                        .to_string(),
-                );
-            }
-        }
-
-        // max_queue_depth must be > 0
-        for tier in &tiers {
-            if tier.max_queue_depth == 0 {
-                return Err(
-                    "router_queue_by_incoming_missing_isl: max_queue_depth must be > 0".to_string(),
-                );
-            }
-        }
-
-        Ok(Self(tiers))
-    }
-}
-
-impl Default for RouterQueueDepthTiers {
-    fn default() -> Self {
-        Self::unbounded_cap()
-    }
-}
-
-impl From<RouterQueueDepthTiers> for Vec<RouterQueueDepthByMissingIslTier> {
-    fn from(tiers: RouterQueueDepthTiers) -> Self {
-        tiers.0
-    }
-}
-
-impl TryFrom<Vec<(usize, usize)>> for RouterQueueDepthTiers {
-    type Error = String;
-
-    fn try_from(tuples: Vec<(usize, usize)>) -> Result<Self, Self::Error> {
-        Self::from_tuples(tuples)
     }
 }
 
@@ -418,6 +505,44 @@ impl RouterPrefillLoadModel {
     }
 }
 
+/// Which conditional-disagg bypass policy to run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConditionalDisaggPolicyKind {
+    /// Bypass when effective ISL is below both the absolute and ratio thresholds.
+    #[default]
+    IslBounding,
+    /// Bypass when the chosen prefill worker is over the prefill-busy line.
+    PrefillLoad,
+    /// Bypass when either `isl_bounding` or `prefill_load` would bypass.
+    IslOrLoad,
+}
+
+impl fmt::Display for ConditionalDisaggPolicyKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::IslBounding => f.write_str("isl_bounding"),
+            Self::PrefillLoad => f.write_str("prefill_load"),
+            Self::IslOrLoad => f.write_str("isl_or_load"),
+        }
+    }
+}
+
+impl FromStr for ConditionalDisaggPolicyKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "isl_bounding" => Ok(Self::IslBounding),
+            "prefill_load" => Ok(Self::PrefillLoad),
+            "isl_or_load" => Ok(Self::IslOrLoad),
+            _ => Err(format!(
+                "unknown conditional_disagg_policy: {s:?}, expected 'isl_bounding', 'prefill_load', or 'isl_or_load'"
+            )),
+        }
+    }
+}
+
 impl FromStr for RouterQueuePolicy {
     type Err = String;
 
@@ -445,23 +570,21 @@ struct RouterConfigOverrideSerde {
 }
 
 /// Override configuration for router settings that can be specified per-request
-#[derive(Debug, Clone, Default, Builder, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, Default, Builder, Serialize, Deserialize)]
 #[serde(try_from = "RouterConfigOverrideSerde")]
-#[validate(schema(function = "validate_router_config_override"))]
 pub struct RouterConfigOverride {
     /// Device-local prefix-overlap credit multiplier applied to the prefill
-    /// load before sampling (0.0 to 1.0). Set to 0.0 to ignore prefix matching.
+    /// load before sampling. Values must be finite and non-negative. Values above
+    /// 1.0 give device overlap extra credit. Set to 0.0 to ignore prefix matching.
     #[builder(default)]
     pub overlap_score_credit: Option<f64>,
 
     /// Scale applied to the adjusted prefill load after device/lower-tier
     /// cache-hit credits have been subtracted.
     #[builder(default)]
-    #[validate(range(min = 0.0))]
     pub prefill_load_scale: Option<f64>,
 
     #[builder(default)]
-    #[validate(range(min = 0.0))]
     pub router_temperature: Option<f64>,
 
     #[builder(default)]
@@ -472,8 +595,25 @@ pub struct RouterConfigOverride {
 
     /// Per-request override of `shared_cache_multiplier`.
     #[builder(default)]
-    #[validate(range(min = 0.0, max = 1.0))]
     pub shared_cache_multiplier: Option<f64>,
+}
+
+impl RouterConfigOverride {
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(value) = self.overlap_score_credit {
+            validate_overlap_score_credit(value)?;
+        }
+        if let Some(value) = self.prefill_load_scale {
+            validate_min("prefill_load_scale", value, 0.0)?;
+        }
+        if let Some(value) = self.router_temperature {
+            validate_min("router_temperature", value, 0.0)?;
+        }
+        if let Some(value) = self.shared_cache_multiplier {
+            validate_range("shared_cache_multiplier", value, 0.0, 1.0)?;
+        }
+        Ok(())
+    }
 }
 
 impl TryFrom<RouterConfigOverrideSerde> for RouterConfigOverride {
@@ -491,41 +631,53 @@ impl TryFrom<RouterConfigOverrideSerde> for RouterConfigOverride {
             );
         }
 
-        validate_and_return(Self {
+        let config = Self {
             overlap_score_credit,
             prefill_load_scale,
             router_temperature: compat.router_temperature,
             assume_kv_reuse: compat.assume_kv_reuse,
             track_prefill_tokens: compat.track_prefill_tokens,
             shared_cache_multiplier: compat.shared_cache_multiplier,
-        })
+        };
+        config.validate()?;
+        Ok(config)
     }
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct KvRouterConfigSerde {
     overlap_score_credit: f64,
     overlap_score_credit_decay: f64,
     prefill_load_scale: f64,
+    decode_active_request_weight: f64,
     overlap_score_weight: Option<f64>,
     host_cache_hit_weight: f64,
     disk_cache_hit_weight: f64,
     router_temperature: f64,
     use_kv_events: bool,
-    durable_kv_events: bool,
+    // Compatibility with v1.3 MDCs during v1.4 rolling upgrades. These fields remain private
+    // because the removed JetStream behavior is not supported by the current router.
+    // TODO(v1.5): Remove when v1.3 falls outside the N-1 window.
+    #[serde(rename = "durable_kv_events")]
+    legacy_durable_kv_events: bool,
     router_replica_sync: bool,
     router_track_active_blocks: bool,
     router_track_output_blocks: bool,
     router_assume_kv_reuse: bool,
     router_track_prefill_tokens: bool,
+    router_tracking_hash: TrackingHashAlgorithm,
+    router_tracking_key_file: Option<PathBuf>,
+    router_tracking_key_id: Option<String>,
     router_prefill_load_model: RouterPrefillLoadModel,
-    router_snapshot_threshold: Option<u32>,
-    router_reset_states: bool,
+    #[serde(rename = "router_snapshot_threshold")]
+    _legacy_router_snapshot_threshold: Option<u32>,
+    #[serde(rename = "router_reset_states")]
+    _legacy_router_reset_states: bool,
     router_ttl_secs: f64,
     router_queue_threshold: Option<f64>,
     #[serde(default)]
-    router_queue_by_incoming_missing_isl: RouterQueueDepthTiers,
+    router_policy_config: Option<String>,
     router_event_threads: u32,
     skip_initial_worker_wait: bool,
     router_queue_policy: RouterQueuePolicy,
@@ -534,6 +686,14 @@ struct KvRouterConfigSerde {
     shared_cache_multiplier: f64,
     shared_cache_type: SharedCacheType,
     router_predicted_ttl_secs: Option<f64>,
+    conditional_disagg_enabled: bool,
+    conditional_disagg_policy: ConditionalDisaggPolicyKind,
+    conditional_disagg_eff_isl_threshold: usize,
+    conditional_disagg_eff_isl_ratio_threshold: f64,
+    #[serde(default)]
+    conditional_disagg_prefill_busy_threshold: Option<f64>,
+    #[serde(default)]
+    conditional_disagg_decode_busy_threshold: Option<f64>,
 }
 
 impl Default for KvRouterConfigSerde {
@@ -543,23 +703,27 @@ impl Default for KvRouterConfigSerde {
             overlap_score_credit: config.overlap_score_credit,
             overlap_score_credit_decay: config.overlap_score_credit_decay,
             prefill_load_scale: config.prefill_load_scale,
+            decode_active_request_weight: config.decode_active_request_weight,
             overlap_score_weight: None,
             host_cache_hit_weight: config.host_cache_hit_weight,
             disk_cache_hit_weight: config.disk_cache_hit_weight,
             router_temperature: config.router_temperature,
             use_kv_events: config.use_kv_events,
-            durable_kv_events: config.durable_kv_events,
+            legacy_durable_kv_events: false,
             router_replica_sync: config.router_replica_sync,
             router_track_active_blocks: config.router_track_active_blocks,
             router_track_output_blocks: config.router_track_output_blocks,
             router_assume_kv_reuse: config.router_assume_kv_reuse,
             router_track_prefill_tokens: config.router_track_prefill_tokens,
+            router_tracking_hash: config.router_tracking_hash,
+            router_tracking_key_file: config.router_tracking_key_file,
+            router_tracking_key_id: config.router_tracking_key_id,
             router_prefill_load_model: config.router_prefill_load_model,
-            router_snapshot_threshold: config.router_snapshot_threshold,
-            router_reset_states: config.router_reset_states,
+            _legacy_router_snapshot_threshold: None,
+            _legacy_router_reset_states: false,
             router_ttl_secs: config.router_ttl_secs,
             router_queue_threshold: config.router_queue_threshold,
-            router_queue_by_incoming_missing_isl: config.router_queue_by_incoming_missing_isl,
+            router_policy_config: config.router_policy_config,
             router_event_threads: config.router_event_threads,
             skip_initial_worker_wait: config.skip_initial_worker_wait,
             router_queue_policy: config.router_queue_policy,
@@ -568,48 +732,52 @@ impl Default for KvRouterConfigSerde {
             shared_cache_multiplier: config.shared_cache_multiplier,
             shared_cache_type: config.shared_cache_type,
             router_predicted_ttl_secs: config.router_predicted_ttl_secs,
+            conditional_disagg_enabled: config.conditional_disagg_enabled,
+            conditional_disagg_policy: config.conditional_disagg_policy,
+            conditional_disagg_eff_isl_threshold: config.conditional_disagg_eff_isl_threshold,
+            conditional_disagg_eff_isl_ratio_threshold: config
+                .conditional_disagg_eff_isl_ratio_threshold,
+            conditional_disagg_prefill_busy_threshold: config
+                .conditional_disagg_prefill_busy_threshold,
+            conditional_disagg_decode_busy_threshold: config
+                .conditional_disagg_decode_busy_threshold,
         }
     }
 }
 
 /// KV Router configuration parameters
-#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(try_from = "KvRouterConfigSerde")]
-#[validate(schema(function = "validate_kv_router_config"))]
 pub struct KvRouterConfig {
     /// Device-local prefix-overlap credit multiplier applied to the prefill
-    /// load before sampling (0.0 to 1.0). Set to 0.0 to ignore prefix matching.
-    #[validate(custom(function = "validate_overlap_score_credit"))]
+    /// load before sampling. Values must be finite and non-negative. Values above
+    /// 1.0 give device overlap extra credit. Set to 0.0 to ignore prefix matching.
     pub overlap_score_credit: f64,
 
     /// Decay rate for device-local overlap credit as active prefill load rises
     /// above the least-loaded eligible worker. A value of 0.0 disables decay.
     #[serde(default = "default_overlap_score_credit_decay")]
-    #[validate(range(min = 0.0))]
     pub overlap_score_credit_decay: f64,
 
     /// Scale applied after overlap/cache-hit credits reduce the prompt-side
     /// prefill load. Defaults to 1.0.
-    #[validate(range(min = 0.0))]
     pub prefill_load_scale: f64,
 
+    /// Block-equivalent cost added for each active request on a candidate
+    /// worker. This can balance decode batch size when per-request decode
+    /// compute matters more than resident KV footprint. Defaults to 0.0.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub decode_active_request_weight: f64,
+
     #[serde(default = "default_host_cache_hit_weight")]
-    #[validate(range(min = 0.0, max = 1.0))]
     pub host_cache_hit_weight: f64,
 
     #[serde(default = "default_disk_cache_hit_weight")]
-    #[validate(range(min = 0.0, max = 1.0))]
     pub disk_cache_hit_weight: f64,
 
-    #[validate(range(min = 0.0))]
     pub router_temperature: f64,
 
     pub use_kv_events: bool,
-
-    /// **Deprecated:** Enable durable KV events using NATS JetStream instead of the default event plane.
-    /// This option will be removed in a future release. The event-plane subscriber
-    /// (local_indexer mode) is now the recommended path.
-    pub durable_kv_events: bool,
 
     pub router_replica_sync: bool,
 
@@ -632,57 +800,66 @@ pub struct KvRouterConfig {
     #[serde(default = "default_track_prefill_tokens")]
     pub router_track_prefill_tokens: bool,
 
+    /// Hash algorithm used for router-derived active-sequence identities.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub router_tracking_hash: TrackingHashAlgorithm,
+
+    /// File containing the 32-byte provider key used by keyed tracking mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_tracking_key_file: Option<PathBuf>,
+
+    /// Provider-managed epoch identifier mixed into keyed tracking scope derivation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_tracking_key_id: Option<String>,
+
     /// Optional model for estimating effective prompt-side prefill load over time.
     pub router_prefill_load_model: RouterPrefillLoadModel,
 
-    /// Threshold for triggering snapshots. If None, no snapshots will be performed.
-    #[validate(range(min = 1))]
-    pub router_snapshot_threshold: Option<u32>,
-
-    /// Whether to reset the router state on startup (default: false)
-    pub router_reset_states: bool,
-
     /// TTL for blocks in seconds (only used when use_kv_events is false, default: 120.0)
-    #[validate(range(min = 0.0))]
     pub router_ttl_secs: f64,
+
+    /// Process-local retention policy for a primary approximate indexer.
+    ///
+    /// This value is deliberately omitted from worker model cards. It is only
+    /// meaningful on the router process that owns request guards and releases.
+    #[serde(skip)]
+    pub router_approximate_cache_policy: ApproximateCachePolicyKind,
 
     /// Queue threshold fraction for prefill token capacity.
     /// When set, requests are queued if all workers exceed this fraction of max_num_batched_tokens.
     /// If None, queueing is disabled and all requests go directly to ready.
-    /// Default: 16.0. Must be >= 0. Use 0.0 for maximum queueing sensitivity.
-    #[validate(range(min = 0.0))]
+    /// Disabled by default. Must be >= 0. Use 0.0 for maximum queueing sensitivity.
     pub router_queue_threshold: Option<f64>,
 
-    /// Tiered per-worker pending ISL token caps keyed on incoming missing ISL
-    /// (ISL minus best cached tokens across eligible workers).
-    ///
-    /// For each request, the tier with the highest matched floor wins, and
-    /// that tier's `max_queue_depth * worker_count` is the effective ISL token cap.
-    /// The cap is compared against the sum of ISL tokens for all requests currently
-    /// parked in the pending queue.
-    ///
-    /// Example with 4 workers:
-    ///   [(0, 4194304), (3072, 2097152)]  # 4M and 2M ISL tokens per worker
-    /// - request missing 500 tokens  → matches (0, 4194304)    → cap = 4M*4 = 16M tokens
-    /// - request missing 3500 tokens → matches (3072, 2097152) → cap = 2M*4 = 8M tokens
-    ///
-    /// Semantics across config surfaces:
-    /// - omitted / `None` disables ISL-token capping (unbounded queue cap)
-    /// - when provided, the tier list must be non-empty, start at floor 0,
-    ///   have strictly ascending floors, and use `max_queue_depth > 0`
-    ///
-    /// **Note:** This cap applies only to the SchedulerQueue, not to upstream
-    /// buffers. The TCP request plane has a fixed 1024-slot buffer per
-    /// connection (see `REQUEST_CHANNEL_BUFFER` in tcp_client.rs). Requests
-    /// may accumulate there before reaching the scheduler, so the effective
-    /// end-to-end backlog can exceed the tier caps.
+    /// Optional startup-only YAML configuration for policy-class queues and custom worker selection.
     #[serde(default)]
-    pub router_queue_by_incoming_missing_isl: RouterQueueDepthTiers,
+    pub router_policy_config: Option<String>,
+
+    /// Optional prefill worker-selection instance override.
+    ///
+    /// This process-local value is not serialized into worker model cards.
+    #[serde(skip)]
+    pub router_prefill_policy: Option<String>,
+
+    /// Optional decode worker-selection instance override.
+    ///
+    /// This process-local value is not serialized into worker model cards.
+    #[serde(skip)]
+    pub router_decode_policy: Option<String>,
+
+    /// Run-level model selector used by offline and online replay.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub policy_model_name: Option<String>,
+
+    /// Parsed startup policy document. This prevents per-model file reloads.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub policy_config_cache: OnceLock<super::policy_config::RouterPolicyConfig>,
 
     /// Number of KV indexer worker threads.
     /// When > 1, uses ConcurrentRadixTree with a thread pool for event-driven
     /// and approximate routing writes. Default: 4.
-    #[validate(range(min = 1))]
     pub router_event_threads: u32,
 
     pub skip_initial_worker_wait: bool,
@@ -706,7 +883,6 @@ pub struct KvRouterConfig {
     /// because they need to be fetched. A value of 0.5 means each shared cache hit
     /// counts as half a device-local hit. Default: 0.0 (shared cache scoring disabled);
     /// the CLI sets this to 0.5 when shared cache is enabled.
-    #[validate(range(min = 0.0, max = 1.0))]
     pub shared_cache_multiplier: f64,
 
     /// Type of external shared KV cache to query during routing.
@@ -720,8 +896,56 @@ pub struct KvRouterConfig {
     /// event-driven primary and local side indexer and returns the per-worker
     /// maximum overlap.
     #[serde(default)]
-    #[validate(range(min = 0.0))]
     pub router_predicted_ttl_secs: Option<f64>,
+
+    /// Enable conditional-disagg bypass. When true, the `PrefillRouter`
+    /// may short-circuit selected requests to prefill+decode on a decode worker.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub conditional_disagg_enabled: bool,
+
+    /// Which conditional-disagg policy to run.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub conditional_disagg_policy: ConditionalDisaggPolicyKind,
+
+    /// `IslBoundingPolicy` absolute effective-ISL cutoff in tokens.
+    #[serde(
+        default = "default_conditional_disagg_eff_isl_threshold",
+        skip_serializing_if = "is_default_conditional_disagg_eff_isl_threshold"
+    )]
+    pub conditional_disagg_eff_isl_threshold: usize,
+
+    /// `IslBoundingPolicy` effective-ISL/prompt-token ratio cutoff.
+    #[serde(
+        default = "default_conditional_disagg_eff_isl_ratio_threshold",
+        skip_serializing_if = "is_default_conditional_disagg_eff_isl_ratio_threshold"
+    )]
+    pub conditional_disagg_eff_isl_ratio_threshold: f64,
+
+    /// `PrefillLoadPolicy` busy-line fraction for the chosen prefill worker.
+    /// When unset, the prefill-load condition falls back to `router_queue_threshold`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conditional_disagg_prefill_busy_threshold: Option<f64>,
+
+    /// Decode-busy guard fraction for the chosen decode worker. When unset,
+    /// the guard is disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conditional_disagg_decode_busy_threshold: Option<f64>,
+}
+
+fn default_conditional_disagg_eff_isl_threshold() -> usize {
+    crate::conditional_disagg::DEFAULT_CONDITIONAL_DISAGG_EFF_ISL_THRESHOLD
+}
+
+fn default_conditional_disagg_eff_isl_ratio_threshold() -> f64 {
+    crate::conditional_disagg::DEFAULT_CONDITIONAL_DISAGG_EFF_ISL_RATIO_THRESHOLD
+}
+
+fn is_default_conditional_disagg_eff_isl_threshold(value: &usize) -> bool {
+    *value == default_conditional_disagg_eff_isl_threshold()
+}
+
+fn is_default_conditional_disagg_eff_isl_ratio_threshold(value: &f64) -> bool {
+    *value == default_conditional_disagg_eff_isl_ratio_threshold()
 }
 
 impl Default for KvRouterConfig {
@@ -730,22 +954,28 @@ impl Default for KvRouterConfig {
             overlap_score_credit: 1.0,
             overlap_score_credit_decay: default_overlap_score_credit_decay(),
             prefill_load_scale: default_prefill_load_scale(),
+            decode_active_request_weight: default_decode_active_request_weight(),
             host_cache_hit_weight: default_host_cache_hit_weight(),
             disk_cache_hit_weight: default_disk_cache_hit_weight(),
             router_temperature: 0.0,
             use_kv_events: true,
-            durable_kv_events: false, // default to NATS Core (local indexer mode)
             router_replica_sync: false,
             router_track_active_blocks: true,
             router_track_output_blocks: false,
             router_assume_kv_reuse: true,
             router_track_prefill_tokens: default_track_prefill_tokens(),
+            router_tracking_hash: TrackingHashAlgorithm::default(),
+            router_tracking_key_file: None,
+            router_tracking_key_id: None,
             router_prefill_load_model: RouterPrefillLoadModel::default(),
-            router_snapshot_threshold: Some(1000000),
-            router_reset_states: false,
             router_ttl_secs: 120.0,
-            router_queue_threshold: Some(16.0),
-            router_queue_by_incoming_missing_isl: RouterQueueDepthTiers::unbounded_cap(),
+            router_approximate_cache_policy: ApproximateCachePolicyKind::default(),
+            router_queue_threshold: None,
+            router_policy_config: None,
+            router_prefill_policy: None,
+            router_decode_policy: None,
+            policy_model_name: None,
+            policy_config_cache: OnceLock::new(),
             router_event_threads: 4,
             skip_initial_worker_wait: false,
             router_queue_policy: RouterQueuePolicy::default(),
@@ -754,6 +984,13 @@ impl Default for KvRouterConfig {
             shared_cache_multiplier: 0.0,
             shared_cache_type: SharedCacheType::default(),
             router_predicted_ttl_secs: None,
+            conditional_disagg_enabled: false,
+            conditional_disagg_policy: ConditionalDisaggPolicyKind::default(),
+            conditional_disagg_eff_isl_threshold: default_conditional_disagg_eff_isl_threshold(),
+            conditional_disagg_eff_isl_ratio_threshold:
+                default_conditional_disagg_eff_isl_ratio_threshold(),
+            conditional_disagg_prefill_busy_threshold: None,
+            conditional_disagg_decode_busy_threshold: None,
         }
     }
 }
@@ -762,6 +999,10 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
     type Error = String;
 
     fn try_from(compat: KvRouterConfigSerde) -> Result<Self, Self::Error> {
+        if compat.legacy_durable_kv_events {
+            return Err("durable_kv_events=true is not supported by this runtime".to_string());
+        }
+
         let mut overlap_score_credit = compat.overlap_score_credit;
         let mut prefill_load_scale = compat.prefill_load_scale;
 
@@ -773,26 +1014,32 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             );
         }
 
-        validate_and_return(Self {
+        let config = Self {
             overlap_score_credit,
             overlap_score_credit_decay: compat.overlap_score_credit_decay,
             prefill_load_scale,
+            decode_active_request_weight: compat.decode_active_request_weight,
             host_cache_hit_weight: compat.host_cache_hit_weight,
             disk_cache_hit_weight: compat.disk_cache_hit_weight,
             router_temperature: compat.router_temperature,
             use_kv_events: compat.use_kv_events,
-            durable_kv_events: compat.durable_kv_events,
             router_replica_sync: compat.router_replica_sync,
             router_track_active_blocks: compat.router_track_active_blocks,
             router_track_output_blocks: compat.router_track_output_blocks,
             router_assume_kv_reuse: compat.router_assume_kv_reuse,
             router_track_prefill_tokens: compat.router_track_prefill_tokens,
+            router_tracking_hash: compat.router_tracking_hash,
+            router_tracking_key_file: compat.router_tracking_key_file,
+            router_tracking_key_id: compat.router_tracking_key_id,
             router_prefill_load_model: compat.router_prefill_load_model,
-            router_snapshot_threshold: compat.router_snapshot_threshold,
-            router_reset_states: compat.router_reset_states,
             router_ttl_secs: compat.router_ttl_secs,
+            router_approximate_cache_policy: ApproximateCachePolicyKind::default(),
             router_queue_threshold: compat.router_queue_threshold,
-            router_queue_by_incoming_missing_isl: compat.router_queue_by_incoming_missing_isl,
+            router_policy_config: compat.router_policy_config,
+            router_prefill_policy: None,
+            router_decode_policy: None,
+            policy_model_name: None,
+            policy_config_cache: OnceLock::new(),
             router_event_threads: compat.router_event_threads,
             skip_initial_worker_wait: compat.skip_initial_worker_wait,
             router_queue_policy: compat.router_queue_policy,
@@ -801,68 +1048,388 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             shared_cache_multiplier: compat.shared_cache_multiplier,
             shared_cache_type: compat.shared_cache_type,
             router_predicted_ttl_secs: compat.router_predicted_ttl_secs,
-        })
+            conditional_disagg_enabled: compat.conditional_disagg_enabled,
+            conditional_disagg_policy: compat.conditional_disagg_policy,
+            conditional_disagg_eff_isl_threshold: compat.conditional_disagg_eff_isl_threshold,
+            conditional_disagg_eff_isl_ratio_threshold: compat
+                .conditional_disagg_eff_isl_ratio_threshold,
+            conditional_disagg_prefill_busy_threshold: compat
+                .conditional_disagg_prefill_busy_threshold,
+            conditional_disagg_decode_busy_threshold: compat
+                .conditional_disagg_decode_busy_threshold,
+        };
+        config.validate()?;
+        Ok(config)
     }
 }
 
-fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationError> {
-    if config.durable_kv_events {
-        tracing::warn!(
-            "--durable-kv-events is deprecated and will be removed in a future release. \
-             The event-plane subscriber (local_indexer mode) is now the recommended path."
+fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), String> {
+    validate_tracking_hash_options(
+        config.router_tracking_hash,
+        config.router_tracking_key_file.is_some(),
+        config.router_tracking_key_id.as_deref(),
+    )?;
+    if config.router_track_output_blocks && !config.router_track_active_blocks {
+        return Err(
+            "router_track_output_blocks requires router_track_active_blocks=true".to_string(),
         );
     }
-    if config.durable_kv_events && !config.use_kv_events {
-        return Err(ValidationError::new(
-            "durable_kv_events requires use_kv_events=true",
-        ));
-    }
-    if config.router_track_output_blocks && !config.router_track_active_blocks {
-        return Err(ValidationError::new(
-            "router_track_output_blocks requires router_track_active_blocks=true",
-        ));
-    }
     if config.router_prefill_load_model.is_enabled() && !config.router_track_prefill_tokens {
-        return Err(ValidationError::new(
-            "router_prefill_load_model requires router_track_prefill_tokens=true",
-        ));
-    }
-    if config.router_prefill_load_model.is_enabled()
-        && !matches!(config.router_queue_policy, RouterQueuePolicy::Fcfs)
-    {
-        return Err(ValidationError::new(
-            "router_prefill_load_model currently requires router_queue_policy='fcfs'",
-        ));
+        return Err(
+            "router_prefill_load_model requires router_track_prefill_tokens=true".to_string(),
+        );
     }
     if config.use_remote_indexer && config.serve_indexer {
-        return Err(ValidationError::new(
-            "use_remote_indexer and serve_indexer are mutually exclusive",
-        ));
+        return Err("use_remote_indexer and serve_indexer are mutually exclusive".to_string());
     }
     if config.serve_indexer && config.overlap_score_credit == 0.0 {
-        return Err(ValidationError::new(
-            "serve_indexer requires overlap_score_credit > 0",
-        ));
+        return Err("serve_indexer requires overlap_score_credit > 0".to_string());
     }
     if config.router_predicted_ttl_secs.is_some() && !config.use_kv_events {
-        return Err(ValidationError::new(
-            "router_predicted_ttl_secs requires use_kv_events=true",
-        ));
+        return Err("router_predicted_ttl_secs requires use_kv_events=true".to_string());
     }
-    // Validation for router_queue_by_incoming_missing_isl is handled by RouterQueueDepthTiers::try_from
+    if config.use_kv_events
+        && config.router_approximate_cache_policy == ApproximateCachePolicyKind::Lru
+    {
+        return Err(
+            "router_approximate_cache_policy=lru requires use_kv_events=false; the local side indexer is TTL-only"
+                .to_string(),
+        );
+    }
+    if config.conditional_disagg_enabled
+        && matches!(
+            config.conditional_disagg_policy,
+            ConditionalDisaggPolicyKind::PrefillLoad | ConditionalDisaggPolicyKind::IslOrLoad,
+        )
+    {
+        match (
+            config.conditional_disagg_prefill_busy_threshold,
+            config.router_queue_threshold,
+        ) {
+            (Some(threshold), _) => {
+                tracing::info!(
+                    busy_threshold = threshold,
+                    "conditional_disagg prefill-load condition using --router-conditional-disagg-config {{\"prefill_busy_threshold\": ...}}"
+                );
+            }
+            (None, Some(threshold)) => {
+                tracing::info!(
+                    inherited_threshold = threshold,
+                    "conditional_disagg prefill-load condition using --router-queue-threshold because --router-conditional-disagg-config {{\"prefill_busy_threshold\": ...}} is unset"
+                );
+            }
+            (None, None) => {
+                return Err(format!(
+                    "conditional_disagg policy={:?} needs prefill_busy_threshold, but neither --router-conditional-disagg-config {{\"prefill_busy_threshold\": ...}} nor --router-queue-threshold is set",
+                    config.conditional_disagg_policy
+                ));
+            }
+        }
+    }
+    if config.conditional_disagg_enabled
+        && let Some(threshold) = config.conditional_disagg_decode_busy_threshold
+    {
+        tracing::info!(
+            decode_busy_threshold = threshold,
+            "conditional_disagg decode-busy guard enabled: bypass is disabled when the selected decode worker's projected decode load exceeds this fraction of KV capacity"
+        );
+    }
+    if let Err(error) = config.loaded_policy_config() {
+        return Err(format!("router_policy_config: {error}"));
+    }
     Ok(())
 }
 
 impl KvRouterConfig {
+    fn loaded_policy_config(
+        &self,
+    ) -> Result<
+        Option<&super::policy_config::RouterPolicyConfig>,
+        super::policy_config::RouterPolicyConfigError,
+    > {
+        let Some(path) = self.router_policy_config.as_deref() else {
+            return Ok(None);
+        };
+        if self.policy_config_cache.get().is_none() {
+            let parsed = super::policy_config::RouterPolicyConfig::from_path(path)?;
+            let _ = self.policy_config_cache.set(parsed);
+        }
+        Ok(self.policy_config_cache.get())
+    }
+
+    pub fn policy_profile(
+        &self,
+        model_name: Option<&str>,
+    ) -> Result<super::policy_config::PolicyProfile, super::policy_config::RouterPolicyConfigError>
+    {
+        let Some(policy_config) = self.loaded_policy_config()? else {
+            return Ok(super::policy_config::PolicyProfile::synthetic(
+                self.router_queue_threshold,
+                self.router_queue_policy,
+            ));
+        };
+        Ok(policy_config.resolve_profile(
+            model_name,
+            self.router_queue_threshold,
+            self.router_queue_policy,
+        ))
+    }
+
+    /// Return the custom worker-selection configuration from `router_policy_config`, if any.
+    pub fn worker_selection_config(
+        &self,
+    ) -> Result<
+        Option<&super::policy_config::WorkerSelectionConfig>,
+        super::policy_config::RouterPolicyConfigError,
+    > {
+        Ok(self
+            .loaded_policy_config()?
+            .and_then(super::policy_config::RouterPolicyConfig::worker_selection))
+    }
+
+    /// Return one configured custom worker-selection instance, if any.
+    ///
+    /// `DYN_ROUTER_WORKER_SELECTION_POLICY` overrides the role-specific YAML selections. The
+    /// reserved value `default`, and an absent selection, both use Dynamo's built-in worker
+    /// selector. This method also reports a stage-specific instance so stock builds can reject
+    /// unsupported custom policy configuration instead of silently ignoring it.
+    pub fn selected_worker_selection_policy_instance(
+        &self,
+    ) -> Result<Option<String>, WorkerSelectionPolicyConfigError> {
+        let selected = match env::var(DYN_ROUTER_WORKER_SELECTION_POLICY) {
+            Ok(name) => Ok(Some(name)),
+            Err(VarError::NotPresent) => Ok(None),
+            Err(source) => Err(source),
+        };
+        let selected = self.selected_worker_selection_policy_instances_from(selected)?;
+        Ok(selected
+            .aggregated
+            .or(selected.prefill)
+            .or(selected.decode)
+            .or(selected.encode))
+    }
+
+    /// Return the custom worker-selection instance selected for one explicit worker role.
+    ///
+    /// Prefill and decode overrides take precedence over the global environment override. The
+    /// global override takes precedence over all YAML role selections.
+    pub fn selected_worker_selection_policy_instance_for(
+        &self,
+        worker_type: WorkerType,
+    ) -> Result<Option<String>, WorkerSelectionPolicyConfigError> {
+        let selected = match env::var(DYN_ROUTER_WORKER_SELECTION_POLICY) {
+            Ok(name) => Ok(Some(name)),
+            Err(VarError::NotPresent) => Ok(None),
+            Err(source) => Err(source),
+        };
+        let selected = self.selected_worker_selection_policy_instances_from(selected)?;
+        Ok(match worker_type {
+            WorkerType::Aggregated => selected.aggregated,
+            WorkerType::Prefill => selected.prefill,
+            WorkerType::Decode => selected.decode,
+            WorkerType::Encode => selected.encode,
+        })
+    }
+
+    /// Return worker roles with a non-default policy selected after applying standard precedence.
+    pub fn explicit_worker_selection_policy_types(
+        &self,
+    ) -> Result<Vec<WorkerType>, WorkerSelectionPolicyConfigError> {
+        let selected = match env::var(DYN_ROUTER_WORKER_SELECTION_POLICY) {
+            Ok(name) => Ok(Some(name)),
+            Err(VarError::NotPresent) => Ok(None),
+            Err(source) => Err(source),
+        };
+        self.explicit_worker_selection_policy_types_from(selected)
+    }
+
+    fn explicit_worker_selection_policy_types_from(
+        &self,
+        selected: Result<Option<String>, VarError>,
+    ) -> Result<Vec<WorkerType>, WorkerSelectionPolicyConfigError> {
+        let WorkerSelectionPolicySelections {
+            aggregated,
+            prefill,
+            decode,
+            encode,
+        } = self.selected_worker_selection_policy_instances_from(selected)?;
+        Ok([
+            (WorkerType::Aggregated, aggregated),
+            (WorkerType::Prefill, prefill),
+            (WorkerType::Decode, decode),
+            (WorkerType::Encode, encode),
+        ]
+        .into_iter()
+        .filter_map(|(worker_type, selection)| selection.map(|_| worker_type))
+        .collect())
+    }
+
+    #[cfg(test)]
+    fn selected_worker_selection_policy_instance_from(
+        &self,
+        selected: Result<Option<String>, VarError>,
+    ) -> Result<Option<String>, WorkerSelectionPolicyConfigError> {
+        let selected = self.selected_worker_selection_policy_instances_from(selected)?;
+        Ok(selected
+            .aggregated
+            .or(selected.prefill)
+            .or(selected.decode)
+            .or(selected.encode))
+    }
+
+    #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
+    pub(crate) fn selected_worker_selection_policy_instances(
+        &self,
+    ) -> Result<WorkerSelectionPolicySelections, WorkerSelectionPolicyConfigError> {
+        let selected = match env::var(DYN_ROUTER_WORKER_SELECTION_POLICY) {
+            Ok(name) => Ok(Some(name)),
+            Err(VarError::NotPresent) => Ok(None),
+            Err(source) => Err(source),
+        };
+        self.selected_worker_selection_policy_instances_from(selected)
+    }
+
+    fn selected_worker_selection_policy_instances_from(
+        &self,
+        selected: Result<Option<String>, VarError>,
+    ) -> Result<WorkerSelectionPolicySelections, WorkerSelectionPolicyConfigError> {
+        fn normalized(value: Option<&str>) -> Option<String> {
+            value
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+        }
+
+        fn custom_only(selected: Option<String>) -> Option<String> {
+            selected.filter(|name| name != "default")
+        }
+
+        let policy_config = self
+            .worker_selection_config()
+            .map_err(|source| WorkerSelectionPolicyConfigError::Config { source })?;
+        let global = selected
+            .map_err(|source| WorkerSelectionPolicyConfigError::Environment { source })?
+            .and_then(|name| normalized(Some(&name)));
+        let yaml_aggregated = policy_config
+            .and_then(|config| config.aggregated_instance())
+            .map(str::to_owned);
+        let aggregated = global.clone().or(yaml_aggregated);
+        let prefill = normalized(self.router_prefill_policy.as_deref())
+            .or_else(|| global.clone())
+            .or_else(|| {
+                policy_config
+                    .and_then(|config| config.prefill_instance())
+                    .map(str::to_owned)
+            });
+        let decode = normalized(self.router_decode_policy.as_deref())
+            .or_else(|| global.clone())
+            .or_else(|| {
+                policy_config
+                    .and_then(|config| config.decode_instance())
+                    .map(str::to_owned)
+            });
+        let encode = global.or_else(|| {
+            policy_config
+                .and_then(|config| config.encode_instance())
+                .map(str::to_owned)
+        });
+
+        Ok(WorkerSelectionPolicySelections {
+            aggregated: custom_only(aggregated),
+            prefill: custom_only(prefill),
+            decode: custom_only(decode),
+            encode: custom_only(encode),
+        })
+    }
+
+    pub fn with_policy_model_name(mut self, model_name: Option<String>) -> Self {
+        self.policy_model_name = model_name;
+        self
+    }
+
+    pub fn configured_policy_profile(
+        &self,
+    ) -> Result<super::policy_config::PolicyProfile, super::policy_config::RouterPolicyConfigError>
+    {
+        self.policy_profile(self.policy_model_name.as_deref())
+    }
+
     pub fn validate_config(&self) -> Result<(), String> {
-        self.validate().map_err(|error| error.to_string())
+        self.validate()
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        validate_overlap_score_credit(self.overlap_score_credit)?;
+        validate_min(
+            "overlap_score_credit_decay",
+            self.overlap_score_credit_decay,
+            0.0,
+        )?;
+        validate_min("prefill_load_scale", self.prefill_load_scale, 0.0)?;
+        validate_range(
+            "decode_active_request_weight",
+            self.decode_active_request_weight,
+            0.0,
+            f64::MAX,
+        )?;
+        validate_range(
+            "host_cache_hit_weight",
+            self.host_cache_hit_weight,
+            0.0,
+            1.0,
+        )?;
+        validate_range(
+            "disk_cache_hit_weight",
+            self.disk_cache_hit_weight,
+            0.0,
+            1.0,
+        )?;
+        validate_min("router_temperature", self.router_temperature, 0.0)?;
+        validate_min("router_ttl_secs", self.router_ttl_secs, 0.0)?;
+        if let Some(value) = self.router_queue_threshold {
+            validate_min("router_queue_threshold", value, 0.0)?;
+        }
+        if self.router_event_threads == 0 {
+            return Err("router_event_threads must be at least 1".to_string());
+        }
+        validate_range(
+            "shared_cache_multiplier",
+            self.shared_cache_multiplier,
+            0.0,
+            1.0,
+        )?;
+        if let Some(value) = self.router_predicted_ttl_secs {
+            validate_min("router_predicted_ttl_secs", value, 0.0)?;
+        }
+        validate_range(
+            "conditional_disagg_eff_isl_ratio_threshold",
+            self.conditional_disagg_eff_isl_ratio_threshold,
+            0.0,
+            1.0,
+        )?;
+        if let Some(value) = self.conditional_disagg_prefill_busy_threshold {
+            validate_min("conditional_disagg_prefill_busy_threshold", value, 0.0)?;
+        }
+        if let Some(value) = self.conditional_disagg_decode_busy_threshold {
+            validate_min("conditional_disagg_decode_busy_threshold", value, 0.0)?;
+        }
+        validate_kv_router_config(self)
     }
 
     pub fn router_queue_recheck_interval(&self) -> Duration {
         const DEFAULT_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
         const PREFILL_LOAD_RECHECK_INTERVAL: Duration = Duration::from_millis(100);
 
-        if self.router_prefill_load_model.is_enabled() && self.router_queue_threshold.is_some() {
+        // `validate_config` parses router_policy_config at startup. Preserve the old
+        // conservative behavior if this helper is called before validation, but do
+        // not treat a worker-selection-only document as a queue policy profile.
+        let has_routing_profiles = self.policy_config_cache.get().map_or(
+            self.router_policy_config.is_some(),
+            super::policy_config::RouterPolicyConfig::has_routing_profiles,
+        );
+        if self.router_prefill_load_model.is_enabled()
+            && (has_routing_profiles || self.router_queue_threshold.is_some())
+        {
             return PREFILL_LOAD_RECHECK_INTERVAL;
         }
 
@@ -871,6 +1438,17 @@ impl KvRouterConfig {
 
     pub fn predict_on_route_enabled(&self) -> bool {
         self.router_predicted_ttl_secs.is_some()
+    }
+
+    pub fn queueing_enabled(
+        &self,
+        model_name: Option<&str>,
+    ) -> Result<bool, super::policy_config::RouterPolicyConfigError> {
+        Ok(self
+            .policy_profile(model_name)?
+            .classes()
+            .iter()
+            .any(super::policy_config::PolicyClassConfig::queueing_enabled))
     }
 
     pub fn assume_kv_reuse(&self, config_override: Option<&RouterConfigOverride>) -> bool {
@@ -891,6 +1469,11 @@ impl KvRouterConfig {
     /// - `None` if `router_track_active_blocks` is false
     /// - Random hashes if `router_track_active_blocks` is true but `router_assume_kv_reuse` is false
     /// - Actual sequence hashes if both are true
+    /// # Panics
+    ///
+    /// Panics in keyed mode because the legacy interface has no initialized
+    /// [`TrackingHashContext`]. Keyed callers must use
+    /// [`Self::compute_seq_hashes_for_tracking_with_context`].
     pub fn compute_seq_hashes_for_tracking(
         &self,
         tokens: &[u32],
@@ -899,18 +1482,26 @@ impl KvRouterConfig {
         hash_options: BlockHashOptions<'_>,
         precomputed_block_hashes: Option<&[LocalBlockHash]>,
     ) -> Option<Vec<u64>> {
+        assert_eq!(
+            self.router_tracking_hash,
+            TrackingHashAlgorithm::PublicXxh3V1,
+            "compute_seq_hashes_for_tracking cannot be used with keyed tracking; initialize a TrackingHashContext and call compute_seq_hashes_for_tracking_with_context"
+        );
+
         if !self.router_track_active_blocks {
             return None;
         }
 
-        let num_blocks = tokens.len() / block_size as usize;
+        let num_blocks = complete_block_count(
+            tokens.len(),
+            block_size,
+            hash_options.is_eagle.unwrap_or(false),
+        );
         if num_blocks == 0 {
             return Some(Vec::new());
         }
 
-        let assume_kv_reuse = self.assume_kv_reuse(config_override);
-
-        if assume_kv_reuse {
+        if self.assume_kv_reuse(config_override) {
             let block_hashes = match precomputed_block_hashes {
                 Some(block_hashes) => block_hashes,
                 None => {
@@ -920,9 +1511,48 @@ impl KvRouterConfig {
             };
             Some(compute_seq_hash_for_block(block_hashes))
         } else {
-            let mut rng = rand::rng();
-            Some((0..num_blocks).map(|_| rng.random::<u64>()).collect())
+            Some(random_sequence_hashes(num_blocks))
         }
+    }
+
+    /// Generate non-reusable sequence identities for a known number of full
+    /// blocks. Callers that already have compact block metadata can use this
+    /// without materializing the original token sequence solely to recover its
+    /// length.
+    pub fn random_seq_hashes_for_tracking(&self, num_blocks: usize) -> Option<Vec<u64>> {
+        if !self.router_track_active_blocks {
+            return None;
+        }
+        Some(random_sequence_hashes(num_blocks))
+    }
+
+    /// Compute sequence hashes with a router-initialized tracking-hash context.
+    pub fn compute_seq_hashes_for_tracking_with_context(
+        &self,
+        tracking_hash: &TrackingHashContext,
+        scope: TrackingHashScope<'_>,
+        tokens: &[u32],
+        config_override: Option<&RouterConfigOverride>,
+        hash_options: BlockHashOptions<'_>,
+        precomputed_block_hashes: Option<&[LocalBlockHash]>,
+    ) -> Option<Vec<u64>> {
+        assert_eq!(
+            tracking_hash.algorithm(),
+            self.router_tracking_hash,
+            "tracking hash context must match KvRouterConfig"
+        );
+        if !self.router_track_active_blocks {
+            return None;
+        }
+
+        let assume_kv_reuse = self.assume_kv_reuse(config_override);
+        Some(tracking_hash.compute_sequence_hashes_for_tracking(
+            scope,
+            tokens,
+            hash_options,
+            assume_kv_reuse,
+            precomputed_block_hashes,
+        ))
     }
 
     /// Check if KV event subscription should be started.
@@ -938,33 +1568,31 @@ impl KvRouterConfig {
     }
 }
 
+fn random_sequence_hashes(num_blocks: usize) -> Vec<u64> {
+    (0..num_blocks).map(|_| fastrand::u64(..)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::{BlockExtraInfo, BlockMmObjectInfo};
+    use crate::identity::RoutingPartitionRef;
+    use crate::protocols::{BlockExtraInfo, BlockMmObjectInfo, compute_seq_hash_for_block};
     use std::collections::HashMap;
 
-    fn config_from_values(values: &[(&str, &str)]) -> KvRouterConfig {
-        let values: HashMap<&str, &str> = values.iter().copied().collect();
-        kv_router_config_from_lookup(|key| values.get(key).map(|value| (*value).to_string()))
+    fn test_tracking_scope(block_size: u32) -> TrackingHashScope<'static> {
+        TrackingHashScope {
+            partition: RoutingPartitionRef::new("model", "default"),
+            block_size,
+        }
     }
 
-    #[test]
-    fn dynamo_env_config_uses_defaults_when_unset() {
-        let config = config_from_values(&[]);
-        let default = KvRouterConfig::default();
+    fn config_from_values(values: &[(&str, &str)]) -> KvRouterConfig {
+        try_config_from_values(values).unwrap()
+    }
 
-        assert_eq!(config.overlap_score_credit, default.overlap_score_credit);
-        assert_eq!(
-            config.overlap_score_credit_decay,
-            default.overlap_score_credit_decay
-        );
-        assert_eq!(config.prefill_load_scale, default.prefill_load_scale);
-        assert_eq!(config.use_kv_events, default.use_kv_events);
-        assert_eq!(
-            config.router_predicted_ttl_secs,
-            default.router_predicted_ttl_secs
-        );
+    fn try_config_from_values(values: &[(&str, &str)]) -> Result<KvRouterConfig, String> {
+        let values: HashMap<&str, &str> = values.iter().copied().collect();
+        kv_router_config_from_lookup(|key| values.get(key).map(|value| (*value).to_string()))
     }
 
     #[test]
@@ -973,25 +1601,74 @@ mod tests {
             ("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "0.25"),
             ("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY", "0.75"),
             ("DYN_ROUTER_PREFILL_LOAD_SCALE", "2.5"),
+            ("DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT", "32"),
             ("DYN_ROUTER_TEMPERATURE", "0.7"),
-            ("DYN_USE_KV_EVENTS", "false"),
+            ("DYN_ROUTER_USE_KV_EVENTS", "false"),
             ("DYN_ROUTER_REPLICA_SYNC", "yes"),
             ("DYN_ROUTER_TRACK_ACTIVE_BLOCKS", "0"),
             ("DYN_ROUTER_TRACK_OUTPUT_BLOCKS", "on"),
+            ("DYN_ROUTER_ASSUME_KV_REUSE", "false"),
             ("DYN_ROUTER_TRACK_PREFILL_TOKENS", "false"),
+            ("DYN_ROUTER_TRACKING_HASH", "keyed-xxh3-v1"),
+            (
+                "DYN_ROUTER_TRACKING_KEY_FILE",
+                "/run/secrets/dynamo/tracking-key",
+            ),
+            ("DYN_ROUTER_TRACKING_KEY_ID", "2026-01"),
             ("DYN_ROUTER_QUEUE_THRESHOLD", "4.5"),
+            ("DYN_ROUTER_TTL_SECS", "300"),
+            ("DYN_ROUTER_EVENT_THREADS", "8"),
+            ("DYN_ROUTER_QUEUE_POLICY", "wspt"),
+            ("DYN_USE_REMOTE_INDEXER", "true"),
+            ("DYN_SHARED_CACHE_MULTIPLIER", "0.5"),
+            ("DYN_SHARED_CACHE_TYPE", "hicache"),
+            ("DYN_ROUTER_HOST_CACHE_HIT_WEIGHT", "0.6"),
+            ("DYN_ROUTER_DISK_CACHE_HIT_WEIGHT", "0.3"),
+            ("DYN_ROUTER_PREFILL_LOAD_MODEL", "aic"),
+            (DYN_ROUTER_PREFILL_POLICY, "prefill-cli"),
+            (DYN_ROUTER_DECODE_POLICY, "decode-cli"),
+            (DYN_ROUTER_APPROXIMATE_CACHE_POLICY, "lru"),
         ]);
 
         assert_eq!(config.overlap_score_credit, 0.25);
         assert_eq!(config.overlap_score_credit_decay, 0.75);
         assert_eq!(config.prefill_load_scale, 2.5);
+        assert_eq!(config.router_prefill_policy.as_deref(), Some("prefill-cli"));
+        assert_eq!(config.router_decode_policy.as_deref(), Some("decode-cli"));
+        assert_eq!(config.decode_active_request_weight, 32.0);
         assert_eq!(config.router_temperature, 0.7);
         assert!(!config.use_kv_events);
         assert!(config.router_replica_sync);
         assert!(!config.router_track_active_blocks);
         assert!(config.router_track_output_blocks);
+        assert!(!config.router_assume_kv_reuse);
         assert!(!config.router_track_prefill_tokens);
+        assert_eq!(
+            config.router_tracking_hash,
+            TrackingHashAlgorithm::KeyedXxh3V1
+        );
+        assert_eq!(
+            config.router_tracking_key_file,
+            Some(PathBuf::from("/run/secrets/dynamo/tracking-key"))
+        );
+        assert_eq!(config.router_tracking_key_id.as_deref(), Some("2026-01"));
         assert_eq!(config.router_queue_threshold, Some(4.5));
+        assert_eq!(config.router_ttl_secs, 300.0);
+        assert_eq!(config.router_event_threads, 8);
+        assert_eq!(config.router_queue_policy, RouterQueuePolicy::Wspt);
+        assert!(config.use_remote_indexer);
+        assert_eq!(config.shared_cache_multiplier, 0.5);
+        assert_eq!(config.shared_cache_type, SharedCacheType::Hicache);
+        assert_eq!(config.host_cache_hit_weight, 0.6);
+        assert_eq!(config.disk_cache_hit_weight, 0.3);
+        assert_eq!(
+            config.router_prefill_load_model,
+            RouterPrefillLoadModel::Aic
+        );
+        assert_eq!(
+            config.router_approximate_cache_policy,
+            ApproximateCachePolicyKind::Lru
+        );
 
         let predicted = config_from_values(&[("DYN_ROUTER_PREDICTED_TTL_SECS", "60")]);
         assert_eq!(predicted.router_predicted_ttl_secs, Some(60.0));
@@ -1019,6 +1696,22 @@ mod tests {
     }
 
     #[test]
+    fn dynamo_env_config_prefers_canonical_use_kv_events_name() {
+        let canonical_false = config_from_values(&[("DYN_ROUTER_USE_KV_EVENTS", "false")]);
+        assert!(!canonical_false.use_kv_events);
+
+        let legacy_false = config_from_values(&[("DYN_USE_KV_EVENTS", "false")]);
+        assert!(!legacy_false.use_kv_events);
+
+        // Canonical name wins when both are set.
+        let canonical_wins = config_from_values(&[
+            ("DYN_ROUTER_USE_KV_EVENTS", "false"),
+            ("DYN_USE_KV_EVENTS", "true"),
+        ]);
+        assert!(!canonical_wins.use_kv_events);
+    }
+
+    #[test]
     fn dynamo_env_config_ignores_unparseable_values_and_validates_ranges() {
         let unparseable = config_from_values(&[
             ("DYN_ROUTER_TEMPERATURE", "warm"),
@@ -1031,8 +1724,37 @@ mod tests {
             default.router_track_active_blocks
         );
 
-        let out_of_range = config_from_values(&[("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "1.5")]);
-        assert!(out_of_range.validate_config().is_err());
+        let amplified = config_from_values(&[("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "1.5")]);
+        assert!(amplified.validate_config().is_ok());
+
+        for value in ["-0.5", "NaN", "inf"] {
+            let invalid_credit =
+                config_from_values(&[("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", value)]);
+            assert!(invalid_credit.validate_config().is_err());
+
+            let invalid_active_request_weight =
+                config_from_values(&[("DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT", value)]);
+            assert!(invalid_active_request_weight.validate_config().is_err());
+        }
+
+        let error = try_config_from_values(&[("DYN_ROUTER_TRACKING_HASH", "mystery")]).unwrap_err();
+        assert!(error.contains("public-xxh3-v1 or keyed-xxh3-v1"));
+
+        let error =
+            try_config_from_values(&[(DYN_ROUTER_APPROXIMATE_CACHE_POLICY, "clock")]).unwrap_err();
+        assert!(error.contains("expected 'ttl' or 'lru'"));
+
+        let error = try_config_from_values(&[("DYN_ROUTER_QUEUE_POLICY", "random")]).unwrap_err();
+        assert!(error.contains("expected 'fcfs', 'lcfs', or 'wspt'"));
+
+        let error = try_config_from_values(&[("DYN_SHARED_CACHE_TYPE", "rdma")]).unwrap_err();
+        assert!(error.contains("expected 'none' or 'hicache'"));
+
+        let error =
+            try_config_from_values(&[("DYN_ROUTER_PREFILL_LOAD_MODEL", "fast")]).unwrap_err();
+        assert!(error.contains("expected 'none' or 'aic'"));
+
+        assert!(serde_json::to_string(&config_from_values(&[])).is_ok());
     }
 
     #[test]
@@ -1086,6 +1808,60 @@ mod tests {
     }
 
     #[test]
+    fn random_seq_hashes_for_tracking_uses_block_count_and_tracking_policy() {
+        let config = KvRouterConfig::default();
+        assert_eq!(config.random_seq_hashes_for_tracking(3).unwrap().len(), 3);
+
+        let disabled = KvRouterConfig {
+            router_track_active_blocks: false,
+            ..Default::default()
+        };
+        assert_eq!(disabled.random_seq_hashes_for_tracking(3), None);
+    }
+
+    #[test]
+    fn context_aware_tracking_matches_public_legacy_api() {
+        let config = KvRouterConfig::default();
+        let context = TrackingHashContext::from_config(&config).unwrap();
+        let tokens: Vec<u32> = (0..8).collect();
+
+        let legacy = config.compute_seq_hashes_for_tracking(
+            &tokens,
+            4,
+            None,
+            BlockHashOptions::default(),
+            None,
+        );
+        let context_aware = config.compute_seq_hashes_for_tracking_with_context(
+            &context,
+            test_tracking_scope(4),
+            &tokens,
+            None,
+            BlockHashOptions::default(),
+            None,
+        );
+
+        assert_eq!(legacy, context_aware);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot be used with keyed tracking")]
+    fn legacy_tracking_api_does_not_fall_back_in_keyed_mode() {
+        let config = KvRouterConfig {
+            router_tracking_hash: TrackingHashAlgorithm::KeyedXxh3V1,
+            ..Default::default()
+        };
+
+        let _ = config.compute_seq_hashes_for_tracking(
+            &[1, 2, 3, 4],
+            4,
+            None,
+            BlockHashOptions::default(),
+            None,
+        );
+    }
+
+    #[test]
     fn test_kv_router_config_rejects_out_of_range_shared_cache_multiplier() {
         let too_small = KvRouterConfig {
             shared_cache_multiplier: -0.1,
@@ -1098,6 +1874,32 @@ mod tests {
 
         assert!(too_small.validate().is_err());
         assert!(too_large.validate().is_err());
+    }
+
+    #[test]
+    fn dynamo_env_config_applies_python_default_shared_cache_multiplier() {
+        let default = KvRouterConfig::default();
+
+        // Without shared cache, the multiplier stays at its Rust default (0.0).
+        let none_type = config_from_values(&[("DYN_SHARED_CACHE_TYPE", "none")]);
+        assert_eq!(none_type.shared_cache_type, SharedCacheType::None);
+        assert_eq!(
+            none_type.shared_cache_multiplier,
+            default.shared_cache_multiplier
+        );
+
+        // Enabling shared cache without an explicit multiplier matches the
+        // Python CLI default of 0.5.
+        let hicache_only = config_from_values(&[("DYN_SHARED_CACHE_TYPE", "hicache")]);
+        assert_eq!(hicache_only.shared_cache_type, SharedCacheType::Hicache);
+        assert_eq!(hicache_only.shared_cache_multiplier, 0.5);
+
+        // An explicit multiplier still wins.
+        let explicit = config_from_values(&[
+            ("DYN_SHARED_CACHE_TYPE", "hicache"),
+            ("DYN_SHARED_CACHE_MULTIPLIER", "0.3"),
+        ]);
+        assert_eq!(explicit.shared_cache_multiplier, 0.3);
     }
 
     #[test]
@@ -1148,49 +1950,471 @@ mod tests {
     }
 
     #[test]
-    fn test_kv_router_config_deserializes_predicted_ttl() {
-        let config: KvRouterConfig =
-            serde_json::from_str(r#"{"router_predicted_ttl_secs":5.0}"#).unwrap();
+    fn test_kv_router_config_deserializes_policy_path() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            "default_policy_family: default\nuncached_isl_buckets:\n  - min_tokens: 0\n    bucket: all\npolicy_classes:\n  - name: default\n    policy_family: default\n    cache_bucket: all\n    quantum: 1\n",
+        )
+        .unwrap();
+        let encoded = serde_json::json!({
+            "router_policy_config": policy_file.path(),
+        })
+        .to_string();
+        let config: KvRouterConfig = serde_json::from_str(&encoded).unwrap();
 
-        assert_eq!(config.router_predicted_ttl_secs, Some(5.0));
+        assert_eq!(
+            config.router_policy_config.as_deref(),
+            Some(policy_file.path().to_str().unwrap())
+        );
     }
 
     #[test]
-    fn test_kv_router_config_defaults_to_unbounded_queue_cap() {
-        let config = KvRouterConfig::default();
-
-        assert!(config.router_queue_by_incoming_missing_isl.is_unbounded());
-    }
-
-    #[test]
-    fn test_kv_router_config_deserializes_missing_queue_tiers_as_unbounded() {
-        let config: KvRouterConfig = serde_json::from_str(r#"{}"#).unwrap();
-
-        assert!(config.router_queue_by_incoming_missing_isl.is_unbounded());
-    }
-
-    #[test]
-    fn test_kv_router_config_deserializes_empty_queue_tiers_as_unbounded() {
-        let config: KvRouterConfig =
-            serde_json::from_str(r#"{"router_queue_by_incoming_missing_isl":[]}"#).unwrap();
-
-        assert!(config.router_queue_by_incoming_missing_isl.is_unbounded());
-    }
-
-    #[test]
-    fn test_kv_router_config_rejects_out_of_range_overlap_score_credit() {
-        let too_small = KvRouterConfig {
-            overlap_score_credit: -0.1,
+    fn selected_worker_selection_policy_instance_uses_override_or_yaml_aggregated() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            r#"
+worker_selection:
+  aggregated: custom
+  instances:
+    - name: custom
+      type: acme
+      parameters: {}
+"#,
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
             ..Default::default()
         };
-        let too_large = KvRouterConfig {
+
+        assert_eq!(
+            config
+                .selected_worker_selection_policy_instances_from(Ok(None))
+                .unwrap(),
+            WorkerSelectionPolicySelections {
+                aggregated: Some("custom".to_string()),
+                prefill: None,
+                decode: None,
+                encode: None,
+            }
+        );
+
+        assert_eq!(
+            config
+                .selected_worker_selection_policy_instance_from(Ok(None))
+                .unwrap(),
+            Some("custom".to_string())
+        );
+        assert_eq!(
+            config
+                .selected_worker_selection_policy_instance_from(Ok(Some("default".to_string())))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            config
+                .selected_worker_selection_policy_instance_from(Ok(Some("".to_string())))
+                .unwrap(),
+            Some("custom".to_string())
+        );
+        assert_eq!(
+            config
+                .selected_worker_selection_policy_instance_from(Ok(Some("override".to_string())))
+                .unwrap(),
+            Some("override".to_string())
+        );
+        assert_eq!(
+            config
+                .selected_worker_selection_policy_instance_from(Ok(Some(" override ".to_string())))
+                .unwrap(),
+            Some("override".to_string())
+        );
+    }
+
+    #[test]
+    fn selected_worker_selection_policy_instances_apply_stage_precedence() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            r#"
+worker_selection:
+  aggregated: yaml-aggregated
+  prefill: yaml-prefill
+  decode: yaml-decode
+  encode: yaml-encode
+  instances:
+    - name: yaml-aggregated
+      type: acme
+    - name: yaml-prefill
+      type: acme
+    - name: yaml-decode
+      type: acme
+    - name: yaml-encode
+      type: acme
+    - name: global
+      type: acme
+    - name: cli-prefill
+      type: acme
+"#,
+        )
+        .unwrap();
+        let mut config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            config
+                .selected_worker_selection_policy_instances_from(Ok(None))
+                .unwrap(),
+            WorkerSelectionPolicySelections {
+                aggregated: Some("yaml-aggregated".to_string()),
+                prefill: Some("yaml-prefill".to_string()),
+                decode: Some("yaml-decode".to_string()),
+                encode: Some("yaml-encode".to_string()),
+            }
+        );
+
+        config.router_prefill_policy = Some("cli-prefill".to_string());
+        config.router_decode_policy = Some("default".to_string());
+        assert_eq!(
+            config
+                .selected_worker_selection_policy_instances_from(Ok(Some("global".to_string())))
+                .unwrap(),
+            WorkerSelectionPolicySelections {
+                aggregated: Some("global".to_string()),
+                prefill: Some("cli-prefill".to_string()),
+                decode: None,
+                encode: Some("global".to_string()),
+            }
+        );
+
+        assert_eq!(
+            config
+                .selected_worker_selection_policy_instance_for(WorkerType::Encode)
+                .unwrap(),
+            Some("yaml-encode".to_string())
+        );
+
+        let default_policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            default_policy_file.path(),
+            r#"
+worker_selection:
+  prefill: default
+  decode: default
+  encode: default
+"#,
+        )
+        .unwrap();
+        let default_config = KvRouterConfig {
+            router_policy_config: Some(default_policy_file.path().display().to_string()),
+            router_prefill_policy: Some(" default ".to_string()),
+            router_decode_policy: Some("default".to_string()),
+            ..Default::default()
+        };
+        let prefill_only_config = KvRouterConfig {
+            router_prefill_policy: Some("custom".to_string()),
+            ..Default::default()
+        };
+        let blank_prefill_override_config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            router_prefill_policy: Some(" ".to_string()),
+            ..Default::default()
+        };
+        let global_only_config = KvRouterConfig::default();
+        for (name, config, global, expected) in [
+            (
+                "stage default disables YAML policy",
+                &config,
+                None,
+                vec![
+                    WorkerType::Aggregated,
+                    WorkerType::Prefill,
+                    WorkerType::Encode,
+                ],
+            ),
+            ("defaults only", &default_config, None, Vec::new()),
+            (
+                "prefill override only",
+                &prefill_only_config,
+                None,
+                vec![WorkerType::Prefill],
+            ),
+            (
+                "global custom policy applies to every role",
+                &global_only_config,
+                Some("global"),
+                vec![
+                    WorkerType::Aggregated,
+                    WorkerType::Prefill,
+                    WorkerType::Decode,
+                    WorkerType::Encode,
+                ],
+            ),
+            (
+                "stage overrides take precedence over global policy",
+                &config,
+                Some("global"),
+                vec![
+                    WorkerType::Aggregated,
+                    WorkerType::Prefill,
+                    WorkerType::Encode,
+                ],
+            ),
+            (
+                "blank stage override falls through to YAML",
+                &blank_prefill_override_config,
+                None,
+                vec![
+                    WorkerType::Aggregated,
+                    WorkerType::Prefill,
+                    WorkerType::Decode,
+                    WorkerType::Encode,
+                ],
+            ),
+        ] {
+            assert_eq!(
+                config
+                    .explicit_worker_selection_policy_types_from(Ok(global.map(str::to_owned)))
+                    .unwrap(),
+                expected,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn removed_missing_isl_queue_config_is_rejected_as_unknown() {
+        for value in [
+            serde_json::json!(null),
+            serde_json::json!([]),
+            serde_json::json!([{
+                "missing_cache_tokens_floor": 0,
+                "max_queue_depth": 1,
+            }]),
+        ] {
+            let encoded = serde_json::json!({
+                "router_queue_by_incoming_missing_isl": value,
+            })
+            .to_string();
+            let error = serde_json::from_str::<KvRouterConfig>(&encoded).unwrap_err();
+            let message = error.to_string();
+            assert!(
+                message.contains("unknown field `router_queue_by_incoming_missing_isl`"),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn kv_router_config_preserves_v1_3_wire_compatibility() {
+        let _: KvRouterConfig = serde_json::from_value(serde_json::json!({
+            "durable_kv_events": false,
+            "router_snapshot_threshold": 1_000_000,
+            "router_reset_states": false,
+        }))
+        .unwrap();
+
+        let value = serde_json::to_value(KvRouterConfig::default()).unwrap();
+        for post_v1_3_field in [
+            "decode_active_request_weight",
+            "router_tracking_hash",
+            "router_tracking_key_file",
+            "router_tracking_key_id",
+            "conditional_disagg_enabled",
+            "conditional_disagg_policy",
+            "conditional_disagg_eff_isl_threshold",
+            "conditional_disagg_eff_isl_ratio_threshold",
+            "conditional_disagg_prefill_busy_threshold",
+            "conditional_disagg_decode_busy_threshold",
+        ] {
+            assert!(value.get(post_v1_3_field).is_none(), "{post_v1_3_field}");
+        }
+        assert!(value.get("router_approximate_cache_policy").is_none());
+
+        let frontend_config = KvRouterConfig {
+            router_prefill_policy: Some("prefill-policy".to_string()),
+            router_decode_policy: Some("decode-policy".to_string()),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(frontend_config).unwrap();
+        assert!(value.get("router_prefill_policy").is_none());
+        assert!(value.get("router_decode_policy").is_none());
+
+        let error = serde_json::from_value::<KvRouterConfig>(serde_json::json!({
+            "durable_kv_events": true,
+        }))
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("durable_kv_events=true is not supported")
+        );
+    }
+
+    #[test]
+    fn policy_config_is_validated_and_cached_at_startup() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            "default_policy_family: stable\nuncached_isl_buckets:\n  - min_tokens: 0\n    bucket: all\npolicy_classes:\n  - name: stable\n    policy_family: stable\n    cache_bucket: all\n    quantum: 7\n",
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..Default::default()
+        };
+
+        config.validate_config().unwrap();
+        std::fs::write(policy_file.path(), "not: [valid").unwrap();
+
+        let profile = config.policy_profile(None).unwrap();
+        assert_eq!(profile.default_class().name, "stable");
+        assert_eq!(profile.default_class().quantum, 7);
+    }
+
+    #[test]
+    fn invalid_policy_config_fails_config_validation() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(policy_file.path(), "not: [valid").unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..Default::default()
+        };
+
+        let error = config.validate_config().unwrap_err();
+        assert!(
+            error.contains(policy_file.path().to_str().unwrap()),
+            "{error}"
+        );
+        assert!(
+            error.contains("failed to parse router policy config"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn policy_config_uses_fast_recheck_with_prefill_load_model() {
+        let config = KvRouterConfig {
+            router_prefill_load_model: RouterPrefillLoadModel::Aic,
+            router_policy_config: Some("/tmp/policy.yaml".to_string()),
+            router_queue_threshold: None,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            config.router_queue_recheck_interval(),
+            Duration::from_millis(100)
+        );
+    }
+
+    #[test]
+    fn worker_selection_only_config_uses_default_recheck_interval() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            r#"
+worker_selection:
+  aggregated: custom
+  instances:
+    - name: custom
+      type: acme
+      parameters: {}
+"#,
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_prefill_load_model: RouterPrefillLoadModel::Aic,
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..Default::default()
+        };
+
+        config.validate_config().unwrap();
+        assert_eq!(
+            config.router_queue_recheck_interval(),
+            Duration::from_secs(60)
+        );
+    }
+
+    #[test]
+    fn prefill_load_model_allows_wspt_policy_classes() {
+        let config = KvRouterConfig {
+            router_prefill_load_model: RouterPrefillLoadModel::Aic,
+            router_queue_policy: RouterQueuePolicy::Wspt,
+            ..Default::default()
+        };
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn configured_policy_profile_uses_transient_replay_model_name() {
+        let path = std::env::temp_dir().join(format!(
+            "dynamo-router-policy-{}.yaml",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(
+            &path,
+            r#"
+default_policy_family: root
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: root
+    policy_family: root
+    cache_bucket: all
+    quantum: 1
+models:
+  replay-model:
+    default_policy_family: selected
+    uncached_isl_buckets:
+      - min_tokens: 0
+        bucket: all
+    policy_classes:
+      - name: selected
+        policy_family: selected
+        cache_bucket: all
+        quantum: 9
+"#,
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(path.display().to_string()),
+            ..Default::default()
+        }
+        .with_policy_model_name(Some("replay-model".to_string()));
+
+        let profile = config.configured_policy_profile().unwrap();
+        assert_eq!(profile.default_class().name, "selected");
+        assert_eq!(profile.default_class().quantum, 9);
+        assert!(
+            !serde_json::to_string(&config)
+                .unwrap()
+                .contains("replay-model")
+        );
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_kv_router_config_accepts_credit_above_one() {
+        let amplified = KvRouterConfig {
             overlap_score_credit: 1.1,
             ..Default::default()
         };
 
-        assert!(too_small.validate().is_err());
-        let error = too_large.validate().unwrap_err().to_string();
-        assert!(error.contains("prefill_load_scale"));
+        assert!(amplified.validate().is_ok());
+        for value in [-0.1, f64::NAN, f64::INFINITY] {
+            let invalid = KvRouterConfig {
+                overlap_score_credit: value,
+                ..Default::default()
+            };
+            assert!(invalid.validate().is_err());
+        }
     }
 
     #[test]
@@ -1235,16 +2459,19 @@ mod tests {
     }
 
     #[test]
-    fn test_kv_router_config_deserialize_rejects_invalid_values() {
+    fn test_kv_router_config_deserialize_accepts_credit_above_one() {
+        let amplified: KvRouterConfig =
+            serde_json::from_str(r#"{"overlap_score_credit":1.5}"#).unwrap();
         let credit_error =
-            serde_json::from_str::<KvRouterConfig>(r#"{"overlap_score_credit":1.1}"#)
+            serde_json::from_str::<KvRouterConfig>(r#"{"overlap_score_credit":-0.1}"#)
                 .unwrap_err()
                 .to_string();
         let scale_error = serde_json::from_str::<KvRouterConfig>(r#"{"prefill_load_scale":-0.1}"#)
             .unwrap_err()
             .to_string();
 
-        assert!(credit_error.contains("prefill_load_scale"));
+        assert_eq!(amplified.overlap_score_credit, 1.5);
+        assert!(credit_error.contains("overlap_score_credit"));
         assert!(scale_error.contains("prefill_load_scale"));
     }
 
@@ -1289,9 +2516,11 @@ mod tests {
     }
 
     #[test]
-    fn test_router_config_override_deserialize_rejects_invalid_values() {
+    fn test_router_config_override_deserialize_accepts_credit_above_one() {
+        let amplified: RouterConfigOverride =
+            serde_json::from_str(r#"{"overlap_score_credit":1.5}"#).unwrap();
         let credit_error =
-            serde_json::from_str::<RouterConfigOverride>(r#"{"overlap_score_credit":1.1}"#)
+            serde_json::from_str::<RouterConfigOverride>(r#"{"overlap_score_credit":-0.1}"#)
                 .unwrap_err()
                 .to_string();
         let scale_error =
@@ -1299,7 +2528,8 @@ mod tests {
                 .unwrap_err()
                 .to_string();
 
-        assert!(credit_error.contains("prefill_load_scale"));
+        assert_eq!(amplified.overlap_score_credit, Some(1.5));
+        assert!(credit_error.contains("overlap_score_credit"));
         assert!(scale_error.contains("prefill_load_scale"));
     }
 
@@ -1338,16 +2568,8 @@ mod tests {
     }
 
     #[test]
-    fn test_router_config_override_rejects_out_of_range_overlap_score_credit() {
-        let too_small = RouterConfigOverride {
-            overlap_score_credit: Some(-0.1),
-            prefill_load_scale: None,
-            router_temperature: None,
-            assume_kv_reuse: None,
-            track_prefill_tokens: None,
-            shared_cache_multiplier: None,
-        };
-        let too_large = RouterConfigOverride {
+    fn test_router_config_override_accepts_credit_above_one() {
+        let amplified = RouterConfigOverride {
             overlap_score_credit: Some(1.1),
             prefill_load_scale: None,
             router_temperature: None,
@@ -1356,13 +2578,29 @@ mod tests {
             shared_cache_multiplier: None,
         };
 
-        assert!(too_small.validate().is_err());
-        let error = too_large.validate().unwrap_err().to_string();
-        assert!(error.contains("prefill_load_scale"));
+        assert!(amplified.validate().is_ok());
+        for value in [-0.1, f64::NAN, f64::INFINITY] {
+            let invalid = RouterConfigOverride {
+                overlap_score_credit: Some(value),
+                prefill_load_scale: None,
+                router_temperature: None,
+                assume_kv_reuse: None,
+                track_prefill_tokens: None,
+                shared_cache_multiplier: None,
+            };
+            assert!(invalid.validate().is_err());
+        }
     }
 
     #[test]
-    fn test_kv_router_config_default_shared_cache_multiplier_is_disabled() {
-        assert_eq!(KvRouterConfig::default().shared_cache_multiplier, 0.0);
+    fn queueing_enabled_reflects_synthetic_threshold() {
+        // With default config, queueing is disabled.
+        assert!(!KvRouterConfig::default().queueing_enabled(None).unwrap());
+        let with_threshold = KvRouterConfig {
+            router_queue_threshold: Some(0.5),
+            ..Default::default()
+        };
+        // With a threshold set, queueing is enabled
+        assert!(with_threshold.queueing_enabled(None).unwrap());
     }
 }
