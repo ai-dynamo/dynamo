@@ -847,6 +847,54 @@ fn request() -> PreprocessedRequest {
         .expect("request")
 }
 
+#[test]
+fn skip_special_tokens_is_forwarded_without_compatibility_envelope() {
+    let mut request = request();
+    request.output_options.skip_special_tokens = Some(false);
+    request
+        .extra_args
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("object extra_args")
+        .insert("vllm_tito".to_string(), json!({"sampling_params": {}}));
+
+    let wire = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("native controls should be forwarded");
+
+    assert_eq!(
+        wire.response
+            .and_then(|response| response.skip_special_tokens),
+        Some(false)
+    );
+}
+
+#[test]
+fn unprojected_generate_controls_are_rejected() {
+    let mut request = request();
+    request
+        .extra_args
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("object extra_args")
+        .insert(
+            "vllm_tito".to_string(),
+            json!({"sampling_params": {"logit_bias": {"42": 1.0}}}),
+        );
+
+    let error = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("unprojected controls must be rejected");
+
+    assert!(error.to_string().contains("logit_bias is not supported"));
+}
+
 fn epd_image_request() -> PreprocessedRequest {
     let mut request = request();
     request.output_options.prompt_logprobs = None;
@@ -995,6 +1043,20 @@ fn engine_config_normalizes_total_kv_blocks_per_dp_rank() {
     let registration = model.engine_config().llm.expect("LLM registration");
 
     assert_eq!(registration.total_kv_blocks, Some(2048));
+}
+
+#[test]
+fn engine_config_advertises_vllm_generate_capability() {
+    let model =
+        DiscoveredModel::from_proto(model_info(), server_info()).expect("valid discovery metadata");
+
+    assert_eq!(
+        model
+            .engine_config()
+            .runtime_data
+            .get("vllm_inference_v1_generate"),
+        Some(&json!(true))
+    );
 }
 
 #[test]
