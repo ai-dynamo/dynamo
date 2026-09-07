@@ -86,11 +86,11 @@ async def test_realtime_llm_replays_revised_asr_hypothesis_before_commit():
     await text_input.commit("recognize speech")
 
     assert websocket.sent == [
-        {"type": "input_text_buffer.append", "text": "recognize"},
-        {"type": "input_text_buffer.append", "text": " wreck"},
-        {"type": "input_text_buffer.clear"},
-        {"type": "input_text_buffer.append", "text": "recognize speech"},
-        {"type": "input_text_buffer.commit"},
+        {"type": "input_text.append", "text": "recognize"},
+        {"type": "input_text.append", "text": " wreck"},
+        {"type": "input_text.clear"},
+        {"type": "input_text.append", "text": "recognize speech"},
+        {"type": "input_text.commit"},
     ]
 
 
@@ -126,8 +126,8 @@ async def test_transcription_forwards_deltas_to_realtime_llm_before_commit():
     assert transcript == "hello"
     assert 0 <= first_delta <= completed
     assert llm_websocket.sent == [
-        {"type": "input_text_buffer.append", "text": "hello"},
-        {"type": "input_text_buffer.commit"},
+        {"type": "input_text.append", "text": "hello"},
+        {"type": "input_text.commit"},
     ]
 
 

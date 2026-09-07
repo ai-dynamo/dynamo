@@ -47,9 +47,7 @@ class _RealtimeTextInput:
     async def append(self, text: str) -> None:
         if not text:
             return
-        await self.websocket.send_json(
-            {"type": "input_text_buffer.append", "text": text}
-        )
+        await self.websocket.send_json({"type": "input_text.append", "text": text})
         self.text += text
 
     async def commit(self, final_text: str) -> None:
@@ -57,11 +55,11 @@ class _RealtimeTextInput:
         # preserves correctness while retaining useful prefill before revision.
         if final_text != self.text:
             if self.text:
-                await self.websocket.send_json({"type": "input_text_buffer.clear"})
+                await self.websocket.send_json({"type": "input_text.clear"})
                 self.text = ""
             await self.append(final_text)
         if self.text:
-            await self.websocket.send_json({"type": "input_text_buffer.commit"})
+            await self.websocket.send_json({"type": "input_text.commit"})
 
 
 async def _synthesize(

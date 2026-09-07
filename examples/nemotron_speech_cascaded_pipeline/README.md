@@ -302,6 +302,11 @@ image containing [incremental realtime text support](https://github.com/ai-dynam
 add `--realtime` to the `VllmWorker` arguments in `deploy/agg.yaml`, and redeploy
 the DGD. Then run:
 
+> [!NOTE]
+> The incremental text events are an experimental Dynamo extension and may
+> change before stabilization.
+
+
 ```bash
 python3 examples/nemotron_speech_cascaded_pipeline/smoke_speech_loop.py \
   --llm-transport realtime
@@ -309,7 +314,7 @@ python3 examples/nemotron_speech_cascaded_pipeline/smoke_speech_loop.py \
 
 Pipecat remains the orchestrator in the UI deployment. It opens separate ASR
 and LLM WebSockets through the Dynamo frontend, forwards ASR deltas with
-Dynamo's `input_text_buffer.append` extension, commits the final transcript,
+Dynamo's `input_text.append` extension, commits the final transcript,
 and then requests a response. If ASR revises an interim hypothesis, the client
 clears the speculative text and replays the final transcript before commit.
 This smoke client mirrors that endpoint flow without running Pipecat.
