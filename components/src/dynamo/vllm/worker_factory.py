@@ -1820,13 +1820,25 @@ class WorkerFactory:
             "resume_generation": handler.resume_generation,
             "flush_cache": handler.flush_cache,
             "abort_request": handler.abort_request,
-            "update_weights_from_disk": handler.update_weights_from_disk,
-            "update_weights_from_distributed": handler.update_weights_from_distributed,
-            "update_weights_from_tensor": handler.update_weights_from_tensor,
-            "init_weights_update_group": handler.init_weights_update_group,
-            "destroy_weights_update_group": handler.destroy_weights_update_group,
-            "get_weight_version": handler.get_weight_version,
         }
+
+        # Weight-update routes drive engine_client.collective_rpc with a
+        # caller-selected method (RCE-capable) and exist only for RL training.
+        # Register them solely when RL is enabled (--enable-rl / DYN_ENABLE_RL,
+        # default off) so a non-RL deployment does not expose the surface on the
+        # worker system server. Operators can further restrict the registered
+        # routes via the engine-route policy.
+        if handler.config.enable_rl:
+            rl_routes.update(
+                {
+                    "update_weights_from_disk": handler.update_weights_from_disk,
+                    "update_weights_from_distributed": handler.update_weights_from_distributed,
+                    "update_weights_from_tensor": handler.update_weights_from_tensor,
+                    "init_weights_update_group": handler.init_weights_update_group,
+                    "destroy_weights_update_group": handler.destroy_weights_update_group,
+                    "get_weight_version": handler.get_weight_version,
+                }
+            )
 
         if lora_enabled:
 
