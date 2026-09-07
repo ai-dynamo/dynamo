@@ -13,7 +13,7 @@ const MAX_TIMER_DURATION_MS: u64 = 365 * 24 * 60 * 60 * 1_000;
 const MAX_LOAD_FANOUT_CAPACITY: usize = 65_536;
 
 #[derive(Debug, Clone)]
-pub struct KvDcRelayTransportConfig {
+pub struct KvDcRelayGrpcConfig {
     pub bind: SocketAddr,
     pub max_message_bytes: usize,
     pub keepalive_interval_ms: u64,
@@ -34,7 +34,7 @@ pub struct KvDcRelayTransportConfig {
     pub max_load_subscribers: usize,
 }
 
-impl KvDcRelayTransportConfig {
+impl KvDcRelayGrpcConfig {
     /// Plaintext gRPC transport configuration with default tuning bounds.
     pub fn new(bind: SocketAddr) -> Self {
         Self {
@@ -153,8 +153,8 @@ impl KvDcRelayTransportConfig {
 mod tests {
     use super::*;
 
-    fn valid_config() -> KvDcRelayTransportConfig {
-        KvDcRelayTransportConfig::new("127.0.0.1:0".parse().unwrap())
+    fn valid_config() -> KvDcRelayGrpcConfig {
+        KvDcRelayGrpcConfig::new("127.0.0.1:0".parse().unwrap())
     }
 
     #[test]
@@ -192,7 +192,7 @@ mod tests {
     #[test]
     fn arbitrary_bind_address_is_preserved() {
         let wildcard: SocketAddr = "0.0.0.0:5561".parse().unwrap();
-        let config = KvDcRelayTransportConfig::new(wildcard);
+        let config = KvDcRelayGrpcConfig::new(wildcard);
         assert_eq!(config.bind, wildcard);
         config.validate().unwrap();
     }

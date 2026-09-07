@@ -9,13 +9,13 @@ use dynamo_kv_router::identity::{
 use dynamo_kv_router::indexer::cuckoo::{DcCkfFormatIdentity, ProducerIdentity};
 use dynamo_runtime::protocols::EndpointId;
 
-use super::super::identity::{
+use super::protocol as proto;
+use crate::kv_dc_relay::identity::{
     CanonicalModelRegistration, DcPoolDescriptor, DcRelayIdentity, KvQueryHashFormat,
     KvQuerySemantics, ModelTarget, WorkerRole,
 };
-use super::super::protocol as proto;
 
-pub(crate) fn unix_timestamp<const UNITS_PER_SECOND: u128>() -> u64 {
+pub(super) fn unix_timestamp<const UNITS_PER_SECOND: u128>() -> u64 {
     let units = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -26,21 +26,21 @@ pub(crate) fn unix_timestamp<const UNITS_PER_SECOND: u128>() -> u64 {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum WireConversionError {
+pub(super) enum WireConversionError {
     #[error(transparent)]
     InvalidIdentity(#[from] proto::WireIdentityError),
     #[error("wire pool ID has invalid {field} identity source {value}")]
     InvalidIdentitySource { field: &'static str, value: i32 },
 }
 
-pub(crate) fn relay_identity_to_wire(identity: DcRelayIdentity) -> proto::RelayIdentity {
+pub(super) fn relay_identity_to_wire(identity: DcRelayIdentity) -> proto::RelayIdentity {
     proto::RelayIdentity {
         drt_instance_id: identity.drt_instance_id(),
         relay_incarnation: identity.relay_incarnation(),
     }
 }
 
-pub(crate) fn pool_id_to_wire(pool_id: PoolId) -> proto::KvPoolId {
+pub(super) fn pool_id_to_wire(pool_id: PoolId) -> proto::KvPoolId {
     let domain = pool_id.indexer_domain();
     proto::KvPoolId {
         identity_version: proto::POOL_IDENTITY_VERSION,
@@ -58,7 +58,7 @@ pub(crate) fn pool_id_to_wire(pool_id: PoolId) -> proto::KvPoolId {
     }
 }
 
-pub(crate) fn pool_id_from_wire(pool_id: &proto::KvPoolId) -> Result<PoolId, WireConversionError> {
+pub(super) fn pool_id_from_wire(pool_id: &proto::KvPoolId) -> Result<PoolId, WireConversionError> {
     proto::validate_pool_id(pool_id)?;
     let domain = pool_id
         .indexer_domain
@@ -87,7 +87,7 @@ pub(crate) fn pool_id_from_wire(pool_id: &proto::KvPoolId) -> Result<PoolId, Wir
     ))
 }
 
-pub(crate) fn producer_to_wire(identity: ProducerIdentity) -> proto::ProducerIdentity {
+pub(super) fn producer_to_wire(identity: ProducerIdentity) -> proto::ProducerIdentity {
     proto::ProducerIdentity {
         pool_id: Some(pool_id_to_wire(identity.pool_id())),
         producer_incarnation: identity.producer_incarnation(),
@@ -96,7 +96,7 @@ pub(crate) fn producer_to_wire(identity: ProducerIdentity) -> proto::ProducerIde
     }
 }
 
-pub(crate) fn format_to_wire(format: DcCkfFormatIdentity) -> proto::CkfFormat {
+pub(super) fn format_to_wire(format: DcCkfFormatIdentity) -> proto::CkfFormat {
     proto::CkfFormat {
         format_version: u32::from(format.format_version()),
         seed: format.seed(),
@@ -106,7 +106,7 @@ pub(crate) fn format_to_wire(format: DcCkfFormatIdentity) -> proto::CkfFormat {
     }
 }
 
-pub(crate) fn descriptor_to_wire(descriptor: &DcPoolDescriptor) -> proto::KvPoolDescriptor {
+pub(super) fn descriptor_to_wire(descriptor: &DcPoolDescriptor) -> proto::KvPoolDescriptor {
     proto::KvPoolDescriptor {
         producer: Some(producer_to_wire(descriptor.producer())),
         serving_endpoint: Some(endpoint_to_wire(descriptor.serving_endpoint())),
@@ -126,7 +126,7 @@ pub(crate) fn descriptor_to_wire(descriptor: &DcPoolDescriptor) -> proto::KvPool
     }
 }
 
-pub(crate) const fn worker_role_to_wire(role: WorkerRole) -> proto::WorkerRole {
+pub(super) const fn worker_role_to_wire(role: WorkerRole) -> proto::WorkerRole {
     match role {
         WorkerRole::Prefill => proto::WorkerRole::Prefill,
         WorkerRole::Decode => proto::WorkerRole::Decode,
@@ -147,7 +147,7 @@ fn query_semantics_to_wire(semantics: KvQuerySemantics) -> proto::KvQuerySemanti
     }
 }
 
-pub(crate) fn model_target_to_wire(target: &ModelTarget) -> proto::ModelTarget {
+pub(super) fn model_target_to_wire(target: &ModelTarget) -> proto::ModelTarget {
     let target = match target {
         ModelTarget::Base { base_model } => {
             proto::v1::model_target::Target::Base(proto::BaseModelTarget {
@@ -179,7 +179,7 @@ fn registration_to_wire(registration: &CanonicalModelRegistration) -> proto::Mod
     }
 }
 
-pub(crate) fn endpoint_to_wire(endpoint: &EndpointId) -> proto::DynamoEndpointId {
+pub(super) fn endpoint_to_wire(endpoint: &EndpointId) -> proto::DynamoEndpointId {
     proto::DynamoEndpointId {
         namespace: endpoint.namespace.clone(),
         component: endpoint.component.clone(),

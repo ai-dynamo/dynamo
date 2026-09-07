@@ -57,8 +57,7 @@ use super::publication::{
 };
 use super::resolution::stable_dc_id;
 use super::topology::{TopologyPublisher, TopologySnapshot};
-use super::transport::{KvDcRelayTransport, WanPublicationSource};
-use super::transport_config::KvDcRelayTransportConfig;
+use super::wan::grpc::{GrpcTransport, KvDcRelayGrpcConfig};
 use crate::discovery::{
     KvSourceMembershipCoordinator, KvSourceMembershipView, KvSourceMembershipWatch,
 };
@@ -138,7 +137,7 @@ impl Default for KvDcRelayProducerConfig {
 pub struct KvDcRelayConfig {
     pub discovery: KvDcRelayDiscoveryConfig,
     pub producer: KvDcRelayProducerConfig,
-    pub transport: Option<KvDcRelayTransportConfig>,
+    pub transport: Option<KvDcRelayGrpcConfig>,
 }
 
 impl Default for KvDcRelayConfig {
@@ -618,7 +617,7 @@ pub struct KvDcRelay {
     pools: Arc<PoolRegistry>,
     topology: Arc<TopologyPublisher>,
     publication_source: Arc<RegistryPublicationSource>,
-    transport: Option<KvDcRelayTransport>,
+    transport: Option<GrpcTransport>,
 }
 
 impl KvDcRelay {
@@ -725,8 +724,9 @@ impl KvDcRelay {
             snapshot_progress_timeout,
         ));
         let transport = if let Some(transport_config) = transport_config {
-            let source = WanPublicationSource::new(publication_source.clone(), cancel.clone());
-            match KvDcRelayTransport::start(source, transport_config).await {
+            match GrpcTransport::start(publication_source.clone(), cancel.clone(), transport_config)
+                .await
+            {
                 Ok(transport) => Some(transport),
                 Err(error) => {
                     cancel.cancel();
@@ -907,7 +907,7 @@ impl KvDcRelay {
         let transport_health = self
             .transport
             .as_ref()
-            .map(KvDcRelayTransport::health)
+            .map(GrpcTransport::health)
             .unwrap_or_default();
         let transport_healthy = !transport_health.enabled
             || (transport_health.serving && transport_health.last_error.is_none());

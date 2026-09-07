@@ -8,20 +8,20 @@ use parking_lot::RwLock;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
-use super::super::identity::DcRelayIdentity;
-use super::super::load::PoolLoadSnapshot;
-use super::super::protocol as proto;
 use super::identity::{producer_to_wire, relay_identity_to_wire, unix_timestamp};
-use super::source::WanPublicationSource;
+use super::protocol as proto;
+use super::source::GrpcPublicationSource;
+use crate::kv_dc_relay::identity::DcRelayIdentity;
+use crate::kv_dc_relay::load::PoolLoadSnapshot;
 
 #[derive(Clone)]
-pub(crate) struct LoadUpdateHub {
+pub(super) struct LoadUpdateHub {
     updates: broadcast::Sender<proto::KvPoolLoadUpdate>,
     current: Arc<RwLock<proto::KvPoolLoadUpdate>>,
 }
 
 impl LoadUpdateHub {
-    pub(crate) fn new(source: &WanPublicationSource, window: Duration, capacity: usize) -> Self {
+    pub(super) fn new(source: &GrpcPublicationSource, window: Duration, capacity: usize) -> Self {
         let (updates, _) = broadcast::channel(capacity);
         let current = load_update(source.relay_identity(), source.load_snapshots(), window, 0);
         Self {
@@ -30,11 +30,11 @@ impl LoadUpdateHub {
         }
     }
 
-    pub(crate) fn subscribe(&self) -> broadcast::Receiver<proto::KvPoolLoadUpdate> {
+    pub(super) fn subscribe(&self) -> broadcast::Receiver<proto::KvPoolLoadUpdate> {
         self.updates.subscribe()
     }
 
-    pub(crate) fn current(&self) -> proto::KvPoolLoadUpdate {
+    pub(super) fn current(&self) -> proto::KvPoolLoadUpdate {
         self.current.read().clone()
     }
 
@@ -44,8 +44,8 @@ impl LoadUpdateHub {
     }
 }
 
-pub(crate) async fn run_load_publisher(
-    source: WanPublicationSource,
+pub(super) async fn run_load_publisher(
+    source: GrpcPublicationSource,
     window: Duration,
     updates: LoadUpdateHub,
     cancel: CancellationToken,

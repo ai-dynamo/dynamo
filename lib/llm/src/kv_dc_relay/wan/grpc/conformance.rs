@@ -24,24 +24,23 @@ use tokio_util::sync::CancellationToken;
 use tonic::Streaming;
 use tonic::transport::{Channel, Endpoint};
 
-use super::super::discovery::{
+use super::config::KvDcRelayGrpcConfig;
+use super::protocol as proto;
+use super::protocol::wire::images::{self, FilterFormat, ImagesFrame, SnapshotAssembly};
+use super::server::GrpcTransport;
+use crate::kv_dc_relay::actor::KvDcRelayHandle;
+use crate::kv_dc_relay::discovery::{
     DcMembershipView, DomainWorkerTopology, EndpointMembership, KvCacheDomainKey,
 };
-use super::super::identity::{
+use crate::kv_dc_relay::identity::{
     CanonicalModelId, CanonicalModelRegistration, DcRelayIdentity, KvQueryHashFormat,
     KvQuerySemantics, ModelAlias, WorkerRole,
 };
-use super::super::pool_registry::{
+use crate::kv_dc_relay::pool_registry::{
     PoolActorConfig, PoolAttachRequest, PoolAttachment, PoolRegistry, PoolServingFacts,
 };
-use super::super::protocol as proto;
-use super::super::protocol::wire::images::{self, FilterFormat, ImagesFrame, SnapshotAssembly};
-use super::super::publication::RegistryPublicationSource;
-use super::super::topology::TopologyPublisher;
-use super::super::transport_config::KvDcRelayTransportConfig;
-use super::server::KvDcRelayTransport;
-use super::source::WanPublicationSource;
-use crate::kv_dc_relay::actor::KvDcRelayHandle;
+use crate::kv_dc_relay::publication::RegistryPublicationSource;
+use crate::kv_dc_relay::topology::TopologyPublisher;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -51,7 +50,7 @@ static NEXT_FIXTURE_ID: AtomicU64 = AtomicU64::new(1);
 
 struct RelayFixture {
     address: SocketAddr,
-    transport: KvDcRelayTransport,
+    transport: GrpcTransport,
     registry: Arc<PoolRegistry>,
     topology: Arc<TopologyPublisher>,
     attachment: Option<PoolAttachment>,
@@ -59,13 +58,13 @@ struct RelayFixture {
 }
 
 impl RelayFixture {
-    async fn start(configure: impl FnOnce(&mut KvDcRelayTransportConfig)) -> Self {
+    async fn start(configure: impl FnOnce(&mut KvDcRelayGrpcConfig)) -> Self {
         Self::start_with_pool_capacity(32, configure).await
     }
 
     async fn start_with_pool_capacity(
         expected_unique_blocks: usize,
-        configure: impl FnOnce(&mut KvDcRelayTransportConfig),
+        configure: impl FnOnce(&mut KvDcRelayGrpcConfig),
     ) -> Self {
         let fixture_id = NEXT_FIXTURE_ID.fetch_add(1, Ordering::Relaxed);
         let runtime = Runtime::from_current().unwrap();
@@ -109,7 +108,7 @@ impl RelayFixture {
         ));
 
         let lifecycle = CancellationToken::new();
-        let mut config = KvDcRelayTransportConfig::new("127.0.0.1:0".parse().unwrap());
+        let mut config = KvDcRelayGrpcConfig::new("127.0.0.1:0".parse().unwrap());
         configure(&mut config);
         let publication = Arc::new(RegistryPublicationSource::new(
             registry.clone(),
@@ -120,8 +119,9 @@ impl RelayFixture {
             config.max_pool_streams_total,
             Duration::from_millis(config.snapshot_progress_timeout_ms),
         ));
-        let source = WanPublicationSource::new(publication, lifecycle);
-        let transport = KvDcRelayTransport::start(source, config).await.unwrap();
+        let transport = GrpcTransport::start(publication, lifecycle, config)
+            .await
+            .unwrap();
         let address = transport
             .health()
             .bound_address

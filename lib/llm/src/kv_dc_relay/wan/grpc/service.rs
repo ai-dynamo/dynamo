@@ -12,19 +12,19 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast};
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 
-use super::super::identity::{DcPoolCatalog, DcRelayIdentity};
-use super::super::protocol as proto;
-use super::super::publication::{
-    PoolPublicationStream, PublicationError, PublicationErrorKind, PublicationFrame,
-    PublicationFrameKind,
-};
-use super::super::topology::{TopologyReadinessState, TopologySnapshot};
 use super::identity::{
     descriptor_to_wire, endpoint_to_wire, pool_id_from_wire, pool_id_to_wire, producer_to_wire,
     relay_identity_to_wire, unix_timestamp, worker_role_to_wire,
 };
 use super::load::LoadUpdateHub;
-use super::source::WanPublicationSource;
+use super::protocol as proto;
+use super::source::GrpcPublicationSource;
+use crate::kv_dc_relay::identity::{DcPoolCatalog, DcRelayIdentity};
+use crate::kv_dc_relay::publication::{
+    PoolPublicationStream, PublicationError, PublicationErrorKind, PublicationFrame,
+    PublicationFrameKind,
+};
+use crate::kv_dc_relay::topology::{TopologyReadinessState, TopologySnapshot};
 use proto::RelayErrorReason;
 
 type CatalogStream =
@@ -51,7 +51,7 @@ impl SubscriberLimit {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum StreamKind {
+pub(super) enum StreamKind {
     Catalog,
     Pool,
     Readiness,
@@ -59,7 +59,7 @@ pub(crate) enum StreamKind {
 }
 
 #[derive(Clone)]
-pub(crate) struct SubscriberLimits {
+pub(super) struct SubscriberLimits {
     catalog: SubscriberLimit,
     pool: SubscriberLimit,
     readiness: SubscriberLimit,
@@ -67,7 +67,7 @@ pub(crate) struct SubscriberLimits {
 }
 
 impl SubscriberLimits {
-    pub(crate) fn new(catalog: usize, pool: usize, readiness: usize, load: usize) -> Self {
+    pub(super) fn new(catalog: usize, pool: usize, readiness: usize, load: usize) -> Self {
         Self {
             catalog: SubscriberLimit::new(catalog),
             pool: SubscriberLimit::new(pool),
@@ -98,8 +98,8 @@ impl SubscriberLimits {
 }
 
 #[derive(Clone)]
-pub(crate) struct KvEventRelayService {
-    source: WanPublicationSource,
+pub(super) struct KvEventRelayService {
+    source: GrpcPublicationSource,
     cancel: CancellationToken,
     pool_heartbeat_interval: Duration,
     readiness_heartbeat_interval: Duration,
@@ -107,16 +107,16 @@ pub(crate) struct KvEventRelayService {
     limits: SubscriberLimits,
 }
 
-pub(crate) struct KvEventRelayServiceConfig {
-    pub(crate) pool_heartbeat_interval: Duration,
-    pub(crate) readiness_heartbeat_interval: Duration,
-    pub(crate) load_updates: LoadUpdateHub,
-    pub(crate) limits: SubscriberLimits,
+pub(super) struct KvEventRelayServiceConfig {
+    pub(super) pool_heartbeat_interval: Duration,
+    pub(super) readiness_heartbeat_interval: Duration,
+    pub(super) load_updates: LoadUpdateHub,
+    pub(super) limits: SubscriberLimits,
 }
 
 impl KvEventRelayService {
-    pub(crate) fn new(
-        source: WanPublicationSource,
+    pub(super) fn new(
+        source: GrpcPublicationSource,
         cancel: CancellationToken,
         config: KvEventRelayServiceConfig,
     ) -> Self {

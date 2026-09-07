@@ -6,24 +6,24 @@ SPDX-License-Identifier: Apache-2.0
 # KV DC Relay Protocol
 
 The Relay publishes endpoint-local KV pool state through the transport-neutral
-[`RelayPublicationSource`](../publication/source.rs). The universal publisher owns snapshot
+[`RelayPublicationSource`](../../../publication/source.rs). The universal publisher owns snapshot
 bootstrapping, contiguous deltas, bounded queues, and producer-generation fencing. Transport
 adapters consume its state watches and canonical `PublicationFrame`s.
 
-`dynamo_llm::kv_dc_relay::protocol` provides the Protobuf/gRPC representation of that state.
+`dynamo_llm::kv_dc_relay::wan::grpc::protocol` provides the Protobuf/gRPC representation of that state.
 It adds generated messages, client/server interfaces, and wire validation; it does not own
 another publication hub or CKF mirror. Its Cuckoo Bucket Images v1 (CBI1) helpers re-export
-the [publisher's transport-neutral codec](../publication/cbi1.rs).
+the [publisher's transport-neutral codec](../../../publication/cbi1.rs).
 
 ## Interfaces and Documentation
 
-- [Universal publication API](../publication.rs): state watches, pool streams, canonical frames,
+- [Universal publication API](../../../publication.rs): state watches, pool streams, canonical frames,
   and transport-neutral errors.
-- [Producer architecture](../docs/architecture.md): discovery inputs, pool lifecycle,
+- [Producer architecture](../../../docs/architecture.md): discovery inputs, pool lifecycle,
   publication, and serving topology.
-- [Protobuf schema](relay.proto) and [gRPC contract](../docs/grpc-contract.md): the
+- [Protobuf schema](relay.proto) and [gRPC contract](../../../docs/grpc-contract.md): the
   `dynamo.kvrelay.v1` adapter's RPCs, wire identity, compatibility, errors, and client rules.
-- [Component usage](../../../../../components/src/dynamo/kv_dc_relay/README.md#usage):
+- [Component usage](../../../../../../../components/src/dynamo/kv_dc_relay/README.md#usage):
   minimal startup and links to deployment and configuration documentation.
 
 The standard build includes the protocol package and plaintext gRPC server; `--bind` enables
@@ -90,7 +90,7 @@ A complete CKF lane is encoded as dense `u64` bucket words. Each chunk body is:
 
 Each word packs four 16-bit slots, least-significant slot first; zero means empty.
 For example, bytes `34 12 00 00 cd ab 01 00` encode slots `[0x1234, 0, 0xabcd, 1]`.
-See the shared [CKF addressing](../../../../kv-router/src/indexer/cuckoo/addressing.rs)
+See the shared [CKF addressing](../../../../../../kv-router/src/indexer/cuckoo/addressing.rs)
 for fingerprint and candidate-bucket derivation from a canonical sequence hash.
 
 One chunk contains at most 512 Ki buckets, or 4 MiB of bucket words. `SnapshotAssembly` accepts only

@@ -40,4 +40,4 @@ optional TLS/mTLS sidecar across trust boundaries, and do not expose the plainte
 - [CLI, environment variables, and diagnostics](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/components/kv-dc-relay-configuration.md)
 - [Rust implementation](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/src/kv_dc_relay/docs/architecture.md)
 - [gRPC contract](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/src/kv_dc_relay/docs/grpc-contract.md)
-- [Protocol helpers and CBI1](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/src/kv_dc_relay/protocol/README.md)
+- [Protocol helpers and CBI1](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/src/kv_dc_relay/wan/grpc/protocol/README.md)

@@ -12,7 +12,7 @@ For deployment and runtime options, see the
 [Kubernetes how-to](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/kv-aware-routing/kv-dc-relay.md)
 and [configuration reference](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/components/kv-dc-relay-configuration.md).
 Wire semantics are specified in [the gRPC contract](grpc-contract.md) and
-[the protocol README](../protocol/README.md).
+[the protocol README](../wan/grpc/protocol/README.md).
 
 ## Module Map
 
@@ -25,12 +25,16 @@ Wire semantics are specified in [the gRPC contract](grpc-contract.md) and
 | [`topology.rs`](../topology.rs), [`load.rs`](../load.rs) | Serving readiness and worker-authoritative load projections. |
 | [`publication.rs`](../publication.rs) | Transport-neutral source, streams, frames, and error categories. |
 | [`publication/hub.rs`](../publication/hub.rs), [`publication/stream.rs`](../publication/stream.rs) | Lazy mirrors, bounded fanout, snapshot bootstrap, and stream continuity. |
-| [`transport/server.rs`](../transport/server.rs), [`transport/grpc.rs`](../transport/grpc.rs) | WAN listener, RPC adaptation, transport admission, and heartbeats. |
-| [`protocol.rs`](../protocol.rs) | Protobuf types, explicit wire identity validation, and shared codec exports. |
+| [`wan/grpc.rs`](../wan/grpc.rs), [`wan/grpc/config.rs`](../wan/grpc/config.rs) | gRPC adapter facade and configuration. |
+| [`wan/grpc/server.rs`](../wan/grpc/server.rs), [`wan/grpc/service.rs`](../wan/grpc/service.rs) | gRPC listener, RPC adaptation, transport admission, and heartbeats. |
+| [`wan/grpc/protocol.rs`](../wan/grpc/protocol.rs) | Protobuf types, explicit wire identity validation, and shared codec exports. |
 
 ## Universal Publication Boundary
 
-WAN is a transport adapter over the existing `RelayPublicationSource`. The universal publisher
+The `wan::grpc` adapter consumes the existing `RelayPublicationSource`. The host configures
+publication resources and passes the source and lifecycle token to `GrpcTransport::start`.
+The adapter creates its private source wrapper; the host does not depend on gRPC handlers,
+Protobuf conversions, or that wrapper. The universal publisher
 owns lazy pool hubs, snapshot cuts, CBI1 encoding, bounded queues, generation fencing, and
 snapshot progress deadlines. Idle hubs can be evicted to admit another pool; later subscribers
 capture a fresh snapshot from the same producer generation.

@@ -6,10 +6,10 @@ SPDX-License-Identifier: Apache-2.0
 # KV DC Relay: gRPC Contract
 
 Service `dynamo.kvrelay.v1.KvEventRelay`, defined in
-[`../protocol/relay.proto`](../protocol/relay.proto). This document is the
+[`../wan/grpc/protocol/relay.proto`](../wan/grpc/protocol/relay.proto). This document is the
 contract-level view: RPCs, message semantics, validation, and lifecycle rules.
 The transport-neutral CKF payload (CBI1) is specified in the
-[protocol README](../protocol/README.md#cbi1-payload); the producer
+[protocol README](../wan/grpc/protocol/README.md#cbi1-payload); the producer
 model behind the contract is in [`architecture.md`](architecture.md).
 
 ## Envelope and versioning

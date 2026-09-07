@@ -3,13 +3,15 @@
 
 //! WAN gRPC transport for Relay pool publications.
 
+mod config;
 #[cfg(test)]
 mod conformance;
-mod grpc;
 mod identity;
 mod load;
+pub mod protocol;
 mod server;
+mod service;
 mod source;
 
-pub(crate) use server::KvDcRelayTransport;
-pub(crate) use source::WanPublicationSource;
+pub use config::KvDcRelayGrpcConfig;
+pub(crate) use server::GrpcTransport;

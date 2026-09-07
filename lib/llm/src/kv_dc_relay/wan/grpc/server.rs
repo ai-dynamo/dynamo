@@ -23,23 +23,24 @@ use tonic::codec::CompressionEncoding;
 use tonic::transport::Server;
 use tonic::transport::server::Connected;
 
-use super::super::protocol::{FILE_DESCRIPTOR_SET, KvEventRelayServer};
-use super::super::transport_config::KvDcRelayTransportConfig;
-use super::grpc::{KvEventRelayService, KvEventRelayServiceConfig, SubscriberLimits};
+use super::config::KvDcRelayGrpcConfig;
 use super::load::{LoadUpdateHub, run_load_publisher};
-use super::source::WanPublicationSource;
+use super::protocol::{FILE_DESCRIPTOR_SET, KvEventRelayServer};
+use super::service::{KvEventRelayService, KvEventRelayServiceConfig, SubscriberLimits};
+use super::source::GrpcPublicationSource;
+use crate::kv_dc_relay::RelayPublicationSource;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct KvDcRelayTransportHealth {
+pub(crate) struct GrpcTransportHealth {
     pub(crate) enabled: bool,
     pub(crate) serving: bool,
     pub(crate) bound_address: Option<SocketAddr>,
     pub(crate) last_error: Option<String>,
 }
 
-pub(crate) struct KvDcRelayTransport {
+pub(crate) struct GrpcTransport {
     cancel: CancellationToken,
-    health: Arc<RwLock<KvDcRelayTransportHealth>>,
+    health: Arc<RwLock<GrpcTransportHealth>>,
     task: Mutex<Option<JoinHandle<()>>>,
     #[cfg(test)]
     accepted: Arc<Notify>,
@@ -135,12 +136,14 @@ impl Connected for CancellableIo {
     }
 }
 
-impl KvDcRelayTransport {
+impl GrpcTransport {
     pub(crate) async fn start(
-        source: WanPublicationSource,
-        config: KvDcRelayTransportConfig,
+        publication: Arc<dyn RelayPublicationSource>,
+        lifecycle: CancellationToken,
+        config: KvDcRelayGrpcConfig,
     ) -> anyhow::Result<Self> {
         config.validate()?;
+        let source = GrpcPublicationSource::new(publication, lifecycle);
         let reflection = tonic_reflection::server::Builder::configure()
             .register_encoded_file_descriptor_set(FILE_DESCRIPTOR_SET)
             .build_v1()
@@ -153,7 +156,7 @@ impl KvDcRelayTransport {
             .context("reading bound KV Relay gRPC listener address")?;
         let cancel = source.lifecycle().child_token();
         let fatal_cancel = source.lifecycle().clone();
-        let health = Arc::new(RwLock::new(KvDcRelayTransportHealth {
+        let health = Arc::new(RwLock::new(GrpcTransportHealth {
             enabled: true,
             serving: false,
             bound_address: Some(bound_address),
@@ -252,7 +255,7 @@ impl KvDcRelayTransport {
         })
     }
 
-    pub(crate) fn health(&self) -> KvDcRelayTransportHealth {
+    pub(crate) fn health(&self) -> GrpcTransportHealth {
         self.health.read().clone()
     }
 
@@ -274,7 +277,7 @@ impl KvDcRelayTransport {
     }
 }
 
-impl Drop for KvDcRelayTransport {
+impl Drop for GrpcTransport {
     fn drop(&mut self) {
         self.cancel.cancel();
     }
@@ -285,7 +288,7 @@ async fn supervise_transport(
     mut load: JoinHandle<anyhow::Result<()>>,
     cancel: CancellationToken,
     fatal_cancel: CancellationToken,
-    health: Arc<RwLock<KvDcRelayTransportHealth>>,
+    health: Arc<RwLock<GrpcTransportHealth>>,
 ) {
     enum Exit {
         Cancelled,
@@ -335,10 +338,10 @@ mod tests {
     async fn supervised_load_task_failure_cancels_the_relay() {
         let cancel = CancellationToken::new();
         let fatal = CancellationToken::new();
-        let health = Arc::new(RwLock::new(KvDcRelayTransportHealth {
+        let health = Arc::new(RwLock::new(GrpcTransportHealth {
             enabled: true,
             serving: true,
-            ..KvDcRelayTransportHealth::default()
+            ..GrpcTransportHealth::default()
         }));
         let server_cancel = cancel.clone();
         let server = tokio::spawn(async move {
@@ -362,10 +365,10 @@ mod tests {
     async fn relay_root_cancellation_marks_wan_transport_not_serving() {
         let relay_cancel = CancellationToken::new();
         let transport_cancel = relay_cancel.child_token();
-        let health = Arc::new(RwLock::new(KvDcRelayTransportHealth {
+        let health = Arc::new(RwLock::new(GrpcTransportHealth {
             enabled: true,
             serving: true,
-            ..KvDcRelayTransportHealth::default()
+            ..GrpcTransportHealth::default()
         }));
         let server_cancel = transport_cancel.clone();
         let load_cancel = transport_cancel.clone();

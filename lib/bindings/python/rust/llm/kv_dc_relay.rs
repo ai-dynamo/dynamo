@@ -91,7 +91,9 @@ impl KvDcRelay {
                 let bind = bind.parse().map_err(|error| {
                     PyValueError::new_err(format!("invalid KV DC Relay bind address: {error}"))
                 })?;
-                Some(llm_rs::kv_dc_relay::KvDcRelayTransportConfig::new(bind))
+                Some(llm_rs::kv_dc_relay::wan::grpc::KvDcRelayGrpcConfig::new(
+                    bind,
+                ))
             }
             None => None,
         };
@@ -169,7 +171,7 @@ impl KvDcRelay {
                     return Err(PyValueError::new_err(format!(
                         "unknown tuning key {key}; producer keys: publication_threshold, \
                          publication_delay_ms, recovery_attempt_timeout_ms; WAN transport keys \
-                         mirror the KvDcRelayTransportConfig field names"
+                         mirror the KvDcRelayGrpcConfig field names"
                     )));
                 }
             }

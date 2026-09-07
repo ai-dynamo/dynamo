@@ -9,22 +9,22 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tonic::Status;
 
-use super::super::identity::{DcPoolCatalog, DcRelayIdentity};
-use super::super::load::PoolLoadSnapshot;
-use super::super::protocol::RelayErrorReason;
-use super::super::publication::{PoolPublicationStream, RelayPublicationSource};
-use super::super::topology::TopologySnapshot;
+use super::protocol::RelayErrorReason;
+use crate::kv_dc_relay::identity::{DcPoolCatalog, DcRelayIdentity};
+use crate::kv_dc_relay::load::PoolLoadSnapshot;
+use crate::kv_dc_relay::publication::{PoolPublicationStream, RelayPublicationSource};
+use crate::kv_dc_relay::topology::TopologySnapshot;
 
-/// WAN driver facade over the transport-neutral publisher.
+/// Private gRPC driver facade over the transport-neutral publisher.
 /// The lifecycle token is supplied by the host, separately from the read-only source.
 #[derive(Clone)]
-pub(crate) struct WanPublicationSource {
+pub(super) struct GrpcPublicationSource {
     publication: Arc<dyn RelayPublicationSource>,
     lifecycle: CancellationToken,
 }
 
-impl WanPublicationSource {
-    pub(crate) fn new(
+impl GrpcPublicationSource {
+    pub(super) fn new(
         publication: Arc<dyn RelayPublicationSource>,
         lifecycle: CancellationToken,
     ) -> Self {
@@ -34,23 +34,23 @@ impl WanPublicationSource {
         }
     }
 
-    pub(crate) fn relay_identity(&self) -> DcRelayIdentity {
+    pub(super) fn relay_identity(&self) -> DcRelayIdentity {
         self.publication.relay_identity()
     }
 
-    pub(crate) fn lifecycle(&self) -> &CancellationToken {
+    pub(super) fn lifecycle(&self) -> &CancellationToken {
         &self.lifecycle
     }
 
-    pub(crate) fn watch_catalog(&self) -> watch::Receiver<DcPoolCatalog> {
+    pub(super) fn watch_catalog(&self) -> watch::Receiver<DcPoolCatalog> {
         self.publication.watch_catalog()
     }
 
-    pub(crate) fn watch_readiness(&self) -> watch::Receiver<Arc<TopologySnapshot>> {
+    pub(super) fn watch_readiness(&self) -> watch::Receiver<Arc<TopologySnapshot>> {
         self.publication.watch_readiness()
     }
 
-    pub(crate) async fn subscribe_pool(
+    pub(super) async fn subscribe_pool(
         &self,
         pool_id: PoolId,
         identity_matches: impl Fn(ProducerIdentity) -> bool + Send,
@@ -74,10 +74,10 @@ impl WanPublicationSource {
         self.publication
             .subscribe_pool(expected)
             .await
-            .map_err(super::grpc::publication_status)
+            .map_err(super::service::publication_status)
     }
 
-    pub(crate) fn load_snapshots(&self) -> Vec<PoolLoadSnapshot> {
+    pub(super) fn load_snapshots(&self) -> Vec<PoolLoadSnapshot> {
         self.publication.watch_load().borrow().clone()
     }
 }

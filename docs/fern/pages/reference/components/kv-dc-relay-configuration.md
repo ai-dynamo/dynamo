@@ -156,4 +156,4 @@ separately. Terminal host or transport failures stop the component with a nonzer
 
 - [Python argument parsing](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/kv_dc_relay/cli.py)
 - [Producer defaults](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/src/kv_dc_relay/host.rs)
-- [Transport defaults and validation](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/src/kv_dc_relay/transport_config.rs)
+- [gRPC adapter defaults and validation](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/src/kv_dc_relay/wan/grpc/config.rs)
