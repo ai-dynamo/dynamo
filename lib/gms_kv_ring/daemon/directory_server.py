@@ -10,6 +10,7 @@ full KV daemon composes the same RPC handlers when those tiers are enabled.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import os
 import threading
@@ -107,3 +108,14 @@ class DirectoryDaemon:
                 await writer.wait_closed()
             except Exception:  # noqa: BLE001
                 pass
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("listen_socket", help="Unix socket used by directory clients")
+    args = parser.parse_args()
+    asyncio.run(DirectoryDaemon(args.listen_socket).serve())
+
+
+if __name__ == "__main__":
+    main()
