@@ -5,9 +5,11 @@ SPDX-License-Identifier: Apache-2.0
 
 # Vendored vLLM protocol
 
-- Inference source: [`rust/proto/inference.proto`](https://github.com/vllm-project/vllm/blob/42156466db66f6d54cbea6075af82304cdfdaa6a/rust/proto/inference.proto) at `42156466db66f6d54cbea6075af82304cdfdaa6a`
+- Inference source: [`rust/proto/inference.proto`](https://github.com/vllm-project/vllm/blob/1f9444a34ff4ebfba4d65c68971bb5306a11aa92/rust/proto/inference.proto) at `1f9444a34ff4ebfba4d65c68971bb5306a11aa92`, extended by [vLLM #55047](https://github.com/vllm-project/vllm/pull/55047) at `090b63a7d7f4d9ebafcd8499dbaf7ebd7dce3275`
 - RL Control source: [`rust/proto/control.proto`](https://github.com/vllm-project/vllm/blob/2991f864083fdd5c60aa140d4fe1a561585a85dc/rust/proto/control.proto) from [vllm-project/vllm#51316](https://github.com/vllm-project/vllm/pull/51316) and [vllm-project/vllm#53204](https://github.com/vllm-project/vllm/pull/53204) at `2991f864083fdd5c60aa140d4fe1a561585a85dc`
-- `inference.proto` SHA-256: `4c04f91d4967d1ba873fff6f546df138bc15cd29565c707c8554163392bb609a`
+- `inference.proto` SHA-256: `8e2168cb421fdb1535e1c81404ee6dec1537f4d892fcf10ababdcb5e98491275`
 - `control.proto` SHA-256: `c8363fd4397187a44e667d3d04ada30401e078ab6763ed5144f674184dd8d787`
 
-The files are copied without modification. Update the revision and checksums together. `dynamo-vllm-sidecar` generates and temporarily exports these types for `dynamo-vllm-mocker-server`.
+The control file is copied without modification. The inference file matches the current-main vLLM base plus the documented pull-request extension above. Update the revisions and checksums together. `dynamo-vllm-sidecar` generates and temporarily exports these types for `dynamo-vllm-mocker-server`.
+
+The initial preprocessed multimodal transport accepts inline `kwargs_data` only. Native TITO cache-only references remain outside this PR because they require cache affinity across the Dynamo routing boundary.
