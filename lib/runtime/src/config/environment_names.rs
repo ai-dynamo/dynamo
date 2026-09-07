@@ -475,6 +475,13 @@ pub mod llm {
     /// EMA smoothing factor (alpha) for the EMA predictor. Range [0.0, 1.0].
     pub const DYN_LORA_ALLOCATION_EMA_ALPHA: &str = "DYN_LORA_ALLOCATION_EMA_ALPHA";
 
+    /// Bounded startup wait, in seconds, for the KV state-agent host
+    /// advertisement before an opted-in worker gives up on KV routing.
+    /// `0` fails after a single discovery snapshot; invalid values use the
+    /// 30-second default.
+    pub const DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS: &str =
+        "DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS";
+
     /// Metrics configuration
     pub mod metrics {
         /// Custom metrics prefix (overrides default "dynamo_frontend")
@@ -738,7 +745,8 @@ pub mod tcp_response_stream {
     /// If unset or 0, the OS assigns a free ephemeral port.
     pub const DYN_TCP_RESPONSE_STREAM_PORT: &str = "DYN_TCP_RESPONSE_STREAM_PORT";
 
-    /// Host/interface for the TCP response stream server.
+    /// IP address or exact interface used to bind and advertise the TCP response stream server.
+    /// Unspecified addresses are rejected.
     /// If unset, the server auto-detects a routable local IP.
     pub const DYN_TCP_RESPONSE_STREAM_HOST: &str = "DYN_TCP_RESPONSE_STREAM_HOST";
 
@@ -798,6 +806,11 @@ pub mod event_plane {
 
     /// Event plane codec selection: "json" or "msgpack".
     pub const DYN_EVENT_PLANE_CODEC: &str = "DYN_EVENT_PLANE_CODEC";
+
+    /// IP address or exact interface advertised by direct ZMQ event publishers.
+    /// Unspecified addresses are rejected.
+    /// If unset, the runtime auto-detects a local IP address.
+    pub const DYN_EVENT_PLANE_HOST: &str = "DYN_EVENT_PLANE_HOST";
 
     /// Bounded capacity of the direct ZMQ event-subscriber's merged event channel.
     ///
@@ -980,6 +993,7 @@ mod tests {
             llm::DYN_REASONING_FIELD_NAME,
             llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
             llm::DYN_ENABLE_GUIDED_TOOL_STREAMING,
+            llm::DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS,
             llm::DYN_LORA_ALLOCATION_ENABLED,
             llm::DYN_LORA_ALLOCATION_ALGORITHM,
             llm::DYN_LORA_ALLOCATION_TIMESTEP_SECS,
@@ -1058,6 +1072,7 @@ mod tests {
             // Event Plane
             event_plane::DYN_EVENT_PLANE,
             event_plane::DYN_EVENT_PLANE_CODEC,
+            event_plane::DYN_EVENT_PLANE_HOST,
             event_plane::DYN_ZMQ_EVENT_SUBSCRIBER_CHANNEL_CAPACITY,
             // ZMQ Broker
             zmq_broker::DYN_ZMQ_BROKER_URL,

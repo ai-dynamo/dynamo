@@ -2033,6 +2033,12 @@ async fn build_local_model(
     };
 
     let mut runtime_data = engine_config.runtime_data.clone();
+    if config.route_to_encoder {
+        runtime_data.insert(
+            "encoder_result_handoff".to_string(),
+            serde_json::Value::Bool(true),
+        );
+    }
     if let Some(default_thinking_mode) = config.default_thinking_mode.as_deref() {
         runtime_data.insert(
             "default_thinking_mode".to_string(),
@@ -2386,6 +2392,7 @@ mod tests {
             exclude_tools_when_tool_choice_none: false,
             enable_local_indexer: false,
             kv_state_endpoint: Some(EndpointId::from("dynamo/kv-state/events")),
+            route_to_encoder: true,
             ..WorkerConfig::default()
         };
         let engine_config = EngineConfig {
@@ -2422,6 +2429,13 @@ mod tests {
                 .get("default_thinking_mode")
                 .and_then(|value| value.as_str()),
             Some("disabled")
+        );
+        assert_eq!(
+            runtime_config
+                .runtime_data
+                .get("encoder_result_handoff")
+                .and_then(|value| value.as_bool()),
+            Some(true)
         );
         assert!(!runtime_config.exclude_tools_when_tool_choice_none);
         assert!(!runtime_config.enable_local_indexer);
