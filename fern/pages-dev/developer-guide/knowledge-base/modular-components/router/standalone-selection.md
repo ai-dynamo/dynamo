@@ -49,10 +49,8 @@ operations as the standalone HTTP service.
 
 `SelectionCore::try_new_local` creates an intentionally unsynchronized core for
 tests and local-only use while reporting invalid tracking-hash configuration.
-`SelectionCore::new_local` remains available for compatibility and panics on
-invalid configuration. Production integrations should use
-`SelectionServiceBuilder` so startup recovery, readiness, and background-task
-lifecycle remain consistent with the standalone service.
+Production integrations should use `SelectionServiceBuilder` so startup recovery,
+readiness, and background-task lifecycle remain consistent with the standalone service.
 
 To inject native Rust scorers and a picker while retaining those service-owned capabilities, see [Write Custom Routing Strategies](custom-worker-selection.mdx).
 
