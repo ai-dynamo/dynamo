@@ -355,12 +355,6 @@ impl<P: EndpointPicker> ExtProcServer<P> {
                 }
             }
         } else {
-            tracing::trace!(
-                request_id = %ctx.request_id,
-                has_cache_namespace = result.cache_namespace.is_some(),
-                cache_salt_forwarding = ?result.cache_salt_forwarding,
-                "No routing extensions to inject; forwarding body unchanged"
-            );
             raw_body.clone()
         };
 

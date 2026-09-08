@@ -229,59 +229,55 @@ mod tests {
     }
 
     #[test]
-    fn tenant_header_wins_over_body_sources() {
-        let resolved = resolve_cache_namespace(
-            &headers(&[("X-Tenant-ID", "tenant-header")]),
-            Some("nvext-salt"),
-            Some("top-level-salt"),
-        );
-        assert_eq!(resolved.as_deref(), Some("tenant-header"));
-    }
-
-    #[test]
-    fn nvext_cache_salt_wins_over_top_level() {
-        let resolved = resolve_cache_namespace(&[], Some("nvext-salt"), Some("top-level-salt"));
-        assert_eq!(resolved.as_deref(), Some("nvext-salt"));
-    }
-
-    #[test]
-    fn top_level_cache_salt_is_fallback() {
-        let resolved = resolve_cache_namespace(&[], None, Some("top-level-salt"));
-        assert_eq!(resolved.as_deref(), Some("top-level-salt"));
-    }
-
-    #[test]
-    fn empty_values_are_absent() {
-        // Empty nvext falls through to top-level; empty top-level is absent.
-        let resolved = resolve_cache_namespace(&[], Some(""), Some("top-level-salt"));
-        assert_eq!(resolved.as_deref(), Some("top-level-salt"));
-
-        let resolved = resolve_cache_namespace(&[], Some("nvext-salt"), Some(""));
-        assert_eq!(resolved.as_deref(), Some("nvext-salt"));
-
-        // Empty header falls through to the body; whitespace-only is empty too.
-        let hdrs = headers(&[("x-tenant-id", ""), ("X-Tenant-ID", "   ")]);
-        let resolved = resolve_cache_namespace(&hdrs, Some("nvext-salt"), None);
-        assert_eq!(resolved.as_deref(), Some("nvext-salt"));
-
-        assert_eq!(resolve_cache_namespace(&[], None, None), None);
-    }
-
-    #[test]
-    fn last_non_empty_trimmed_tenant_header_wins() {
-        let hdrs = headers(&[
-            ("x-tenant-id", "tenant-client"),
-            ("X-Tenant-ID", "   "),
-            ("x-tenant-id", " tenant-gateway "),
-        ]);
-        let resolved = resolve_cache_namespace(&hdrs, Some("nvext-salt"), None);
-        assert_eq!(resolved.as_deref(), Some("tenant-gateway"));
-    }
-
-    #[test]
-    fn pick_result_defaults_to_preserve_forwarding() {
-        let result = PickResult::default();
-        assert_eq!(result.cache_salt_forwarding, CacheSaltForwarding::Preserve);
-        assert!(result.cache_namespace.is_none());
+    fn resolve_cache_namespace_precedence() {
+        for (name, request_headers, nvext_cache_salt, top_level_cache_salt, expected) in [
+            (
+                "tenant header wins over both body sources",
+                headers(&[("X-Tenant-ID", "tenant-header")]),
+                Some("nvext-salt"),
+                Some("top-level-salt"),
+                Some("tenant-header"),
+            ),
+            (
+                "last non-empty trimmed tenant header wins",
+                headers(&[
+                    ("x-tenant-id", "tenant-client"),
+                    ("X-Tenant-ID", "   "),
+                    ("x-tenant-id", " tenant-gateway "),
+                ]),
+                Some("nvext-salt"),
+                None,
+                Some("tenant-gateway"),
+            ),
+            (
+                "nvext cache salt wins over top level",
+                vec![],
+                Some("nvext-salt"),
+                Some("top-level-salt"),
+                Some("nvext-salt"),
+            ),
+            (
+                "top-level cache salt is the fallback",
+                vec![],
+                None,
+                Some("top-level-salt"),
+                Some("top-level-salt"),
+            ),
+            (
+                "empty values are absent",
+                headers(&[("x-tenant-id", ""), ("X-Tenant-ID", "   ")]),
+                Some(""),
+                Some("top-level-salt"),
+                Some("top-level-salt"),
+            ),
+            ("all sources absent", vec![], None, Some(""), None),
+        ] {
+            assert_eq!(
+                resolve_cache_namespace(&request_headers, nvext_cache_salt, top_level_cache_salt,)
+                    .as_deref(),
+                expected,
+                "{name}"
+            );
+        }
     }
 }
