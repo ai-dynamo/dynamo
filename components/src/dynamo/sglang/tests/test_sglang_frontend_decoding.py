@@ -26,6 +26,7 @@ from dynamo.sglang.request_handlers.llm.decode_handler import (
     DecodeWorkerHandler,
     FrontendDecodedVideo,
 )
+from dynamo.sglang.request_handlers.llm.prefill_handler import PrefillWorkerHandler
 from dynamo.sglang.request_handlers.multimodal.encode_worker_handler import (
     Modality,
     MultimodalEncodeWorkerHandler,
@@ -613,3 +614,257 @@ async def test_aggregated_fd_on_no_images_passes_none():
         pass
 
     assert captured["image_data"] is None
+
+
+# NVBug 6418893 — SGLang session radix wiring.
+#
+# Dynamo used to derive `session_params={"id": <session_id>}` from a request's
+# `agent_context.session_id` and pass it to `engine.async_generate`. SGLang
+# treats `session_params.id` as an explicit session lifecycle and rejects any id
+# that was not created through `open_session`, so every request carrying an
+# `agent_context.session_id` failed against an SGLang server. Commit `d245a5be3`
+# removed that wiring but added no test guarding its return. These tests assert
+# the corrected contract at the engine seam: no handler may synthesize
+# `session_params` from `agent_context`. See the "Session identity" note in
+# components/src/dynamo/sglang/AGENTS.md.
+
+
+class _GenerateRecorder:
+    """Stands in for ``sgl.Engine``, recording each ``async_generate`` call.
+
+    ``calls`` holds one keyword-argument dict per call, so a test can assert both
+    what reached the engine and that the engine was reached exactly once. The
+    ``**kwargs`` signature matters: ``filter_supported_async_generate_kwargs``
+    inspects it and forwards every kwarg when it finds a var-keyword parameter.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[Dict[str, Any]] = []
+
+    async def async_generate(
+        self, **kwargs: Any
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        self.calls.append(kwargs)
+        return _empty_stream()
+
+
+# The deleted helper read the flag through
+# `getattr(server_args, "enable_session_radix_cache", False)`, so an
+# attribute-free SimpleNamespace is exactly the fixture its default-False
+# behavior would have satisfied silently. Pinning all three states means no
+# future server_args flag can quietly reopen the path.
+_SESSION_RADIX_SERVER_ARGS = [
+    pytest.param({"enable_session_radix_cache": True}, id="radix_flag_true"),
+    pytest.param({"enable_session_radix_cache": False}, id="radix_flag_false"),
+    pytest.param({}, id="radix_flag_absent"),
+]
+
+_ADVERSARIAL_AGENT_CONTEXTS = [
+    pytest.param({}, id="no_agent_context_key"),
+    pytest.param({"agent_context": None}, id="null_agent_context"),
+    pytest.param({"agent_context": {}}, id="empty_agent_context"),
+    pytest.param({"agent_context": {"session_id": ""}}, id="empty_session_id"),
+    pytest.param({"agent_context": {"session_id": None}}, id="null_session_id"),
+    pytest.param({"agent_context": {"session_id": 123}}, id="int_session_id"),
+    pytest.param(
+        {"agent_context": {"session_id": {"id": "s-1"}}}, id="dict_session_id"
+    ),
+]
+
+_SESSION_AGENT_CONTEXT = {"agent_context": {"session_id": "s-1"}}
+
+
+def _set_server_args(handler: Any, extra_fields: Dict[str, Any]) -> None:
+    """Rebuild ``handler.config.server_args`` with the given extra attributes."""
+    handler.config = SimpleNamespace(
+        server_args=SimpleNamespace(served_model_name="test-model", **extra_fields)
+    )
+
+
+def _new_prefill_handler() -> PrefillWorkerHandler:
+    """Build a PrefillWorkerHandler without invoking sgl.Engine.
+
+    Same bypass-``__init__`` pattern as ``_new_decode_handler`` above and as
+    test_sglang_decode_handler.py.
+    """
+    handler = PrefillWorkerHandler.__new__(PrefillWorkerHandler)
+    handler.use_sglang_tokenizer = False
+    handler.enable_trace = False
+    handler.serving_mode = DisaggregationMode.PREFILL
+    handler.config = SimpleNamespace(
+        server_args=SimpleNamespace(served_model_name="test-model")
+    )
+    handler.bootstrap_host = "127.0.0.1"
+    handler.bootstrap_port = 1234
+    handler._generate_bootstrap_room = lambda: 7
+    handler._consume_tasks = set()
+
+    @asynccontextmanager
+    async def no_cancellation_monitor(*args, **kwargs):
+        yield None
+
+    handler._cancellation_monitor = no_cancellation_monitor
+
+    handler._get_input_param = lambda req: {"input_ids": req.get("token_ids", [])}
+    handler._resolve_lora = lambda req: None
+    handler._priority_kwargs = lambda priority: {}
+
+    return handler
+
+
+async def _capture_aggregated_kwargs(
+    request_overrides: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Run one aggregated decode request; return the recorded engine kwargs.
+
+    Asserts the engine was called exactly once. Without that check, an
+    "``x`` is absent" assertion would also pass when the handler never reached
+    the engine at all.
+    """
+    handler = _new_decode_handler(enable_frontend_decoding=False)
+    recorder = _GenerateRecorder()
+    handler.engine = recorder
+
+    request: Dict[str, Any] = {"token_ids": [1, 2, 3], "multi_modal_data": {}}
+    request.update(request_overrides)
+
+    async for _ in handler.generate(request, _Context()):
+        pass
+
+    assert len(recorder.calls) == 1
+    return recorder.calls[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("server_args_fields", _SESSION_RADIX_SERVER_ARGS)
+async def test_aggregated_decode_omits_session_params_for_agent_context(
+    server_args_fields,
+):
+    """Aggregated decode must not turn ``agent_context.session_id`` into
+    ``session_params`` (NVBug 6418893).
+
+    The absent-key assertion is deliberate, not a stale leftover: reverting
+    commit ``d245a5be3`` restores ``_session_kwargs`` and makes this fail.
+    """
+    handler = _new_decode_handler(enable_frontend_decoding=False)
+    _set_server_args(handler, server_args_fields)
+    recorder = _GenerateRecorder()
+    handler.engine = recorder
+
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {},
+        **_SESSION_AGENT_CONTEXT,
+    }
+
+    async for _ in handler.generate(request, _Context()):
+        pass
+
+    assert len(recorder.calls) == 1
+    captured = recorder.calls[0]
+    assert captured["input_ids"] == [1, 2, 3]
+    assert "session_params" not in captured
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("server_args_fields", _SESSION_RADIX_SERVER_ARGS)
+async def test_disaggregated_decode_omits_session_params_for_agent_context(
+    server_args_fields,
+):
+    """Disaggregated decode must not attach ``session_params`` either
+    (NVBug 6418893).
+
+    Commit ``d245a5be3`` removed a separate ``_session_kwargs`` call site on this
+    branch of ``DecodeWorkerHandler.generate``, so it needs its own test.
+    """
+    handler = _new_decode_handler(enable_frontend_decoding=False)
+    handler.serving_mode = DisaggregationMode.DECODE
+    _set_server_args(handler, server_args_fields)
+    recorder = _GenerateRecorder()
+    handler.engine = recorder
+
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {},
+        "bootstrap_info": {
+            "bootstrap_host": "127.0.0.1",
+            "bootstrap_port": 1234,
+            "bootstrap_room": 7,
+        },
+        **_SESSION_AGENT_CONTEXT,
+    }
+
+    async for _ in handler.generate(request, _Context()):
+        pass
+
+    assert len(recorder.calls) == 1
+    captured = recorder.calls[0]
+    assert captured["input_ids"] == [1, 2, 3]
+    assert captured["bootstrap_room"] == 7
+    assert "session_params" not in captured
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("server_args_fields", _SESSION_RADIX_SERVER_ARGS)
+async def test_prefill_omits_session_params_for_agent_context(server_args_fields):
+    """Prefill must not attach ``session_params`` either (NVBug 6418893).
+
+    The third ``_session_kwargs`` call site removed by commit ``d245a5be3`` was
+    in ``PrefillWorkerHandler.generate``.
+    """
+    handler = _new_prefill_handler()
+    _set_server_args(handler, server_args_fields)
+    recorder = _GenerateRecorder()
+    handler.engine = recorder
+
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {},
+        "stop_conditions": {},
+        **_SESSION_AGENT_CONTEXT,
+    }
+
+    async for _ in handler.generate(request, _Context()):
+        pass
+
+    assert len(recorder.calls) == 1
+    captured = recorder.calls[0]
+    assert captured["input_ids"] == [1, 2, 3]
+    assert "session_params" not in captured
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("request_overrides", _ADVERSARIAL_AGENT_CONTEXTS)
+async def test_aggregated_decode_tolerates_adversarial_agent_context(
+    request_overrides,
+):
+    """Missing, empty, and wrong-typed session ids reach the engine unchanged.
+
+    The no-raise half carries as much weight as the absent key. The removed
+    ``_session_id`` helper guarded on ``isinstance(session_id, str)``; a
+    reintroduction that drops the guard surfaces as an exception rather than a
+    wrong keyword argument, and only running these inputs catches that variant.
+    An exception anywhere in ``generate`` fails the test.
+    """
+    captured = await _capture_aggregated_kwargs(request_overrides)
+
+    assert captured["input_ids"] == [1, 2, 3]
+    assert "session_params" not in captured
+
+
+@pytest.mark.asyncio
+async def test_agent_context_contributes_no_engine_kwargs():
+    """Control: an ``agent_context`` changes nothing about the engine payload.
+
+    Asserting only that ``session_params`` is absent would still pass if a
+    handler grew some other ``agent_context``-derived keyword argument.
+    Comparing the whole key set against an otherwise identical request pins that
+    ``agent_context`` contributes nothing. This control stays green under
+    refactors of the kwargs assembly and goes red only when ``agent_context``
+    starts contributing a key.
+    """
+    with_context = await _capture_aggregated_kwargs(_SESSION_AGENT_CONTEXT)
+    without_context = await _capture_aggregated_kwargs({})
+
+    assert set(with_context) == set(without_context)
+    assert "session_params" not in with_context
