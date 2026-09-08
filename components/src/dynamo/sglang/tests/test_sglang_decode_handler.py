@@ -28,6 +28,7 @@ from dynamo.sglang.request_handlers.llm.decode_handler import (
     _nvext_extra_field_requested,
     _openai_stop_sampling_params,
     _remove_suppressed_stop_tokens,
+    _requests_input_logprobs,
     _suppressed_stop_token_ids,
     _user_stop_token_ids,
 )
@@ -417,6 +418,35 @@ def test_engine_generate_reads_return_logprob_as_sglang_does():
     )
 
     assert native.return_logprob is False
+
+
+def test_prompt_logprobs_need_a_start_position_inside_the_prompt():
+    # logprob_start_len is the absolute position where scoring starts. Its
+    # default of -1 lands on the last prompt position, so return_logprob on
+    # its own scores output tokens only and asks nothing of the prompt.
+    def native(payload):
+        return build_native_generate_request(
+            payload,
+            input_ids=[1, 2, 3],
+            fallback_rid="request",
+            priority=None,
+        )
+
+    assert _requests_input_logprobs(native({"return_logprob": True})) is False
+    assert (
+        _requests_input_logprobs(
+            native({"return_logprob": True, "logprob_start_len": -1})
+        )
+        is False
+    )
+    assert (
+        _requests_input_logprobs(
+            native({"return_logprob": True, "logprob_start_len": 0})
+        )
+        is True
+    )
+    # A start position without the flag computes no logprobs at all.
+    assert _requests_input_logprobs(native({"logprob_start_len": 0})) is False
 
 
 def test_engine_generate_requires_object_sampling_params_for_prefill_override():

@@ -255,9 +255,10 @@ its `meta_info` simply lacks `input_token_logprobs`. On the terminal chunk of su
 request the handler writes `meta_info["input_logprobs_unavailable_reason"] =
 "disaggregated_decode"` -- read it as "this topology cannot serve prompt logprobs", as
 opposed to an absent key, which means the prompt genuinely produced none. The marker is
-written only when the client sent `return_logprob`, the chunk carries a non-null
-`finish_reason`, and `input_token_logprobs` is absent or empty; aggregated workers and the
-prefill worker's responses are untouched. `DecodeWorkerHandler._process_native_generate_stream`
+written only when the request actually asked for prompt logprobs (`return_logprob` **and**
+`logprob_start_len >= 0` -- the default `-1` scores output tokens only), the chunk carries
+a non-null `finish_reason`, and `input_token_logprobs` is absent or empty; aggregated
+workers and the prefill worker's responses are untouched. `DecodeWorkerHandler._process_native_generate_stream`
 and the Rust sidecar's `native_http::output` both emit it (via
 `dynamo.common.backend.logprobs.annotate_input_logprobs_unavailable` and its mirror in
 `lib/sidecar/sglang/src/native_http.rs`) -- change the two together.

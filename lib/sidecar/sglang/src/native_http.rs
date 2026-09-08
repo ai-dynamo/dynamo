@@ -132,7 +132,8 @@ pub(crate) fn request(
     } else {
         None
     };
-    let input_logprobs_requested = parse_return_logprob(body.get("return_logprob"));
+    let input_logprobs_requested = parse_return_logprob(body.get("return_logprob"))
+        && parse_logprob_start_len(body.get("logprob_start_len")) >= 0;
     Ok(Some(NativeRequest {
         body: Value::Object(body),
         is_prefill: mode.is_prefill(),
@@ -158,6 +159,21 @@ fn parse_return_logprob(value: Option<&Value>) -> bool {
             "1" | "on" | "t" | "true" | "y" | "yes"
         ),
         _ => false,
+    }
+}
+
+/// `logprob_start_len` is the absolute sequence position where SGLang starts
+/// computing logprobs. Its default, `-1`, resolves to the last prompt position,
+/// so the prompt itself is skipped and only output tokens are scored; `0` and
+/// above reach into the prompt. `return_logprob` alone therefore does not ask
+/// for prompt logprobs, and reading it as if it did would explain their absence
+/// to a client that only wanted output logprobs. Absent, null, and anything
+/// SGLang would reject all read as the default.
+fn parse_logprob_start_len(value: Option<&Value>) -> i64 {
+    match value {
+        Some(Value::Number(number)) => number.as_i64().unwrap_or(-1),
+        Some(Value::String(text)) => text.trim().parse().unwrap_or(-1),
+        _ => -1,
     }
 }
 
@@ -430,15 +446,11 @@ fn output(
 }
 
 /// Mirror of `annotate_input_logprobs_unavailable` in
-/// `components/src/dynamo/common/backend/logprobs.py`: mark prompt logprobs a
-/// decode worker structurally cannot produce, so a client can tell suppressed
-/// data from genuinely empty data.
-///
-/// The caller has already established that this worker is decode under
-/// disaggregation and that the client asked for logprobs. This function adds
-/// the remaining two conditions: the chunk must be terminal (`finish_reason`
-/// present and non-null -- an error response is terminal without one), and the
-/// response must not already carry input logprobs.
+/// `components/src/dynamo/common/backend/logprobs.py`: a decode worker under
+/// disaggregation never prefills, so it cannot produce prompt logprobs, and the
+/// marker lets a client tell that from a prompt that produced none. Never mark
+/// a response that already carries input logprobs, which is what keeps the
+/// marker from contradicting data forwarded from prefill.
 fn annotate_input_logprobs_unavailable(response: &mut Value) {
     let Some(meta_info) = response.get_mut("meta_info").and_then(Value::as_object_mut) else {
         return;
@@ -512,8 +524,8 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        NativeHttp, NativeRequest, authentication_error, output, parse_return_logprob, request,
-        response_error, response_has_output,
+        NativeHttp, NativeRequest, authentication_error, output, parse_logprob_start_len,
+        parse_return_logprob, request, response_error, response_has_output,
     };
     use crate::client::Discovery;
 
@@ -633,7 +645,7 @@ mod tests {
             handoff_id: None,
         });
         canonical.extra_args = Some(json!({
-            "sglang_tito": {"return_logprob": true}
+            "sglang_tito": {"return_logprob": true, "logprob_start_len": 0}
         }));
 
         let native = request(
@@ -648,6 +660,25 @@ mod tests {
         assert!(native.is_decode);
         assert!(!native.is_prefill);
         assert!(native.input_logprobs_requested);
+
+        // `return_logprob` on its own leaves `logprob_start_len` at its default,
+        // which scores output tokens only. Such a response is missing prompt
+        // logprobs because none were asked for, not because decode cannot serve
+        // them, so there is nothing to explain.
+        canonical.extra_args = Some(json!({
+            "sglang_tito": {"return_logprob": true}
+        }));
+        let native = request(
+            &canonical,
+            "request-id",
+            DisaggregationMode::Decode,
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(native.is_decode);
+        assert!(!native.input_logprobs_requested);
 
         canonical.extra_args = Some(json!({"sglang_tito": {}}));
         let native = request(
@@ -685,6 +716,18 @@ mod tests {
         // logprobs arrives, so there is nothing to explain on the way back.
         assert!(!parse_return_logprob(Some(&Value::Null)));
         assert!(!parse_return_logprob(None));
+    }
+
+    #[test]
+    fn logprob_start_len_defaults_to_output_tokens_only() {
+        // Only a start position inside the prompt asks SGLang to score it.
+        assert_eq!(parse_logprob_start_len(Some(&json!(0))), 0);
+        assert_eq!(parse_logprob_start_len(Some(&json!(4))), 4);
+        assert_eq!(parse_logprob_start_len(Some(&json!("0"))), 0);
+        // Absent, null, and the explicit default all mean output tokens only.
+        assert_eq!(parse_logprob_start_len(None), -1);
+        assert_eq!(parse_logprob_start_len(Some(&Value::Null)), -1);
+        assert_eq!(parse_logprob_start_len(Some(&json!(-1))), -1);
     }
 
     #[test]

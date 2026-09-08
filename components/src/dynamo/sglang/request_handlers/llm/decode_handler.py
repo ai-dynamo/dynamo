@@ -288,6 +288,21 @@ def _extract_sglang_stop_reason(
     return None
 
 
+def _requests_input_logprobs(native_request: Any) -> bool:
+    """Report whether a validated native request asks SGLang to score the prompt.
+
+    ``return_logprob`` alone is not enough: ``logprob_start_len`` is the absolute
+    sequence position where scoring starts, and its default of ``-1`` resolves to
+    the last prompt position, so only output tokens are scored. Prompt logprobs
+    need a start position of ``0`` or above.
+    """
+
+    if not native_request.return_logprob:
+        return False
+    start_len = native_request.logprob_start_len
+    return isinstance(start_len, int) and start_len >= 0
+
+
 class DecodeWorkerHandler(BaseWorkerHandler):
     """Handler for decode workers in both aggregated and disaggregated serving modes."""
 
@@ -492,9 +507,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     ) -> tuple[AsyncIterator[Dict[str, Any]], bool]:
         """Build and dispatch one native SGLang request.
 
-        Returns the response stream alongside SGLang's own reading of
-        ``return_logprob``. The opaque payload is client JSON, so only the
-        validated request says whether the engine will compute logprobs.
+        Returns the response stream alongside whether the validated request asks
+        the engine to score the prompt. The opaque payload is client JSON, so
+        only the validated request gives a reliable answer.
         """
         raise_if_unextracted_multimodal(request)
         input_ids = input_param.get("input_ids")
@@ -526,7 +541,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         )
         return (
             native_generate_stream(self.engine, native_request),
-            bool(native_request.return_logprob),
+            _requests_input_logprobs(native_request),
         )
 
     async def generate(
@@ -743,9 +758,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Forward opaque SGLang chunks while retaining engine cancellation.
 
-        ``input_logprobs_requested`` carries the client's ``return_logprob``
-        from the opaque native payload, which is not in scope here. It is
-        keyword-only and required because it cannot be derived inside this
+        ``input_logprobs_requested`` says whether the request asked SGLang to
+        score the prompt; the native payload it comes from is not in scope here.
+        It is keyword-only and required because it cannot be derived inside this
         method, and a default would silently disable the terminal-chunk
         annotation for any future caller that forgot it.
         """
