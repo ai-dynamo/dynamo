@@ -80,7 +80,7 @@ jobs:
           echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
 
   pre-commit:
-    runs-on: ubuntu-latest
+    runs-on: stg-deploy-tester-v1
     permissions:
       contents: read
     steps:
