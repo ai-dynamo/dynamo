@@ -9,6 +9,8 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use super::config::RouterQueuePolicy;
+use super::request_classifier_config::RawRequestClassifierConfig;
+pub use super::request_classifier_config::RequestClassifierConfig;
 use super::worker_selection_config::RawWorkerSelectionConfig;
 pub use super::worker_selection_config::{WorkerSelectionConfig, WorkerSelectionInstance};
 
@@ -206,6 +208,7 @@ pub struct RouterPolicyConfig {
     root: Option<PolicyProfile>,
     models: HashMap<String, PolicyProfile>,
     worker_selection: Option<WorkerSelectionConfig>,
+    request_classifier: Option<RequestClassifierConfig>,
 }
 
 impl RouterPolicyConfig {
@@ -254,6 +257,11 @@ impl RouterPolicyConfig {
         self.worker_selection.as_ref()
     }
 
+    /// Returns the process-wide request-classifier plugin configuration, if present.
+    pub fn request_classifier(&self) -> Option<&RequestClassifierConfig> {
+        self.request_classifier.as_ref()
+    }
+
     /// Whether this document configures queue policy profiles.
     pub fn has_routing_profiles(&self) -> bool {
         self.root.is_some() || !self.models.is_empty()
@@ -273,6 +281,8 @@ struct RawRouterPolicyConfig {
     models: HashMap<String, RawPolicyProfile>,
     #[serde(default)]
     worker_selection: Option<RawWorkerSelectionConfig>,
+    #[serde(default)]
+    request_classifier: Option<RawRequestClassifierConfig>,
 }
 
 impl RawRouterPolicyConfig {
@@ -316,9 +326,18 @@ impl RawRouterPolicyConfig {
             None => None,
         };
 
-        if root.is_none() && models.is_empty() && worker_selection.is_none() {
+        let request_classifier = match self.request_classifier {
+            Some(config) => Some(config.resolve()?),
+            None => None,
+        };
+
+        if root.is_none()
+            && models.is_empty()
+            && worker_selection.is_none()
+            && request_classifier.is_none()
+        {
             return Err(RouterPolicyConfigError::Validation(
-                "router policy config must define a root profile, at least one model profile, or worker_selection".to_string(),
+                "router policy config must define a root profile, at least one model profile, worker_selection, or request_classifier".to_string(),
             ));
         }
 
@@ -326,6 +345,7 @@ impl RawRouterPolicyConfig {
             root,
             models,
             worker_selection,
+            request_classifier,
         })
     }
 }
@@ -667,6 +687,50 @@ worker_selection:
                 .queue_policy,
             RouterQueuePolicy::Wspt
         );
+    }
+
+    #[test]
+    fn request_classifier_only_config_preserves_parameter_mapping() {
+        let config = RouterPolicyConfig::from_yaml(
+            r#"
+request_classifier:
+  type: thunderagent
+  parameters:
+    pause_threshold: 0.9
+"#,
+        )
+        .unwrap();
+
+        let classifier = config.request_classifier().unwrap();
+        assert_eq!(classifier.classifier_type(), "thunderagent");
+        assert!(matches!(
+            classifier.parameters(),
+            serde_yaml::Value::Mapping(_)
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_request_classifier_config() {
+        for yaml in [
+            r#"
+request_classifier:
+  type: default
+"#,
+            r#"
+request_classifier:
+  type: thunderagent
+  parameters: 1
+"#,
+            r#"
+request_classifier:
+  type: ""
+"#,
+        ] {
+            assert!(
+                RouterPolicyConfig::from_yaml(yaml).is_err(),
+                "unexpectedly accepted {yaml}"
+            );
+        }
     }
 
     #[test]

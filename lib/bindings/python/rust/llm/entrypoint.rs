@@ -1010,15 +1010,18 @@ pub fn run_input<'p>(
     let input_enum: Input = input.parse().map_err(to_pyerr)?;
     let frontend_route_extensions =
         super::frontend_routes::frontend_route_extensions_from_py(py, frontend_route_extensions)?;
-    let worker_selection_policy_factory = crate::worker_selection_policy_factory(
-        &engine_config
-            .inner
-            .local_model()
-            .router_config()
-            .kv_router_config,
-    )
-    .map_err(to_pyerr)?;
-    if worker_selection_policy_factory.is_some()
+    let kv_router_config = &engine_config
+        .inner
+        .local_model()
+        .router_config()
+        .kv_router_config;
+    let worker_selection_policy_factory =
+        crate::worker_selection_policy_factory(kv_router_config).map_err(to_pyerr)?;
+    let request_classifier_factory =
+        crate::request_classifier_factory(kv_router_config).map_err(to_pyerr)?;
+    let has_linked_router_plugin =
+        worker_selection_policy_factory.is_some() || request_classifier_factory.is_some();
+    if has_linked_router_plugin
         && !engine_config
             .inner
             .local_model()
@@ -1027,21 +1030,27 @@ pub fn run_input<'p>(
             .is_kv_routing()
     {
         return Err(PyValueError::new_err(
-            "linked worker-selection policies require --router-mode kv",
+            "linked router plugins require --router-mode kv",
         ));
     }
-    if worker_selection_policy_factory.is_some() && !matches!(&input_enum, Input::Http) {
+    if has_linked_router_plugin && !matches!(&input_enum, Input::Http) {
         return Err(PyValueError::new_err(
-            "linked worker-selection policies require HTTP frontend input",
+            "linked router plugins require HTTP frontend input",
         ));
     }
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        if let Some(factory) = worker_selection_policy_factory {
-            HttpFrontend::default()
-                .frontend_route_extensions(frontend_route_extensions)
-                .worker_selection_policy_factory(move |config, worker_type, partition| {
-                    factory(config, worker_type, partition)
-                })
+        if has_linked_router_plugin {
+            let mut frontend =
+                HttpFrontend::default().frontend_route_extensions(frontend_route_extensions);
+            if let Some(factory) = worker_selection_policy_factory {
+                frontend = frontend.worker_selection_policy_factory(
+                    move |config, worker_type, partition| factory(config, worker_type, partition),
+                );
+            }
+            if let Some(classifier_factory) = request_classifier_factory {
+                frontend = frontend.request_classifier_factory(classifier_factory);
+            }
+            frontend
                 .run(distributed_runtime.inner.clone(), engine_config.inner)
                 .await
                 .map_err(to_pyerr)?;

@@ -1187,6 +1187,18 @@ impl KvRouterConfig {
             .and_then(super::policy_config::RouterPolicyConfig::worker_selection))
     }
 
+    /// Return the custom request-classifier configuration from `router_policy_config`, if any.
+    pub fn request_classifier_config(
+        &self,
+    ) -> Result<
+        Option<&super::policy_config::RequestClassifierConfig>,
+        super::policy_config::RouterPolicyConfigError,
+    > {
+        Ok(self
+            .loaded_policy_config()?
+            .and_then(super::policy_config::RouterPolicyConfig::request_classifier))
+    }
+
     /// Return one configured custom worker-selection instance, if any.
     ///
     /// `DYN_ROUTER_WORKER_SELECTION_POLICY` overrides the role-specific YAML selections. The
