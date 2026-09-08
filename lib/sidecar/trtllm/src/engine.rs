@@ -139,12 +139,8 @@ impl LLMEngine for TrtllmSidecarEngine {
         let client = TrtllmClient::connect(&self.endpoint, self.transport).await?;
         let connection_count = client.connection_count();
 
-        // An explicitly configured `--context-length` wins; the server-reported
-        // value is adopted only when the argument was omitted. Some TensorRT-LLM
-        // releases report `max_input_len` rather than the real maximum sequence
-        // length in `GetModelInfo.max_seq_len` (others return zero), so the
-        // operator must be able to correct what the server claims. The resolved
-        // value backs the default-`max_tokens` path in `convert::max_tokens`.
+        // Some TensorRT-LLM releases report `max_input_len` (or zero) as
+        // `GetModelInfo.max_seq_len`, so a configured `--context-length` wins.
         let mut model = self.model.clone();
         let reported = match client.model_info().await {
             Ok(reported) => reported,

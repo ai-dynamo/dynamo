@@ -661,9 +661,8 @@ async fn configured_context_length_overrides_the_engine_report() {
 
     let requests = server.service.requests.lock().await;
     let sent = requests.first().expect("recorded request");
-    // The derived default is `context_length - prompt_len` over request()'s
-    // three prompt tokens: 8189 from the configured 8192, not the 4093 the
-    // engine-reported 4096 would give.
+    // 8192 configured minus request()'s three prompt tokens; the reported
+    // 4096 would give 4093.
     assert_eq!(sent.max_tokens, 8189);
 }
 
