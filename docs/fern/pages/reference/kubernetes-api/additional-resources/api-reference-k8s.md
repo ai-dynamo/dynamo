@@ -2364,7 +2364,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `forceScalingGroup` _boolean_ | forceScalingGroup opts a single-node component into rendering as a<br />PodCliqueScalingGroup with one single-pod PodClique per replica.<br />Scaling changes the scaling-group replica count. The first<br />`minAvailable` replicas join the deployment's base PodGang together<br />with its other base workloads; each replica beyond `minAvailable`<br />gets its own PodGang, gang-scheduled separately from the rest of the<br />deployment. `false` or omitted means automatic selection (multi-node<br />and inter-pod GMS components use a scaling group, other single-node<br />components a standalone PodClique), not "force PodClique".<br />Immutable after creation. |  | Optional: \{\} <br /> |
+| `forceScalingGroup` _boolean_ | forceScalingGroup opts a single-node component into rendering as a<br />PodCliqueScalingGroup with one single-pod PodClique per replica.<br />Scaling changes the scaling-group replica count. The first<br />`minAvailable` replicas join the deployment's base PodGang together<br />with its other base workloads; each replica beyond `minAvailable`<br />gets its own PodGang, gang-scheduled separately from the rest of the<br />deployment. `false` or omitted means automatic selection (multi-node<br />and inter-pod GMS components use a scaling group, other single-node<br />components a standalone PodClique), not "force PodClique".<br />The pointer preserves field presence on the wire: `nil` and `false` are<br />semantically identical, and consumers must dereference with `false`.<br />Immutable after creation. |  | Optional: \{\} <br /> |
 
 
 #### HardwareSpec
@@ -3865,7 +3865,6 @@ For users who want to understand the implementation details or contribute to the
 - **Checkpoint / Restore**:
   - [`internal/checkpoint/podspec.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/checkpoint/podspec.go) - Checkpoint env var injection and volume setup
   - [`internal/checkpoint/resolve.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/checkpoint/resolve.go) - Checkpoint resolution logic
-  - [`internal/checkpoint/resource.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/checkpoint/resource.go) - Checkpoint resource management
 - **Constants & Annotations**: [`internal/consts/consts.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/consts/consts.go) - Defines annotation keys and other constants
 
 ## Notes
