@@ -67,6 +67,9 @@ __all__ = [
     "LOCAL",
     "BUILTIN_SITES",
     "resolve",
+    "Refused",
+    "Mismatch",
+    "Divergence",
 ]
 
 
@@ -368,3 +371,75 @@ def resolve(name: str | None, extra: Mapping[str, Site] | None = None) -> Site:
         return known[name]
     except KeyError:
         raise UnknownSite(name, known) from None
+
+
+class Refused(PermissionError):
+    """A verb was called that this site cannot or may not perform.
+
+    **Raised, never returned, and never quietly satisfied.** That is the whole
+    point. A ``stop()`` that no-ops because the site does not own the deployment
+    turns a fault-tolerance test into a test of nothing: the fault is never
+    injected, the system stays healthy, and the assertion that it recovered
+    passes. A raise is noisy and correct; a no-op is quiet and wrong.
+
+    The message names the property responsible, so the reader can tell whether
+    to change the site, pick another, or accept the test belongs to one tier.
+    """
+
+    def __init__(self, verb: str, site: "Site", why_not: str | None = None) -> None:
+        self.verb = verb
+        self.site = site
+        self.why_not = why_not
+        super().__init__(
+            f"{verb}() is not available on site {site.name!r} "
+            f"({site.topology}, {site.ownership})" + (f": {why_not}" if why_not else "")
+        )
+
+
+@dataclass(frozen=True)
+class Divergence:
+    """One field where the running system differs from what was declared.
+
+    Both sides are :class:`~dynamo_test.facts.Fact`, which is what lets a
+    comparison record *unverified* instead of guessing. ``declared=KNOWN,
+    observed=UNKNOWN`` means the check could not be made — scoring that as
+    either agreement or divergence would be inventing a result.
+    """
+
+    role: str
+    field: str
+    declared: object  # Fact[Any] -- typed loosely to keep this module import-light
+    observed: object
+
+    @property
+    def is_unverified(self) -> bool:
+        return getattr(self.observed, "is_unknown", False)
+
+    def describe(self) -> str:
+        d = getattr(self.declared, "value", self.declared)
+        o = getattr(self.observed, "value", self.observed)
+        if self.is_unverified:
+            detail = getattr(self.observed, "detail", "")
+            return f"{self.role}.{self.field}: declared {d!r}, could not observe ({detail})"
+        return f"{self.role}.{self.field}: declared {d!r}, observed {o!r}"
+
+
+class Mismatch(AssertionError):
+    """A ``VERIFY`` site bound to something that is not what was declared.
+
+    Raised at bind time, on purpose. The alternative is that the divergence
+    surfaces much later as a confusing symptom: attach to a deployment serving a
+    different model and the first sign is a 404 at query time, which reads like a
+    routing bug rather than "you are looking at the wrong deployment".
+    """
+
+    def __init__(self, divergences: "Iterable[Divergence]") -> None:
+        self.divergences = tuple(divergences)
+        unverified = [d for d in self.divergences if d.is_unverified]
+        lines = "\n  ".join(d.describe() for d in self.divergences)
+        super().__init__(
+            f"the running system does not match what was declared "
+            f"({len(self.divergences)} divergence(s)"
+            + (f", {len(unverified)} unverified" if unverified else "")
+            + f"):\n  {lines}"
+        )

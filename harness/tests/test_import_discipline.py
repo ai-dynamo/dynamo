@@ -155,3 +155,47 @@ def test_tier_zero_modules_all_exist():
     """Guards against the rule above silently applying to nothing."""
     present = {p.name for p in _modules()}
     assert TIER_0 <= present, f"missing Tier 0 modules: {TIER_0 - present}"
+
+
+PROVIDER_METHODS = {
+    "address",
+    "start",
+    "stop",
+    "restart",
+    "replicas",
+    "restart_count",
+    "logs",
+    "request",
+    "all_logs",
+    "shutdown",
+    "collect_into",
+}
+
+
+def test_the_provider_protocol_declares_everything_a_provider_must_have():
+    """`all_logs`, `shutdown` and `collect_into` existed in the only
+    implementation and were load-bearing, but were never declared.
+
+    An undeclared method that every caller depends on is a contract in practice
+    and a surprise in principle: a second provider could omit one and only fail
+    at teardown, which is exactly when the evidence it was meant to collect is
+    the point.
+    """
+    import ast
+
+    tree = ast.parse((PACKAGE / "sut.py").read_text())
+    protocol = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.ClassDef) and n.name == "Provider"
+    )
+    declared = {n.name for n in protocol.body if isinstance(n, ast.FunctionDef)}
+    assert declared == PROVIDER_METHODS
+    assert len(declared) == 11
+
+
+def test_the_local_provider_satisfies_the_whole_protocol():
+    from dynamo_test.providers import LocalProvider
+
+    missing = PROVIDER_METHODS - set(dir(LocalProvider))
+    assert missing == set(), f"LocalProvider is missing {missing}"

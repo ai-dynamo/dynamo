@@ -284,3 +284,92 @@ def test_topology_is_a_label_nothing_branches_on():
         "capabilities() branches on a topology name; it should read the "
         "physical properties instead"
     )
+
+
+# --------------------------------------------- refusal, and why it must raise
+
+
+def test_refusal_is_raised_never_returned():
+    """The single most important line in the ladder.
+
+    A `stop()` that quietly no-ops because the site does not own the deployment
+    turns a fault-tolerance test into a test of nothing: the fault is never
+    injected, the system stays healthy, and the assertion that it recovered
+    passes. A raise is noisy and correct; a no-op is quiet and wrong.
+    """
+    from dynamo_test.site import Refused
+
+    assert issubclass(Refused, Exception)
+    with pytest.raises(Refused) as exc:
+        raise Refused("stop", ATTACHED, why(ATTACHED, Capability.STOP_ROLE))
+    message = str(exc.value)
+    assert "stop()" in message
+    assert ATTACHED.name in message
+    assert "does not own" in message  # the rung, not just "unavailable"
+
+
+def test_a_verify_site_cannot_reach_a_mutating_verb_at_all():
+    """Belt and braces: the capability is absent *and* the refusal explains it."""
+    for cap in (
+        Capability.STOP_ROLE,
+        Capability.RESTART_ROLE,
+        Capability.SCALE_REPLICAS,
+    ):
+        assert cap not in capabilities(ATTACHED)
+        assert why(ATTACHED, cap)
+
+
+def test_divergence_records_unverified_rather_than_guessing():
+    """`declared=KNOWN, observed=UNKNOWN` is neither agreement nor divergence.
+
+    Scoring it either way invents a result. The comparison has to be able to say
+    "I could not check this".
+    """
+    from dynamo_test.facts import Fact
+    from dynamo_test.site import Divergence
+
+    could_not_look = Divergence(
+        role="frontend",
+        field="model",
+        declared=Fact.known("Qwen/Qwen3-0.6B", "stack"),
+        observed=Fact.unknown("/v1/models", "connection refused"),
+    )
+    assert could_not_look.is_unverified
+    assert "could not observe" in could_not_look.describe()
+    assert "connection refused" in could_not_look.describe()
+
+    real = Divergence(
+        role="frontend",
+        field="model",
+        declared=Fact.known("Qwen/Qwen3-0.6B", "stack"),
+        observed=Fact.known("meta-llama/Llama-3.1-8B", "/v1/models"),
+    )
+    assert not real.is_unverified
+    assert "Llama" in real.describe()
+
+
+def test_mismatch_names_every_divergence_and_counts_the_unverified():
+    """Raised at bind time. The alternative is that attaching to a deployment
+    serving a different model first shows up as a 404 at query time, which reads
+    like a routing bug rather than "you are looking at the wrong deployment"."""
+    from dynamo_test.facts import Fact
+    from dynamo_test.site import Divergence, Mismatch
+
+    with pytest.raises(Mismatch) as exc:
+        raise Mismatch(
+            [
+                Divergence(
+                    "frontend", "model", Fact.known("A", "s"), Fact.known("B", "o")
+                ),
+                Divergence(
+                    "worker",
+                    "replicas",
+                    Fact.known(2, "s"),
+                    Fact.unknown("o", "no api"),
+                ),
+            ]
+        )
+    message = str(exc.value)
+    assert "2 divergence(s)" in message
+    assert "1 unverified" in message
+    assert "frontend.model" in message and "worker.replicas" in message

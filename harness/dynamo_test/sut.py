@@ -150,6 +150,25 @@ class Provider(Protocol):
     ) -> Fact[Any]:
         ...
 
+    # The three below already exist in the only implementation and are
+    # load-bearing for teardown and evidence, but were never declared here. An
+    # undeclared method that every caller depends on is a contract in practice
+    # and a surprise in principle: a second provider could omit it and only fail
+    # at teardown, which is exactly when the evidence it was supposed to collect
+    # is the point.
+
+    def all_logs(self) -> Mapping[str, str]:
+        """Every role's current log, for the COLLECT phase."""
+        ...
+
+    def shutdown(self) -> None:
+        """Stop everything this provider started. Safe to call twice."""
+        ...
+
+    def collect_into(self, sut: "Sut", recorder: Recorder) -> None:
+        """Declare and write this provider's artifacts into the bundle."""
+        ...
+
 
 class Sut:
     """The system under test, acted on through verbs.
