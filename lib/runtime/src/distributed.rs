@@ -375,7 +375,7 @@ impl DistributedRuntime {
     }
 
     pub async fn from_settings(runtime: Runtime) -> Result<Self> {
-        let config = DistributedConfig::from_settings();
+        let config = DistributedConfig::from_settings()?;
         Self::new(runtime, config).await
     }
 
@@ -796,8 +796,8 @@ pub struct DistributedConfig {
 }
 
 impl DistributedConfig {
-    pub fn from_settings() -> DistributedConfig {
-        let request_plane = RequestPlaneMode::from_env().unwrap_or_else(|err| panic!("{err}"));
+    pub fn from_settings() -> Result<DistributedConfig> {
+        let request_plane = RequestPlaneMode::from_env()?;
 
         // Determine the discovery backend first — we need it to compute the NATS default below.
         // Valid values for DYN_DISCOVERY_BACKEND: "kubernetes", "etcd" (default), "file", "mem"
@@ -840,7 +840,7 @@ impl DistributedConfig {
                 crate::discovery::EventTransportKind::Nats
             );
 
-        DistributedConfig {
+        Ok(DistributedConfig {
             discovery_backend,
             nats_config: if nats_enabled {
                 Some(nats::ClientOptions::default())
@@ -850,15 +850,15 @@ impl DistributedConfig {
             request_plane,
             response_plane: None,
             event_transport_kind,
-        }
+        })
     }
 
-    pub fn for_cli() -> DistributedConfig {
+    pub fn for_cli() -> Result<DistributedConfig> {
         let etcd_config = etcd::ClientOptions {
             attach_lease: false,
             ..Default::default()
         };
-        let request_plane = RequestPlaneMode::from_env().unwrap_or_else(|err| panic!("{err}"));
+        let request_plane = RequestPlaneMode::from_env()?;
         let discovery_backend =
             DiscoveryBackend::KvStore(kv::Selector::Etcd(Box::new(etcd_config)));
         let event_transport_kind = discovery_backend.resolve_event_transport_kind();
@@ -868,7 +868,7 @@ impl DistributedConfig {
                 event_transport_kind,
                 crate::discovery::EventTransportKind::Nats
             );
-        DistributedConfig {
+        Ok(DistributedConfig {
             discovery_backend,
             nats_config: if nats_enabled {
                 Some(nats::ClientOptions::default())
@@ -878,7 +878,7 @@ impl DistributedConfig {
             request_plane,
             response_plane: None,
             event_transport_kind,
-        }
+        })
     }
 
     /// A DistributedConfig that isn't distributed, for when the frontend and backend are in the
