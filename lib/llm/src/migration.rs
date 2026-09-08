@@ -730,10 +730,13 @@ mod tests {
         );
     }
 
-    // Guard: attaching the worker's typed error to a pre-stream failure must not
-    // change which requests migrate. The outer type is still CannotConnect, and
-    // InvalidArgument is in neither the migratable nor the non-migratable set, so
-    // this error must stay migratable exactly like a bare CannotConnect.
+    // Guard: the case this fix exists for -- a backend refusing a request it
+    // can never serve -- keeps migrating exactly like today's bare
+    // CannotConnect. Backend(InvalidArgument) is in neither MIGRATABLE nor
+    // NON_MIGRATABLE, so this pins the specific error the fix produces. It
+    // cannot detect a regression in the general invariant, because
+    // Backend(_) can never reach the exclusion set; the test below covers
+    // the types that can.
     #[test]
     fn pre_stream_failure_with_typed_cause_is_still_migratable() {
         use dynamo_runtime::pipeline::network::StreamPrologueError;
@@ -754,7 +757,70 @@ mod tests {
         ));
         assert!(
             is_migratable(&with_cause),
-            "attaching the worker's error must not change retry classification"
+            "a pre-stream refusal must migrate exactly like a bare CannotConnect"
+        );
+    }
+
+    // Guard: the general invariant, on the types that can actually break it.
+    //
+    // is_migratable walks the whole chain and short-circuits to false on the
+    // first member whose type is in NON_MIGRATABLE, so the outer CannotConnect
+    // does not protect anything -- an attached cause decides. A worker that
+    // itself dispatches to another worker can fail pre-stream with a top-level
+    // ResourceExhausted or Cancelled (see push_router.rs and
+    // addressed_router.rs dispatch-permit exhaustion), so this is reachable,
+    // not hypothetical.
+    //
+    // pre_stream_failure_error withholds exactly these types instead of
+    // attaching them (MIGRATION_SENSITIVE_ERROR_TYPES in addressed_router.rs
+    // mirrors NON_MIGRATABLE above), so the failure must still migrate. This
+    // test is the pin on that pairing: add a type to NON_MIGRATABLE without
+    // mirroring it there and this fails.
+    #[test]
+    fn pre_stream_failure_with_migration_sensitive_cause_is_still_migratable() {
+        use dynamo_runtime::pipeline::network::StreamPrologueError;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::pre_stream_failure_error;
+
+        for error_type in [ErrorType::Cancelled, ErrorType::ResourceExhausted] {
+            let worker_error = DynamoError::builder()
+                .error_type(error_type)
+                .message("no capacity on the downstream worker")
+                .build();
+
+            // Sanity: the cause alone is genuinely non-migratable, so a naive
+            // attach really would flip the classification.
+            assert!(!is_migratable(&worker_error), "{error_type:?} setup");
+
+            let err = pre_stream_failure_error(&StreamPrologueError::new(
+                format!("Generate Error: {worker_error}"),
+                worker_error.clone(),
+            ));
+            assert!(
+                is_migratable(&err),
+                "a {error_type:?} worker error must not make a pre-stream failure stop migrating"
+            );
+        }
+
+        // The same holds one link down: match_error_chain walks the whole
+        // chain, so a nested excluded type short-circuits it just as an outer
+        // one does.
+        let nested = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message("downstream worker rejected the request")
+            .cause(
+                DynamoError::builder()
+                    .error_type(ErrorType::ResourceExhausted)
+                    .message("no capacity on the downstream worker")
+                    .build(),
+            )
+            .build();
+        let err = pre_stream_failure_error(&StreamPrologueError::new(
+            "Generate Error: downstream worker rejected the request",
+            nested,
+        ));
+        assert!(
+            is_migratable(&err),
+            "a nested ResourceExhausted must not make a pre-stream failure stop migrating"
         );
     }
 

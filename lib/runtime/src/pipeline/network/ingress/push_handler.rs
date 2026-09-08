@@ -682,16 +682,9 @@ where
 
                 // Send the worker's own error type along with the display text, so a
                 // frontend can tell a request the backend can never serve apart from a
-                // transport failure. `PipelineError::GenerateError` holds an
-                // `anyhow::Error`, which is not itself a `std::error::Error`, so the
-                // typed error is recovered from the anyhow payload rather than from
-                // `e.source()`.
-                let source: &(dyn std::error::Error + 'static) = match &e {
-                    PipelineError::GenerateError(inner) => inner.as_ref(),
-                    other => other,
-                };
+                // transport failure.
                 let prologue_error =
-                    StreamPrologueError::new(error_string, DynamoError::from(source));
+                    StreamPrologueError::new(error_string, typed_error_from_pipeline_error(&e));
 
                 let _result = publisher.send_prologue(Some(prologue_error)).await;
                 Err(e)?
@@ -773,6 +766,27 @@ where
     }
 }
 
+/// Recover the worker's typed error from a pipeline failure, for the prologue.
+///
+/// This is the hop the whole pre-stream typing path depends on, and the obvious
+/// spelling of it is wrong. `PipelineError::GenerateError` holds an
+/// `anyhow::Error`, and `anyhow::Error` does not itself implement
+/// `std::error::Error`, so that variant exposes no `source()`:
+/// `DynamoError::from(&e)` on the `PipelineError` yields a bare
+/// `ErrorType::Unknown` carrying only the display text, losing exactly the type
+/// this path exists to carry. The anyhow payload has to be unwrapped first.
+///
+/// Any other variant is a transport-side or plumbing failure with no worker
+/// error behind it, and converts to `ErrorType::Unknown` -- the same untyped
+/// result the prologue carried before it could carry a type at all.
+pub(crate) fn typed_error_from_pipeline_error(e: &PipelineError) -> DynamoError {
+    let source: &(dyn std::error::Error + 'static) = match e {
+        PipelineError::GenerateError(inner) => inner.as_ref(),
+        other => other,
+    };
+    DynamoError::from(source)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -782,9 +796,47 @@ mod tests {
     use futures::stream;
     use prometheus::{Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, Opts};
 
+    use crate::error::{BackendError, ErrorType};
+
     type TestRequest = serde_json::Value;
     type TestResponse = Annotated<serde_json::Value>;
     type TestIngress = Ingress<SingleIn<TestRequest>, ManyOut<TestResponse>>;
+
+    /// The positive half of the recovery hop: a worker's typed refusal, boxed
+    /// into the `anyhow::Error` payload of `PipelineError::GenerateError`,
+    /// comes back out with its type intact.
+    ///
+    /// Replacing the body of `typed_error_from_pipeline_error` with
+    /// `DynamoError::from(&e)` -- the spelling the function's own doc comment
+    /// warns about -- makes this assertion fail with `Unknown`.
+    #[test]
+    fn generate_error_payload_keeps_the_workers_error_type() {
+        let e = PipelineError::GenerateError(anyhow::Error::new(
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                .message("multimodal input is not supported by this backend")
+                .build(),
+        ));
+
+        assert_eq!(
+            typed_error_from_pipeline_error(&e).error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument),
+            "the worker's type must survive the anyhow payload"
+        );
+    }
+
+    /// The negative half: a failure that is not a worker's `generate()` error
+    /// has no type to recover, and must not acquire one.
+    #[test]
+    fn non_generate_pipeline_error_stays_untyped() {
+        let e = PipelineError::DeserializationError("bad request payload".to_string());
+
+        assert_eq!(
+            typed_error_from_pipeline_error(&e).error_type(),
+            ErrorType::Unknown,
+            "a transport-side failure must not be reported as a worker error"
+        );
+    }
 
     /// Standalone metrics, not bound to an `Endpoint`, so the test needs no DRT.
     fn test_metrics() -> WorkHandlerMetrics {
