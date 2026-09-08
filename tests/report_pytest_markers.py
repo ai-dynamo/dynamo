@@ -180,6 +180,7 @@ STUB_MODULES = [
     "sglang.srt.utils",
     "sglang.srt.utils.hf_transformers_utils",
     "sglang.srt.utils.network",
+    "sglang.srt.utils.video_decoder",
     "sglang.srt.disaggregation",
     "sglang.srt.disaggregation.kv_events",
     "sglang.srt.disaggregation.utils",
@@ -201,6 +202,9 @@ STUB_MODULES = [
     "vllm.entrypoints.openai.chat_completion.protocol",
     "vllm.entrypoints.openai.engine",
     "vllm.entrypoints.openai.engine.protocol",
+    "vllm.entrypoints.pooling",
+    "vllm.entrypoints.pooling.embed",
+    "vllm.entrypoints.pooling.embed.protocol",
     "vllm.inputs",
     "vllm.logprobs",
     "vllm.lora",
@@ -221,6 +225,8 @@ STUB_MODULES = [
     "vllm.tool_parsers.mistral_tool_parser",
     "vllm.tool_parsers.qwen3_engine_tool_parser",
     "vllm.tool_parsers.utils",
+    "vllm.usage",
+    "vllm.usage.usage_lib",
     "vllm.utils",
     "vllm.utils.async_utils",
     "vllm.utils.hashing",
@@ -237,6 +243,8 @@ STUB_MODULES = [
     "vllm.v1.engine.exceptions",
     "vllm.v1.engine.input_processor",
     "vllm.v1.engine.output_processor",
+    "vllm.v1.engine.utils",
+    "vllm.v1.executor",
     "vllm.v1.metrics",
     "vllm.v1.metrics.loggers",
     "vllm.v1.metrics.stats",
@@ -324,6 +332,15 @@ def missing_categories(markers: Set[str]) -> List[str]:
 # --------------------------------------------------------------------------- #
 
 
+class _StubMeta(type):
+    def __getattr__(cls, attr):
+        if attr.startswith("__") and attr.endswith("__"):
+            raise AttributeError(attr)
+        sub = _make_stub_class(f"{cls.__name__}.{attr}")
+        setattr(cls, attr, sub)
+        return sub
+
+
 def _make_stub_class(name: str) -> type:
     """Permissive class usable as a base, a pydantic field type, or a callable.
 
@@ -333,14 +350,6 @@ def _make_stub_class(name: str) -> type:
     - __init_subclass__ tolerates arbitrary keyword args from typing tricks.
     - __get_pydantic_core_schema__ returns any_schema for pydantic field use.
     """
-
-    class _StubMeta(type):
-        def __getattr__(cls, attr):
-            if attr.startswith("__") and attr.endswith("__"):
-                raise AttributeError(attr)
-            sub = _make_stub_class(f"{cls.__name__}.{attr}")
-            setattr(cls, attr, sub)
-            return sub
 
     def _init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
         pass

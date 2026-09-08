@@ -126,7 +126,9 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	}
 
 	resources := append(stableResources, podCliqueSetResource)
-	return checkGroveResourcesReadiness(resources, readiness.Classification), nil
+	result := checkGroveResourcesReadiness(resources, readiness.Classification)
+	applyComponentGPUShapes(result.ComponentStatus, renderedPodCliqueSet.gpuShapes)
+	return result, nil
 }
 
 func (r *groveWorkloadsReconciler) reconcilePodCliqueSet(

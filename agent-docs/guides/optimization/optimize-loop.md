@@ -23,6 +23,7 @@ rules:
   - agent-docs/rules/benchmarking/proxy-workload-selection.md
   - agent-docs/rules/benchmarking/result-storage.md
   - agent-docs/rules/benchmarking/series-boundaries.md
+  - agent-docs/rules/benchmarking/tool-version.md
   - agent-docs/rules/optimization/evidence-before-spend.md
   - agent-docs/rules/optimization/one-variable.md
   - agent-docs/rules/verification/config-engagement.md
@@ -185,10 +186,28 @@ outcomes for `no-proposal` are exactly one of:
   check was impossible) is recorded in `recommended_config.md` — the stop-request references the
   draft recommendation, and operator grant closes the engagement rather than starting its write-up. A `ruled-out` row must cite a measurement, a sourced hard
   constraint, a confirmed incompatibility, or an explicit operator decision; the generator's own unsourced reasoning
-  does not qualify, and expected upside below the minimum detectable effect is `deferred`, not `ruled-out`. While
-  more than half of any granted budget remains, `deferred` is not a terminal state for a family whose recorded
-  expected upside is medium or higher: test it, ask about it, or rule it out with qualifying evidence before
-  requesting a stop. Hand the stop-request to `hypothesis-challenger` for evidence-class validation, passing the
+  does not qualify, and expected upside below the minimum detectable effect is `deferred`, not `ruled-out`.
+  `deferred` is terminal for a family on exactly one of two recorded grounds: (a) its expected upside is below
+  the primary series' measured minimum detectable effect (noise-floor deferral — terminal on that evidence
+  alone), or (b) its ledger row records WHY its next cheapest informative experiment does not fit the remaining
+  budget: estimate that experiment's cost from this engagement's own observed costs (deploy time, benchmark
+  duration, GPU allocation), compare it against the remaining budget, and cite both numbers in the row. When
+  the estimate fits and the recorded expected upside clears the minimum detectable effect, test the family, ask
+  about it, or rule it out with qualifying evidence before requesting a stop; a fixed fraction of budget spent
+  or remaining is never by itself a reason to defer.
+  For a throughput-class objective, the recommendation additionally requires SATURATION EVIDENCE: the top of
+  the measured operating-point curve must be flat within the series' measured noise floor, or the stop-request
+  must record the explicit reason (budget arithmetic or an operator decision) in `known_limitations.md`. An
+  objective still rising at the top of the measured grid leaves the operating-point family non-terminal:
+  extend the grid before requesting a stop (within the workload's declared envelope; a user-pinned concurrency
+  list makes extension an operator ask, per `concurrency-grid.md`).
+  These judgments require the primary objective series' measured noise floor and minimum detectable effect:
+  when no pilot repetition has produced them by stop-request or recommendation time, running that pilot (n>=3
+  on the decision-point configuration) is PRE-AUTHORIZED and required — it is part of finishing, not a new
+  candidate family. When the remaining budget cannot cover the pilot, `BUDGET_STOP` wins:
+  record the missing noise floor and the resulting unquantified-delta risk in
+  `known_limitations.md` and stop, rather than overrunning the budget or submitting a
+  recommendation the challenger must reject. Hand the stop-request to `hypothesis-challenger` for evidence-class validation, passing the
   ledger path and the SHA256 of the submitted ledger state alongside the consultation; the challenger's verdict
   binds to that SHA256.
 
@@ -200,20 +219,38 @@ Stop only when the operator grants a validated stop-request (`STOP_GRANTED`), th
 (`BUDGET_STOP`), access is lost and cannot be restored, or iteration 0 ends with the section-3 incompatibility
 report (the baseline cannot run on the target; this is a valid engagement end, not a premature stop). Never stop because a report exists. Derive budget
 consumption from existing artifacts — wall clock from `manifest.yaml`'s session start; failed deploys from
-deployment ledgers marked failed; GPU-hours from summed `benchmark_execution.json` durations times the deployed
-GPU count — check the totals against the contract's `budgets:`
+deployment ledgers' failed-attempt records; GPU-hours from GPU ALLOCATION time: for each deployment ledger, the
+span from its recorded `allocated_at` (first GPU pod scheduled — a Pending pod holds no GPUs) to its recorded
+`torn_down_at` (or to now, for a live deployment) times the ledger's `gpus_requested`, summed across
+deployments. Benchmark-duration-only accounting undercounts real spend by excluding weight-load and hold time
+and must not be used — check the totals against the contract's `budgets:`
 at every iteration boundary, and cite them in every stop-request delta. A `null` budget leaves that limit
 ungated.
 
 ## 7. Finalize
 
-Before recommending, the top-level loop agent runs a correctness regression check whenever the recommended configuration differs from the
-user-provided baseline in an output-affecting dimension (parallelism or reduction order, speculative decoding,
-quantization, attention or MoE backend, KV dtype or reuse): replay 8-16 fixed representative prompts with frozen
-continuations through both configurations and compare teacher-forced per-token log-probabilities, calibrating the
-tolerance with a baseline-versus-baseline repeat; require zero request failures, malformed responses, non-finite
-scores, and no unexpected truncation. Run it against the currently deployed recommended configuration; run the
-baseline side only when the baseline is still live or can be redeployed within remaining budget. If no such check
+Correctness evidence is captured opportunistically, not by redeployment. Before deploying the FIRST candidate that
+differs from the baseline in an output-affecting dimension (parallelism or reduction order, speculative decoding,
+quantization, attention or MoE backend, KV dtype or reuse) — that is, while the baseline side is still live and
+capturable — capture and store the baseline's side of the correctness check: 8-16 fixed representative prompts with
+frozen continuations, teacher-forced per-token log-probabilities where the API exposes them, plus a
+baseline-versus-baseline repeat to calibrate tolerance, under `EXP_ROOT/analysis/correctness/`. (An engagement
+whose candidate families are all output-preserving never pays this cost.) Earlier output-preserving candidates may
+already have replaced the baseline deployment by this point; the current live endpoint still represents the
+baseline's correctness side exactly as long as every intervening candidate was output-preserving, so capture from
+it and record which deployment served the capture. A candidate whose output-preserving status cannot be
+classified against the dimension list above is treated as output-affecting. Before tearing down any
+output-affecting candidate, capture its side against the same frozen prompt set.
+
+Before recommending, the top-level loop agent runs the correctness regression check whenever the recommended
+configuration differs from the engagement baseline (the user-provided baseline when one exists, otherwise the
+established iteration-0 baseline) in an output-affecting dimension: compare the already-captured evidence from
+both sides. The pass criterion is semantic, not just structural: where teacher-forced per-token
+log-probabilities were captured, their divergence on the frozen prompt set must not exceed the tolerance
+calibrated by the baseline-versus-baseline repeat; where the API exposes no log-probabilities, the frozen greedy
+continuations must match within that same calibrated tolerance. Additionally require zero request failures,
+malformed responses, non-finite scores, and no unexpected truncation. Redeploy a side only when its captured artifacts are missing or incompatible
+AND the redeploy fits the remaining budget. If no such check
 is possible, record an ask; report a waived check as
 `correctness: unverified`, never as a pass. Record the correctness status in `recommended_config.md`.
 

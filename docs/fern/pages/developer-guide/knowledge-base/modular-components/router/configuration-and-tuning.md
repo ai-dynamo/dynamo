@@ -11,6 +11,16 @@ boolean forms, use the [Frontend Configuration Reference](../../../../reference/
 For the routing cost model and worker-selection behavior, see
 [Routing Concepts](routing-concepts.md).
 
+## Configuration Scope and Precedence
+
+The Frontend configuration is the default for worker sets that do not advertise router settings. A worker set that advertises router configuration replaces that default for requests routed to the set; it does not merge individual settings with the Frontend configuration.
+
+Every replica in a worker set must advertise the same routing configuration. A worker set is defined by namespace, component, endpoint, model, and worker type. Mixed router settings split the set into conflicting cohorts, so Dynamo admits no instances from that set.
+
+When a worker set advertises `--router-mode kv`, restate every non-default setting that it needs. An omitted worker flag selects the shared default, not the Frontend's tuned value. This distinction matters most when the Frontend and workers receive different environment variables, such as separate Kubernetes services.
+
+For example, if the Frontend sets `--router-kv-overlap-score-credit 2.5` but a worker set advertises only `--router-mode kv`, the worker set uses the default overlap credit of `1.0`. If both processes inherit the same environment variable, they resolve to the same value. Check the `Activating prefill router` log line to confirm the resolved configuration for each hop.
+
 ## Routing Behavior
 
 - `--router-kv-overlap-score-credit`: Device-local prefix-overlap credit multiplier in the prefill cost calculation. It must be finite and nonnegative. Values greater than `1.0` give overlap extra credit, but the adjusted prefill contribution is clamped at zero. When set to `0`, the router ignores prefix caches and skips creating a local indexer. Defaults to `1.0`.
@@ -26,7 +36,7 @@ For the routing cost model and worker-selection behavior, see
 - `--router-prefill-load-model`: Selects the router's prompt-side load model. `none` keeps the existing static prompt load accounting. `aic` predicts one expected prefill duration per admitted request and lazily decays only the oldest active prefill request on each worker.
 - `--router-queue-threshold`: Optional queue threshold fraction for prefill token capacity. Queueing is disabled by default; setting a numeric value enables it. The router holds incoming requests in a priority queue while all eligible workers exceed `threshold * max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch rather than rejecting work, so routing decisions use the freshest load metrics at the moment a request is sent to a worker. `nvext.agent_hints.strict_priority` selects an absolute pending-queue tier, while `nvext.agent_hints.priority` adjusts ordering within the configured policy. Must be greater than or equal to 0; use `0.0` for maximum queueing sensitivity. See the SGLang note under [Tuning Guidelines](#tuning-guidelines) for caveats around how `max_num_batched_tokens` is populated on that backend, and see [Priority Scheduling](../../../../use-cases/agents/priority-scheduling.md) for how router priority differs from backend engine priority.
 - `--router-queue-policy`: Scheduling policy for the router queue: `fcfs` (default) or `wspt`.
-- `--router-policy-config`: Startup-only YAML path for policy-class queues and custom worker-selection instances. When omitted, `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class. The equivalent environment variable is `DYN_ROUTER_POLICY_CONFIG`. See [Write Custom Routing Strategies](../../../advanced-customizations/custom-worker-selection.mdx) for the linked-policy schema.
+- `--router-policy-config`: Startup-only YAML path for policy-class queues and custom worker-selection instances. When omitted, `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class. The equivalent environment variable is `DYN_ROUTER_POLICY_CONFIG`. See [Write Custom Routing Strategies](custom-worker-selection.mdx) for the linked-policy schema.
 
 For how queue backpressure differs from candidate filtering and busy-threshold overload handling, see [Router Filtering](worker-filtering.md).
 
@@ -125,13 +135,23 @@ a value from `1` through `31536000` to enable it, then send
 `X-Dynamo-Session-ID` to keep related requests on one worker. Supplying the header
 without the TTL option provides session identity but does not enable router affinity.
 
-The first successfully dispatched request binds the session ID to its selected
-worker and, when available, data-parallel rank. Later requests exact-dispatch to
-that target without transport fallback. Concurrent requests can share a binding.
-Active requests prevent expiry. When a request lease ends after EOF, early drop,
-error, or cancellation, the idle timer restarts. A missing bound worker or a
-non-cancellation selection, setup, dispatch, or target-validation failure invalidates
-the binding.
+The first successfully dispatched request binds the session ID to its selected worker and, when available, data-parallel rank. Choose how later requests use that binding with `--router-session-affinity-mode` or `DYN_ROUTER_SESSION_AFFINITY_MODE`:
+
+| Mode | Behavior |
+|---|---|
+| `hard` | Default. Exact-dispatch to the stored target. If the worker or rank is no longer valid, invalidate the binding and retry normal selection once |
+| `soft` | Pass the stored target through the normal selection pipeline as an advisory target. The built-in selector retains it while eligible; a custom policy can choose another worker |
+
+For soft affinity, Dynamo commits a changed binding after dispatch returns a response stream. Selection, setup, or dispatch failure before that point leaves the old binding intact. A later stream error or cancellation does not roll back the rebind. Explicit request targets remain exact in both modes.
+
+```bash
+python -m dynamo.frontend \
+  --router-mode kv \
+  --router-session-affinity-ttl-secs 300 \
+  --router-session-affinity-mode soft
+```
+
+Concurrent requests can share a binding. Versioned updates prevent an older concurrent request from replacing a newer soft rebind. Active requests prevent expiry. When a request lease ends after EOF, early drop, error, or cancellation, the idle timer restarts. A missing hard-bound worker or a non-cancellation hard-mode selection, setup, dispatch, or target-validation failure invalidates the binding.
 
 The configured value is the idle timeout. It is independent of
 `--router-ttl-secs` and `--router-predicted-ttl-secs`. Omit the session-affinity
@@ -224,7 +244,7 @@ For Kimi-style TP-only MoE runs, use `--aic-moe-tp-size` equal to `--aic-tp-size
 Topology-aware KV transfer is configured on workers through runtime metadata, not with frontend router flags. In Kubernetes, use `spec.experimental.kvTransferPolicy` on the `DynamoGraphDeployment`; the operator injects the worker environment and topology files. Outside Kubernetes, set `DYN_TOPOLOGY_ENABLED`, `DYN_TOPOLOGY_MOUNT_PATH`, `DYN_KV_TRANSFER_DOMAIN`, and `DYN_KV_TRANSFER_ENFORCEMENT` on workers. Set `DYN_KV_TRANSFER_PREFERRED_WEIGHT` only when enforcement is `preferred`.
 
 For the full runtime contract and routing behavior, see [Topology-Aware KV Transfer](topology-aware-kv-transfer.md).
-For Kubernetes deployment examples, see [Kubernetes Topology-Aware KV Transfer](../../kubernetes/multinode/topology-aware-kv-transfer.md).
+For the Kubernetes configuration fields, see the [KvTransferPolicy API](../../../../reference/kubernetes-api/full-api-reference.mdx#kvtransferpolicy).
 
 ## Block Tracking
 
@@ -233,7 +253,7 @@ For Kubernetes deployment examples, see [Kubernetes Topology-Aware KV Transfer](
 - `--no-router-assume-kv-reuse`: When tracking active blocks, disables the assumption of KV cache reuse. This is useful in disaggregated setups where transferred blocks are not actually deduplicated on the decode side.
 - `--no-router-track-prefill-tokens`: Disables prompt-side prefill token accounting in the router's active load model. Use this for decode-only routing paths where prompt processing already happened elsewhere.
 - `--router-replica-sync`: Disabled by default. Enables best-effort Runtime event-plane synchronization of KV active-sequence state. Session-affinity synchronization is independent and starts when `--router-session-affinity-ttl-secs` is set.
-- `DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS`: Environment-only safety timeout for stale active requests in the router's slot tracker, including entries learned through replica sync. Each router periodically force-expires entries older than this value; the default is `300` seconds. It does not turn best-effort synchronization into authoritative state.
+- `DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS`: Environment-only request-liveness duration. The default is `300` seconds for both implementations. Legacy selection-service and standalone slot-tracker state expires by absolute age, approximately five to six minutes after admission regardless of output progress. The embedded `KvRouter` uses the duration as its shared CLOCK scan interval. Output progress grants a lease one second chance, so idle cleanup occurs approximately five to ten minutes after the last progress touch. Replica mirrors refresh only from synchronized lifecycle events. Each router expires local and mirrored copies independently without publishing `Free`; expiry removes only that router's scheduler state and local approximate-LRU references. Explicit lifecycle completion publishes `Free` and remains idempotent after local expiry. This request-liveness policy is separate from approximate-cache retention TTL and does not turn best-effort synchronization into authoritative state.
 
 ### Tracking Hash Identities
 
@@ -273,7 +293,8 @@ traffic. Mixed epochs are not detected.
 ## KV Indexer / Approx KV Indexer
 
 - `--router-ttl-secs`: Time-to-live in seconds for blocks in the router's local cache predictions. Defaults to 120.0 seconds when `--no-router-kv-events` is used.
-- `--router-approximate-cache-policy`: Retention policy for a local approximate primary indexer. `ttl` is the default. Experimental `lru` models the physical KV capacity advertised by each worker data-parallel rank, retains complete canonical prompt and output blocks, and evicts the least recently used unreferenced copies under pressure. It requires `--no-router-kv-events`. Remote and served approximate indexers fall back to TTL; the predict-on-route side indexer is always TTL-only. LRU request leases are owned only by the normal push-router request guard; direct, Python, detached, and replicated admissions keep the existing scheduler expiry behavior and do not create LRU leases. The experimental LRU mutation lanes currently reuse the existing unbounded internal queues; bounded backpressure is deferred. The equivalent environment variable is `DYN_ROUTER_APPROXIMATE_CACHE_POLICY`.
+- `--router-approximate-cache-policy`: Retention policy for a local approximate primary indexer. `ttl` is the default. Experimental `lru` models the physical KV capacity advertised by each worker data-parallel rank, retains complete canonical prompt and output blocks, and evicts the least recently used unreferenced copies under pressure. It requires `--no-router-kv-events`. Remote and served approximate indexers fall back to TTL; the predict-on-route side indexer is always TTL-only. The equivalent environment variable is `DYN_ROUTER_APPROXIMATE_CACHE_POLICY`.
+- Approximate-LRU mutation lanes currently use unbounded queues. Bounded backpressure is deferred while this policy remains experimental.
 - `--router-event-threads`: Number of KV indexer worker threads (default: 4). Values greater than 1 use the concurrent radix tree for event-driven routing, approximate routing with `--no-router-kv-events`, and the predict-on-route side indexer.
 - `--router-predicted-ttl-secs`: Enables predict-on-route with this TTL in seconds for entries in a local side indexer. Requires KV events; omit to disable. When enabled, the router feeds each routing decision into the side indexer and scores each worker with the larger overlap from the primary indexer and the local side indexer. Independent of `--router-ttl-secs`; kept short so decisions the engine never confirms (cancelled requests, prefill failures) age out quickly.
 

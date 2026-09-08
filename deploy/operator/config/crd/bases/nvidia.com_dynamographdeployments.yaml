@@ -1011,32 +1011,39 @@ spec:
                         properties:
                           checkpointRef:
                             description: |-
-                              CheckpointRef references an existing DynamoCheckpoint CR by metadata.name.
-                              If specified, this service's Identity is ignored and the referenced checkpoint is used directly.
+                              CheckpointRef references an existing PodSnapshot in the same namespace by
+                              metadata.name. If specified, this service's Identity is ignored and the
+                              referenced PodSnapshot is used directly.
+                              Standalone worker-class (worker, prefill, or decode)
+                              DynamoComponentDeployment resources cannot set this field; configure
+                              CheckpointRef on the owning DynamoGraphDeployment service.
                             type: string
                           deletionPolicy:
                             default: Delete
                             description: |-
                               DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and
                               artifact are deleted or retained when the owning DGD is deleted.
-                              Explicit checkpointRef checkpoints are never owned or deleted by the DGD.
+                              Explicit checkpointRef PodSnapshots are never owned or deleted by the DGD.
                             enum:
                               - Delete
                               - Retain
                             type: string
                           enabled:
                             default: false
-                            description: Enabled indicates whether checkpointing is enabled for this service
+                            description: |-
+                              Enabled indicates whether checkpointing is enabled for this service. When
+                              true, omit CheckpointRef for a DGD-managed automatic checkpoint or set
+                              CheckpointRef to restore a PodSnapshot in the same namespace.
                             type: boolean
                           identity:
                             description: |-
-                              Deprecated: omit for DGD-managed checkpoints; no action is needed.
-                              Use CheckpointRef to restore an existing checkpoint.
+                              Deprecated: omit for DGD-managed checkpoints; the operator ignores this field.
+                              Use CheckpointRef to restore an existing PodSnapshot.
                             properties:
                               backendFramework:
                                 description: |-
-                                  BackendFramework is the runtime framework (vllm, sglang, trtllm)
-                                  Deprecated: legacy spec.identity only.
+                                  BackendFramework is the runtime framework (vllm, sglang, trtllm).
+                                  Deprecated: legacy identity only.
                                 enum:
                                   - vllm
                                   - sglang
@@ -1045,38 +1052,37 @@ spec:
                               dtype:
                                 description: |-
                                   Dtype is the data type (fp16, bf16, fp8, etc.).
-                                  Deprecated: legacy spec.identity only.
+                                  Deprecated: legacy identity only.
                                 type: string
                               dynamoVersion:
                                 description: |-
-                                  DynamoVersion is the Dynamo platform version (optional).
-                                  Deprecated: legacy spec.identity only.
+                                  DynamoVersion is the Dynamo platform version.
+                                  Deprecated: legacy identity only.
                                 type: string
                               extraParameters:
                                 additionalProperties:
                                   type: string
                                 description: |-
-                                  ExtraParameters are additional parameters that affect the checkpoint hash.
-                                  Use for any framework-specific or custom parameters not covered above.
-                                  Deprecated: legacy spec.identity only.
+                                  ExtraParameters contains additional legacy identity parameters.
+                                  Deprecated: legacy identity only.
                                 type: object
                               maxModelLen:
                                 description: |-
                                   MaxModelLen is the maximum sequence length.
-                                  Deprecated: legacy spec.identity only.
+                                  Deprecated: legacy identity only.
                                 format: int32
                                 minimum: 1
                                 type: integer
                               model:
                                 description: |-
-                                  Model is the model identifier (e.g., "meta-llama/Llama-3-70B")
-                                  Deprecated: legacy spec.identity only.
+                                  Model is the model identifier (e.g., "meta-llama/Llama-3-70B").
+                                  Deprecated: legacy identity only.
                                 type: string
                               pipelineParallelSize:
                                 default: 1
                                 description: |-
                                   PipelineParallelSize is the pipeline parallel configuration.
-                                  Deprecated: checkpoint launch uses the pod template instead.
+                                  Deprecated: automatic capture derives compatibility from the worker.
                                 format: int32
                                 minimum: 1
                                 type: integer
@@ -1084,7 +1090,7 @@ spec:
                                 default: 1
                                 description: |-
                                   TensorParallelSize is the tensor parallel configuration.
-                                  Deprecated: checkpoint launch uses the pod template instead.
+                                  Deprecated: automatic capture derives compatibility from the worker.
                                 format: int32
                                 minimum: 1
                                 type: integer
@@ -1093,11 +1099,11 @@ spec:
                               - model
                             type: object
                           job:
-                            description: Job customizes the DGD-managed checkpoint Job.
+                            description: Job customizes the DGD-managed SnapshotJob capture Pod.
                             properties:
                               gmsClientContainers:
                                 description: |-
-                                  GMSClientContainers lists checkpoint Job containers that should receive
+                                  GMSClientContainers lists SnapshotJob capture Pod containers that should receive
                                   GMS client wiring. Requires gpuMemoryService on the service.
                                 items:
                                   maxLength: 63
@@ -1108,7 +1114,7 @@ spec:
                                 x-kubernetes-list-type: set
                               podTemplate:
                                 description: |-
-                                  PodTemplate customizes the checkpoint Job pod. The operator starts from the
+                                  PodTemplate customizes the SnapshotJob capture Pod. The operator starts from the
                                   selected workload container and merges this template so users can add helper
                                   containers such as gms-saver.
                                 type: object
@@ -1118,7 +1124,7 @@ spec:
                             description: |-
                               Deprecated: omit mode. Use enabled=true without checkpointRef for a
                               DGD-managed automatic checkpoint, or use checkpointRef to restore the
-                              named checkpoint.
+                              named PodSnapshot.
                             enum:
                               - Auto
                               - Manual
@@ -1309,8 +1315,11 @@ spec:
                         type: array
                       eppConfig:
                         description: |-
-                          EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.
+                          EPPConfig defines legacy Go-EPP configuration for Endpoint Picker Plugin components.
                           Only applicable when ComponentType is "epp".
+
+                          Deprecated: omit this field for the native Rust EPP. Presence of eppConfig
+                          keeps the Go EPP Pod contract until migration clears it.
                         properties:
                           config:
                             description: |-
@@ -11253,9 +11262,8 @@ spec:
                             description: |-
                               ExtraClientContainers lists additional user-declared containers that should
                               be wired as GMS clients in pods rendered from the enclosing spec.
-                              DGD/DCD services apply this to service pods. Auto-created checkpoints
-                              apply checkpoint job clients before creating the DynamoCheckpoint; manual
-                              DynamoCheckpoint users must provide an already-prepared pod template.
+                              DGD/DCD services apply this to service pods. Automatic captures apply
+                              SnapshotJob capture Pod clients before creating the SnapshotJob.
                               Every name must match a user-declared container in the enclosing pod spec.
                             items:
                               maxLength: 63
@@ -11979,6 +11987,8 @@ spec:
                         rule: '!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
                       - message: minAvailable is immutable after creation
                         rule: '!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)'
+                      - message: componentType is immutable after it is set
+                        rule: '!has(oldSelf.componentType) || (has(self.componentType) && self.componentType == oldSelf.componentType)'
                   description: Services are the services to deploy as part of this deployment.
                   maxProperties: 25
                   type: object
@@ -12017,16 +12027,17 @@ spec:
                     description: ServiceCheckpointStatus contains checkpoint information for a single service.
                     properties:
                       checkpointID:
-                        description: CheckpointID is the artifact ID used by the snapshot protocol
+                        description: |-
+                          CheckpointID is a deprecated legacy Dynamo artifact ID. Native standalone
+                          snapshots leave this field empty.
                         type: string
                       checkpointName:
-                        description: CheckpointName is the name of the associated Checkpoint CR
+                        description: CheckpointName is the name of the active PodSnapshot.
                         type: string
                       identityHash:
                         description: |-
-                          IdentityHash is the computed hash of the checkpoint identity
-                          Deprecated: automatic checkpoints use CheckpointID. This field is retained
-                          for older status consumers.
+                          IdentityHash is a deprecated legacy checkpoint identity hash. Native
+                          standalone snapshots leave this field empty.
                         type: string
                       ready:
                         description: Ready indicates the checkpoint artifact is ready for future pods to restore.
@@ -12203,6 +12214,26 @@ spec:
                         items:
                           type: string
                         type: array
+                      gpusPerEngine:
+                        description: |-
+                          GPUsPerEngine is the number of GPUs assigned to one inference engine in a
+                          service replica, across all of its nodes. Independent auxiliary GPU
+                          allocations are excluded. A present zero means the engine itself has no
+                          GPUs; consult GPUsPerReplica for auxiliary allocations.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      gpusPerReplica:
+                        description: |-
+                          GPUsPerReplica is the unique GPU allocation added when this service scales
+                          by one replica, across all nodes, application and initialization phases,
+                          and provider-owned Pods. Scalar GPUs use the Kubernetes effective Pod
+                          scheduling footprint; shared DRA claims are counted once. A present zero
+                          records a successful non-GPU resolution; omission means no current shape
+                          is available.
+                        format: int64
+                        minimum: 0
+                        type: integer
                       readyReplicas:
                         description: |-
                           ReadyReplicas is the number of ready replicas.
@@ -12370,8 +12401,13 @@ spec:
                         type: object
                       eppConfig:
                         description: |-
-                          eppConfig holds EPP-specific configuration for Endpoint Picker Plugin
+                          eppConfig holds legacy Go-EPP configuration for Endpoint Picker Plugin
                           components. Only meaningful when `type` is `epp`.
+
+                          Deprecated: omit this field for the native Rust EPP. Presence of
+                          `eppConfig` selects the legacy Go EPP Pod contract (CLI flags + config
+                          mount) so existing DGDs keep running across operator upgrades until
+                          migration is started by clearing this field.
                         properties:
                           config:
                             description: |-
@@ -12539,25 +12575,29 @@ spec:
                             description: |-
                               checkpoint configures container-image snapshotting and restore for
                               this component. Set `checkpoint.enabled: true` to opt in. Without
-                              checkpointRef, the DGD controller creates a DGD-scoped DynamoCheckpoint
-                              CR and later restores pods in the same DGD generation from that
-                              checkpoint. With checkpointRef, the DGD restores from that existing
-                              checkpoint instead. The user-facing shape of this field is still settling,
-                              which is why it lives under `experimental` in v1beta1 instead of at the
-                              top level.
+                              checkpointRef, the DGD controller creates a DGD-scoped SnapshotJob and
+                              later restores pods in the same DGD generation from its PodSnapshot.
+                              With checkpointRef, the DGD restores from the named
+                              PodSnapshot in the same namespace. The user-facing shape of this field is
+                              still settling, which is why it lives under `experimental` in v1beta1
+                              instead of at the top level.
                             properties:
                               checkpointRef:
                                 description: |-
-                                  checkpointRef references an existing DynamoCheckpoint CR by `metadata.name`.
+                                  checkpointRef references an existing PodSnapshot in the same namespace by
+                                  metadata.name.
                                   When set, this component's `identity` is ignored and the referenced
-                                  checkpoint is used directly.
+                                  PodSnapshot is used directly.
+                                  Standalone worker-class (worker, prefill, or decode)
+                                  DynamoComponentDeployment resources cannot set this field; configure
+                                  checkpointRef on the owning DynamoGraphDeployment component.
                                 type: string
                               deletionPolicy:
                                 default: Delete
                                 description: |-
                                   DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and
                                   artifact are deleted or retained when the owning DGD is deleted.
-                                  Explicit checkpointRef checkpoints are never owned or deleted by the DGD.
+                                  Explicit checkpointRef PodSnapshots are never owned or deleted by the DGD.
                                 enum:
                                   - Delete
                                   - Retain
@@ -12566,13 +12606,13 @@ spec:
                                 description: |-
                                   enabled indicates whether checkpointing is enabled for this component.
                                   When true, omit checkpointRef for a DGD-managed automatic checkpoint or
-                                  set checkpointRef to restore an existing checkpoint. Omit the checkpoint
-                                  block, or set enabled=false, to disable checkpointing.
+                                  set checkpointRef to restore an existing PodSnapshot in the same namespace.
+                                  Omit the checkpoint block, or set enabled=false, to disable checkpointing.
                                 type: boolean
                               identity:
                                 description: |-
-                                  Deprecated: omit for DGD-managed checkpoints; no action is needed.
-                                  Use checkpointRef to restore an existing checkpoint.
+                                  Deprecated: omit for DGD-managed checkpoints; the operator ignores this field.
+                                  Use checkpointRef to restore an existing PodSnapshot.
                                 properties:
                                   backendFramework:
                                     description: |-
@@ -12634,11 +12674,11 @@ spec:
                                   - model
                                 type: object
                               job:
-                                description: job customizes the DGD-managed checkpoint Job.
+                                description: job customizes the DGD-managed SnapshotJob capture Pod.
                                 properties:
                                   gmsClientContainers:
                                     description: |-
-                                      gmsClientContainers lists checkpoint Job containers that should receive
+                                      gmsClientContainers lists SnapshotJob capture Pod containers that should receive
                                       GMS client wiring. Requires gpuMemoryService on the component.
                                     items:
                                       maxLength: 63
@@ -12649,7 +12689,7 @@ spec:
                                     x-kubernetes-list-type: set
                                   podTemplate:
                                     description: |-
-                                      podTemplate customizes the checkpoint Job pod. The operator starts from the
+                                      podTemplate customizes the SnapshotJob capture Pod. The operator starts from the
                                       selected workload container and merges this template so users can add helper
                                       containers such as gms-saver.
                                     type: object
@@ -12659,7 +12699,7 @@ spec:
                                 description: |-
                                   Deprecated: omit mode. Use enabled=true without checkpointRef for a
                                   DGD-managed automatic checkpoint, or use checkpointRef to restore the
-                                  named checkpoint.
+                                  named PodSnapshot.
                                 enum:
                                   - Auto
                                   - Manual
@@ -12730,8 +12770,8 @@ spec:
                               extraClientContainers:
                                 description: |-
                                   extraClientContainers lists additional user-declared containers that should
-                                  be wired as GMS clients in service pods. Checkpoint Job clients are declared
-                                  under checkpoint.job.gmsClientContainers. Every name must match a container
+                                  be wired as GMS clients in service pods. SnapshotJob capture Pod clients are
+                                  declared under checkpoint.job.gmsClientContainers. Every name must match a container
                                   in the enclosing component's podTemplate.spec.containers.
                                 items:
                                   maxLength: 63
@@ -21196,6 +21236,8 @@ spec:
                         rule: '!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
                       - message: minAvailable is immutable after creation
                         rule: '!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)'
+                      - message: type is immutable after it is set
+                        rule: '!has(oldSelf.type) || (has(self.type) && self.type == oldSelf.type)'
                   maxItems: 25
                   type: array
                   x-kubernetes-list-map-keys:
@@ -21537,16 +21579,17 @@ spec:
                     description: ComponentCheckpointStatus contains checkpoint information for a single component.
                     properties:
                       checkpointID:
-                        description: checkpointID is the artifact ID used by the snapshot protocol.
+                        description: |-
+                          checkpointID is a deprecated legacy Dynamo artifact ID. Native standalone
+                          snapshots leave this field empty.
                         type: string
                       checkpointName:
-                        description: checkpointName is the name of the associated DynamoCheckpoint CR.
+                        description: checkpointName is the name of the active PodSnapshot.
                         type: string
                       identityHash:
                         description: |-
-                          identityHash is the computed hash of the checkpoint identity.
-                          Deprecated: automatic checkpoints use checkpointID. This field is retained
-                          for older status consumers.
+                          identityHash is a deprecated legacy checkpoint identity hash. Native
+                          standalone snapshots leave this field empty.
                         type: string
                       ready:
                         description: ready indicates the checkpoint artifact is ready for future pods to restore.
@@ -21584,6 +21627,26 @@ spec:
                         items:
                           type: string
                         type: array
+                      gpusPerEngine:
+                        description: |-
+                          gpusPerEngine is the number of GPUs assigned to one inference engine in a
+                          component replica, across all of its nodes. Independent auxiliary GPU
+                          allocations are excluded. A present zero means the engine itself has no
+                          GPUs; consult gpusPerReplica for auxiliary allocations.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      gpusPerReplica:
+                        description: |-
+                          gpusPerReplica is the unique GPU allocation added when this component
+                          scales by one replica, across all nodes, application and initialization
+                          phases, and provider-owned Pods. Scalar GPUs use the Kubernetes effective
+                          Pod scheduling footprint; shared DRA claims are counted once. A present
+                          zero records a successful non-GPU resolution; omission means no current
+                          shape is available.
+                        format: int64
+                        minimum: 0
+                        type: integer
                       readyReplicas:
                         description: |-
                           readyReplicas is the number of ready replicas. Populated for

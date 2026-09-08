@@ -40,7 +40,7 @@ use dynamo_kv_router::{
     },
     protocols::{
         KvCacheEvent, KvCacheEventData, PlacementEvent, ResidencyDomain, ResidencyOwner,
-        RouterEvent, StorageTier, WorkerWithDpRank,
+        RouterEvent, RouterHintSourceMetadata, StorageTier, WorkerWithDpRank,
     },
     zmq_wire::{KvEventOwnership, ZmqEventNormalizer},
 };
@@ -98,6 +98,7 @@ pub fn resolve_stable_dp_slot_id(explicit_slot: &str) -> Result<StableDpSlotId> 
 pub struct KvStateAgentSlotConfig {
     pub cache_owner_id: CacheOwnerId,
     pub global_dp_rank: u32,
+    pub router_hint_source: Option<RouterHintSourceMetadata>,
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +106,7 @@ pub struct KvStateAgentVllmSource {
     pub endpoint: String,
     pub topic: String,
     pub image_token_id: Option<u32>,
+    pub video_token_id: Option<u32>,
     pub ingress_protocol: KvStateIngressProtocol,
 }
 
@@ -872,6 +874,7 @@ impl KvStateAgent {
             protocol_version: identity.protocol_version,
             event_topic: KV_STATE_EVENT_TOPIC_V2.to_string(),
             recovery_control_target: recovery_target.clone(),
+            router_hint_source: config.slot.router_hint_source.clone(),
         };
         let persistent_source = match register_advertisement(
             &component,
@@ -1574,10 +1577,12 @@ async fn run_vllm_listener(task: VllmListenerTask<'_>) -> Result<()> {
         status,
         cancel,
     } = task;
-    let mut framework_normalizer =
-        ZmqEventNormalizer::new(kv_block_size).with_image_token_id(source.image_token_id);
-    let mut cache_owner_normalizer =
-        ZmqEventNormalizer::new(kv_block_size).with_image_token_id(source.image_token_id);
+    let mut framework_normalizer = ZmqEventNormalizer::new(kv_block_size)
+        .with_image_token_id(source.image_token_id)
+        .with_video_token_id(source.video_token_id);
+    let mut cache_owner_normalizer = ZmqEventNormalizer::new(kv_block_size)
+        .with_image_token_id(source.image_token_id)
+        .with_video_token_id(source.video_token_id);
     loop {
         if !status
             .load()

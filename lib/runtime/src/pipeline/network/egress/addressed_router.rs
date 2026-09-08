@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::future::Future;
+use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
 use super::unified_client::RequestPlaneClient;
@@ -10,7 +11,7 @@ use super::*;
 use crate::component::Instance;
 use crate::discovery::EndpointInstanceId;
 use crate::dynamo_nvtx_range;
-use crate::engine::{AsyncEngine, AsyncEngineContextProvider, Data};
+use crate::engine::{AsyncEngine, AsyncEngineContextProvider, Data, EngineContextGuard};
 use crate::error::{DynamoError, ErrorType};
 use crate::logging::inject_trace_headers_into_map;
 use crate::metrics::frontend_perf::STAGE_DURATION_SECONDS;
@@ -25,6 +26,8 @@ use crate::pipeline::network::RegisteredStream;
 use crate::pipeline::network::RequestControlMessage;
 use crate::pipeline::network::RequestPlanePayloadCodec;
 use crate::pipeline::network::RequestType;
+use crate::pipeline::network::ResponsePlaneMode;
+use crate::pipeline::network::ResponseService;
 use crate::pipeline::network::ResponseType;
 use crate::pipeline::network::StreamOptions;
 use crate::pipeline::network::StreamProvider;
@@ -32,6 +35,7 @@ use crate::pipeline::network::StreamReceiver;
 use crate::pipeline::network::StreamSender;
 use crate::pipeline::network::TwoPartCodec;
 use crate::pipeline::network::codec::TwoPartMessage;
+use crate::pipeline::network::quic_response;
 use crate::pipeline::network::tcp;
 use crate::pipeline::{ManyIn, ManyOut, PipelineError, ResponseStream, SingleIn};
 use crate::protocols::maybe_error::MaybeError;
@@ -39,10 +43,132 @@ use crate::traits::DistributedRuntimeProvider;
 
 use anyhow::{Error, Result};
 use futures::stream::Stream;
+use parking_lot::Mutex;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_stream::{StreamExt, StreamNotifyClose, wrappers::ReceiverStream};
 use tracing::Instrument;
+
+const FIRST_RESPONSE_GUARD_CONTEXT_KEY: &str = "dynamo.request_plane.first_response_guard";
+// A timeout cannot safely release registered memory while a remote read may
+// still be active. Bound the detached pre-first-response phase process-wide.
+const MAX_RETAINED_FIRST_RESPONSE_DISPATCHES: usize = 1024;
+static RETAINED_FIRST_RESPONSE_DISPATCH_PERMITS: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(MAX_RETAINED_FIRST_RESPONSE_DISPATCHES)));
+
+#[derive(Clone)]
+struct FirstResponseGuard {
+    guard: Arc<Mutex<Option<EngineContextGuard>>>,
+}
+
+impl FirstResponseGuard {
+    fn new(guard: EngineContextGuard) -> Self {
+        Self {
+            guard: Arc::new(Mutex::new(Some(guard))),
+        }
+    }
+
+    fn take(&self) -> Option<EngineContextGuard> {
+        self.guard.lock().take()
+    }
+}
+
+/// Keep a frontend-owned resource alive until the addressed worker produces
+/// its first response item or closes the response stream.
+pub fn attach_first_response_guard<T: Data>(
+    context: &mut context::Context<T>,
+    guard: EngineContextGuard,
+) {
+    context.insert(
+        FIRST_RESPONSE_GUARD_CONTEXT_KEY,
+        FirstResponseGuard::new(guard),
+    );
+}
+
+/// Share a take-once first-response guard with a derived request context.
+pub fn propagate_first_response_guard<S: Data, T: Data>(
+    source: &context::Context<S>,
+    target: &mut context::Context<T>,
+) -> Result<(), Error> {
+    if let Some(guard) = source
+        .get_optional::<FirstResponseGuard>(FIRST_RESPONSE_GUARD_CONTEXT_KEY)
+        .map_err(Error::msg)?
+    {
+        target.insert(FIRST_RESPONSE_GUARD_CONTEXT_KEY, guard.as_ref().clone());
+    }
+    Ok(())
+}
+
+fn try_acquire_retained_dispatch_permit(
+    permits: &Arc<Semaphore>,
+) -> Result<OwnedSemaphorePermit, Error> {
+    permits.clone().try_acquire_owned().map_err(|_| {
+        DynamoError::builder()
+            .error_type(ErrorType::ResourceExhausted)
+            .message("retained request dispatch limit reached")
+            .build()
+            .into()
+    })
+}
+
+// Only dispatch and the first response are detached from the caller. The tail
+// is handed back so normal stream polling and cancellation stay on the caller.
+async fn dispatch_with_first_response_guard<F, U>(
+    dispatch: F,
+    guard: EngineContextGuard,
+    permit: OwnedSemaphorePermit,
+) -> Result<ManyOut<U>, Error>
+where
+    F: Future<Output = Result<ManyOut<U>, Error>> + Send + 'static,
+    U: Data + MaybeError,
+{
+    let (dispatch_tx, dispatch_rx) = tokio::sync::oneshot::channel();
+
+    tokio::spawn(
+        async move {
+            let mut response = match dispatch.await {
+                Ok(response) => response,
+                Err(error) => {
+                    let _ = dispatch_tx.send(Err(error));
+                    return;
+                }
+            };
+
+            let response_context = response.context();
+            let (first_tx, first_rx) = tokio::sync::oneshot::channel::<(Option<U>, ManyOut<U>)>();
+            let stream = async_stream::stream! {
+                match first_rx.await {
+                    Ok((first, mut tail)) => {
+                        if let Some(first) = first {
+                            yield first;
+                        }
+                        while let Some(item) = tail.next().await {
+                            yield item;
+                        }
+                    }
+                    Err(_) => {
+                        yield U::from_err(DynamoError::msg(
+                            "retained request dispatch ended before first response handoff",
+                        ));
+                    }
+                }
+            };
+            let handoff: ManyOut<U> = ResponseStream::new(Box::pin(stream), response_context);
+            let _ = dispatch_tx.send(Ok(handoff));
+
+            let first = response.next().await;
+            drop(guard);
+            drop(permit);
+            let _ = first_tx.send((first, response));
+        }
+        .in_current_span(),
+    );
+
+    dispatch_rx
+        .await
+        .map_err(|_| anyhow::anyhow!("retained request dispatch ended before setup completed"))?
+}
 
 /// Stream transformation helper that:
 /// - decodes a response byte stream from network into the fully-shaped `ManyOut<U>`
@@ -335,10 +461,7 @@ impl<S> Drop for InflightDecStream<S> {
     }
 }
 
-/// Extract the TCP stream subject from a [`ConnectionInfo`], if it carries a
-/// well-formed [`tcp::TcpStreamConnectionInfo`]. Used for the pre-dispatch
-/// tombstone check.
-fn subject_of(conn_info: &ConnectionInfo) -> Option<String> {
+fn tcp_subject_of(conn_info: &ConnectionInfo) -> Option<String> {
     serde_json::from_str::<tcp::TcpStreamConnectionInfo>(&conn_info.info)
         .ok()
         .map(|ci| ci.subject)
@@ -381,12 +504,19 @@ impl<T> AddressedRequest<T> {
     }
 }
 
+#[derive(Clone)]
 pub struct AddressedPushRouter {
     // Request transport (unified trait object - works with all transports)
     req_client: Arc<dyn RequestPlaneClient>,
 
-    // Response transport (TCP streaming - unchanged)
-    resp_transport: Arc<tcp::server::TcpStreamServer>,
+    request_callbacks: Arc<tcp::server::TcpStreamServer>,
+    responses: ResponseServer,
+}
+
+#[derive(Clone)]
+enum ResponseServer {
+    Tcp(Arc<tcp::server::TcpStreamServer>),
+    Quic(Arc<quic_response::QuicResponseServer>),
 }
 
 impl AddressedPushRouter {
@@ -396,12 +526,25 @@ impl AddressedPushRouter {
     /// The client is provided as a trait object, hiding the specific implementation.
     pub fn new(
         req_client: Arc<dyn RequestPlaneClient>,
-        resp_transport: Arc<tcp::server::TcpStreamServer>,
+        responses: Arc<tcp::server::TcpStreamServer>,
     ) -> Result<Arc<Self>> {
         Ok(Arc::new(Self {
             req_client,
-            resp_transport,
+            request_callbacks: responses.clone(),
+            responses: ResponseServer::Tcp(responses),
         }))
+    }
+
+    fn new_quic(
+        req_client: Arc<dyn RequestPlaneClient>,
+        request_callbacks: Arc<tcp::server::TcpStreamServer>,
+        responses: Arc<quic_response::QuicResponseServer>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            req_client,
+            request_callbacks,
+            responses: ResponseServer::Quic(responses),
+        })
     }
 
     pub async fn from_runtime_provider(
@@ -409,28 +552,50 @@ impl AddressedPushRouter {
     ) -> Result<Arc<Self>> {
         let manager = provider.drt().network_manager();
         let req_client = manager.create_client()?;
-        let resp_transport = provider.drt().tcp_server().await?;
+        let request_callbacks = provider.drt().tcp_server().await?;
 
         tracing::debug!(
             transport = req_client.transport_name(),
             "Creating AddressedPushRouter with request plane client"
         );
 
-        Self::new(req_client, resp_transport)
+        match provider.drt().response_plane() {
+            ResponsePlaneMode::Tcp => Self::new(req_client, request_callbacks),
+            ResponsePlaneMode::Quic => {
+                let responses = provider.drt().quic_response_server().await?;
+                Ok(Self::new_quic(req_client, request_callbacks, responses))
+            }
+        }
     }
 
     /// Cancel all pending response-stream registrations for an instance.
     pub async fn cancel_instance_streams(&self, instance_id: &EndpointInstanceId) -> usize {
-        self.resp_transport
-            .cancel_instance_streams(instance_id)
-            .await
+        match &self.responses {
+            ResponseServer::Tcp(responses) => responses.cancel_instance_streams(instance_id).await,
+            ResponseServer::Quic(responses) => {
+                let response_count = responses.cancel_instance_streams(instance_id).await;
+                response_count
+                    + self
+                        .request_callbacks
+                        .cancel_instance_streams(instance_id)
+                        .await
+            }
+        }
     }
 
     /// Clear the tombstone after an instance reappears in discovery.
     pub async fn clear_instance_tombstone(&self, instance_id: &EndpointInstanceId) {
-        self.resp_transport
-            .clear_instance_tombstone(instance_id)
-            .await
+        match &self.responses {
+            ResponseServer::Tcp(responses) => {
+                responses.clear_instance_tombstone(instance_id).await;
+            }
+            ResponseServer::Quic(responses) => {
+                responses.clear_instance_tombstone(instance_id).await;
+                self.request_callbacks
+                    .clear_instance_tombstone(instance_id)
+                    .await;
+            }
+        }
     }
 
     /// Bidirectional generation. Note that it doesn't implement the AsyncEngine trait directly
@@ -466,8 +631,8 @@ impl AddressedPushRouter {
     /// Shared dispatch core for both unary and bidirectional requests. Wire
     /// shape is inferred from the inputs:
     ///   - `input_stream = Some(_)` + `request = None` → bidirectional,
-    ///     header-only envelope. The worker dials back for both halves and
-    ///     pulls request frames off the spawned forwarder.
+    ///     header-only envelope. The worker opens the optional TCP request
+    ///     callback and sends responses over QUIC.
     ///   - `input_stream = None` + `request = Some(_)` → unary, two-part
     ///     `[ctrl, data]` envelope. The payload travels in the data part.
     async fn dispatch_and_finalize<T, U>(
@@ -497,35 +662,61 @@ impl AddressedPushRouter {
         // subject is reaped by the worker's dial-in (instance healthy) or the discovery
         // watcher (instance dropped), so no cleanup is owed.
         let (send_registered, recv_registered) = self
-            .register_streams(engine_ctx.clone(), enable_request_stream, true)
+            .register_streams(engine_ctx.clone(), enable_request_stream)
             .await?;
-        let recv_registered = recv_registered.ok_or_else(|| {
-            anyhow::anyhow!("response stream registration missing despite enable_response_stream")
-        })?;
 
         // Tombstone check: if discovery already removed the worker, fail fast
         // with a migratable error rather than writing to the request plane.
         // Dropping the held registrations on this return runs their cleanup.
-        let recv_subject = subject_of(&recv_registered.connection_info);
+        let response_registration = recv_registered.registration_id();
+        let response_subject = tcp_subject_of(&recv_registered.connection_info);
         let send_subject = send_registered
             .as_ref()
-            .and_then(|r| subject_of(&r.connection_info));
-        if let (Some(subject), Some(inst)) = (&recv_subject, instance)
-            && !self
-                .resp_transport
-                .associate_instance(
-                    subject,
-                    send_subject.as_deref(),
-                    &inst.endpoint_instance_id(),
-                )
-                .await
-        {
-            return Err(anyhow::anyhow!(
-                DynamoError::builder()
-                    .error_type(ErrorType::Disconnected)
-                    .message("Worker removed before request could be sent (tombstoned instance)")
-                    .build()
-            ));
+            .and_then(|r| tcp_subject_of(&r.connection_info));
+        if let Some(inst) = instance {
+            let instance_id = inst.endpoint_instance_id();
+            let associated = match &self.responses {
+                ResponseServer::Tcp(responses) => match response_subject.as_deref() {
+                    Some(subject) => {
+                        responses
+                            .associate_instance(subject, send_subject.as_deref(), &instance_id)
+                            .await
+                    }
+                    None => false,
+                },
+                ResponseServer::Quic(responses) => {
+                    let response_ok = match response_registration {
+                        Some(registration_id) => {
+                            responses
+                                .associate_instance(registration_id, &instance_id)
+                                .await
+                        }
+                        None => false,
+                    };
+                    let request_ok = match send_subject.as_deref() {
+                        Some(subject) => {
+                            self.request_callbacks
+                                .associate_request_instance(subject, &instance_id)
+                                .await
+                        }
+                        None => true,
+                    };
+                    if !request_ok && let Some(registration_id) = response_registration {
+                        responses.cancel_response(registration_id).await;
+                    }
+                    response_ok && request_ok
+                }
+            };
+            if !associated {
+                return Err(anyhow::anyhow!(
+                    DynamoError::builder()
+                        .error_type(ErrorType::Disconnected)
+                        .message(
+                            "Worker removed before request could be sent (tombstoned instance)"
+                        )
+                        .build()
+                ));
+            }
         }
 
         let buffer = build_request_envelope(
@@ -573,7 +764,7 @@ impl AddressedPushRouter {
             .await?;
         }
 
-        let _nvtx_wait = dynamo_nvtx_range!("transport.tcp.wait_backend");
+        let _nvtx_wait = dynamo_nvtx_range!("transport.response.wait_backend");
         tracing::trace!(request_id = context.id(), "awaiting transport handshake");
 
         // Disarms the recv-side cleanup; see the holding rationale above.
@@ -622,32 +813,44 @@ impl AddressedPushRouter {
         ))
     }
 
-    /// Register the requested halves of a data-plane stream with the response
-    /// transport. Returns `(send_stream, recv_stream)` mirroring the
-    /// `PendingConnections::into_parts` shape — either side is `None` when not
-    /// requested. Asserts post-registration that the transport produced
-    /// exactly the requested shape; a mismatch is a transport-layer bug, not
-    /// a runtime error path.
+    /// Register the optional TCP request callback and selected response stream.
     async fn register_streams(
         &self,
         engine_ctx: Arc<dyn crate::engine::AsyncEngineContext>,
         enable_request_stream: bool,
-        enable_response_stream: bool,
-    ) -> Result<
-        (
-            Option<RegisteredStream<StreamSender>>,
-            Option<RegisteredStream<StreamReceiver>>,
-        ),
-        Error,
-    > {
-        let options = StreamOptions::builder()
-            .context(engine_ctx)
-            .enable_request_stream(enable_request_stream)
-            .enable_response_stream(enable_response_stream)
-            .build()?;
-
-        let pending: PendingConnections = self.resp_transport.register(options).await;
-        let (send_stream, recv_stream) = pending.into_parts();
+    ) -> Result<(
+        Option<RegisteredStream<StreamSender>>,
+        RegisteredStream<StreamReceiver>,
+    )> {
+        let (send_stream, recv_stream) = match &self.responses {
+            ResponseServer::Tcp(responses) => {
+                let options = StreamOptions::builder()
+                    .context(engine_ctx)
+                    .enable_request_stream(enable_request_stream)
+                    .enable_response_stream(true)
+                    .build()?;
+                let pending: PendingConnections = responses.register(options).await;
+                pending.into_parts()
+            }
+            ResponseServer::Quic(responses) => {
+                let send_stream = if enable_request_stream {
+                    let options = StreamOptions::builder()
+                        .context(engine_ctx.clone())
+                        .enable_request_stream(true)
+                        .enable_response_stream(false)
+                        .build()?;
+                    let pending: PendingConnections =
+                        self.request_callbacks.register(options).await;
+                    pending.send_stream
+                } else {
+                    None
+                };
+                (send_stream, Some(responses.register_response(engine_ctx)))
+            }
+        };
+        let recv_stream = recv_stream.ok_or_else(|| {
+            anyhow::anyhow!("response stream registration missing despite response being enabled")
+        })?;
 
         // Transport-layer invariant: the data plane produces exactly the halves
         // we requested. A mismatch is a bug in the transport, not a runtime
@@ -657,12 +860,6 @@ impl AddressedPushRouter {
             enable_request_stream,
             "data-plane registration: request-stream presence does not match request"
         );
-        debug_assert_eq!(
-            recv_stream.is_some(),
-            enable_response_stream,
-            "data-plane registration: response-stream presence does not match request"
-        );
-
         Ok((send_stream, recv_stream))
     }
 
@@ -765,6 +962,28 @@ where
         let (addressed_request, context) = request.transfer(());
         let (request, address, instance_info) = addressed_request.into_parts();
 
+        let first_response_guard = context
+            .get_optional::<FirstResponseGuard>(FIRST_RESPONSE_GUARD_CONTEXT_KEY)
+            .map_err(Error::msg)?;
+
+        if let Some(guard) = first_response_guard.and_then(|guard| guard.take()) {
+            let permit =
+                try_acquire_retained_dispatch_permit(&RETAINED_FIRST_RESPONSE_DISPATCH_PERMITS)?;
+            let router = self.clone();
+            let dispatch = async move {
+                router
+                    .dispatch_and_finalize::<T, U>(
+                        &context,
+                        address,
+                        instance_info.as_ref(),
+                        Some(&request),
+                        None,
+                    )
+                    .await
+            };
+            return dispatch_with_first_response_guard(dispatch, guard, permit).await;
+        }
+
         self.dispatch_and_finalize::<T, U>(
             &context,
             address,
@@ -864,16 +1083,33 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        CONTROL_MESSAGE_MAX_BYTES, ConnectionInfo, RequestControlMessage, RequestPlanePayloadCodec,
-        RequestType, ResponseType, TwoPartCodec, build_request_envelope, payload_codec_for_worker,
-        serialize_control_message,
+        CONTROL_MESSAGE_MAX_BYTES, ConnectionInfo, FIRST_RESPONSE_GUARD_CONTEXT_KEY,
+        FirstResponseGuard, RequestControlMessage, RequestPlanePayloadCodec, RequestType,
+        ResponseType, TwoPartCodec, attach_first_response_guard, build_request_envelope,
+        dispatch_with_first_response_guard, payload_codec_for_worker,
+        propagate_first_response_guard, serialize_control_message,
+        try_acquire_retained_dispatch_permit,
     };
     use crate::{
         component::{Instance, TransportType},
-        pipeline::Context,
+        error::{ErrorType, match_error_chain},
+        pipeline::{AsyncEngineContextProvider, Context, ManyOut, ResponseStream},
+        protocols::annotated::Annotated,
     };
     use serde::{Deserialize, Serialize};
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, sync::Arc, time::Duration};
+    use tokio::sync::{Semaphore, oneshot, oneshot::error::TryRecvError};
+    use tokio_stream::{StreamExt, wrappers::ReceiverStream};
+
+    struct DropSignal(Option<oneshot::Sender<()>>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
 
     fn base_control_message(metadata: BTreeMap<String, String>) -> RequestControlMessage {
         RequestControlMessage {
@@ -957,5 +1193,127 @@ mod tests {
             .to_string();
         assert!(err.contains("request control message too large"));
         assert!(err.contains(&CONTROL_MESSAGE_MAX_BYTES.to_string()));
+    }
+
+    #[test]
+    fn propagated_first_response_guard_is_taken_once() {
+        let (guard_dropped_tx, mut guard_dropped_rx) = oneshot::channel();
+        let mut source_context = Context::new(());
+        attach_first_response_guard(
+            &mut source_context,
+            Arc::new(DropSignal(Some(guard_dropped_tx))),
+        );
+        let mut derived_context = Context::new(());
+        propagate_first_response_guard(&source_context, &mut derived_context).unwrap();
+
+        let source_guard = source_context
+            .get::<FirstResponseGuard>(FIRST_RESPONSE_GUARD_CONTEXT_KEY)
+            .unwrap();
+        let derived_guard = derived_context
+            .get::<FirstResponseGuard>(FIRST_RESPONSE_GUARD_CONTEXT_KEY)
+            .unwrap();
+        let retained = derived_guard.take().expect("derived context should win");
+        assert!(source_guard.take().is_none());
+
+        drop(retained);
+        assert_eq!(guard_dropped_rx.try_recv(), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn first_response_guard_outlives_cancelled_dispatch_waiter() {
+        let (raw_tx, raw_rx) = tokio::sync::mpsc::channel(1);
+        let response_context = Context::new(()).context();
+        let (dispatch_started_tx, dispatch_started_rx) = oneshot::channel();
+        let (release_dispatch_tx, release_dispatch_rx) = oneshot::channel();
+        let (guard_dropped_tx, mut guard_dropped_rx) = oneshot::channel();
+        let mut source_context = Context::new(());
+        attach_first_response_guard(
+            &mut source_context,
+            Arc::new(DropSignal(Some(guard_dropped_tx))),
+        );
+        let mut derived_context = Context::new(());
+        propagate_first_response_guard(&source_context, &mut derived_context).unwrap();
+        let guard = derived_context
+            .get::<FirstResponseGuard>(FIRST_RESPONSE_GUARD_CONTEXT_KEY)
+            .unwrap()
+            .take()
+            .unwrap();
+        drop(source_context);
+        drop(derived_context);
+        let permits = Arc::new(Semaphore::new(1));
+        let permit = try_acquire_retained_dispatch_permit(&permits).unwrap();
+
+        let waiter = tokio::spawn(dispatch_with_first_response_guard(
+            async move {
+                let _ = dispatch_started_tx.send(());
+                let _ = release_dispatch_rx.await;
+                let response: ManyOut<Annotated<u64>> =
+                    ResponseStream::new(Box::pin(ReceiverStream::new(raw_rx)), response_context);
+                Ok(response)
+            },
+            guard,
+            permit,
+        ));
+
+        dispatch_started_rx.await.unwrap();
+        waiter.abort();
+        let _ = waiter.await;
+        assert_eq!(guard_dropped_rx.try_recv(), Err(TryRecvError::Empty));
+        let error = try_acquire_retained_dispatch_permit(&permits).unwrap_err();
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::ResourceExhausted],
+            &[],
+        ));
+
+        release_dispatch_tx.send(()).unwrap();
+        raw_tx.send(Annotated::from_data(1_u64)).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), guard_dropped_rx)
+            .await
+            .expect("source guard was not released after the first worker response")
+            .unwrap();
+        let released_permit = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Ok(permit) = try_acquire_retained_dispatch_permit(&permits) {
+                    break permit;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("retained dispatch permit was not released");
+        drop(released_permit);
+    }
+
+    #[tokio::test]
+    async fn dropping_handed_off_tail_closes_upstream() {
+        let (raw_tx, raw_rx) = tokio::sync::mpsc::channel(1);
+        let response_context = Context::new(()).context();
+        let (guard_dropped_tx, guard_dropped_rx) = oneshot::channel();
+        let permits = Arc::new(Semaphore::new(1));
+        let permit = try_acquire_retained_dispatch_permit(&permits).unwrap();
+        let mut response = dispatch_with_first_response_guard(
+            async move {
+                let response: ManyOut<Annotated<u64>> =
+                    ResponseStream::new(Box::pin(ReceiverStream::new(raw_rx)), response_context);
+                Ok(response)
+            },
+            Arc::new(DropSignal(Some(guard_dropped_tx))),
+            permit,
+        )
+        .await
+        .unwrap();
+
+        raw_tx.send(Annotated::from_data(1_u64)).await.unwrap();
+        assert_eq!(response.next().await.unwrap().data, Some(1));
+        tokio::time::timeout(Duration::from_secs(1), guard_dropped_rx)
+            .await
+            .expect("source guard was not released after the first worker response")
+            .unwrap();
+
+        drop(response);
+        tokio::time::timeout(Duration::from_secs(1), raw_tx.closed())
+            .await
+            .expect("dropping the caller stream did not close the upstream tail");
     }
 }

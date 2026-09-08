@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_backend_common::{DynamoError, EngineConfig, LlmRegistration};
+use dynamo_backend_common::{
+    DynamoError, EngineConfig, LlmRegistration, RlAdminBaseUrl, RlWorkerMetadata,
+};
 
 use crate::client;
 use crate::proto as pb;
@@ -82,11 +84,10 @@ impl DiscoveredModel {
                 self.identity, observed.identity
             )));
         }
-        let expected_dp_size = self.data_parallel_size();
-        let observed_dp_size = observed.data_parallel_size();
-        if expected_dp_size != observed_dp_size {
+        if self.server.parallelism != observed.server.parallelism {
             return Err(client::protocol_error(format!(
-                "data-parallel size changed between bootstrap and startup: expected {expected_dp_size}, observed {observed_dp_size}"
+                "parallelism changed between bootstrap and startup: expected {:?}, observed {:?}",
+                self.server.parallelism, observed.server.parallelism
             )));
         }
         if self.server.rl_capabilities != observed.server.rl_capabilities {
@@ -102,6 +103,38 @@ impl DiscoveredModel {
         self.server.rl_capabilities.as_ref()
     }
 
+    pub(crate) fn rl_worker_metadata(
+        &self,
+        admin_base_url: Option<RlAdminBaseUrl>,
+    ) -> Result<RlWorkerMetadata, DynamoError> {
+        let parallelism = self.server.parallelism.as_ref().ok_or_else(|| {
+            client::protocol_error("RL discovery requires vLLM parallelism metadata")
+        })?;
+        let tensor_parallel_size = nonzero(parallelism.tensor_parallel_size)
+            .ok_or_else(|| client::protocol_error("vLLM reports a tensor-parallel size of zero"))?;
+        let pipeline_parallel_size =
+            nonzero(parallelism.pipeline_parallel_size).ok_or_else(|| {
+                client::protocol_error("vLLM reports a pipeline-parallel size of zero")
+            })?;
+        let engine_world_size = u32::try_from(parallelism.world_size)
+            .ok()
+            .and_then(nonzero)
+            .ok_or_else(|| client::protocol_error("vLLM reports an invalid engine world size"))?;
+        let expected_minimum_world_size = tensor_parallel_size
+            .checked_mul(pipeline_parallel_size)
+            .ok_or_else(|| client::protocol_error("vLLM reports an invalid RL world size"))?;
+        if engine_world_size % expected_minimum_world_size != 0 {
+            return Err(client::protocol_error(
+                "vLLM reports an engine world size that is not divisible by TP * PP",
+            ));
+        }
+        let world_size = engine_world_size
+            .checked_mul(parallelism.data_parallel_size)
+            .ok_or_else(|| client::protocol_error("vLLM reports an invalid RL world size"))?;
+        RlWorkerMetadata::new(world_size, admin_base_url)
+            .map_err(|error| client::protocol_error(error.to_string()))
+    }
+
     pub(crate) fn engine_config(&self) -> EngineConfig {
         let parallelism = self.server.parallelism.as_ref();
         EngineConfig {
@@ -112,7 +145,7 @@ impl DiscoveredModel {
             llm: Some(LlmRegistration {
                 context_length: nonzero(self.server.max_model_len),
                 kv_cache_block_size: nonzero(self.server.kv_block_size),
-                total_kv_blocks: nonzero(self.server.total_kv_blocks),
+                total_kv_blocks: self.total_kv_blocks_per_rank(),
                 max_num_seqs: nonzero(self.server.max_running_requests),
                 max_num_batched_tokens: nonzero(self.server.max_batched_tokens),
                 data_parallel_size: parallelism
@@ -128,6 +161,36 @@ impl DiscoveredModel {
             .parallelism
             .as_ref()
             .map_or(1, |parallelism| parallelism.data_parallel_size)
+    }
+
+    fn total_kv_blocks_per_rank(&self) -> Option<u64> {
+        let total_kv_blocks = nonzero(self.server.total_kv_blocks)?;
+        let data_parallel_size = u64::from(self.data_parallel_size());
+        // Control exposes only the aggregate across DP engines. This arithmetic-mean
+        // estimate assumes homogeneous ranks; exact division does not prove they are equal.
+        // TODO(rank-aware-kv-capacity): consume a per-rank Control response when available and
+        // publish it atomically; never relabel this quotient as exact for hard admission.
+        let per_rank = total_kv_blocks / data_parallel_size;
+
+        if per_rank == 0 {
+            tracing::warn!(
+                total_kv_blocks,
+                data_parallel_size,
+                "vLLM reported fewer total KV blocks than DP ranks; publishing one block per rank"
+            );
+            return Some(1);
+        }
+
+        if total_kv_blocks % data_parallel_size != 0 {
+            tracing::warn!(
+                total_kv_blocks,
+                data_parallel_size,
+                per_rank,
+                "vLLM aggregate KV blocks are not divisible by DP ranks; publishing floor per-rank capacity"
+            );
+        }
+
+        Some(per_rank)
     }
 }
 

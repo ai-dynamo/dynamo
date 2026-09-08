@@ -122,7 +122,7 @@ The launcher configures KV events on each worker and sets `--router-mode kv` wit
 The Dynamo SGLang image includes both routing prerequisites:
 
 - Dynamo is built with the `mm-routing` Rust feature.
-- SGLang 0.5.13 or later includes `GenerateReqInput.mm_hashes` support. Dynamo currently pins 0.5.17.
+- SGLang 0.5.13 or later includes `GenerateReqInput.mm_hashes` support. Dynamo currently pins 0.5.18.
 
 Custom installations on SGLang 0.5.12 or earlier need the `mm_hashes` change
 from [sgl-project/sglang#25300](https://github.com/sgl-project/sglang/pull/25300).
@@ -551,7 +551,7 @@ Controls how many threads the encoder uses to fetch and load images concurrently
 export SGLANG_ENCODER_MM_LOAD_WORKERS=16
 ```
 
-Only applies to the EPD encode worker (which uses [SGLang's MMEncoder](https://github.com/sgl-project/sglang/blob/v0.5.17/python/sglang/srt/disaggregation/encode_server.py) internally).
+Only applies to the EPD encode worker (which uses [SGLang's MMEncoder](https://github.com/sgl-project/sglang/blob/v0.5.18/python/sglang/srt/disaggregation/encode_server.py) internally).
 
 ## Profiling
 

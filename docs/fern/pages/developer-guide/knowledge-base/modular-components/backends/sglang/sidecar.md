@@ -65,10 +65,11 @@ curl localhost:8000/v1/chat/completions \
 
 ## Deploy on Kubernetes
 
-No published SGLang sidecar image is available yet. Follow the
+No published sidecar image is available yet. Follow the
 [Kubernetes quick start](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/README.md#deploy-on-kubernetes-quick-start)
-to build the CPU-only sidecar image and pair it with a stock upstream SGLang
-image. The source tree includes
+to build `dynamo-sidecar`, which contains all three engine-specific sidecar
+executables. The SGLang manifests run `dynamo-sglang-sidecar` as the container
+command and pair it with a stock upstream SGLang image. The source tree includes
 [aggregated](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/agg.yaml)
 and
 [disaggregated](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/deploy/disagg.yaml)

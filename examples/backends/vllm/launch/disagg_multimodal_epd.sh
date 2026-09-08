@@ -13,12 +13,13 @@ export DYN_REQUEST_PLANE=tcp
 
 # Default values
 MODEL_NAME="llava-hf/llava-1.5-7b-hf"
+FRONTEND_DECODING=false
 
 # --single-gpu: Packs all 3 workers (encode, prefill, decode) onto a single GPU.
 # This is intended for functional testing with small models (e.g. 2B) where CI
 # only has 1 GPU available. It reduces performance by:
 #   - Enabling --enforce-eager (disables torch.compile and CUDA graph capture)
-#   - Hardcoding P/D KV cache to 512 MB (skips all memory profiling)
+#   - Capping P/D KV cache at 2 GiB for the default model (skips memory profiling)
 #   - Limiting --max-model-len to 4096 tokens on P/D workers
 #   - Limiting P/D workers to image=3,video=3,audio=0 (--limit-mm-per-prompt)
 #   - Using lower gpu-memory-utilization fractions to share the GPU
@@ -28,10 +29,10 @@ SINGLE_GPU=false
 # Layout: encode + prefill on GPU 0, decode on GPU 1. Preserves the disagg
 # semantic — prefill→decode KV transfer still crosses the GPU boundary via
 # NIXL — while halving the GPU footprint vs the default 3-GPU mode. Same
-# small-KV defaults as --single-gpu (enforce-eager, 512 MB KV, max-model-len
-# 4096, limit-mm-per-prompt 3/3/0) so it's a functional-testing knob, not a
-# perf config. Override _PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES to grow the
-# KV cap when profiling.
+# packed-worker defaults as --single-gpu (enforce-eager, 2 GiB default KV cap,
+# max-model-len 4096, limit-mm-per-prompt 3/3/0) so it's a functional-testing
+# knob, not a perf config. Override _PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES when
+# profiling another model.
 TWO_GPU=false
 
 # Parse command line arguments
@@ -49,6 +50,10 @@ while [[ $# -gt 0 ]]; do
             TWO_GPU=true
             shift
             ;;
+        --frontend-decoding)
+            FRONTEND_DECODING=true
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo ""
@@ -59,6 +64,7 @@ while [[ $# -gt 0 ]]; do
             echo "                                LLaVA 1.5 7B, Qwen2.5-VL, and Phi3V models have predefined templates"
             echo "  --single-gpu                  Pack all 3 workers on 1 GPU (for small models, e.g. 2B)"
             echo "  --two-gpu                     Pack 3 workers on 2 GPUs (encode+prefill on GPU 0, decode on GPU 1)"
+            echo "  --frontend-decoding           Decode images in the Rust frontend and transfer pixels to the encode worker via NIXL"
             echo "  -h, --help                    Show this help message"
             echo ""
             echo "Examples:"
@@ -157,15 +163,20 @@ if [[ "$SINGLE_GPU" == "true" || "$TWO_GPU" == "true" ]]; then
     EXTRA_ARGS="--enforce-eager"
     # Default KV cache cap for packed worker layouts.
     #
-    # vLLM has a preflight check: KV must hold at least one max-model-len
-    # request. For LLaVA-1.5-7b at max-model-len=4096, that's ~2 GiB
-    # minimum. 512 MB used to work for older vLLM / smaller max-model-len
-    # but vLLM 0.20+ rejects it.
+    # vLLM requires the KV cache to hold at least one max-model-len request.
+    # The default LLaVA-1.5-7b model needs approximately 2 GiB at
+    # max-model-len=4096. Smaller models may use lower profiled values.
     #
     # The profiler/test framework overrides via _PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES,
     # and gpu_utils.sh builds args.
     : "${_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES:=$((2 * 1024 * 1024 * 1024))}"
     PD_EXTRA_ARGS="--max-model-len 4096 --limit-mm-per-prompt {\"image\":3,\"video\":3,\"audio\":0}"
+fi
+
+# Frontend decoding participates in every E/P/D stage: Decode advertises the
+# media decoder, Prefill forwards decoded descriptors, and Encode reads pixels.
+if [[ "$FRONTEND_DECODING" == "true" ]]; then
+    EXTRA_ARGS="$EXTRA_ARGS --frontend-decoding"
 fi
 
 PD_GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)

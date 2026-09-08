@@ -13,7 +13,7 @@
 //!
 //! - [`RoutingOverheadMetrics`]: Per-request routing phase latency histograms.
 //!   Registered on the frontend's own `prometheus::Registry` (default port 8000).
-//!   Populated by `KvPushRouter` in the frontend during routing decisions.
+//!   Populated by `RoutingHost` in the frontend during routing decisions.
 //!   - Frontend (aggregated and disaggregated): available on default port 8000
 //!   - Standalone router: not created (frontend-only)
 //!
@@ -21,11 +21,11 @@
 //!   tokens, KV hit rate, and non-max-overlap routing decisions).
 //!   Registered on the DRT `MetricsRegistry` hierarchy via `Component::metrics()`.
 //!   Eagerly created so they appear as zeros before any requests arrive.
-//!   Populated by `KvPushRouter::generate()` and its `RequestGuard` as it observes
+//!   Populated by `RoutingHost::generate()` and its `RequestGuard` as it observes
 //!   the streaming response (TTFT on first token, ITL per output block,
 //!   ISL/OSL/kv_hit_rate at routing and completion).
-//!   - Frontend, non-KV modes (direct/random/round-robin): always zero (registered
-//!     on default port 8000, but never populated since KvPushRouter is not used)
+//!   - Frontend, builtin modes without affinity or LoRA filtering: populated by `RoutingHost`;
+//!     modes that still bypass the host remain registered as zeros
 //!   - Frontend, KV mode (aggregated and disaggregated): available on default port
 //!     8000 via the `drt_metrics` bridge, populated per-request
 //!   - Standalone router (`python -m dynamo.router`): available on `DYN_SYSTEM_PORT`
@@ -206,7 +206,7 @@ pub(crate) fn kv_publisher_metrics() -> Option<Arc<KvPublisherMetrics>> {
 }
 
 // ---------------------------------------------------------------------------
-// Direct-ZMQ KV ingress metrics
+// ZMQ KV ingress metrics
 // ---------------------------------------------------------------------------
 
 pub(crate) struct KvZmqIngressMetrics {
@@ -225,7 +225,7 @@ impl KvZmqIngressMetrics {
                 let sources = metrics
                     .create_intgaugevec(
                         "router_kv_zmq_ingress_sources",
-                        "Number of direct-ZMQ KV ingress sources by lifecycle state",
+                        "Number of ZMQ KV ingress sources by lifecycle state",
                         &["state"],
                         &[],
                     )
@@ -233,14 +233,14 @@ impl KvZmqIngressMetrics {
                 let batches_total = metrics
                     .create_intcounter(
                         "router_kv_zmq_ingress_batches_total",
-                        "Total direct-ZMQ KV ingress batches handed to WorkerQueryClient",
+                        "Total ZMQ KV ingress batches handed to WorkerQueryClient",
                         &[],
                     )
                     .expect("failed to create router_kv_zmq_ingress_batches_total counter");
                 let lifecycle_total = metrics
                     .create_intcountervec(
                         "router_kv_zmq_ingress_lifecycle_total",
-                        "Total direct-ZMQ KV ingress lifecycle transitions and errors",
+                        "Total ZMQ KV ingress lifecycle transitions and errors",
                         &["action"],
                         &[],
                     )
@@ -268,6 +268,17 @@ impl KvZmqIngressMetrics {
 
     pub(crate) fn increment_lifecycle(&self, action: &'static str) {
         self.lifecycle_total.with_label_values(&[action]).inc();
+    }
+
+    pub(crate) fn increment_lifecycle_by(&self, action: &'static str, value: u64) {
+        self.lifecycle_total
+            .with_label_values(&[action])
+            .inc_by(value);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lifecycle_count(&self, action: &'static str) -> u64 {
+        self.lifecycle_total.with_label_values(&[action]).get()
     }
 }
 
@@ -819,9 +830,9 @@ impl RoutingOverheadMetrics {
 ///
 /// # When these metrics are created
 ///
-/// Eagerly in `KvPushRouter::new()`, so they appear as zeros before any requests.
+/// Eagerly in `RoutingHost::new()`, so they appear as zeros before any requests.
 /// Both the frontend pipeline and the standalone router (via Python bindings)
-/// create a `KvPushRouter`, so both get these metrics registered automatically.
+/// create a `RoutingHost`, so both get these metrics registered automatically.
 ///
 /// # Why component-scoped
 ///
@@ -866,7 +877,7 @@ impl RouterRequestMetrics {
     /// injects hierarchy labels, and registers with the DRT `MetricsRegistry`.
     /// Also adds `router_id` (discovery instance_id) to distinguish router instances.
     ///
-    /// Called eagerly by `KvPushRouter::new()` so metrics appear as zeros at startup.
+    /// Called eagerly by `RoutingHost::new()` so metrics appear as zeros at startup.
     pub fn from_component(component: &Component) -> Arc<Self> {
         ROUTER_REQUEST_METRICS
             .get_or_init(|| {

@@ -47,4 +47,4 @@ Reference implementations for deploying multimodal models for each backend:
 - [TensorRT-LLM Multimodal](../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/multimodal.md)
 - [vLLM Multimodal](../../developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md)
 
-To use an author-provided custom vision tower or projector, see [Custom Vision Encoders](../../developer-guide/advanced-customizations/custom-vision-encoders.md).
+To use an author-provided custom vision tower or projector, see [Custom Vision Encoders](custom-vision-encoders.md).

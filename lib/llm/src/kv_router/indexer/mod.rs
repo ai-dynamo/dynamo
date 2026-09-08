@@ -13,7 +13,10 @@ use dynamo_kv_router::{
         KvIndexerInterface, KvIndexerMetrics, KvRouterError, LowerTierIndexers, ThreadPoolIndexer,
         record_unsupported_residency_event,
     },
-    protocols::{DpRank, KvCacheEventData, ResidencyProjection, RouterEvent, WorkerId},
+    protocols::{
+        DpRank, KvCacheEventData, ResidencyProjection, ResidencyRoutingSnapshot, RouterEvent,
+        WorkerId,
+    },
 };
 
 // Re-export tiered-match types so internal callers (`indexer::TieredMatchDetails`)
@@ -34,6 +37,7 @@ mod side;
 pub use self::embedding_cache::{
     EmbeddingCacheIndexer, preprocessed_multimodal_cache_keys, try_build_cache_indexer,
 };
+pub(crate) use self::recording::ApproximateRequestLease;
 use self::remote::RemoteIndexer;
 pub use self::remote::{ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use self::side::SideIndexer;
@@ -139,11 +143,20 @@ impl Indexer {
         }
     }
 
+    pub fn set_residency_routing_snapshot(&self, snapshot: ResidencyRoutingSnapshot) {
+        match self {
+            Self::KvIndexer { lower_tier, .. } | Self::Concurrent { lower_tier, .. } => {
+                lower_tier.set_residency_routing_snapshot(snapshot)
+            }
+            Self::Remote { .. } | Self::None => {}
+        }
+    }
+
     pub(crate) fn supports_overlap_refresh(&self) -> bool {
         matches!(self, Self::KvIndexer { .. } | Self::Concurrent { .. })
     }
 
-    pub(crate) fn supports_router_hint_chain_retention(&self) -> bool {
+    pub(crate) fn supports_kv_transfer_chain_retention(&self) -> bool {
         matches!(
             self,
             Self::KvIndexer {
@@ -321,11 +334,9 @@ impl Indexer {
                 ..
             } => dump_local_events(primary.dump_events().await?, lower_tier).await,
             Self::Remote { .. } => Ok(Vec::new()),
-            Self::None => {
-                panic!(
-                    "Cannot dump events: indexer does not exist (is overlap_score_credit set to 0?)"
-                );
-            }
+            Self::None => Err(KvRouterError::Unsupported(
+                "event dumping requires a KV indexer".to_string(),
+            )),
         }
     }
 
@@ -628,11 +639,11 @@ mod tests {
     }
 
     #[test]
-    fn router_hint_chain_retention_requires_event_driven_primary() {
-        assert!(make_test_indexer().supports_router_hint_chain_retention());
-        assert!(make_test_concurrent_indexer().supports_router_hint_chain_retention());
-        assert!(!make_test_concurrent_approx_indexer().supports_router_hint_chain_retention());
-        assert!(!Indexer::None.supports_router_hint_chain_retention());
+    fn kv_transfer_chain_retention_requires_event_driven_primary() {
+        assert!(make_test_indexer().supports_kv_transfer_chain_retention());
+        assert!(make_test_concurrent_indexer().supports_kv_transfer_chain_retention());
+        assert!(!make_test_concurrent_approx_indexer().supports_kv_transfer_chain_retention());
+        assert!(!Indexer::None.supports_kv_transfer_chain_retention());
     }
 
     async fn flush_indexer(indexer: &Indexer) {

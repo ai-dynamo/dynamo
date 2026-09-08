@@ -68,6 +68,7 @@ class DistributedRuntime:
         enable_nats: Optional[bool] = None,
         *,
         event_plane: Optional[str] = None,
+        response_plane: Optional[str] = None,
     ) -> "DistributedRuntime":
         """
         Create a new DistributedRuntime.
@@ -78,6 +79,7 @@ class DistributedRuntime:
             request_plane: Request plane transport ("tcp" or "nats")
             enable_nats: Deprecated; NATS enablement is inferred from runtime config
             event_plane: Event plane transport ("nats" or "zmq")
+            response_plane: Response plane transport ("tcp" or "quic")
         """
         ...
 
@@ -1181,6 +1183,7 @@ class KvEventPublisher:
         batching_timeout_ms: Optional[int] = None,
         image_token_id: Optional[int] = None,
         kv_state_endpoint: Optional[str] = None,
+        video_token_id: Optional[int] = None,
     ) -> None:
         """
         Create a `KvEventPublisher` object.
@@ -1201,7 +1204,9 @@ class KvEventPublisher:
             zmq_topic: ZMQ topic to subscribe to (defaults to "" when zmq_endpoint is set)
             batching_timeout_ms: Cross-list batching timeout in milliseconds. None/0
                 flushes at each submitted source-list boundary.
+            image_token_id: Optional model image-placeholder token for exact MM routing.
             kv_state_endpoint: KV event ownership endpoint; defaults to endpoint.
+            video_token_id: Optional model video-placeholder token for exact MM routing.
         """
 
     def publish_stored(
@@ -1713,6 +1718,7 @@ class RouterConfig:
         active_prefill_tokens_threshold_frac: Optional[float] = None,
         enforce_disagg: bool = False,
         session_affinity_ttl_secs: Optional[int] = None,
+        session_affinity_mode: str = "hard",
     ) -> None:
         """
         Create a RouterConfig.
@@ -1725,7 +1731,24 @@ class RouterConfig:
             active_prefill_tokens_threshold_frac: Fraction of max_num_batched_tokens for busy detection
             enforce_disagg: Deprecated and ignored. Routing topology and readiness come from registered worker types.
             session_affinity_ttl_secs: Router-local session-affinity idle TTL in seconds.
+            session_affinity_mode: Session binding behavior: ``hard`` or ``soft``.
         """
+        ...
+
+class LoadThresholdConfig:
+    """Overload-admission thresholds shared by all policies in one routing load context."""
+
+    active_decode_blocks_threshold: Optional[float]
+    active_prefill_tokens_threshold: Optional[int]
+    active_prefill_tokens_threshold_frac: Optional[float]
+
+    def __init__(
+        self,
+        *,
+        active_decode_blocks_threshold: Optional[float] = None,
+        active_prefill_tokens_threshold: Optional[int] = None,
+        active_prefill_tokens_threshold_frac: Optional[float] = None,
+    ) -> None:
         ...
 
 class AicPerfConfig:
@@ -2471,6 +2494,7 @@ def run_mocker_trace_replay(
         "mooncake_delta",
         "agentic_mooncake",
         "agentic-mooncake",
+        "weka",
         "applied_compute_agentic",
         "dynamo",
     ] = "mooncake",
@@ -2485,6 +2509,7 @@ def run_mocker_trace_replay(
     capture_per_request: bool = False,
     capture_planner_details: bool = True,
     scaling_policy: Optional[Any] = None,
+    agentic_lanes: Optional[int] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 
@@ -2861,6 +2886,10 @@ class KvRouter:
         block_size: int,
         kv_router_config: KvRouterConfig,
         aic_perf_config: Optional[AicPerfConfig] = None,
+        session_affinity_ttl_secs: Optional[int] = None,
+        *,
+        load_threshold_config: Optional[LoadThresholdConfig] = None,
+        session_affinity_mode: str = "hard",
     ) -> None:
         """
         Create a new KvRouter instance.
@@ -2870,6 +2899,9 @@ class KvRouter:
             block_size: The KV cache block size
             kv_router_config: Configuration for the KV router
             aic_perf_config: Optional AIC perf-model config for effective prefill load tracking
+            session_affinity_ttl_secs: Optional router-local session-affinity idle TTL in seconds
+            load_threshold_config: Optional overload-admission thresholds; all checks are disabled when omitted
+            session_affinity_mode: Session binding behavior: ``hard`` or ``soft``
         """
         ...
 
@@ -3313,6 +3345,16 @@ class backend:
     @staticmethod
     def _run_sglang_sidecar(argv: Optional[List[str]] = None) -> None:
         """Run the native SGLang sidecar with CLI-style arguments."""
+        ...
+
+    @staticmethod
+    def _run_trtllm_sidecar(argv: Optional[List[str]] = None) -> None:
+        """Run the native TensorRT-LLM sidecar with CLI-style arguments."""
+        ...
+
+    @staticmethod
+    def _run_vllm_sidecar(argv: Optional[List[str]] = None) -> None:
+        """Run the native vLLM sidecar with CLI-style arguments."""
         ...
 
     class DisaggregationMode:
