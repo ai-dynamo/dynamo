@@ -410,6 +410,48 @@ fn validate_bucket_config(min: f64, max: f64, count: usize) -> bool {
         && count <= MAX_BUCKET_COUNT
 }
 
+/// Read one histogram bucket setting, e.g. `DYN_METRICS_ITL_MAX`, from the environment.
+///
+/// Falls back to the deprecated doubled form (`DYN_HISTOGRAM_DYN_METRICS_ITL_MAX`)
+/// that PR #4083 introduced by accident, warning so operators can migrate.
+///
+/// Returns `default` when neither name is set. A name that *is* set but cannot be
+/// parsed also returns `default`, but warns first: silently ignoring a typo makes
+/// the whole knob look like it does not exist.
+fn bucket_env_var<T: std::str::FromStr>(prefix: &str, suffix: &str, default: T) -> T {
+    let name = format!("{prefix}_{suffix}");
+    let found = match std::env::var(&name) {
+        Ok(value) => Some((name, value)),
+        Err(_) => {
+            let deprecated = format!(
+                "{}{prefix}_{suffix}",
+                env_metrics::DEPRECATED_HISTOGRAM_PREFIX
+            );
+            std::env::var(&deprecated).ok().map(|value| {
+                tracing::warn!(
+                    deprecated = %deprecated,
+                    replacement = %name,
+                    "Deprecated histogram bucket environment variable; rename it, \
+                     support for the old name will be removed in a future release"
+                );
+                (deprecated, value)
+            })
+        }
+    };
+
+    match found {
+        None => default,
+        Some((name, value)) => value.parse::<T>().unwrap_or_else(|_| {
+            tracing::warn!(
+                env_var = %name,
+                value = %value,
+                "Could not parse histogram bucket environment variable, using default"
+            );
+            default
+        }),
+    }
+}
+
 /// Parse histogram bucket configuration from environment variables
 /// Returns (min, max, count) with defaults if not specified
 fn parse_bucket_config(
@@ -427,19 +469,9 @@ fn parse_bucket_config(
         );
         return (1.0, 10.0, 10);
     }
-    let env_prefix = format!("{}{}", env_metrics::HISTOGRAM_PREFIX, env_prefix);
-    let mut min = std::env::var(format!("{env_prefix}_MIN"))
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(default_min);
-    let mut max = std::env::var(format!("{env_prefix}_MAX"))
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(default_max);
-    let mut count = std::env::var(format!("{env_prefix}_COUNT"))
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(default_count);
+    let mut min = bucket_env_var(env_prefix, "MIN", default_min);
+    let mut max = bucket_env_var(env_prefix, "MAX", default_max);
+    let mut count = bucket_env_var(env_prefix, "COUNT", default_count);
 
     if !validate_bucket_config(min, max, count) {
         tracing::warn!(
@@ -729,7 +761,7 @@ impl Metrics {
     /// All histograms use log-spaced buckets rounded to 2 significant figures. Bucket configuration
     /// can be customized via environment variables (MIN: minimum value, MAX: maximum value, COUNT: number of buckets):
     ///
-    /// - `DYN_METRICS_REQUEST_DURATION_{MIN,MAX,COUNT}` - Request duration histogram (defaults: 1.0, 256.0, 10)
+    /// - `DYN_METRICS_REQUEST_DURATION_{MIN,MAX,COUNT}` - Request duration histogram (defaults: 1.0, 512.0, 10)
     /// - `DYN_METRICS_INPUT_SEQUENCE_{MIN,MAX,COUNT}` - Input sequence length histogram (defaults: 50.0, 128000.0, 12)
     /// - `DYN_METRICS_OUTPUT_SEQUENCE_{MIN,MAX,COUNT}` - Output sequence length histogram (defaults: 50.0, 32000.0, 10)
     /// - `DYN_METRICS_TTFT_{MIN,MAX,COUNT}` - Time to first token histogram (defaults: 0.001, 480.0, 18)
@@ -830,7 +862,7 @@ impl Metrics {
 
         // Request duration buckets: configurable via DYN_METRICS_REQUEST_DURATION_{MIN,MAX,COUNT}
         let (req_dur_min, req_dur_max, req_dur_count) =
-            parse_bucket_config("DYN_METRICS_REQUEST_DURATION", 1.0, 512.0, 10);
+            parse_bucket_config(env_metrics::DYN_METRICS_REQUEST_DURATION, 1.0, 512.0, 10);
         let request_duration_buckets =
             generate_log_buckets(req_dur_min, req_dur_max, req_dur_count);
 
@@ -846,7 +878,7 @@ impl Metrics {
 
         // Input sequence length buckets: configurable via DYN_METRICS_INPUT_SEQUENCE_{MIN,MAX,COUNT}
         let (isl_min, isl_max, isl_count) =
-            parse_bucket_config("DYN_METRICS_INPUT_SEQUENCE", 50.0, 128000.0, 12);
+            parse_bucket_config(env_metrics::DYN_METRICS_INPUT_SEQUENCE, 50.0, 128000.0, 12);
         let input_sequence_buckets = generate_log_buckets(isl_min, isl_max, isl_count);
 
         let input_sequence_length = HistogramVec::new(
@@ -861,7 +893,7 @@ impl Metrics {
 
         // Output sequence length buckets: configurable via DYN_METRICS_OUTPUT_SEQUENCE_{MIN,MAX,COUNT}
         let (osl_min, osl_max, osl_count) =
-            parse_bucket_config("DYN_METRICS_OUTPUT_SEQUENCE", 50.0, 32000.0, 10);
+            parse_bucket_config(env_metrics::DYN_METRICS_OUTPUT_SEQUENCE, 50.0, 32000.0, 10);
         let output_sequence_buckets = generate_log_buckets(osl_min, osl_max, osl_count);
 
         let output_sequence_length = HistogramVec::new(
@@ -885,7 +917,7 @@ impl Metrics {
 
         // Time to first token buckets: configurable via DYN_METRICS_TTFT_{MIN,MAX,COUNT}
         let (ttft_min, ttft_max, ttft_count) =
-            parse_bucket_config("DYN_METRICS_TTFT", 0.001, 480.0, 18);
+            parse_bucket_config(env_metrics::DYN_METRICS_TTFT, 0.001, 480.0, 18);
         let time_to_first_token_buckets = generate_log_buckets(ttft_min, ttft_max, ttft_count);
 
         let time_to_first_token = HistogramVec::new(
@@ -899,7 +931,8 @@ impl Metrics {
         .unwrap();
 
         // Inter-token latency buckets: configurable via DYN_METRICS_ITL_{MIN,MAX,COUNT}
-        let (itl_min, itl_max, itl_count) = parse_bucket_config("DYN_METRICS_ITL", 0.001, 2.0, 13);
+        let (itl_min, itl_max, itl_count) =
+            parse_bucket_config(env_metrics::DYN_METRICS_ITL, 0.001, 2.0, 13);
         let inter_token_latency_buckets = generate_log_buckets(itl_min, itl_max, itl_count);
 
         let inter_token_latency = HistogramVec::new(
@@ -917,7 +950,7 @@ impl Metrics {
         // range), so 1ms..10s on a log scale gives p50/p99 resolution that
         // the 1..512s `request_duration` buckets cannot.
         let (emb_min, emb_max, emb_count) =
-            parse_bucket_config("DYN_METRICS_EMBEDDING_LATENCY", 0.001, 10.0, 14);
+            parse_bucket_config(env_metrics::DYN_METRICS_EMBEDDING_LATENCY, 0.001, 10.0, 14);
         let embedding_latency_buckets = generate_log_buckets(emb_min, emb_max, emb_count);
 
         let embedding_latency = HistogramVec::new(
@@ -2525,6 +2558,157 @@ mod tests {
                 buckets[i]
             );
         }
+    }
+
+    // Env-touching tests use `temp_env` (snapshot + restore around the closure) and
+    // `#[serial_test::serial]` (serialize against every other env-touching test in the
+    // binary, not just this module). A module-local mutex would be insufficient because
+    // `std::env::{set_var, remove_var}` race against `getenv` in any other thread.
+
+    #[test]
+    #[serial_test::serial]
+    fn bucket_config_reads_the_documented_env_var_names() {
+        // PR #4083 prepended DYN_HISTOGRAM_ to a prefix that already started with
+        // DYN_METRICS_, so these names silently stopped working.
+        temp_env::with_vars(
+            [
+                ("DYN_METRICS_ITL_MIN", Some("0.002")),
+                ("DYN_METRICS_ITL_MAX", Some("80")),
+                ("DYN_METRICS_ITL_COUNT", Some("20")),
+            ],
+            || {
+                let cfg = parse_bucket_config(env_metrics::DYN_METRICS_ITL, 0.001, 2.0, 13);
+                assert_eq!(cfg, (0.002, 80.0, 20));
+            },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn bucket_config_falls_back_to_the_deprecated_doubled_name() {
+        // The doubled form was the only working name between #4083 and this fix, so it
+        // stays supported for one release rather than silently reverting to defaults.
+        temp_env::with_vars(
+            [
+                ("DYN_METRICS_ITL_MAX", None),
+                ("DYN_HISTOGRAM_DYN_METRICS_ITL_MAX", Some("80")),
+            ],
+            || {
+                let (_, max, _) = parse_bucket_config(env_metrics::DYN_METRICS_ITL, 0.001, 2.0, 13);
+                assert_eq!(max, 80.0);
+            },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn bucket_config_prefers_the_new_name_over_the_deprecated_one() {
+        temp_env::with_vars(
+            [
+                ("DYN_METRICS_ITL_MAX", Some("80")),
+                ("DYN_HISTOGRAM_DYN_METRICS_ITL_MAX", Some("30")),
+            ],
+            || {
+                let (_, max, _) = parse_bucket_config(env_metrics::DYN_METRICS_ITL, 0.001, 2.0, 13);
+                assert_eq!(max, 80.0);
+            },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn bucket_config_falls_back_to_defaults_for_unset_and_unparseable_values() {
+        // Unparseable also warns, which is what makes a typo diagnosable; the warning
+        // itself is not asserted here, only that the default is preserved.
+        temp_env::with_vars(
+            [
+                ("DYN_METRICS_ITL_MIN", Some("not-a-number")),
+                ("DYN_METRICS_ITL_MAX", None),
+                ("DYN_METRICS_ITL_COUNT", Some("12.5")),
+                ("DYN_HISTOGRAM_DYN_METRICS_ITL_MIN", None),
+                ("DYN_HISTOGRAM_DYN_METRICS_ITL_MAX", None),
+                ("DYN_HISTOGRAM_DYN_METRICS_ITL_COUNT", None),
+            ],
+            || {
+                let cfg = parse_bucket_config(env_metrics::DYN_METRICS_ITL, 0.001, 2.0, 13);
+                assert_eq!(cfg, (0.001, 2.0, 13));
+            },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn bucket_config_rejects_a_parseable_but_invalid_combination() {
+        // min >= max parses fine but cannot produce buckets, so the whole set reverts.
+        temp_env::with_vars(
+            [
+                ("DYN_METRICS_ITL_MIN", Some("5")),
+                ("DYN_METRICS_ITL_MAX", Some("1")),
+                ("DYN_METRICS_ITL_COUNT", None),
+                ("DYN_HISTOGRAM_DYN_METRICS_ITL_MIN", None),
+                ("DYN_HISTOGRAM_DYN_METRICS_ITL_MAX", None),
+                ("DYN_HISTOGRAM_DYN_METRICS_ITL_COUNT", None),
+            ],
+            || {
+                let cfg = parse_bucket_config(env_metrics::DYN_METRICS_ITL, 0.001, 2.0, 13);
+                assert_eq!(cfg, (0.001, 2.0, 13));
+            },
+        );
+    }
+
+    /// Upper bounds of a histogram's buckets, i.e. the `le` label values that a
+    /// dashboard's `histogram_quantile` query sees on `/metrics`.
+    fn bucket_upper_bounds(registry: &Registry, metric_name: &str) -> Vec<f64> {
+        registry
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == metric_name)
+            .expect("histogram not registered")
+            .get_metric()[0]
+            .get_histogram()
+            .get_bucket()
+            .iter()
+            .map(|b| b.upper_bound())
+            .collect()
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn itl_ceiling_env_var_reaches_the_exported_le_labels() {
+        // End to end: the documented name must move the `le` labels that
+        // dashboards actually read, which is the only reliable confirmation operators have.
+        temp_env::with_vars(
+            [
+                ("DYN_METRICS_ITL_MAX", Some("80")),
+                ("DYN_METRICS_ITL_COUNT", Some("20")),
+                ("DYN_METRICS_PREFIX", None),
+                ("DYN_HISTOGRAM_DYN_METRICS_ITL_MAX", None),
+                ("DYN_HISTOGRAM_DYN_METRICS_ITL_COUNT", None),
+            ],
+            || {
+                let registry = Registry::new();
+                let metrics = Metrics::new();
+                metrics.register(&registry).unwrap();
+                metrics
+                    .inter_token_latency
+                    .with_label_values(&["m"])
+                    .observe(0.5);
+
+                let bounds = bucket_upper_bounds(
+                    &registry,
+                    &format!(
+                        "{}_{}",
+                        name_prefix::FRONTEND,
+                        frontend_service::INTER_TOKEN_LATENCY_SECONDS
+                    ),
+                );
+                assert_eq!(
+                    bounds.last().copied(),
+                    Some(80.0),
+                    "top finite bucket should follow DYN_METRICS_ITL_MAX, got {bounds:?}"
+                );
+            },
+        );
     }
 
     #[test]

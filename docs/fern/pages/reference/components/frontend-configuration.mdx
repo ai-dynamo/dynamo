@@ -513,6 +513,44 @@ See the [KServe gRPC Frontend](../../developer-guide/knowledge-base/modular-comp
   Environment variable: `DYN_DUMP_CONFIG_TO`
 </ParamField>
 
+### Histogram buckets
+
+The frontend's six latency and size histograms use log-spaced buckets, rounded to two significant figures, always starting with a `0` edge. Each histogram is tuned by three environment variables that share a prefix: `_MIN` and `_MAX` bound the range, and `_COUNT` sets how many edges are generated across it. These have no CLI equivalent, and they are read once while the frontend builds its metrics, so changing one requires a restart.
+
+| Histogram | Variable prefix | Min | Max | Count |
+|---|---|---|---|---|
+| `dynamo_frontend_request_duration_seconds` | `DYN_METRICS_REQUEST_DURATION` | `1.0` | `512.0` | `10` |
+| `dynamo_frontend_input_sequence_tokens` | `DYN_METRICS_INPUT_SEQUENCE` | `50.0` | `128000.0` | `12` |
+| `dynamo_frontend_output_sequence_tokens` | `DYN_METRICS_OUTPUT_SEQUENCE` | `50.0` | `32000.0` | `10` |
+| `dynamo_frontend_time_to_first_token_seconds` | `DYN_METRICS_TTFT` | `0.001` | `480.0` | `18` |
+| `dynamo_frontend_inter_token_latency_seconds` | `DYN_METRICS_ITL` | `0.001` | `2.0` | `13` |
+| `dynamo_frontend_embedding_latency_seconds` | `DYN_METRICS_EMBEDDING_LATENCY` | `0.001` | `10.0` | `14` |
+
+For example, to raise the inter-token latency ceiling from 2 seconds to 80:
+
+```bash
+DYN_METRICS_ITL_MAX=80
+DYN_METRICS_ITL_COUNT=20
+```
+
+`dynamo_frontend_cached_tokens` shares the input sequence buckets, so `DYN_METRICS_INPUT_SEQUENCE_*` changes both histograms.
+
+A configuration is rejected, with a warning, unless `MIN` is greater than zero, `MIN` is less than `MAX`, and `COUNT` is between 1 and 512. Rejected values fall back to the defaults above. A value that cannot be parsed at all also warns and falls back. Because rounding to two significant figures can collapse neighboring edges, a high `COUNT` over a narrow range yields fewer buckets than requested; the frontend warns when that removes more than a tenth of them.
+
+Bucket edges appear directly in the `le` label, which is the only reliable way to confirm a setting took effect:
+
+```bash
+curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_seconds_bucket
+```
+
+<Warning>
+  Prometheus cannot compute `histogram_quantile` across series with different `le` sets, so changing any of these values makes the new data non-comparable with data already scraped, and dashboards show a discontinuity at the restart. Bucket count also drives cardinality: each edge is a separate series per value of the `model` label.
+</Warning>
+
+<Note>
+  From v0.8.0 until this release these variables were read under a doubled prefix, as in `DYN_HISTOGRAM_DYN_METRICS_ITL_MAX`, so the names in the table above had no effect on those versions. The doubled names still work but now log a deprecation warning, and support for them will be removed in a future release. Rename them to the forms above. Configurations written against v0.7.1 or earlier work again without change.
+</Note>
+
 ## Tokenizer
 
 <ParamField path="--tokenizer" type="string" default="default">
