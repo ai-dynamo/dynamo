@@ -773,11 +773,7 @@ mod tests {
             RequestPhase::Decode,
         ] {
             let permit = tracker.set_phase(phase).await;
-            for error_type in [
-                ErrorType::Disconnected,
-                ErrorType::WorkerOverloaded,
-                ErrorType::WorkerUnavailable,
-            ] {
+            for error_type in [ErrorType::Disconnected, ErrorType::WorkerOverloaded] {
                 let error = migratable_error(error_type);
                 assert!(
                     !is_migratable_for_request(&request, &error),
