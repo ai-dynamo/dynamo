@@ -267,6 +267,9 @@ runs:
 
         TEST_EXIT_CODE=$?
         echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
+        # Back to fail-fast: a failure while processing results must fail the
+        # step instead of being masked by the pytest status returned below.
+        set -e
 
         # Process test results. The JUnit file gets a unique per-stage name so
         # several stages can share one test-results/ directory and one upload.
