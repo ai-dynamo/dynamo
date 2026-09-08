@@ -12,6 +12,7 @@ use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
+#[cfg(test)]
 use super::config::RouterQueuePolicy;
 use super::filter::RoutingEligibility;
 use super::overlap::SelectedWorkerTierSnapshot;
@@ -464,35 +465,7 @@ impl<
 > SchedulerQueue<P, C, Sel, RF>
 {
     #[allow(clippy::too_many_arguments)]
-    pub fn new_with_overlap_refresh(
-        slots: Arc<ActiveSequencesMultiWorker<P>>,
-        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
-        threshold_frac: Option<f64>,
-        block_size: u32,
-        selector: Sel,
-        queue_policy: RouterQueuePolicy,
-        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-        overlap_scores_refresh: Option<Arc<RF>>,
-        overloaded_worker_provider: Option<OverloadedWorkerProvider>,
-        available_worker_provider: Option<WorkerAvailabilityProvider>,
-    ) -> Self {
-        let profile = PolicyProfile::synthetic(threshold_frac, queue_policy);
-        Self::new_with_policy_profile(
-            slots,
-            workers_with_configs,
-            profile,
-            block_size,
-            selector,
-            prefill_load_estimator,
-            overlap_scores_refresh,
-            overloaded_worker_provider,
-            available_worker_provider,
-        )
-        .expect("synthetic policy profile does not require admission policies")
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_with_policy_profile(
+    pub fn new(
         slots: Arc<ActiveSequencesMultiWorker<P>>,
         workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
         profile: PolicyProfile,
@@ -502,8 +475,8 @@ impl<
         overlap_scores_refresh: Option<Arc<RF>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
         available_worker_provider: Option<WorkerAvailabilityProvider>,
-    ) -> Result<Self, KvSchedulerError> {
-        Self::new_with_policy_profile_and_capacity(
+    ) -> Self {
+        Self::new_with_capacity(
             slots,
             workers_with_configs,
             profile,
@@ -518,7 +491,7 @@ impl<
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn new_with_policy_profile_and_capacity(
+    fn new_with_capacity(
         slots: Arc<ActiveSequencesMultiWorker<P>>,
         workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
         profile: PolicyProfile,
@@ -529,7 +502,7 @@ impl<
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
         available_worker_provider: Option<WorkerAvailabilityProvider>,
         admission_channel_capacity: usize,
-    ) -> Result<Self, KvSchedulerError> {
+    ) -> Self {
         let pending = PolicyQueue::new(profile.clone());
         let queueing_enabled = profile
             .classes()
@@ -596,7 +569,7 @@ impl<
             non_max_overlap_selection_observer: Arc::clone(&non_max_overlap_selection_observer),
         };
         tokio::spawn(actor.run(admission_rx));
-        Ok(Self {
+        Self {
             admission_tx,
             cleanup,
             pending_count,
@@ -608,63 +581,7 @@ impl<
             supports_overlap_refresh: overlap_refresh_after.is_some(),
             non_max_overlap_selection_observer,
             _marker: PhantomData,
-        })
-    }
-}
-
-impl<
-    P: SequencePublisher + 'static,
-    C: WorkerConfigLike + Send + Sync + 'static,
-    Sel: WorkerSelector<C> + Send + 'static,
-> SchedulerQueue<P, C, Sel, NoopOverlapScoresRefresh>
-{
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        slots: Arc<ActiveSequencesMultiWorker<P>>,
-        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
-        threshold_frac: Option<f64>,
-        block_size: u32,
-        selector: Sel,
-        queue_policy: RouterQueuePolicy,
-        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-    ) -> Self {
-        Self::new_with_overlap_refresh(
-            slots,
-            workers_with_configs,
-            threshold_frac,
-            block_size,
-            selector,
-            queue_policy,
-            prefill_load_estimator,
-            None,
-            None,
-            None,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_with_overload_provider(
-        slots: Arc<ActiveSequencesMultiWorker<P>>,
-        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
-        threshold_frac: Option<f64>,
-        block_size: u32,
-        selector: Sel,
-        queue_policy: RouterQueuePolicy,
-        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-        overloaded_worker_provider: Option<OverloadedWorkerProvider>,
-    ) -> Self {
-        Self::new_with_overlap_refresh(
-            slots,
-            workers_with_configs,
-            threshold_frac,
-            block_size,
-            selector,
-            queue_policy,
-            prefill_load_estimator,
-            None,
-            overloaded_worker_provider,
-            None,
-        )
+        }
     }
 }
 
@@ -1935,10 +1852,12 @@ mod tests {
         let queue = Arc::new(SchedulerQueue::new(
             Arc::clone(&slots),
             cfg_rx,
-            threshold_frac,
+            PolicyProfile::synthetic(threshold_frac, RouterQueuePolicy::Fcfs),
             block_size,
             selector,
-            RouterQueuePolicy::Fcfs,
+            None,
+            None,
+            None,
             None,
         ));
 
@@ -1984,11 +1903,13 @@ mod tests {
         let queue = Arc::new(SchedulerQueue::new(
             Arc::clone(&slots),
             cfg_rx,
-            threshold_frac,
+            PolicyProfile::synthetic(threshold_frac, RouterQueuePolicy::Fcfs),
             block_size,
             selector,
-            RouterQueuePolicy::Fcfs,
             prefill_load_estimator,
+            None,
+            None,
+            None,
         ));
 
         (queue, slots, cfg_tx)
@@ -2052,20 +1973,17 @@ mod tests {
             })
             .collect();
         let (cfg_tx, cfg_rx) = watch::channel(configs);
-        let queue = Arc::new(
-            SchedulerQueue::new_with_policy_profile(
-                Arc::clone(&slots),
-                cfg_rx,
-                profile,
-                block_size,
-                DefaultWorkerSelector::new(None, "test"),
-                None,
-                None,
-                None,
-                None,
-            )
-            .unwrap(),
-        );
+        let queue = Arc::new(SchedulerQueue::new(
+            Arc::clone(&slots),
+            cfg_rx,
+            profile,
+            block_size,
+            DefaultWorkerSelector::new(None, "test"),
+            None,
+            None,
+            None,
+            None,
+        ));
         (queue, slots, cfg_tx)
     }
 
@@ -2103,13 +2021,12 @@ mod tests {
         let (_cfg_tx, cfg_rx) = watch::channel(configs);
 
         let selector = DefaultWorkerSelector::new(None, "test");
-        let queue = Arc::new(SchedulerQueue::new_with_overlap_refresh(
+        let queue = Arc::new(SchedulerQueue::new(
             Arc::clone(&slots),
             cfg_rx,
-            None,
+            PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs),
             block_size,
             selector,
-            RouterQueuePolicy::Fcfs,
             None,
             None,
             overloaded_worker_provider,
@@ -2222,13 +2139,12 @@ mod tests {
         }
         let (_cfg_tx, cfg_rx) = watch::channel(configs);
 
-        let queue = Arc::new(SchedulerQueue::new_with_overlap_refresh(
+        let queue = Arc::new(SchedulerQueue::new(
             Arc::clone(&slots),
             cfg_rx,
-            threshold_frac,
+            PolicyProfile::synthetic(threshold_frac, RouterQueuePolicy::Fcfs),
             block_size,
             DefaultWorkerSelector::new(None, "test"),
-            RouterQueuePolicy::Fcfs,
             None,
             Some(refresher),
             None,
@@ -2280,21 +2196,18 @@ mod tests {
         }
         let (_cfg_tx, cfg_rx) = watch::channel(configs);
 
-        let queue = Arc::new(
-            SchedulerQueue::new_with_policy_profile_and_capacity(
-                Arc::clone(&slots),
-                cfg_rx,
-                PolicyProfile::synthetic(threshold_frac, crate::config::RouterQueuePolicy::Fcfs),
-                block_size,
-                DefaultWorkerSelector::new(None, "test"),
-                None,
-                Some(refresher),
-                None,
-                None,
-                admission_channel_capacity,
-            )
-            .unwrap(),
-        );
+        let queue = Arc::new(SchedulerQueue::new_with_capacity(
+            Arc::clone(&slots),
+            cfg_rx,
+            PolicyProfile::synthetic(threshold_frac, crate::config::RouterQueuePolicy::Fcfs),
+            block_size,
+            DefaultWorkerSelector::new(None, "test"),
+            None,
+            Some(refresher),
+            None,
+            None,
+            admission_channel_capacity,
+        ));
 
         (queue, slots)
     }
@@ -2674,10 +2587,12 @@ mod tests {
         let queue = SchedulerQueue::new(
             Arc::clone(&slots),
             cfg_rx,
-            None,
+            PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs),
             16,
             DefaultWorkerSelector::new(None, "test"),
-            RouterQueuePolicy::Fcfs,
+            None,
+            None::<Arc<NoopOverlapScoresRefresh>>,
+            None,
             None,
         );
 

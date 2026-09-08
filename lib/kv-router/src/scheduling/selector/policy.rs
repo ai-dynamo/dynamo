@@ -427,7 +427,7 @@ impl WorkerSelectionPolicy {
     /// `worker_label` selects the built-in scoring and logging contract. Typed hosts use
     /// [`crate::WorkerType::default_selector_label`] to preserve Dynamo's historical behavior.
     pub fn default(kv_router_config: KvRouterConfig, worker_label: &'static str) -> Self {
-        let picker = DefaultWorkerPicker::new(kv_router_config.router_temperature);
+        let picker = DefaultWorkerPicker::new();
         Self {
             kv_router_config,
             worker_label,
@@ -638,13 +638,25 @@ mod tests {
 
     use rustc_hash::FxHashMap;
 
+    use super::super::DefaultWorkerSelector;
     use super::super::test_support::*;
-    use super::super::{DefaultWorkerPicker, DefaultWorkerSelector};
     use super::*;
     use crate::scheduling::{WorkerSelectionInputTrigger, WorkerSelectionKvHints};
 
     fn uses_exclusive_affinity(selector: &impl WorkerSelector<TaintedWorkerConfig>) -> bool {
         selector.uses_exclusive_affinity_target()
+    }
+
+    struct FirstPicker;
+
+    impl WorkerPicker for FirstPicker {
+        fn pick(
+            &mut self,
+            _context: &WorkerSelectionContext<'_>,
+            _input: WorkerInputView<'_>,
+        ) -> Result<usize, WorkerSelectionPolicyError> {
+            Ok(0)
+        }
     }
 
     #[test]
@@ -1082,7 +1094,7 @@ mod tests {
             "test",
             vec![Box::new(RejectWithoutSignals)],
             vec![Box::new(CacheScorer)],
-            Box::new(DefaultWorkerPicker::new(0.0)),
+            Box::new(FirstPicker),
         );
 
         assert!(matches!(
@@ -1125,17 +1137,6 @@ mod tests {
                 _candidate: &WorkerCandidate,
             ) -> Result<f64, WorkerSelectionPolicyError> {
                 Ok(0.0)
-            }
-        }
-
-        struct FirstPicker;
-        impl WorkerPicker for FirstPicker {
-            fn pick(
-                &mut self,
-                _context: &WorkerSelectionContext<'_>,
-                _input: WorkerInputView<'_>,
-            ) -> Result<usize, WorkerSelectionPolicyError> {
-                Ok(0)
             }
         }
 
