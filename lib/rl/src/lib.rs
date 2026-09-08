@@ -26,6 +26,7 @@ use dynamo_runtime::{
     DistributedRuntime,
     component::{Client, Instance, TransportType},
     discovery::{DiscoveryInstance, DiscoveryQuery},
+    namespace::{GLOBAL_NAMESPACE, NamespaceFilter},
     pipeline::{
         SingleIn,
         network::egress::push_router::{PushRouter, RouterMode},
@@ -89,16 +90,80 @@ type ModelKey = (String, String, u64);
 #[derive(Clone)]
 pub struct RlDiscoveryConfig {
     pub runtime: Arc<DistributedRuntime>,
-    pub namespace: String,
+    /// Which Dynamo namespaces this listener searches. See [`resolve_namespace_filter`].
+    pub namespace_filter: NamespaceFilter,
     pub rl_endpoint: String,
     pub component_filter: Option<Vec<String>>,
     pub request_timeout: Duration,
     pub max_concurrent_probes: usize,
 }
 
+/// Resolve the namespace scope for RL discovery from the three namespace inputs.
+///
+/// This is deliberately pure — it reads no environment — so the composition rule can be
+/// tested without mutating process-global state.
+///
+/// Precedence, highest first:
+///
+/// 1. `namespace_prefix` (`DYN_NAMESPACE_PREFIX`): match every namespace under that
+///    prefix. Kubernetes deployments get this on the frontend container automatically,
+///    and it is what lets one listener see several worker generations during a rolling
+///    update.
+/// 2. `worker_suffix` (`DYN_NAMESPACE_WORKER_SUFFIX`): match exactly `{base}-{suffix}`.
+/// 3. Neither: match `base` exactly.
+///
+/// `base` is `namespace` (`DYN_NAMESPACE`), or [`DEFAULT_NAMESPACE`] when it is absent.
+/// The suffix rule mirrors `get_worker_namespace` in
+/// `components/src/dynamo/common/utils/namespace.py`, which is how workers pick the
+/// namespace they register under: a single ASCII hyphen, no trimming, no case folding.
+/// An empty value counts as absent, matching that helper's truthiness test.
+///
+/// The no-prefix, no-suffix case stays [`NamespaceFilter::Exact`] rather than going
+/// through `NamespaceFilter::from_namespace_and_prefix`, because that constructor maps
+/// the literal `dynamo` to `NamespaceFilter::Global`. Routing the default through it
+/// would silently widen RL discovery from one namespace to all of them for everyone who
+/// leaves `DYN_NAMESPACE` unset.
+pub fn resolve_namespace_filter(
+    namespace: Option<&str>,
+    namespace_prefix: Option<&str>,
+    worker_suffix: Option<&str>,
+) -> NamespaceFilter {
+    fn present(value: Option<&str>) -> Option<&str> {
+        value.filter(|value| !value.is_empty())
+    }
+
+    if let Some(prefix) = present(namespace_prefix) {
+        return NamespaceFilter::Prefix(prefix.to_string());
+    }
+
+    let base = present(namespace).unwrap_or(DEFAULT_NAMESPACE);
+    match present(worker_suffix) {
+        Some(suffix) => NamespaceFilter::Exact(format!("{base}-{suffix}")),
+        None => NamespaceFilter::Exact(base.to_string()),
+    }
+}
+
+/// The scope reported back to the caller in [`RlWorkersResponse::namespace`].
+///
+/// Protocol version 1 types that field as a plain string, so a prefix scope reports the
+/// prefix itself. `Global` has no string form of its own and reports `GLOBAL_NAMESPACE`;
+/// [`resolve_namespace_filter`] never produces it, so this arm only covers a config built
+/// directly by a caller.
+fn namespace_scope(filter: &NamespaceFilter) -> &str {
+    match filter {
+        NamespaceFilter::Global => GLOBAL_NAMESPACE,
+        NamespaceFilter::Exact(namespace) => namespace,
+        NamespaceFilter::Prefix(prefix) => prefix,
+    }
+}
+
 impl RlDiscoveryConfig {
     pub fn from_env(runtime: Arc<DistributedRuntime>) -> Self {
-        let namespace = std::env::var("DYN_NAMESPACE").unwrap_or_else(|_| DEFAULT_NAMESPACE.into());
+        let namespace_filter = resolve_namespace_filter(
+            std::env::var("DYN_NAMESPACE").ok().as_deref(),
+            std::env::var("DYN_NAMESPACE_PREFIX").ok().as_deref(),
+            std::env::var("DYN_NAMESPACE_WORKER_SUFFIX").ok().as_deref(),
+        );
         let rl_endpoint =
             std::env::var("DYN_RL_ENDPOINT").unwrap_or_else(|_| DEFAULT_RL_ENDPOINT.into());
         let component_filter = parse_csv_env("DYN_RL_COMPONENTS")
@@ -116,7 +181,7 @@ impl RlDiscoveryConfig {
 
         Self {
             runtime,
-            namespace,
+            namespace_filter,
             rl_endpoint,
             component_filter,
             request_timeout,
@@ -244,7 +309,7 @@ async fn workers_handler(State(state): State<RlDiscoveryState>) -> impl IntoResp
     match list_workers(&state).await {
         Ok(workers) => Json(RlWorkersResponse {
             protocol_version: RL_WORKERS_PROTOCOL_VERSION,
-            namespace: state.config.namespace.clone(),
+            namespace: namespace_scope(&state.config.namespace_filter).to_string(),
             workers,
         })
         .into_response(),
@@ -264,22 +329,42 @@ async fn workers_handler(State(state): State<RlDiscoveryState>) -> impl IntoResp
 
 async fn list_workers(state: &RlDiscoveryState) -> anyhow::Result<Vec<RlWorkerInfo>> {
     let config = &state.config;
-    let endpoint_instances = config
-        .runtime
-        .discovery()
-        .list(DiscoveryQuery::NamespacedEndpoints {
-            namespace: config.namespace.clone(),
-        })
-        .await?;
+    // `DiscoveryQuery` has no prefix-scoped variant, so a prefix (or global) scope has to
+    // list everything and drop non-matching namespaces here — the same client-side
+    // filtering `ModelWatcher::normalize` in `dynamo-llm` already does. An exact scope
+    // keeps the narrow query, so the pre-existing path costs and returns exactly what it
+    // did before. `/v1/rl/workers` is a low-rate administrative endpoint, and the probe
+    // fan-out below stays bounded by `max_concurrent_probes` either way.
+    let (endpoint_query, model_query) = match &config.namespace_filter {
+        NamespaceFilter::Exact(namespace) => (
+            DiscoveryQuery::NamespacedEndpoints {
+                namespace: namespace.clone(),
+            },
+            DiscoveryQuery::NamespacedModels {
+                namespace: namespace.clone(),
+            },
+        ),
+        NamespaceFilter::Prefix(_) | NamespaceFilter::Global => {
+            (DiscoveryQuery::AllEndpoints, DiscoveryQuery::AllModels)
+        }
+    };
+
+    let endpoint_instances = config.runtime.discovery().list(endpoint_query).await?;
 
     let model_instances = config
         .runtime
         .discovery()
-        .list(DiscoveryQuery::NamespacedModels {
-            namespace: config.namespace.clone(),
-        })
+        .list(model_query)
         .await
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|instance| match instance {
+            DiscoveryInstance::Model { namespace, .. } => {
+                config.namespace_filter.matches(namespace)
+            }
+            _ => true,
+        })
+        .collect();
 
     let models = model_map(model_instances);
     let rl_endpoints = endpoint_instances
@@ -288,6 +373,7 @@ async fn list_workers(state: &RlDiscoveryState) -> anyhow::Result<Vec<RlWorkerIn
             DiscoveryInstance::Endpoint(endpoint) => Some(endpoint),
             _ => None,
         })
+        .filter(|endpoint| config.namespace_filter.matches(&endpoint.namespace))
         .filter(|endpoint| endpoint.endpoint == config.rl_endpoint)
         .filter(|endpoint| {
             config
@@ -603,6 +689,7 @@ fn model_map(instances: Vec<DiscoveryInstance>) -> HashMap<ModelKey, String> {
 mod tests {
     use super::*;
     use dynamo_runtime::{
+        component::StartedEndpoint,
         discovery::DiscoverySpec,
         pipeline::{
             AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, async_trait,
@@ -806,20 +893,29 @@ mod tests {
         assert!(map.is_empty());
     }
 
-    #[tokio::test]
-    async fn list_workers_keeps_endpoints_without_unambiguous_model_metadata() {
+    /// A `DistributedRuntime` backed by a private in-memory discovery store, so every test
+    /// that calls this sees only the endpoints it registers itself.
+    async fn test_runtime() -> Arc<DistributedRuntime> {
         let runtime = dynamo_runtime::Runtime::from_current().expect("test runtime");
-        let distributed = Arc::new(
+        Arc::new(
             DistributedRuntime::new(
                 runtime,
                 dynamo_runtime::distributed::DistributedConfig::process_local(),
             )
             .await
             .expect("distributed runtime"),
-        );
+        )
+    }
+
+    /// Register a live `rl` endpoint under `namespace`, exactly as a worker started with
+    /// `DYN_ENABLE_RL` does. The caller must `shutdown()` the returned handle.
+    async fn start_rl_endpoint(
+        distributed: &Arc<DistributedRuntime>,
+        namespace: &str,
+    ) -> StartedEndpoint {
         let ingress = Ingress::for_engine(Arc::new(TestRoutesHandler)).expect("test ingress");
-        let started = distributed
-            .namespace("dynamo")
+        distributed
+            .namespace(namespace)
             .expect("namespace")
             .component("backend")
             .expect("component")
@@ -828,15 +924,118 @@ mod tests {
             .handler(ingress)
             .start_with_registration()
             .await
-            .expect("RL endpoint");
-        let state = RlDiscoveryState::new(RlDiscoveryConfig {
+            .expect("RL endpoint")
+    }
+
+    fn discovery_state(
+        distributed: &Arc<DistributedRuntime>,
+        namespace_filter: NamespaceFilter,
+    ) -> RlDiscoveryState {
+        RlDiscoveryState::new(RlDiscoveryConfig {
             runtime: distributed.clone(),
-            namespace: "dynamo".to_string(),
+            namespace_filter,
             rl_endpoint: "rl".to_string(),
             component_filter: None,
             request_timeout: Duration::from_secs(1),
             max_concurrent_probes: 1,
-        });
+        })
+    }
+
+    /// The reported defect: with `DYN_NAMESPACE_WORKER_SUFFIX` set, workers register under
+    /// `{namespace}-{suffix}`, so a listener scoped to the bare namespace found none of
+    /// them. A prefix scope has to see them.
+    #[tokio::test]
+    async fn list_workers_finds_suffixed_namespace_under_prefix_scope() {
+        let distributed = test_runtime().await;
+        let started = start_rl_endpoint(&distributed, "ns-abc123").await;
+        let state = discovery_state(&distributed, NamespaceFilter::Prefix("ns".to_string()));
+
+        let workers = list_workers(&state).await.expect("list");
+        assert_eq!(workers.len(), 1);
+        assert_eq!(workers[0].namespace, "ns-abc123");
+
+        started.shutdown().await.expect("endpoint shutdown");
+    }
+
+    /// A prefix scope must still be a scope: an unrelated namespace that the widened
+    /// `AllEndpoints` query now returns has to be dropped before the probe fan-out.
+    #[tokio::test]
+    async fn list_workers_prefix_scope_excludes_other_namespaces() {
+        let distributed = test_runtime().await;
+        let matching = start_rl_endpoint(&distributed, "ns-abc123").await;
+        let other = start_rl_endpoint(&distributed, "other-ns").await;
+        let state = discovery_state(&distributed, NamespaceFilter::Prefix("ns".to_string()));
+
+        let workers = list_workers(&state).await.expect("list");
+        let namespaces: Vec<&str> = workers.iter().map(|w| w.namespace.as_str()).collect();
+        assert_eq!(namespaces, ["ns-abc123"]);
+
+        matching.shutdown().await.expect("endpoint shutdown");
+        other.shutdown().await.expect("endpoint shutdown");
+    }
+
+    /// An exact scope keeps its old meaning: `ns` still does not match `ns-abc123`. This
+    /// pins that the fix widens discovery only when a prefix is configured.
+    #[tokio::test]
+    async fn list_workers_exact_scope_excludes_suffixed_namespace() {
+        let distributed = test_runtime().await;
+        let started = start_rl_endpoint(&distributed, "ns-abc123").await;
+        let state = discovery_state(&distributed, NamespaceFilter::Exact("ns".to_string()));
+
+        let workers = list_workers(&state).await.expect("list");
+        assert!(workers.is_empty(), "unexpected workers: {workers:?}");
+
+        started.shutdown().await.expect("endpoint shutdown");
+    }
+
+    #[test]
+    fn resolve_namespace_filter_precedence() {
+        // (namespace, prefix, suffix, expected)
+        let cases = [
+            (
+                "prefix wins over a suffix that is also set",
+                Some("ns"),
+                Some("ns"),
+                Some("abc123"),
+                NamespaceFilter::Prefix("ns".to_string()),
+            ),
+            (
+                "suffix composes the worker namespace",
+                Some("ns"),
+                None,
+                Some("abc123"),
+                NamespaceFilter::Exact("ns-abc123".to_string()),
+            ),
+            (
+                "an empty suffix counts as absent",
+                Some("ns"),
+                None,
+                Some(""),
+                NamespaceFilter::Exact("ns".to_string()),
+            ),
+            (
+                "nothing set falls back to the default namespace",
+                None,
+                None,
+                None,
+                NamespaceFilter::Exact(DEFAULT_NAMESPACE.to_string()),
+            ),
+        ];
+
+        for (description, namespace, prefix, suffix, expected) in cases {
+            assert_eq!(
+                resolve_namespace_filter(namespace, prefix, suffix),
+                expected,
+                "{description}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn list_workers_keeps_endpoints_without_unambiguous_model_metadata() {
+        let distributed = test_runtime().await;
+        let started = start_rl_endpoint(&distributed, "dynamo").await;
+        let state = discovery_state(&distributed, NamespaceFilter::Exact("dynamo".to_string()));
 
         let workers = list_workers(&state).await.expect("workers without models");
         assert_eq!(workers.len(), 1);
