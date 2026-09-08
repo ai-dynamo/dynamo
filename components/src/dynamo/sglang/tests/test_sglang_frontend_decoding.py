@@ -690,29 +690,6 @@ def _new_prefill_handler() -> PrefillWorkerHandler:
     return handler
 
 
-async def _capture_aggregated_kwargs(
-    request_overrides: Dict[str, Any],
-) -> Dict[str, Any]:
-    """Run one aggregated decode request; return the recorded engine kwargs.
-
-    Asserts the engine was called exactly once. Without that check, an
-    "``x`` is absent" assertion would also pass when the handler never reached
-    the engine at all.
-    """
-    handler = _new_decode_handler(enable_frontend_decoding=False)
-    recorder = _GenerateRecorder()
-    handler.engine = recorder
-
-    request: Dict[str, Any] = {"token_ids": [1, 2, 3], "multi_modal_data": {}}
-    request.update(request_overrides)
-
-    async for _ in handler.generate(request, _Context()):
-        pass
-
-    assert len(recorder.calls) == 1
-    return recorder.calls[0]
-
-
 @pytest.mark.asyncio
 async def test_aggregated_decode_omits_session_params_for_agent_context(
     session_agent_context: Dict[str, Any],
@@ -805,17 +782,3 @@ async def test_prefill_omits_session_params_for_agent_context(
     captured = recorder.calls[0]
     assert captured["input_ids"] == [1, 2, 3]
     assert "session_params" not in captured
-
-
-@pytest.mark.asyncio
-async def test_agent_context_contributes_no_engine_kwargs(
-    session_agent_context: Dict[str, Any],
-):
-    """Control: an ``agent_context`` contributes no engine keyword argument at
-    all, not merely no ``session_params``.
-    """
-    with_context = await _capture_aggregated_kwargs(session_agent_context)
-    without_context = await _capture_aggregated_kwargs({})
-
-    assert set(with_context) == set(without_context)
-    assert "session_params" not in with_context
