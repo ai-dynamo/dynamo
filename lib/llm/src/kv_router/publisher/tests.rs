@@ -2132,6 +2132,63 @@ mod test_event_dedup_filter {
     }
 }
 
+#[cfg(test)]
+mod worker_metrics_tests {
+    use std::time::Duration;
+
+    use anyhow::Result;
+    use dynamo_kv_router::protocols::ActiveLoad;
+
+    use super::super::worker_metrics::{WorkerMetricsPublisher, WorkerMetricsSink};
+
+    struct ChannelSink(tokio::sync::mpsc::UnboundedSender<ActiveLoad>);
+
+    #[async_trait::async_trait]
+    impl WorkerMetricsSink for ChannelSink {
+        async fn publish(&self, active_load: ActiveLoad) -> Result<()> {
+            self.0
+                .send(active_load)
+                .map_err(|_| anyhow::anyhow!("metrics test channel closed"))
+        }
+    }
+
+    #[tokio::test]
+    async fn publish_debounces_updates_independently_per_rank() {
+        let publisher = WorkerMetricsPublisher::new().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        publisher.start_metrics_publishing_with(ChannelSink(tx), 42);
+
+        publisher.publish(Some(0), None, Some(100)).unwrap();
+        publisher.publish(Some(1), None, Some(200)).unwrap();
+        publisher.publish(Some(0), None, Some(300)).unwrap();
+
+        let mut published = Vec::new();
+        for _ in 0..2 {
+            published.push(
+                tokio::time::timeout(Duration::from_millis(100), rx.recv())
+                    .await
+                    .expect("timed out waiting for rank metrics")
+                    .expect("metrics publishing task stopped"),
+            );
+        }
+        published.sort_unstable_by_key(|load| load.dp_rank);
+
+        assert_eq!(published[0].worker_id, 42);
+        assert_eq!(published[0].dp_rank, 0);
+        assert_eq!(published[0].kv_used_blocks, Some(300));
+        assert_eq!(published[1].worker_id, 42);
+        assert_eq!(published[1].dp_rank, 1);
+        assert_eq!(published[1].kv_used_blocks, Some(200));
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), rx.recv())
+                .await
+                .is_err(),
+            "same-rank updates should be coalesced"
+        );
+    }
+}
+
 #[cfg(all(test, feature = "integration"))]
 mod test_integration_publisher {
     use super::*;

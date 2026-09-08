@@ -165,6 +165,15 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	Multinode *MultinodeSpec `json:"multinode,omitempty"`
 
+	// roles expose the named Pod-producing parts inside a compound component.
+	// When set for a multinode component, this list must contain exactly one
+	// leader and one worker role. Their cardinality is derived from multinode.nodeCount.
+	// Omission preserves the implicit multinode role layout.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Roles []ComponentRoleSpec `json:"roles,omitempty"`
+
 	// sharedMemorySize controls the size of the tmpfs mounted at `/dev/shm`.
 	// `nil` selects the operator default (8Gi), a positive quantity sets a
 	// custom size, and `"0"` disables the shared-memory volume entirely.

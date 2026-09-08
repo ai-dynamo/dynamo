@@ -376,6 +376,10 @@ service.
   Seconds between throughput-based scaling decisions. Also accepts the alias `throughput_adjustment_interval`.
 </ParamField>
 
+<ParamField path="max_throughput_scaling_replicas" type="integer" default="8">
+  Maximum replica-count change per component from one throughput observation. The Planner caps and stores the throughput lower bound, so load-scaling ticks cannot repeatedly apply the same uncapped prediction. GPU and power budgets can reduce the change further. At the nominal minimum GPU budget, scale-down-only requests hold. At a full GPU budget, two scale-up requests hold; an opposing prefill/decode proposal applies only the largest atomic pair that fits the budget. Endpoint and out-of-band budget recovery take precedence over this limit. Must be greater than `0`.
+</ParamField>
+
 <ParamField path="throughput_metrics_source" type="string" default="frontend">
   Prometheus traffic source. `frontend` reads `dynamo_frontend_*` metrics from the public Frontend; `router` reads `dynamo_component_router_*` from a LocalRouter (use for a pool-local Planner in GlobalPlanner deployments).
 

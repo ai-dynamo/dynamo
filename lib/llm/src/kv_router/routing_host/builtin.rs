@@ -374,7 +374,7 @@ where
         drop(route_guard);
 
         guard.start_dispatch(&phase_label);
-        guard.record_prefill_start();
+        guard.record_prefill_start(request.content());
         let dispatch_result = if is_direct && !has_affinity_session {
             let target = target_constraint.expect("Direct routing requires an explicit target");
             await_with_cleanup_policy(

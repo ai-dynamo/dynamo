@@ -50,7 +50,7 @@ func buildSharedMemoryVolumeAndMount(sizeSpec *resource.Quantity) (*corev1.Volum
 	return volume, volumeMount
 }
 
-// ApplySharedMemoryVolumeAndMount applies the checkpoint Job's /dev/shm
+// ApplySharedMemoryVolumeAndMount applies the SnapshotJob capture Pod's /dev/shm
 // compatibility setting to the target container.
 func ApplySharedMemoryVolumeAndMount(
 	podSpec *corev1.PodSpec,

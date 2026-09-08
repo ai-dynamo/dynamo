@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Optional
+from typing import Literal, Optional
 
 from dynamo.planner.config.planner_config import resolve_min_endpoint
 from dynamo.planner.core.types import ScalingDecision
@@ -34,12 +34,30 @@ class ThroughputScalingMixin:
     _diag_throughput_reason_prefill: Optional[str]
     _diag_throughput_reason_decode: Optional[str]
 
+    def _cap_throughput_replicas(
+        self, desired: int, current: int, component: str
+    ) -> int:
+        """Bound one throughput observation's replica change for a component."""
+        limit = self._config.max_throughput_scaling_replicas
+        bounded = min(max(desired, max(0, current - limit)), current + limit)
+        if bounded != desired:
+            logger.warning(
+                "Throughput target capped for %s: raw=%s, current=%s, "
+                "max_delta=%s, bounded=%s",
+                component,
+                desired,
+                current,
+                limit,
+                bounded,
+            )
+        return bounded
+
     def _throughput_single(
         self,
         demand_rps: float,
         isl: float,
         osl: float,
-        component: str,
+        component: Literal["prefill", "decode"],
         kv_hit_rate: Optional[float] = None,
     ) -> Optional[ScalingDecision]:
         desired = (
@@ -49,17 +67,42 @@ class ThroughputScalingMixin:
         )
         if desired is None:
             return None
+        current = self._num_p_workers if component == "prefill" else self._num_d_workers
+        desired = self._cap_throughput_replicas(desired, current, component)
+        # Endpoint recovery is a hard invariant, not an ordinary throughput
+        # movement, so it may exceed the per-observation delta cap.
+        desired = max(desired, resolve_min_endpoint(self._config, component))
+        desired, _ceiling_reason = self._fit_single_throughput_ceiling(
+            desired,
+            component,
+        )
 
         if self._config.enable_load_scaling:
             if component == "prefill":
                 self._throughput_lower_bound_p = desired
             else:
                 self._throughput_lower_bound_d = desired
-            logger.info(f"Throughput lower bound set to {desired} for {component}")
-            self._diag_throughput_reason = "set_lower_bound"
+            logger.info(
+                "Throughput lower bound set to %s for %s",
+                desired,
+                component,
+            )
+            self._diag_throughput_reason = (
+                "gpu_budget_guard_hold"
+                if _ceiling_reason == "gpu_budget_guard_hold"
+                else "set_lower_bound"
+            )
             return None
 
-        desired = self._apply_single_budget(desired, component)
+        desired, _budget_reason = self._apply_single_scaling_budget(
+            desired,
+            component,
+        )
+        if desired == current:
+            self._diag_throughput_reason = (
+                _budget_reason or _ceiling_reason or "no_change"
+            )
+            return None
         self._diag_throughput_reason = "scale"
         return (
             ScalingDecision(num_prefill=desired)
@@ -90,6 +133,19 @@ class ThroughputScalingMixin:
             )
             return None
 
+        num_p = self._cap_throughput_replicas(num_p, self._num_p_workers, "prefill")
+        num_d = self._cap_throughput_replicas(num_d, self._num_d_workers, "decode")
+        # A runtime endpoint increase must recover immediately even when the
+        # gap is larger than the throughput delta cap.
+        num_p = max(num_p, resolve_min_endpoint(self._config, "prefill"))
+        num_d = max(num_d, resolve_min_endpoint(self._config, "decode"))
+        bounded_p, bounded_d = num_p, num_d
+        num_p, num_d = self._fit_disagg_throughput_ceiling(num_p, num_d)
+        budget_held = (num_p, num_d) == (self._num_p_workers, self._num_d_workers) and (
+            bounded_p,
+            bounded_d,
+        ) != (self._num_p_workers, self._num_d_workers)
+
         reason = "set_lower_bound" if self._config.enable_load_scaling else "scale"
         self._diag_throughput_reason_prefill = reason
         self._diag_throughput_reason_decode = reason
@@ -98,10 +154,26 @@ class ThroughputScalingMixin:
             self._throughput_lower_bound_p = num_p
             self._throughput_lower_bound_d = num_d
             logger.info(f"Throughput lower bounds set: prefill={num_p}, decode={num_d}")
-            self._diag_throughput_reason = "set_lower_bound"
+            if budget_held:
+                self._diag_throughput_reason = "gpu_budget_guard_hold"
+                self._diag_throughput_reason_prefill = "gpu_budget_guard_hold"
+                self._diag_throughput_reason_decode = "gpu_budget_guard_hold"
+            else:
+                self._diag_throughput_reason = "set_lower_bound"
             return None
 
-        num_p, num_d = self._apply_global_budget(num_p, num_d)
+        num_p, num_d, budget_reason = self._apply_disagg_scaling_budget(
+            num_p, num_d, source="throughput"
+        )
+        if num_p == self._num_p_workers and num_d == self._num_d_workers:
+            hold_reason = budget_reason or (
+                "gpu_budget_guard_hold" if budget_held else "no_change"
+            )
+            self._diag_throughput_reason = hold_reason
+            self._diag_throughput_reason_prefill = hold_reason
+            self._diag_throughput_reason_decode = hold_reason
+            return None
+
         self._diag_throughput_reason = "scale"
         return ScalingDecision(num_prefill=num_p, num_decode=num_d)
 
@@ -155,14 +227,34 @@ class ThroughputScalingMixin:
         logger.info(
             f"Agg: {demand_rps:.2f} rps / {engine_rps:.2f} engine_rps = {desired} replicas"
         )
+        desired = self._cap_throughput_replicas(
+            desired, self._num_d_workers, "aggregated"
+        )
+        desired = max(desired, resolve_min_endpoint(self._config, "decode"))
+        desired, _ceiling_reason = self._fit_single_throughput_ceiling(
+            desired,
+            "decode",
+        )
 
         if self._config.enable_load_scaling:
             self._throughput_lower_bound_d = desired
-            logger.info(f"Agg throughput lower bound set to {desired}")
-            self._diag_throughput_reason = "set_lower_bound"
+            logger.info("Agg throughput lower bound set to %s", desired)
+            self._diag_throughput_reason = (
+                "gpu_budget_guard_hold"
+                if _ceiling_reason == "gpu_budget_guard_hold"
+                else "set_lower_bound"
+            )
             return None
 
-        desired = self._apply_single_budget(desired, "decode")
+        desired, _budget_reason = self._apply_single_scaling_budget(
+            desired,
+            "decode",
+        )
+        if desired == self._num_d_workers:
+            self._diag_throughput_reason = (
+                _budget_reason or _ceiling_reason or "no_change"
+            )
+            return None
         self._diag_throughput_reason = "scale"
         return ScalingDecision(num_decode=desired)
 

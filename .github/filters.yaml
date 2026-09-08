@@ -3,8 +3,8 @@
 # Filters that trigger CI jobs:
 #   core     -> dynamo build-test, all backend builds (vllm/sglang/trtllm)
 #   operator -> operator build and test
-#   snapshot -> snapshot-agent build/test + all-framework DynamoCheckpoint deploy tests
-#   snapshot_vllm / snapshot_sglang / snapshot_trtllm -> that framework's DynamoCheckpoint suite
+#   snapshot -> standalone Snapshot integration + all-framework checkpoint deploy tests
+#   snapshot_vllm / snapshot_sglang / snapshot_trtllm -> that framework's checkpoint suite
 #   power_agent -> power-agent image build
 #   deploy   -> deploy tests
 #   dgdr     -> DGDR deploy tests
@@ -231,8 +231,44 @@ snapshot:
   - 'deploy/checkpoint-placeholder/**'
   - 'components/src/dynamo/common/snapshot/**'
   - 'deploy/operator/internal/checkpoint/**'
-  - 'deploy/operator/internal/checkpointjob/**'
+  - 'deploy/operator/internal/controller/*checkpoint*'
+  - 'deploy/operator/internal/controller/*snapshot*'
+  - 'deploy/operator/internal/controller/dgd_component_workloads_reconciler.go'
+  - 'deploy/operator/internal/controller/dynamographdeployment_*'
+  - 'deploy/operator/internal/controller/dynamocomponentdeployment_*'
+  - 'deploy/operator/internal/controller/failover_cascade_controller*'
+  - 'deploy/operator/internal/controller/gms_pod_replacement_controller*'
+  - 'deploy/operator/internal/webhook/mutation/pod_checkpoint_restore_handler*'
+  - 'deploy/operator/internal/webhook/setup/setup.go'
+  - 'deploy/operator/internal/webhook/validation/dynamocomponentdeployment.go'
+  - 'deploy/operator/internal/webhook/validation/shared_v1beta1.go'
+  - 'deploy/operator/internal/podcache/**'
+  - 'deploy/operator/internal/gms/**'
+  - 'deploy/operator/internal/consts/consts.go'
+  - 'deploy/operator/internal/features/gates.go'
+  - 'deploy/operator/internal/dynamo/graph.go'
+  - 'deploy/operator/internal/dynamo/hash.go'
+  - 'deploy/operator/internal/dynamo/component_worker.go'
+  - 'deploy/operator/internal/dynamo/failover.go'
+  - 'deploy/operator/api/v1alpha1/common.go'
+  - 'deploy/operator/api/v1alpha1/dynamocomponentdeployment_types.go'
+  - 'deploy/operator/api/v1alpha1/dynamographdeployment_types.go'
+  - 'deploy/operator/api/v1alpha1/dynamographdeployment_conversion.go'
+  - 'deploy/operator/api/v1alpha1/shared_spec_conversion.go'
+  - 'deploy/operator/api/v1beta1/common.go'
+  - 'deploy/operator/api/v1beta1/dynamocomponentdeployment_types.go'
+  - 'deploy/operator/api/v1beta1/dynamocomponentdeployment_conversion.go'
+  - 'deploy/operator/api/v1beta1/dynamographdeployment_types.go'
+  - 'deploy/operator/api/v1beta1/dynamographdeployment_conversion.go'
+  - 'deploy/operator/config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml'
+  - 'deploy/operator/config/crd/bases/nvidia.com_dynamographdeployments.yaml'
+  - 'deploy/operator/config/rbac/role.yaml'
+  - 'deploy/operator/go.mod'
+  - 'deploy/operator/go.sum'
+  - 'deploy/helm/charts/platform/components/operator/**'
   - 'tests/deploy/test_dynamocheckpoint.py'
+  - '.github/actions/setup-dynamo-operator/action.yml'
+  - '.github/actions/setup-snapshot-agent/action.yml'
   # Where the pinned github.com/ai-dynamo/snapshot chart version/values live --
   # a version bump or install-config change must trigger the deploy-snapshot-
   # agent-checkpoint-*/deploy-test-checkpoint-* jobs, not just 'operator'.
@@ -241,18 +277,22 @@ snapshot:
   - 'deploy/helm/charts/platform/Chart.yaml'
   - 'deploy/helm/charts/platform/values.yaml'
 
-# Framework-local snapshot lifecycle files, plus TRT-LLM's unit test. These gate
-# that framework's DynamoCheckpoint deploy jobs (and shared snapshot-agent/operator
-# deps) without forcing the other backends' checkpoint suites.
+# Backend-specific snapshot runtime and Pod-rendering files. These gate that
+# backend's checkpoint deploy jobs (and shared Snapshot/operator dependencies)
+# without forcing the other backends' checkpoint suites.
 snapshot_vllm:
   - 'components/src/dynamo/vllm/snapshot.py'
+  - 'components/src/dynamo/vllm/handlers.py'
+  - 'deploy/operator/internal/dynamo/backend_vllm.go'
 
 snapshot_sglang:
   - 'components/src/dynamo/sglang/snapshot.py'
+  - 'deploy/operator/internal/dynamo/backend_sglang.go'
 
 snapshot_trtllm:
   - 'components/src/dynamo/trtllm/snapshot.py'
   - 'components/src/dynamo/trtllm/tests/test_trtllm_snapshot.py'
+  - 'deploy/operator/internal/dynamo/backend_trtllm.go'
 
 power_agent:
   - *ci
