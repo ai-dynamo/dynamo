@@ -1164,15 +1164,14 @@ mod tests_non_nixl {
 
     #[test]
     fn test_is_blocked_ip_blocks_ipv4_smuggled_through_transition_formats() {
-        // NAT64 and 6to4 carry an IPv4 destination inside the IPv6 address, so
-        // an IPv6-only cluster routes them to that IPv4. Matching only the IPv6
-        // form against the range list let metadata and loopback through.
+        // One row per transition format, since the format is what this test
+        // protects; the blocklist membership of each IPv4 is covered directly
+        // by test_is_blocked_ip_ranges. The Teredo client is stored bitwise
+        // negated, so 5601:5601 is 169.254.169.254.
         for (ip, reaches) in [
-            ("64:ff9b::7f00:1", "127.0.0.1"),
             ("64:ff9b::a9fe:a9fe", "169.254.169.254"),
-            ("64:ff9b::a00:1", "10.0.0.1"),
-            ("2002:7f00:1::", "127.0.0.1"),
             ("2002:a9fe:a9fe::", "169.254.169.254"),
+            ("2001:0:808:808:0:0:5601:5601", "169.254.169.254"),
         ] {
             let target: IpAddr = reaches.parse().unwrap();
             assert!(is_blocked_ip(&target), "fixture expects {reaches} blocked");
@@ -1188,7 +1187,11 @@ mod tests_non_nixl {
     fn test_is_blocked_ip_allows_transition_formats_reaching_public_ipv4() {
         // An IPv6-only cluster reaches public IPv4 through NAT64, so the
         // prefixes must not be blocked wholesale.
-        for ip in ["64:ff9b::808:808", "2002:808:808::"] {
+        for ip in [
+            "64:ff9b::808:808",
+            "2002:808:808::",
+            "2001:0:808:808:0:0:f7f7:f7f7",
+        ] {
             let addr: IpAddr = ip.parse().unwrap();
             assert!(
                 !is_blocked_ip(&addr),
