@@ -45,7 +45,7 @@ jobs:
     runs-on: ${{ vars.N2_GPU_RUNNER || 'prod-tester-amd-gpu-v2' }}
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: ${{ inputs.source_ref || github.sha }}
       - name: Log in to candidate registry
@@ -71,7 +71,7 @@ jobs:
             --release-line "$RELEASE_LINE" --output "$RUNNER_TEMP/n2-results"
       - name: Upload evidence even on failure
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: n2-compatibility-${{ github.run_id }}-${{ github.run_attempt }}
           path: |

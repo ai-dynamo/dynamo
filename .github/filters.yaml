@@ -144,6 +144,9 @@ ignore:
   - 'scripts/validate_agent_instructions.py'
   - 'scripts/validate_skills.py'
   - 'scripts/check_action_pins.py'
+  # Validated by compatibility-contract-tests.yml; GPU coverage runs through
+  # the dedicated cross-version workflow, not the backend build filters.
+  - 'scripts/compatibility/**'
   # CODEOWNERS generation tooling (data + scripts). Validated by its own
   # codeowners.yml workflow (triggers on '**'); no backend CI needed here.
   - '.github/codeowners/**'
