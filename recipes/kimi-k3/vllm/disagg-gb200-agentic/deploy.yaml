@@ -187,10 +187,10 @@ spec:
             value: expandable_segments:False
           - name: UCX_MEMTYPE_CACHE
             value: 'n'
+          # ^cuda_ipc keeps NIXL KV on RDMA IB: without --enable-cumem-allocator the
+          # KV buffer is not VMM-registered, so cuda_ipc/MNNVL cannot apply here.
           - name: UCX_TLS
             value: '^cuda_ipc'
-          - name: UCX_CUDA_IPC_ENABLE_MNNVL
-            value: 'y'
           - name: UCX_RCACHE_MAX_UNRELEASED
             value: '1024'
           - name: UCX_MEMTYPE_REG_WHOLE
@@ -367,10 +367,10 @@ spec:
             value: expandable_segments:False
           - name: UCX_MEMTYPE_CACHE
             value: 'n'
+          # ^cuda_ipc keeps NIXL KV on RDMA IB: without --enable-cumem-allocator the
+          # KV buffer is not VMM-registered, so cuda_ipc/MNNVL cannot apply here.
           - name: UCX_TLS
             value: '^cuda_ipc'
-          - name: UCX_CUDA_IPC_ENABLE_MNNVL
-            value: 'y'
           - name: UCX_RCACHE_MAX_UNRELEASED
             value: '1024'
           - name: UCX_MEMTYPE_REG_WHOLE
