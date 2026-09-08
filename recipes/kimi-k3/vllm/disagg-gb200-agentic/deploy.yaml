@@ -187,8 +187,9 @@ spec:
             value: expandable_segments:False
           - name: UCX_MEMTYPE_CACHE
             value: 'n'
-          # ^cuda_ipc keeps NIXL KV on RDMA IB: without --enable-cumem-allocator the
-          # KV buffer is not VMM-registered, so cuda_ipc/MNNVL cannot apply here.
+          # cuda_ipc is excluded, so NIXL KV goes over the NIC (this pod claims GKE rdma-*).
+          # The cross-node NVLink path would additionally need the KV buffer VMM-registered
+          # (--enable-cumem-allocator or --enable-sleep-mode) and UCX_CUDA_IPC_ENABLE_MNNVL=y.
           - name: UCX_TLS
             value: '^cuda_ipc'
           - name: UCX_RCACHE_MAX_UNRELEASED
@@ -367,8 +368,9 @@ spec:
             value: expandable_segments:False
           - name: UCX_MEMTYPE_CACHE
             value: 'n'
-          # ^cuda_ipc keeps NIXL KV on RDMA IB: without --enable-cumem-allocator the
-          # KV buffer is not VMM-registered, so cuda_ipc/MNNVL cannot apply here.
+          # cuda_ipc is excluded, so NIXL KV goes over the NIC (this pod claims GKE rdma-*).
+          # The cross-node NVLink path would additionally need the KV buffer VMM-registered
+          # (--enable-cumem-allocator or --enable-sleep-mode) and UCX_CUDA_IPC_ENABLE_MNNVL=y.
           - name: UCX_TLS
             value: '^cuda_ipc'
           - name: UCX_RCACHE_MAX_UNRELEASED
