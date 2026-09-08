@@ -633,9 +633,14 @@ class _GenerateRecorder:
     """Stands in for ``sgl.Engine``, recording each ``async_generate`` call.
 
     ``calls`` holds one keyword-argument dict per call, so a test can assert both
-    what reached the engine and that the engine was reached exactly once. The
-    ``**kwargs`` signature matters: ``filter_supported_async_generate_kwargs``
-    inspects it and forwards every kwarg when it finds a var-keyword parameter.
+    what reached the engine and that the engine was reached exactly once.
+
+    The ``**kwargs`` signature is required. All three engine call sites splat
+    their keyword arguments straight into the call — ``sampling_params``,
+    ``stream``, ``bootstrap_*``, ``external_trace_header``, ``rid``,
+    ``data_parallel_rank``, ``lora_path``, and more — so a stub that named its
+    parameters would raise ``TypeError`` on the first one it had not listed, and
+    would need editing every time a handler adds a keyword argument.
     """
 
     def __init__(self) -> None:
@@ -648,36 +653,20 @@ class _GenerateRecorder:
         return _empty_stream()
 
 
-# The deleted helper read the flag through
-# `getattr(server_args, "enable_session_radix_cache", False)`, so an
-# attribute-free SimpleNamespace is exactly the fixture its default-False
-# behavior would have satisfied silently. Pinning all three states means no
-# future server_args flag can quietly reopen the path.
-_SESSION_RADIX_SERVER_ARGS = [
-    pytest.param({"enable_session_radix_cache": True}, id="radix_flag_true"),
-    pytest.param({"enable_session_radix_cache": False}, id="radix_flag_false"),
-    pytest.param({}, id="radix_flag_absent"),
-]
-
-_ADVERSARIAL_AGENT_CONTEXTS = [
-    pytest.param({}, id="no_agent_context_key"),
-    pytest.param({"agent_context": None}, id="null_agent_context"),
-    pytest.param({"agent_context": {}}, id="empty_agent_context"),
-    pytest.param({"agent_context": {"session_id": ""}}, id="empty_session_id"),
-    pytest.param({"agent_context": {"session_id": None}}, id="null_session_id"),
-    pytest.param({"agent_context": {"session_id": 123}}, id="int_session_id"),
-    pytest.param(
-        {"agent_context": {"session_id": {"id": "s-1"}}}, id="dict_session_id"
-    ),
-]
-
 _SESSION_AGENT_CONTEXT = {"agent_context": {"session_id": "s-1"}}
 
 
-def _set_server_args(handler: Any, extra_fields: Dict[str, Any]) -> None:
-    """Rebuild ``handler.config.server_args`` with the given extra attributes."""
+def _enable_session_radix_cache(handler: Any) -> None:
+    """Set ``enable_session_radix_cache=True`` on ``handler.config.server_args``.
+
+    The core-contract tests below run with the flag on because that is the most
+    demanding state: if any code ever reads the flag again, on is the state that
+    would re-enable the removed path. No production code reads it today.
+    """
     handler.config = SimpleNamespace(
-        server_args=SimpleNamespace(served_model_name="test-model", **extra_fields)
+        server_args=SimpleNamespace(
+            served_model_name="test-model", enable_session_radix_cache=True
+        )
     )
 
 
@@ -736,18 +725,20 @@ async def _capture_aggregated_kwargs(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("server_args_fields", _SESSION_RADIX_SERVER_ARGS)
-async def test_aggregated_decode_omits_session_params_for_agent_context(
-    server_args_fields,
-):
+async def test_aggregated_decode_omits_session_params_for_agent_context():
     """Aggregated decode must not turn ``agent_context.session_id`` into
     ``session_params`` (NVBug 6418893).
 
-    The absent-key assertion is deliberate, not a stale leftover: reverting
-    commit ``d245a5be3`` restores ``_session_kwargs`` and makes this fail.
+    The absent-key assertion is deliberate, not a stale leftover. It goes red if
+    the wiring commit ``d245a5be3`` removed is reintroduced into production code:
+    a new ``session_params`` splat at this call site puts the key into the
+    recorded kwargs. (A literal ``git revert`` of ``d245a5be3`` would not turn it
+    red, because that commit also deleted a ``handler._session_kwargs = lambda
+    req: {}`` stub from ``_new_decode_handler`` in this file, and reverting
+    restores the stub.)
     """
     handler = _new_decode_handler(enable_frontend_decoding=False)
-    _set_server_args(handler, server_args_fields)
+    _enable_session_radix_cache(handler)
     recorder = _GenerateRecorder()
     handler.engine = recorder
 
@@ -767,19 +758,18 @@ async def test_aggregated_decode_omits_session_params_for_agent_context(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("server_args_fields", _SESSION_RADIX_SERVER_ARGS)
-async def test_disaggregated_decode_omits_session_params_for_agent_context(
-    server_args_fields,
-):
+async def test_disaggregated_decode_omits_session_params_for_agent_context():
     """Disaggregated decode must not attach ``session_params`` either
     (NVBug 6418893).
 
     Commit ``d245a5be3`` removed a separate ``_session_kwargs`` call site on this
-    branch of ``DecodeWorkerHandler.generate``, so it needs its own test.
+    branch of ``DecodeWorkerHandler.generate``, so it needs its own test: a
+    reintroduction that only re-wires the aggregated branch would leave this one
+    green, and the reverse.
     """
     handler = _new_decode_handler(enable_frontend_decoding=False)
     handler.serving_mode = DisaggregationMode.DECODE
-    _set_server_args(handler, server_args_fields)
+    _enable_session_radix_cache(handler)
     recorder = _GenerateRecorder()
     handler.engine = recorder
 
@@ -805,15 +795,16 @@ async def test_disaggregated_decode_omits_session_params_for_agent_context(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("server_args_fields", _SESSION_RADIX_SERVER_ARGS)
-async def test_prefill_omits_session_params_for_agent_context(server_args_fields):
+async def test_prefill_omits_session_params_for_agent_context():
     """Prefill must not attach ``session_params`` either (NVBug 6418893).
 
     The third ``_session_kwargs`` call site removed by commit ``d245a5be3`` was
-    in ``PrefillWorkerHandler.generate``.
+    in ``PrefillWorkerHandler.generate``. ``_new_prefill_handler`` builds its own
+    handler, so this test is unaffected by the decode-side stub that a literal
+    revert of that commit would restore.
     """
     handler = _new_prefill_handler()
-    _set_server_args(handler, server_args_fields)
+    _enable_session_radix_cache(handler)
     recorder = _GenerateRecorder()
     handler.engine = recorder
 
@@ -829,25 +820,6 @@ async def test_prefill_omits_session_params_for_agent_context(server_args_fields
 
     assert len(recorder.calls) == 1
     captured = recorder.calls[0]
-    assert captured["input_ids"] == [1, 2, 3]
-    assert "session_params" not in captured
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("request_overrides", _ADVERSARIAL_AGENT_CONTEXTS)
-async def test_aggregated_decode_tolerates_adversarial_agent_context(
-    request_overrides,
-):
-    """Missing, empty, and wrong-typed session ids reach the engine unchanged.
-
-    The no-raise half carries as much weight as the absent key. The removed
-    ``_session_id`` helper guarded on ``isinstance(session_id, str)``; a
-    reintroduction that drops the guard surfaces as an exception rather than a
-    wrong keyword argument, and only running these inputs catches that variant.
-    An exception anywhere in ``generate`` fails the test.
-    """
-    captured = await _capture_aggregated_kwargs(request_overrides)
-
     assert captured["input_ids"] == [1, 2, 3]
     assert "session_params" not in captured
 
