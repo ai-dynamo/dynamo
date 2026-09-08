@@ -25,6 +25,10 @@ MAX_IMAGE_DIMENSION = 4096
 def _coerce_dimension(value: Any, name: str) -> int:
     """Convert a client-supplied width/height to a bounded int, rejecting
     non-numeric or out-of-range values instead of letting ``int()`` raise."""
+    # bool is an int subclass and float truncates silently; reject both so
+    # true/1.5 don't slip through as 1.
+    if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+        raise ValueError(f"{name} must be an integer")
     try:
         dim = int(value)
     except (TypeError, ValueError) as exc:
