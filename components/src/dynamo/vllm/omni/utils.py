@@ -19,6 +19,19 @@ from dynamo.common.utils.video_utils import compute_num_frames, parse_size
 
 DEFAULT_IMAGE_SIZE = "1024x1024"
 DEFAULT_VIDEO_SIZE = "832x480"
+MAX_IMAGE_DIMENSION = 4096
+
+
+def _coerce_dimension(value: Any, name: str) -> int:
+    """Convert a client-supplied width/height to a bounded int, rejecting
+    non-numeric or out-of-range values instead of letting ``int()`` raise."""
+    try:
+        dim = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if not 1 <= dim <= MAX_IMAGE_DIMENSION:
+        raise ValueError(f"{name} must be between 1 and {MAX_IMAGE_DIMENSION}")
+    return dim
 
 
 def streaming_sampling_params(
@@ -91,9 +104,9 @@ def image_generation_size_from_request(request: dict) -> tuple[int, int]:
 
     for source in (extra_body, request):
         if source.get("width") is not None:
-            width = int(source["width"])
+            width = _coerce_dimension(source["width"], "width")
         if source.get("height") is not None:
-            height = int(source["height"])
+            height = _coerce_dimension(source["height"], "height")
     return width, height
 
 

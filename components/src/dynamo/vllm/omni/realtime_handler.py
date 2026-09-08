@@ -442,7 +442,11 @@ def decode_pcm16(audio_b64: str) -> np.ndarray | None:
     """
     if not audio_b64:
         return None
-    raw = base64.b64decode(audio_b64)
+    try:
+        raw = base64.b64decode(audio_b64)
+    except ValueError:
+        logger.warning("realtime omni: dropping malformed base64 audio chunk")
+        return None
     if len(raw) % 2:
         # PCM16 is 2-byte aligned; np.frombuffer would raise. Drop the malformed
         # chunk rather than let one bad frame tear down the whole session.

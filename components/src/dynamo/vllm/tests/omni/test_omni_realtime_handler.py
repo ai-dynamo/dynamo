@@ -22,7 +22,12 @@ try:
     # logic itself is vllm-free, but the package import is not.
     from vllm_omni.outputs.mm_outputs import MultimodalPayload
 
-    from dynamo.vllm.omni.realtime_handler import RealtimeOmniHandler, Turn
+    from dynamo.vllm.omni.realtime_handler import (
+        RealtimeOmniHandler,
+        Turn,
+        decode_pcm16,
+    )
+    from dynamo.vllm.omni.utils import image_generation_size_from_request
 except (ImportError, ModuleNotFoundError):
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
@@ -477,3 +482,13 @@ def test_concurrent_turns_capped():
     assert engine.peak == cap  # never more than the cap in flight at once
     done = [e for e in out if e["type"] == "response.done"]
     assert len(done) == 4 and all(e["response"]["status"] == "completed" for e in done)
+
+
+def test_decode_pcm16_drops_malformed_base64():
+    # A malformed chunk must be dropped (None), not tear down the session.
+    assert decode_pcm16("a") is None
+
+
+def test_image_generation_size_rejects_non_integer_width():
+    with pytest.raises(ValueError):
+        image_generation_size_from_request({"width": "not-a-number"})

@@ -397,8 +397,11 @@ class AudioGenerationHandler:
                             f"max {self.config.tts_ref_audio_max_bytes})"
                         )
         elif ref_audio_str.startswith("data:"):
-            _, encoded = ref_audio_str.split(",", 1)
-            audio_bytes = base64.b64decode(encoded)
+            try:
+                _, encoded = ref_audio_str.split(",", 1)
+                audio_bytes = base64.b64decode(encoded)
+            except ValueError as exc:
+                raise ValueError("Invalid data: ref_audio (malformed base64)") from exc
             if len(audio_bytes) > self.config.tts_ref_audio_max_bytes:
                 raise ValueError(
                     f"ref_audio data URI too large "
