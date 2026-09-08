@@ -145,7 +145,18 @@ impl LLMEngine for TrtllmSidecarEngine {
         let reported = match client.model_info().await {
             Ok(reported) => reported,
             Err(error) => {
-                tracing::warn!(%error, "GetModelInfo failed; using --context-length");
+                match model.context_length {
+                    Some(configured) => tracing::warn!(
+                        %error,
+                        configured_context_length = configured,
+                        "GetModelInfo failed; using the configured --context-length"
+                    ),
+                    None => tracing::warn!(
+                        %error,
+                        "GetModelInfo failed and no --context-length was configured; \
+                         no context length is available"
+                    ),
+                }
                 None
             }
         };

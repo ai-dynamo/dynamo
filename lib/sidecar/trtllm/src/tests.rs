@@ -259,8 +259,6 @@ fn engine(endpoint: &str, connections: usize) -> TrtllmSidecarEngine {
     engine_with_context_length(endpoint, connections, None)
 }
 
-/// `engine` with an explicit `--context-length`, as `from_parsed` would build it
-/// when the operator supplied one.
 fn engine_with_context_length(
     endpoint: &str,
     connections: usize,
