@@ -234,9 +234,8 @@ def test_parent_launches_n_minus_one_children_and_one_engine(monkeypatch, make_l
         children.append(child)
         return child
 
-    # The parameters mirror vLLM's own launch_core_engines signature exactly.
-    # A permissive *args stub here is what let a call with one argument too
-    # many pass this test while crashing at startup, so keep it strict.
+    # Mirrors vLLM's launch_core_engines signature exactly: no *args, so a
+    # call with the wrong arity fails here instead of at startup.
     @contextmanager
     def launch_context(vllm_config, executor_class, log_stats, addresses):
         yield make_launch(engine_manager, addresses)
