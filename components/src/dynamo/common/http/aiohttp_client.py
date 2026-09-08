@@ -58,6 +58,9 @@ class AiohttpClient(HttpClient):
             enable_cleanup_closed=True,
         )
         # Connect-time SSRF backstop against DNS rebinding (see _ssrf_resolver).
+        # Deliberately keyed to the env baseline, not the per-call fetch policy:
+        # this shared connector must not let a per-request allow_private_ips=True
+        # loosen the SSRF backstop. DYN_MM_ALLOW_INTERNAL is the deployment knob.
         if BlocklistResolver is not None:
             connector_kwargs["resolver"] = BlocklistResolver(
                 allow_private_ips=UrlValidationPolicy.from_env().allow_private_ips
