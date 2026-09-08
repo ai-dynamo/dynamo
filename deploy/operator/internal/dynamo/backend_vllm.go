@@ -51,6 +51,16 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 		}
 	}
 
+	// Prefill advertises its bootstrap server to remote decoders; preserve user overrides.
+	if component.ComponentType == v1beta1.ComponentTypePrefill {
+		container.Env = MergeEnvs([]corev1.EnvVar{{
+			Name: "DYN_VLLM_MOONCAKE_BOOTSTRAP_ADVERTISE_HOST",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"},
+			},
+		}}, container.Env)
+	}
+
 	isMultinode := numberOfNodes > 1
 	annotations := GetPodTemplateAnnotations(component)
 
