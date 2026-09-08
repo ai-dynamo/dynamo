@@ -809,10 +809,11 @@ def patched_get_new_blocks(self, num_blocks: int):
             self.metrics_collector.on_block_allocated(block)
     return ret
 
-def patched_free_blocks(self, ordered_blocks, prepend: bool = False):
+
+def patched_free_blocks(self, ordered_blocks):
     client = getattr(self, "_gms_kv_lease_client", None)
     if client is None:
-        return orig_free_blocks(self, ordered_blocks, prepend=prepend)
+        return orig_free_blocks(self, ordered_blocks)
 
     blocks_list = list(ordered_blocks)
     for block in blocks_list:
@@ -896,10 +897,22 @@ def patched_free_blocks(self, ordered_blocks, prepend: bool = False):
     if invalidated:
         _drop_directory_hashes(directory, invalidated)
     client.release(leases)
-    if prepend:
-        self.free_block_queue.prepend_n(free_blocks)
-    else:
-        self.free_block_queue.append_n(free_blocks)
+    # Match current vLLM's reuse policy: unhashed blocks are hot reusable
+    # capacity and go to the LIFO head, while retained prefix-cache entries go
+    # to the FIFO/LRU tail.  Appending every block was inherited from the old
+    # ``prepend=`` API and regressed locality after vLLM removed that argument.
+    reuse_first = [
+        block
+        for block in free_blocks
+        if block.block_hash is None or not self.enable_caching
+    ]
+    reuse_last = [
+        block
+        for block in free_blocks
+        if block.block_hash is not None and self.enable_caching
+    ]
+    self.free_block_queue.prepend_n(reuse_first)
+    self.free_block_queue.append_n(reuse_last)
 
 
 def patched_allocate_slots(self, *args, **kwargs):
