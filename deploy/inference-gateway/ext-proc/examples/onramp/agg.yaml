@@ -76,7 +76,7 @@ spec:
     spec:
       containers:
         - name: vllm
-          image: vllm/vllm-openai:v0.28.0
+          image: vllm/vllm-openai:latest
           args:
             - --model
             - Qwen/Qwen3-0.6B
