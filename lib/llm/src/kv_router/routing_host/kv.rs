@@ -410,7 +410,7 @@ where
         backend_input.routing_mut().dp_rank = Some(selection.worker.dp_rank);
         backend_input.kv_hint = selection.kv_hint;
         let updated_request = context.map(|_| backend_input);
-        guard.record_prefill_start();
+        guard.record_prefill_start(updated_request.content());
 
         let dispatch = self
             .inner

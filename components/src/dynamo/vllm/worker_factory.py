@@ -72,6 +72,7 @@ WORKER_GC_STOP_TIMEOUT_SECONDS = 30.0
 # have no KV cache / scheduler gauges, so setup_vllm_engine() skips the
 # LLMBackendMetrics registration there.
 EngineSetupResult = tuple[AsyncLLM, VllmConfig, Any, Any, Optional[LLMBackendMetrics]]
+SnapshotEngineSetupResult = tuple[EngineSetupResult, StatLoggerFactory]
 
 
 def _benchmark_rank_path(base_path: Path, dp_rank: int) -> Path:
@@ -709,7 +710,7 @@ class WorkerFactory:
         config: Config,
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,
-        snapshot_engine: Optional[EngineSetupResult] = None,
+        snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
         """Create the appropriate multimodal worker based on config flags."""
 
@@ -771,7 +772,7 @@ class WorkerFactory:
         config: Config,
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,
-        snapshot_engine: Optional[EngineSetupResult] = None,
+        snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
         """Initialize an aggregated vLLM realtime worker."""
         del shutdown_event  # Connection cancellation is carried by Dynamo Context.
@@ -783,18 +784,16 @@ class WorkerFactory:
 
         fpm_worker_id = str(generate_endpoint.connection_id())
         if snapshot_engine is not None:
+            engine_setup, factory = snapshot_engine
             (
                 engine_client,
                 vllm_config,
                 _default_sampling_params,
                 prometheus_temp_dir,
-                component_gauges,
-            ) = snapshot_engine
+                _component_gauges,
+            ) = engine_setup
             os.environ[ENV_FPM_WORKER_ID] = fpm_worker_id
-            factory = StatLoggerFactory(
-                endpoint=generate_endpoint,
-                component_gauges=component_gauges,
-            )
+            factory.bind_endpoint(generate_endpoint)
         else:
             factory = StatLoggerFactory(endpoint=generate_endpoint)
             (
@@ -802,7 +801,7 @@ class WorkerFactory:
                 vllm_config,
                 _default_sampling_params,
                 prometheus_temp_dir,
-                component_gauges,
+                _component_gauges,
             ) = self.setup_vllm_engine(
                 config,
                 factory,
@@ -1162,7 +1161,7 @@ class WorkerFactory:
         config: Config,
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,  # mutated in place
-        snapshot_engine: Optional[EngineSetupResult] = None,
+        snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
         """
         Instantiate and serve
@@ -1186,7 +1185,7 @@ class WorkerFactory:
         config: Config,
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,  # mutated in place
-        snapshot_engine: Optional[EngineSetupResult],
+        snapshot_engine: Optional[SnapshotEngineSetupResult],
         lifecycle: _DecodeWorkerLifecycle,
     ) -> None:
         """Initialize and serve a decode worker."""
@@ -1238,19 +1237,16 @@ class WorkerFactory:
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
         fpm_worker_id = str(generate_endpoint.connection_id())
         if snapshot_engine is not None:
+            engine_setup, factory = snapshot_engine
             (
                 engine_client,
                 vllm_config,
                 default_sampling_params,
                 prometheus_temp_dir,
-                component_gauges,
-            ) = snapshot_engine
+                _component_gauges,
+            ) = engine_setup
             os.environ[ENV_FPM_WORKER_ID] = fpm_worker_id
-            # Factory is created after unpack so component_gauges is available
-            factory = StatLoggerFactory(
-                endpoint=generate_endpoint,
-                component_gauges=component_gauges,
-            )
+            factory.bind_endpoint(generate_endpoint)
         else:
             # Factory is created without component_gauges; setup_vllm_engine() will
             # create the gauges after setup_multiprocess_prometheus() and set them
@@ -1263,7 +1259,7 @@ class WorkerFactory:
                 vllm_config,
                 default_sampling_params,
                 prometheus_temp_dir,
-                component_gauges,
+                _component_gauges,
             ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
         lifecycle.engine_client = engine_client
         lifecycle.vllm_config = vllm_config
@@ -1497,7 +1493,7 @@ class WorkerFactory:
         config: Config,
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,
-        snapshot_engine: Optional[EngineSetupResult] = None,
+        snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
         try:
             await self._run_prefill_worker(
@@ -1517,7 +1513,7 @@ class WorkerFactory:
         config: Config,
         shutdown_event: asyncio.Event,
         shutdown_endpoints: list,  # mutated in place
-        snapshot_engine: Optional[EngineSetupResult] = None,
+        snapshot_engine: Optional[SnapshotEngineSetupResult] = None,
     ) -> None:
         """
         Instantiate and serve
@@ -1552,14 +1548,17 @@ class WorkerFactory:
 
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
         fpm_worker_id = str(generate_endpoint.connection_id())
+        snapshot_factory: Optional[StatLoggerFactory] = None
         if snapshot_engine is not None:
+            engine_setup, snapshot_factory = snapshot_engine
             (
                 engine_client,
                 vllm_config,
                 default_sampling_params,
                 prometheus_temp_dir,
                 _component_gauges,
-            ) = snapshot_engine
+            ) = engine_setup
+            snapshot_factory.bind_endpoint(generate_endpoint)
             # TODO: The scheduler in the child process still has worker_id=""
             # because the engine was forked before the runtime existed.
             # Propagating the new ID to the child requires shared memory or
@@ -1574,6 +1573,15 @@ class WorkerFactory:
                 _component_gauges,
             ) = self.setup_vllm_engine(config, fpm_worker_id=fpm_worker_id)
         await configure_kv_event_block_size(engine_client, vllm_config)
+
+        if snapshot_factory is not None:
+            _, dp_size = get_dp_range_for_worker(vllm_config)
+            per_rank_num_gpu_blocks = per_rank_kv_blocks(
+                vllm_config.cache_config.num_gpu_blocks,
+                dp_size,
+            )
+            snapshot_factory.set_num_gpu_blocks_all(per_rank_num_gpu_blocks or 0)
+            snapshot_factory.init_publish()
 
         encode_worker_client = await self._maybe_get_encode_worker_client(
             runtime, config

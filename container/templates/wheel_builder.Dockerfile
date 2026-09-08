@@ -236,7 +236,7 @@ ENV VIRTUAL_ENV=/workspace/.venv
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION --seed && \
-    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit pyyaml
+    uv pip install --upgrade auditwheel meson pybind11 patchelf maturin[patchelf] tomlkit pyyaml
 
 ARG NIXL_UCX_REF
 
@@ -595,15 +595,20 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     cd /opt/dynamo/lib/bindings/python && \
 {% if framework == "sglang" %}    maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3" --out /opt/dynamo/dist && \
 {% else %}    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
-        # Skip maturin's built-in repair: it would graft the in-tree libav* into the
-        # wheel, which the codec gate rejects. Repair with those sonames excluded so
-        # they stay external and resolve to the image's /usr/local/lib copies. This
-        # media-enabled wheel is intentionally image-only and non-self-contained.
+    # Skip maturin's built-in repair: it would graft the in-tree libav* into the
+    # wheel, which the codec gate rejects. Repair with those sonames excluded so
+    # they stay external and resolve to the image's /usr/local/lib copies. This
+    # media-enabled wheel is intentionally image-only and non-self-contained.
+{% if device == "xpu" %}        ARCH_ALT=x86_64 && \
+    MANYLINUX_POLICY=manylinux_2_39_x86_64 && \
+{% else %}
         case "${TARGETARCH}" in \
             amd64) ARCH_ALT=x86_64 ;; \
             arm64) ARCH_ALT=aarch64 ;; \
             *) echo "ERROR: unexpected TARGETARCH='${TARGETARCH}'; cannot pick a manylinux platform tag" >&2; exit 1 ;; \
         esac && \
+    MANYLINUX_POLICY=manylinux_2_28_${ARCH_ALT} && \
+{% endif %}
         maturin build --release --features "media-ffmpeg,kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3" --auditwheel skip --out target/wheels && \
         auditwheel repair \
             --exclude 'libavcodec.so.*' \
@@ -613,7 +618,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
             --exclude 'libavutil.so.*' \
             --exclude 'libswresample.so.*' \
             --exclude 'libswscale.so.*' \
-            --plat manylinux_2_28_${ARCH_ALT} \
+            --plat ${MANYLINUX_POLICY} \
             --wheel-dir /opt/dynamo/dist \
             target/wheels/ai_dynamo_runtime-*.whl; \
     else \
