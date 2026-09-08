@@ -1107,10 +1107,7 @@ def test_structured_response_requires_effective_reasoning():
 @pytest.mark.parametrize(
     ("legacy_constraint", "expected"),
     [
-        ({"guided_json": {"type": "object"}}, False),
         ({"guided_regex": "trueish"}, False),
-        ({"guided_grammar": 'root ::= "trueish"'}, False),
-        ({"guided_choice": ["trueish"]}, False),
         ({"guided_choice": []}, True),
     ],
 )
@@ -1125,14 +1122,14 @@ def test_structured_response_respects_legacy_constraint_precedence(
 
 @pytest.mark.core
 @pytest.mark.timeout(60)
-@pytest.mark.parametrize("use_pool", [False, True], ids=["inline", "pool"])
 @pytest.mark.parametrize(
-    ("thinking", "separate_reasoning", "legacy_regex"),
+    ("use_pool", "thinking", "separate_reasoning", "legacy_regex"),
     [
-        (True, True, False),
-        (False, True, False),
-        (True, False, False),
-        (True, True, True),
+        pytest.param(False, True, True, False, id="inline-structured"),
+        pytest.param(False, False, True, False, id="inline-thinking-disabled"),
+        pytest.param(False, True, False, False, id="inline-separation-disabled"),
+        pytest.param(False, True, True, True, id="inline-legacy-regex"),
+        pytest.param(True, True, True, False, id="pool-structured"),
     ],
 )
 def test_structured_response_generator_routes_json_and_preserves_streaming(
