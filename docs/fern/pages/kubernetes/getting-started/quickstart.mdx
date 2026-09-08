@@ -34,7 +34,32 @@ follow that tab throughout the guide. The Intel GPU path uses the XPU runtime an
     </Tabs>
   </Step>
 
+  <Step title="Check for an existing Dynamo platform">
+    Before installing anything, inventory Helm releases, operator images, and Dynamo Custom
+    Resource Definitions (CRDs). These commands do not change the cluster:
+
+```bash
+helm list --all-namespaces --all
+kubectl get deployments --all-namespaces \
+  -o 'custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name,IMAGES:.spec.template.spec.containers[*].image'
+kubectl get crd dynamographdeployments.nvidia.com \
+  dynamographdeploymentrequests.nvidia.com --ignore-not-found
+```
+
+    If Dynamo is already installed, record its release name, namespace, chart version, and operator
+    image. Follow [Existing Platforms](../installation/install-dynamo.md#existing-platforms) to
+    confirm its scope and version before continuing. If you cannot inventory all namespaces, or
+    find Dynamo resources without a known owner, stop and ask the cluster administrator.
+
+<Warning>
+Run only one cluster-wide Dynamo operator. A different release name or namespace is not a way to
+install a second one. Do not apply this guide's manifests to an older operator without checking
+the installed API schema.
+</Warning>
+  </Step>
+
   <Step title="Install accelerator support">
+    Skip this step if your cluster administrator has already configured accelerator support.
     <Tabs>
       <Tab title="NVIDIA GPU">
         Install the NVIDIA GPU Operator:
@@ -66,20 +91,50 @@ kubectl get resourceslices
     </Tabs>
   </Step>
 
-  <Step title="Install Dynamo">
-    Use the `DYNAMO_VERSION` value from the selector above to install the Dynamo platform chart in a dedicated namespace. Helm creates the namespace for you:
+  <Step title="Install or reuse Dynamo">
+    Choose the path established by the preflight. Keep the model workload separate from the
+    platform namespace:
 
 ```bash
-export NAMESPACE=dynamo-system
+export NAMESPACE=dynamo-quickstart
+```
 
-helm upgrade --install dynamo-platform \
+    <Tabs>
+      <Tab title="No existing platform">
+        Only if the inventory found no existing Dynamo platform or CRDs, install the version
+        selected above. Use `helm install` so this step cannot upgrade an existing release:
+
+```bash
+export PLATFORM_NAMESPACE=dynamo-system
+
+helm install dynamo-platform \
   "https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-${DYNAMO_VERSION}.tgz" \
-  --namespace "$NAMESPACE" \
+  --namespace "$PLATFORM_NAMESPACE" \
   --create-namespace \
   --wait \
   --timeout=10m
 
-kubectl get pods --namespace "$NAMESPACE"
+kubectl get pods --namespace "$PLATFORM_NAMESPACE"
+```
+      </Tab>
+      <Tab title="Existing platform">
+        Reuse the cluster-wide operator without running a Helm install or upgrade. Confirm with
+        its owner that the operator and CRDs match the selected `DYNAMO_VERSION`, the operator is
+        healthy, and no namespace-restricted operator owns `dynamo-quickstart`.
+
+        If versions differ, stop here. Select the installed release's documentation and obtain
+        manifests from that release's Git tag, or have the platform owner review
+        [Upgrade Checks](../installation/install-dynamo.md#upgrade-checks)
+        before upgrading the existing release. Changing only the image tag does not make an
+        older CRD accept newer fields such as `spec.runtimeVersionOverride`. Validate the chosen
+        manifests with `kubectl apply --dry-run=server` before applying them.
+      </Tab>
+    </Tabs>
+
+    Create the workload namespace, or use an existing namespace approved by the platform owner:
+
+```bash
+kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 ```
 
     For the NVIDIA GPU DGDR path, `DYNAMO_IMAGE` points to the Dynamo planner image from the selector above. The planner profiles the model and creates the worker deployment; you do not need to choose a separate runtime image for that path.
@@ -213,11 +268,14 @@ curl --silent --show-error http://localhost:8000/v1/chat/completions \
 ## What You Did
 
 - Installed the accelerator support required by your hardware.
-- Installed the Dynamo platform on your Kubernetes cluster.
+- Installed or reused the Dynamo platform on your Kubernetes cluster.
 - Created either a DGDR that generated a DGD, or a DGD directly.
 - Sent an OpenAI-compatible request to the deployed model.
 
 ## Clean Up
+
+The commands below remove only the quickstart workload. Do not uninstall a shared platform or
+delete its CRDs as part of this cleanup.
 
 Stop the port-forward and remove the quickstart deployment:
 
