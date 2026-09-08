@@ -102,22 +102,48 @@ def _is_forced_tool_choice(tool_choice: Any) -> bool:
     return tool_choice == "required" or _is_named_tool_choice(tool_choice)
 
 
-def _forced_tool_choice_without_tools_error(tool_choice: Any) -> HttpError:
-    """Mirror the Rust frontend's wording so clients see one behaviour.
+def _named_tool_choice_name(tool_choice: Any) -> str:
+    """The requested tool name. Only call once _is_named_tool_choice has passed."""
+    if isinstance(tool_choice, ChatCompletionNamedToolChoiceParam):
+        return tool_choice.function.name
+    return tool_choice["function"]["name"]
 
-    ``validate_tool_choice`` in protocols/openai/validate.rs emits exactly these
-    two messages for the same request.
+
+def _tool_names(tools: Any) -> set[str]:
+    """Names of the supplied tools.
+
+    The fast path builds the request with ``model_construct``, so tools and
+    their function bodies can still be the client's raw dicts here.
     """
+    names: set[str] = set()
+    for tool in tools or ():
+        function = tool["function"] if isinstance(tool, dict) else tool.function
+        name = function["name"] if isinstance(function, dict) else function.name
+        if name:
+            names.add(name)
+    return names
+
+
+def _forced_tool_choice_error(request: Any) -> HttpError | None:
+    """The 400 a forced tool_choice deserves, or None if it can be satisfied.
+
+    Mirrors ``validate_tool_choice`` in protocols/openai/validate.rs, which
+    rejects both an empty tools list and a named choice naming a tool that is
+    not in a non-empty list, with exactly these two messages.
+    """
+    tool_choice = request.tool_choice
+    if not _is_forced_tool_choice(tool_choice):
+        return None
     if _is_named_tool_choice(tool_choice):
-        name = (
-            tool_choice.function.name
-            if isinstance(tool_choice, ChatCompletionNamedToolChoiceParam)
-            else tool_choice["function"]["name"]
-        )
-        return HttpError(
-            400, f'tool named "{name}" in tool_choice is not present in tools'
-        )
-    return HttpError(400, 'tool_choice is "required" but tools is empty')
+        name = _named_tool_choice_name(tool_choice)
+        if name not in _tool_names(request.tools):
+            return HttpError(
+                400, f'tool named "{name}" in tool_choice is not present in tools'
+            )
+        return None
+    if not request.tools:
+        return HttpError(400, 'tool_choice is "required" but tools is empty')
+    return None
 
 
 def _typed_tool_choice(tool_choice: Any) -> Any:
@@ -185,8 +211,6 @@ def _should_build_tool_call_guidance(
     # A forced tool_choice with no tools is rejected in preprocess_chat_request,
     # so reaching here without tools means the choice was not forced and there is
     # nothing to constrain.
-    # TODO: sglang_prepost.py still has no such rejection. #14179 is editing that
-    # file, so it is left for a follow-up.
     if not request.tools:
         return False
 
@@ -619,17 +643,13 @@ async def preprocess_chat_request(
     structural_tag_schema: str = "auto",
 ) -> PreprocessResult:
     validated_request = _validate_chat_completion_request(request)
-    # A forced tool_choice with no tools cannot be satisfied: the reply has to be
-    # a tool call and there is no tool to call. The Rust preprocessor rejects it
-    # (ToolChoiceError::EmptyTools); this path did not, because vLLM's own
-    # "when using tool_choice, tools must be set" validator is skipped on the
-    # DYN_VLLM_SKIP_REQUEST_VALIDATION fast path, which uses model_construct.
-    # Without this the caller gets a plausible answer that can never contain the
-    # tool call they required.
-    if not validated_request.tools and _is_forced_tool_choice(
-        validated_request.tool_choice
-    ):
-        raise _forced_tool_choice_without_tools_error(validated_request.tool_choice)
+    # A forced tool_choice the tools list cannot satisfy has no valid answer, and
+    # vLLM's own check for it is skipped on the DYN_VLLM_SKIP_REQUEST_VALIDATION
+    # fast path. Without this the caller gets a plausible reply that can never
+    # contain the tool call they required.
+    forced_tool_choice_error = _forced_tool_choice_error(validated_request)
+    if forced_tool_choice_error is not None:
+        raise forced_tool_choice_error
     assistant_guided_decoding = _build_assistant_guided_decoding(validated_request)
     client_structured_guidance = deepcopy(
         _guided_decoding_from_structured_outputs(
