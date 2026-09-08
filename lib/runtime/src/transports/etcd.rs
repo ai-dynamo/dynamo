@@ -926,10 +926,9 @@ fn default_servers() -> Vec<String> {
 /// Default lease TTL (seconds) used when `ETCD_LEASE_TTL` is unset or invalid.
 const DEFAULT_LEASE_TTL_SECS: u64 = 10;
 
-/// Requested lease TTL, cached so it is read from the environment exactly once
-/// per process (issue #12312: env var + [`OnceLock`]). Every `ClientOptions`
-/// constructed in this process — primary runtime, component clients, planner —
-/// then requests the same TTL even if the environment changes mid-process.
+/// Default requested lease TTL, read from the environment once per process.
+/// Clients using the default share this cached value even if the environment
+/// changes; explicit `ClientOptions::lease_ttl` overrides may differ.
 static LEASE_TTL_SECS: OnceLock<u64> = OnceLock::new();
 
 /// Lease TTL in seconds to request from etcd.
@@ -1277,8 +1276,6 @@ mod unit_tests {
         assert!(!Client::is_etcd_connection_error(&err));
     }
 
-    /// Valid `ETCD_LEASE_TTL` values pass through unchanged, including values
-    /// far above the default (the operator ask in issue #12312).
     #[test]
     fn resolves_valid_lease_ttl() {
         assert_eq!(resolve_lease_ttl(Some("1")), 1);
@@ -1286,15 +1283,12 @@ mod unit_tests {
         assert_eq!(resolve_lease_ttl(Some("900")), 900);
     }
 
-    /// An unset variable keeps the documented default behavior.
     #[test]
     fn unset_lease_ttl_falls_back_to_default() {
         assert_eq!(resolve_lease_ttl(None), DEFAULT_LEASE_TTL_SECS);
         assert_eq!(DEFAULT_LEASE_TTL_SECS, 10);
     }
 
-    /// Zero, negative, non-numeric, and empty values all fall back to the
-    /// documented default instead of panicking or producing a zero-TTL lease.
     #[test]
     fn invalid_lease_ttl_falls_back_to_default() {
         for raw in ["0", "", " 30", "30s", "abc", "-1", "1.5"] {
@@ -1322,8 +1316,6 @@ mod unit_tests {
         );
     }
 
-    /// `Default` and the builder default must carry the same resolved TTL, and
-    /// an explicit builder value must win over the default.
     #[test]
     fn client_options_default_and_builder_carry_lease_ttl() {
         assert_eq!(ClientOptions::default().lease_ttl, default_lease_ttl());
