@@ -106,6 +106,9 @@ type VolumeMount struct {
 	// If useAsCompilationCache is true and mountPoint is not specified,
 	// a backend-specific default will be used.
 	MountPoint string `json:"mountPoint,omitempty"`
+	// SubPath specifics the subPath for the volume mount.
+	// Only used when UseAsCompilationCache is true
+	SubPath string `json:"subPath,omitempty"`
 	// UseAsCompilationCache indicates this volume should be used as a compilation cache.
 	// When true, backend-specific environment variables will be set and default mount points may be used.
 	// +kubebuilder:default=false

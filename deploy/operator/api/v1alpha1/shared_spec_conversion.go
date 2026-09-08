@@ -200,6 +200,7 @@ func ConvertFromDynamoComponentDeploymentSharedSpec(src *DynamoComponentDeployme
 			dst.CompilationCache = &v1beta1.CompilationCacheConfig{
 				PVCName:   vm.Name,
 				MountPath: vm.MountPoint,
+				SubPath:   vm.SubPath,
 			}
 			break
 		}
@@ -813,6 +814,7 @@ func sparseSharedHubOnlyVolumeMounts(src, projected []corev1.VolumeMount) []core
 		savedMount := corev1.VolumeMount{
 			Name:      srcMount.Name,
 			MountPath: srcMount.MountPath,
+			SubPath:   srcMount.SubPath,
 		}
 		if projectedMount, ok := findPreservedVolumeMount(projected, srcMount); !ok ||
 			!apiequality.Semantic.DeepEqual(srcMount, projectedMount) {
@@ -1008,6 +1010,7 @@ func convertVolumeMountsFromHub(src *v1beta1.DynamoComponentDeploymentSharedSpec
 	dst.VolumeMounts = []VolumeMount{{
 		Name:                  src.CompilationCache.PVCName,
 		MountPoint:            src.CompilationCache.MountPath,
+		SubPath:               src.CompilationCache.SubPath,
 		UseAsCompilationCache: true,
 	}}
 }
@@ -1560,6 +1563,7 @@ func buildMainContainerFromDedicated(src *DynamoComponentDeploymentSharedSpec) c
 		ctr.VolumeMounts = append(ctr.VolumeMounts, corev1.VolumeMount{
 			Name:      vm.Name,
 			MountPath: mp,
+			SubPath:   vm.SubPath,
 		})
 	}
 	return ctr
@@ -2007,9 +2011,11 @@ func findPreservedVolumeMount(mounts []corev1.VolumeMount, mount corev1.VolumeMo
 func copyHubOnlyVolumeMountFields(dst *corev1.VolumeMount, preserved corev1.VolumeMount) {
 	name := dst.Name
 	mountPath := dst.MountPath
+	subPath := dst.SubPath
 	*dst = *preserved.DeepCopy()
 	dst.Name = name
 	dst.MountPath = mountPath
+	dst.SubPath = subPath
 }
 
 func hasContainerNamed(containers []corev1.Container, name string) bool {
@@ -2569,6 +2575,7 @@ func volumeMountsFromNative(mounts []corev1.VolumeMount) []VolumeMount {
 		out = append(out, VolumeMount{
 			Name:       mount.Name,
 			MountPoint: mount.MountPath,
+			SubPath:    mount.SubPath,
 		})
 	}
 	return out

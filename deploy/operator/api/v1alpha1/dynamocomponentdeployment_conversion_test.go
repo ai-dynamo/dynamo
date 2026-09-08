@@ -594,7 +594,7 @@ func TestDCD_HubSnapshotIsBaseAndV1alpha1OverlayWins(t *testing.T) {
 	if main.VolumeMounts[0].Name != testModelPVCName || main.VolumeMounts[0].MountPath != "/new-models" {
 		t.Fatalf("expected v1alpha1 volume mount name/path to win, got %#v", main.VolumeMounts[0])
 	}
-	if !main.VolumeMounts[0].ReadOnly || main.VolumeMounts[0].SubPath != "weights" {
+	if !main.VolumeMounts[0].ReadOnly {
 		t.Fatalf("expected hub-only volume mount fields to be preserved, got %#v", main.VolumeMounts[0])
 	}
 }
