@@ -653,8 +653,7 @@ mod tests {
     #[test]
     fn disaggregated_decode_marks_input_logprobs_unavailable() {
         // Terminal chunk, decode worker, logprobs requested: the one case that
-        // annotates. `input_token_logprobs` is absent because the decode engine
-        // never prefilled the prompt.
+        // annotates. `input_token_logprobs` is absent: decode never prefilled.
         let (annotated, finished) = output(terminal_decode_response(), &mut None, true);
         assert!(finished);
         assert_eq!(

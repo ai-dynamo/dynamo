@@ -478,8 +478,7 @@ async def test_native_generate_stream_forwards_only_opaque_response():
 @pytest.mark.asyncio
 async def test_native_generate_stream_marks_input_logprobs_unavailable_on_decode():
     # A disaggregated decode worker never prefills the prompt, so its terminal
-    # meta_info simply lacks input_token_logprobs. The marker makes that
-    # structural absence distinguishable from a genuinely empty result.
+    # meta_info lacks input_token_logprobs; the marker records that.
     streaming_response = {
         "output_ids": [101],
         "meta_info": {"id": "request-1", "finish_reason": None},
