@@ -20,7 +20,7 @@ import os
 import socket
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 
 class UrlValidationError(ValueError):
@@ -220,7 +220,8 @@ async def validate_media_url(url: str, policy: UrlValidationPolicy) -> str:
     scheme = parsed.scheme.lower()
 
     if scheme in ("", "file"):
-        raw_path = parsed.path if scheme == "file" else url
+        # file:// paths are percent-encoded; a bare path is literal.
+        raw_path = unquote(parsed.path) if scheme == "file" else url
         resolved = validate_local_path(raw_path, policy)
         return resolved.as_uri()
 
@@ -234,7 +235,8 @@ async def validate_media_reference(reference: str, policy: UrlValidationPolicy) 
     """
     parsed = urlparse(reference)
     if parsed.scheme.lower() in ("", "file"):
-        raw_path = parsed.path if parsed.scheme else reference
+        # file:// paths are percent-encoded; a bare path is literal.
+        raw_path = unquote(parsed.path) if parsed.scheme else reference
         return str(validate_local_path(raw_path, policy))
     return await validate_url(reference, policy)
 
