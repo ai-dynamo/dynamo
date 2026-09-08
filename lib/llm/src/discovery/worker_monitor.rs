@@ -16,12 +16,12 @@ use crate::http::service::metrics::{
     WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE, WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE,
     WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE,
 };
+use crate::kv_router::RouterLoadSource;
 use crate::kv_router::metrics::WORKER_LOAD_METRICS;
+use crate::kv_router::metrics_subscriber::KvMetricsSubscriber;
 use crate::kv_router::routing_load::SchedulerLoadReceiver;
-use crate::kv_router::{KV_METRICS_SUBJECT, RouterLoadSource};
 use dynamo_runtime::component::Client;
 use dynamo_runtime::pipeline::{WorkerLoadMonitor, async_trait};
-use dynamo_runtime::transports::event_plane::EventSubscriber;
 
 use super::runtime_config_watch;
 
@@ -753,11 +753,10 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                 }
             };
 
-        // Subscribe to KV metrics events using EventSubscriber (Msgpack payloads)
-        // This is optional - if NATS isn't available, we skip KV metrics but still do TTFT/ITL cleanup
-        let kv_metrics_rx = match EventSubscriber::for_endpoint(endpoint, KV_METRICS_SUBJECT).await
-        {
-            Ok(sub) => Some(sub.typed::<ActiveLoad>()),
+        // Subscribe to KV metrics over the configured event transport. This is
+        // optional; cleanup of TTFT and ITL metrics continues without it.
+        let kv_metrics_rx = match KvMetricsSubscriber::for_endpoint(endpoint).await {
+            Ok(sub) => Some(sub),
             Err(e) => {
                 tracing::warn!(
                     "KvWorkerMonitor: KV metrics subscriber not available ({}), skipping load metrics.",
@@ -807,10 +806,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
             loop {
                 let kv_event_future = async {
                     if let Some(kv_metrics_rx) = &mut kv_metrics_rx {
-                        kv_metrics_rx
-                            .next()
-                            .await
-                            .map(|result| result.map(|(_envelope, active_load)| active_load))
+                        kv_metrics_rx.next().await
                     } else {
                         std::future::pending().await
                     }
