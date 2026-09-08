@@ -4,7 +4,6 @@
 """
 Test Execution Times (Last Run: 2026-01-09):
 - test_request_migration_vllm_aggregated: ~95s
-- test_request_migration_vllm_prefill: N/A
 - test_request_migration_vllm_kv_transfer: N/A
 - test_request_migration_vllm_decode: ~115s
 """
@@ -12,19 +11,214 @@ Test Execution Times (Last Run: 2026-01-09):
 import json
 import logging
 import os
-import shutil
+from pathlib import Path
 
 import pytest
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DynamoPortRange
+from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_models_api
-from tests.utils.port_utils import allocate_port, deallocate_port
+from tests.utils.port_utils import allocate_port, deallocate_ports
 
 # Customized utils for migration tests
-from .utils import DynamoFrontendProcess, run_migration_test
+from .utils import (
+    DynamoFrontendProcess,
+    managed_processes_concurrently,
+    run_migration_test,
+    wait_for_endpoint_instances,
+)
 
 logger = logging.getLogger(__name__)
+
+AGGREGATED_MAX_MODEL_LEN = 1024
+AGGREGATED_MAX_TOKENS = 512
+DECODE_MAX_MODEL_LEN = 1024
+DECODE_MAX_TOKENS = 512
+KV_TRANSFER_MAX_MODEL_LEN = 1024
+KV_TRANSFER_MAX_TOKENS = 192
+KV_TRANSFER_PROMPT_REPETITIONS = 800
+
+# Cover each distinct migration policy with complementary lifecycle, API,
+# response, and transport values. Together these eight rows cover every pair
+# of those four binary dimensions without paying for their Cartesian product.
+MIGRATION_CASES = [
+    pytest.param(
+        3,
+        None,
+        True,
+        "chat",
+        True,
+        "nats",
+        id="migration_enabled-no_seq_cap-worker_failure-chat-stream-nats",
+    ),
+    pytest.param(
+        3,
+        None,
+        False,
+        "completion",
+        False,
+        "tcp",
+        id="migration_enabled-no_seq_cap-graceful_shutdown-completion-unary-tcp",
+    ),
+    pytest.param(
+        0,
+        None,
+        True,
+        "chat",
+        False,
+        "tcp",
+        id="migration_disabled-worker_failure-chat-unary-tcp",
+    ),
+    pytest.param(
+        0,
+        None,
+        False,
+        "completion",
+        True,
+        "nats",
+        id="migration_disabled-graceful_shutdown-completion-stream-nats",
+    ),
+    pytest.param(
+        3,
+        1,
+        True,
+        "completion",
+        True,
+        "tcp",
+        id="max_seq_len_exceeded-worker_failure-completion-stream-tcp",
+    ),
+    pytest.param(
+        3,
+        1,
+        False,
+        "chat",
+        False,
+        "nats",
+        id="max_seq_len_exceeded-graceful_shutdown-chat-unary-nats",
+    ),
+    pytest.param(
+        3,
+        1_000_000,
+        True,
+        "completion",
+        False,
+        "nats",
+        id="max_seq_len_not_exceeded-worker_failure-completion-unary-nats",
+    ),
+    pytest.param(
+        3,
+        1_000_000,
+        False,
+        "chat",
+        True,
+        "tcp",
+        id="max_seq_len_not_exceeded-graceful_shutdown-chat-stream-tcp",
+    ),
+]
+
+# Decode migration injects the fault only after a response stream is
+# established, so unary responses are not an executable policy value here.
+# Retain one streaming case for each migration-policy outcome while balancing
+# both shutdown paths, APIs, and request-plane transports.
+DECODE_MIGRATION_CASES = [
+    pytest.param(
+        3,
+        None,
+        True,
+        "chat",
+        "nats",
+        id="migration_enabled-worker_failure-chat-stream-nats",
+    ),
+    pytest.param(
+        0,
+        None,
+        False,
+        "completion",
+        "nats",
+        id="migration_disabled-graceful_shutdown-completion-stream-nats",
+    ),
+    pytest.param(
+        3,
+        1,
+        True,
+        "completion",
+        "tcp",
+        id="max_seq_len_exceeded-worker-failure-completion-stream-tcp",
+    ),
+    pytest.param(
+        3,
+        1_000_000,
+        False,
+        "chat",
+        "tcp",
+        id="max_seq_len_not_exceeded-graceful-shutdown-chat-stream-tcp",
+    ),
+]
+
+# This target enters KV transfer only when migration is enabled and under the
+# sequence cap. The aggregate test owns the shared disabled/max-seq policies.
+# Chat retains the historical prefix-cache regression shape; these two cases
+# cover both shutdown lifecycles and both request-plane implementations while
+# pairing the response mode, which is independent before KV transfer completes.
+KV_TRANSFER_CASES = [
+    pytest.param(
+        3,
+        None,
+        True,
+        "chat",
+        True,
+        "nats",
+        id="worker-failure-chat-stream-nats",
+    ),
+    pytest.param(
+        3,
+        None,
+        False,
+        "chat",
+        False,
+        "tcp",
+        id="graceful-shutdown-chat-unary-tcp",
+    ),
+]
+
+MIGRATION_PARAMETERS = pytest.mark.parametrize(
+    (
+        "migration_limit",
+        "migration_max_seq_len",
+        "immediate_kill",
+        "request_api",
+        "stream",
+        "request_plane",
+    ),
+    MIGRATION_CASES,
+    indirect=["request_plane"],
+)
+
+DECODE_MIGRATION_PARAMETERS = pytest.mark.parametrize(
+    (
+        "migration_limit",
+        "migration_max_seq_len",
+        "immediate_kill",
+        "request_api",
+        "request_plane",
+    ),
+    DECODE_MIGRATION_CASES,
+    indirect=["request_plane"],
+)
+
+KV_TRANSFER_MIGRATION_PARAMETERS = pytest.mark.parametrize(
+    (
+        "migration_limit",
+        "migration_max_seq_len",
+        "immediate_kill",
+        "request_api",
+        "stream",
+        "request_plane",
+    ),
+    KV_TRANSFER_CASES,
+    indirect=["request_plane"],
+)
 
 pytestmark = [
     pytest.mark.fault_tolerance,
@@ -32,42 +226,6 @@ pytestmark = [
     pytest.mark.gpu_1,
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
-    pytest.mark.parametrize(
-        "migration_limit", [3, 0], ids=["migration_enabled", "migration_disabled"]
-    ),
-    pytest.mark.parametrize(
-        "migration_max_seq_len",
-        [
-            pytest.param(None, id="max_seq_len_disabled"),
-            pytest.param(1_000_000, id="max_seq_len_not_exceeded"),
-            pytest.param(1, id="max_seq_len_exceeded"),
-        ],
-    ),
-    pytest.mark.parametrize(
-        "immediate_kill", [True, False], ids=["worker_failure", "graceful_shutdown"]
-    ),
-    pytest.mark.parametrize(
-        "request_api",
-        [
-            pytest.param("chat"),
-            pytest.param(
-                "completion",
-                marks=pytest.mark.skip(reason="Behavior unverified yet"),
-            ),
-        ],
-    ),
-    pytest.mark.parametrize(
-        "stream",
-        [
-            pytest.param(True, id="stream"),
-            pytest.param(
-                False,
-                id="unary",
-                marks=pytest.mark.skip(reason="Behavior unverified yet"),
-            ),
-        ],
-    ),
-    pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True),
 ]
 
 
@@ -82,6 +240,7 @@ class DynamoWorkerProcess(ManagedProcess):
         worker_id: Unique identifier for the worker (e.g., "worker1", "prefill1")
         frontend_port: Port where the frontend is running
         is_prefill: None for aggregated mode, True for prefill worker, False for decode worker
+        max_model_len: Maximum input-plus-output context exposed by the worker
     """
 
     def __init__(
@@ -89,11 +248,40 @@ class DynamoWorkerProcess(ManagedProcess):
         request,
         worker_id: str,
         frontend_port: int,
+        log_root: Path,
         is_prefill: bool | None = None,
+        max_model_len: int = 8192,
     ):
         self.worker_id = worker_id
+        allocated_ports: list[int] = []
+        request.addfinalizer(lambda ports=allocated_ports: deallocate_ports(ports))
+
         self.system_port = allocate_port(DynamoPortRange.SERVE.value)
-        request.addfinalizer(lambda port=self.system_port: deallocate_port(port))
+        allocated_ports.append(self.system_port)
+
+        self.nixl_side_channel_port = allocate_port(DynamoPortRange.NIXL.value)
+        allocated_ports.append(self.nixl_side_channel_port)
+
+        # vLLM defaults every engine to the same torch.distributed rendezvous
+        # port (29501). TP=1 does not always bind it, but assigning it explicitly
+        # avoids startup races when several engine processes initialize together.
+        self.master_port = allocate_port(DynamoPortRange.BOOTSTRAP.value)
+        allocated_ports.append(self.master_port)
+
+        env = os.environ.copy()
+        if "_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES" not in env:
+            kv_mark = request.node.get_closest_marker("requested_vllm_kv_cache_bytes")
+            if kv_mark:
+                env["_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES"] = str(int(kv_mark.args[0]))
+
+        gpu_mem_args = build_gpu_mem_args("build_vllm_gpu_mem_args", env=env)
+        if not gpu_mem_args:
+            gpu_mem_args = [
+                "--num-gpu-blocks-override",
+                "512",  # 8192 tokens / 16 tokens per block
+                "--gpu-memory-utilization",
+                "0.15",
+            ]
 
         command = [
             "python3",
@@ -103,22 +291,30 @@ class DynamoWorkerProcess(ManagedProcess):
             FAULT_TOLERANCE_MODEL_NAME,
             "--enforce-eager",
             "--max-model-len",
-            "8192",  # input + output tokens
+            str(max_model_len),
             "--max-num-seqs",
             "1",  # number of requests at a time
-            "--num-gpu-blocks-override",  # limit total KV cache allocation
-            "512",  # 8192 tokens x 1 context / 16 tokens per block = 512 blocks
-            "--gpu-memory-utilization",
-            "0.15",  # avoid assertion error on vLLM available memory checks
+            "--master-port",
+            str(self.master_port),
+            *gpu_mem_args,
         ]
         if is_prefill is True:
             command.extend(["--disaggregation-mode", "prefill"])
         elif is_prefill is False:
             command.extend(["--disaggregation-mode", "decode"])
 
+        if is_prefill is not None:
+            command.extend(
+                [
+                    "--kv-transfer-config",
+                    '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+                ]
+            )
+
         # Aggregated mode and prefill workers publish KV events
         if is_prefill is not False:
-            kv_event_port = f"2008{worker_id[-1]}"  # TODO: use dynamic port allocation
+            kv_event_port = allocate_port(DynamoPortRange.SERVE.value)
+            allocated_ports.append(kv_event_port)
             command.extend(
                 [
                     "--kv-events-config",
@@ -134,13 +330,10 @@ class DynamoWorkerProcess(ManagedProcess):
             )
 
         # Set environment variables
-        env = os.environ.copy()
         env["DYN_REQUEST_PLANE"] = request.getfixturevalue("request_plane")
 
         # All workers need unique NIXL side channel ports for KV transfer
-        env[
-            "VLLM_NIXL_SIDE_CHANNEL_PORT"
-        ] = f"560{worker_id[-1]}"  # TODO: use dynamic port allocation
+        env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(self.nixl_side_channel_port)
 
         env["DYN_LOG"] = "debug"
         # Disable canary health check - these tests expect full control over requests
@@ -165,62 +358,45 @@ class DynamoWorkerProcess(ManagedProcess):
                 (f"http://localhost:{frontend_port}/v1/models", check_models_api)
             )
 
-        # TODO: Have the managed process take a command name explicitly to distinguish
-        #       between processes started with the same command.
-        log_dir = f"{request.node.name}_{worker_id}"
-
-        # Clean up any existing log directory from previous runs
-        try:
-            shutil.rmtree(log_dir)
-            logger.info(f"Cleaned up existing log directory: {log_dir}")
-        except FileNotFoundError:
-            # Directory doesn't exist, which is fine
-            pass
+        log_dir = log_root / worker_id
 
         super().__init__(
             command=command,
             env=env,
             health_check_urls=health_check_urls,
             timeout=300,
-            display_output=True,
+            # Every worker retains a complete per-test log. Avoid interleaving
+            # verbose engine output when several GPU tests run concurrently.
+            display_output=False,
             terminate_all_matching_process_names=False,
             stragglers=["VLLM::EngineCore"],
             straggler_commands=["-m dynamo.vllm"],
-            log_dir=log_dir,
+            log_dir=str(log_dir),
             display_name=worker_id,
         )
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Release allocated port when worker exits."""
-        try:
-            # system_port is always allocated in __init__
-            deallocate_port(self.system_port)
-        except Exception as e:
-            logging.warning(f"Failed to release vLLM worker port: {e}")
-
-        return super().__exit__(exc_type, exc_val, exc_tb)
 
     def is_ready(self, response) -> bool:
         """Check the health of the worker process"""
         try:
             data = response.json()
             if data.get("status") == "ready":
-                logger.info(f"{self.worker_id} status is ready")
+                logger.info("%s status is ready", self.worker_id)
                 return True
             logger.warning(
-                f"{self.worker_id} status is not ready: {data.get('status')}"
+                "%s status is not ready: %s",
+                self.worker_id,
+                data.get("status"),
             )
         except ValueError:
-            logger.warning(f"{self.worker_id} health response is not valid JSON")
+            logger.warning("%s health response is not valid JSON", self.worker_id)
         return False
 
 
 @pytest.mark.timeout(290)  # 3x average
-@pytest.mark.post_merge
-@pytest.mark.skip(
-    reason="Flaky: 0% post-merge pass rate across multiple parametrizations; "
-    "skipped wholesale until the underlying migration fault is owned and fixed."
-)
+@pytest.mark.nightly
+@pytest.mark.profiled_vram_gib(4.8)
+@pytest.mark.requested_vllm_kv_cache_bytes(331_711_000)
+@MIGRATION_PARAMETERS
 def test_request_migration_vllm_aggregated(
     request,
     runtime_services_dynamic_ports,
@@ -231,6 +407,7 @@ def test_request_migration_vllm_aggregated(
     immediate_kill,
     request_api,
     stream,
+    tmp_path,
 ):
     """
     End-to-end test for aggregated worker request migration.
@@ -251,117 +428,46 @@ def test_request_migration_vllm_aggregated(
     ) as frontend:
         logger.info("Frontend started successfully")
 
-        # Step 2: Start 2 workers
-        with DynamoWorkerProcess(request, "worker1", frontend.frontend_port) as worker1:
-            logger.info(f"Worker 1 PID: {worker1.get_pid()}")
-
-            with DynamoWorkerProcess(
-                request,
-                "worker2",
-                frontend.frontend_port,
-            ) as worker2:
-                logger.info(f"Worker 2 PID: {worker2.get_pid()}")
-
-                # Step 3: Run migration test
-                run_migration_test(
-                    frontend,
-                    worker1,
-                    worker2,
-                    receiving_pattern="Decode Request ID: ",
-                    migration_limit=migration_limit,
-                    migration_max_seq_len=migration_max_seq_len,
-                    immediate_kill=immediate_kill,
-                    use_chat_completion=(request_api == "chat"),
-                    stream=stream,
-                )
-
-
-@pytest.mark.skip(reason="Prefill migration not yet supported")
-@pytest.mark.timeout(350)  # 3x average
-@pytest.mark.nightly
-def test_request_migration_vllm_prefill(
-    request,
-    runtime_services_dynamic_ports,
-    set_ucx_tls_no_mm,
-    predownload_models,
-    migration_limit,
-    migration_max_seq_len,
-    immediate_kill,
-    request_api,
-    stream,
-):
-    """
-    End-to-end test for prefill worker request migration in disaggregated mode.
-
-    Setup: 1 decode worker + 2 prefill workers
-
-    Parameters:
-        immediate_kill: True for abrupt kill (SIGKILL), False for graceful shutdown (SIGTERM)
-        migration_limit: > 0 to verify migration succeeds, 0 to verify request fails
-        request_api: "chat" for chat completion API, "completion" for completion API
-        stream: True for streaming, False for non-streaming
-    """
-
-    # Step 1: Start the frontend
-    with DynamoFrontendProcess(
-        request,
-        migration_limit=migration_limit,
-        migration_max_seq_len=migration_max_seq_len,
-    ) as frontend:
-        logger.info("Frontend started successfully")
-
-        # Step 2: Start decode worker first (required for prefill workers to connect)
-        with DynamoWorkerProcess(
+        # Step 2: Start 2 independent workers concurrently
+        worker1 = DynamoWorkerProcess(
             request,
-            "worker0",
+            "worker1",
             frontend.frontend_port,
-            is_prefill=False,
-        ) as decode_worker:
-            logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
+            tmp_path,
+            max_model_len=AGGREGATED_MAX_MODEL_LEN,
+        )
+        worker2 = DynamoWorkerProcess(
+            request,
+            "worker2",
+            frontend.frontend_port,
+            tmp_path,
+            max_model_len=AGGREGATED_MAX_MODEL_LEN,
+        )
+        with managed_processes_concurrently(worker1, worker2):
+            logger.info("Worker 1 PID: %s", worker1.get_pid())
+            logger.info("Worker 2 PID: %s", worker2.get_pid())
 
-            # Step 3: Start 2 prefill workers
-            with DynamoWorkerProcess(
-                request,
-                "worker1",
-                frontend.frontend_port,
-                is_prefill=True,
-            ) as prefill1:
-                logger.info(f"Prefill Worker 1 PID: {prefill1.get_pid()}")
-
-                with DynamoWorkerProcess(
-                    request,
-                    "worker2",
-                    frontend.frontend_port,
-                    is_prefill=True,
-                ) as prefill2:
-                    logger.info(f"Prefill Worker 2 PID: {prefill2.get_pid()}")
-
-                    # Step 4: Run migration test
-                    run_migration_test(
-                        frontend,
-                        prefill1,
-                        prefill2,
-                        receiving_pattern="Prefill Request ID: ",
-                        migration_limit=migration_limit,
-                        migration_max_seq_len=migration_max_seq_len,
-                        immediate_kill=immediate_kill,
-                        use_chat_completion=(request_api == "chat"),
-                        stream=stream,
-                        use_long_prompt=True,
-                    )
+            # Step 3: Run migration test
+            run_migration_test(
+                frontend,
+                worker1,
+                worker2,
+                receiving_pattern="Decode Request ID: ",
+                migration_limit=migration_limit,
+                migration_max_seq_len=migration_max_seq_len,
+                immediate_kill=immediate_kill,
+                use_chat_completion=(request_api == "chat"),
+                stream=stream,
+                max_tokens=AGGREGATED_MAX_TOKENS,
+                expected_ongoing_request_count=1,
+            )
 
 
-@pytest.mark.skip(
-    reason=(
-        "Migration reuses the same request_id for vLLM, but the prefill worker's "
-        "KV cache still holds the request due to delay_free_blocks in disaggregated mode. "
-        "With chat completions API, prefix cache hits on chat template tokens cause "
-        "an assertion error in vLLM's KV cache manager (save_new_computed_blocks expects "
-        "no new computed blocks for existing requests)."
-    ),
-)
 @pytest.mark.timeout(350)  # 3x average
 @pytest.mark.nightly
+@pytest.mark.profiled_vram_gib(6.9)
+@pytest.mark.requested_vllm_kv_cache_bytes(331_711_000)
+@KV_TRANSFER_MIGRATION_PARAMETERS
 def test_request_migration_vllm_kv_transfer(
     request,
     runtime_services_dynamic_ports,
@@ -372,6 +478,7 @@ def test_request_migration_vllm_kv_transfer(
     immediate_kill,
     request_api,
     stream,
+    tmp_path,
 ):
     """
     End-to-end test for request migration during KV transfer in disaggregated mode.
@@ -393,58 +500,63 @@ def test_request_migration_vllm_kv_transfer(
     ) as frontend:
         logger.info("Frontend started successfully")
 
-        # Step 2: Start prefill worker first
-        with DynamoWorkerProcess(
+        # Step 2: Start the independent prefill and decode workers concurrently.
+        prefill_worker = DynamoWorkerProcess(
             request,
             "worker0",
             frontend.frontend_port,
+            tmp_path,
             is_prefill=True,
-        ) as prefill_worker:
-            logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
-
-            # Step 3: Start 2 decode workers
-            with DynamoWorkerProcess(
-                request,
-                "worker1",
+            max_model_len=KV_TRANSFER_MAX_MODEL_LEN,
+        )
+        decode1 = DynamoWorkerProcess(
+            request,
+            "worker1",
+            frontend.frontend_port,
+            tmp_path,
+            is_prefill=False,
+            max_model_len=KV_TRANSFER_MAX_MODEL_LEN,
+        )
+        decode2 = DynamoWorkerProcess(
+            request,
+            "worker2",
+            frontend.frontend_port,
+            tmp_path,
+            is_prefill=False,
+            max_model_len=KV_TRANSFER_MAX_MODEL_LEN,
+        )
+        with managed_processes_concurrently(prefill_worker, decode1, decode2):
+            logger.info("Prefill Worker PID: %s", prefill_worker.get_pid())
+            logger.info("Decode Worker 1 PID: %s", decode1.get_pid())
+            logger.info("Decode Worker 2 PID: %s", decode2.get_pid())
+            wait_for_endpoint_instances(
                 frontend.frontend_port,
-                is_prefill=False,
-            ) as decode1:
-                logger.info(f"Decode Worker 1 PID: {decode1.get_pid()}")
+                {("prefill", "generate"): 1, ("backend", "generate"): 2},
+            )
 
-                with DynamoWorkerProcess(
-                    request,
-                    "worker2",
-                    frontend.frontend_port,
-                    is_prefill=False,
-                ) as decode2:
-                    logger.info(f"Decode Worker 2 PID: {decode2.get_pid()}")
-
-                    # Step 4: Run migration test
-                    run_migration_test(
-                        frontend,
-                        decode1,
-                        decode2,
-                        receiving_pattern="Decode Request ID: ",
-                        migration_limit=migration_limit,
-                        migration_max_seq_len=migration_max_seq_len,
-                        immediate_kill=immediate_kill,
-                        use_chat_completion=(request_api == "chat"),
-                        stream=stream,
-                        use_long_prompt=True,
-                    )
+            # Step 3: Run migration test
+            run_migration_test(
+                frontend,
+                decode1,
+                decode2,
+                receiving_pattern="Decode Request ID: ",
+                migration_limit=migration_limit,
+                migration_max_seq_len=migration_max_seq_len,
+                immediate_kill=immediate_kill,
+                use_chat_completion=(request_api == "chat"),
+                stream=stream,
+                max_tokens=KV_TRANSFER_MAX_TOKENS,
+                use_long_prompt=True,
+                long_prompt_repetitions=KV_TRANSFER_PROMPT_REPETITIONS,
+                expected_ongoing_request_count=1,
+            )
 
 
-@pytest.mark.skip(
-    reason=(
-        "Migration reuses the same request_id for vLLM, but the prefill worker's "
-        "KV cache still holds the request due to delay_free_blocks in disaggregated mode. "
-        "With chat completions API, prefix cache hits on chat template tokens cause "
-        "an assertion error in vLLM's KV cache manager (save_new_computed_blocks expects "
-        "no new computed blocks for existing requests)."
-    ),
-)
 @pytest.mark.timeout(350)  # 3x average
 @pytest.mark.nightly
+@pytest.mark.profiled_vram_gib(6.8)
+@pytest.mark.requested_vllm_kv_cache_bytes(331_711_000)
+@DECODE_MIGRATION_PARAMETERS
 def test_request_migration_vllm_decode(
     request,
     runtime_services_dynamic_ports,
@@ -454,24 +566,22 @@ def test_request_migration_vllm_decode(
     migration_max_seq_len,
     immediate_kill,
     request_api,
-    stream,
+    tmp_path,
 ):
     """
     End-to-end test for decode worker request migration in disaggregated mode.
 
     Setup: 1 prefill worker + 2 decode workers
+    The request is streamed so the test can inject a fault after decode starts.
 
     Parameters:
         immediate_kill: True for abrupt kill (SIGKILL), False for graceful shutdown (SIGTERM)
         migration_limit: > 0 to verify migration succeeds, 0 to verify request fails
         request_api: "chat" for chat completion API, "completion" for completion API
-        stream: True for streaming, False for non-streaming
-    """
-    if not stream:
-        pytest.skip(
-            "Decode test requires streaming to wait for response before stopping worker"
-        )
 
+    This target is always streaming so the fault can be injected while the
+    decode request is in flight.
+    """
     # Step 1: Start the frontend
     with DynamoFrontendProcess(
         request,
@@ -480,42 +590,48 @@ def test_request_migration_vllm_decode(
     ) as frontend:
         logger.info("Frontend started successfully")
 
-        # Step 2: Start prefill worker first
-        with DynamoWorkerProcess(
+        # Step 2: Start the independent prefill and decode workers concurrently
+        prefill_worker = DynamoWorkerProcess(
             request,
             "worker0",
             frontend.frontend_port,
+            tmp_path,
             is_prefill=True,
-        ) as prefill_worker:
-            logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
+            max_model_len=DECODE_MAX_MODEL_LEN,
+        )
+        decode1 = DynamoWorkerProcess(
+            request,
+            "worker1",
+            frontend.frontend_port,
+            tmp_path,
+            is_prefill=False,
+            max_model_len=DECODE_MAX_MODEL_LEN,
+        )
+        decode2 = DynamoWorkerProcess(
+            request,
+            "worker2",
+            frontend.frontend_port,
+            tmp_path,
+            is_prefill=False,
+            max_model_len=DECODE_MAX_MODEL_LEN,
+        )
+        with managed_processes_concurrently(prefill_worker, decode1, decode2):
+            logger.info("Prefill Worker PID: %s", prefill_worker.get_pid())
+            logger.info("Decode Worker 1 PID: %s", decode1.get_pid())
+            logger.info("Decode Worker 2 PID: %s", decode2.get_pid())
 
-            # Step 3: Start 2 decode workers
-            with DynamoWorkerProcess(
-                request,
-                "worker1",
-                frontend.frontend_port,
-                is_prefill=False,
-            ) as decode1:
-                logger.info(f"Decode Worker 1 PID: {decode1.get_pid()}")
-
-                with DynamoWorkerProcess(
-                    request,
-                    "worker2",
-                    frontend.frontend_port,
-                    is_prefill=False,
-                ) as decode2:
-                    logger.info(f"Decode Worker 2 PID: {decode2.get_pid()}")
-
-                    # Step 4: Run migration test
-                    run_migration_test(
-                        frontend,
-                        decode1,
-                        decode2,
-                        receiving_pattern="Decode Request ID: ",
-                        migration_limit=migration_limit,
-                        migration_max_seq_len=migration_max_seq_len,
-                        immediate_kill=immediate_kill,
-                        use_chat_completion=(request_api == "chat"),
-                        stream=stream,
-                        wait_for_new_response_before_stop=True,
-                    )
+            # Step 3: Run migration test
+            run_migration_test(
+                frontend,
+                decode1,
+                decode2,
+                receiving_pattern="Decode Request ID: ",
+                migration_limit=migration_limit,
+                migration_max_seq_len=migration_max_seq_len,
+                immediate_kill=immediate_kill,
+                use_chat_completion=(request_api == "chat"),
+                stream=True,
+                max_tokens=DECODE_MAX_TOKENS,
+                wait_for_new_response_before_stop=True,
+                expected_ongoing_request_count=1,
+            )

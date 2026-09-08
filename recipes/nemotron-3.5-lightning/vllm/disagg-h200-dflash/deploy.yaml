@@ -127,8 +127,6 @@ spec:
           - '32'
           - --async-scheduling
           - --no-enable-flashinfer-autotune
-          - --quantization
-          - modelopt_fp4
           - --enable-prefix-caching
           - --mamba-cache-mode
           - align
@@ -264,8 +262,6 @@ spec:
           - '32'
           - --async-scheduling
           - --no-enable-flashinfer-autotune
-          - --quantization
-          - modelopt_fp4
           - --enable-prefix-caching
           - --mamba-cache-mode
           - align

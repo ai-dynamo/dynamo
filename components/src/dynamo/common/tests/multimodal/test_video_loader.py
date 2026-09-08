@@ -108,22 +108,38 @@ async def test_load_video_batch_rejects_decoded_variant_without_frontend_decodin
 
 
 @pytest.mark.asyncio
-async def test_load_video_batch_prioritizes_typed_client_error():
+@pytest.mark.parametrize(
+    "client_error",
+    [
+        UrlValidationError("blocked host"),
+        HttpStatusError(415, "Unsupported Media Type", "https://example.com/x.mp4"),
+    ],
+)
+async def test_load_video_batch_prioritizes_typed_client_error(client_error):
     loader = VideoLoader()
-    client_error = HttpStatusError(
-        415, "Unsupported Media Type", "https://example.com/bad.mp4"
-    )
     loader.load_video = AsyncMock(  # type: ignore[method-assign]
         side_effect=[RuntimeError("decode failed"), client_error]
     )
 
-    with pytest.raises(HttpStatusError) as exc_info:
+    with pytest.raises(type(client_error)) as exc_info:
         await loader.load_video_batch(
             [
                 {"Url": "https://example.com/bad.mp4"},
                 {"Url": "https://example.com/unsupported.mp4"},
             ]
         )
+
+    assert exc_info.value is client_error
+
+
+@pytest.mark.asyncio
+async def test_load_video_batch_preserves_value_error():
+    loader = VideoLoader()
+    client_error = ValueError("invalid num_frames")
+    loader.load_video = AsyncMock(side_effect=client_error)  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError) as exc_info:
+        await loader.load_video_batch([{"Url": "https://example.com/bad.mp4"}])
 
     assert exc_info.value is client_error
 
@@ -156,6 +172,41 @@ async def test_load_video_batch_reads_decoded_variant_with_metadata(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_load_video_batch_normalizes_rust_frontend_metadata(monkeypatch):
+    loader = VideoLoader(enable_frontend_decoding=False)
+    loader._enable_frontend_decoding = True
+    loader._nixl_connector = object()
+
+    frames = np.zeros((3, 2, 2, 3), dtype=np.uint8)
+    rust_metadata = {
+        "Video": {
+            "source_fps": 24.0,
+            "source_duration": 10.0,
+            "sampled_timestamps": [0.0, 5.0, 9.0],
+        }
+    }
+    monkeypatch.setattr(
+        video_loader_module,
+        "read_decoded_media_via_nixl",
+        AsyncMock(return_value=(frames, rust_metadata)),
+    )
+
+    [(loaded_frames, metadata)] = await loader.load_video_batch(
+        [{"Decoded": {"shape": [3, 2, 2, 3]}}]
+    )
+
+    np.testing.assert_array_equal(loaded_frames, frames)
+    assert metadata == {
+        "fps": 24.0,
+        "duration": 10.0,
+        "frames_indices": [0, 120, 216],
+        "total_num_frames": 240,
+        "video_backend": "dynamo_frontend",
+        "do_sample_frames": False,
+    }
+
+
+@pytest.mark.asyncio
 async def test_decode_video_bytes_routes_h264_to_nvdec(monkeypatch):
     loader = VideoLoader()
     frames = np.zeros((2, 4, 6, 3), dtype=np.uint8)
@@ -163,7 +214,9 @@ async def test_decode_video_bytes_routes_h264_to_nvdec(monkeypatch):
     monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "h264")
     monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: True)
     monkeypatch.setattr(
-        video_loader_module, "decode_video_nvdec", lambda b, n: (frames, meta)
+        video_loader_module,
+        "decode_video_nvdec",
+        lambda content, **kwargs: (frames, meta),
     )
     media_io = _RecordingMediaIO(frames)
 

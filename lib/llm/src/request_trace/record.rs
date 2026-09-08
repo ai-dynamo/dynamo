@@ -14,6 +14,7 @@ use super::RequestTraceEventType;
 use super::RequestTraceMetrics;
 use super::RequestTraceRecord;
 use super::RequestTraceSchema;
+use super::RequestTraceWorkerInfo;
 use super::publish;
 
 fn unix_time_ms() -> u64 {
@@ -54,33 +55,42 @@ pub(crate) fn emit_request_end(
     tracker: &RequestTracker,
     replay: RequestReplayMetrics,
 ) {
-    let request_received_ms = tracker.request_received_epoch_ms();
-    let event_time_unix_ms = tracker
-        .total_time_ms()
-        .map_or_else(unix_time_ms, |elapsed| {
-            request_received_ms.saturating_add(elapsed.max(0.0).round() as u64)
+    let timing = tracker.get_timing_info();
+    let event_time_unix_ms = timing.total_time_ms.map_or_else(unix_time_ms, |elapsed| {
+        timing
+            .request_received_ms
+            .saturating_add(elapsed.max(0.0).round() as u64)
+    });
+    let worker = tracker
+        .get_worker_info()
+        .map(|worker| RequestTraceWorkerInfo {
+            prefill_worker_id: worker.prefill_worker_id,
+            prefill_dp_rank: worker.prefill_dp_rank,
+            decode_worker_id: worker.decode_worker_id,
+            decode_dp_rank: worker.decode_dp_rank,
         });
 
-    let request = RequestTraceMetrics {
+    let mut request = RequestTraceMetrics {
         request_id,
         x_request_id: None,
         model: None,
-        input_tokens: None,
+        input_tokens: tracker.isl_tokens().map(|v| v as u64),
         output_tokens: Some(tracker.osl_tokens()),
-        cached_tokens: None,
-        request_received_ms: Some(request_received_ms),
-        prefill_wait_time_ms: None,
-        prefill_time_ms: None,
-        ttft_ms: None,
-        total_time_ms: None,
-        avg_itl_ms: None,
-        kv_hit_rate: None,
-        kv_transfer_estimated_latency_ms: None,
-        queue_depth: None,
-        worker: None,
+        cached_tokens: tracker.cached_tokens().map(|v| v as u64),
+        request_received_ms: Some(timing.request_received_ms),
+        prefill_wait_time_ms: timing.prefill_wait_time_ms,
+        prefill_time_ms: timing.prefill_time_ms,
+        ttft_ms: timing.ttft_ms,
+        total_time_ms: timing.total_time_ms,
+        avg_itl_ms: tracker.avg_itl_ms(),
+        kv_hit_rate: timing.kv_hit_rate,
+        kv_transfer_estimated_latency_ms: timing.kv_transfer_estimated_latency_ms,
+        queue_depth: timing.router_queue_depth.map(|v| v as u64),
+        worker,
         replay: Some(replay),
         finish_reason_metadata: None,
     };
+    sanitize_request(&mut request);
 
     publish(RequestTraceRecord {
         schema: RequestTraceSchema::V1,
@@ -183,6 +193,8 @@ mod tests {
         BUS.init(16);
         let mut rx = BUS.subscribe();
         let tracker = RequestTracker::new();
+        tracker.record_isl(8, Some(4));
+        tracker.record_kv_hit(2.0, 4);
         tracker.record_osl(7);
         tracker.record_finish();
 
@@ -208,7 +220,10 @@ mod tests {
         };
         let request = record.request.as_ref().expect("request payload");
         assert_eq!(request.request_id, "req-1");
+        assert_eq!(request.input_tokens, Some(8));
         assert_eq!(request.output_tokens, Some(7));
+        assert_eq!(request.cached_tokens, Some(4));
+        assert_eq!(request.kv_hit_rate, Some(0.5));
         assert_eq!(
             request.request_received_ms,
             Some(tracker.request_received_epoch_ms())

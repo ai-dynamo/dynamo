@@ -1,11 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! End-to-end coverage for chat template rendering failures over HTTP.
+//! End-to-end coverage for preprocessor-raised client errors over HTTP.
 //!
 //! Rendering only consumes the request, so a template that refuses to render is a client
 //! error: the frontend must answer 400 with a JSON body on both the streaming and the
 //! non-streaming path, and must not reject inputs the model's own template accepts.
+//!
+//! Guided-decoding conflicts are the same class. Both are raised inside
+//! `OpenAIPreprocessor` and typed `InvalidArgument`, and both depend on that type
+//! surviving the operator chain to reach `ErrorMessage::from_anyhow`. Unit tests that
+//! call `extract_sampling_options` and `from_anyhow` directly pin the two ends and not
+//! the pipeline between them, so a `map_err` anywhere in the middle that rebuilds the
+//! error with `anyhow!("{e}")` would drop the source chain and silently restore the 500.
 
 use std::sync::Arc;
 
@@ -221,6 +228,25 @@ impl TestService {
             .expect("POST /v1/chat/completions failed")
     }
 
+    async fn post_conflicting_guided_decoding(&self, stream: bool) -> reqwest::Response {
+        self.client
+            .post(format!(
+                "http://127.0.0.1:{}/v1/chat/completions",
+                self.port
+            ))
+            .json(&serde_json::json!({
+                "model": ACCEPTING_MODEL,
+                "stream": stream,
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "hi"}],
+                "guided_json": {"type": "object"},
+                "guided_regex": "a+"
+            }))
+            .send()
+            .await
+            .expect("POST /v1/chat/completions failed")
+    }
+
     async fn shutdown(self) {
         self.cancel.cancel();
         self.join
@@ -274,6 +300,42 @@ async fn assistant_only_history_succeeds_when_template_accepts_it() {
     assert_eq!(response.status(), StatusCode::OK);
     let body: serde_json::Value = response.json().await.expect("response body was not JSON");
     assert_eq!(body["choices"][0]["message"]["content"], "ok", "{body}");
+
+    service.shutdown().await;
+}
+
+#[tokio::test]
+async fn guided_decoding_conflict_returns_400_json_not_sse() {
+    let service = TestService::start().await;
+
+    // The model's template accepts this message list, so the only thing that can fail is
+    // the guided-decoding conflict, raised while the preprocessor builds sampling options.
+    for stream in [false, true] {
+        let response = service.post_conflicting_guided_decoding(stream).await;
+
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "stream={stream}"
+        );
+        assert_eq!(
+            response.headers().get(reqwest::header::CONTENT_TYPE),
+            Some(&reqwest::header::HeaderValue::from_static(
+                "application/json"
+            )),
+            "stream={stream}"
+        );
+
+        let body: serde_json::Value = response.json().await.expect("error body was not JSON");
+        assert_eq!(body["code"], 400, "stream={stream}");
+        // Naming the conflicting fields is the point: the caller has to be able to tell
+        // which options collided, and the schema must not be echoed back into the body.
+        assert_eq!(
+            body["message"],
+            "Only one guided-decoding constraint can be set; received: json, regex",
+            "stream={stream}, body={body}"
+        );
+    }
 
     service.shutdown().await;
 }

@@ -12,10 +12,6 @@ pub(crate) struct Args {
     #[command(flatten)]
     pub sidecar: SidecarArgs,
 
-    /// TensorRT-LLM gRPC endpoint as host:port or an http:// URL.
-    #[arg(long, env = "TRTLLM_GRPC_ENDPOINT")]
-    pub trtllm_endpoint: String,
-
     /// Hugging Face model ID or local path used for tokenization and templates.
     #[arg(long)]
     pub model_path: String,

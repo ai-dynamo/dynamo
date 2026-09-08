@@ -19,6 +19,8 @@ from dynamo.common.multimodal import (
     NixlWriteEmbeddingSender,
 )
 from dynamo.common.multimodal.embedding_transfer import AbstractEmbeddingSender
+from dynamo.common.multimodal.image_loader import DECODED_VARIANT_KEY, URL_VARIANT_KEY
+from dynamo.common.multimodal.media_descriptor import decoded_content_hash_key
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.time_section import time_and_log_code_section
 from dynamo.runtime import DistributedRuntime
@@ -44,13 +46,78 @@ CACHE_SIZE_MAXIMUM = 8
 # scale worse than local. Need to investigate why.
 # [gluo NOTE] default off to benchmark standalone encoder
 ENABLE_ENCODER_CACHE = int(os.getenv("ENABLE_ENCODER_CACHE", 1))
+SPLIT_ENCODE = int(os.getenv("DYN_SPLIT_ENCODE", 1))
+
+
+def _load_image_processor(engine_args: AsyncEngineArgs):
+    processor_kwargs = getattr(engine_args, "mm_processor_kwargs", None) or {}
+    processor = AutoImageProcessor.from_pretrained(
+        engine_args.model,
+        trust_remote_code=engine_args.trust_remote_code,
+        **processor_kwargs,
+    )
+    logger.info(
+        "Encode worker image processor initialized with mm_processor_kwargs=%s",
+        processor_kwargs,
+    )
+    return processor
 
 
 @dataclass
 class EmbeddingItem:
-    key: str
+    # None when the item has no stable identity (e.g. a frontend-decoded
+    # descriptor without a canonical content hash); such items skip the cache.
+    key: str | None
     image_grid_thw: list
     embeddings: torch.Tensor
+
+
+def _prepare_embedding_transfers(
+    embedding_items: list[EmbeddingItem],
+    *,
+    coalesce: bool,
+    combined_embedding: torch.Tensor | None = None,
+) -> tuple[list[torch.Tensor], list[int | None]]:
+    """Return the tensors to transfer for one encode response.
+
+    Qwen-VL stores each image as ``[1, visual_tokens, hidden]``. When the
+    request is not split across encode workers, concatenate the token axis so
+    the response needs one transfer instead of one transfer per image.
+    """
+    tensors = [item.embeddings for item in embedding_items]
+    if not coalesce or len(tensors) <= 1:
+        return tensors, list(range(len(tensors)))
+
+    first = tensors[0]
+    if any(
+        tensor.ndim != 3 or tensor.shape[0] != 1 or tensor.shape[2] != first.shape[2]
+        for tensor in tensors
+    ):
+        raise ValueError(
+            "Coalesced embedding transfer requires matching "
+            "[1, visual_tokens, hidden] tensors"
+        )
+
+    expected_shape = (1, sum(tensor.shape[1] for tensor in tensors), first.shape[2])
+    if combined_embedding is not None:
+        if tuple(combined_embedding.shape) != expected_shape:
+            raise ValueError(
+                "Combined Qwen-VL embedding does not match its per-image views: "
+                f"expected={expected_shape}, actual={tuple(combined_embedding.shape)}"
+            )
+        transfer_tensor = combined_embedding
+    else:
+        transfer_tensor = torch.cat(tensors, dim=1)
+
+    return [transfer_tensor], [0, *([None] * (len(tensors) - 1))]
+
+
+def _should_coalesce_embedding_transfers(model: str, item_count: int) -> bool:
+    return (
+        not SPLIT_ENCODE
+        and item_count > 1
+        and resolve_model_family(model) is ModelFamily.QWEN_VL
+    )
 
 
 class EncodeWorkerHandler:
@@ -58,14 +125,18 @@ class EncodeWorkerHandler:
         self,
         engine_args: AsyncEngineArgs,
         embedding_transfer_mode: EmbeddingTransferMode,
+        enable_frontend_decoding: bool = False,
     ) -> None:
         self.engine_args = engine_args
         self.model = self.engine_args.model
 
-        self.image_loader = ImageLoader(cache_size=CACHE_SIZE_MAXIMUM)
-        self.image_processor = AutoImageProcessor.from_pretrained(
-            self.model, trust_remote_code=self.engine_args.trust_remote_code
+        self._enable_frontend_decoding = enable_frontend_decoding
+        self._decoded_content_hash_warning_emitted = False
+        self.image_loader = ImageLoader(
+            cache_size=CACHE_SIZE_MAXIMUM,
+            enable_frontend_decoding=enable_frontend_decoding,
         )
+        self.image_processor = _load_image_processor(self.engine_args)
         self.vision_model = load_vision_model(
             self.model,
             enforce_eager=self.engine_args.enforce_eager,
@@ -119,6 +190,52 @@ class EncodeWorkerHandler:
             (None, None)
         )  # Send sentinel value to stop the checker
 
+    def _image_cache_key(self, group_input) -> str | None:
+        """Validate one image group and return its embedding-cache key.
+
+        URL images hash the URL (unchanged from the URL-only path). Frontend-
+        decoded images reuse the canonical content hash serialized by the Rust
+        media decoder; a missing or malformed hash returns ``None`` and the
+        item is encoded without caching.
+        """
+        if group_input is None:
+            raise ValueError(
+                "image_url or image_decoded is required for the encode worker."
+            )
+        has_url = group_input.image_url is not None
+        has_decoded = group_input.image_decoded is not None
+        if not has_url and not has_decoded:
+            raise ValueError(
+                "image_url or image_decoded is required for the encode worker."
+            )
+        if has_url and has_decoded:
+            raise ValueError(
+                "Exactly one of image_url or image_decoded is allowed for the "
+                "encode worker."
+            )
+        if has_url:
+            return EmbeddingCache.generate_hash_key(group_input.image_url)
+        if not self._enable_frontend_decoding:
+            raise ValueError(
+                "Received a frontend-decoded image but --frontend-decoding is "
+                "not enabled on the encode worker. Enable it on both the "
+                "frontend-facing worker and the encode worker."
+            )
+        cache_key = decoded_content_hash_key(group_input.image_decoded)
+        if (
+            cache_key is None
+            and self.embedding_cache is not None
+            and not self._decoded_content_hash_warning_emitted
+        ):
+            logger.warning(
+                "Frontend-decoded image descriptor has a missing or invalid "
+                "canonical content_hash; this item will bypass the encode-worker "
+                "embedding cache. Ensure the frontend and encode worker use "
+                "compatible Dynamo versions and the descriptor is not corrupted."
+            )
+            self._decoded_content_hash_warning_emitted = True
+        return cache_key
+
     async def async_init(self, runtime: DistributedRuntime):
         """Initialize the connector for RDMA transfers"""
         logger.info("Encode worker startup started.")
@@ -144,7 +261,8 @@ class EncodeWorkerHandler:
         ), "multimodal_inputs must not be None for encode worker"
 
         # The following steps encode the requested image and provided useful embeddings.
-        # 1. Open the image from the provided URL.
+        # 1. Open the image from the provided URL, or read frontend-decoded
+        #    pixels via NIXL.
         # 2. Process the image using the image processor.
         # 3. Run the image through the vision model's vision tower.
         # 4. Run the results of the vision tower through the multi-modal projector.
@@ -155,6 +273,7 @@ class EncodeWorkerHandler:
 
         try:
             time_start = time.perf_counter()
+            encoded_embeddings: torch.Tensor | None = None
 
             with _nvtx.annotate("mm:enc:cache_check", color="cyan"):
                 # Before batch process images, check cache first
@@ -164,14 +283,10 @@ class EncodeWorkerHandler:
                 )
                 for idx in range(len(request.multimodal_inputs)):
                     group_input = request.multimodal_inputs[idx].multimodal_input
-                    if group_input is None or not group_input.image_url:
-                        raise ValueError("image_url is required for the encode worker.")
-
-                    image_url = group_input.image_url
-                    # see if we have local cache
-                    embedding_key = EmbeddingCache.generate_hash_key(image_url)
+                    embedding_key = self._image_cache_key(group_input)
                     if (
                         self.embedding_cache is not None
+                        and embedding_key is not None
                         and self.embedding_cache.has_key(embedding_key)
                     ):
                         (image_grid_thw, embeddings) = self.embedding_cache.get(
@@ -190,36 +305,20 @@ class EncodeWorkerHandler:
             ), time_and_log_code_section(
                 f"[ENCODE] request: {request_id} image loading"
             ):
-                # Load and generate image tensors
-                image_tasks = []
-                image_to_load = []
+                # Load URL images and read frontend-decoded pixels via NIXL.
+                # load_image_batch preserves order and aggregates per-item
+                # failures into a single raised error.
+                wire_items: list[dict[str, Any]] = []
                 for idx, _ in need_encode_indexes:
                     group_mm_input = request.multimodal_inputs[idx].multimodal_input
                     assert group_mm_input is not None
-                    assert group_mm_input.image_url is not None
-                    url: str = group_mm_input.image_url
-                    image_tasks.append(
-                        asyncio.create_task(self.image_loader.load_image(url))
-                    )
-                    image_to_load.append(url)
-                results = await asyncio.gather(*image_tasks, return_exceptions=True)
-                loaded_images = []
-                collective_exceptions = ""
-                for i, result in enumerate(results):
-                    if isinstance(result, Exception):
-                        url = image_to_load[i]
-                        logger.error(
-                            f"Failed to load image from {url[:80]}...: {result}"
+                    if group_mm_input.image_url is not None:
+                        wire_items.append({URL_VARIANT_KEY: group_mm_input.image_url})
+                    else:
+                        wire_items.append(
+                            {DECODED_VARIANT_KEY: group_mm_input.image_decoded}
                         )
-                        collective_exceptions += (
-                            f"Failed to load image from {url[:80]}...: {result}\n"
-                        )
-                        continue
-                    loaded_images.append(result)
-                if collective_exceptions:
-                    raise ValueError(
-                        f"Errors occurred during image loading:\n{collective_exceptions}"
-                    )
+                loaded_images = await self.image_loader.load_image_batch(wire_items)
 
             if loaded_images:
                 with _nvtx.annotate(
@@ -244,6 +343,7 @@ class EncodeWorkerHandler:
                         vision_encoder=self.vision_encoder,
                         projector=self.projector,
                     )
+                    encoded_embeddings = embeddings
                     # Sync XPU to ensure kernels complete before NIXL transfer.
                     if embeddings.device.type == "xpu":
                         torch.xpu.synchronize()
@@ -282,8 +382,8 @@ class EncodeWorkerHandler:
                     [image_grid_thw[split_idx]] if image_grid_thw else [],
                     splitted_embeddings[split_idx].unsqueeze(0),
                 )
-                # Cache the computed value for future use
-                if self.embedding_cache is not None:
+                # Cache the computed value for future use (unkeyed items skip)
+                if self.embedding_cache is not None and key is not None:
                     self.embedding_cache.set(
                         embedding_lists[list_idx].key,  # type: ignore
                         (
@@ -295,37 +395,69 @@ class EncodeWorkerHandler:
             before_transfer_time = time.perf_counter()
 
             with _nvtx.annotate("mm:enc:embedding_transfer", color="purple"):
-                # Prepare transfer
+                complete_items = [
+                    embedding_item
+                    for embedding_item in embedding_lists
+                    if embedding_item is not None
+                ]
+                if len(complete_items) != len(request.multimodal_inputs):
+                    raise RuntimeError(
+                        "Encode worker did not produce one embedding for every "
+                        f"multimodal input: expected={len(request.multimodal_inputs)}, "
+                        f"actual={len(complete_items)}"
+                    )
+
+                coalesce = _should_coalesce_embedding_transfers(
+                    self.model, len(complete_items)
+                )
+                combined_embedding = (
+                    encoded_embeddings
+                    if coalesce and len(need_encode_indexes) == len(complete_items)
+                    else None
+                )
+                transfer_tensors, transfer_indices = _prepare_embedding_transfers(
+                    complete_items,
+                    coalesce=coalesce,
+                    combined_embedding=combined_embedding,
+                )
                 send_tasks = [
                     asyncio.create_task(
                         self.embedding_sender.send_embeddings(
-                            embedding_item.embeddings, stage_embeddings=True
+                            transfer_tensor, stage_embeddings=True
                         )
                     )
-                    for embedding_item in embedding_lists
-                    if embedding_item is not None
+                    for transfer_tensor in transfer_tensors
                 ]
                 transfer_requests = await asyncio.gather(*send_tasks)
 
                 after_transfer_time = time.perf_counter()
 
-                for idx, item in enumerate(zip(embedding_lists, transfer_requests)):
-                    embedding_item, transfer_request = item
-                    assert embedding_item is not None
+                for idx, embedding_item in enumerate(complete_items):
                     logger.debug(
                         f"{embedding_item.embeddings.shape} prepared for transfer."
                     )
-                    # Update request for transfer metadata
+                    # Update request for transfer metadata. Drop the media
+                    # source (URL / decoded descriptor) — the caller only
+                    # needs the embedding transfer metadata back.
                     group = request.multimodal_inputs[idx]
                     assert group.multimodal_input is not None
                     group.multimodal_input.image_url = None
+                    group.multimodal_input.image_decoded = None
                     group.image_grid_thw = embedding_item.image_grid_thw
                     group.embeddings_shape = tuple(embedding_item.embeddings.shape)  # type: ignore[assignment]
-                    group.serialized_request = transfer_request[0]
+                    transfer_idx = transfer_indices[idx]
+                    group.serialized_request = (
+                        None
+                        if transfer_idx is None
+                        else transfer_requests[transfer_idx][0]
+                    )
 
-                    # Keep a reference of the embedding and only drop reference when the transfer is done
+                for transfer_request, transfer_tensor in zip(
+                    transfer_requests, transfer_tensors, strict=True
+                ):
+                    # Keep the transfer buffer alive until the transfer completes.
                     self.send_complete_queue.put_nowait(
-                        (transfer_request[1], embedding_item.embeddings)
+                        (transfer_request[1], transfer_tensor)
                     )
 
             payload = request.model_dump_json()

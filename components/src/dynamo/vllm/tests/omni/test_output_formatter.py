@@ -354,25 +354,94 @@ class TestAudioFormatterEncode:
         assert media_type == "audio/wav"
 
     @pytest.mark.parametrize(
-        ("input_shape", "output_shape", "num_channels"),
+        ("input_shape", "output_shape", "num_channels", "channel_axis"),
         [
-            ((8,), (8,), 1),
-            ((1, 2), (2, 1), 1),
-            ((2, 1), (1, 2), 2),
-            ((1, 2, 8), (8, 2), 2),
+            ((8,), (8,), 1, None),
+            ((1, 2), (2, 1), 1, 0),
+            ((2, 1), (1, 2), 2, 0),
+            ((8, 1), (8, 1), 1, 1),
+            ((8, 2), (8, 2), 2, 1),
+            ((1, 2, 8), (8, 2), 2, 0),
+            ((1, 8, 2), (8, 2), 2, 1),
         ],
     )
-    def test_normalizes_vllm_omni_channel_first_layout(
-        self, input_shape, output_shape, num_channels
+    def test_normalizes_supported_audio_layouts(
+        self, input_shape, output_shape, num_channels, channel_axis
     ):
-        normalized, actual_channels = AudioFormatter._normalize_audio_layout(
+        (
+            normalized,
+            actual_channels,
+            actual_axis,
+        ) = AudioFormatter._normalize_audio_layout(
             np.zeros(input_shape, dtype=np.float32)
         )
 
         assert normalized.shape == output_shape
         assert actual_channels == num_channels
+        assert actual_axis == channel_axis
 
-    @pytest.mark.parametrize("shape", [(2, 1, 8), (3, 8), (1, 1, 1, 8)])
+    def test_warns_when_ambiguous_without_established_layout(self, caplog):
+        with caplog.at_level("WARNING", logger="dynamo.vllm.omni.output_formatter"):
+            (
+                normalized,
+                actual_channels,
+                actual_axis,
+            ) = AudioFormatter._normalize_audio_layout(
+                np.zeros((2, 2), dtype=np.float32)
+            )
+
+        assert normalized.shape == (2, 2)
+        assert actual_channels == 2
+        assert actual_axis == 0
+        assert "without an established channel layout" in caplog.text
+        assert "assuming vLLM-Omni's channel-first layout" in caplog.text
+
+    @pytest.mark.parametrize(
+        ("input_shape", "expected_channels", "channel_axis", "output_shape"),
+        [
+            ((2, 1), 1, 1, (2, 1)),
+            ((2, 1), 2, 0, (1, 2)),
+            ((1, 2), 1, 0, (2, 1)),
+            ((1, 2), 2, 1, (1, 2)),
+        ],
+    )
+    def test_established_channel_axis_disambiguates_short_chunks(
+        self, input_shape, expected_channels, channel_axis, output_shape
+    ):
+        (
+            normalized,
+            actual_channels,
+            actual_axis,
+        ) = AudioFormatter._normalize_audio_layout(
+            np.zeros(input_shape, dtype=np.float32),
+            expected_channels=expected_channels,
+            expected_channel_axis=channel_axis,
+        )
+
+        assert normalized.shape == output_shape
+        assert actual_channels == expected_channels
+        assert actual_axis == channel_axis
+
+    def test_established_channel_axis_preserves_square_chunk_order(self):
+        audio = np.array([[0.1, 0.2], [0.3, 0.4]], dtype=np.float32)
+
+        channel_first, _, channel_first_axis = AudioFormatter._normalize_audio_layout(
+            audio,
+            expected_channels=2,
+            expected_channel_axis=0,
+        )
+        frame_major, _, frame_major_axis = AudioFormatter._normalize_audio_layout(
+            audio,
+            expected_channels=2,
+            expected_channel_axis=1,
+        )
+
+        np.testing.assert_array_equal(channel_first, audio.T)
+        np.testing.assert_array_equal(frame_major, audio)
+        assert channel_first_axis == 0
+        assert frame_major_axis == 1
+
+    @pytest.mark.parametrize("shape", [(2, 1, 8), (3, 8), (8, 3), (1, 1, 1, 8)])
     def test_rejects_unsupported_audio_layout(self, shape):
         with pytest.raises(ValueError):
             AudioFormatter._normalize_audio_layout(np.zeros(shape, dtype=np.float32))
@@ -463,6 +532,125 @@ class TestAudioFormatterFormat:
         assert [len(chunk) for chunk in chunks] == [2, 2]
 
     @pytest.mark.asyncio
+    async def test_streaming_uses_established_layout_for_short_chunk(self):
+        formatter = AudioFormatter("test", None, None)
+        state = AudioStreamState()
+
+        first = await formatter.format(
+            {"audio": np.zeros((8, 1), dtype=np.float32), "sr": 24000},
+            "req-1",
+            output_format="pcm",
+            audio_stream_state=state,
+        )
+        second = await formatter.format(
+            {"audio": np.zeros((2, 1), dtype=np.float32), "sr": 24000},
+            "req-1",
+            output_format="pcm",
+            audio_stream_state=state,
+        )
+
+        assert first["status"] == "completed"
+        assert state.channel_axis == 1
+        assert second["status"] == "completed"
+        assert state.num_channels == 1
+        assert len(base64.b64decode(second["data"][0]["b64_json"])) == 4
+
+    @pytest.mark.asyncio
+    async def test_streaming_uses_established_axis_for_square_chunk(self):
+        formatter = AudioFormatter("test", None, None)
+        state = AudioStreamState()
+        square_chunk = np.array(
+            [[0.1, 0.2], [0.3, 0.4]],
+            dtype=np.float32,
+        )
+
+        await formatter.format(
+            {"audio": np.zeros((8, 2), dtype=np.float32), "sr": 24000},
+            "req-1",
+            output_format="pcm",
+            audio_stream_state=state,
+        )
+        response = await formatter.format(
+            {"audio": square_chunk, "sr": 24000},
+            "req-1",
+            output_format="pcm",
+            audio_stream_state=state,
+        )
+        expected, _ = formatter._write_audio(square_chunk, 24000, "pcm")
+
+        assert state.channel_axis == 1
+        assert base64.b64decode(response["data"][0]["b64_json"]) == expected
+
+    @pytest.mark.asyncio
+    async def test_aggregate_uses_established_layout_for_short_chunk(self):
+        formatter = AudioFormatter("test", None, None)
+        state = AudioAggregateState()
+
+        first = await formatter.format(
+            {"audio": np.zeros((8, 1), dtype=np.float32), "sr": 24000},
+            "req-1",
+            audio_aggregate_state=state,
+        )
+        second = await formatter.format(
+            {"audio": np.zeros((2, 1), dtype=np.float32), "sr": 24000},
+            "req-1",
+            audio_aggregate_state=state,
+        )
+
+        assert first is None
+        assert second is None
+        assert state.channel_axis == 1
+        assert state.num_channels == 1
+        assert [chunk.shape for chunk in state.chunks] == [(1, 8), (1, 2)]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("first_audio", "first_sample_rate", "next_audio", "next_sample_rate", "error"),
+        [
+            (
+                np.zeros(8, dtype=np.float32),
+                24000,
+                np.zeros(8, dtype=np.float32),
+                16000,
+                "Audio sample rate changed",
+            ),
+            (
+                np.zeros((1, 8), dtype=np.float32),
+                24000,
+                np.zeros((2, 8), dtype=np.float32),
+                24000,
+                "Audio channel count changed",
+            ),
+        ],
+    )
+    async def test_streaming_rejects_audio_metadata_changes(
+        self,
+        first_audio,
+        first_sample_rate,
+        next_audio,
+        next_sample_rate,
+        error,
+    ):
+        formatter = AudioFormatter("test", None, None)
+        state = AudioStreamState()
+        first = await formatter.format(
+            {"audio": first_audio, "sr": first_sample_rate},
+            "req-1",
+            output_format="wav",
+            audio_stream_state=state,
+        )
+        second = await formatter.format(
+            {"audio": next_audio, "sr": next_sample_rate},
+            "req-1",
+            output_format="wav",
+            audio_stream_state=state,
+        )
+
+        assert first["status"] == "completed"
+        assert second["status"] == "failed"
+        assert error in second["error"]
+
+    @pytest.mark.asyncio
     async def test_aggregate_audio_is_encoded_once_with_speed_adjustment(
         self, monkeypatch
     ):
@@ -540,6 +728,8 @@ class TestAudioFormatterFormat:
 
         channel_major_chunk = await encode(channel_major)
         assert channel_major_chunk == await encode(channel_major[None, ...])
+        assert channel_major_chunk == await encode(channel_major.T)
+        assert channel_major_chunk == await encode(channel_major.T[None, ...])
         assert int.from_bytes(channel_major_chunk[22:24], "little") == 2
         assert int.from_bytes(channel_major_chunk[28:32], "little") == 96000
         assert int.from_bytes(channel_major_chunk[32:34], "little") == 4

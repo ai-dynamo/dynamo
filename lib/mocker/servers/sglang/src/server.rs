@@ -263,19 +263,15 @@ impl pb::sglang_service_server::SglangService for SglangMockerService {
         });
         let stream = async_stream::try_stream! {
             let _permit = permit;
-            let mut output_tokens = Vec::with_capacity(prepared.max_output_tokens);
+            // The sidecar contract enables SGLang's incremental streaming output,
+            // so each response contains only this chunk's token and metadata.
             while let Some(signal) = signal_rx.recv().await {
                 let token_id = checked_token(&signal).map_err(|status| *status)?;
-                output_tokens.push(token_id);
-                let output_ids = output_tokens
-                    .iter()
-                    .copied()
-                    .map(i32::try_from)
-                    .collect::<Result<Vec<_>, _>>()
+                let output_id = i32::try_from(token_id)
                     .map_err(|_| Status::internal("synthetic token ID does not fit i32"))?;
                 yield pb::GenerateResponse {
-                    output_ids,
-                    meta_info: prepared.meta_info(&output_tokens, signal.completed),
+                    output_ids: vec![output_id],
+                    meta_info: prepared.meta_info(&[token_id], signal.completed),
                     finished: signal.completed,
                 };
                 if signal.completed {
