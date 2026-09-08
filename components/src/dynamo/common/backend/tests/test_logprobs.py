@@ -340,7 +340,6 @@ def test_prompt_logprobs_sglang_handles_missing_decoded_token():
 
 # ---------------------------------------------------------------------------
 # annotate_input_logprobs_unavailable
-# ---------------------------------------------------------------------------
 
 # The literals are spelled out rather than imported: they are the wire contract
 # a client matches on, so a rename must fail here instead of following along.
