@@ -286,6 +286,8 @@ snapshot_vllm:
   - 'deploy/operator/internal/dynamo/backend_vllm.go'
 
 snapshot_sglang:
+  - 'tests/deploy/test_n2_rolling_upgrade.py'
+  - 'tests/deploy/dgd_utils.py'
   - 'components/src/dynamo/sglang/snapshot.py'
   - 'deploy/operator/internal/dynamo/backend_sglang.go'
 
@@ -388,6 +390,8 @@ sample:
   - '!**/*.rst'
 
 frontend:
+  - 'tests/deploy/test_n2_rolling_upgrade.py'
+  - 'tests/deploy/dgd_utils.py'
   - 'scripts/compatibility/**'
   - *ci
   - '.cargo/config.toml'

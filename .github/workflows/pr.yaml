@@ -204,6 +204,7 @@ jobs:
       - changed-files
       - dynamo-pipeline
       - cross-version-compatibility
+      - rolling-upgrade-compatibility
     if: always()
     steps:
       - name: Check all dynamo jobs
@@ -1138,7 +1139,10 @@ jobs:
     needs: [changed-files, frontend-build]
     if: |
       always() && !cancelled() &&
-      (needs.changed-files.outputs.snapshot == 'true' ||
+      (needs.changed-files.outputs.sglang == 'true' ||
+      needs.changed-files.outputs.frontend == 'true' ||
+      needs.changed-files.outputs.core == 'true' ||
+      needs.changed-files.outputs.snapshot == 'true' ||
       needs.changed-files.outputs.snapshot_vllm == 'true' ||
       needs.changed-files.outputs.snapshot_sglang == 'true' ||
       needs.changed-files.outputs.snapshot_trtllm == 'true') &&
@@ -1354,6 +1358,22 @@ jobs:
           # endpoint; empty vars -> no cache (workers download from HuggingFace).
           model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
+
+  rolling-upgrade-compatibility:
+    name: SGLang N-2 rolling upgrade
+    needs: [changed-files, operator, sglang-copy-to-acr, frontend-copy-to-acr]
+    if: |
+      needs.changed-files.outputs.run_deploy_tests == 'true' &&
+      (needs.changed-files.outputs.sglang == 'true' ||
+       needs.changed-files.outputs.frontend == 'true' ||
+       needs.changed-files.outputs.core == 'true')
+    uses: $/.github/workflows/rolling-upgrade-compatibility.yml
+    with:
+      frontend_tag: ${{ needs.frontend-copy-to-acr.outputs.image_tag }}
+      worker_tag: ${{ needs.sglang-copy-to-acr.outputs.image_tag }}
+      operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
+      source_ref: ${{ github.sha }}
+    secrets: inherit
 
   deploy-test-vllm:
     name: vllm Deploy Test
