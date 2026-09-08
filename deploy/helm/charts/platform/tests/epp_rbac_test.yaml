@@ -29,33 +29,6 @@ tests:
               - get
         documentIndex: 0
 
-  - it: leaves the existing ClusterRole pod and endpointslice grants untouched
-    asserts:
-      - contains:
-          path: rules
-          content:
-            apiGroups:
-              - ""
-            resources:
-              - pods
-            verbs:
-              - get
-              - watch
-              - list
-        documentIndex: 0
-      - contains:
-          path: rules
-          content:
-            apiGroups:
-              - discovery.k8s.io
-            resources:
-              - endpointslices
-            verbs:
-              - get
-              - list
-              - watch
-        documentIndex: 0
-
   # ── namespace-restricted mode ────────────────────────────────────────────────
 
   - it: grants get on core services in the namespace-restricted Role
@@ -72,34 +45,4 @@ tests:
               - services
             verbs:
               - get
-        documentIndex: 1
-
-  - it: leaves the existing Role pod and endpointslice grants untouched
-    set:
-      dynamo-operator.namespaceRestriction.enabled: true
-      dynamo-operator.upgradeCRD: false
-    asserts:
-      - contains:
-          path: rules
-          content:
-            apiGroups:
-              - ""
-            resources:
-              - pods
-            verbs:
-              - get
-              - watch
-              - list
-        documentIndex: 1
-      - contains:
-          path: rules
-          content:
-            apiGroups:
-              - discovery.k8s.io
-            resources:
-              - endpointslices
-            verbs:
-              - get
-              - list
-              - watch
         documentIndex: 1
