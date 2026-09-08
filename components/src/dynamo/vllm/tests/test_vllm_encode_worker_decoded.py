@@ -123,9 +123,8 @@ def test_image_processor_receives_engine_mm_processor_kwargs(monkeypatch):
 
 
 def test_cache_key_for_url_image_is_unchanged():
-    # Pinned literal, not a call to the helper the handler itself uses: the
-    # digest is a persisted cache key, so a worker on a new release must derive
-    # the same key an older worker did for the same URL.
+    # Pinned literal, not a call to the helper under test: this digest is a
+    # persisted cache key that must stay stable across releases.
     expected = "494a30704d4f32ac0b81739d18a66d3638d440cbc6f5669f6af66f840edee5ab"
     handler = _handler(frontend_decoding=False)
     group_input = MultiModalInput(image_url="https://example.com/a.png")
@@ -192,9 +191,8 @@ def test_configured_capacity_sizes_the_cache():
 
 
 def test_unset_capacity_falls_back_to_a_bounded_default():
-    # The capacity flag defaults to 0. Treating that as "disabled" here would
-    # turn off a cache that has always been on by default, so it is sized from
-    # DEFAULT_ENCODER_CACHE_CAPACITY_GB instead.
+    # A 0 capacity flag means 'unset', not 'disabled': the cache is still built
+    # and sized from DEFAULT_ENCODER_CACHE_CAPACITY_GB.
     cache = encode_worker_handler._build_embedding_cache(0)
 
     assert cache is not None
@@ -210,9 +208,8 @@ def test_encoder_cache_switch_disables_the_cache(monkeypatch):
 
 
 def test_store_path_evicts_instead_of_growing_past_capacity():
-    # Four 256 KiB embeddings through a 1 MiB cache fit; the fifth must push the
-    # oldest out rather than grow the cache, which is what the previous
-    # dict-backed cache did.
+    # Four 256 KiB embeddings fill the 1 MiB cache exactly; the fifth must evict
+    # the oldest rather than grow it.
     entry_bytes = 256 * 1024
     element_count = entry_bytes // torch.tensor([], dtype=torch.float32).element_size()
     handler = _handler(frontend_decoding=False, capacity_bytes=1 << 20)

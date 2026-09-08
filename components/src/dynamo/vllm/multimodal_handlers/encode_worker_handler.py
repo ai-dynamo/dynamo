@@ -52,11 +52,8 @@ CACHE_SIZE_MAXIMUM = 8
 ENABLE_ENCODER_CACHE = int(os.getenv("ENABLE_ENCODER_CACHE", 1))
 SPLIT_ENCODE = int(os.getenv("DYN_SPLIT_ENCODE", 1))
 
-# Capacity used when ENABLE_ENCODER_CACHE is on but
-# --multimodal-embedding-cache-capacity-gb was left at its 0 default. Reading
-# that 0 as "disabled" here would switch off a cache that has been on by
-# default for every deployment that never passed the flag, so the cache is
-# bounded at this size instead. A positive flag value overrides it.
+# Used when --multimodal-embedding-cache-capacity-gb is left at its 0 default;
+# ENABLE_ENCODER_CACHE, not the capacity flag, is what disables the cache.
 DEFAULT_ENCODER_CACHE_CAPACITY_GB = 4.0
 
 
@@ -293,9 +290,8 @@ class EncodeWorkerHandler:
         """
         if self.embedding_cache_manager is None or item.key is None:
             return
-        # The manager asserts contiguity to size the entry. These tensors are
-        # split views of one encoder output, so they share its storage and the
-        # entry is sized per view.
+        # The manager asserts contiguity when sizing an entry. These tensors are
+        # split views sharing one encoder output's storage, so sizing is per view.
         self.embedding_cache_manager.set(
             item.key,
             CachedEmbedding(
