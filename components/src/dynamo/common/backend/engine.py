@@ -115,6 +115,7 @@ class LlmRegistration:
 
     context_length: Optional[int] = None
     kv_cache_block_size: Optional[int] = None
+    # Physical KV capacity per router-visible DP rank, never a process aggregate.
     total_kv_blocks: Optional[int] = None
     max_num_seqs: Optional[int] = None
     max_num_batched_tokens: Optional[int] = None

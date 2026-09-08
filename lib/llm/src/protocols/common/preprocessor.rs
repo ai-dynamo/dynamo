@@ -383,6 +383,13 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mm_processor_kwargs: Option<serde_json::Value>,
 
+    /// Per-request media I/O options, forwarded untouched from the incoming request
+    /// when the worker owns media decoding. Absent when the frontend decoded the
+    /// media itself and already consumed them.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_io_kwargs: Option<serde_json::Value>,
+
     /// Optional request timestamp in milliseconds forwarded from nvext.
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -506,7 +513,13 @@ pub struct PreprocessedEmbeddingRequest {
     pub model: String,
 
     /// Encoding format preference
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub encoding_format: Option<String>,
+
+    /// Maximum prompt tokens requested by the client; -1 means the model limit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub truncate_prompt_tokens: Option<i64>,
 
     /// Number of dimensions for output embeddings (if supported)
     pub dimensions: Option<u32>,
@@ -535,6 +548,32 @@ impl PreprocessedEmbeddingRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedding_encoding_format_serde_omits_none() {
+        let mut request = PreprocessedEmbeddingRequest {
+            token_ids: vec![vec![1, 2, 3]],
+            model: "test-model".to_string(),
+            encoding_format: None,
+            truncate_prompt_tokens: None,
+            dimensions: None,
+            mdc_sum: None,
+            annotations: Vec::new(),
+        };
+
+        let omitted = serde_json::to_value(&request).unwrap();
+        assert!(omitted.get("encoding_format").is_none());
+        assert!(omitted.get("truncate_prompt_tokens").is_none());
+        let round_trip: PreprocessedEmbeddingRequest = serde_json::from_value(omitted).unwrap();
+        assert!(round_trip.encoding_format.is_none());
+        assert!(round_trip.truncate_prompt_tokens.is_none());
+
+        request.encoding_format = Some("float".to_string());
+        request.truncate_prompt_tokens = Some(-1);
+        let explicit = serde_json::to_value(&request).unwrap();
+        assert_eq!(explicit["encoding_format"], "float");
+        assert_eq!(explicit["truncate_prompt_tokens"], -1);
+    }
 
     #[test]
     fn attach_router_hint_preserves_extra_args_object() {

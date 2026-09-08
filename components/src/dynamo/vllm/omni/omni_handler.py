@@ -26,6 +26,7 @@ from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
 from dynamo._core import Context
 from dynamo.common.multimodal import ImageLoader
+from dynamo.common.protocols import sanitize_media_passthrough
 from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
 from dynamo.common.protocols.image_protocol import ImageNvExt, NvCreateImageRequest
 from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
@@ -47,17 +48,51 @@ from dynamo.llm.exceptions import EngineShutdown
 from dynamo.vllm.handlers import get_lora_manager
 from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
-from dynamo.vllm.omni.output_formatter import OutputFormatter
+from dynamo.vllm.omni.output_formatter import (
+    AudioAggregateState,
+    AudioStreamState,
+    OutputFormatter,
+)
 from dynamo.vllm.omni.utils import (
     build_image_generation_prompt,
     image_generation_negative_prompt_from_request,
     image_generation_sampling_overrides,
     image_generation_size_from_request,
+    streaming_sampling_params,
 )
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_VIDEO_FPS = 16
+
+
+def _apply_media_passthrough(
+    sp: OmniDiffusionSamplingParams, extra_args: Optional[Dict[str, Any]]
+) -> None:
+    """Hand frontend-forwarded passthrough knobs to the engine.
+
+    The frontend nests a request's unknown top-level fields (an OpenAI
+    client's ``extra_body``) under ``extra_args["media_passthrough"]``.
+    ``sanitize_media_passthrough`` drops the request if any knob names a
+    path/checkpoint or a policy control, then the rest ride ``sp.extra_args``
+    to the engine. Nothing is set on the sampling params by attribute name:
+    a caller-controlled key must not choose which attribute it writes.
+    """
+    knobs = sanitize_media_passthrough(extra_args)
+    if not knobs:
+        return
+    existing = getattr(sp, "extra_args", None)
+    if isinstance(existing, dict):
+        existing.update(knobs)
+    else:
+        try:
+            sp.extra_args = knobs
+        except (AttributeError, TypeError):
+            logger.warning(
+                "Dropping media passthrough knobs %s: sampling params expose "
+                "no extra_args",
+                sorted(knobs),
+            )
 
 
 @dataclass
@@ -84,6 +119,7 @@ class EngineInputs:
     response_format: str | None = None
     output_format: str | None = None
     lora_request: LoRARequest | None = None
+    stream_audio: bool = False
 
 
 class OmniHandler(BaseOmniHandler):
@@ -351,6 +387,10 @@ class OmniHandler(BaseOmniHandler):
             "prompt": inputs.prompt,
             "request_id": request_id,
         }
+        if inputs.request_type == RequestType.AUDIO_GENERATION:
+            inputs.sampling_params_list = streaming_sampling_params(
+                self.engine_client, inputs.sampling_params_list
+            )
         if inputs.sampling_params_list is not None:
             generate_kwargs["sampling_params_list"] = inputs.sampling_params_list
             # Note: For diffusion paths, lora_request is embedded in sampling_params_list
@@ -361,6 +401,13 @@ class OmniHandler(BaseOmniHandler):
             generate_kwargs["lora_request"] = inputs.lora_request
 
         previous_text = ""
+        audio_stream_state = AudioStreamState() if inputs.stream_audio else None
+        audio_aggregate_state = (
+            AudioAggregateState()
+            if inputs.request_type == RequestType.AUDIO_GENERATION
+            and not inputs.stream_audio
+            else None
+        )
 
         def update_previous_text(stage_output: Any, current: str) -> str:
             if getattr(stage_output, "final_output_type", None) == "text" and getattr(
@@ -404,9 +451,21 @@ class OmniHandler(BaseOmniHandler):
                     output_format=inputs.output_format,
                     previous_text=previous_text,
                     speed=inputs.speed,
+                    audio_stream_state=audio_stream_state,
+                    audio_aggregate_state=audio_aggregate_state,
                 )
                 previous_text = update_previous_text(stage_output, previous_text)
                 yield {"stage_output": stage_output, "formatted_chunk": chunk}
+
+            if audio_aggregate_state is not None:
+                chunk = await self.output_formatter.finish_audio(
+                    request_id,
+                    audio_aggregate_state,
+                    response_format=inputs.response_format,
+                    output_format=inputs.output_format,
+                    speed=inputs.speed,
+                )
+                yield {"stage_output": None, "formatted_chunk": chunk}
 
         async with self._abort_monitor(context, request_id):
             try:
@@ -653,6 +712,7 @@ class OmniHandler(BaseOmniHandler):
         sp.seed = (
             nvext.seed if nvext.seed is not None else random.randint(0, 2**32 - 1)
         )
+        _apply_media_passthrough(sp, req.extra_args)
 
         sampling_params_list = self._build_sampling_params_list(sp)
         lora_request = self._resolve_and_apply_lora(req.model, sampling_params_list)
@@ -714,6 +774,7 @@ class OmniHandler(BaseOmniHandler):
         self._update_if_not_none(sp, "boundary_ratio", nvext.boundary_ratio)
         self._update_if_not_none(sp, "guidance_scale_2", nvext.guidance_scale_2)
         self._update_if_not_none(sp, "fps", fps)
+        _apply_media_passthrough(sp, req.extra_args)
 
         sampling_params_list = self._build_sampling_params_list(sp)
         lora_request = self._resolve_and_apply_lora(req.model, sampling_params_list)

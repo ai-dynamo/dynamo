@@ -895,8 +895,8 @@ mod tests {
         assert_eq!(
             candidates.owner_prefix_blocks,
             vec![
-                (WorkerWithDpRank::new(7, 0), 2),
-                (WorkerWithDpRank::new(8, 0), 3),
+                (WorkerWithDpRank::new(7, 0).into(), 2),
+                (WorkerWithDpRank::new(8, 0).into(), 3),
             ]
         );
     }

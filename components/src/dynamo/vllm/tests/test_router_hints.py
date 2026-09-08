@@ -128,6 +128,39 @@ def test_enable_router_hint_support_publishes_runtime_metadata(
     )
 
 
+def test_enable_router_hint_support_keeps_source_endpoint_off_state_agent_worker():
+    runtime_config = MagicMock()
+    engine_args = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector_extra_config={
+                "secondary_tiers": [
+                    {
+                        "type": "custom",
+                        "router_capabilities": ["router_hint"],
+                        "control_advertise_host": "127.0.0.1",
+                        "control_ports": ["23280"],
+                    }
+                ]
+            }
+        )
+    )
+
+    enable_router_hint_support(
+        runtime_config,
+        engine_args,
+        WorkerType.Prefill,
+        publish_source_endpoints=False,
+    )
+
+    published_keys = {
+        call.args[0] for call in runtime_config.set_engine_specific.call_args_list
+    }
+    assert published_keys == {
+        ROUTER_HINT_RUNTIME_CAPABILITY_KEY,
+        ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY,
+    }
+
+
 # Skip cases: without both router-hint capability and a supported worker role,
 # registration leaves runtime metadata untouched instead of failing.
 @pytest.mark.parametrize(

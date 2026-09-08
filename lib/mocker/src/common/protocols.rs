@@ -472,8 +472,17 @@ struct MockEngineArgsSerde {
     router_queue_policy: OptionalConfigValue<String>,
     sglang: OptionalConfigValue<SglangArgs>,
     trtllm: OptionalConfigValue<TrtllmArgs>,
+    timing_model: OptionalConfigValue<TimingModelSerde>,
     #[serde(rename = "has_perf_model")]
     _has_perf_model: OptionalConfigValue<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
+enum TimingModelSerde {
+    Default,
+    Polynomial,
+    Fixed { prefill_ms: f64, decode_ms: f64 },
 }
 
 fn load_perf_model(path: &Path) -> Arc<PerfModel> {
@@ -936,6 +945,31 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
             if let Some(path) = planner_profile_data {
                 builder = builder.perf_model(load_perf_model(&path));
             }
+        }
+        if let Some(timing_model) = compat.timing_model.into_nullable().flatten() {
+            let perf_model = match timing_model {
+                TimingModelSerde::Default | TimingModelSerde::Polynomial => PerfModel::Polynomial,
+                TimingModelSerde::Fixed {
+                    prefill_ms,
+                    decode_ms,
+                } => {
+                    if !prefill_ms.is_finite()
+                        || prefill_ms < 0.0
+                        || !decode_ms.is_finite()
+                        || decode_ms < 0.0
+                    {
+                        return Err(
+                            "fixed timing prefill_ms and decode_ms must be finite and nonnegative"
+                                .to_string(),
+                        );
+                    }
+                    PerfModel::Fixed {
+                        prefill_ms,
+                        decode_ms,
+                    }
+                }
+            };
+            builder = builder.perf_model(Arc::new(perf_model));
         }
 
         if let Some(aic_backend) = compat.aic_backend.into_nullable() {

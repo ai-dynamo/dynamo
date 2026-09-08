@@ -17,9 +17,11 @@ import functools
 import json
 import logging
 import os
+from contextlib import contextmanager
 from enum import Enum
+from importlib import import_module
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 import torch
 from transformers import AutoModel
@@ -31,6 +33,30 @@ logger = logging.getLogger(__name__)
 # [gluo NOTE] Debug flag to compare vLLM encoder vs transformers encoder,
 # should be removed once there is proper way to extract vLLM encoder.
 VLLM_ENCODER = int(os.getenv("VLLM_ENCODER", 1))
+
+
+@contextmanager
+def _maybe_skip_encoder_only_kernel_warmup() -> Iterator[None]:
+    if os.getenv("DYN_VLLM_SKIP_ENCODER_ONLY_KERNEL_WARMUP") != "1":
+        yield
+        return
+
+    # vLLM imports kernel_warmup directly into gpu_worker, so patch the symbol
+    # used by GPUWorker.compile_or_warm_up_model. Encoder-only workers do not
+    # execute generation kernels; their vision encoder is warmed by real image
+    # requests instead. Keep this patch scoped to synchronous LLM construction
+    # and restore it even when initialization fails.
+    worker_module = import_module("vllm.v1.worker.gpu_worker")
+    original = getattr(worker_module, "kernel_warmup")
+
+    def kernel_warmup(*_args: Any, **_kwargs: Any) -> None:
+        logger.info("Skipping generation kernel warmup for mm_encoder_only worker")
+
+    setattr(worker_module, "kernel_warmup", kernel_warmup)
+    try:
+        yield
+    finally:
+        setattr(worker_module, "kernel_warmup", original)
 
 
 class ModelFamily(str, Enum):
@@ -172,20 +198,27 @@ def load_vision_model(
         # Load only the vision model via vLLM on encoder workers to avoid loading the full LLM weights, significantly reducing memory usage.
         # Uses native vLLM encoder only model loading added in https://github.com/vllm-project/vllm/pull/32605.
         # Load only the vision model via vLLM
-        vllm_model = LLM(
-            model=model_id,
-            enforce_eager=enforce_eager,
-            trust_remote_code=trust_remote_code,
-            # vLLM's free-memory precheck runs before kv_cache_memory_bytes applies;
-            # default 0.9 fails on <=24 GiB GPUs when another worker shares the device.
-            gpu_memory_utilization=0.2,
-            kv_cache_memory_bytes=1024
-            * 1024
-            * 64,  # 64MB KV cache for vLLM to complete the init lifecycle, encoder-only doesn't require KV cache.
-            max_model_len=1,
-            mm_encoder_only=True,
-            enable_prefix_caching=False,
-        )
+        with _maybe_skip_encoder_only_kernel_warmup():
+            vllm_model = LLM(
+                model=model_id,
+                enforce_eager=enforce_eager,
+                trust_remote_code=trust_remote_code,
+                # vLLM's free-memory precheck runs before kv_cache_memory_bytes applies;
+                # default 0.9 fails on <=24 GiB GPUs when another worker shares the device.
+                gpu_memory_utilization=float(
+                    os.getenv("DYN_VLLM_ENCODER_GPU_MEMORY_UTILIZATION", "0.2")
+                ),
+                kv_cache_memory_bytes=int(
+                    os.getenv(
+                        "DYN_VLLM_ENCODER_KV_CACHE_MEMORY_BYTES",
+                        str(1024 * 1024 * 64),
+                    )
+                ),  # Encoder-only needs only enough KV for vLLM's init lifecycle.
+                max_num_seqs=int(os.getenv("DYN_VLLM_ENCODER_MAX_NUM_SEQS", "64")),
+                max_model_len=1,
+                mm_encoder_only=True,
+                enable_prefix_caching=False,
+            )
         return (
             vllm_model.llm_engine.engine_core.engine_core.model_executor.driver_worker.worker.model_runner.model.visual
         )

@@ -37,6 +37,9 @@ pub const DYN_ROUTER_PREFILL_POLICY: &str = "DYN_ROUTER_PREFILL_POLICY";
 /// Selects a configured custom worker-selection policy instance for decode workers.
 pub const DYN_ROUTER_DECODE_POLICY: &str = "DYN_ROUTER_DECODE_POLICY";
 
+/// Selects the process-local retention policy for a primary approximate indexer.
+pub const DYN_ROUTER_APPROXIMATE_CACHE_POLICY: &str = "DYN_ROUTER_APPROXIMATE_CACHE_POLICY";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WorkerSelectionPolicySelections {
     pub(crate) aggregated: Option<String>,
@@ -187,6 +190,16 @@ fn log_env_config(config: &KvRouterConfig) {
         conditional_disagg_prefill_busy_threshold = ?config.conditional_disagg_prefill_busy_threshold,
         conditional_disagg_decode_busy_threshold = ?config.conditional_disagg_decode_busy_threshold,
         router_predicted_ttl_secs = ?config.router_predicted_ttl_secs,
+        router_ttl_secs = config.router_ttl_secs,
+        router_event_threads = config.router_event_threads,
+        router_queue_policy = %config.router_queue_policy,
+        use_remote_indexer = config.use_remote_indexer,
+        shared_cache_multiplier = config.shared_cache_multiplier,
+        shared_cache_type = %config.shared_cache_type,
+        host_cache_hit_weight = config.host_cache_hit_weight,
+        disk_cache_hit_weight = config.disk_cache_hit_weight,
+        router_prefill_load_model = %config.router_prefill_load_model,
+        router_approximate_cache_policy = %config.router_approximate_cache_policy,
         "KvRouterConfig initialized (DYN_* env overrides applied)"
     );
 }
@@ -199,6 +212,10 @@ fn kv_router_config_from_lookup(
     }
 
     fn parse_usize(get_env: &impl Fn(&str) -> Option<String>, key: &str) -> Option<usize> {
+        get_env(key).and_then(|value| value.parse().ok())
+    }
+
+    fn parse_u32(get_env: &impl Fn(&str) -> Option<String>, key: &str) -> Option<u32> {
         get_env(key).and_then(|value| value.parse().ok())
     }
 
@@ -238,7 +255,10 @@ fn kv_router_config_from_lookup(
     if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_TEMPERATURE") {
         config.router_temperature = value;
     }
-    if let Some(value) = parse_bool(&get_env, "DYN_USE_KV_EVENTS") {
+    // Read the canonical name first, then the Rust-only alias for backward compatibility.
+    let use_kv_events = parse_bool(&get_env, "DYN_ROUTER_USE_KV_EVENTS")
+        .or_else(|| parse_bool(&get_env, "DYN_USE_KV_EVENTS"));
+    if let Some(value) = use_kv_events {
         config.use_kv_events = value;
     }
     if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_REPLICA_SYNC") {
@@ -309,6 +329,41 @@ fn kv_router_config_from_lookup(
     if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_PREDICTED_TTL_SECS") {
         config.router_predicted_ttl_secs = Some(value);
     }
+    if let Some(value) = get_env(DYN_ROUTER_APPROXIMATE_CACHE_POLICY) {
+        config.router_approximate_cache_policy = value.parse()?;
+    }
+    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_TTL_SECS") {
+        config.router_ttl_secs = value;
+    }
+    if let Some(value) = parse_u32(&get_env, "DYN_ROUTER_EVENT_THREADS") {
+        config.router_event_threads = value;
+    }
+    if let Some(value) = get_env("DYN_ROUTER_QUEUE_POLICY") {
+        config.router_queue_policy = value.parse()?;
+    }
+    if let Some(value) = parse_bool(&get_env, "DYN_USE_REMOTE_INDEXER") {
+        config.use_remote_indexer = value;
+    }
+    let mut shared_cache_multiplier_set = false;
+    if let Some(value) = parse_f64(&get_env, "DYN_SHARED_CACHE_MULTIPLIER") {
+        config.shared_cache_multiplier = value;
+        shared_cache_multiplier_set = true;
+    }
+    if let Some(value) = get_env("DYN_SHARED_CACHE_TYPE") {
+        config.shared_cache_type = value.parse()?;
+    }
+    if config.shared_cache_type != SharedCacheType::None && !shared_cache_multiplier_set {
+        config.shared_cache_multiplier = 0.5;
+    }
+    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_HOST_CACHE_HIT_WEIGHT") {
+        config.host_cache_hit_weight = value;
+    }
+    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_DISK_CACHE_HIT_WEIGHT") {
+        config.disk_cache_hit_weight = value;
+    }
+    if let Some(value) = get_env("DYN_ROUTER_PREFILL_LOAD_MODEL") {
+        config.router_prefill_load_model = value.parse()?;
+    }
 
     Ok(config)
 }
@@ -333,6 +388,42 @@ pub enum SharedCacheType {
     None,
     /// HiCache L3 shared cache — queries sglang workers via the request plane.
     Hicache,
+}
+
+/// Retention policy for a router-local primary approximate indexer.
+///
+/// This selector is intentionally process-local. Workers do not advertise it in
+/// model cards because request lifetime and release ownership live in the router.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ApproximateCachePolicyKind {
+    /// Expire predicted entries after `router_ttl_secs`.
+    #[default]
+    Ttl,
+    /// Retain predicted entries until per-rank KV capacity requires LRU eviction.
+    Lru,
+}
+
+impl fmt::Display for ApproximateCachePolicyKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ttl => f.write_str("ttl"),
+            Self::Lru => f.write_str("lru"),
+        }
+    }
+}
+
+impl FromStr for ApproximateCachePolicyKind {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "ttl" => Ok(Self::Ttl),
+            "lru" => Ok(Self::Lru),
+            _ => Err(format!(
+                "unknown approximate cache policy {value:?}, expected 'ttl' or 'lru'"
+            )),
+        }
+    }
 }
 
 impl fmt::Display for SharedCacheType {
@@ -727,6 +818,13 @@ pub struct KvRouterConfig {
     /// TTL for blocks in seconds (only used when use_kv_events is false, default: 120.0)
     pub router_ttl_secs: f64,
 
+    /// Process-local retention policy for a primary approximate indexer.
+    ///
+    /// This value is deliberately omitted from worker model cards. It is only
+    /// meaningful on the router process that owns request guards and releases.
+    #[serde(skip)]
+    pub router_approximate_cache_policy: ApproximateCachePolicyKind,
+
     /// Queue threshold fraction for prefill token capacity.
     /// When set, requests are queued if all workers exceed this fraction of max_num_batched_tokens.
     /// If None, queueing is disabled and all requests go directly to ready.
@@ -871,6 +969,7 @@ impl Default for KvRouterConfig {
             router_tracking_key_id: None,
             router_prefill_load_model: RouterPrefillLoadModel::default(),
             router_ttl_secs: 120.0,
+            router_approximate_cache_policy: ApproximateCachePolicyKind::default(),
             router_queue_threshold: None,
             router_policy_config: None,
             router_prefill_policy: None,
@@ -934,6 +1033,7 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             router_tracking_key_id: compat.router_tracking_key_id,
             router_prefill_load_model: compat.router_prefill_load_model,
             router_ttl_secs: compat.router_ttl_secs,
+            router_approximate_cache_policy: ApproximateCachePolicyKind::default(),
             router_queue_threshold: compat.router_queue_threshold,
             router_policy_config: compat.router_policy_config,
             router_prefill_policy: None,
@@ -987,6 +1087,14 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), String> {
     }
     if config.router_predicted_ttl_secs.is_some() && !config.use_kv_events {
         return Err("router_predicted_ttl_secs requires use_kv_events=true".to_string());
+    }
+    if config.use_kv_events
+        && config.router_approximate_cache_policy == ApproximateCachePolicyKind::Lru
+    {
+        return Err(
+            "router_approximate_cache_policy=lru requires use_kv_events=false; the local side indexer is TTL-only"
+                .to_string(),
+        );
     }
     if config.conditional_disagg_enabled
         && matches!(
@@ -1123,26 +1231,37 @@ impl KvRouterConfig {
         })
     }
 
-    /// Return whether a custom stage-specific worker-selection setting was configured.
-    ///
-    /// Standalone hosts use this to warn that prefill, decode, and encode settings only apply to
-    /// typed worker pools in the embedded frontend.
-    pub fn has_explicit_stage_worker_selection_policy(
+    /// Return worker roles with a non-default policy selected after applying standard precedence.
+    pub fn explicit_worker_selection_policy_types(
         &self,
-    ) -> Result<bool, WorkerSelectionPolicyConfigError> {
-        fn is_custom(value: Option<&str>) -> bool {
-            value.is_some_and(|name| {
-                let name = name.trim();
-                !name.is_empty() && name != "default"
-            })
-        }
+    ) -> Result<Vec<WorkerType>, WorkerSelectionPolicyConfigError> {
+        let selected = match env::var(DYN_ROUTER_WORKER_SELECTION_POLICY) {
+            Ok(name) => Ok(Some(name)),
+            Err(VarError::NotPresent) => Ok(None),
+            Err(source) => Err(source),
+        };
+        self.explicit_worker_selection_policy_types_from(selected)
+    }
 
-        let policy_config = self
-            .worker_selection_config()
-            .map_err(|source| WorkerSelectionPolicyConfigError::Config { source })?;
-        Ok(is_custom(self.router_prefill_policy.as_deref())
-            || is_custom(self.router_decode_policy.as_deref())
-            || policy_config.is_some_and(|config| config.has_explicit_stage_selection()))
+    fn explicit_worker_selection_policy_types_from(
+        &self,
+        selected: Result<Option<String>, VarError>,
+    ) -> Result<Vec<WorkerType>, WorkerSelectionPolicyConfigError> {
+        let WorkerSelectionPolicySelections {
+            aggregated,
+            prefill,
+            decode,
+            encode,
+        } = self.selected_worker_selection_policy_instances_from(selected)?;
+        Ok([
+            (WorkerType::Aggregated, aggregated),
+            (WorkerType::Prefill, prefill),
+            (WorkerType::Decode, decode),
+            (WorkerType::Encode, encode),
+        ]
+        .into_iter()
+        .filter_map(|(worker_type, selection)| selection.map(|_| worker_type))
+        .collect())
     }
 
     #[cfg(test)]
@@ -1484,7 +1603,7 @@ mod tests {
             ("DYN_ROUTER_PREFILL_LOAD_SCALE", "2.5"),
             ("DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT", "32"),
             ("DYN_ROUTER_TEMPERATURE", "0.7"),
-            ("DYN_USE_KV_EVENTS", "false"),
+            ("DYN_ROUTER_USE_KV_EVENTS", "false"),
             ("DYN_ROUTER_REPLICA_SYNC", "yes"),
             ("DYN_ROUTER_TRACK_ACTIVE_BLOCKS", "0"),
             ("DYN_ROUTER_TRACK_OUTPUT_BLOCKS", "on"),
@@ -1497,8 +1616,18 @@ mod tests {
             ),
             ("DYN_ROUTER_TRACKING_KEY_ID", "2026-01"),
             ("DYN_ROUTER_QUEUE_THRESHOLD", "4.5"),
+            ("DYN_ROUTER_TTL_SECS", "300"),
+            ("DYN_ROUTER_EVENT_THREADS", "8"),
+            ("DYN_ROUTER_QUEUE_POLICY", "wspt"),
+            ("DYN_USE_REMOTE_INDEXER", "true"),
+            ("DYN_SHARED_CACHE_MULTIPLIER", "0.5"),
+            ("DYN_SHARED_CACHE_TYPE", "hicache"),
+            ("DYN_ROUTER_HOST_CACHE_HIT_WEIGHT", "0.6"),
+            ("DYN_ROUTER_DISK_CACHE_HIT_WEIGHT", "0.3"),
+            ("DYN_ROUTER_PREFILL_LOAD_MODEL", "aic"),
             (DYN_ROUTER_PREFILL_POLICY, "prefill-cli"),
             (DYN_ROUTER_DECODE_POLICY, "decode-cli"),
+            (DYN_ROUTER_APPROXIMATE_CACHE_POLICY, "lru"),
         ]);
 
         assert_eq!(config.overlap_score_credit, 0.25);
@@ -1524,6 +1653,22 @@ mod tests {
         );
         assert_eq!(config.router_tracking_key_id.as_deref(), Some("2026-01"));
         assert_eq!(config.router_queue_threshold, Some(4.5));
+        assert_eq!(config.router_ttl_secs, 300.0);
+        assert_eq!(config.router_event_threads, 8);
+        assert_eq!(config.router_queue_policy, RouterQueuePolicy::Wspt);
+        assert!(config.use_remote_indexer);
+        assert_eq!(config.shared_cache_multiplier, 0.5);
+        assert_eq!(config.shared_cache_type, SharedCacheType::Hicache);
+        assert_eq!(config.host_cache_hit_weight, 0.6);
+        assert_eq!(config.disk_cache_hit_weight, 0.3);
+        assert_eq!(
+            config.router_prefill_load_model,
+            RouterPrefillLoadModel::Aic
+        );
+        assert_eq!(
+            config.router_approximate_cache_policy,
+            ApproximateCachePolicyKind::Lru
+        );
 
         let predicted = config_from_values(&[("DYN_ROUTER_PREDICTED_TTL_SECS", "60")]);
         assert_eq!(predicted.router_predicted_ttl_secs, Some(60.0));
@@ -1548,6 +1693,22 @@ mod tests {
         ]);
         assert_eq!(disabled.overlap_score_credit, 0.0);
         assert_eq!(disabled.prefill_load_scale, 0.0);
+    }
+
+    #[test]
+    fn dynamo_env_config_prefers_canonical_use_kv_events_name() {
+        let canonical_false = config_from_values(&[("DYN_ROUTER_USE_KV_EVENTS", "false")]);
+        assert!(!canonical_false.use_kv_events);
+
+        let legacy_false = config_from_values(&[("DYN_USE_KV_EVENTS", "false")]);
+        assert!(!legacy_false.use_kv_events);
+
+        // Canonical name wins when both are set.
+        let canonical_wins = config_from_values(&[
+            ("DYN_ROUTER_USE_KV_EVENTS", "false"),
+            ("DYN_USE_KV_EVENTS", "true"),
+        ]);
+        assert!(!canonical_wins.use_kv_events);
     }
 
     #[test]
@@ -1578,6 +1739,20 @@ mod tests {
 
         let error = try_config_from_values(&[("DYN_ROUTER_TRACKING_HASH", "mystery")]).unwrap_err();
         assert!(error.contains("public-xxh3-v1 or keyed-xxh3-v1"));
+
+        let error =
+            try_config_from_values(&[(DYN_ROUTER_APPROXIMATE_CACHE_POLICY, "clock")]).unwrap_err();
+        assert!(error.contains("expected 'ttl' or 'lru'"));
+
+        let error = try_config_from_values(&[("DYN_ROUTER_QUEUE_POLICY", "random")]).unwrap_err();
+        assert!(error.contains("expected 'fcfs', 'lcfs', or 'wspt'"));
+
+        let error = try_config_from_values(&[("DYN_SHARED_CACHE_TYPE", "rdma")]).unwrap_err();
+        assert!(error.contains("expected 'none' or 'hicache'"));
+
+        let error =
+            try_config_from_values(&[("DYN_ROUTER_PREFILL_LOAD_MODEL", "fast")]).unwrap_err();
+        assert!(error.contains("expected 'none' or 'aic'"));
 
         assert!(serde_json::to_string(&config_from_values(&[])).is_ok());
     }
@@ -1699,6 +1874,32 @@ mod tests {
 
         assert!(too_small.validate().is_err());
         assert!(too_large.validate().is_err());
+    }
+
+    #[test]
+    fn dynamo_env_config_applies_python_default_shared_cache_multiplier() {
+        let default = KvRouterConfig::default();
+
+        // Without shared cache, the multiplier stays at its Rust default (0.0).
+        let none_type = config_from_values(&[("DYN_SHARED_CACHE_TYPE", "none")]);
+        assert_eq!(none_type.shared_cache_type, SharedCacheType::None);
+        assert_eq!(
+            none_type.shared_cache_multiplier,
+            default.shared_cache_multiplier
+        );
+
+        // Enabling shared cache without an explicit multiplier matches the
+        // Python CLI default of 0.5.
+        let hicache_only = config_from_values(&[("DYN_SHARED_CACHE_TYPE", "hicache")]);
+        assert_eq!(hicache_only.shared_cache_type, SharedCacheType::Hicache);
+        assert_eq!(hicache_only.shared_cache_multiplier, 0.5);
+
+        // An explicit multiplier still wins.
+        let explicit = config_from_values(&[
+            ("DYN_SHARED_CACHE_TYPE", "hicache"),
+            ("DYN_SHARED_CACHE_MULTIPLIER", "0.3"),
+        ]);
+        assert_eq!(explicit.shared_cache_multiplier, 0.3);
     }
 
     #[test]
@@ -1890,21 +2091,11 @@ worker_selection:
             }
         );
 
-        assert!(config.has_explicit_stage_worker_selection_policy().unwrap());
-
         assert_eq!(
             config
                 .selected_worker_selection_policy_instance_for(WorkerType::Encode)
                 .unwrap(),
             Some("yaml-encode".to_string())
-        );
-
-        config.router_policy_config = None;
-        assert!(config.has_explicit_stage_worker_selection_policy().unwrap());
-        assert!(
-            !KvRouterConfig::default()
-                .has_explicit_stage_worker_selection_policy()
-                .unwrap()
         );
 
         let default_policy_file = tempfile::NamedTempFile::new().unwrap();
@@ -1924,11 +2115,75 @@ worker_selection:
             router_decode_policy: Some("default".to_string()),
             ..Default::default()
         };
-        assert!(
-            !default_config
-                .has_explicit_stage_worker_selection_policy()
-                .unwrap()
-        );
+        let prefill_only_config = KvRouterConfig {
+            router_prefill_policy: Some("custom".to_string()),
+            ..Default::default()
+        };
+        let blank_prefill_override_config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            router_prefill_policy: Some(" ".to_string()),
+            ..Default::default()
+        };
+        let global_only_config = KvRouterConfig::default();
+        for (name, config, global, expected) in [
+            (
+                "stage default disables YAML policy",
+                &config,
+                None,
+                vec![
+                    WorkerType::Aggregated,
+                    WorkerType::Prefill,
+                    WorkerType::Encode,
+                ],
+            ),
+            ("defaults only", &default_config, None, Vec::new()),
+            (
+                "prefill override only",
+                &prefill_only_config,
+                None,
+                vec![WorkerType::Prefill],
+            ),
+            (
+                "global custom policy applies to every role",
+                &global_only_config,
+                Some("global"),
+                vec![
+                    WorkerType::Aggregated,
+                    WorkerType::Prefill,
+                    WorkerType::Decode,
+                    WorkerType::Encode,
+                ],
+            ),
+            (
+                "stage overrides take precedence over global policy",
+                &config,
+                Some("global"),
+                vec![
+                    WorkerType::Aggregated,
+                    WorkerType::Prefill,
+                    WorkerType::Encode,
+                ],
+            ),
+            (
+                "blank stage override falls through to YAML",
+                &blank_prefill_override_config,
+                None,
+                vec![
+                    WorkerType::Aggregated,
+                    WorkerType::Prefill,
+                    WorkerType::Decode,
+                    WorkerType::Encode,
+                ],
+            ),
+        ] {
+            assert_eq!(
+                config
+                    .explicit_worker_selection_policy_types_from(Ok(global.map(str::to_owned)))
+                    .unwrap(),
+                expected,
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -1978,6 +2233,7 @@ worker_selection:
         ] {
             assert!(value.get(post_v1_3_field).is_none(), "{post_v1_3_field}");
         }
+        assert!(value.get("router_approximate_cache_policy").is_none());
 
         let frontend_config = KvRouterConfig {
             router_prefill_policy: Some("prefill-policy".to_string()),

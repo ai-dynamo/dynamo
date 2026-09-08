@@ -105,6 +105,35 @@ def test_materialize_dgd_copies_blueprint_without_transforms() -> None:
     assert materialized["spec"] is not blueprint["spec"]
 
 
+def test_materialize_remote_model_preserves_explicit_frontend_cli(
+    monkeypatch,
+) -> None:
+    from dynamo.profiler.utils.dgd_template import load_dgd_template
+
+    blueprint = load_dgd_template("vllm", "agg")
+    monkeypatch.setattr(dgd_materialization, "model_has_auto_map", lambda _model: False)
+
+    materialized = materialize_dgd(
+        blueprint,
+        purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+        runtime_backend="vllm",
+        model_name_or_path="Qwen/Qwen3-0.6B",
+    )
+
+    frontend = next(
+        component
+        for component in materialized["spec"]["components"]
+        if component["name"] == "Frontend"
+    )
+    main = next(
+        container
+        for container in frontend["podTemplate"]["spec"]["containers"]
+        if container["name"] == "main"
+    )
+    assert main["command"] == ["python3"]
+    assert main["args"] == ["-m", "dynamo.frontend"]
+
+
 def test_materialize_dgd_only_changes_last_document(monkeypatch) -> None:
     config_map = {"apiVersion": "v1", "kind": "ConfigMap", "data": {"key": "value"}}
     dgd = {"apiVersion": "nvidia.com/v1beta1", "kind": "DynamoGraphDeployment"}
@@ -146,3 +175,19 @@ def test_materialize_dgd_rejects_non_object_dgd() -> None:
             [{"kind": "ConfigMap"}, "not-an-object"],
             purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
         )
+
+
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        (["python3", "-m", "dynamo.mocker"], []),
+        (["sh", "-c"], ["python3 -m dynamo.mocker --model-path test/model"]),
+    ],
+)
+def test_mocker_detection_matches_discrete_command_tokens(command, args) -> None:
+    assert dgd_materialization._invokes_mocker(command, args)
+
+
+def test_mocker_detection_rejects_substring_matches() -> None:
+    args = ["-m", "dynamo.worker", "--model", "org/dynamo.mocker-model"]
+    assert not dgd_materialization._invokes_mocker(["python3"], args)

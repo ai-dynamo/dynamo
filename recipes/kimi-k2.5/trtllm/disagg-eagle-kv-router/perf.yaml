@@ -163,7 +163,7 @@ spec:
         - name: CONCURRENCIES
           value: "32"
         - name: BENCHMARK_DURATION
-          value: "3600"
+          value: "1800"
         - name: TTFT_THRESHOLD_MS
           value: "5000"
         - name: ITL_THRESHOLD_MS

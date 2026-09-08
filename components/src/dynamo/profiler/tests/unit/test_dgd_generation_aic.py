@@ -457,7 +457,7 @@ class TestBuildPlannerConfigEmbedsAicSpec:
         )
 
         assert spec is None
-        assert "aiconfigurator-core is unavailable" in caplog.text
+        assert "AISimulate's AIC perf model is unavailable" in caplog.text
 
     @pytest.mark.parametrize(
         ("mode", "prefill_pick", "decode_pick"),

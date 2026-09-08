@@ -60,6 +60,13 @@ vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/vllm"
 )
 
+
+@pytest.fixture(autouse=True)
+def clear_stale_fpm_env(monkeypatch):
+    """Keep serve/XPU tests isolated from stale FPM env vars inherited by CI or parent shells."""
+    monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+
+
 # Generated multimodal configs from profile definitions
 _mm_configs: dict[str, VLLMConfig] = {}
 for _profile in VLLM_MULTIMODAL_PROFILES:
@@ -538,7 +545,9 @@ vllm_configs = {
             pytest.mark.requested_vllm_kv_cache_bytes(
                 1_119_388_000
             ),  # KV cache cap (2x safety over min=559_693_824)
-            pytest.mark.timeout(110),  # ~5x observed 22.3s; CI machines are slower
+            # vLLM 0.27 warms more MRV2 scheduler/kernel specializations before
+            # serving; XPU CI measured 92-105s of startup warmup.
+            pytest.mark.timeout(360),
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
