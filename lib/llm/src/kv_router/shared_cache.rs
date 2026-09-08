@@ -624,6 +624,11 @@ fn maybe_prefix_key(logical_key: &str, extra_backend_tag: Option<&str>) -> Strin
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::HashMap, ops::Range};
+
+    use super::*;
+    use tokio::sync::watch;
+
     #[tokio::test]
     async fn subscriber_stops_when_its_last_consumer_drops() {
         let (tx, rx) = tokio::sync::watch::channel(std::collections::HashMap::new());
@@ -639,11 +644,6 @@ mod tests {
             .await
             .expect("the subscriber must release its runtime-config receiver");
     }
-
-    use std::{collections::HashMap, ops::Range};
-
-    use super::*;
-    use tokio::sync::watch;
 
     fn mooncake_config() -> SglangHicacheMooncakeConfig {
         SglangHicacheMooncakeConfig {
