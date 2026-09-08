@@ -616,17 +616,8 @@ async def test_aggregated_fd_on_no_images_passes_none():
     assert captured["image_data"] is None
 
 
-# NVBug 6418893 — SGLang session radix wiring.
-#
-# Dynamo used to derive `session_params={"id": <session_id>}` from a request's
-# `agent_context.session_id` and pass it to `engine.async_generate`. SGLang
-# treats `session_params.id` as an explicit session lifecycle and rejects any id
-# that was not created through `open_session`, so every request carrying an
-# `agent_context.session_id` failed against an SGLang server. Commit `d245a5be3`
-# removed that wiring but added no test guarding its return. These tests assert
-# the corrected contract at the engine seam: no handler may synthesize
-# `session_params` from `agent_context`. See the "Session identity" note in
-# components/src/dynamo/sglang/AGENTS.md.
+# NVBug 6418893: SGLang rejects a `session_params.id` not created through
+# `open_session`, so no handler may synthesize one from `agent_context`.
 
 
 class _GenerateRecorder:
