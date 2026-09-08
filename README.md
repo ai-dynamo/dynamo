@@ -103,12 +103,12 @@ Most inference engines optimize a single GPU or a single node. Dynamo is the **o
 | [**ModelExpress**](https://github.com/ai-dynamo/modelexpress) | Streams model weights GPU-to-GPU via NIXL/NVLink | 7x faster cold-start for new replicas |
 | [**Planner**](https://docs.nvidia.com/dynamo/components/planner/planner-guide) | SLA-driven autoscaler that profiles workloads and right-sizes pools | Meets latency targets at minimum total cost of ownership (TCO) |
 | [**Grove**](https://github.com/ai-dynamo/grove) | K8s operator for topology-aware gang scheduling (NVL72) | Places workloads optimally across racks, hosts, and NUMA nodes |
-| [**AIConfigurator**](https://github.com/ai-dynamo/aiconfigurator) | Simulates 10K+ deployment configs in seconds | Finds optimal serving config without burning GPU-hours |
+| [**AISimulate**](https://pypi.org/project/aisimulate/) | Predicts serving behavior and searches deployment configurations offline | Finds a strong serving configuration without bringing up a GPU cluster |
 | [**Fault Tolerance**](https://docs.nvidia.com/dynamo/user-guides/fault-tolerance/request-migration) | Canary health checks + in-flight request migration | Workers fail; user requests don't |
 
 ### New in 1.0
 
-- **Zero-config deploy ([DGDR](https://docs.nvidia.com/dynamo/kubernetes-deployment/deploy-models/dgdr-reference))** *(beta):* Specify model, HW, and SLA in one YAML — AIConfigurator auto-profiles the workload, Planner optimizes the topology, and Dynamo deploys
+- **Zero-config deploy ([DGDR](https://docs.nvidia.com/dynamo/kubernetes-deployment/deploy-models/dgdr-reference))** *(beta):* Specify model, HW, and SLA in one YAML — AISimulate performance models estimate candidate configurations, Planner optimizes the topology, and Dynamo deploys
 - **Agentic inference:** Per-request hints for priority, expected output length, and speculative prefill, plus session metadata for tracing and SGLang subagent KV isolation. [LangChain](https://docs.langchain.com/oss/python/integrations/chat/nvidia_ai_endpoints#use-with-nvidia-dynamo) + [NeMo Agent Toolkit](https://github.com/NVIDIA/NeMo-Agent-Toolkit) integrations
 - **Multimodal E/P/D:** Disaggregated encode/prefill/decode with embedding cache — 30% faster TTFT on image workloads
 - **Video generation:** Native [FastVideo](https://github.com/hao-ai-lab/FastVideo) + [SGLang Diffusion](https://lmsys.org/blog/2026-02-16-sglang-diffusion-advanced-optimizations/) support — real-time 1080p on single B200

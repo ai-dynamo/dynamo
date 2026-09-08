@@ -63,6 +63,9 @@ use request_guard::{KvRequestCleanup, LoraLoadGuard, RequestGuard};
 const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
 const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
 
+/// Bounds the wait for a worker's trailing typed error after a terminal frame.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub(crate) fn is_cancelled(error: &Error) -> bool {
     match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[])
 }
@@ -85,31 +88,84 @@ where
         let stopped = context.stopped();
         tokio::pin!(stopped);
 
+        // Migration acts on errors only; a shutting-down worker sends its error after the terminal frame.
+        let mut drainable_terminal = false;
+        let mut pending_terminal: Option<Annotated<LLMEngineOutput>> = None;
+        // Armed only while draining: a worker that goes quiet without EOF must not hang us.
+        let drain_deadline = tokio::time::sleep(Duration::ZERO);
+        tokio::pin!(drain_deadline);
+
         let completed = loop {
             tokio::select! {
                 biased;
 
                 _ = &mut stopped => {
                     tracing::debug!(request_id = context.id(), "Request cancelled, ending stream");
+                    // The client is gone, so the withheld frame has nowhere to go.
+                    drop(pending_terminal.take());
                     break false;
                 }
 
                 item = response_stream.next() => {
                     let Some(item) = item else {
-                        break true;
+                        // EOF while draining means no trailing error is coming.
+                        if drainable_terminal {
+                            guard.record_migration_failure(None);
+                        }
+                        break !drainable_terminal;
                     };
-                    let item_failed = response_item_failed(&item);
+                    let outcome = classify_response_item(&item);
                     guard.on_item(&item).await;
-                    if item_failed {
-                        guard.record_migration_failure(item.error.clone());
-                        // Release the failed attempt before Migration can observe
-                        // the item and start another one. This keeps serialized
-                        // retries free of stale-cleanup ABA races.
-                        guard.abort().await;
-                        yield item;
-                        break false;
+                    match outcome {
+                        ResponseItemOutcome::Failed => {
+                            // Supersedes the withheld frame: never end a request about to be retried.
+                            drop(pending_terminal.take());
+                            guard.record_migration_failure(item.error.clone());
+                            // Release the failed attempt before Migration can observe
+                            // the item and start another one. This keeps serialized
+                            // retries free of stale-cleanup ABA races.
+                            guard.abort().await;
+                            yield item;
+                            break false;
+                        }
+                        ResponseItemOutcome::DrainableTerminal => {
+                            // Armed once: re-arming per frame would let a flood of terminals
+                            // postpone the deadline forever.
+                            if !drainable_terminal {
+                                drainable_terminal = true;
+                                drain_deadline.as_mut().reset(tokio::time::Instant::now() + DRAIN_TIMEOUT);
+                            }
+                            // Only the newest terminal frame can be the last one.
+                            if let Some(previous) = pending_terminal.replace(item) {
+                                yield previous;
+                            }
+                            // `biased` polls this arm first, so an always-ready stream would
+                            // otherwise starve the deadline below. Compare the clock rather than
+                            // `is_elapsed()`: a `Sleep` that is never polled never reports elapsed.
+                            if tokio::time::Instant::now() >= drain_deadline.deadline() {
+                                guard.record_migration_failure(None);
+                                break false;
+                            }
+                        }
+                        ResponseItemOutcome::Healthy => {
+                            // More data followed, so the withheld frame was not last after all.
+                            drainable_terminal = false;
+                            if let Some(previous) = pending_terminal.take() {
+                                yield previous;
+                            }
+                            yield item;
+                        }
                     }
-                    yield item;
+                }
+
+                // Last arm: a frame that is already available always beats an expired drain.
+                _ = &mut drain_deadline, if drainable_terminal => {
+                    tracing::debug!(
+                        request_id = context.id(),
+                        "Terminal frame was not followed by an error within {DRAIN_TIMEOUT:?}, ending stream"
+                    );
+                    guard.record_migration_failure(None);
+                    break false;
                 }
             }
         };
@@ -118,6 +174,10 @@ where
             guard.finish().await;
         } else {
             guard.abort().await;
+        }
+        // Released only now: the drain proved it was last, and the booking is already gone.
+        if let Some(pending) = pending_terminal.take() {
+            yield pending;
         }
     }
 }
@@ -712,16 +772,29 @@ where
     }
 }
 
-fn response_item_failed(item: &Annotated<LLMEngineOutput>) -> bool {
-    item.error.is_some()
-        || item.event.as_deref() == Some("error")
-        || item
-            .data
-            .as_ref()
-            .and_then(|data| data.finish_reason.as_ref())
-            .is_some_and(|reason| {
-                matches!(reason, FinishReason::Error(_) | FinishReason::Cancelled)
-            })
+enum ResponseItemOutcome {
+    /// The stream is healthy and must keep running.
+    Healthy,
+    /// Terminal by finish reason only; withheld while the stream drains for a trailing error.
+    DrainableTerminal,
+    /// Terminal and carries the error itself. Yielded, and the stream ends.
+    Failed,
+}
+
+fn classify_response_item(item: &Annotated<LLMEngineOutput>) -> ResponseItemOutcome {
+    if item.error.is_some() || item.event.as_deref() == Some("error") {
+        return ResponseItemOutcome::Failed;
+    }
+    let terminal = item
+        .data
+        .as_ref()
+        .and_then(|data| data.finish_reason.as_ref())
+        .is_some_and(|reason| matches!(reason, FinishReason::Error(_) | FinishReason::Cancelled));
+    if terminal {
+        ResponseItemOutcome::DrainableTerminal
+    } else {
+        ResponseItemOutcome::Healthy
+    }
 }
 
 #[cfg(test)]

@@ -13,7 +13,7 @@ the operator propagates the corresponding env vars to all DGD pods it manages.
 
 For the full list of TLS/mTLS environment variables and CLI flags, and for the
 per-component configuration method, see the
-[TLS reference](../../../../reference/components/tls-configuration.mdx).
+[TLS reference](../../reference/components/tls-configuration.mdx).
 
 ## Operator-level TLS configuration
 
@@ -53,7 +53,7 @@ values when both are set.
 > When any `natsTLS*` value is set, `natsAddr` **must** use the
 > `tls://` scheme — the runtime fails closed at startup otherwise. If you are
 > using the bundled NATS subchart, also enable TLS on the server side (see
-> [Enabling TLS on the NATS server](../../../../reference/components/tls-configuration.mdx#enabling-tls-on-the-nats-server)).
+> [Enabling TLS on the NATS server](../../reference/components/tls-configuration.mdx#enabling-tls-on-the-nats-server)).
 
 ## Operator-level mTLS configuration
 
@@ -121,5 +121,5 @@ operator's auto-injection, apply these mounts in each component's
 > For NATS TLS to work, the NATS server itself must also be
 > configured to listen on TLS. The operator injects the **client-side** env
 > vars, but enabling TLS on the NATS server subchart is a separate step — see
-> [Enabling TLS on the NATS server](../../../../reference/components/tls-configuration.mdx#enabling-tls-on-the-nats-server)
+> [Enabling TLS on the NATS server](../../reference/components/tls-configuration.mdx#enabling-tls-on-the-nats-server)
 > in the TLS reference.
