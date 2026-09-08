@@ -55,20 +55,26 @@ WORKER = os.path.join(os.path.dirname(__file__), "parity_worker.py")
 OTLP_ONLY = {"target_info"}
 
 
-def _free_port() -> int:
-    """A free port that fits in an i16.
+def _reserved_port() -> tuple[int, socket.socket]:
+    """A port plus the socket still holding it.
 
-    `DYN_SYSTEM_PORT` is parsed as i16, so the ephemeral range the kernel hands
-    out is often too high and the runtime refuses the config.
+    Closing the socket before the real listener binds leaves a window another
+    process can claim, which shows up as an intermittent failure under parallel
+    runs. The caller keeps the reservation open until the moment it binds.
+
+    `DYN_SYSTEM_PORT` is parsed as an i16, so the kernel's ephemeral range is
+    often too high and the runtime rejects the config.
     """
     for _ in range(200):
         candidate = random.randint(20000, 32000)
-        with contextlib.closing(socket.socket()) as s:
-            try:
-                s.bind(("127.0.0.1", candidate))
-            except OSError:
-                continue
-            return candidate
+        sock = socket.socket()
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("127.0.0.1", candidate))
+        except OSError:
+            sock.close()
+            continue
+        return candidate, sock
     raise RuntimeError("no free port below the i16 ceiling")
 
 
@@ -108,10 +114,12 @@ class _OtlpReceiver(metrics_service_pb2_grpc.MetricsServiceServicer):
 
 
 @contextlib.contextmanager
-def _running_receiver(port: int):
+def _running_receiver(port: int, reservation: socket.socket):
     receiver = _OtlpReceiver()
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
     metrics_service_pb2_grpc.add_MetricsServiceServicer_to_server(receiver, server)
+    # Release the reservation only as the real listener takes the port.
+    reservation.close()
     server.add_insecure_port(f"127.0.0.1:{port}")
     server.start()
     try:
@@ -197,11 +205,16 @@ class _Worker(ManagedProcess):
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
 @pytest.mark.e2e
+# Runs in ~4s; this bounds the whole item, where ManagedProcess's own timeout
+# only bounds worker startup.
+@pytest.mark.timeout(120)
 def test_otlp_and_prometheus_expose_the_same_metrics(request, runtime_services):
-    system_port = _free_port()
-    otlp_port = _free_port()
+    system_port, system_reservation = _reserved_port()
+    otlp_port, otlp_reservation = _reserved_port()
 
-    with _running_receiver(otlp_port) as receiver:
+    with _running_receiver(otlp_port, otlp_reservation) as receiver:
+        # The worker binds this one itself; hold it until it starts.
+        system_reservation.close()
         with _Worker(request, system_port, otlp_port):
             assert receiver.wait_for_export(
                 timeout=60

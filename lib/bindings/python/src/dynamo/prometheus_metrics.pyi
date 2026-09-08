@@ -34,7 +34,23 @@ class RuntimeMetrics:
     def register_prometheus_typed_callback(
         self,
         callback: Callable[
-            [], list[tuple[str, str, str, list[tuple[str, list[tuple[str, str]], float]]]]
+            [],
+            list[
+                tuple[
+                    str,  # family name
+                    str,  # help text
+                    str,  # Prometheus type word
+                    str,  # UNIT metadata, empty when undeclared
+                    list[
+                        tuple[
+                            str,  # sample name
+                            list[tuple[str, str]],  # labels
+                            float,  # value
+                            float | None,  # sample timestamp, when the source set one
+                        ]
+                    ],
+                ]
+            ],
         ],
     ) -> None:
         """

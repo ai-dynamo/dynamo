@@ -1041,12 +1041,19 @@ impl MetricsRegistry {
 
     /// Execute all update callbacks and return their results
     pub fn execute_update_callbacks(&self) -> Vec<anyhow::Result<()>> {
-        self.prometheus_update_callbacks
+        // Snapshot before invoking, for the same reason as the typed and
+        // exposition callbacks: a callback may take the Python GIL or register
+        // another callback, and holding the read lock across the call deadlocks
+        // against a registration that holds the GIL and wants the write lock.
+        let callbacks: Vec<PrometheusUpdateCallback> = self
+            .prometheus_update_callbacks
             .read()
             .unwrap()
             .iter()
-            .map(|callback| callback())
-            .collect()
+            .cloned()
+            .collect();
+
+        callbacks.iter().map(|callback| callback()).collect()
     }
 
     /// Add a Prometheus metric collector to this registry
@@ -1094,12 +1101,6 @@ fn run_update_callbacks(registries: &[MetricsRegistry]) {
             }
         }
     }
-}
-
-fn merge_gathered_families(
-    registries: &[MetricsRegistry],
-) -> anyhow::Result<Vec<prometheus::proto::MetricFamily>> {
-    Ok(FamilyMerger::from_gathered(registries)?.into_sorted())
 }
 
 /// Merges metric families from several sources under one set of rules.
