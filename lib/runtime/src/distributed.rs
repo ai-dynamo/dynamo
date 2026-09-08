@@ -375,7 +375,7 @@ impl DistributedRuntime {
     }
 
     pub async fn from_settings(runtime: Runtime) -> Result<Self> {
-        let config = DistributedConfig::from_settings()?;
+        let config = DistributedConfig::try_from_settings()?;
         Self::new(runtime, config).await
     }
 
@@ -796,7 +796,11 @@ pub struct DistributedConfig {
 }
 
 impl DistributedConfig {
-    pub fn from_settings() -> Result<DistributedConfig> {
+    pub fn from_settings() -> DistributedConfig {
+        Self::try_from_settings().unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    pub fn try_from_settings() -> Result<DistributedConfig> {
         let request_plane = RequestPlaneMode::from_env()?;
 
         // Determine the discovery backend first — we need it to compute the NATS default below.
@@ -853,7 +857,11 @@ impl DistributedConfig {
         })
     }
 
-    pub fn for_cli() -> Result<DistributedConfig> {
+    pub fn for_cli() -> DistributedConfig {
+        Self::try_for_cli().unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    pub fn try_for_cli() -> Result<DistributedConfig> {
         let etcd_config = etcd::ClientOptions {
             attach_lease: false,
             ..Default::default()
