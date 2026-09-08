@@ -13,8 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Each engine Service must select exactly one engine. Slime uses this fixed pair
-# for control requests; do not increase either worker component's replica count.
+# Each engine Service must select exactly one engine. Slime uses this fixed
+# worker set for control requests.
+#
+# Keep each worker component at one replica.
 apiVersion: v1
 kind: Service
 metadata:

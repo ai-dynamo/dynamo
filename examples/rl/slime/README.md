@@ -5,43 +5,45 @@ SPDX-License-Identifier: Apache-2.0
 
 # Slime External Rollouts with Dynamo
 
-**Experimental.** Run Slime against a fixed pair of SGLang engines managed by a
-DynamoGraphDeployment. Each worker Pod runs SGLang and the Dynamo sidecar in one
-runtime container. Slime connects through stable Kubernetes Services and
-uses the Dynamo frontend for incremental streaming responses.
+**Experimental.** This example runs Slime with two SGLang engines in a fixed
+worker set. A DynamoGraphDeployment manages the engines. Each worker Pod runs
+SGLang and the Dynamo sidecar in one runtime container. Slime connects through
+stable Kubernetes Services. Slime uses the Dynamo frontend for incremental
+streaming responses.
 
 This example uses the external-engine and streaming support from
 [THUDM/slime#2272](https://github.com/THUDM/slime/pull/2272). Slime queries
-`/server_info` on each engine. It registers the fixed addresses with its own
-SGLang router. It calls the native SGLang control and weight-update endpoints.
+`/server_info` on each engine. Slime registers the fixed addresses with its
+SGLang router. Slime calls the native SGLang control and weight-update endpoints.
 The included custom generator sends rollout requests to the Dynamo frontend.
 
 > [!IMPORTANT]
-> Slime still starts an SGLang router for external-engine bookkeeping. The
-> custom generator does not send rollout requests to that router. Keep the two
-> worker components at one replica each, and restart Slime after changing the
-> worker set.
+> Slime starts an SGLang router to track the external engines. The custom
+> generator does not send rollout requests to that router.
+>
+> Keep each worker component at one replica. If you change the worker set,
+> restart Slime.
 
 ## Prerequisites
 
 - Install the Dynamo Kubernetes Platform on a GPU-capable Kubernetes cluster.
-- Install the NVIDIA device plugin. The worker Pods request the
-  `nvidia.com/gpu` resource.
+- Install the NVIDIA device plugin for the `nvidia.com/gpu` resource.
 - Use a Dynamo SGLang runtime image that contains `dynamo.sglang.sidecar`.
 - For a gated model, create an `hf-token-secret` secret that contains
   `HF_TOKEN` in the deployment namespace. The public default model does not
   require this secret.
 - Use a Slime revision that contains
   [THUDM/slime#2272](https://github.com/THUDM/slime/pull/2272).
-- Run Slime where it can resolve and reach the worker Services, normally in the
-  same Kubernetes namespace.
+- Run Slime in a location that can resolve and reach the worker Services. The
+  same Kubernetes namespace meets this requirement.
 - Install `envsubst` on the machine that deploys the manifest.
 
-## Deploy the Fixed Worker Set
+## Deploy the fixed worker set
 
-Set matching Dynamo frontend and SGLang runtime images. Set
-`DYNAMO_RUNTIME_VERSION` to the matching release version. The script defaults
-to `MODEL_PATH=Qwen/Qwen3-0.6B`.
+Set the Dynamo frontend image and the SGLang runtime image to the same Dynamo
+version. Set `DYNAMO_RUNTIME_VERSION` to that version.
+
+The script uses `MODEL_PATH=Qwen/Qwen3-0.6B` by default.
 
 ```bash
 export KUBE_CONTEXT=<cluster-context>
@@ -53,17 +55,17 @@ export MODEL_PATH=Qwen/Qwen3-0.6B
 examples/rl/slime/deploy-dynamo.sh
 ```
 
-If you test an unreleased version, pin matching dated nightly tags for
-reproducible runs.
+If you use an unreleased version, pin nightly tags from the same date.
 
 SGLang loads `dynamo.sglang.sidecar` through its `--sidecar` option. It passes
 the local gRPC endpoint to the module through `--sidecar-args`. This path does
 not require a separate Dynamo sidecar image.
 
 Each worker Pod requests one `nvidia.com/gpu` resource. The worker Pods also
-tolerate the standard `nvidia.com/gpu=true:NoSchedule` GPU-node taint. Add only
-the site-specific node selectors and tolerations that your cluster
-administrator assigns to your workload.
+tolerate the standard `nvidia.com/gpu=true:NoSchedule` GPU-node taint.
+
+Add only the node selectors and tolerations that your cluster administrator
+assigns to your workload.
 
 The manifest creates three Services:
 
@@ -76,16 +78,18 @@ The operator uses those worker Services for Dynamo discovery on port 9090.
 
 Each engine Service selects one worker component with one replica. The Service
 name stays stable after Kubernetes replaces its Pod. Slime does not recover an
-external engine automatically. After an engine restart or replacement, restart
-the Slime job.
+external engine automatically.
+
+If Kubernetes restarts or replaces an engine Pod, restart the Slime job.
 
 The native engine Services expose administrative APIs and weight-update APIs.
-Restrict them to the training network.
 
-## Validate the Engines
+Restrict access to these Services to the training network.
 
-Run these validation commands from the Slime environment or another Pod in the
-deployment namespace:
+## Engine Readiness
+
+Run these commands from the Slime environment or another Pod in the deployment
+namespace:
 
 ```bash
 curl --fail-with-body http://slime-sglang-engine-0:30000/health_generate
@@ -93,14 +97,16 @@ curl --fail-with-body http://slime-sglang-engine-1:30000/health_generate
 curl --fail-with-body http://slime-sglang-rollout:8000/health
 ```
 
-The first two commands validate access to both fixed engines. The third command
-validates that the Dynamo frontend is ready.
+The first two commands make sure that both fixed engines are reachable. The
+third command makes sure that the Dynamo frontend is ready.
 
 ## Start Slime
 
-`launch-slime.sh` supplies the fixed external-engine list and enables the
-streaming generator merged in THUDM/slime#2272. Append the model, dataset,
-trainer, weight-update, and resource arguments required by your workload.
+`launch-slime.sh` supplies the fixed external-engine list. It uses the streaming
+generator from THUDM/slime#2272.
+
+Add the model, dataset, trainer, weight-update, and resource arguments that your
+workload requires.
 
 ```bash
 export SLIME_HOME=<path-to-slime>
@@ -128,20 +134,27 @@ The launcher passes these integration arguments:
 --sglang-incremental-streaming-output
 ```
 
-`dynamo_generate.generate_streaming` copies the Slime arguments and replaces
-the generation address with `DYNAMO_ROLLOUT_URL`. It then calls the streaming
-generator from THUDM/slime#2272. Slime continues to call each fixed engine for
-control operations and weight updates.
+The `dynamo_generate.generate_streaming` adapter copies the Slime arguments.
+Then the adapter sets the generation address to `DYNAMO_ROLLOUT_URL`. The
+adapter calls the streaming generator from THUDM/slime#2272. Slime calls each
+fixed engine for control operations and weight updates.
 
 The `--sglang-incremental-streaming-output` flag must match the
-`--incremental-streaming-output` setting in `dynamo.yaml`. See the Slime
+`--incremental-streaming-output` configuration in `dynamo.yaml`.
+
+Read the Slime
 [external rollout engine guide](https://github.com/THUDM/slime/blob/main/docs/en/advanced/external-rollout-engines.md)
-for NCCL, full-checkpoint disk, and delta disk weight-update options.
+for NCCL updates, full-checkpoint disk updates, and delta disk updates.
 
 ## Current Boundary
 
-This example demonstrates a fixed external fleet. It does not provide elastic
-discovery, dynamic endpoint registration, or external-engine fault recovery.
-Before you use the example for training, validate one complete rollout, policy
-update, post-update rollout, and worker-failure path. Use the selected model and
-weight transport for this validation.
+This example uses a fixed worker set. It does not support elastic discovery,
+dynamic endpoint registration, or external-engine fault recovery.
+
+Before you use the example for training, complete these tests:
+
+1. Run one rollout with the selected model and weight transport.
+2. Apply one policy update.
+3. Run one post-update rollout.
+4. Simulate one worker failure.
+5. Make sure that the system recovers.

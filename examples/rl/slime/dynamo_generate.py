@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Route Slime streaming rollout requests through the Dynamo frontend."""
+"""Routes Slime streaming rollout requests through the Dynamo frontend."""
 
 import copy
 import os
