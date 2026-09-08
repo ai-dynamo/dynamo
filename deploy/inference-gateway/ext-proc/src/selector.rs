@@ -49,6 +49,8 @@ pub struct SelectRequest {
     /// already knows so the booking is releasable even if this response is lost.
     pub reservation_id: String,
     pub token_ids: Vec<u32>,
+    /// Prefill estimate used only when tokenization is unavailable.
+    pub estimated_input_tokens: usize,
     pub allowed_worker_ids: Option<HashSet<u64>>,
     pub priority_jump: Option<f64>,
     pub strict_priority: Option<u32>,
@@ -276,16 +278,13 @@ impl Selector {
     /// rather than cloned on the hot path.
     pub async fn select_and_reserve(&self, req: SelectRequest) -> Result<SelectResponse> {
         let reservation_id = req.reservation_id;
-        // The scheduler requires a positive `isl_tokens` value even when no
-        // token sequence is available. EPP's load-only fallback intentionally
-        // passes an empty token vector; represent that as an empty hash prompt
-        // with one minimal accounting token so it cannot trigger the scheduler
-        // invariant or manufacture a KV prefix match.
+        // Empty hashes disable prefix matching, but degraded requests still
+        // reserve their estimated prefill load until the first generated token.
         let prompt = if req.token_ids.is_empty() {
             PromptRequest {
                 block_hashes: Some(Vec::new()),
                 sequence_hashes: Some(Vec::new()),
-                isl_tokens: Some(1),
+                isl_tokens: Some(req.estimated_input_tokens.max(1)),
                 ..Default::default()
             }
         } else {
@@ -490,6 +489,7 @@ models:
             model_name: "test-model".to_string(),
             reservation_id: reservation_id.to_string(),
             token_ids: (1..=16).collect(),
+            estimated_input_tokens: 4096,
             allowed_worker_ids: None,
             priority_jump: None,
             strict_priority: None,
@@ -633,21 +633,25 @@ worker_selection:
     }
 
     #[tokio::test]
-    async fn load_only_empty_tokens_can_be_reserved() {
+    async fn load_only_reserves_estimated_prefill_without_prefix_matches() {
         let selector = selector_with_schedulable_worker().await;
 
-        let response = selector
-            .select_and_reserve(load_only_select_request("load-only"))
-            .await
-            .expect("load-only fallback should still reserve a worker");
-        assert_eq!(response.worker_id, 1);
-        assert_eq!(response.overlap.longest_matched, 0);
-        assert_eq!(response.effective_prefill_tokens, 1);
+        for estimate in [0, 64, 4096, 65536] {
+            let mut request = load_only_select_request("load-only");
+            request.estimated_input_tokens = estimate;
+            let response = selector
+                .select_and_reserve(request)
+                .await
+                .expect("load-only fallback should still reserve a worker");
+            assert_eq!(response.worker_id, 1);
+            assert_eq!(response.overlap.longest_matched, 0);
+            assert_eq!(response.effective_prefill_tokens, estimate.max(1));
 
-        selector
-            .free_reservation("load-only")
-            .await
-            .expect("load-only reservation should be releasable");
+            selector
+                .free_reservation("load-only")
+                .await
+                .expect("load-only reservation should be releasable");
+        }
     }
 
     /// Item 5: prefill completion releases prompt load exactly once and is

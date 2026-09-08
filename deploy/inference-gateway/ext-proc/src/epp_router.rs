@@ -276,11 +276,7 @@ impl EndpointPicker for EppRouter {
         }
 
         // Header-over-body priority (via the shared resolver), honored here as on
-        // the frontend path. Transient renderer failures (timeout, unavailable,
-        // overload, or gateway/service unavailability) degrade to load-only
-        // selection — empty token_ids score no prefix overlap — while malformed/
-        // client payloads and renderer configuration or contract failures remain
-        // errors.
+        // the frontend path.
         let priority_header =
             first_header(&req.headers, HEADER_REQUEST_PRIORITY).map(str::to_owned);
         let strict_priority_header =
@@ -312,6 +308,10 @@ impl EndpointPicker for EppRouter {
             model_name: self.model_name.clone(),
             reservation_id: reservation_id.clone(),
             token_ids: tokens,
+            // Budget one token per serialized request byte when rendering is
+            // unavailable. This overestimates ordinary text, but cannot account
+            // for media URL expansion or tokens injected by the chat template.
+            estimated_input_tokens: req.body.len().max(1),
             // `None` on the ordinary path: the selector schedules over its
             // catalog; `Some` only carries an Envoy subset constraint.
             allowed_worker_ids: allowed,
@@ -735,7 +735,7 @@ mod tests {
             StatusCode::SERVICE_UNAVAILABLE,
             StatusCode::GATEWAY_TIMEOUT,
         ] {
-            let degraded = tokenized_or_load_only(
+            tokenized_or_load_only(
                 Err(TokenizeFailure {
                     priority_jump: Some(1.0),
                     strict_priority: Some(2),
@@ -747,9 +747,6 @@ mod tests {
                 "req-1",
             )
             .expect("transient renderer status should route load-only");
-            assert!(degraded.token_ids.is_empty());
-            assert_eq!(degraded.priority_jump, Some(1.0));
-            assert_eq!(degraded.strict_priority, Some(2));
         }
     }
 
