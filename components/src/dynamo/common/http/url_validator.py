@@ -227,4 +227,16 @@ async def validate_media_url(url: str, policy: UrlValidationPolicy) -> str:
     return await validate_url(url, policy)
 
 
+async def validate_media_reference(reference: str, policy: UrlValidationPolicy) -> str:
+    """Like :func:`validate_media_url` but return a plain filesystem path for
+    local references instead of a ``file://`` URI, for callers that pass the
+    result to a loader expecting a bare path.
+    """
+    parsed = urlparse(reference)
+    if parsed.scheme.lower() in ("", "file"):
+        raw_path = parsed.path if parsed.scheme else reference
+        return str(validate_local_path(raw_path, policy))
+    return await validate_url(reference, policy)
+
+
 _MAX_REDIRECTS = 3

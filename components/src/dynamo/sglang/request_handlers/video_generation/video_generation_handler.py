@@ -12,6 +12,10 @@ from typing import Any, AsyncGenerator, Optional
 import torch
 
 from dynamo._core import Context
+from dynamo.common.http.url_validator import (
+    UrlValidationPolicy,
+    validate_media_reference,
+)
 from dynamo.common.storage import upload_to_fs
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
@@ -229,7 +233,9 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
 
         # Add image_path for I2V if provided
         if input_reference:
-            args["image_path"] = input_reference
+            args["image_path"] = await validate_media_reference(
+                input_reference, UrlValidationPolicy.from_env()
+            )
 
         logger.info(
             f"Generating video with {num_frames} frames at {width}x{height}, "

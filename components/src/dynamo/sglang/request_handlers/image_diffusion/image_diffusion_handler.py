@@ -9,7 +9,6 @@ import random
 import time
 import uuid
 from typing import Any, AsyncGenerator, Optional
-from urllib.parse import urlparse
 
 import torch
 from PIL import Image
@@ -17,8 +16,7 @@ from PIL import Image
 from dynamo._core import Context
 from dynamo.common.http.url_validator import (
     UrlValidationPolicy,
-    validate_local_path,
-    validate_url,
+    validate_media_reference,
 )
 from dynamo.common.protocols.image_protocol import ImageNvExt
 from dynamo.common.storage import upload_to_fs
@@ -28,20 +26,6 @@ from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseGenerativeHandler
 
 logger = logging.getLogger(__name__)
-
-
-async def _validate_input_reference(reference: str) -> str:
-    """Validate a client-supplied I2I image reference before it becomes the
-    generator's ``image_path``. Local paths are confined to ``DYN_MM_LOCAL_PATH``
-    (traversal rejected); URLs are blocked from resolving to internal addresses.
-    """
-    policy = UrlValidationPolicy.from_env()
-    parsed = urlparse(reference)
-    if parsed.scheme.lower() in ("", "file"):
-        raw = parsed.path if parsed.scheme else reference
-        return str(validate_local_path(raw, policy))
-    return await validate_url(reference, policy)
-
 
 MAX_NUM_INFERENCE_STEPS = 50
 DEFAULT_NUM_INFERENCE_STEPS = 50
@@ -199,7 +183,9 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         if input_reference is not None:
             if not input_reference.strip():
                 raise ValueError("input_reference must be a non-empty string")
-            args["image_path"] = await _validate_input_reference(input_reference)
+            args["image_path"] = await validate_media_reference(
+                input_reference, UrlValidationPolicy.from_env()
+            )
 
         result = await asyncio.to_thread(
             self.generator.generate,
