@@ -200,16 +200,12 @@ export function KubernetesContainerSelector() {
   const title = channel === "stable"
     ? `Dynamo ${entry?.dynamo}`
     : channel === "nightly"
-      ? entry?.latest
-        ? "Latest nightly"
-        : `Nightly ${entry?.dynamo}`
+      ? "Latest nightly"
       : "Build Dynamo XPU image";
   const role = channel === "stable"
     ? "Latest stable release that supports this version"
     : channel === "nightly"
-      ? entry?.latest
-        ? "Latest nightly container"
-        : "Pinned nightly build"
+      ? "Latest nightly container"
       : "Intel XPU Kubernetes runtime";
   const versionRowLabel = `${INSTALL_DATA[backend].label} version`;
 
