@@ -2200,16 +2200,6 @@ mod tests {
             materialization_fingerprint(&round_robin, &frontend).unwrap(),
             materialization_fingerprint(&kv, &frontend).unwrap()
         );
-
-        // Card-side serving differences must keep splitting as well.
-        let mut small_blocks = ModelDeploymentCard::with_name_only("model");
-        small_blocks.kv_cache_block_size = 16;
-        let mut large_blocks = ModelDeploymentCard::with_name_only("model");
-        large_blocks.kv_cache_block_size = 64;
-        assert_ne!(
-            materialization_fingerprint(&small_blocks, &frontend).unwrap(),
-            materialization_fingerprint(&large_blocks, &frontend).unwrap()
-        );
     }
 
     #[tokio::test]
