@@ -112,12 +112,15 @@ impl LifecycleIdentity {
 /// `WorkerOperationPrefill` and `WorkerOperationDecode` are coarse Dynamo
 /// runtime boundaries around the worker operation; they are not direct engine
 /// execution measurements.
+///
+/// Router queue and selection stages are intentionally deferred. A later
+/// instrumentation milestone will add spans at the actual scheduling
+/// boundaries together with the router-specific metrics and invariants needed
+/// to interpret them.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LifecycleStage {
     RequestLifecycle,
     RequestPreprocessing,
-    RouterQueue,
-    RouterSelection,
     WorkerAdmission,
     RequestDispatch,
     WorkerOperation,
@@ -135,7 +138,6 @@ impl LifecycleStage {
             Self::RequestLifecycle | Self::RequestPreprocessing | Self::ResponseStreaming => {
                 "frontend"
             }
-            Self::RouterQueue | Self::RouterSelection => "router",
             Self::WorkerAdmission
             | Self::RequestDispatch
             | Self::WorkerOperation
@@ -189,8 +191,6 @@ impl LifecycleStage {
                 "dynamo.request.terminal.error" = tracing::field::Empty,
             ),
             Self::RequestPreprocessing => common_span!("request.preprocessing"),
-            Self::RouterQueue => common_span!("router.queue"),
-            Self::RouterSelection => common_span!("router.selection"),
             Self::WorkerAdmission => common_span!("worker.admission"),
             Self::RequestDispatch => common_span!("request.dispatch"),
             Self::WorkerOperation => common_span!("worker.operation"),
@@ -256,10 +256,6 @@ impl LifecycleTrace {
             return Self::disabled();
         }
         Self::enabled(LifecycleIdentity::new(Some(request_id.into()), role), None)
-    }
-
-    pub fn router_request(request_id: impl Into<String>) -> Self {
-        Self::with_role(request_id, LifecycleOperationRole::Frontend)
     }
 
     /// Construct frontend capture state and root-only session identity.
@@ -512,12 +508,12 @@ mod tests {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(CaptureLayer(captured.clone()));
         let _guard = tracing::subscriber::set_default(subscriber);
-        let _span = LifecycleTrace::new(true).start(LifecycleStage::RouterQueue);
+        let _span = LifecycleTrace::new(true).start(LifecycleStage::RequestPreprocessing);
 
         assert_eq!(
             captured.lock().unwrap().as_slice(),
             [CapturedSpan {
-                name: "router.queue",
+                name: "request.preprocessing",
                 target: LIFECYCLE_TARGET,
             }]
         );
@@ -530,7 +526,7 @@ mod tests {
         let _guard = tracing::subscriber::set_default(subscriber);
         let trace = LifecycleTrace::new(false);
         assert!(trace.identity.is_none());
-        let _span = trace.start(LifecycleStage::RouterQueue);
+        let _span = trace.start(LifecycleStage::RequestPreprocessing);
 
         assert!(captured.lock().unwrap().is_empty());
     }

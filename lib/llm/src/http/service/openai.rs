@@ -148,12 +148,15 @@ impl Drop for StreamingLifecycleTerminal {
 }
 
 fn terminal_outcome_for_error_response(response: &ErrorResponse) -> TerminalOutcome {
-    if response.0.as_u16() == 499 {
-        TerminalOutcome::Cancelled
-    } else if response.0.is_client_error() {
-        TerminalOutcome::Rejected
-    } else {
-        TerminalOutcome::Failed
+    match extract_error_type_from_response(response) {
+        ErrorType::Validation
+        | ErrorType::NotFound
+        | ErrorType::Overload
+        | ErrorType::Unavailable
+        | ErrorType::NotImplemented => TerminalOutcome::Rejected,
+        ErrorType::Cancelled => TerminalOutcome::Cancelled,
+        ErrorType::ResponseTimeout => TerminalOutcome::TimedOut,
+        ErrorType::Internal | ErrorType::None => TerminalOutcome::Failed,
     }
 }
 
@@ -570,6 +573,13 @@ impl ErrorMessage {
     /// If successful, it will return the [`HttpError`] as an [`ErrorMessage::internal_server_error`]
     /// with the details of the error.
     pub fn from_anyhow(err: anyhow::Error, alt_msg: &str) -> ErrorResponse {
+        if super::metrics::request_was_timed_out(err.as_ref()) {
+            let mut response =
+                ErrorMessage::internal_server_error_with_details(alt_msg, format!("{err:#}"));
+            response.1.metric_error_type = Some(ErrorType::ResponseTimeout);
+            return response;
+        }
+
         if let Some(rejection) = find_queue_rejection_in_chain(err.as_ref()) {
             let code = overload_status_code();
             return (
@@ -2354,6 +2364,9 @@ struct BackendErrorInfo {
     /// status alone is not enough to recover it. `None` means "derive it from
     /// `status`" — the ordinary case for a status the worker supplied.
     sanitized: Option<SanitizedError>,
+    /// Semantic classification preserved from the typed request-plane error.
+    /// This may intentionally differ from the HTTP status classification.
+    metric_error_type: Option<ErrorType>,
 }
 
 impl BackendErrorInfo {
@@ -2363,7 +2376,13 @@ impl BackendErrorInfo {
             message,
             status,
             sanitized: None,
+            metric_error_type: None,
         }
+    }
+
+    fn with_metric_error_type(mut self, error_type: Option<ErrorType>) -> Self {
+        self.metric_error_type = error_type;
+        self
     }
 }
 
@@ -2382,14 +2401,15 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
     if let Some(event_type) = &event.event
         && event_type == "error"
     {
-        use dynamo_runtime::error::{BackendError, ErrorType};
+        use dynamo_runtime::error::{BackendError, ErrorType as DynamoErrorType};
 
         // Classify only this event's error, not its causes. An inner invalid
         // argument must not override an outer unavailable or internal error.
         let invalid_argument = event.error.as_ref().filter(|error| {
             matches!(
                 error.error_type(),
-                ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument)
+                DynamoErrorType::InvalidArgument
+                    | DynamoErrorType::Backend(BackendError::InvalidArgument)
             )
         });
 
@@ -2424,6 +2444,11 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
             .error
             .as_ref()
             .is_some_and(|error| super::metrics::request_was_rejected(error));
+        let metric_error_type = event
+            .error
+            .as_ref()
+            .filter(|error| super::metrics::request_was_timed_out(*error))
+            .map(|_| ErrorType::ResponseTimeout);
 
         // Parse the status-bearing node's own message. The diagnostic string
         // above includes its causes and therefore is not necessarily JSON.
@@ -2453,14 +2478,18 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
                 message,
                 status: code,
                 sanitized: overloaded.then_some(SanitizedError::Overloaded),
+                metric_error_type,
             });
         }
 
         if let Some(invalid_argument) = invalid_argument {
-            return Some(BackendErrorInfo::from_status(
-                invalid_argument.message().to_string(),
-                StatusCode::BAD_REQUEST,
-            ));
+            return Some(
+                BackendErrorInfo::from_status(
+                    invalid_argument.message().to_string(),
+                    StatusCode::BAD_REQUEST,
+                )
+                .with_metric_error_type(metric_error_type),
+            );
         }
 
         if overloaded {
@@ -2468,13 +2497,14 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
                 message: error_str,
                 status: overload_status_code(),
                 sanitized: Some(SanitizedError::Overloaded),
+                metric_error_type,
             });
         }
 
-        return Some(BackendErrorInfo::from_status(
-            error_str,
-            StatusCode::INTERNAL_SERVER_ERROR,
-        ));
+        return Some(
+            BackendErrorInfo::from_status(error_str, StatusCode::INTERNAL_SERVER_ERROR)
+                .with_metric_error_type(metric_error_type),
+        );
     }
 
     // Check if the data payload itself contains an error structure with code >= 400
@@ -2623,12 +2653,13 @@ fn backend_error_response(backend_error: BackendErrorInfo) -> ErrorResponse {
         message,
         status,
         sanitized,
+        metric_error_type,
     } = backend_error;
     let action = match sanitized {
         Some(variant) => BackendStatusAction::Sanitize(variant),
         None => BackendStatusAction::triage(status),
     };
-    match action {
+    let mut response = match action {
         BackendStatusAction::Sanitize(variant) => {
             ErrorMessage::sanitized_with_details(variant, message)
         }
@@ -2646,7 +2677,11 @@ fn backend_error_response(backend_error: BackendErrorInfo) -> ErrorResponse {
                 metric_error_type: None,
             }),
         ),
+    };
+    if let Some(error_type) = metric_error_type {
+        response.1.metric_error_type = Some(error_type);
     }
+    response
 }
 
 /// Read the pre-commit peek window from the environment.
@@ -3076,6 +3111,8 @@ async fn chat_completions(
         //   - `event: tool_call_dispatch`  — complete tool call detected early (tool dispatch)
         //   - `event: reasoning_dispatch`  — complete reasoning block (emitted once)
         let (activity_tx, activity_rx) = tokio::sync::mpsc::unbounded_channel();
+        let monitor_error_signal = StreamErrorSignal::default();
+        let producer_error_signal = monitor_error_signal.clone();
         let stream = async_stream::stream! {
             let mut stream = Box::pin(stream);
             let mut events: Vec<Result<Event, axum::Error>> = Vec::with_capacity(4);
@@ -3083,6 +3120,10 @@ async fn chat_completions(
 
             while let Some(mut response) = stream.next().await {
                 events.clear();
+                let response_timed_out = response
+                    .error
+                    .as_ref()
+                    .is_some_and(|error| super::metrics::request_was_timed_out(error));
 
                 // When parallel_tool_calls is false, surface only the first tool call
                 // Keep index 0 and drop any higher indexes
@@ -3122,12 +3163,6 @@ async fn chat_completions(
                     continue;
                 }
 
-                if response_streaming.is_none() {
-                    let _entered_request_lifecycle = streaming_request_lifecycle.enter();
-                    response_streaming = Some(
-                        streaming_lifecycle.start(LifecycleStage::ResponseStreaming),
-                    );
-                }
                 if tool_dispatch_enabled {
                     streaming_tool_dispatch_events(
                         &response,
@@ -3156,17 +3191,27 @@ async fn chat_completions(
                 match sse_result {
                     Ok(Some(ev)) => events.push(Ok(ev)),
                     Ok(None) => {}
-                    Err(e) => events.push(Err(e)),
+                    Err(e) => {
+                        if response_timed_out {
+                            producer_error_signal.set(ErrorType::ResponseTimeout);
+                        }
+                        events.push(Err(e));
+                    }
                 }
 
                 events.reverse();
                 while let Some(event) = events.pop() {
+                    if response_streaming.is_none() && event.is_ok() {
+                        let _entered_request_lifecycle = streaming_request_lifecycle.enter();
+                        response_streaming = Some(
+                            streaming_lifecycle.start(LifecycleStage::ResponseStreaming),
+                        );
+                    }
                     yield event;
                 }
             }
         };
         let keep_alive = state.sse_keep_alive_for_response(stream_can_defer_all_output);
-        let monitor_error_signal = StreamErrorSignal::default();
         let stream = monitor_for_disconnects_with_activity_and_error_signal(
             stream,
             ctx.clone(),
@@ -6223,6 +6268,46 @@ mod tests {
     }
 
     #[test]
+    fn response_timeout_from_anyhow_preserves_terminal_outcome() {
+        use dynamo_runtime::error::{DynamoError, ErrorType as DynamoErrorType};
+
+        let err: anyhow::Error = DynamoError::builder()
+            .error_type(DynamoErrorType::ResponseTimeout)
+            .message("request-plane response timeout")
+            .build()
+            .into();
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::ResponseTimeout
+        );
+        assert_eq!(
+            terminal_outcome_for_error_response(&response),
+            TerminalOutcome::TimedOut
+        );
+    }
+
+    #[test]
+    fn terminal_outcome_uses_semantic_error_type() {
+        let response = (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorMessage {
+                message: "request rejected because the service is overloaded".to_string(),
+                error_type: "service_unavailable".to_string(),
+                code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+                details: None,
+                metric_error_type: Some(ErrorType::Overload),
+            }),
+        );
+
+        assert_eq!(
+            terminal_outcome_for_error_response(&response),
+            TerminalOutcome::Rejected
+        );
+    }
+
+    #[test]
     fn queue_rejection_maps_to_structured_http_529() {
         use dynamo_kv_router::scheduling::{QueueLimitKind, QueueRejection};
 
@@ -7175,6 +7260,39 @@ mod tests {
             assert_eq!(error_response.1.error_type, "Bad Request");
             assert_eq!(error_response.1.message, "unsupported JSON schema keyword");
         }
+    }
+
+    #[tokio::test]
+    async fn test_check_for_backend_error_preserves_response_timeout() {
+        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use dynamo_runtime::error::{DynamoError, ErrorType as DynamoErrorType};
+        use futures::stream;
+
+        let error_event = Annotated::<NvCreateChatCompletionStreamResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(
+                DynamoError::builder()
+                    .error_type(DynamoErrorType::ResponseTimeout)
+                    .message("request-plane response timeout")
+                    .build(),
+            ),
+        };
+
+        let response = match check_for_backend_error(stream::iter(vec![error_event]), None).await {
+            Err(response) => response,
+            Ok(_) => panic!("typed response timeout must fail preflight"),
+        };
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::ResponseTimeout
+        );
+        assert_eq!(
+            terminal_outcome_for_error_response(&response),
+            TerminalOutcome::TimedOut
+        );
     }
 
     #[tokio::test]

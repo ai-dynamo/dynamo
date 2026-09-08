@@ -498,7 +498,12 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
                             yield event;
                         }
                         Some(Err(err)) => {
-                            let (error_type, error_body) = error_formatter(&err);
+                            let (fallback_error_type, error_body) = error_formatter(&err);
+                            let error_type = error_signal
+                                .as_ref()
+                                .and_then(StreamErrorSignal::get)
+                                .cloned()
+                                .unwrap_or(fallback_error_type);
                             if let Some(error_signal) = &error_signal {
                                 error_signal.set(error_type.clone());
                             }
@@ -1173,6 +1178,49 @@ mod tests {
         let monitored = monitor_for_disconnects_with_timeout(stream, ctx, guard, handle, None);
         let body = collect_sse_body(monitored).await;
         assert_fault_contract("python_consumer_drop", &body, backend_detail);
+    }
+
+    #[tokio::test]
+    async fn typed_producer_error_overrides_generic_stream_error_classification() {
+        let model = "typed-timeout-model";
+        let (metrics, guard, ctx, handle) = setup_test(model, "req-typed-timeout");
+        let error_signal = StreamErrorSignal::default();
+        error_signal.set(ErrorType::ResponseTimeout);
+        let stream = simulate_mid_stream_error(0, "request-plane response timeout");
+        let monitored = monitor_for_disconnects_with_timeout_error_and_keep_alive(
+            stream,
+            ctx,
+            guard,
+            handle,
+            None,
+            openai_stream_error,
+            StreamMonitorOptions {
+                error_signal: Some(error_signal),
+                ..Default::default()
+            },
+        );
+
+        let _body = collect_sse_body(monitored).await;
+        assert_eq!(
+            metrics.get_request_counter(
+                model,
+                &Endpoint::ChatCompletions,
+                &RequestType::Stream,
+                &Status::Error,
+                &ErrorType::ResponseTimeout,
+            ),
+            1
+        );
+        assert_eq!(
+            metrics.get_request_counter(
+                model,
+                &Endpoint::ChatCompletions,
+                &RequestType::Stream,
+                &Status::Error,
+                &ErrorType::Internal,
+            ),
+            0
+        );
     }
 
     /// A backend error carrying sensitive internals (file paths, panic text,
