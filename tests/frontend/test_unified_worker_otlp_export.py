@@ -30,6 +30,7 @@ from tests.utils.managed_process import DynamoFrontendProcess
 from tests.utils.otel import (
     get_engine_generate_roles,
     get_span_attribute,
+    has_complete_span_chain,
     wait_for_engine_generate_count,
 )
 
@@ -324,25 +325,30 @@ def test_python_routers_preserve_trace_and_worker_cancellation(
     deadline = time.monotonic() + 20.0
     while time.monotonic() < deadline:
         spans = collector.spans_for_trace_id(trace_id)
+        roots = [span for span in spans if span.name == "http-request"]
+        dispatches = [
+            span
+            for span in spans
+            if span.name == "client_request"
+            and get_span_attribute(span, "operation")
+            == "kv_router.generate_from_request"
+        ]
         if (
             sum(span.name == "router.route_request" for span in spans) == 2
             and sum(span.name == "kv_router.route_request" for span in spans) == 1
             and sum(span.name == "handle_payload" for span in spans) == 3
-            and any(span.name == "http-request" for span in spans)
+            and len(roots) == 1
+            and len(dispatches) == 1
+            and has_complete_span_chain(
+                spans, span_id=dispatches[0].span_id, ancestor_id=roots[0].span_id
+            )
         ):
             break
         time.sleep(0.2)
 
-    roots = [span for span in spans if span.name == "http-request"]
     routes = [span for span in spans if span.name == "router.route_request"]
     kv_routes = [span for span in spans if span.name == "kv_router.route_request"]
     handlers = [span for span in spans if span.name == "handle_payload"]
-    dispatches = [
-        span
-        for span in spans
-        if span.name == "client_request"
-        and get_span_attribute(span, "operation") == "kv_router.generate_from_request"
-    ]
     assert len(roots) == 1, f"expected one HTTP span, got {len(roots)}"
     assert len(routes) == 2, f"expected frontend/global route spans, got {len(routes)}"
     assert len(kv_routes) == 1, "missing downstream KV route span"
@@ -356,14 +362,9 @@ def test_python_routers_preserve_trace_and_worker_cancellation(
 
     # Follow exported parent IDs, rather than assuming that matching trace IDs
     # or mocked context identity proves the Python boundary preserved parentage.
-    spans_by_id = {span.span_id: span for span in spans}
-    ancestor = dispatch
-    visited = set()
-    while ancestor.span_id != root.span_id:
-        assert ancestor.span_id not in visited, "cycle in exported trace ancestry"
-        visited.add(ancestor.span_id)
-        assert ancestor.parent_span_id in spans_by_id, f"orphan span: {ancestor}"
-        ancestor = spans_by_id[ancestor.parent_span_id]
+    assert has_complete_span_chain(
+        spans, span_id=dispatch.span_id, ancestor_id=root.span_id
+    ), "PyO3 dispatch is not a descendant of the inbound HTTP span"
 
     route = kv_routes[0]
     assert (
