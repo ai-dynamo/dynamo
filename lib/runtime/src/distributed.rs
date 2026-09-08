@@ -838,7 +838,6 @@ impl RequestPlaneMode {
     fn from_env_result(value: std::result::Result<String, std::env::VarError>) -> Result<Self> {
         match value {
             Err(std::env::VarError::NotPresent) => Ok(Self::default()),
-            Ok(s) if s.is_empty() => Ok(Self::default()),
             Ok(s) => s.parse(),
             Err(std::env::VarError::NotUnicode(raw)) => Err(anyhow::anyhow!(
                 "Invalid request plane mode: '{}' is not valid Unicode. \
@@ -865,23 +864,16 @@ mod request_plane_env_tests {
     }
 
     #[test]
-    fn empty_request_plane_defaults_to_tcp() {
-        let mode = RequestPlaneMode::from_env_result(Ok(String::new()))
-            .expect("an empty DYN_REQUEST_PLANE must not be an error");
-        assert_eq!(mode, RequestPlaneMode::Tcp);
+    fn empty_request_plane_is_an_error() {
+        RequestPlaneMode::from_env_result(Ok(String::new()))
+            .expect_err("an empty DYN_REQUEST_PLANE must not silently fall back to TCP");
     }
 
     #[test]
-    fn valid_request_plane_values_resolve() {
-        for (value, expected) in [
-            ("nats", RequestPlaneMode::Nats),
-            ("tcp", RequestPlaneMode::Tcp),
-            ("NaTs", RequestPlaneMode::Nats),
-        ] {
-            let mode = RequestPlaneMode::from_env_result(Ok(value.to_string()))
-                .unwrap_or_else(|err| panic!("DYN_REQUEST_PLANE={value} should resolve: {err}"));
-            assert_eq!(mode, expected, "DYN_REQUEST_PLANE={value}");
-        }
+    fn valid_request_plane_value_resolves() {
+        let mode = RequestPlaneMode::from_env_result(Ok("nats".to_string()))
+            .expect("DYN_REQUEST_PLANE=nats should resolve");
+        assert_eq!(mode, RequestPlaneMode::Nats);
     }
 
     #[test]
