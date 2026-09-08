@@ -48,10 +48,12 @@ EXPECTED_TYPE_COUNTS = {
     # (PodReference, PodSnapshotSource/Spec/Status,
     # PodSnapshotContentSource/Spec/Status, PodSnapshotReference), which are
     # owned by github.com/ai-dynamo/snapshot.
-    "nvidia.com/v1alpha1": 75,
+    "nvidia.com/v1alpha1": 69,
     "nvidia.com/v1beta1": 69,
-    # 33 since ElasticEPRayPoCConfiguration, the operator-managed Ray elastic-EP gate.
-    "operator.config.dynamo.nvidia.com/v1alpha1": 33,
+    # 29 = main's 28 plus ElasticEPRayPoCConfiguration, the operator-managed Ray
+    # elastic-EP gate. Both sides moved this number, so the merge resolution is their
+    # sum, not either value.
+    "operator.config.dynamo.nvidia.com/v1alpha1": 29,
 }
 EXPECTED_OPERATOR_DEFAULT_SECTIONS = (
     "Pod Specification Defaults",
@@ -217,16 +219,22 @@ def test_v1beta1_shared_type_names_use_deduplicated_anchors(
         assert by_display[display].anchor == expected_anchor
 
 
-def test_dynamocheckpoint_carries_the_expected_field_set(
+def test_removed_dynamocheckpoint_types_are_absent(
     reference: kubernetes_api_discovery.KubernetesReference,
 ) -> None:
-    """DynamoCheckpoint (resource) surfaces apiVersion/kind/metadata/spec/status."""
+    """The hard cutover removes DynamoCheckpoint and its resource-only types."""
     v1alpha1 = next(p for p in reference.packages if p.name == "nvidia.com/v1alpha1")
-    by_name = {t.name: t for t in v1alpha1.types}
-    dyn_checkpoint = by_name["DynamoCheckpoint"]
-    assert dyn_checkpoint.kind == "resource"
-    field_names = [f.name for f in dyn_checkpoint.fields]
-    assert field_names == ["apiVersion", "kind", "metadata", "spec", "status"]
+    type_names = {t.name for t in v1alpha1.types}
+    assert not type_names.intersection(
+        {
+            "DynamoCheckpoint",
+            "DynamoCheckpointJobConfig",
+            "DynamoCheckpointPhase",
+            "DynamoCheckpointSpec",
+            "DynamoCheckpointStatus",
+            "DynamoCheckpointStorageType",
+        }
+    )
 
 
 def test_enum_types_expose_their_enum_values_not_fields(
@@ -390,12 +398,13 @@ def test_raw_reference_omits_dgd_only_fields_from_standalone_dcd_docs(
         dcd = by_name["DynamoComponentDeploymentSpec"]
         assert "providerOverride" not in {field.name for field in dcd.fields}
         dcd_multinode = next(field for field in dcd.fields if field.name == "multinode")
-        assert dcd_multinode.type == "object"
-        assert "`leader` and `worker` are DGD-only" in dcd_multinode.description
+        assert "MultinodeSpec" in dcd_multinode.type
+        dcd_roles = next(field for field in dcd.fields if field.name == "roles")
+        assert dcd_roles.type == "object array"
+        assert "Standalone DCD roles accept only `name`" in dcd_roles.description
         for type_name in (
             "DynamoComponentDeploymentSharedSpec",
-            "MultinodeSpec",
-            "MultinodeRoleSpec",
+            "ComponentRoleSpec",
             "ProviderOverride",
         ):
             assert "DynamoComponentDeploymentSpec" not in {

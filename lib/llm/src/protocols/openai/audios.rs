@@ -74,6 +74,29 @@ pub struct NvCreateAudioSpeechRequest {
     /// NVIDIA extensions (reserved for future use)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
+
+    /// Worker-boundary contract, not a public field: the frontend moves
+    /// `passthrough` under `extra_args["media_passthrough"]` before
+    /// dispatch (see [`Self::nest_passthrough`]) so workers read one
+    /// explicit nested entry. A client-sent `extra_args` lands in
+    /// `passthrough` like any other unknown field.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub extra_args: Option<serde_json::Map<String, serde_json::Value>>,
+
+    /// Unknown top-level fields are retained here and forwarded to the
+    /// backend without strict validation. This matches the OpenAI client's
+    /// extra_body option, which merges into the top level of the body.
+    /// Stable knobs can be promoted to typed fields over time.
+    #[serde(default, flatten)]
+    pub passthrough: serde_json::Map<String, serde_json::Value>,
+}
+
+impl NvCreateAudioSpeechRequest {
+    /// Nest captured top-level unknowns under `extra_args["media_passthrough"]`
+    /// for dispatch to a worker.
+    pub fn nest_passthrough(&mut self) {
+        super::nest_media_passthrough(&mut self.passthrough, &mut self.extra_args);
+    }
 }
 
 /// Audio data in response
@@ -246,9 +269,51 @@ mod tests {
             max_new_tokens: None,
             user: None,
             nvext: None,
+            extra_args: None,
+            passthrough: serde_json::Map::new(),
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("data_source"));
+    }
+
+    #[test]
+    fn audio_request_captures_unknown_top_level_fields() {
+        // The OpenAI client's extra_body option merges into the top level of
+        // the body, so that is where backend knobs arrive.
+        let json = r#"{"input":"hello","emotion":"calm","pitch":1.2}"#;
+        let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.passthrough["emotion"], serde_json::json!("calm"));
+        assert_eq!(req.passthrough["pitch"], serde_json::json!(1.2));
+        assert!(!req.passthrough.contains_key("input"));
+
+        let out = serde_json::to_string(&req).unwrap();
+        let back: NvCreateAudioSpeechRequest = serde_json::from_str(&out).unwrap();
+        assert_eq!(back.passthrough, req.passthrough);
+        assert!(out.contains("\"emotion\":\"calm\""));
+    }
+
+    #[test]
+    fn audio_request_empty_passthrough_adds_nothing() {
+        let json = r#"{"input":"hello"}"#;
+        let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
+        assert!(req.passthrough.is_empty());
+        let out: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
+        assert_eq!(out, serde_json::json!({"input":"hello"}));
+    }
+
+    #[test]
+    fn audio_request_nests_passthrough_for_workers() {
+        let json = r#"{"input":"hello","emotion":"calm"}"#;
+        let mut req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
+        req.nest_passthrough();
+        assert!(req.passthrough.is_empty());
+        let out = serde_json::to_value(&req).unwrap();
+        assert_eq!(
+            out["extra_args"]["media_passthrough"]["emotion"],
+            serde_json::json!("calm")
+        );
+        assert!(out.get("emotion").is_none());
     }
 
     // --- AudioData ---

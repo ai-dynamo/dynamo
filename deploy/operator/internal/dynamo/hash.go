@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -120,6 +121,18 @@ func workerHashSpec(dcd *v1beta1.DynamoComponentDeployment) v1beta1.DynamoCompon
 	// Hash the resolved version separately so equivalent image-derived and
 	// explicit versions produce the same worker hash.
 	spec.RuntimeVersionOverride = ""
+
+	// Roles are a Kubernetes map-list keyed by name. Canonicalize the copied
+	// slice so declaration order does not create a new worker generation.
+	sort.Slice(spec.Roles, func(i, j int) bool {
+		return spec.Roles[i].Name < spec.Roles[j].Name
+	})
+
+	// An explicit declaration of the established multinode roles is a
+	// representation-only migration and must not create a worker generation.
+	if ExplicitMultinodeRolesMatchImplicit(&spec.DynamoComponentDeploymentSharedSpec) {
+		spec.Roles = nil
+	}
 
 	return *spec
 }

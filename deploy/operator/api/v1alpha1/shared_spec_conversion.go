@@ -165,6 +165,12 @@ func ConvertFromDynamoComponentDeploymentSharedSpec(src *DynamoComponentDeployme
 		dst.Multinode = &v1beta1.MultinodeSpec{}
 		ConvertFromMultinodeSpec(src.Multinode, dst.Multinode)
 	}
+	if src.Roles != nil {
+		dst.Roles = make([]v1beta1.ComponentRoleSpec, len(src.Roles))
+		for i := range src.Roles {
+			ConvertFromComponentRoleSpec(&src.Roles[i], &dst.Roles[i])
+		}
+	}
 
 	if src.ModelRef != nil {
 		dst.ModelRef = &v1beta1.ModelReference{}
@@ -541,6 +547,12 @@ func ConvertToDynamoComponentDeploymentSharedSpec(src *v1beta1.DynamoComponentDe
 		dst.Multinode = &MultinodeSpec{}
 		ConvertToMultinodeSpec(src.Multinode, dst.Multinode)
 	}
+	if src.Roles != nil {
+		dst.Roles = make([]ComponentRoleSpec, len(src.Roles))
+		for i := range src.Roles {
+			ConvertToComponentRoleSpec(&src.Roles[i], &dst.Roles[i])
+		}
+	}
 	if src.ModelRef != nil {
 		dst.ModelRef = &ModelReference{}
 		ConvertToModelReference(src.ModelRef, dst.ModelRef)
@@ -851,38 +863,18 @@ func ConvertToProviderOverride(src *v1beta1.ProviderOverride, dst *ProviderOverr
 // v1beta1. src and dst must not be nil.
 func ConvertFromMultinodeSpec(src *MultinodeSpec, dst *v1beta1.MultinodeSpec) {
 	*dst = v1beta1.MultinodeSpec{NodeCount: src.NodeCount}
-
-	// Convert each explicit role independently to preserve its provider context.
-	if src.Leader != nil {
-		dst.Leader = &v1beta1.MultinodeRoleSpec{}
-		ConvertFromMultinodeRoleSpec(src.Leader, dst.Leader)
-	}
-	if src.Worker != nil {
-		dst.Worker = &v1beta1.MultinodeRoleSpec{}
-		ConvertFromMultinodeRoleSpec(src.Worker, dst.Worker)
-	}
 }
 
 // ConvertToMultinodeSpec converts multinode settings from v1beta1 to
 // v1alpha1. src and dst must not be nil.
 func ConvertToMultinodeSpec(src *v1beta1.MultinodeSpec, dst *MultinodeSpec) {
 	*dst = MultinodeSpec{NodeCount: src.NodeCount}
-
-	// Convert each explicit role independently to preserve its provider context.
-	if src.Leader != nil {
-		dst.Leader = &MultinodeRoleSpec{}
-		ConvertToMultinodeRoleSpec(src.Leader, dst.Leader)
-	}
-	if src.Worker != nil {
-		dst.Worker = &MultinodeRoleSpec{}
-		ConvertToMultinodeRoleSpec(src.Worker, dst.Worker)
-	}
 }
 
-// ConvertFromMultinodeRoleSpec converts one explicit multinode role. src and
-// dst must not be nil.
-func ConvertFromMultinodeRoleSpec(src *MultinodeRoleSpec, dst *v1beta1.MultinodeRoleSpec) {
-	*dst = v1beta1.MultinodeRoleSpec{}
+// ConvertFromComponentRoleSpec converts one explicit component role from
+// v1alpha1 to v1beta1. src and dst must not be nil.
+func ConvertFromComponentRoleSpec(src *ComponentRoleSpec, dst *v1beta1.ComponentRoleSpec) {
+	*dst = v1beta1.ComponentRoleSpec{Name: src.Name}
 
 	// Preserve the role-level provider schema and sparse value verbatim.
 	if src.ProviderOverride != nil {
@@ -891,10 +883,10 @@ func ConvertFromMultinodeRoleSpec(src *MultinodeRoleSpec, dst *v1beta1.Multinode
 	}
 }
 
-// ConvertToMultinodeRoleSpec converts one explicit multinode role. src and dst
-// must not be nil.
-func ConvertToMultinodeRoleSpec(src *v1beta1.MultinodeRoleSpec, dst *MultinodeRoleSpec) {
-	*dst = MultinodeRoleSpec{}
+// ConvertToComponentRoleSpec converts one explicit component role from
+// v1beta1 to v1alpha1. src and dst must not be nil.
+func ConvertToComponentRoleSpec(src *v1beta1.ComponentRoleSpec, dst *ComponentRoleSpec) {
+	*dst = ComponentRoleSpec{Name: src.Name}
 
 	// Preserve the role-level provider schema and sparse value verbatim.
 	if src.ProviderOverride != nil {
