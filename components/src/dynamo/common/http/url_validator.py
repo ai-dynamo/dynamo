@@ -27,6 +27,13 @@ class UrlValidationError(ValueError):
     """Raised when a URL or filesystem path fails the configured policy."""
 
 
+# Cap on the raw length of an inline ``data:`` URL. A client can otherwise inline
+# an arbitrarily large payload in a single request and force the worker to hold
+# it (and its base64-decoded form) in memory. Default 16 MiB, overridable via
+# ``DYN_MM_MAX_DATA_URL_MB``.
+_MAX_DATA_URL_BYTES = int(os.getenv("DYN_MM_MAX_DATA_URL_MB", "16")) * 1024 * 1024
+
+
 # IP ranges that must never be reachable from a user-controlled URL.
 # Source: RFC1918 (private), RFC6598 (CGNAT), RFC5735 (loopback, link-local,
 # 0.0.0.0/8), RFC4193 (ULA), RFC4291 (IPv6 loopback / link-local), RFC6890
@@ -120,6 +127,11 @@ async def validate_url(url: str, policy: UrlValidationPolicy) -> str:
     scheme = parsed.scheme.lower()
 
     if scheme == "data":
+        if len(url) > _MAX_DATA_URL_BYTES:
+            raise UrlValidationError(
+                f"data: URL is {len(url)} bytes, exceeds the "
+                f"{_MAX_DATA_URL_BYTES}-byte limit"
+            )
         return url
 
     if scheme not in ("http", "https"):
