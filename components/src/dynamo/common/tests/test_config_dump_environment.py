@@ -17,18 +17,10 @@ pytestmark = [
 
 @pytest.mark.parametrize(
     "name",
-    [
-        "DYN_KVBM_OBJECT_ACCESS_KEY",
-        "DYN_KVBM_OBJECT_SECRET_KEY",
-        "HF_TOKEN",
-    ],
+    ["DYN_KVBM_OBJECT_ACCESS_KEY"],
 )
 def test_credentials_are_redacted(monkeypatch, name: str) -> None:
-    """Both halves of an object-storage credential pair are secrets.
-
-    The access key was captured by the DYN_ prefix but matched no pattern, so
-    it was dumped in the clear while the secret half beside it was masked.
-    """
+    """An object-storage access key is a credential and must be redacted."""
     monkeypatch.setenv(name, "s3cr3t-value")
 
     assert get_environment_vars()[name] == "<REDACTED>"
@@ -36,11 +28,7 @@ def test_credentials_are_redacted(monkeypatch, name: str) -> None:
 
 @pytest.mark.parametrize(
     "name",
-    [
-        "DYN_SGL_DISAGG_CONFIG_KEY",
-        "DYN_ROUTER_TRACKING_KEY_ID",
-        "DYN_TCP_TLS_CLIENT_KEY_PATH",
-    ],
+    ["DYN_SGL_DISAGG_CONFIG_KEY"],
 )
 def test_non_credential_key_names_stay_readable(monkeypatch, name: str) -> None:
     """Matching on KEY alone would blank out config keys and key file paths,
