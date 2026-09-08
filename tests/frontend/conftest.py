@@ -230,7 +230,6 @@ def start_services_with_grpc(
 class MockerWorkerProcess(ManagedProcess):
     """Shared mocker worker process for frontend tests.
 
-    Uses dynamo.mocker with configurable model and speedup ratio.
     Can be used by any frontend test that needs a fast mock backend.
     """
 

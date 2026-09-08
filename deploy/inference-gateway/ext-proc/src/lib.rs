@@ -3,7 +3,6 @@
 
 //! Envoy ext_proc gRPC server for Dynamo inference routing.
 //!
-//! Mirrors the Go LW-EPP architecture from GAIE (issue #2834 / PR #2842):
 //! - `StreamingServer` handles the ext-proc bidirectional streaming protocol
 //! - `EndpointPicker` trait abstracts endpoint selection
 //! - The Dynamo `epp::Router` implements `EndpointPicker` using the KV-aware router
@@ -30,7 +29,9 @@ pub mod vllm_render_client;
 
 pub use epp::Router;
 pub use epp_router::EppRouter;
-pub use epp_standalone_config::{EppMode, EppStandaloneConfig, TokenizerProtocol};
+pub use epp_standalone_config::{
+    EppMode, EppStandaloneConfig, PeerReplicationConfig, TokenizerProtocol,
+};
 pub use inference_pool::PoolState;
 pub use picker::{Endpoint, EndpointPicker, PickResult, RequestInfo, ResponseUsage};
 pub use pod_discovery::{PodDiscovery, RawWorker};

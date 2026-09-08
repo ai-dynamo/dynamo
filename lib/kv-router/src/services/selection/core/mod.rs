@@ -14,8 +14,8 @@ use tokio_util::sync::CancellationToken;
 use crate::identity::RoutingPartitionId;
 use crate::indexer::TieredMatchDetails;
 use crate::protocols::{
-    ActiveSequenceEvent, LocalBlockHash, PrefillLoadHint, RoutingConstraints, WorkerId,
-    WorkerWithDpRank,
+    ActiveSequenceEvent, LocalBlockHash, PrefillLoadHint, RoutingConstraints, WorkerAffinityTarget,
+    WorkerId, WorkerWithDpRank,
 };
 use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::selector::WorkerSelectionPolicy;
@@ -83,6 +83,7 @@ struct SelectionOperation {
     strict_priority: u32,
     policy_class: Option<String>,
     session_id: Option<String>,
+    affinity_target: Option<WorkerAffinityTarget>,
     pinned_worker: Option<WorkerWithDpRank>,
     allowed_worker_ids: Option<HashSet<WorkerId>>,
     routing_constraints: RoutingConstraints,
@@ -649,6 +650,7 @@ impl SelectionCore {
                 strict_priority: req.strict_priority.unwrap_or(0),
                 policy_class,
                 session_id: req.session_id,
+                affinity_target: req.affinity_target,
                 pinned_worker: req.pinned_worker,
                 allowed_worker_ids: req.allowed_worker_ids,
                 routing_constraints: req.routing_constraints,
@@ -684,6 +686,7 @@ impl SelectionCore {
                 strict_priority: req.strict_priority.unwrap_or(0),
                 policy_class,
                 session_id: req.session_id,
+                affinity_target: req.affinity_target,
                 pinned_worker: req.pinned_worker,
                 allowed_worker_ids: req.allowed_worker_ids,
                 routing_constraints: req.routing_constraints,
@@ -708,6 +711,7 @@ impl SelectionCore {
             strict_priority,
             policy_class,
             session_id,
+            affinity_target,
             pinned_worker,
             allowed_worker_ids,
             routing_constraints,
@@ -775,6 +779,7 @@ impl SelectionCore {
             session_context: session_id
                 .map(|session_id| SessionContext::new(session_id, None, None, None, None)),
             expected_output_tokens,
+            affinity_target,
             pinned_worker,
             allowed_worker_ids,
             routing_constraints,
@@ -1310,6 +1315,7 @@ mod tests {
             priority_jump: None,
             strict_priority: None,
             session_id: None,
+            affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: RoutingConstraints::default(),
@@ -1327,6 +1333,7 @@ mod tests {
             priority_jump: None,
             strict_priority: None,
             session_id: None,
+            affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: RoutingConstraints::default(),
@@ -1654,7 +1661,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    #[tokio::test(flavor = "current_thread")]
     async fn queued_selection_returns_refreshed_overlap_snapshot() {
         let mut config = test_config(false);
         config.router_queue_threshold = Some(0.0);
@@ -1729,6 +1736,7 @@ mod tests {
                     priority_jump: None,
                     strict_priority: None,
                     session_id: None,
+                    affinity_target: None,
                     pinned_worker: None,
                     allowed_worker_ids: None,
                     routing_constraints: RoutingConstraints::default(),
@@ -1743,6 +1751,8 @@ mod tests {
             .await
             .unwrap();
         entry.indexer.dump_events().await.expect("flush indexer");
+        // Freeze time only after async setup so background timers cannot expire the fixture.
+        tokio::time::pause();
         tokio::time::advance(Duration::from_secs(11)).await;
         core.free_reservation("occupy-2")
             .await

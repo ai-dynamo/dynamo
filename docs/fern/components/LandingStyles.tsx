@@ -288,6 +288,18 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   outline-offset: 4px;
 }
 
+.dynamo-welcome__cta--secondary {
+  background: transparent;
+  border-color: #76b900;
+  color: #d8e8c0 !important;
+}
+
+.dynamo-welcome__cta--secondary:hover {
+  background: rgba(118, 185, 0, 0.12);
+  border-color: #76b900;
+  box-shadow: none;
+}
+
 .dynamo-welcome__cta svg {
   width: 1rem;
   height: 1rem;

@@ -518,6 +518,24 @@ impl Client {
         self.instances().into_iter().map(|ep| ep.id()).collect()
     }
 
+    /// Whether the live discovery source (not the asynchronously reconciled
+    /// routing snapshot) currently contains this instance.
+    pub fn is_instance_live(&self, instance_id: u64) -> bool {
+        self.instance_source
+            .borrow()
+            .iter()
+            .any(|instance| instance.id() == instance_id)
+    }
+
+    /// Whether the latest discovery snapshot contains this instance, including inhibited workers.
+    pub fn is_instance_discovered(&self, instance_id: u64) -> bool {
+        self.routing_instances
+            .snapshot()
+            .discovered_ids()
+            .binary_search(&instance_id)
+            .is_ok()
+    }
+
     pub fn instance_ids_avail(&self) -> Vec<u64> {
         self.routing_instances.routable_ids()
     }
