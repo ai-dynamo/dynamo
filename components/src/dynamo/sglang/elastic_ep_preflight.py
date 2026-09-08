@@ -19,9 +19,12 @@ from typing import Dict, List, Optional, Tuple
 
 MOONCAKE_BACKEND = "mooncake"
 
-# The torch backend name SGLang registers the elastic-EP *device* group under
-# (sglang/srt/distributed/parallel_state.py). "mooncake-cpu" is not required.
-_MOONCAKE_DEVICE_BACKEND = "mooncake"
+# The torch backend names SGLang registers its elastic-EP process groups under
+# (sglang/srt/distributed/parallel_state.py): the device group and the CPU group
+# it uses for the metadata collectives. The extension registers both together, so
+# one present without the other is a partial registration the engine falls over
+# on later.
+_REQUIRED_TORCH_BACKENDS = ("mooncake", "mooncake-cpu")
 
 # mooncake renamed this extension ``mooncake.ep`` -> ``mooncake.pg``; SGLang
 # v0.5.16 imports the old name and v0.5.18 the new one.
@@ -169,6 +172,7 @@ def _format_versions(versions: Dict[str, str]) -> str:
 def _build_diagnostic(
     import_failure: Optional[str],
     registered_backends: Dict[str, Tuple[str, ...]],
+    missing_backends: Tuple[str, ...],
     enable_dp_attention: bool,
 ) -> str:
     mooncake_backends = {
@@ -188,6 +192,10 @@ def _build_diagnostic(
         f"  ProcessGroup extensions this mooncake ships: {', '.join(_available_extension_modules()) or 'none found'}",
         f"  mooncake backends registered with torch.distributed: {mooncake_backends or 'none'}",
     ]
+    if missing_backends:
+        lines.append(
+            "  required by SGLang but not registered: " f"{', '.join(missing_backends)}"
+        )
     if enable_dp_attention:
         lines.append(
             "  --enable-dp-attention is also set: DP attention synchronizes its "
@@ -215,7 +223,7 @@ def check_elastic_ep_backend(
     Raises:
         ValueError: The mooncake backend was requested but its torch
             ProcessGroup extension does not import, or imports without
-            registering the device backend SGLang asks torch for.
+            registering both of the backends SGLang asks torch for.
     """
     if not elastic_ep_backend:
         return
@@ -224,16 +232,23 @@ def check_elastic_ep_backend(
 
     import_failure = _import_process_group_extension()
     registered_backends: Dict[str, Tuple[str, ...]] = {}
+    missing_backends: Tuple[str, ...] = ()
     if import_failure is None:
         readable_backends = _registered_torch_backends()
-        # An unreadable registry fails open: the import above already catches
-        # the reported failure, and torch could rename a private attribute.
         if readable_backends is None:
             return
-        if _MOONCAKE_DEVICE_BACKEND in readable_backends:
+        missing_backends = tuple(
+            name for name in _REQUIRED_TORCH_BACKENDS if name not in readable_backends
+        )
+        if not missing_backends:
             return
         registered_backends = readable_backends
 
     raise ValueError(
-        _build_diagnostic(import_failure, registered_backends, enable_dp_attention)
+        _build_diagnostic(
+            import_failure,
+            registered_backends,
+            missing_backends,
+            enable_dp_attention,
+        )
     )

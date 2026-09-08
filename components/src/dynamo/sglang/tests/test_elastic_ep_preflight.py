@@ -139,6 +139,33 @@ def test_accepts_mooncake_when_the_image_can_serve_it(monkeypatch):
     check_elastic_ep_backend("mooncake", True)
 
 
+def test_rejects_a_wheel_that_registers_only_half_the_process_groups(monkeypatch):
+    """A device backend without its CPU peer is not a usable image.
+
+    SGLang builds both an elastic-EP device group and a CPU group for the
+    metadata collectives, so accepting on ``mooncake`` alone lets a wheel that
+    registered only that one pass here and still fail during engine startup.
+    """
+    _simulate_environment(
+        monkeypatch,
+        import_failure=None,
+        registered_backends={
+            "gloo": ("cpu",),
+            "nccl": ("cuda",),
+            "mooncake": ("cuda",),
+        },
+        mooncake_versions={"mooncake-transfer-engine-cuda13": "0.3.11.post1"},
+        extension_modules=["pg_2_11_0"],
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        check_elastic_ep_backend("mooncake")
+
+    # The operator has to be told which half is absent; the registry line alone
+    # shows a mooncake backend present and reads as a working image.
+    assert "mooncake-cpu" in str(excinfo.value)
+
+
 def test_unreadable_torch_backend_registry_does_not_block_startup(monkeypatch):
     """A registry that cannot be read is not evidence that mooncake is absent.
 
