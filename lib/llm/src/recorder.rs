@@ -57,6 +57,8 @@ pub struct Recorder<T> {
     event_count: Arc<Mutex<usize>>,
     /// Time when the first event was received
     first_event_time: Arc<Mutex<Option<Instant>>>,
+    /// Handle to the writer task, so shutdown can await the final drain + flush.
+    task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl<T> Recorder<T>
@@ -131,7 +133,7 @@ where
         let file_path = output_path.as_ref().to_path_buf();
 
         // Spawn a task to receive events and write them to the file
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let start_time = start_time;
             let mut writer = BufWriter::with_capacity(options.buffer_bytes.max(1), file);
             let mut line_count = 0;
@@ -168,6 +170,32 @@ where
                     biased;
 
                     _ = cancel_clone.cancelled() => {
+                        // Drain records still queued in the channel so a graceful
+                        // shutdown doesn't truncate them, then flush. Rotation and
+                        // count limits are not enforced on this final drain.
+                        while let Ok(event) = event_rx.try_recv() {
+                            let elapsed_ms = start_time.elapsed().as_millis() as u64;
+                            let entry = RecordEntry {
+                                timestamp: elapsed_ms,
+                                event,
+                            };
+                            match serde_json::to_string(&entry) {
+                                Ok(json) => {
+                                    if let Err(e) = writer.write_all(json.as_bytes()).await {
+                                        tracing::error!("Failed to write event on shutdown: {}", e);
+                                    } else if let Err(e) = writer.write_all(b"\n").await {
+                                        tracing::error!(
+                                            "Failed to write newline on shutdown: {}",
+                                            e
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to serialize event on shutdown: {}", e);
+                                }
+                            }
+                        }
+
                         // Flush any pending writes before shutting down
                         if let Err(e) = writer.flush().await {
                             tracing::error!("Failed to flush on shutdown: {}", e);
@@ -283,6 +311,7 @@ where
             cancel: token,
             event_count,
             first_event_time,
+            task: std::sync::Mutex::new(Some(task)),
         })
     }
 
@@ -310,6 +339,17 @@ where
     /// Shutdown the recorder
     pub fn shutdown(&self) {
         self.cancel.cancel();
+    }
+
+    /// Cancel recording and await the writer task's final drain + flush, so every
+    /// accepted record is durably written before returning. Idempotent: a second
+    /// call is a no-op once the task has been joined.
+    pub async fn shutdown_and_join(&self) {
+        self.cancel.cancel();
+        let handle = self.task.lock().unwrap().take();
+        if let Some(handle) = handle {
+            let _ = handle.await;
+        }
     }
 
     /// Send events from a JSONL file to the provided event sender

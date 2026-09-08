@@ -136,6 +136,12 @@ impl RequestTraceSink for JsonlRequestTraceSink {
             tracing::warn!("request trace file sink closed; dropping record");
         }
     }
+
+    async fn shutdown(&self) {
+        // Drain and flush the buffered writer so a graceful shutdown doesn't
+        // truncate the final records.
+        self.writer.shutdown().await;
+    }
 }
 
 pub struct JsonlGzipRequestTraceSink {
@@ -507,6 +513,31 @@ mod tests {
             !written,
             "record emitted after shutdown must be dropped, not written to {}",
             segment.display()
+        );
+    }
+
+    #[tokio::test]
+    async fn jsonl_sink_shutdown_flushes_buffered_record() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("request_trace_jsonl_shutdown.jsonl");
+        let sink = JsonlRequestTraceSink::new(
+            path.display().to_string(),
+            JsonlSinkOptions {
+                // Large buffer + long interval: nothing reaches disk until shutdown.
+                buffer_bytes: 1024 * 1024,
+                flush_interval: Duration::from_secs(60),
+            },
+        )
+        .await
+        .unwrap();
+
+        sink.emit(&sample_record()).await;
+        RequestTraceSink::shutdown(&sink).await;
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content.contains("\"request_id\":\"req-123\""),
+            "shutdown must flush the buffered record; file was: {content:?}"
         );
     }
 }

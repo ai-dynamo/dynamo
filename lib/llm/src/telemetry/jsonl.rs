@@ -31,7 +31,7 @@ impl Default for JsonlSinkOptions {
 pub struct JsonlWriter<T> {
     tx: mpsc::Sender<T>,
     // Holding the recorder keeps its background task alive; its Drop cancels.
-    _recorder: Recorder<T>,
+    recorder: Recorder<T>,
 }
 
 impl<T> JsonlWriter<T>
@@ -53,14 +53,17 @@ where
         .await
         .with_context(|| format!("opening jsonl sink at {path}"))?;
         let tx = recorder.event_sender();
-        Ok(Self {
-            tx,
-            _recorder: recorder,
-        })
+        Ok(Self { tx, recorder })
     }
 
     pub async fn send(&self, rec: T) -> Result<(), mpsc::error::SendError<T>> {
         self.tx.send(rec).await
+    }
+
+    /// Flush and finalize the sink: awaits the writer task's final drain + flush
+    /// so buffered records are durably written. Sends after this are dropped.
+    pub async fn shutdown(&self) {
+        self.recorder.shutdown_and_join().await;
     }
 }
 
