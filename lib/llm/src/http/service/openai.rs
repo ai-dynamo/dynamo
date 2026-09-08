@@ -6144,11 +6144,6 @@ mod tests {
 
     /// A worker that refuses a request before the response stream opens must
     /// reach the client as 400, not 500.
-    ///
-    /// The error here is built by the real egress classification function, not
-    /// hand-assembled, so this fails if that function stops attaching the
-    /// worker's error. Previously the refusal was flattened into a message and
-    /// this request returned 500.
     #[test]
     fn test_pre_stream_refusal_surfaces_as_400() {
         use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};

@@ -2438,12 +2438,6 @@ mod tests {
 
     /// A worker that refuses a request before producing any response bytes must
     /// keep its error type all the way to the requesting side.
-    ///
-    /// This drives the real transport: a real registration, a real client
-    /// dial-in, a real `send_prologue`, and the real egress classification
-    /// function. Before the prologue carried a typed error, everything below
-    /// the message string was lost here and the requester could only see an
-    /// opaque `CannotConnect`.
     #[tokio::test]
     async fn test_typed_prologue_error_survives_to_requester() {
         let server = test_server().await;
@@ -2460,7 +2454,6 @@ mod tests {
         let client_context =
             Context::with_id_and_metadata((), context.id().to_string(), Default::default());
 
-        // The worker refuses the request: the backend can never serve it.
         let worker_error = DynamoError::builder()
             .error_type(ErrorType::Backend(BackendError::InvalidArgument))
             .message("multimodal input is not supported by this backend")
@@ -2472,7 +2465,7 @@ mod tests {
                     .await
                     .unwrap();
             sender
-                .send_prologue(Some(StreamPrologueError::new(
+                .send_prologue_typed(Some(StreamPrologueError::new(
                     "Generate Error: multimodal input is not supported by this backend",
                     worker_error,
                 )))
@@ -2497,7 +2490,6 @@ mod tests {
             "the worker's error type must survive the prologue round trip"
         );
 
-        // Feed it through the real egress classification.
         let egress_error = pre_stream_failure_error(&prologue_error);
         assert_eq!(
             egress_error.error_type(),

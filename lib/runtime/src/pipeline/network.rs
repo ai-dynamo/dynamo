@@ -445,13 +445,20 @@ impl StreamSender {
             .await?)
     }
 
-    pub async fn send_prologue(
+    /// Send the prologue, reporting an untyped failure.
+    ///
+    /// A caller holding the worker's typed error uses
+    /// [`Self::send_prologue_typed`] instead, which keeps that type on the wire.
+    pub async fn send_prologue(&mut self, error: Option<String>) -> Result<(), String> {
+        self.send_prologue_typed(error.map(StreamPrologueError::from_message))
+            .await
+    }
+
+    pub async fn send_prologue_typed(
         &mut self,
         error: Option<StreamPrologueError>,
     ) -> Result<(), String> {
         // leaving the original logic in place for now
-        // error overrides the dissolved prologue, so the value passed by the caller is always the
-        // one that goes on the wire
         if let Some(_prologue) = self.prologue.take() {
             let (error, typed_error) = match error {
                 Some(StreamPrologueError {

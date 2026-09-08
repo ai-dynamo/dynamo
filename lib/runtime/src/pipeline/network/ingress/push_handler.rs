@@ -685,7 +685,7 @@ where
                 let prologue_error =
                     StreamPrologueError::new(error_string, typed_error_from_pipeline_error(&e));
 
-                let _result = publisher.send_prologue(Some(prologue_error)).await;
+                let _result = publisher.send_prologue_typed(Some(prologue_error)).await;
                 Err(e)?
             }
         };
@@ -798,10 +798,6 @@ mod tests {
     /// The positive half of the recovery hop: a worker's typed refusal, boxed
     /// into the `anyhow::Error` payload of `PipelineError::GenerateError`,
     /// comes back out with its type intact.
-    ///
-    /// Replacing the body of `typed_error_from_pipeline_error` with
-    /// `DynamoError::from(&e)` -- the spelling the function's own doc comment
-    /// warns about -- makes this assertion fail with `Unknown`.
     #[test]
     fn generate_error_payload_keeps_the_workers_error_type() {
         let e = PipelineError::GenerateError(anyhow::Error::new(
