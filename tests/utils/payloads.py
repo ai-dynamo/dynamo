@@ -791,6 +791,40 @@ class LoraTestChatPayload(ChatPayload):
         return super().url()
 
 
+def lora_chat_payload(
+    lora_name: str,
+    s3_uri: str,
+    system_port: int = DefaultPort.SYSTEM1.value,
+    repeat_count: int = 2,
+    expected_response: Optional[list] = None,
+    expected_log: Optional[list] = None,
+    max_tokens: int = 100,
+    temperature: float = 0.0,
+) -> LoraTestChatPayload:
+    """Create a LoRA-enabled chat payload for testing."""
+    return LoraTestChatPayload(
+        body={
+            "model": lora_name,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "What is deep learning? Answer in one sentence.",
+                }
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": False,
+        },
+        lora_name=lora_name,
+        s3_uri=s3_uri,
+        system_port=system_port,
+        repeat_count=repeat_count,
+        expected_response=expected_response
+        or ["learning", "neural", "network", "AI", "model"],
+        expected_log=expected_log or [],
+    )
+
+
 @dataclass
 class ElasticEPScalePayload(ChatPayload):
     """Scales the vLLM data-parallel size live, then verifies the worker still
