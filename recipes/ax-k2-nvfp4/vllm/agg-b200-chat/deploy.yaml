@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 apiVersion: v1
@@ -134,7 +134,7 @@ spec:
                     --tensor-parallel-size 4 \
                     --data-parallel-size 1 \
                     --attention-backend FLASHINFER_MLA_SPARSE \
-                    --kv-cache-dtype auto \
+                    --kv-cache-dtype fp8 \
                     --max-model-len 262144 \
                     --enable-prefix-caching \
                     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}' \

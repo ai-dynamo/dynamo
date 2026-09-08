@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 -->
 
@@ -17,7 +17,7 @@ independent TP4 workers behind the Dynamo KV-aware router.
 | Topology | Aggregated, two worker replicas |
 | Parallelism | TP4, DP1, expert parallel disabled |
 | Weight precision | NVFP4 |
-| KV-cache precision | `auto` (BF16 for this checkpoint/backend) |
+| KV-cache precision | Ordinary per-tensor FP8 |
 | Attention | `FLASHINFER_MLA_SPARSE` |
 | Speculative decoding | `skt/A.X-K2-EAGLE3`, EAGLE3, k=3 |
 | Routing | KV-aware, vLLM prefix-cache events, 64-token blocks |
@@ -34,9 +34,10 @@ The deployment uses the immutable A.X-K2 development image built from Dynamo
 1.4.1 and the stock vLLM 0.26.0 base. The Dynamo runtime build overlays the
 A.X-K2 model port, DSpark anchor-layout fix, and sparse-MLA/SWA KV-allocation
 fix as source-only patches. It deliberately excludes the native FP8 DS-MLA
-scale-writer patch and does not rebuild vLLM. This recipe keeps
-`--kv-cache-dtype auto`, so the deployment remains on the validated BF16-KV
-path and does not require that native FP8 KV-cache change.
+scale-writer patch and does not rebuild vLLM. This recipe uses ordinary
+`--kv-cache-dtype fp8` with `FLASHINFER_MLA_SPARSE`. That is vLLM's standard
+per-tensor FP8 layout, not the packed `fp8_ds_mla` layout, so it does not
+require the native FP8 DS-MLA scale-writer patch.
 
 The EAGLE3 draft is revision-pinned and loaded through vLLM's real speculative
 decoder with `num_speculative_tokens=3`. Production selects the
