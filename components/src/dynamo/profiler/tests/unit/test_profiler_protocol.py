@@ -238,13 +238,11 @@ def test_convert_vllm_disagg_decode_removes_disaggregation_role() -> None:
 
 
 def _use_equals_spelling(args: list[str], flag: str) -> None:
-    """Rewrite ``--flag value`` in place as the equivalent ``--flag=value``."""
     index = args.index(flag)
     args[index : index + 2] = [f"{flag}={args[index + 1]}"]
 
 
 def test_convert_vllm_prefill_to_aggregated_drops_equals_spelled_role() -> None:
-    """An aggregated candidate must not keep the prefill role it was converted from."""
     modifier = CONFIG_MODIFIERS["vllm"]
     config = modifier.load_default_config("disagg")
     prefill_args = _main_container(_component_by_type(config, "prefill"))["args"]
@@ -294,7 +292,6 @@ def test_sglang_tp_sweep_drops_equals_spelled_parallelism_args() -> None:
 def test_convert_trtllm_drops_equals_spelled_disaggregation_args(
     target: EngineType, source_type: str
 ) -> None:
-    """TensorRT-LLM candidates must not inherit disaggregation wiring either."""
     modifier = CONFIG_MODIFIERS["trtllm"]
     config = modifier.load_default_config("disagg")
     source_args = _main_container(_component_by_type(config, source_type))["args"]
@@ -313,7 +310,6 @@ def test_convert_trtllm_drops_equals_spelled_disaggregation_args(
 def test_convert_sglang_drops_equals_spelled_disaggregation_args(
     target: EngineType, source_type: str
 ) -> None:
-    """SGLang candidates must not inherit disaggregation wiring in either spelling."""
     modifier = CONFIG_MODIFIERS["sglang"]
     config = modifier.load_default_config("disagg")
     source_args = _main_container(_component_by_type(config, source_type))["args"]
