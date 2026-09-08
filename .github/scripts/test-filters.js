@@ -156,6 +156,16 @@ const testCases = [
     expect: { sidecar: true },
     desc: 'compliance policy changes validate the sidecar image gate'
   },
+  {
+    file: 'Cargo.toml',
+    expect: { sidecar: true, rust: true },
+    desc: 'root workspace manifest is a sidecar image build input'
+  },
+  {
+    file: 'Cargo.lock',
+    expect: { sidecar: true, rust: true },
+    desc: 'root lockfile is a sidecar image build input'
+  },
 
   // Doc files should be excluded from core (negation patterns)
   {
