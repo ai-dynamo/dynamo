@@ -361,3 +361,19 @@ class TestMakeRoomFor:
         assert cache.stats["evictions"] == 1
         assert cache.keys() == ["b", "c"]
         assert cache.stats["current_bytes"] == 2 * entry_bytes
+
+    def test_drops_a_replaced_entry_rather_than_promising_its_bytes_back(self):
+        entry_bytes = self._entry_bytes(1024)
+        cache = MultimodalEmbeddingCacheManager(capacity_bytes=2 * entry_bytes)
+        cache.set("a", CachedEmbedding(torch.zeros(1024)))
+        cache.set("b", CachedEmbedding(torch.zeros(1024)))
+
+        reservation = cache.make_room_for("b", entry_bytes)
+
+        # The entry under "b" is released now, so the caller's allocation does
+        # not run alongside it. That release is not an eviction, and it leaves
+        # every other key alone.
+        assert reservation == CacheReservation(True, [])
+        assert cache.keys() == ["a"]
+        assert cache.stats["current_bytes"] == entry_bytes
+        assert cache.stats["evictions"] == 0

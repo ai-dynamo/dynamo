@@ -326,9 +326,46 @@ def test_store_path_rejects_an_oversize_entry_without_copying_it():
     assert stats["evictions"] == 0
 
 
+def test_restoring_a_cached_key_frees_the_old_entry_before_copying():
+    # One request can carry the same uncached image twice: both misses are
+    # queued for encoding and stored in turn, so the second store re-stores a
+    # key the first just made resident. Deducting the old entry's bytes without
+    # releasing them would keep its storage alive across the copy, and a full
+    # cache would peak at capacity plus one entry after all.
+    entry_bytes = 256 * 1024
+    element_count = _float32_element_count(entry_bytes)
+    handler = _handler(frontend_decoding=False, capacity_bytes=4 * entry_bytes)
+    _fill_cache(handler, 4, element_count)
+    assert handler.embedding_cache_manager.stats["current_bytes"] == 4 * entry_bytes
+
+    probe = _RecordingEmbedding(
+        torch.full((1, element_count), 9.0), handler.embedding_cache_manager
+    )
+    handler._store_embedding_item(
+        EmbeddingItem(key="key-1", image_grid_thw=[[1, 2, 2]], embeddings=probe)
+    )
+
+    assert probe.clone_calls == 1
+    # The replaced entry is gone before the copy is taken, not merely promised
+    # back, so the bytes the copy needs are genuinely free.
+    assert probe.stats_at_clone["entries"] == 3
+    assert (
+        probe.stats_at_clone["current_bytes"] + entry_bytes
+        <= probe.stats_at_clone["capacity_bytes"]
+    )
+    # Dropping the replaced entry is not an eviction: nothing was displaced for
+    # want of capacity, and no other key was touched.
+    assert probe.stats_at_clone["evictions"] == 0
+    stats = handler.embedding_cache_manager.stats
+    assert stats["evictions"] == 0
+    assert stats["entries"] == 4
+    assert stats["current_bytes"] == 4 * entry_bytes
+    assert handler._lookup_embedding_item("key-0") is not None
+
+
 def test_restoring_a_cached_key_evicts_nothing():
-    # The cache refunds the bytes of an entry it replaces, so making room for a
-    # re-store must count that refund or it evicts entries needlessly.
+    # Making room for a re-store frees the entry being replaced, so its bytes
+    # cover the incoming entry and no other key has to go.
     entry_bytes = 256 * 1024
     element_count = _float32_element_count(entry_bytes)
     handler = _handler(frontend_decoding=False, capacity_bytes=4 * entry_bytes)

@@ -134,10 +134,17 @@ class MultimodalEmbeddingCacheManager:
         fails leaks no capacity, and the subsequent ``set()`` still does its
         own accounting and finds its eviction loop with nothing left to do.
 
-        ``key`` matters because ``set_with_delta()`` refunds the bytes of an
-        entry it replaces. Passing it keeps a re-store of a key already in the
-        cache from evicting other entries to make room it will get back, and
-        keeps that entry itself out of the eviction candidates.
+        An entry already stored under ``key`` is dropped here rather than
+        counted as a refund against ``set_with_delta()``, which would replace
+        it later. Merely deducting its bytes would keep its storage alive
+        across the caller's allocation, so a full cache would still peak at its
+        capacity plus the new entry — the one thing this method exists to
+        prevent. It is not counted as an eviction, because nothing was
+        displaced for want of capacity; the entry is on its way out either way.
+        A caller that then abandons the store leaves that key uncached, which
+        costs a later miss and no memory. Because the key is gone by the time
+        ``set_with_delta()`` runs, it reports the store as an addition rather
+        than a replacement.
 
         Args:
             key: Cache key the caller intends to store under.
@@ -145,7 +152,8 @@ class MultimodalEmbeddingCacheManager:
 
         Returns:
             CacheReservation reporting whether the entry can be stored at all,
-            plus the keys evicted to make room for it.
+            plus the keys evicted to make room for it. A dropped entry under
+            ``key`` is not among them.
         """
         if size_bytes > self._capacity_bytes:
             logger.warning(
@@ -154,13 +162,14 @@ class MultimodalEmbeddingCacheManager:
             )
             return CacheReservation(False, [])
 
-        refund = self._tensor_size(self._cache[key].tensor) if key in self._cache else 0
+        replaced_entry = self._cache.pop(key, None)
+        if replaced_entry is not None:
+            self._current_bytes -= self._tensor_size(replaced_entry.tensor)
+
         removed_keys: list[str] = []
         for candidate in list(self._cache.keys()):
-            if self._current_bytes - refund + size_bytes <= self._capacity_bytes:
+            if self._current_bytes + size_bytes <= self._capacity_bytes:
                 break
-            if candidate == key:
-                continue
             evicted_entry = self._cache.pop(candidate)
             evicted_size = self._tensor_size(evicted_entry.tensor)
             self._current_bytes -= evicted_size
