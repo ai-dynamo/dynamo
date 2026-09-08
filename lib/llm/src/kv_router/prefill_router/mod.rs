@@ -29,7 +29,7 @@ use dynamo_runtime::{
 use futures::stream::{self, StreamExt};
 
 use crate::{
-    discovery::ModelManager,
+    discovery::{ModelManager, RuntimeConfigWatch},
     kv_router::{RoutingHost, WorkerSelectorFactory},
     local_model::runtime_config::ModelRuntimeConfig,
     protocols::common::{
@@ -224,6 +224,10 @@ where
 {
     endpoint_id: EndpointId,
     router: Arc<RoutingHost<Sel>>,
+    /// Keeps the endpoint's shared runtime-config state alive while a live
+    /// prefill binding still uses manager lookups for bootstrap metadata and
+    /// topology constraints.
+    _runtime_config_watch: RuntimeConfigWatch,
     /// Resolved at activation from the prefill card. Lives here rather than on
     /// `PrefillRouter` because it is unknowable until a target is discovered,
     /// and changes when the binding is rebuilt.
