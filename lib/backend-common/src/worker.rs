@@ -1151,6 +1151,23 @@ impl Worker {
             None
         };
 
+        // Opening the routes and registering the RL endpoint are both awaits, so
+        // a signal can land after the check above. Re-check before publishing a
+        // readiness that shutdown has already invalidated.
+        if shutdown.is_cancelled() {
+            self.begin_engine_route_shutdown().await;
+            if let Some(rl_endpoint) = rl_endpoint
+                && let Err(error) = rl_endpoint.shutdown().await
+            {
+                tracing::warn!(%error, "RL discovery endpoint shutdown failed");
+            }
+            if let Err(error) = primary_endpoint.shutdown().await {
+                tracing::warn!(%error, "primary endpoint shutdown failed");
+            }
+            self.orchestrator_steps(&endpoint).await;
+            return Ok(());
+        }
+
         // First instant the worker is serviceable: every mandatory endpoint is
         // registered, the token is uncancelled, and engine routes are open.
         // Nothing earlier may report ready.
