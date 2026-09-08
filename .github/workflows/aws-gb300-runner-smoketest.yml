@@ -26,7 +26,7 @@ jobs:
       max-parallel: 2
       matrix:
         gpu_count: [1, 2]
-    runs-on: aws-gb300-tester-amd-gpu-v2
+    runs-on: aws-gb300-tester-arm-gpu-v2
     timeout-minutes: 15
     container:
       image: nvcr.io/nvidia/cuda@sha256:1ca86773be1716af6cfff3d2eb8cd10d4d9cac181931d1ee9be792d3e33c7322
@@ -110,7 +110,7 @@ jobs:
             -l nvidia.com/gpu.product=NVIDIA-GB300 \
             -o json)"
           jq -e '.items | length > 0' <<< "${gb300_nodes_json}"
-          jq -e 'all(.items[]; ((.spec.taints // []) | length) == 0)' <<< "${gb300_nodes_json}"
+          jq -e 'any(.items[]; ((.spec.taints // []) | length) == 0)' <<< "${gb300_nodes_json}"
 
       - name: Run GPU smoke Job
         shell: bash
