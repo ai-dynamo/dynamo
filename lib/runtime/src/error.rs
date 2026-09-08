@@ -639,15 +639,15 @@ impl Serialize for DynamoError {
             .and_then(|source| source.downcast_ref::<DynamoError>());
         let mut state = serializer.serialize_struct(
             "DynamoError",
-            3 + (2 * usize::from(self.diagnostic.is_some()))
+            4 + usize::from(self.diagnostic.is_some())
                 + usize::from(public.is_some())
                 + usize::from(caused_by.is_some()),
         )?;
         state.serialize_field("error_type", &self.legacy_wire_error_type())?;
         state.serialize_field("class", &self.class())?;
         state.serialize_field("reason", self.reason())?;
+        state.serialize_field("message", &self.message())?;
         if let Some(diagnostic) = &self.diagnostic {
-            state.serialize_field("message", diagnostic)?;
             state.serialize_field("diagnostic", diagnostic)?;
         }
         if let Some(public) = public {
@@ -684,25 +684,31 @@ impl<'de> Deserialize<'de> for DynamoError {
         }
 
         let representation = Representation::deserialize(deserializer)?;
-        let source_class = representation
-            .class
-            .or(representation.error_type)
+        let declared_class = representation.class;
+        let legacy_error_type = representation.error_type;
+        let source_class = declared_class
+            .or(legacy_error_type)
             .unwrap_or(ErrorClass::Unknown);
-        let raw_class = match source_class {
+        let canonical_class = match source_class {
             ErrorClass::Unknown => ErrorClass::Internal,
-            class => class,
+            class => class.normalized(),
         };
         let reason = match representation.reason {
             Some(reason) => ErrorReason::new(reason).ok(),
-            None => Some(ErrorReason::for_class(source_class)),
+            None => Some(ErrorReason::for_class(
+                legacy_error_type.unwrap_or(source_class),
+            )),
         };
         let valid_reason = reason
             .as_ref()
             .and_then(|reason| ErrorReason::catalog_class(reason.as_str()))
-            .is_some_and(|class| class == raw_class.normalized());
+            .is_some_and(|class| class == canonical_class);
+        let stored_class = legacy_error_type
+            .filter(|class| *class != ErrorClass::Unknown && class.normalized() == canonical_class)
+            .unwrap_or(canonical_class);
 
         let (class, reason, public) = match reason {
-            Some(reason) if valid_reason => (raw_class, reason, representation.public),
+            Some(reason) if valid_reason => (stored_class, reason, representation.public),
             _ => (
                 ErrorClass::Internal,
                 ErrorReason::from_static("runtime.invalid_error"),
@@ -1225,9 +1231,9 @@ mod tests {
         let value = serde_json::to_value(err).unwrap();
         let object = value.as_object().unwrap();
 
-        assert_eq!(object.len(), 3);
+        assert_eq!(object.len(), 4);
         assert_eq!(value["error_type"], "InvalidArgument");
-        assert!(value.get("message").is_none());
+        assert_eq!(value["message"], "");
         assert_eq!(value["class"], "InvalidRequest");
         assert_eq!(value["reason"], "request.invalid");
         assert!(value.get("diagnostic").is_none());
@@ -1282,7 +1288,10 @@ mod tests {
 
     #[test]
     fn diagnostic_is_bounded_at_utf8_boundary() {
-        let diagnostic = Diagnostic::new("x".repeat(Diagnostic::MAX_BYTES - 1) + "é");
+        let truncation_index = Diagnostic::MAX_BYTES - Diagnostic::TRUNCATION_SUFFIX.len();
+        let diagnostic = Diagnostic::new(
+            "x".repeat(truncation_index - 1) + "é" + &"x".repeat(Diagnostic::MAX_BYTES),
+        );
 
         assert!(diagnostic.as_str().len() <= Diagnostic::MAX_BYTES);
         assert!(
@@ -1362,9 +1371,41 @@ mod tests {
         assert!(serialized.contains("\"class\":\"InvalidRequest\""));
 
         let decoded: DynamoError = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(decoded.error_type(), ErrorClass::InvalidRequest);
+        assert_eq!(
+            decoded.error_type(),
+            ErrorClass::Backend(BackendError::InvalidArgument)
+        );
         assert_eq!(decoded.class(), ErrorClass::InvalidRequest);
         assert_eq!(decoded.reason().as_str(), "backend.invalid_argument");
+    }
+
+    #[test]
+    fn transport_subtype_roundtrips() {
+        let error = DynamoError::builder()
+            .error_type(ErrorClass::CannotConnect)
+            .build();
+
+        let decoded: DynamoError =
+            serde_json::from_str(&serde_json::to_string(&error).unwrap()).unwrap();
+
+        assert_eq!(decoded.error_type(), ErrorClass::CannotConnect);
+        assert_eq!(decoded.class(), ErrorClass::Unavailable);
+        assert_eq!(decoded.reason().as_str(), "transport.cannot_connect");
+    }
+
+    #[test]
+    fn response_timeout_subtypes_roundtrip() {
+        for error_type in [
+            ErrorClass::ResponseTimeout,
+            ErrorClass::Backend(BackendError::ResponseTimeout),
+        ] {
+            let error = DynamoError::builder().error_type(error_type).build();
+            let decoded: DynamoError =
+                serde_json::from_str(&serde_json::to_string(&error).unwrap()).unwrap();
+
+            assert_eq!(decoded.error_type(), error_type);
+            assert_eq!(decoded.class(), ErrorClass::DeadlineExceeded);
+        }
     }
 
     #[test]
