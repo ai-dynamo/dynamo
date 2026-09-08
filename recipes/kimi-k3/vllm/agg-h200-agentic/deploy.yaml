@@ -30,17 +30,16 @@ spec:
           - --http-port
           - "8000"
           env:
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: TRANSFORMERS_OFFLINE
+            value: "1"
           - name: DYN_ROUTER_MODE
             value: kv
           resources:
             requests:
               cpu: "16"
               memory: 128Gi
-          securityContext:
-            runAsUser: 0
-            runAsGroup: 0
-            allowPrivilegeEscalation: false
-
   - name: Worker
     type: worker
     replicas: 1
@@ -101,6 +100,8 @@ spec:
           - name: HF_HOME
             value: /shared-model-cache
           - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: TRANSFORMERS_OFFLINE
             value: "1"
           - name: VLLM_USE_NCCL_SYMM_MEM
             value: "0"

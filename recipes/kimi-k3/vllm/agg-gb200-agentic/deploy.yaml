@@ -47,17 +47,16 @@ spec:
           - --http-port
           - "8000"
           env:
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: TRANSFORMERS_OFFLINE
+            value: "1"
           - name: DYN_ROUTER_MODE
             value: kv
           resources:
             requests:
               cpu: "16"
               memory: 128Gi
-          securityContext:
-            runAsUser: 0
-            runAsGroup: 0
-            allowPrivilegeEscalation: false
-
   - name: Worker
     type: worker
     replicas: 1
@@ -133,6 +132,8 @@ spec:
           - kimi_k3
           env:
           - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: TRANSFORMERS_OFFLINE
             value: "1"
           - name: HF_HOME
             value: /shared-model-cache

@@ -122,6 +122,9 @@ spec:
             - name: TOKENIZER
               value: moonshotai/Kimi-K3
 
+            - name: HF_HOME
+              value: /model-cache
+
             - name: INFERENCE_URL
               value: http://kimi-k3-sglang-gb300-agg-agentic-frontend:8000/v1/chat/completions
 

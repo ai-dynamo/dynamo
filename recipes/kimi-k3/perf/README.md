@@ -66,7 +66,7 @@ kubectl cp "${TRACE_SOURCE}" \
   "${NAMESPACE}/pvc-helper:/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl"
 ```
 
-Keep `pvc-helper` to fetch artifacts, or delete it after staging.
+Keep `pvc-helper` until you fetch the benchmark artifacts in step 4.
 
 ### 3. Run the benchmark
 
