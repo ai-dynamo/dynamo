@@ -96,6 +96,8 @@ enum QueryToken {
 /// Event-driven shared KV cache index for SGLang HiCache (L3) state.
 #[derive(Clone)]
 pub struct HicacheSharedKvCache {
+    // The subscriber must not keep its own consumer lifetime alive.
+    owners: Option<Arc<tokio_util::sync::DropGuard>>,
     runtime_configs: RuntimeConfigWatch,
     present_keys: Arc<DashSet<String>>,
     group_states: Arc<DashMap<String, (u64, bool)>>,
@@ -124,6 +126,7 @@ impl HicacheSharedKvCache {
         frontend_kv_events_endpoint: Option<String>,
     ) -> Self {
         Self {
+            owners: Some(Arc::new(cancellation_token.clone().drop_guard())),
             runtime_configs,
             present_keys: Arc::new(DashSet::new()),
             group_states: Arc::new(DashMap::new()),
@@ -136,7 +139,8 @@ impl HicacheSharedKvCache {
     }
 
     pub fn start_subscriber(&self) {
-        let cache = self.clone();
+        let mut cache = self.clone();
+        cache.owners = None;
         let cancellation_token = self.cancellation_token.clone();
         tokio::spawn(async move { cache.run_subscriber(cancellation_token).await });
     }
@@ -144,6 +148,12 @@ impl HicacheSharedKvCache {
     pub fn shutdown(&self) {
         self.cancellation_token.cancel();
         self.clear();
+    }
+
+    pub(crate) fn has_other_owners(&self) -> bool {
+        self.owners
+            .as_ref()
+            .is_some_and(|owners| Arc::strong_count(owners) > 1)
     }
 
     fn clear_on_layout_change(&self, layout: &SglangHicacheMooncakeConfig) {
@@ -614,6 +624,22 @@ fn maybe_prefix_key(logical_key: &str, extra_backend_tag: Option<&str>) -> Strin
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn subscriber_stops_when_its_last_consumer_drops() {
+        let (tx, rx) = tokio::sync::watch::channel(std::collections::HashMap::new());
+        let lifecycle = tokio_util::sync::CancellationToken::new();
+        let cache = super::HicacheSharedKvCache::new_with_cancellation(rx, lifecycle.clone());
+        cache.start_subscriber();
+        let other = cache.clone();
+        drop(cache);
+        assert!(!lifecycle.is_cancelled());
+        drop(other);
+        assert!(lifecycle.is_cancelled());
+        tokio::time::timeout(std::time::Duration::from_secs(1), tx.closed())
+            .await
+            .expect("the subscriber must release its runtime-config receiver");
+    }
+
     use std::{collections::HashMap, ops::Range};
 
     use super::*;
