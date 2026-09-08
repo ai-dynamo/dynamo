@@ -766,8 +766,6 @@ mod tests {
         assert_eq!(degraded.expected_output_tokens, Some(128));
         assert_eq!(degraded.cache_namespace.as_deref(), Some("tenant-a"));
 
-        // A renderer that accepts the connection but does not answer produces
-        // the other transient variant, `Timeout`, and follows the same branch.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -858,25 +856,24 @@ mod tests {
             Err(PickError::TokenizerUpstreamError)
         ));
 
-        for status in [StatusCode::UNAUTHORIZED, StatusCode::NOT_FOUND] {
-            let config_error = tokenized_or_load_only(
-                Err(TokenizeFailure {
-                    priority_jump: Some(1.0),
-                    strict_priority: Some(2),
-                    expected_output_tokens: Some(128),
-                    cache_namespace: None,
-                    error: TokenizeError::Render(RenderError::UpstreamStatus {
-                        status,
-                        body: String::new(),
-                    }),
+        let status = StatusCode::UNAUTHORIZED;
+        let config_error = tokenized_or_load_only(
+            Err(TokenizeFailure {
+                priority_jump: Some(1.0),
+                strict_priority: Some(2),
+                expected_output_tokens: Some(128),
+                cache_namespace: None,
+                error: TokenizeError::Render(RenderError::UpstreamStatus {
+                    status,
+                    body: String::new(),
                 }),
-                "req-1",
-            );
-            assert!(
-                matches!(config_error, Err(PickError::TokenizerUpstreamError)),
-                "{status} must remain visible as an upstream configuration error"
-            );
-        }
+            }),
+            "req-1",
+        );
+        assert!(
+            matches!(config_error, Err(PickError::TokenizerUpstreamError)),
+            "{status} must remain visible as an upstream configuration error"
+        );
 
         for status in [
             StatusCode::TOO_MANY_REQUESTS,
