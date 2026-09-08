@@ -57,7 +57,8 @@ CUDA_VISIBLE_DEVICES="$LLM_GPU_DEVICES" python -m dynamo.vllm \
   --served-model-name "$LLM_MODEL_NAME" \
   --tensor-parallel-size "$LLM_TP_SIZE" \
   --trust-remote-code \
-  --reasoning-parser nemotron_v3 \
+  --dyn-tool-call-parser qwen3_coder \
+  --dyn-reasoning-parser nemotron_v3 \
   --kv-cache-dtype fp8 \
   --max-model-len 32768 \
   --max-num-seqs 256 \

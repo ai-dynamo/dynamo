@@ -111,7 +111,9 @@ spec:
                 - --tensor-parallel-size
                 - "1"
                 - --trust-remote-code
-                - --reasoning-parser
+                - --dyn-tool-call-parser
+                - qwen3_coder
+                - --dyn-reasoning-parser
                 - nemotron_v3
                 - --kv-cache-dtype
                 - fp8
