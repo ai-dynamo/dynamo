@@ -1000,6 +1000,11 @@ mod prefill_start_tests {
         }
         Arc::new(RouterRequestMetrics {
             requests_total: prometheus::IntCounter::new("requests_total", "test").unwrap(),
+            decode_affinity_yields_total: prometheus::IntCounter::new(
+                "decode_affinity_yields_total",
+                "test",
+            )
+            .unwrap(),
             time_to_first_token_seconds: hist("ttft_seconds"),
             inter_token_latency_seconds: hist("itl_seconds"),
             input_sequence_tokens: hist("isl_tokens"),

@@ -25,3 +25,17 @@ def test_decode_active_request_weight_defaults_to_zero_and_validates() -> None:
     for invalid in [-1.0, float("nan"), float("inf")]:
         with pytest.raises(ValueError, match="decode_active_request_weight"):
             KvRouterConfig(decode_active_request_weight=invalid)
+
+
+def test_decode_affinity_high_watermark_defaults_to_none_and_validates() -> None:
+    assert KvRouterConfig().router_decode_affinity_high_watermark is None
+    assert (
+        KvRouterConfig(
+            router_decode_affinity_high_watermark=0.7
+        ).router_decode_affinity_high_watermark
+        == 0.7
+    )
+
+    for invalid in [-0.1, 1.1, float("nan")]:
+        with pytest.raises(ValueError, match="router_decode_affinity_high_watermark"):
+            KvRouterConfig(router_decode_affinity_high_watermark=invalid)

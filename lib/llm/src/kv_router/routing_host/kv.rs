@@ -79,10 +79,75 @@ where
         phase: RequestPhase,
         is_query_only: bool,
     ) -> Result<(WorkerSelection, Option<AffinityAcquire>), Error> {
-        self.select_with_session_affinity(request, phase, is_query_only, |target| {
-            self.select_request(request, phase, is_query_only, target)
-        })
-        .await
+        let pressure_threshold = if phase == RequestPhase::Decode
+            && !is_query_only
+            && self.session_affinity_mode == SessionAffinityMode::Hard
+            && explicit_target(request.content(), phase)?.is_none()
+        {
+            self.kv_router()
+                .kv_router_config()
+                .router_decode_affinity_high_watermark
+        } else {
+            None
+        };
+        let ((selection, yielded_affinity), operation) = self
+            .select_with_session_affinity(request, phase, is_query_only, |target| async move {
+                if let (Some(threshold), Some(target)) = (pressure_threshold, target) {
+                    match self
+                        .select_request_outcome(
+                            request,
+                            phase,
+                            true,
+                            Some(target),
+                            None,
+                            FindBestMatchAdmission::WithoutAdmission,
+                        )
+                        .await
+                        .and_then(SelectionOutcome::into_result)
+                    {
+                        Ok(preview) => {
+                            let signals = self.route_signals(&preview);
+                            if signals.decode_load_exceeds(threshold) == Some(true) {
+                                let selection = self
+                                    .select_request(request, phase, is_query_only, None)
+                                    .await?;
+                                return Ok((selection, Some((signals, threshold))));
+                            }
+                        }
+                        Err(error) if is_cancelled(&error) => return Err(error),
+                        Err(error) => tracing::warn!(
+                            error = %error,
+                            worker_id = target.worker_id,
+                            dp_rank = ?target.dp_rank,
+                            "failed to inspect decode affinity pressure; honoring pin"
+                        ),
+                    }
+                }
+                Ok((
+                    self.select_request(request, phase, is_query_only, target)
+                        .await?,
+                    None,
+                ))
+            })
+            .await?;
+
+        if let Some((previous, threshold)) = yielded_affinity {
+            drop(operation); // Release the lease without invalidating the stored pin.
+            self.request_metrics.decode_affinity_yields_total.inc();
+            tracing::info!(
+                old_worker_id = previous.worker.worker_id,
+                old_dp_rank = previous.worker.dp_rank,
+                selected_worker_id = selection.worker.worker_id,
+                selected_dp_rank = selection.worker.dp_rank,
+                pinned_potential_decode_blocks = previous.potential_decode_blocks,
+                total_kv_blocks = ?previous.total_kv_blocks,
+                threshold,
+                "decode_affinity_yield"
+            );
+            return Ok((selection, None));
+        }
+
+        Ok((selection, operation))
     }
 
     fn route_signals(&self, selection: &WorkerSelection) -> RoutePlanSignals {

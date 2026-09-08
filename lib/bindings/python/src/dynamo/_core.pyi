@@ -1807,6 +1807,7 @@ class KvRouterConfig:
         overlap_score_credit_decay: float = 0.0,
         prefill_load_scale: float = 1.0,
         decode_active_request_weight: float = 0.0,
+        router_decode_affinity_high_watermark: Optional[float] = None,
         router_policy_config: Optional[str] = None,
         router_prefill_policy: Optional[str] = None,
         router_decode_policy: Optional[str] = None,
@@ -1822,6 +1823,7 @@ class KvRouterConfig:
             overlap_score_credit: Finite, non-negative credit multiplier for device-local prefix overlap (default: 1.0). Values above 1.0 give device overlap extra credit, with adjusted prefill cost clamped at zero.
             prefill_load_scale: Scale for adjusted prompt-side prefill load after cache-hit credits (default: 1.0)
             decode_active_request_weight: Experimental block-equivalent decode cost added for each active request on a candidate worker (default: 0.0)
+            router_decode_affinity_high_watermark: Yield an implicit hard decode session-affinity pin when projected active blocks exceed this fraction of KV capacity (default: None)
             host_cache_hit_weight: Credit multiplier for host-pinned cache hits (default: 0.75)
             disk_cache_hit_weight: Credit multiplier for disk/external cache hits (default: 0.25)
             router_temperature: Temperature for normalized worker sampling via softmax (default: 0.0)
@@ -1912,6 +1914,10 @@ class KvRouterConfig:
     def decode_active_request_weight(self) -> float: ...
     @decode_active_request_weight.setter
     def decode_active_request_weight(self, value: float) -> None: ...
+    @property
+    def router_decode_affinity_high_watermark(self) -> Optional[float]: ...
+    @router_decode_affinity_high_watermark.setter
+    def router_decode_affinity_high_watermark(self, value: Optional[float]) -> None: ...
 
     def with_overrides(
         self,

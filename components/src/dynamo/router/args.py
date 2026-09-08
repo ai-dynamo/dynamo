@@ -32,6 +32,7 @@ class DynamoRouterConfig(KvRouterConfigBase, AicPerfConfigBase):
     def validate(self) -> None:
         """Validate config invariants (aligned with Rust KvRouterConfig where applicable)."""
         self.apply_load_aware_preset()
+        self.validate_decode_affinity_high_watermark()
 
         if not self.endpoint:
             raise ValueError(

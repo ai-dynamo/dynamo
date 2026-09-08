@@ -191,6 +191,37 @@ def test_decode_active_request_weight_flows_to_binding_kwargs() -> None:
     assert kwargs["decode_active_request_weight"] == 64.0
 
 
+def test_decode_affinity_high_watermark_cli_and_environment(monkeypatch) -> None:
+    monkeypatch.delenv("DYN_ROUTER_DECODE_AFFINITY_HIGH_WATERMARK", raising=False)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(["--router-decode-affinity-high-watermark", "0.70"])
+    )
+    config.validate()
+    assert config.kv_router_kwargs()["router_decode_affinity_high_watermark"] == 0.70
+
+    monkeypatch.setenv("DYN_ROUTER_DECODE_AFFINITY_HIGH_WATERMARK", "0.65")
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(parser.parse_args([]))
+    config.validate()
+    assert config.router_decode_affinity_high_watermark == 0.65
+
+
+@pytest.mark.parametrize("value", ["-0.1", "1.1", "nan"])
+def test_decode_affinity_high_watermark_rejects_invalid_values(value: str) -> None:
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(["--router-decode-affinity-high-watermark", value])
+    )
+
+    with pytest.raises(ValueError, match="router-decode-affinity-high-watermark"):
+        config.validate()
+
+
 def test_load_aware_cli_applies_no_cache_load_balancing_preset() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)

@@ -170,6 +170,7 @@ fn log_env_config(config: &KvRouterConfig) {
         overlap_score_credit_decay = config.overlap_score_credit_decay,
         prefill_load_scale = config.prefill_load_scale,
         decode_active_request_weight = config.decode_active_request_weight,
+        router_decode_affinity_high_watermark = ?config.router_decode_affinity_high_watermark,
         router_temperature = config.router_temperature,
         use_kv_events = config.use_kv_events,
         router_replica_sync = config.router_replica_sync,
@@ -237,6 +238,9 @@ fn kv_router_config_from_lookup(
     }
     if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT") {
         config.decode_active_request_weight = value;
+    }
+    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_DECODE_AFFINITY_HIGH_WATERMARK") {
+        config.router_decode_affinity_high_watermark = Some(value);
     }
     for key in [
         "DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT",
@@ -651,6 +655,7 @@ struct KvRouterConfigSerde {
     overlap_score_credit_decay: f64,
     prefill_load_scale: f64,
     decode_active_request_weight: f64,
+    router_decode_affinity_high_watermark: Option<f64>,
     overlap_score_weight: Option<f64>,
     host_cache_hit_weight: f64,
     disk_cache_hit_weight: f64,
@@ -704,6 +709,7 @@ impl Default for KvRouterConfigSerde {
             overlap_score_credit_decay: config.overlap_score_credit_decay,
             prefill_load_scale: config.prefill_load_scale,
             decode_active_request_weight: config.decode_active_request_weight,
+            router_decode_affinity_high_watermark: config.router_decode_affinity_high_watermark,
             overlap_score_weight: None,
             host_cache_hit_weight: config.host_cache_hit_weight,
             disk_cache_hit_weight: config.disk_cache_hit_weight,
@@ -768,6 +774,12 @@ pub struct KvRouterConfig {
     /// compute matters more than resident KV footprint. Defaults to 0.0.
     #[serde(default, skip_serializing_if = "is_default")]
     pub decode_active_request_weight: f64,
+
+    /// Yield an implicit hard decode-affinity pin when the request's projected
+    /// active blocks exceed this fraction of the worker rank's KV capacity.
+    /// Explicit request pins remain strict. `None` disables the pressure check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_decode_affinity_high_watermark: Option<f64>,
 
     #[serde(default = "default_host_cache_hit_weight")]
     pub host_cache_hit_weight: f64,
@@ -955,6 +967,7 @@ impl Default for KvRouterConfig {
             overlap_score_credit_decay: default_overlap_score_credit_decay(),
             prefill_load_scale: default_prefill_load_scale(),
             decode_active_request_weight: default_decode_active_request_weight(),
+            router_decode_affinity_high_watermark: None,
             host_cache_hit_weight: default_host_cache_hit_weight(),
             disk_cache_hit_weight: default_disk_cache_hit_weight(),
             router_temperature: 0.0,
@@ -1019,6 +1032,7 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             overlap_score_credit_decay: compat.overlap_score_credit_decay,
             prefill_load_scale,
             decode_active_request_weight: compat.decode_active_request_weight,
+            router_decode_affinity_high_watermark: compat.router_decode_affinity_high_watermark,
             host_cache_hit_weight: compat.host_cache_hit_weight,
             disk_cache_hit_weight: compat.disk_cache_hit_weight,
             router_temperature: compat.router_temperature,
@@ -1372,6 +1386,9 @@ impl KvRouterConfig {
             0.0,
             f64::MAX,
         )?;
+        if let Some(value) = self.router_decode_affinity_high_watermark {
+            validate_range("router_decode_affinity_high_watermark", value, 0.0, 1.0)?;
+        }
         validate_range(
             "host_cache_hit_weight",
             self.host_cache_hit_weight,
@@ -1602,6 +1619,7 @@ mod tests {
             ("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY", "0.75"),
             ("DYN_ROUTER_PREFILL_LOAD_SCALE", "2.5"),
             ("DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT", "32"),
+            ("DYN_ROUTER_DECODE_AFFINITY_HIGH_WATERMARK", "0.7"),
             ("DYN_ROUTER_TEMPERATURE", "0.7"),
             ("DYN_ROUTER_USE_KV_EVENTS", "false"),
             ("DYN_ROUTER_REPLICA_SYNC", "yes"),
@@ -1636,6 +1654,7 @@ mod tests {
         assert_eq!(config.router_prefill_policy.as_deref(), Some("prefill-cli"));
         assert_eq!(config.router_decode_policy.as_deref(), Some("decode-cli"));
         assert_eq!(config.decode_active_request_weight, 32.0);
+        assert_eq!(config.router_decode_affinity_high_watermark, Some(0.7));
         assert_eq!(config.router_temperature, 0.7);
         assert!(!config.use_kv_events);
         assert!(config.router_replica_sync);
@@ -2221,6 +2240,7 @@ worker_selection:
         let value = serde_json::to_value(KvRouterConfig::default()).unwrap();
         for post_v1_3_field in [
             "decode_active_request_weight",
+            "router_decode_affinity_high_watermark",
             "router_tracking_hash",
             "router_tracking_key_file",
             "router_tracking_key_id",

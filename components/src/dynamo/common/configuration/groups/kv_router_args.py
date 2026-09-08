@@ -34,6 +34,7 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "overlap_score_credit_decay",
     "prefill_load_scale",
     "decode_active_request_weight",
+    "router_decode_affinity_high_watermark",
     "host_cache_hit_weight",
     "disk_cache_hit_weight",
     "router_temperature",
@@ -195,6 +196,7 @@ class KvRouterConfigBase(ConfigBase):
     overlap_score_credit_decay: float
     prefill_load_scale: float
     decode_active_request_weight: float
+    router_decode_affinity_high_watermark: Optional[float] = None
     host_cache_hit_weight: float
     disk_cache_hit_weight: float
     router_temperature: float
@@ -229,6 +231,13 @@ class KvRouterConfigBase(ConfigBase):
     conditional_disagg_decode_busy_threshold: Optional[float] = None
     router_predicted_ttl_secs: Optional[float] = None
     load_aware: bool = False
+
+    def validate_decode_affinity_high_watermark(self) -> None:
+        value = self.router_decode_affinity_high_watermark
+        if value is not None and not 0.0 <= value <= 1.0:
+            raise ValueError(
+                "--router-decode-affinity-high-watermark must be between 0.0 and 1.0"
+            )
 
     def apply_load_aware_preset(self) -> None:
         if not self.load_aware:
@@ -361,6 +370,18 @@ class KvRouterArgGroup(ArgGroup):
             ),
             arg_type=float,
             dest="decode_active_request_weight",
+        )
+        add_argument(
+            g,
+            flag_name="--router-decode-affinity-high-watermark",
+            env_var="DYN_ROUTER_DECODE_AFFINITY_HIGH_WATERMARK",
+            default=None,
+            help=(
+                "[EXPERIMENTAL] KV Router: Yield an implicit decode session-affinity "
+                "pin when its projected active blocks exceed this fraction of KV "
+                "capacity. Explicit pins remain strict. Omit to disable."
+            ),
+            arg_type=nullable_float,
         )
         add_argument(
             g,

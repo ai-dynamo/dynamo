@@ -1108,6 +1108,20 @@ async fn router_with_worker_configs(
     session_affinity_ttl: Option<Duration>,
     workers: HashMap<u64, ModelRuntimeConfig>,
 ) -> (RoutingHost, Runtime) {
+    let config = KvRouterConfig {
+        skip_initial_worker_wait: true,
+        use_kv_events: false,
+        router_track_active_blocks: false,
+        ..Default::default()
+    };
+    router_with_config_and_worker_configs(session_affinity_ttl, config, workers).await
+}
+
+async fn router_with_config_and_worker_configs(
+    session_affinity_ttl: Option<Duration>,
+    config: KvRouterConfig,
+    workers: HashMap<u64, ModelRuntimeConfig>,
+) -> (RoutingHost, Runtime) {
     let runtime = Runtime::from_current().unwrap();
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
         .await
@@ -1121,12 +1135,6 @@ async fn router_with_worker_configs(
     let client = endpoint.client().await.unwrap();
     let worker_ids = workers.keys().copied().collect::<Vec<_>>();
     let (_tx, workers) = watch::channel(workers);
-    let config = KvRouterConfig {
-        skip_initial_worker_wait: true,
-        use_kv_events: false,
-        router_track_active_blocks: false,
-        ..Default::default()
-    };
     let chooser = KvRouter::new(
         endpoint,
         client.clone(),
@@ -1154,6 +1162,28 @@ async fn router_with_worker_configs(
         .override_discovered_instances(worker_ids.clone());
     router.inner.client.override_instance_avail(worker_ids);
     (router, runtime)
+}
+
+async fn affinity_pressure_router(high_watermark: f64) -> (RoutingHost, Runtime) {
+    let config = KvRouterConfig {
+        skip_initial_worker_wait: true,
+        use_kv_events: false,
+        router_track_active_blocks: true,
+        router_assume_kv_reuse: false,
+        router_decode_affinity_high_watermark: Some(high_watermark),
+        ..Default::default()
+    };
+    let worker = ModelRuntimeConfig {
+        total_kv_blocks: Some(10),
+        data_parallel_size: 2,
+        ..Default::default()
+    };
+    router_with_config_and_worker_configs(
+        Some(Duration::from_secs(10)),
+        config,
+        HashMap::from([(7, worker)]),
+    )
+    .await
 }
 
 async fn track_request(
@@ -1614,6 +1644,110 @@ async fn bind_affinity_target(
         panic!("first request must initialize");
     };
     drop(initializer.commit(target).unwrap());
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn decode_affinity_above_high_watermark_reselects_least_loaded_rank() {
+    let (router, runtime) = affinity_pressure_router(0.7).await;
+    let session_id = SessionAffinityId::new("heavy-pinned-rank");
+    bind_affinity_target(&router, &session_id, AffinityTarget::new(7, Some(0))).await;
+    router
+        .kv_router()
+        .add_request(
+            "existing-heavy-request".to_string(),
+            &[1; 128],
+            None,
+            0,
+            None,
+            WorkerWithDpRank::new(7, 0),
+            None,
+            None,
+            None,
+        )
+        .await;
+
+    let yields_before = router.request_metrics.decode_affinity_yields_total.get();
+    let mut request = Context::new(request());
+    request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id.clone());
+    let (selection, operation) = router
+        .select_with_affinity(&request, RequestPhase::Decode, false)
+        .await
+        .unwrap();
+
+    assert_eq!(selection.worker, WorkerWithDpRank::new(7, 1));
+    assert!(operation.is_none());
+    assert_eq!(
+        router.request_metrics.decode_affinity_yields_total.get(),
+        yields_before + 1
+    );
+    assert_eq!(
+        router
+            .affinity
+            .as_ref()
+            .unwrap()
+            .query_target(&session_id, None)
+            .unwrap(),
+        Some(AffinityTarget::new(7, Some(0)))
+    );
+
+    router.kv_router().free(request.id()).await.unwrap();
+    router
+        .kv_router()
+        .free("existing-heavy-request")
+        .await
+        .unwrap();
+    drop(router);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn decode_affinity_below_high_watermark_honors_pin() {
+    let (router, runtime) = affinity_pressure_router(0.7).await;
+    let session_id = SessionAffinityId::new("light-pinned-rank");
+    bind_affinity_target(&router, &session_id, AffinityTarget::new(7, Some(0))).await;
+
+    let mut request = Context::new(request());
+    request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id);
+    let (selection, operation) = router
+        .select_with_affinity(&request, RequestPhase::Decode, false)
+        .await
+        .unwrap();
+
+    assert_eq!(selection.worker, WorkerWithDpRank::new(7, 0));
+    assert!(matches!(operation, Some(AffinityAcquire::Bound { .. })));
+
+    router.kv_router().free(request.id()).await.unwrap();
+    drop(operation);
+    drop(router);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn decode_affinity_high_watermark_preserves_explicit_pin() {
+    let (router, runtime) = affinity_pressure_router(0.0).await;
+    let session_id = SessionAffinityId::new("explicit-pinned-rank");
+    bind_affinity_target(&router, &session_id, AffinityTarget::new(7, Some(0))).await;
+
+    let mut input = request();
+    input.routing_mut().decode_worker_id = Some(7);
+    input.routing_mut().dp_rank = Some(0);
+    let mut request = Context::new(input);
+    request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id);
+    let (selection, operation) = router
+        .select_with_affinity(&request, RequestPhase::Decode, false)
+        .await
+        .unwrap();
+
+    assert_eq!(selection.worker, WorkerWithDpRank::new(7, 0));
+    assert!(operation.is_some());
+
+    router.kv_router().free(request.id()).await.unwrap();
+    drop(operation);
+    drop(router);
+    runtime.shutdown();
 }
 
 #[tokio::test]

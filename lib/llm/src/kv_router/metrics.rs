@@ -844,6 +844,7 @@ impl RoutingOverheadMetrics {
 /// independently.
 pub struct RouterRequestMetrics {
     pub requests_total: prometheus::IntCounter,
+    pub decode_affinity_yields_total: prometheus::IntCounter,
     pub time_to_first_token_seconds: prometheus::Histogram,
     pub inter_token_latency_seconds: prometheus::Histogram,
     pub input_sequence_tokens: prometheus::Histogram,
@@ -906,6 +907,13 @@ impl RouterRequestMetrics {
                         extra_labels,
                     )
                     .expect("failed to create router_requests_total");
+                let decode_affinity_yields_total = metrics
+                    .create_intcounter(
+                        &router_metric("decode_affinity_yields_total"),
+                        "Total number of implicit decode affinity pins yielded due to projected KV pressure",
+                        extra_labels,
+                    )
+                    .expect("failed to create router_decode_affinity_yields_total");
                 let time_to_first_token_seconds = metrics
                     .create_histogram(
                         &router_metric(frontend_service::TIME_TO_FIRST_TOKEN_SECONDS),
@@ -991,6 +999,7 @@ impl RouterRequestMetrics {
                 overlap_blocks_lost.with_label_values(&[WORKER_TYPE_PREFILL]);
                 Arc::new(Self {
                     requests_total,
+                    decode_affinity_yields_total,
                     time_to_first_token_seconds,
                     inter_token_latency_seconds,
                     input_sequence_tokens,
