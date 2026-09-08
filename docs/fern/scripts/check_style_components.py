@@ -80,7 +80,6 @@ def check(path: Path) -> list[str]:
 
 
 def check_enum_usage(root: Path = ROOT) -> list[str]:
-    """Require page-delivered styles wherever reference pages use enum badges."""
     problems = []
     for page in (root / "pages" / "reference").rglob("*.mdx"):
         text = page.read_text()
@@ -114,7 +113,7 @@ def main() -> int:
         problems.extend(check(target))
 
     if problems:
-        print("template literal defects found:\n", file=sys.stderr)
+        print("style component validation problems found:\n", file=sys.stderr)
         for problem in problems:
             print(f"  - {problem}", file=sys.stderr)
         return 1
