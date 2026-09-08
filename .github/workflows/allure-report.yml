@@ -62,7 +62,7 @@ jobs:
 
   generate-report:
     needs: resolve-params
-    uses: ./.github/workflows/generate-allure-report.yml
+    uses: $/.github/workflows/generate-allure-report.yml
     with:
       run_id: ${{ needs.resolve-params.outputs.run_id }}
       subdir: ${{ needs.resolve-params.outputs.subdir }}

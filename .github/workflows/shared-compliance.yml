@@ -59,7 +59,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Docker Login
-        uses: ./.github/actions/docker-login
+        uses: $/.github/actions/docker-login
         with:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
@@ -84,7 +84,7 @@ jobs:
           RUNTIME_IMAGE=${ECR_REPOSITORY}:${IMAGE_TAG}
           echo "runtime_image=${RUNTIME_IMAGE}" >> $GITHUB_OUTPUT
       - name: Compliance scan
-        uses: ./.github/actions/compliance-scan
+        uses: $/.github/actions/compliance-scan
         with:
           image: ${{ steps.calculate-target-tag.outputs.runtime_image }}
           artifact_name: compliance-${{ inputs.target_tag_plain }}-${{ matrix.cuda_version }}-${{ matrix.platform }}
