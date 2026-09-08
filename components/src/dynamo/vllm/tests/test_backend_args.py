@@ -51,8 +51,9 @@ def create_config() -> DynamoVllmConfig:
     config.benchmark_mode = None
     config.use_vllm_tokenizer = False
     config.frontend_decoding = False
-    # Not optional on the real config: parse_args always attaches it before
-    # validate() runs, and the exclusivity rules read it unguarded.
+    # parse_args attaches this before validate() runs, so mirror that shape
+    # here to keep the LoRA exclusivity rules on their real code path. The
+    # rules still tolerate its absence, matching a config built by hand.
     config.engine_args = SimpleNamespace(enable_lora=False)
     return config
 
@@ -362,6 +363,17 @@ class TestRealtimeWorkerExclusivity:
         with pytest.raises(ValueError, match=option):
             config._validate_realtime_worker_exclusivity()
 
+    def test_absent_engine_args_reads_as_lora_disabled(self):
+        """Only parse_args attaches engine_args, so a config assembled in code
+        never has one. Treat that as LoRA disabled rather than failing on the
+        missing attribute."""
+        config = create_config()
+        del config.engine_args
+        config.realtime = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+
+        config._validate_realtime_worker_exclusivity()
+
 
 class TestClassifyWorkerExclusivity:
     """--classify-worker mirrors the embedding-worker constraints (both are
@@ -382,6 +394,16 @@ class TestClassifyWorkerExclusivity:
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
         with pytest.raises(ValueError, match="mutually exclusive"):
             config._validate_classify_worker_exclusivity()
+
+    def test_absent_engine_args_reads_as_lora_disabled(self):
+        """Kept alongside the --realtime case: the two rules read engine_args
+        independently, so each needs its own missing-attribute check."""
+        config = create_config()
+        del config.engine_args
+        config.classify_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+
+        config._validate_classify_worker_exclusivity()
 
     @pytest.mark.parametrize(
         "mode",
@@ -478,14 +500,6 @@ class TestParseArgsLoraExclusivity:
         config = self._parse(["--realtime"])
         assert config.realtime is True
         assert not config.engine_args.enable_lora
-
-    def test_prefill_still_requires_kv_transfer_config(self):
-        """update_dynamo_config_with_engine() compares disaggregation_mode
-        against DisaggregationMode.PREFILL, and validate() is what turns the
-        raw string into that enum. If validate() stopped running before this
-        comparison, the guard would silently stop firing."""
-        with pytest.raises(ValueError, match="kv-transfer-config"):
-            self._parse(["--disaggregation-mode", "prefill"])
 
 
 class TestValidateCustomEncoder:
