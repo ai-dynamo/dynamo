@@ -97,6 +97,13 @@ impl CkfConfig {
             ..Self::default()
         }
     }
+
+    /// Reports the physical bucket count so callers can size resources without allocating CKF
+    /// storage.
+    pub fn bucket_count(self) -> Result<usize, CkfBuildError> {
+        validate_config(self)?;
+        bucket_count(self.expected_blocks_per_dc)
+    }
 }
 
 impl Default for CkfConfig {

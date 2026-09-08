@@ -89,6 +89,17 @@ class TokenizerProtocol(Protocol):
         ...
 
 
+def resolve_mm_processor_kwargs(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Per-request processor overrides, canonical field first.
+
+    Presence-based: an explicit top-level {} must not fall through to extra_args.
+    """
+    mm_kwargs = request.get("mm_processor_kwargs")
+    if mm_kwargs is None:
+        mm_kwargs = (request.get("extra_args") or {}).get("mm_processor_kwargs")
+    return mm_kwargs
+
+
 class MultimodalRequestProcessor:
     """Simple processor for OpenAI format multimodal requests."""
 
@@ -340,12 +351,21 @@ class MultimodalRequestProcessor:
 
         # Initialize result in TokensPrompt format
         # mm_processor_kwargs must be a dict (not None) for TRT-LLM's processor
-        processed_inputs: Dict[str, Any] = {"mm_processor_kwargs": {}}
+        extra_args = request.get("extra_args") or {}
+        mm_kwargs = resolve_mm_processor_kwargs(request)
+        if mm_kwargs is not None and not isinstance(mm_kwargs, dict):
+            raise HttpStatusError(
+                400,
+                "Malformed mm_processor_kwargs field: expected an object",
+                str(mm_kwargs),
+            )
+        processed_inputs: Dict[str, Any] = {
+            "mm_processor_kwargs": mm_kwargs if mm_kwargs is not None else {}
+        }
 
         # TODO(TRTLLM-11294): Remove the fallback to text_prompt for EPD-NIXL and embeddings cases.
         # This is a temporary workaround to bypass TRT-LLM's bug where token IDs & embeddings
         # are not processed correctly.
-        extra_args = request.get("extra_args") or {}
         formatted_prompt_from_frontend = extra_args.get("formatted_prompt")
 
         # EPD Flow Case 2: Embeddings received via NIXL from encode worker
@@ -608,8 +628,17 @@ class MultimodalRequestProcessor:
         # Post-expansion prompt length, so an omitted max_tokens can be sized
         # against the real context usage rather than the unexpanded placeholders.
         mm_data = processed_inputs.get("multi_modal_data")
-        expanded_len = self._expanded_prompt_len(
-            token_ids, mm_data.get("image") if mm_data else None
+        # Skipped when the request overrides the processor: the sizing
+        # calculator is not override-aware (Qwen2-VL ignores the kwargs while
+        # counting) and is not guaranteed non-mutating (Gemma-4 writes them
+        # into class-level defaults). Falling back to the engine default beats
+        # a stale or leaked estimate.
+        expanded_len = (
+            None
+            if processed_inputs.get("mm_processor_kwargs")
+            else self._expanded_prompt_len(
+                token_ids, mm_data.get("image") if mm_data else None
+            )
         )
         if expanded_len is not None:
             processed_inputs["expanded_prompt_len"] = expanded_len

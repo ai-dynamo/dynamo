@@ -7,11 +7,10 @@
 //! without depending on `aisimulate-core`, whose API is not yet stable enough
 //! for a production dependency.
 //!
-//! NOTE/TODO: These request-scoped references and the capacity model may eventually
-//! motivate a unified slot-tracker and cache-evictor substrate, similar in spirit to
-//! a HiCache-style unified residency/load model. Keep this implementation narrowly
+//! NOTE/TODO: This shared lifecycle and capacity model may eventually motivate
+//! a unified slot-tracker and cache-evictor substrate, similar in spirit to a
+//! HiCache-style unified residency/load model. Keep this implementation narrowly
 //! scoped and compositional while `aisimulate-core` remains experimental and fluid.
-//! Bounded mutation-queue backpressure is deferred while the policy is experimental.
 //!
 //! NOTE: LRU bookkeeping is intentionally not rolled back if a synthetic radix
 //! event fails to apply. The request release still makes its copies inactive,
@@ -35,34 +34,11 @@ use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash, RouterEvent, WorkerWithDpRank,
 };
+use crate::scheduling::AttemptId;
 use dynamo_tokens::SequenceHash;
 
 pub type ApproximateLruIncarnation = u64;
 type BlockCopyId = u64;
-
-/// Router-local identity for one approximate-LRU request lifecycle.
-#[doc(hidden)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ApproximateLruRequestId(u64);
-
-impl ApproximateLruRequestId {
-    #[doc(hidden)]
-    pub fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    #[cfg(feature = "bench")]
-    #[doc(hidden)]
-    pub fn for_benchmark(value: u64) -> Self {
-        Self::new(value)
-    }
-}
-
-impl std::fmt::Display for ApproximateLruRequestId {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
 
 #[derive(Debug, Clone)]
 pub enum ApproximateRetentionConfig {
@@ -116,14 +92,14 @@ pub(crate) enum ApproximateLruCommand {
     Acquire {
         worker: WorkerWithDpRank,
         incarnation: ApproximateLruIncarnation,
-        lru_request_id: ApproximateLruRequestId,
+        attempt_id: AttemptId,
         blocks: Vec<ApproximateLruBlock>,
         private_blocks: usize,
     },
     Materialize {
         worker: WorkerWithDpRank,
         incarnation: ApproximateLruIncarnation,
-        lru_request_id: ApproximateLruRequestId,
+        attempt_id: AttemptId,
         parent_hash: Option<SequenceHash>,
         blocks: Vec<ApproximateLruBlock>,
         start_position: usize,
@@ -132,7 +108,7 @@ pub(crate) enum ApproximateLruCommand {
     Release {
         worker: WorkerWithDpRank,
         incarnation: ApproximateLruIncarnation,
-        lru_request_id: ApproximateLruRequestId,
+        attempt_id: AttemptId,
     },
     Stats,
 }
@@ -214,9 +190,9 @@ impl ApproximateLruClient {
         &self,
         worker: WorkerWithDpRank,
         incarnation: ApproximateLruIncarnation,
-        lru_request_id: ApproximateLruRequestId,
+        attempt_id: AttemptId,
     ) -> ApproximateLruLease {
-        ApproximateLruLease::new(Arc::clone(&self.sink), worker, incarnation, lru_request_id)
+        ApproximateLruLease::new(Arc::clone(&self.sink), worker, incarnation, attempt_id)
     }
 
     pub async fn set_capacity(
@@ -274,7 +250,7 @@ struct ApproximateLruLeaseInner {
     sink: Arc<dyn ApproximateLruCommandSink>,
     worker: WorkerWithDpRank,
     incarnation: ApproximateLruIncarnation,
-    lru_request_id: ApproximateLruRequestId,
+    attempt_id: AttemptId,
     released: std::sync::atomic::AtomicBool,
 }
 
@@ -302,14 +278,14 @@ impl ApproximateLruLease {
         sink: Arc<dyn ApproximateLruCommandSink>,
         worker: WorkerWithDpRank,
         incarnation: ApproximateLruIncarnation,
-        lru_request_id: ApproximateLruRequestId,
+        attempt_id: AttemptId,
     ) -> Self {
         Self {
             inner: Arc::new(ApproximateLruLeaseInner {
                 sink,
                 worker,
                 incarnation,
-                lru_request_id,
+                attempt_id,
                 released: std::sync::atomic::AtomicBool::new(false),
             }),
         }
@@ -330,7 +306,7 @@ impl ApproximateLruLease {
             ApproximateLruCommand::Acquire {
                 worker: self.inner.worker,
                 incarnation: self.inner.incarnation,
-                lru_request_id: self.inner.lru_request_id,
+                attempt_id: self.inner.attempt_id,
                 blocks,
                 private_blocks,
             },
@@ -356,7 +332,7 @@ impl ApproximateLruLease {
             ApproximateLruCommand::Materialize {
                 worker: self.inner.worker,
                 incarnation: self.inner.incarnation,
-                lru_request_id: self.inner.lru_request_id,
+                attempt_id: self.inner.attempt_id,
                 parent_hash,
                 blocks,
                 start_position,
@@ -372,7 +348,7 @@ impl ApproximateLruLease {
         let (task, response) = ApproximateLruTask::acknowledged(ApproximateLruCommand::Release {
             worker: self.inner.worker,
             incarnation: self.inner.incarnation,
-            lru_request_id: self.inner.lru_request_id,
+            attempt_id: self.inner.attempt_id,
         });
         self.inner.sink.send(task)?;
         Ok(Some(ApproximateLruReleaseAck { response }))
@@ -394,7 +370,7 @@ impl ApproximateLruLease {
             ApproximateLruCommand::Release {
                 worker: self.inner.worker,
                 incarnation: self.inner.incarnation,
-                lru_request_id: self.inner.lru_request_id,
+                attempt_id: self.inner.attempt_id,
             },
         ));
     }
@@ -409,7 +385,7 @@ impl Drop for ApproximateLruLeaseInner {
             ApproximateLruCommand::Release {
                 worker: self.worker,
                 incarnation: self.incarnation,
-                lru_request_id: self.lru_request_id,
+                attempt_id: self.attempt_id,
             },
         ));
     }
@@ -460,7 +436,7 @@ struct RankLruState {
     copies: FxHashMap<BlockCopyId, BlockCopy>,
     by_hash: FxHashMap<SequenceHash, Vec<BlockCopyId>>,
     inactive: BTreeSet<InactiveKey>,
-    leases: FxHashMap<ApproximateLruRequestId, LeaseState>,
+    leases: FxHashMap<AttemptId, LeaseState>,
     private_blocks: usize,
     evicted_blocks: u64,
 }
@@ -495,13 +471,13 @@ impl RankLruState {
 
     fn acquire(
         &mut self,
-        lru_request_id: ApproximateLruRequestId,
+        attempt_id: AttemptId,
         blocks: &[ApproximateLruBlock],
         private_blocks: usize,
     ) -> Result<Vec<SequenceHash>, KvRouterError> {
-        if self.leases.contains_key(&lru_request_id) {
+        if self.leases.contains_key(&attempt_id) {
             return Err(KvRouterError::Unsupported(format!(
-                "duplicate approximate LRU request {lru_request_id}"
+                "duplicate approximate LRU attempt {attempt_id}"
             )));
         }
 
@@ -556,18 +532,18 @@ impl RankLruState {
         }
 
         self.private_blocks += private_blocks;
-        self.leases.insert(lru_request_id, lease);
+        self.leases.insert(attempt_id, lease);
         Ok(self.reconcile())
     }
 
     fn materialize(
         &mut self,
-        lru_request_id: ApproximateLruRequestId,
+        attempt_id: AttemptId,
         blocks: &[ApproximateLruBlock],
         start_position: usize,
         private_blocks: usize,
     ) -> Option<Vec<SequenceHash>> {
-        let mut lease = self.leases.remove(&lru_request_id)?;
+        let mut lease = self.leases.remove(&attempt_id)?;
         for (offset, block) in blocks.iter().enumerate() {
             let copy_id = self.next_copy_id;
             self.next_copy_id = self.next_copy_id.wrapping_add(1).max(1);
@@ -592,12 +568,12 @@ impl RankLruState {
             self.private_blocks -= lease.private_blocks - private_blocks;
         }
         lease.private_blocks = private_blocks;
-        self.leases.insert(lru_request_id, lease);
+        self.leases.insert(attempt_id, lease);
         Some(self.reconcile())
     }
 
-    fn release(&mut self, lru_request_id: ApproximateLruRequestId) -> Vec<SequenceHash> {
-        let Some(lease) = self.leases.remove(&lru_request_id) else {
+    fn release(&mut self, attempt_id: AttemptId) -> Vec<SequenceHash> {
+        let Some(lease) = self.leases.remove(&attempt_id) else {
             return Vec::new();
         };
         let release_epoch = self.next_release_epoch();
@@ -852,7 +828,7 @@ impl ApproximateLruLane {
             ApproximateLruCommand::Acquire {
                 worker,
                 incarnation,
-                lru_request_id,
+                attempt_id,
                 blocks,
                 private_blocks,
             } => {
@@ -894,7 +870,7 @@ impl ApproximateLruLane {
                     unreachable!("retention state was checked above");
                 };
                 let before = state.evicted_blocks;
-                let removed = state.acquire(lru_request_id, &blocks, private_blocks)?;
+                let removed = state.acquire(attempt_id, &blocks, private_blocks)?;
                 let evicted = state.evicted_blocks.saturating_sub(before);
                 self.record_evictions(evicted);
                 self.push_store_event(&mut events, worker, None, blocks);
@@ -904,7 +880,7 @@ impl ApproximateLruLane {
             ApproximateLruCommand::Materialize {
                 worker,
                 incarnation,
-                lru_request_id,
+                attempt_id,
                 parent_hash,
                 blocks,
                 start_position,
@@ -922,7 +898,7 @@ impl ApproximateLruLane {
                 {
                     let before = state.evicted_blocks;
                     if let Some(removed) =
-                        state.materialize(lru_request_id, &blocks, start_position, private_blocks)
+                        state.materialize(attempt_id, &blocks, start_position, private_blocks)
                     {
                         let evicted = state.evicted_blocks.saturating_sub(before);
                         self.record_evictions(evicted);
@@ -935,7 +911,7 @@ impl ApproximateLruLane {
             ApproximateLruCommand::Release {
                 worker,
                 incarnation,
-                lru_request_id,
+                attempt_id,
             } => {
                 self.request_messages = self.request_messages.saturating_add(1);
                 if let Some(WorkerRetentionState::Lru {
@@ -945,7 +921,7 @@ impl ApproximateLruLane {
                     && *current == incarnation
                 {
                     let before = state.evicted_blocks;
-                    let removed = state.release(lru_request_id);
+                    let removed = state.release(attempt_id);
                     let evicted = state.evicted_blocks.saturating_sub(before);
                     self.record_evictions(evicted);
                     self.push_remove_event(&mut events, worker, removed);
@@ -1084,8 +1060,8 @@ mod tests {
         WorkerWithDpRank::new(7, 0)
     }
 
-    fn lru_request(value: u64) -> ApproximateLruRequestId {
-        ApproximateLruRequestId::new(value)
+    fn attempt(value: u64) -> AttemptId {
+        AttemptId::new(value)
     }
 
     fn block(value: u64) -> ApproximateLruBlock {
@@ -1120,7 +1096,7 @@ mod tests {
             ApproximateLruCommand::Acquire {
                 worker: worker(),
                 incarnation: 1,
-                lru_request_id: lru_request(1),
+                attempt_id: attempt(1),
                 blocks: vec![block(1), block(2), block(3)],
                 private_blocks: 0,
             },
@@ -1130,7 +1106,7 @@ mod tests {
             ApproximateLruCommand::Release {
                 worker: worker(),
                 incarnation: 1,
-                lru_request_id: lru_request(1),
+                attempt_id: attempt(1),
             },
         );
         let output = lane
@@ -1162,7 +1138,7 @@ mod tests {
             ApproximateLruCommand::Acquire {
                 worker: worker(),
                 incarnation: 1,
-                lru_request_id: lru_request(1),
+                attempt_id: attempt(1),
                 blocks: vec![block(1), block(2)],
                 private_blocks: 0,
             },
@@ -1173,7 +1149,7 @@ mod tests {
                 ApproximateLruCommand::Materialize {
                     worker: worker(),
                     incarnation: 1,
-                    lru_request_id: lru_request(1),
+                    attempt_id: attempt(1),
                     parent_hash: Some((value - 1) as SequenceHash),
                     blocks: vec![block(value)],
                     start_position: position,
@@ -1186,7 +1162,7 @@ mod tests {
             ApproximateLruCommand::Release {
                 worker: worker(),
                 incarnation: 1,
-                lru_request_id: lru_request(1),
+                attempt_id: attempt(1),
             },
         );
 
@@ -1231,7 +1207,7 @@ mod tests {
             ApproximateLruCommand::Acquire {
                 worker: worker(),
                 incarnation: 1,
-                lru_request_id: lru_request(1),
+                attempt_id: attempt(1),
                 blocks: vec![block(10), block(11), block(12)],
                 private_blocks: 1,
             },
@@ -1249,7 +1225,7 @@ mod tests {
             ApproximateLruCommand::Materialize {
                 worker: worker(),
                 incarnation: 1,
-                lru_request_id: lru_request(1),
+                attempt_id: attempt(1),
                 parent_hash: Some(12),
                 blocks: vec![block(13)],
                 start_position: 3,
@@ -1269,7 +1245,7 @@ mod tests {
             ApproximateLruCommand::Acquire {
                 worker: worker(),
                 incarnation: 1,
-                lru_request_id: lru_request(2),
+                attempt_id: attempt(2),
                 blocks: vec![block(10), block(11), block(20)],
                 private_blocks: 1,
             },
@@ -1287,7 +1263,7 @@ mod tests {
             ApproximateLruCommand::Release {
                 worker: worker(),
                 incarnation: 1,
-                lru_request_id: lru_request(1),
+                attempt_id: attempt(1),
             },
         );
         let stats = lane.stats();
@@ -1305,7 +1281,7 @@ mod tests {
             ApproximateLruCommand::Release {
                 worker: worker(),
                 incarnation: 1,
-                lru_request_id: lru_request(2),
+                attempt_id: attempt(2),
             },
         );
         let stats = lane.stats();
@@ -1321,7 +1297,7 @@ mod tests {
             .apply(ApproximateLruCommand::Acquire {
                 worker: worker(),
                 incarnation: 1,
-                lru_request_id: lru_request(3),
+                attempt_id: attempt(3),
                 blocks: (30..39).map(block).collect(),
                 private_blocks: 0,
             })
@@ -1353,7 +1329,7 @@ mod tests {
             ApproximateLruCommand::Release {
                 worker: worker(),
                 incarnation: 1,
-                lru_request_id: lru_request(3),
+                attempt_id: attempt(3),
             },
         );
         let stats = lane.stats();
@@ -1374,13 +1350,13 @@ mod tests {
                 capacity: Some(2),
             },
         );
-        for lru_request_id in [lru_request(1), lru_request(2)] {
+        for attempt_id in [attempt(1), attempt(2)] {
             apply(
                 &mut lane,
                 ApproximateLruCommand::Acquire {
                     worker: worker(),
                     incarnation: 1,
-                    lru_request_id,
+                    attempt_id,
                     blocks: vec![block(1)],
                     private_blocks: 0,
                 },
@@ -1391,7 +1367,7 @@ mod tests {
             ApproximateLruCommand::Release {
                 worker: worker(),
                 incarnation: 1,
-                lru_request_id: lru_request(1),
+                attempt_id: attempt(1),
             },
         );
         apply(
@@ -1399,18 +1375,18 @@ mod tests {
             ApproximateLruCommand::Acquire {
                 worker: worker(),
                 incarnation: 1,
-                lru_request_id: lru_request(3),
+                attempt_id: attempt(3),
                 blocks: vec![block(2)],
                 private_blocks: 0,
             },
         );
-        for lru_request_id in [lru_request(3), lru_request(2)] {
+        for attempt_id in [attempt(3), attempt(2)] {
             apply(
                 &mut lane,
                 ApproximateLruCommand::Release {
                     worker: worker(),
                     incarnation: 1,
-                    lru_request_id,
+                    attempt_id,
                 },
             );
         }
@@ -1444,7 +1420,7 @@ mod tests {
             ApproximateLruCommand::Acquire {
                 worker: worker(),
                 incarnation: 1,
-                lru_request_id: lru_request(1),
+                attempt_id: attempt(1),
                 blocks: vec![block(1), block(2)],
                 private_blocks: 0,
             },
@@ -1455,7 +1431,7 @@ mod tests {
             ApproximateLruCommand::Release {
                 worker: worker(),
                 incarnation: 1,
-                lru_request_id: lru_request(1),
+                attempt_id: attempt(1),
             },
         );
         let stats = lane.stats();
@@ -1479,7 +1455,7 @@ mod tests {
             .apply(ApproximateLruCommand::Acquire {
                 worker: worker(),
                 incarnation: 1,
-                lru_request_id: lru_request(1),
+                attempt_id: attempt(1),
                 blocks: vec![block(1)],
                 private_blocks: 0,
             })
@@ -1556,7 +1532,7 @@ mod tests {
             .apply(ApproximateLruCommand::Acquire {
                 worker: worker(),
                 incarnation: 1,
-                lru_request_id: lru_request(1),
+                attempt_id: attempt(1),
                 blocks: vec![block(1)],
                 private_blocks: 0,
             })
@@ -1586,7 +1562,7 @@ mod tests {
             ApproximateLruCommand::Acquire {
                 worker: worker(),
                 incarnation: 1,
-                lru_request_id: lru_request(1),
+                attempt_id: attempt(1),
                 blocks: vec![block(1), block(2)],
                 private_blocks: 0,
             },
@@ -1596,7 +1572,7 @@ mod tests {
             ApproximateLruCommand::Release {
                 worker: worker(),
                 incarnation: 1,
-                lru_request_id: lru_request(1),
+                attempt_id: attempt(1),
             },
         );
         apply(
@@ -1604,7 +1580,7 @@ mod tests {
             ApproximateLruCommand::Acquire {
                 worker: worker(),
                 incarnation: 1,
-                lru_request_id: lru_request(2),
+                attempt_id: attempt(2),
                 blocks: vec![block(1), block(2), block(3)],
                 private_blocks: 0,
             },
@@ -1619,7 +1595,7 @@ mod tests {
             ApproximateLruCommand::Release {
                 worker: worker(),
                 incarnation: 1,
-                lru_request_id: lru_request(2),
+                attempt_id: attempt(2),
             },
         );
     }
@@ -1640,7 +1616,7 @@ mod tests {
             ApproximateLruCommand::Acquire {
                 worker: worker(),
                 incarnation: 1,
-                lru_request_id: lru_request(1),
+                attempt_id: attempt(1),
                 blocks: vec![block(1)],
                 private_blocks: 0,
             },
@@ -1650,7 +1626,7 @@ mod tests {
             ApproximateLruCommand::Release {
                 worker: worker(),
                 incarnation: 1,
-                lru_request_id: lru_request(1),
+                attempt_id: attempt(1),
             },
         );
         apply(
@@ -1658,7 +1634,7 @@ mod tests {
             ApproximateLruCommand::Acquire {
                 worker: worker(),
                 incarnation: 1,
-                lru_request_id: lru_request(2),
+                attempt_id: attempt(2),
                 blocks: Vec::new(),
                 private_blocks: 0,
             },
@@ -1668,7 +1644,7 @@ mod tests {
             ApproximateLruCommand::Materialize {
                 worker: worker(),
                 incarnation: 1,
-                lru_request_id: lru_request(2),
+                attempt_id: attempt(2),
                 parent_hash: None,
                 blocks: vec![block(1)],
                 start_position: 0,
@@ -1680,7 +1656,7 @@ mod tests {
             ApproximateLruCommand::Release {
                 worker: worker(),
                 incarnation: 1,
-                lru_request_id: lru_request(2),
+                attempt_id: attempt(2),
             },
         );
 
@@ -1698,7 +1674,7 @@ mod tests {
             .apply(ApproximateLruCommand::Acquire {
                 worker: worker(),
                 incarnation: 1,
-                lru_request_id: lru_request(3),
+                attempt_id: attempt(3),
                 blocks: vec![block(2)],
                 private_blocks: 0,
             })
@@ -1717,7 +1693,7 @@ mod tests {
             ApproximateLruCommand::Release {
                 worker: worker(),
                 incarnation: 1,
-                lru_request_id: lru_request(3),
+                attempt_id: attempt(3),
             },
         );
     }
@@ -1738,7 +1714,7 @@ mod tests {
             ApproximateLruCommand::Acquire {
                 worker: worker(),
                 incarnation: 1,
-                lru_request_id: lru_request(1),
+                attempt_id: attempt(1),
                 blocks: vec![block(1)],
                 private_blocks: 1,
             },
@@ -1762,7 +1738,7 @@ mod tests {
             ApproximateLruCommand::Acquire {
                 worker: worker(),
                 incarnation: 2,
-                lru_request_id: lru_request(1),
+                attempt_id: attempt(1),
                 blocks: vec![block(9)],
                 private_blocks: 1,
             },
@@ -1771,7 +1747,7 @@ mod tests {
             .apply(ApproximateLruCommand::Materialize {
                 worker: worker(),
                 incarnation: 1,
-                lru_request_id: lru_request(1),
+                attempt_id: attempt(1),
                 parent_hash: Some(1),
                 blocks: vec![block(2)],
                 start_position: 1,
@@ -1784,7 +1760,7 @@ mod tests {
             ApproximateLruCommand::Release {
                 worker: worker(),
                 incarnation: 1,
-                lru_request_id: lru_request(1),
+                attempt_id: attempt(1),
             },
         );
         let replacement = lane.stats();
@@ -1796,7 +1772,7 @@ mod tests {
             ApproximateLruCommand::Release {
                 worker: worker(),
                 incarnation: 2,
-                lru_request_id: lru_request(1),
+                attempt_id: attempt(1),
             },
         );
         assert_eq!(lane.stats().leases, 0);
@@ -1824,7 +1800,7 @@ mod tests {
             .await
             .unwrap();
         let lease = indexer
-            .begin_approximate_lru_request(worker, 1, lru_request(1))
+            .begin_approximate_lru_request(worker, 1, attempt(1))
             .unwrap();
         lease
             .acquire(

@@ -25,7 +25,7 @@ use super::bucket::{CuckooBucketStore, OwnedPackedCkfLane, PackedBucket};
 use super::canonical::CanonicalSequenceBlockHash;
 use super::global::GlobalCkfBucketImage;
 use super::mutator::{CuckooInsertionScratch, CuckooMutator, lane_rng_seed};
-use super::{CkfBuildError, CkfConfig, bucket_count, validate_config};
+use super::{CkfBuildError, CkfConfig};
 
 const FORMAT_VERSION: u16 = 1;
 const FINGERPRINT_BITS: u8 = 16;
@@ -487,8 +487,7 @@ pub struct DcCkfState {
 
 impl DcCkfState {
     pub fn new(config: CkfConfig) -> Result<Self, CkfBuildError> {
-        validate_config(config)?;
-        let bucket_count = bucket_count(config.expected_blocks_per_dc)?;
+        let bucket_count = config.bucket_count()?;
         Ok(Self {
             source_lineage: FxHashMap::default(),
             canonical_owners: FxHashMap::default(),

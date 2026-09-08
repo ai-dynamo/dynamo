@@ -80,8 +80,22 @@ func (v *DynamoGraphDeploymentValidator) Validate(
 	deployment *nvidiacomv1beta1.DynamoGraphDeployment,
 	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
+	return v.validate(ctx, deployment, runtimeVersionSource, false)
+}
+
+func (v *DynamoGraphDeploymentValidator) validate(
+	ctx context.Context,
+	deployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	runtimeVersionSource runtimeVersionValidationSource,
+	ratchetRuntimeVersion bool,
+) (admission.Warnings, error) {
 	validation := &dynamoGraphDeploymentValidation{
-		sharedValidation: sharedValidation{ctx: ctx, mgr: v.mgr, runtimeVersionSource: runtimeVersionSource},
+		sharedValidation: sharedValidation{
+			ctx:                   ctx,
+			mgr:                   v.mgr,
+			runtimeVersionSource:  runtimeVersionSource,
+			ratchetRuntimeVersion: ratchetRuntimeVersion,
+		},
 	}
 
 	allErrs := validation.validateDynamoGraphDeployment(deployment)
@@ -106,13 +120,18 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
 	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
 	validation := &dynamoGraphDeploymentValidation{
-		sharedValidation:  sharedValidation{ctx: ctx, mgr: v.mgr, runtimeVersionSource: runtimeVersionSource},
+		sharedValidation: sharedValidation{
+			ctx:                   ctx,
+			mgr:                   v.mgr,
+			runtimeVersionSource:  runtimeVersionSource,
+			ratchetRuntimeVersion: true,
+		},
 		userInfo:          userInfo,
 		operatorPrincipal: operatorPrincipal,
 	}
 
 	allErrs := validation.validateDynamoGraphDeploymentUpdate(newDGD, oldDGD)
-	if validation.validatesRuntimeVersionFor(runtimeVersionSourceV1Alpha1) {
+	if validation.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
 		newAlpha, err := alphaDynamoGraphDeploymentForValidation(newDGD)
 		if err != nil {
 			return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoGraphDeployment fields: %w", err)

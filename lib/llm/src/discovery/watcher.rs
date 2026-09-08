@@ -653,6 +653,7 @@ where
                     self.worker_selector_factory.clone(),
                     self.prefill_load_estimator.clone(),
                     router_config.session_affinity_ttl_secs,
+                    router_config.session_affinity_mode,
                     model_name.clone(),
                     namespace.clone(),
                     load_thresholds.clone(),
@@ -694,6 +695,7 @@ where
                         encoder_chooser.clone(),
                         uses_multimodal_cache_routing(card),
                         router_config.session_affinity_ttl_secs,
+                        router_config.session_affinity_mode,
                     )
                     .await
                     .context("build_preprocessed_routing")?,
@@ -1315,6 +1317,7 @@ fn effective_router_config<'a>(
         .kv_router_config
         .router_decode_policy
         .clone();
+    effective.session_affinity_mode = frontend_config.session_affinity_mode;
     Cow::Owned(effective)
 }
 
