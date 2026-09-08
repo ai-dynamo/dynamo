@@ -29,7 +29,7 @@ if HAS_VLLM:
     from vllm.sampling_params import SamplingParams
     from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 
-    from dynamo.frontend.prepost import StreamingPostProcessor
+    from dynamo.frontend.prepost import StreamingPostProcessor, _prepare_request
 else:
     # Fake some types so that `pre-commit` passes
     class CompletionOutput:
@@ -2076,3 +2076,237 @@ def test_streaming_parallel_tool_calls_no_think(
     assert finish_reasons == [
         "tool_calls"
     ], f"Expected finish_reason=['tool_calls']; got {finish_reasons}"
+
+
+_LONG_ARGUMENT_FRAGMENTS = (
+    "James",
+    " Joyce",
+    " Dubliners",
+    " Ulysses",
+    " Finnegans",
+    " Wake",
+    " Portrait",
+    " of",
+    " the",
+    " Artist",
+)
+
+_LONG_ARGUMENT_CHUNK_TEXTS = (
+    '<tool_call>\n{"name": "search_gutenberg_books", '
+    '"arguments": {"search_terms": ["',
+    *_LONG_ARGUMENT_FRAGMENTS,
+    '"]}}\n</tool_call>',
+)
+
+
+def _long_string_argument_outputs():
+    return [
+        CompletionOutput(
+            index=0,
+            text=text,
+            token_ids=list(range(1000 + i * 4, 1000 + i * 4 + 4)),
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason=(
+                "stop" if i == len(_LONG_ARGUMENT_CHUNK_TEXTS) - 1 else None
+            ),
+        )
+        for i, text in enumerate(_LONG_ARGUMENT_CHUNK_TEXTS)
+    ]
+
+
+def test_streaming_tool_call_arguments_are_not_withheld(
+    tokenizer, request_for_sampling, sampling_params
+):
+    """Stream every tool-call argument delta in its own frame."""
+    tool_parser = Hermes2ProToolParser(tokenizer)
+    proc = StreamingPostProcessor(
+        tokenizer=tokenizer,
+        request_for_sampling=request_for_sampling,
+        sampling_params=sampling_params,
+        prompt_token_ids=PROMPT_TOKEN_IDS,
+        tool_parser=tool_parser,
+        reasoning_parser_class=_resolve_qwen3_reasoning_parser_class(),
+        chat_template_kwargs={"enable_thinking": False},
+    )
+
+    outputs = _long_string_argument_outputs()
+    results = [proc.process_output(output) for output in outputs]
+
+    def _tool_calls_of(result):
+        if result is None:
+            return None
+        return result.get("delta", {}).get("tool_calls")
+
+    withheld = [
+        i
+        for i, (output, result) in enumerate(zip(outputs, results))
+        if output.finish_reason is None and not _tool_calls_of(result)
+    ]
+    assert not withheld, (
+        f"process_output withheld a tool_call delta on chunk(s) {withheld} of "
+        f"{len(outputs)}. The parser produced an argument delta for each, so "
+        "each must be published immediately rather than held until the parser "
+        "falls silent or finish_reason arrives."
+    )
+
+    frames = [r for r in results if _tool_calls_of(r)]
+    assert len(frames) > 1, (
+        "The whole argument arrived in a single frame; argument deltas must "
+        "stream the way plain content does."
+    )
+    assert len(frames) == len(outputs), (
+        f"Expected one tool_call frame per parser delta ({len(outputs)}); got "
+        f"{len(frames)}."
+    )
+
+    tool_calls = _collect_tool_calls([r for r in results if r is not None])
+    assert len(tool_calls) == 1
+    assert json.loads(tool_calls[0]["function"]["arguments"]) == {
+        "search_terms": ["".join(_LONG_ARGUMENT_FRAGMENTS)]
+    }
+
+    id_frames = [
+        i for i, r in enumerate(frames) if r["delta"]["tool_calls"][0].get("id")
+    ]
+    type_frames = [
+        i for i, r in enumerate(frames) if r["delta"]["tool_calls"][0].get("type")
+    ]
+    name_frames = [
+        i
+        for i, r in enumerate(frames)
+        if r["delta"]["tool_calls"][0].get("function", {}).get("name")
+    ]
+    assert id_frames == [0], f"'id' must appear on exactly one frame; got {id_frames}"
+    assert type_frames == [
+        0
+    ], f"'type' must appear on exactly one frame; got {type_frames}"
+    assert name_frames == [
+        0
+    ], f"'function.name' must appear on exactly one frame; got {name_frames}"
+
+    finish_reasons = [
+        r["finish_reason"] for r in results if r and r.get("finish_reason")
+    ]
+    assert finish_reasons == [
+        "tool_calls"
+    ], f"Expected finish_reason=['tool_calls']; got {finish_reasons}"
+
+
+# ---------------------------------------------------------------------------
+# Reasoning-parser adjust_request wiring
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def recording_reasoning_parser():
+    """A reasoning-parser class plus the per-test list of instances it created.
+
+    Returns ``(cls, instances)``. The list is owned by the fixture rather than
+    living on the class, so each test starts clean without depending on a shared
+    registry being cleared (see .ai/pytest-guidelines.md, "Hermetic Testing").
+    """
+    instances = []
+
+    class _RecordingReasoningParser:
+        """Stands in for a parser whose adjust_request mutates the request.
+
+        Real example: a parser that splits thinking from the answer on text markers
+        needs skip_special_tokens=False so those markers survive detokenisation.
+        """
+
+        def __init__(self, tokenizer, chat_template_kwargs=None, model_config=None):
+            self.tokenizer = tokenizer
+            self.chat_template_kwargs = chat_template_kwargs
+            self.called = False
+            instances.append(self)
+
+        def adjust_request(self, request):
+            self.called = True
+            request.skip_special_tokens = False
+            return request
+
+    return _RecordingReasoningParser, instances
+
+
+def _prep(tokenizer, *, reasoning_parser_class=None, chat_template_kwargs=None):
+    request = ChatCompletionRequest.model_construct(
+        messages=[{"role": "user", "content": "hi"}],
+        model="test",
+        tools=None,
+        tool_choice=None,
+        chat_template=None,
+        chat_template_kwargs=chat_template_kwargs,
+        add_generation_prompt=True,
+        continue_final_message=False,
+        documents=None,
+        reasoning_effort=None,
+        skip_special_tokens=True,
+    )
+    return _prepare_request(
+        request,
+        tokenizer=tokenizer,
+        tool_parser_class=None,
+        reasoning_parser_class=reasoning_parser_class,
+    )
+
+
+class TestReasoningParserAdjustRequest:
+    """The reasoning parser's adjust_request must run during request preparation.
+
+    Without it the reasoning channel only works when the *client* sends
+    skip_special_tokens=false, which ordinary OpenAI-compatible clients do not.
+    """
+
+    def test_adjust_request_is_called(self, tokenizer, recording_reasoning_parser):
+        parser_cls, instances = recording_reasoning_parser
+        req, _, _, _, _ = _prep(tokenizer, reasoning_parser_class=parser_cls)
+        assert len(instances) == 1
+        assert instances[0].called
+        assert req.skip_special_tokens is False
+
+    def test_not_called_when_thinking_disabled(
+        self, tokenizer, recording_reasoning_parser
+    ):
+        """Gating must match StreamingPostProcessor: no parser => no adjustment.
+
+        If the sampling params were adjusted for a parser that then does not exist,
+        the model's control markers reach the client as visible text.
+        """
+        parser_cls, instances = recording_reasoning_parser
+        req, _, _, _, _ = _prep(
+            tokenizer,
+            reasoning_parser_class=parser_cls,
+            chat_template_kwargs={"enable_thinking": False},
+        )
+        assert instances == []
+        assert req.skip_special_tokens is True
+
+    def test_enable_thinking_true_still_calls(
+        self, tokenizer, recording_reasoning_parser
+    ):
+        parser_cls, instances = recording_reasoning_parser
+        req, _, _, _, _ = _prep(
+            tokenizer,
+            reasoning_parser_class=parser_cls,
+            chat_template_kwargs={"enable_thinking": True},
+        )
+        assert instances[0].called
+        assert req.skip_special_tokens is False
+
+    def test_no_parser_class_leaves_request_untouched(self, tokenizer):
+        req, _, _, _, _ = _prep(tokenizer, reasoning_parser_class=None)
+        assert req.skip_special_tokens is True
+
+    def test_default_adjust_request_is_a_no_op(
+        self, tokenizer, recording_reasoning_parser
+    ):
+        """ReasoningParser.adjust_request returns the request unchanged by default,
+        so parsers that do not need the override are unaffected."""
+        parser_cls, _ = recording_reasoning_parser
+
+        class _PassThrough(parser_cls):
+            def adjust_request(self, request):
+                self.called = True
+                return request
+
+        req, _, _, _, _ = _prep(tokenizer, reasoning_parser_class=_PassThrough)
+        assert req.skip_special_tokens is True

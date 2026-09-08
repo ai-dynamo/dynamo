@@ -94,6 +94,22 @@ def test_new_request_data_has_fields_instrumented_scheduler_sets():
     )
 
 
+def test_scheduler_output_new_connector_fields_remain_optional():
+    """Dynamo constructs SchedulerOutput directly without v0.27's new fields."""
+    from vllm.v1.core.sched.output import SchedulerOutput
+
+    fields = {field.name: field for field in dataclasses.fields(SchedulerOutput)}
+    for field_name in ("ec_manager_metadata", "partial_tail_offloads"):
+        assert field_name in fields, (
+            f"vLLM SchedulerOutput.{field_name} is gone — re-audit Dynamo's "
+            "direct SchedulerOutput construction."
+        )
+        assert fields[field_name].default is None, (
+            f"vLLM SchedulerOutput.{field_name} became required — update every "
+            "InstrumentedScheduler constructor."
+        )
+
+
 def test_async_scheduler_has_methods_instrumented_scheduler_overrides():
     """Guard the ``AsyncScheduler`` methods ``InstrumentedScheduler`` overrides /
     calls via ``super()``."""
@@ -143,3 +159,19 @@ def test_request_exposes_all_token_ids():
         "vllm.v1.request.Request no longer exposes `_all_token_ids` — "
         "InstrumentedScheduler relies on it for NewRequestData.prefill_token_ids."
     )
+
+
+def test_vllm_freezes_serving_heap_with_freeze_gc_heap():
+    """``dynamo.vllm.gc_policy.stop_gc_policy`` re-establishes vLLM's serving
+    freeze after a benchmark by mirroring ``freeze_gc_heap`` (collect, then
+    ``gc.freeze()``). If vLLM drops or renames that baseline, the mirrored
+    re-freeze must be revisited rather than silently diverge."""
+    from vllm.utils.gc_utils import freeze_gc_heap
+    from vllm.v1.engine.core import EngineCore
+    from vllm.v1.worker.gpu_worker import Worker
+
+    assert callable(freeze_gc_heap)
+    # The re-freeze only makes sense while vLLM itself installs the baseline
+    # in both processes the benchmark touches.
+    assert "freeze_gc_heap()" in inspect.getsource(EngineCore.__init__)
+    assert "freeze_gc_heap()" in inspect.getsource(Worker)

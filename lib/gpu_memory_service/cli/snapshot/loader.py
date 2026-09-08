@@ -12,13 +12,13 @@ restored engine on weight load.
 from __future__ import annotations
 
 import argparse
-import importlib
 import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from gpu_memory_service.cli.snapshot import run_per_device
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm
 from gpu_memory_service.snapshot.backends.sharded_ssd import parse_sharded_ssd_roots
@@ -115,15 +115,30 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=[d.value for d in VMMDeviceType],
         help="VMM device type (default: cuda).",
     )
+    parser.add_argument(
+        "--device",
+        type=int,
+        default=None,
+        help="Device ordinal. Default: every visible GPU.",
+    )
     return parser
 
 
 def _list_checkpoint_devices(
     checkpoint_dir: str | None,
+    device: int | None = None,
 ) -> list[int]:
     vmm = get_vmm()
     vmm.ensure_initialized()
     devices = vmm.list_devices()
+    if device is not None:
+        if device not in devices:
+            raise RuntimeError(f"--device {device} is not visible: visible={devices}")
+        if checkpoint_dir:
+            path = Path(checkpoint_dir) / f"device-{device}"
+            if not path.is_dir():
+                raise RuntimeError(f"Checkpoint directory {path} is missing")
+        return [device]
     if not checkpoint_dir:
         return devices
 
@@ -159,16 +174,12 @@ def _list_checkpoint_devices(
 
 
 def main(argv: list[str] | None = None) -> None:
-    selector = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
-    selector.add_argument("--use-v1", action="store_true")
-    options, remaining = selector.parse_known_args(argv)
-    if options.use_v1:
-        v1_loader = importlib.import_module("gpu_memory_service.v1.snapshot.loader")
-        v1_loader.main(remaining)
+    if os.environ.get("DYN_GMS_USE_V1") == "true":
+        run_per_device("gpu_memory_service.v1.snapshot.loader", argv)
         return
 
     parser = _build_parser()
-    args = parser.parse_args(remaining)
+    args = parser.parse_args(argv)
     if not args.checkpoint_dir:
         parser.error(
             f"--checkpoint-dir is required for --transfer-backend={args.transfer_backend}"
@@ -190,7 +201,7 @@ def main(argv: list[str] | None = None) -> None:
         ",".join(sharded_ssd_roots) or "-",
         sharded_ssd_queues_per_root,
     )
-    devices = _list_checkpoint_devices(checkpoint_dir)
+    devices = _list_checkpoint_devices(checkpoint_dir, args.device)
 
     t0 = time.monotonic()
     with ThreadPoolExecutor(max_workers=len(devices)) as pool:

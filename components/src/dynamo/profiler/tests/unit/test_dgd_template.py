@@ -41,6 +41,28 @@ def test_profiler_blueprints_are_private_and_component_shaped(
     assert all(component.get("type") for component in components)
 
 
+@pytest.mark.parametrize(
+    ("backend", "mode"),
+    [
+        ("vllm", "agg"),
+        ("vllm", "disagg"),
+        ("sglang", "agg"),
+        ("sglang", "disagg"),
+        ("trtllm", "agg"),
+        ("trtllm", "disagg"),
+        ("mocker", "disagg"),
+    ],
+)
+def test_profiler_blueprints_materialize_frontend_cli_defaults(
+    backend: str, mode: str
+) -> None:
+    config = load_dgd_template(backend, mode)
+
+    frontend = _main_container(config, "Frontend")
+    assert frontend["command"] == ["python3"]
+    assert frontend["args"] == ["-m", "dynamo.frontend"]
+
+
 def _main_container(config: dict, component_name: str) -> dict:
     component = next(
         component

@@ -322,6 +322,11 @@ impl GlobalCkfSnapshot {
     pub fn buckets(&self) -> &[u64] {
         &self.buckets
     }
+
+    /// Transfers the backing lane allocation so ownership handoffs avoid copying every bucket.
+    pub fn into_parts(self) -> (ProducerIdentity, LaneLease, u64, Box<[u64]>) {
+        (self.identity, self.lease, self.sequence, self.buckets)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -19,7 +19,7 @@ jobs:
 
       - name: Restore lychee cache
         id: restore-cache
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
         with:
           path: .lycheecache
           key: cache-lychee-${{ github.run_id }}
@@ -27,7 +27,7 @@ jobs:
 
       - name: Check documentation links with lychee (first attempt)
         id: lychee
-        uses: lycheeverse/lychee-action@v2
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8  # v2.9.0
         with:
           args: &lychee_args >-
             --cache
@@ -63,7 +63,7 @@ jobs:
 
       - name: Retry documentation links with lychee
         if: steps.lychee.outputs.exit_code != '0'
-        uses: lycheeverse/lychee-action@v2
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8  # v2.9.0
         with:
           args: *lychee_args
           fail: true
@@ -88,7 +88,7 @@ jobs:
           fi
 
       - name: Save lychee cache
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
         if: always() && github.ref == 'refs/heads/main'
         with:
           path: .lycheecache
@@ -103,7 +103,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: '3.11'
 

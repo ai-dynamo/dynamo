@@ -235,7 +235,7 @@ impl DemandDrivenResponseStream {
 
 pub(super) fn process_request_to_stream<'p>(
     py: Python<'p>,
-    inner: Arc<RsKvPushRouter>,
+    inner: Arc<RsRoutingHost>,
     request: llm_rs::protocols::common::preprocessor::PreprocessedRequest,
     tracker: Option<Arc<RequestTracker>>,
 ) -> PyResult<Bound<'p, PyAny>> {

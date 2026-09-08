@@ -7,14 +7,24 @@ subtitle: Serve fine-tuned LoRA adapters with dynamic loading and routing in Dyn
 
 ## What Are LoRA Adapters
 
-LoRA (Low-Rank Adaptation) serves specialized model variants without duplicating full base weights. In Dynamo you can load adapters at runtime, route inference to workers that hold them, and manage them declaratively on Kubernetes. It provides:
+Low-Rank Adaptation (LoRA) serves specialized model variants without duplicating full base weights. Dynamo supports dynamic LoRA lifecycle management with vLLM and SGLang, with different validation levels for each backend. It provides:
 
 - **Dynamic loading**: Load and unload adapters without restarting workers
 - **Multiple sources**: `file://`, `s3://`, or `hf://` URIs
 - **Automatic caching**: Downloaded adapters are cached under `DYN_LORA_PATH`
 - **Discovery**: Loaded adapters appear in `/v1/models`
-- **KV-aware routing**: Route requests to workers with the matching adapter and cached prefix blocks
-- **Kubernetes native**: Declarative loading through the `DynamoModel` CRD
+- **KV-aware routing**: Route requests to workers with the matching adapter and cached prefix blocks; validated with vLLM
+- **Kubernetes native**: Manage adapters declaratively through the `DynamoModel` CRD; documented for vLLM
+
+## Backend Support
+
+| Backend | Status | Support Scope |
+|---------|--------|-----------------|
+| vLLM | <Badge intent="success" minimal>Supported</Badge> | Dynamic load/unload for aggregated and disaggregated workers; aggregated adapter-aware KV routing |
+| SGLang | <Badge intent="warning" minimal>Experimental</Badge> | Dynamic load/unload and aggregated inference; disaggregated serving and feature pairings are not end-to-end validated |
+| TensorRT-LLM | <Badge intent="note" minimal>Not supported</Badge> | — |
+
+See the [feature support matrix](../../reference/general/compatibility.mdx#feature-support) for the backend and interaction matrices.
 
 <AccordionGroup>
   <Accordion title="Architecture">
@@ -36,11 +46,16 @@ LoRA (Low-Rank Adaptation) serves specialized model variants without duplicating
 
     - **Rust core** (`lib/llm/src/lora/`): Downloading, caching, and validation
     - **Python manager** (`components/src/dynamo/common/lora/`): Custom source support
-    - **Worker handlers** (`components/src/dynamo/vllm/handlers.py`): Load/unload API and inference integration
+    - **Worker handlers** (`components/src/dynamo/vllm/handlers.py` and `components/src/dynamo/sglang/request_handlers/handler_base.py`): Backend load/unload and inference integration
   </Accordion>
 </AccordionGroup>
 
 ## Serve a LoRA Adapter
+
+The following Kubernetes and local workflows use vLLM. For the aggregated SGLang workflow, see [Serve a LoRA Adapter with SGLang](#serve-a-lora-adapter-with-sglang).
+
+> [!WARNING]
+> Keep `DYN_SYSTEM_PORT` on a trusted administrative network. The system API retrieves and loads model artifacts from configured URI sources; do not expose it to untrusted clients.
 
 <Tabs>
 <Tab title="Kubernetes">
@@ -127,11 +142,19 @@ LoRA (Low-Rank Adaptation) serves specialized model variants without duplicating
     | `DYN_LORA_PATH` | Local cache directory for downloaded LoRAs | `~/.cache/dynamo_loras` |
     | `DYN_SYSTEM_ENABLED` | Expose worker load/unload API | `false` |
     | `DYN_SYSTEM_PORT` | System API port | — |
-    | `AWS_ACCESS_KEY_ID` | S3 access key (for `s3://` URIs) | — |
-    | `AWS_SECRET_ACCESS_KEY` | S3 secret key (for `s3://` URIs) | — |
-    | `AWS_ENDPOINT` | Custom S3 endpoint (MinIO, etc.) | — |
+    | `AWS_ACCESS_KEY_ID` | S3 access key from the environment credential provider | — |
+    | `AWS_SECRET_ACCESS_KEY` | S3 secret key from the environment credential provider | — |
+    | `AWS_PROFILE` | Shared AWS configuration and credentials profile | `default` |
+    | `AWS_SHARED_CREDENTIALS_FILE` | Shared credentials file path | `~/.aws/credentials` |
+    | `AWS_CONFIG_FILE` | Shared configuration file path | `~/.aws/config` |
+    | `AWS_ENDPOINT_URL_S3` | Service-specific custom S3 endpoint | — |
+    | `AWS_ENDPOINT_URL` | Generic custom AWS endpoint | — |
+    | `AWS_ENDPOINT` | Legacy custom S3 endpoint fallback | — |
     | `AWS_REGION` | AWS region | `us-east-1` |
     | `AWS_ALLOW_HTTP` | Allow HTTP (non-TLS) connections | `false` |
+    | `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` | Use bucket-qualified virtual-hosted requests | `false` |
+
+    For `s3://` sources, Dynamo uses the standard AWS credential provider chain, including environment variables, shared configuration and credentials files, web identity, container credentials, and Amazon EC2 instance metadata. Endpoint precedence is `AWS_ENDPOINT_URL_S3`, the active profile's S3 service endpoint, `AWS_ENDPOINT_URL`, the active profile's generic `endpoint_url`, then the legacy `AWS_ENDPOINT` fallback.
 
     **vLLM worker arguments**
 
@@ -146,13 +169,13 @@ LoRA (Low-Rank Adaptation) serves specialized model variants without duplicating
 
     <AccordionGroup>
       <Accordion title="S3 or MinIO credentials on the worker">
-        Store secret keys in a Kubernetes Secret and set non-secret endpoint/region inline:
+        Mount shared AWS files and set `AWS_PROFILE`, or store environment credentials in a Kubernetes Secret. Set non-secret endpoint and region values inline:
 
         ```yaml
                   env:
                   - name: DYN_LORA_ENABLED
                     value: "true"
-                  - name: AWS_ENDPOINT
+                  - name: AWS_ENDPOINT_URL
                     value: http://minio:9000        # for MinIO; omit for AWS S3
                   - name: AWS_REGION
                     value: us-east-1
@@ -198,7 +221,7 @@ LoRA (Low-Rank Adaptation) serves specialized model variants without duplicating
     # customer-support-lora   2       2       30s
     ```
 
-    See [Managing Models with DynamoModel](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/managing-models-dynamomodel.md) for the full CRD workflow.
+    See the [DynamoModel API reference](../../reference/kubernetes-api/full-api-reference.mdx#dynamomodel) for the CRD fields.
 
     <AccordionGroup>
       <Accordion title="Load imperatively with the worker system API">
@@ -242,7 +265,7 @@ LoRA (Low-Rank Adaptation) serves specialized model variants without duplicating
     ```
 
     > [!WARNING]
-    > The `model` field is case-sensitive and must match the loaded adapter name exactly. For disaggregated serving, load the adapter on both prefill and decode workers.
+    > The `model` field is case-sensitive and must match the loaded adapter name exactly. For vLLM disaggregated serving, load the adapter on both prefill and decode workers.
   </Step>
 </Steps>
 
@@ -321,14 +344,70 @@ LoRA (Low-Rank Adaptation) serves specialized model variants without duplicating
     ```
 
     > [!WARNING]
-    > The `model` field is case-sensitive and must match `lora_name` exactly. For disaggregated serving, load the adapter on both prefill and decode workers.
+    > The `model` field is case-sensitive and must match `lora_name` exactly. For vLLM disaggregated serving, load the adapter on both prefill and decode workers.
   </Step>
 </Steps>
 
 </Tab>
 </Tabs>
 
+## Serve a LoRA Adapter with SGLang
+
+**Experimental.** The repository validates dynamic loading, discovery, and inference for aggregated SGLang workers. Unloading is implemented but not exercised by an end-to-end test. Prefill and decode lifecycle registration has unit coverage, but disaggregated SGLang LoRA and feature pairings such as KV-aware routing are not end-to-end validated. The Kubernetes workflow above and the adapter-aware routing demo below are vLLM-specific.
+
+<Steps>
+  <Step title="Prepare the adapter">
+    Start MinIO and upload the example adapter:
+
+    ```bash
+    cd examples/backends/sglang/launch/lora
+    ./setup_minio.sh
+    ```
+
+    See the [SGLang LoRA example](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/launch/lora) for the scripts and configurable environment variables.
+  </Step>
+
+  <Step title="Launch aggregated serving">
+    Start the Dynamo frontend and a LoRA-enabled SGLang worker:
+
+    ```bash
+    ./agg_lora.sh
+    ```
+
+    The script starts `dynamo.sglang` with `--enable-lora`, `--max-lora-rank 64`, and `--lora-target-modules all`. It also sets `DYN_LORA_ENABLED`, `DYN_LORA_PATH`, and the worker system port.
+  </Step>
+
+  <Step title="Load and query the adapter">
+    Load the adapter through the worker system API, then address it by name in the OpenAI-compatible request:
+
+    ```bash
+    curl -X POST http://localhost:8081/v1/loras \
+      -H "Content-Type: application/json" \
+      -d '{
+        "lora_name": "codelion/Qwen3-0.6B-accuracy-recovery-lora",
+        "source": {
+          "uri": "s3://my-loras/codelion/Qwen3-0.6B-accuracy-recovery-lora"
+        }
+      }'
+    ```
+
+    ```bash
+    curl -X POST http://localhost:8000/v1/chat/completions \
+      -H "Content-Type: application/json" \
+      -d '{
+        "model": "codelion/Qwen3-0.6B-accuracy-recovery-lora",
+        "messages": [{"role": "user", "content": "What is deep learning?"}],
+        "max_tokens": 100
+      }'
+    ```
+
+    List loaded adapters with `GET /v1/loras`. Unload with `DELETE /v1/loras/{lora_name}`.
+  </Step>
+</Steps>
+
 ## KV Cache-Aware LoRA Routing
+
+This section describes the validated vLLM path. KV-aware routing with SGLang LoRA remains experimental because the combined path is not end-to-end validated.
 
 > [!IMPORTANT]
 > With `DYN_LORA_ENABLED`, only KV, random, and round-robin routing are LoRA-aware.
@@ -357,7 +436,7 @@ LoRA (Low-Rank Adaptation) serves specialized model variants without duplicating
     **Check S3 connectivity:**
 
     ```bash
-    aws --endpoint-url=$AWS_ENDPOINT s3 ls s3://my-loras/ --recursive
+    aws s3 ls s3://my-loras/ --recursive
     ```
 
     **Check the cache directory:**
@@ -385,16 +464,6 @@ LoRA (Low-Rank Adaptation) serves specialized model variants without duplicating
   <Accordion title="Inference returns the base model response">
     - Confirm the request `model` field matches the loaded `lora_name`
     - Verify the adapter is loaded on the worker handling the request
-    - For disaggregated serving, load the adapter on both prefill and decode workers
+    - For vLLM disaggregated serving, load the adapter on both prefill and decode workers
   </Accordion>
 </AccordionGroup>
-
-## Backend Support
-
-| Backend | Status | Notes |
-|---------|--------|-------|
-| vLLM | <Badge intent="success" minimal>Yes</Badge> | Full support including KV-aware routing |
-| SGLang | <Badge intent="warning" minimal>WIP</Badge> | Support is in progress |
-| TensorRT-LLM | <Badge intent="note" minimal>No</Badge> | Not yet supported |
-
-See the [feature support matrix](../../reference/general/compatibility.mdx#feature-support) for full compatibility details.
