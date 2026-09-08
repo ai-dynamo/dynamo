@@ -274,21 +274,26 @@ fn responses_error_code(status_code: StatusCode) -> &'static str {
 /// Match `InvalidArgument` at top-level OR under `Backend()`.
 /// `py_err_to_dynamo` wraps Python `ValueError`/`TypeError` as
 /// `Backend(InvalidArgument)`, which normalizes to `InvalidRequest` on the wire.
+fn is_legacy_invalid_argument(error: &dynamo_runtime::error::DynamoError) -> bool {
+    use dynamo_runtime::error::{BackendError, ErrorType};
+
+    matches!(
+        error.error_type(),
+        ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument)
+    ) || (matches!(error.error_type(), ErrorType::InvalidRequest)
+        && matches!(
+            error.reason().as_str(),
+            "backend.invalid_argument" | "request.invalid_argument"
+        ))
+}
+
 pub(crate) fn find_invalid_argument_in_chain<'a>(
     err: &'a (dyn std::error::Error + 'static),
 ) -> Option<&'a dynamo_runtime::error::DynamoError> {
-    use dynamo_runtime::error::{BackendError, ErrorType};
     let mut current = Some(err);
     while let Some(e) = current {
         if let Some(dynamo_err) = e.downcast_ref::<dynamo_runtime::error::DynamoError>()
-            && (matches!(
-                dynamo_err.error_type(),
-                ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument)
-            ) || (matches!(dynamo_err.error_type(), ErrorType::InvalidRequest)
-                && matches!(
-                    dynamo_err.reason().as_str(),
-                    "backend.invalid_argument" | "request.invalid_argument"
-                )))
+            && is_legacy_invalid_argument(dynamo_err)
         {
             return Some(dynamo_err);
         }
@@ -2299,16 +2304,12 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
     if let Some(event_type) = &event.event
         && event_type == "error"
     {
-        use dynamo_runtime::error::{BackendError, ErrorType};
-
         // Classify only this event's error, not its causes. An inner invalid
         // argument must not override an outer unavailable or internal error.
-        let invalid_argument = event.error.as_ref().filter(|error| {
-            matches!(
-                error.error_type(),
-                ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument)
-            )
-        });
+        let invalid_argument = event
+            .error
+            .as_ref()
+            .filter(|error| is_legacy_invalid_argument(error));
 
         // Extract error string: prefer DynamoError field, fallback to legacy comment.
         // Use message() instead of to_string() for DynamoError to avoid prefixing
@@ -7059,21 +7060,33 @@ mod tests {
         use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
         use futures::stream;
 
-        for error_type in [
-            ErrorType::InvalidArgument,
-            ErrorType::Backend(BackendError::InvalidArgument),
+        let wire = serde_json::to_value(
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                .message("unsupported JSON schema keyword")
+                .build(),
+        )
+        .unwrap();
+        let normalized: DynamoError = serde_json::from_value(wire).unwrap();
+        assert_eq!(normalized.error_type(), ErrorType::InvalidRequest);
+
+        for error in [
+            DynamoError::builder()
+                .error_type(ErrorType::InvalidArgument)
+                .message("unsupported JSON schema keyword")
+                .build(),
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                .message("unsupported JSON schema keyword")
+                .build(),
+            normalized,
         ] {
             let error_event = Annotated::<NvCreateChatCompletionStreamResponse> {
                 data: None,
                 id: None,
                 event: Some("error".to_string()),
                 comment: None,
-                error: Some(
-                    DynamoError::builder()
-                        .error_type(error_type)
-                        .message("unsupported JSON schema keyword")
-                        .build(),
-                ),
+                error: Some(error),
             };
 
             let result = check_for_backend_error(stream::iter(vec![error_event]), None).await;
