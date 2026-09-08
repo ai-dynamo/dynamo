@@ -24,5 +24,5 @@ jobs:
           "$RUNNER_TEMP/n2-client/bin/pip" install requests==2.32.5
           "$RUNNER_TEMP/n2-client/bin/python" -m unittest discover -s scripts/compatibility -v
           "$RUNNER_TEMP/n2-client/bin/python" scripts/compatibility/runner.py \
-            --suite released \
+            --frontend-image candidate-frontend --worker-image candidate-worker \
             --output "$RUNNER_TEMP/unused" --plan

@@ -1,10 +1,5 @@
 {
-  "current_release_line": "1.4",
   "releases": {
-    "1.2": {
-      "frontend": "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.1",
-      "worker": "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1"
-    },
     "1.3": {
       "frontend": "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.1",
       "worker": "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.1"

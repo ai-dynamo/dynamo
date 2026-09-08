@@ -203,6 +203,7 @@ jobs:
     needs:
       - changed-files
       - dynamo-pipeline
+      - cross-version-compatibility
     if: always()
     steps:
       - name: Check all dynamo jobs
@@ -446,6 +447,7 @@ jobs:
     # Snapshot checkpoint deploy tests build a snapshot placeholder from it.
     if: |
       needs.changed-files.outputs.core == 'true' ||
+      needs.changed-files.outputs.frontend == 'true' ||
       needs.changed-files.outputs.sglang == 'true' ||
       needs.changed-files.outputs.deploy == 'true' ||
       needs.changed-files.outputs.operator == 'true' ||
@@ -739,6 +741,8 @@ jobs:
     name: frontend
     needs: [changed-files]
     if: |
+      needs.changed-files.outputs.core == 'true' ||
+      needs.changed-files.outputs.sglang == 'true' ||
       needs.changed-files.outputs.frontend == 'true' ||
       needs.changed-files.outputs.operator == 'true' ||
       needs.changed-files.outputs.snapshot == 'true' ||
@@ -822,6 +826,20 @@ jobs:
       run_sanity_check: false
       gpu_test_markers: pre_merge and vllm and gpu_2
       gpu_test_timeout_minutes: 60
+    secrets: inherit
+
+  cross-version-compatibility:
+    name: SGLang N-2 embedding and chat (GPU)
+    needs: [changed-files, sglang-build, frontend-build]
+    if: |
+      needs.changed-files.outputs.core == 'true' ||
+      needs.changed-files.outputs.sglang == 'true' ||
+      needs.changed-files.outputs.frontend == 'true'
+    uses: $/.github/workflows/cross-version-compatibility.yml
+    with:
+      frontend_image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}-${{ needs.frontend-build.outputs.target_tag_plain }}
+      worker_image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}-${{ needs.sglang-build.outputs.target_tag_plain }}
+      source_ref: ${{ github.sha }}
     secrets: inherit
 
   sglang-test:
