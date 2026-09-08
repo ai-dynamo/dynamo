@@ -392,32 +392,54 @@ class TestImageDiffusionWorkerHandler:
 
     @pytest.mark.asyncio
     async def test_generate_i2i_passes_image_path(
-        self, handler, mock_context, tmp_path
+        self, handler, mock_context, tmp_path, monkeypatch
     ):
-        """Test that input_reference is passed as image_path to the generator."""
+        """input_reference inside DYN_MM_LOCAL_PATH is resolved and passed as image_path."""
         test_image = Image.new("RGB", (256, 256), color="green")
 
         handler.generator.generate = Mock(
             return_value=SimpleNamespace(frames=[test_image])
         )
 
-        input_ref = str(tmp_path / "test_input.png")
+        monkeypatch.setenv("DYN_MM_LOCAL_PATH", str(tmp_path))
+        input_ref = tmp_path / "test_input.png"
+        input_ref.write_bytes(b"x")
         request = {
             "prompt": "Transform this image",
             "model": "test-model",
             "size": "256x256",
             "response_format": "b64_json",
-            "input_reference": input_ref,
+            "input_reference": str(input_ref),
         }
 
         results = []
         async for result in handler.generate(request, mock_context):
             results.append(result)
 
-        # Verify image_path was passed to the generator
-        call_args = handler.generator.generate.call_args
-        sampling_params = call_args[1]["sampling_params_kwargs"]
-        assert sampling_params["image_path"] == input_ref
+        sampling_params = handler.generator.generate.call_args[1][
+            "sampling_params_kwargs"
+        ]
+        assert sampling_params["image_path"] == str(input_ref.resolve())
+
+    @pytest.mark.asyncio
+    async def test_generate_i2i_rejects_path_outside_allowed_dir(
+        self, handler, mock_context, tmp_path, monkeypatch
+    ):
+        """A path outside DYN_MM_LOCAL_PATH is rejected before the generator runs."""
+        handler.generator.generate = Mock()
+        monkeypatch.setenv("DYN_MM_LOCAL_PATH", str(tmp_path))
+        request = {
+            "prompt": "x",
+            "model": "test-model",
+            "size": "256x256",
+            "response_format": "b64_json",
+            "input_reference": "/etc/passwd",
+        }
+
+        results = [r async for r in handler.generate(request, mock_context)]
+
+        assert any("error" in r for r in results)
+        handler.generator.generate.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_generate_t2i_no_image_path(self, handler, mock_context):
