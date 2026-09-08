@@ -22,6 +22,7 @@ use dynamo_llm::local_model::{LocalModel, LocalModelBuilder, update_model_taints
 use dynamo_llm::model_type::{ModelInput, ModelType};
 use dynamo_llm::preprocessor::media::{MediaDecoder, MediaFetcher};
 use dynamo_llm::worker_type::WorkerType;
+use dynamo_runtime::config::HealthStatus;
 use dynamo_runtime::engine_routes::EngineRouteCallback;
 use dynamo_runtime::pipeline::network::Ingress;
 use dynamo_runtime::protocols::EndpointId;
@@ -1131,11 +1132,17 @@ impl Worker {
         // the exact primary discovery instance is callable.
         self.activate_engine_routes().await;
 
+        // Registration succeeded, no signal intervened, and the administrative
+        // routes are open: this is the first instant the worker is serviceable,
+        // so it is the first instant the health route may report ready.
+        set_process_health(&endpoint, HealthStatus::Ready);
+
         let rl_endpoint = if let Some(rl_config) = rl_config {
             match crate::rl::serve_endpoint(&endpoint, rl_config).await {
                 Ok(endpoint) => Some(endpoint),
                 Err(error) => {
                     self.begin_engine_route_shutdown().await;
+                    set_process_health(&endpoint, HealthStatus::NotReady);
                     if let Err(shutdown_error) = primary_endpoint.shutdown().await {
                         tracing::warn!(%shutdown_error, "primary endpoint shutdown failed");
                     }
@@ -1185,6 +1192,11 @@ impl Worker {
         // guards and any discovery-mutation critical section, then close the
         // routes. No resume callback can re-register after the final unregister.
         self.begin_engine_route_shutdown().await;
+
+        // Symmetric with the ready write above: give readiness back before the
+        // orchestrator drains and unregisters, so a terminating worker stops
+        // advertising itself as ready while it is still winding down.
+        set_process_health(&endpoint, HealthStatus::NotReady);
 
         if let Some(rl_endpoint) = rl_endpoint
             && let Err(error) = rl_endpoint.shutdown().await
@@ -1287,6 +1299,23 @@ impl Worker {
             tokio::time::sleep(Duration::from_secs_f64(DRAIN_POLL_INTERVAL_S)).await;
         }
     }
+}
+
+/// Publish the process-wide readiness that the runtime's health route reports.
+///
+/// The route consults per-endpoint canary results first and only falls back to
+/// this process-wide status when no health-check target was registered — which
+/// is the default for a Rust backend, because [`LLMEngine::health_check_payload`]
+/// returns `None` unless an engine opts in. Without this write such a worker
+/// serves traffic while the health route reports not ready forever. Python
+/// workers reach the same status through their own bindings; this keeps the
+/// Rust path consistent with them.
+fn set_process_health(endpoint: &dynamo_runtime::component::Endpoint, status: HealthStatus) {
+    endpoint
+        .drt()
+        .system_health()
+        .lock()
+        .set_health_status(status);
 }
 
 /// Drain-budget resolver: `DYN_PREFILL_DRAIN_TIMEOUT_S` with the same
@@ -3889,6 +3918,110 @@ mod handoff_and_lifecycle_tests {
 
         worker.begin_engine_route_shutdown().await;
         assert!(control_response_is_error(&resume_request.await.unwrap()));
+    }
+
+    /// Assemble a worker whose engine supplies no health-check payload — the
+    /// `LLMEngine` trait default — over the in-memory discovery runtime, and
+    /// hand back the process-wide health handle the runtime's health route
+    /// reads. With no payload there is no health-check target, so that route
+    /// falls through to the process-wide status and nothing else can mask it.
+    async fn payload_free_serving_worker() -> (
+        dynamo_runtime::component::Endpoint,
+        Arc<parking_lot::Mutex<dynamo_runtime::SystemHealth>>,
+        Worker,
+        EngineConfig,
+    ) {
+        let endpoint = test_local_endpoint().await;
+        let system_health = endpoint.drt().system_health();
+        let worker = Worker::new(Arc::new(DefaultsEngine), WorkerConfig::default());
+        let engine_config = EngineConfig {
+            model: "payload-free-mock".to_string(),
+            ..EngineConfig::default()
+        };
+        (endpoint, system_health, worker, engine_config)
+    }
+
+    /// Poll the process-wide health flag until it reaches `expected`, giving
+    /// the serve loop time to reach its serviceable point. Returns false if it
+    /// never does.
+    async fn health_reaches(
+        system_health: &Arc<parking_lot::Mutex<dynamo_runtime::SystemHealth>>,
+        expected: bool,
+    ) -> bool {
+        for _ in 0..600 {
+            if system_health.lock().get_health_status().0 == expected {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        false
+    }
+
+    /// Regression: a Rust sidecar never published a process-wide readiness, so
+    /// an engine that supplies no health-check payload served traffic while the
+    /// health route still reported not ready forever. This drives the real
+    /// serve path and reads the status back through the same runtime accessor
+    /// the route uses.
+    #[tokio::test]
+    async fn serving_worker_reports_ready_once_it_is_serviceable() {
+        let (endpoint, system_health, mut worker, engine_config) =
+            payload_free_serving_worker().await;
+        assert!(
+            !system_health.lock().get_health_status().0,
+            "a worker that has not reached its serviceable point must not report ready"
+        );
+
+        let shutdown = CancellationToken::new();
+        let serve = tokio::spawn({
+            let shutdown = shutdown.clone();
+            async move {
+                worker
+                    .serve_with_orchestrator(&engine_config, endpoint, shutdown)
+                    .await
+            }
+        });
+
+        let became_ready = health_reaches(&system_health, true).await;
+        shutdown.cancel();
+        let outcome = tokio::time::timeout(Duration::from_secs(120), serve).await;
+        assert!(
+            became_ready,
+            "worker must report ready once registration succeeded and engine routes opened; \
+             serve loop returned {outcome:?}"
+        );
+    }
+
+    /// Regression companion: readiness must be given back at the shutdown
+    /// boundary, so a draining worker stops advertising itself as ready before
+    /// the orchestrator unregisters it.
+    #[tokio::test]
+    async fn shutdown_returns_the_serving_worker_to_not_ready() {
+        let (endpoint, system_health, mut worker, engine_config) =
+            payload_free_serving_worker().await;
+
+        let shutdown = CancellationToken::new();
+        let serve = tokio::spawn({
+            let shutdown = shutdown.clone();
+            async move {
+                worker
+                    .serve_with_orchestrator(&engine_config, endpoint, shutdown)
+                    .await
+            }
+        });
+
+        let became_ready = health_reaches(&system_health, true).await;
+        shutdown.cancel();
+        let outcome = tokio::time::timeout(Duration::from_secs(120), serve)
+            .await
+            .expect("serve loop must finish after shutdown");
+        assert!(
+            became_ready,
+            "shutdown case needs a ready worker to start from; serve loop returned {outcome:?}"
+        );
+        assert!(
+            !system_health.lock().get_health_status().0,
+            "worker must report not ready again after the shutdown path runs"
+        );
     }
 
     #[cfg(feature = "integration")]
