@@ -101,11 +101,30 @@ is not enough on its own, because a backgrounded step returns before its
 services are listening. Each workload has to wait on the endpoints it was
 handed.
 
+Two more flags belong on those steps once there is more than one of them:
+
+```bash
+srun --container-name=dynamo ... --kill-on-bad-exit=1 bash launch_worker.sh &
+sleep 5   # let Pyxis finish initializing the container namespace
+```
+
+`--kill-on-bad-exit=1` tears the job down when a step exits badly. Without it a
+worker can die while the rest keep running, and the job reports whatever the
+last step happened to return. The `sleep` is not padding: Pyxis initializes the
+container namespace asynchronously, and launching the next step immediately
+races that setup.
+
 The named form is the better fit for multiple nodes and for steps that need
 different environment variables. **Everything measured for this page used the
-single-`srun` shape**; the named-container shape here follows the pattern in
-`examples/backends/trtllm/performance_sweeps/benchmark_disagg.slurm` and was
-not exercised end to end.
+single-`srun` shape.** The named-container shape, the two flags above, and the
+`sleep` follow
+[`jenkins/scripts/perf/disaggregated/slurm_launch_draft.sh`](https://github.com/NVIDIA/TensorRT-LLM/blob/main/jenkins/scripts/perf/disaggregated/slurm_launch_draft.sh)
+in TensorRT-LLM, which runs this shape at scale; none of it was exercised here.
+
+One thing from that script matters only when steps are split: a step's `&>`
+redirect is owned by that `srun`, so its log is not guaranteed flushed until the
+step is reaped. Anything that parses a worker log has to wait for the step to
+finish, not just for the process to appear done.
 
 Do not pass `--mpi=none` to work around MPI errors. Pyxis mounts the PMIx
 application directory, and suppressing PMI leaves that path missing, so the
@@ -115,10 +134,15 @@ tempt you toward that flag are addressed in
 
 Slurm's own MPI plugin is a separate choice from what the container does with
 PMI. The single-node path recorded here clears the PMI and `SLURM_*` variables
-inside the container and leaves `--mpi` at the site default. Multi-node
-launchers published by NVIDIA take the opposite approach and pass
-`--mpi=pmix --overlap` on every step. Both were not measured against each
-other here; pick one deliberately rather than mixing them.
+inside the container and leaves `--mpi` at the site default.
+
+Multi-node launchers take the opposite approach and pass `--mpi=pmix`
+explicitly, but they do not pass it everywhere. In
+`slurm_launch_draft.sh` the model-serving steps get `--mpi=pmix
+--kill-on-bad-exit=1`, while the coordinating steps get
+`--kill-on-bad-exit=1 --overlap` and no `--mpi` at all. Whichever approach you
+take, apply it per step rather than uniformly, and do not mix it with clearing
+PMI inside the container — these were not measured against each other here.
 
 ## Start the Control Plane Inside the Job
 
