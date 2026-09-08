@@ -17,7 +17,9 @@ from typing import Optional
 import aiohttp
 from yarl import URL
 
+from ._ssrf_resolver import BlocklistResolver
 from .base import HttpClient, HttpConnectionError, HttpStatusError, HttpTimeoutError
+from .url_validator import UrlValidationPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +49,7 @@ class AiohttpClient(HttpClient):
         )
 
     def _build_session(self) -> aiohttp.ClientSession:
-        connector = aiohttp.TCPConnector(
+        connector_kwargs = dict(
             limit=self._config.max_connections,
             # Single-origin fan-out is the whole point; capping per-host
             # would defeat it. Hard-coded rather than env-tunable.
@@ -55,6 +57,15 @@ class AiohttpClient(HttpClient):
             keepalive_timeout=self._config.keepalive_timeout,
             enable_cleanup_closed=True,
         )
+        # Connect-time SSRF backstop: filter blocked IPs at resolve time so a
+        # DNS-rebinding answer can't slip an internal address past the pre-check
+        # in validate_url (mirrors the Rust frontend's BlocklistResolver).
+        # allow_private_ips follows the same env knob the fetch policy uses.
+        if BlocklistResolver is not None:
+            connector_kwargs["resolver"] = BlocklistResolver(
+                allow_private_ips=UrlValidationPolicy.from_env().allow_private_ips
+            )
+        connector = aiohttp.TCPConnector(**connector_kwargs)
         return aiohttp.ClientSession(connector=connector, trust_env=True)
 
     async def _get_session(self) -> aiohttp.ClientSession:
