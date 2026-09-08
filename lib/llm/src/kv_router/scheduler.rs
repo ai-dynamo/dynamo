@@ -207,6 +207,18 @@ where
             worker_type,
             watch_worker_configs,
         )?);
+        let wait_metrics = queue_metrics.clone();
+        let queue_wait_observer: dynamo_kv_router::queue::RouterQueueWaitObserver =
+            Arc::new(move |class_index: usize, wait: Duration| {
+                if let Some(metrics) = wait_metrics.get(class_index) {
+                    metrics.wait_seconds.observe(wait.as_secs_f64());
+                }
+            });
+        if !inner.set_queue_wait_observer(queue_wait_observer) {
+            return Err(KvSchedulerError::InitFailed(
+                "queue-wait observer is already installed".to_string(),
+            ));
+        }
         if worker_type == WORKER_TYPE_PREFILL {
             let locality_observer: NonMaxOverlapSelectionObserver =
                 Arc::new(move |request_id, selection| {

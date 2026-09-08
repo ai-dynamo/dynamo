@@ -43,6 +43,8 @@ pub const DEFAULT_MAX_BATCHED_TOKENS: u64 = 10_000_000;
 
 const ADMISSION_CHANNEL_CAPACITY: usize = 65_536;
 
+pub type RouterQueueWaitObserver = Arc<dyn Fn(usize, Duration) + Send + Sync>;
+
 struct ClassQueueCounters {
     pending_count: AtomicUsize,
     pending_isl_tokens: AtomicUsize,
@@ -426,6 +428,7 @@ struct SchedulerQueueActor<
     overlap_refresh_after: Option<Duration>,
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
     available_worker_provider: Option<WorkerAvailabilityProvider>,
+    queue_wait_observer: Arc<OnceLock<RouterQueueWaitObserver>>,
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
 }
 
@@ -452,6 +455,7 @@ pub struct SchedulerQueue<
     workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
     queueing_enabled: bool,
     supports_overlap_refresh: bool,
+    queue_wait_observer: Arc<OnceLock<RouterQueueWaitObserver>>,
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
     _marker: PhantomData<fn() -> (Sel, RF)>,
 }
@@ -575,6 +579,7 @@ impl<
         );
         let (admission_tx, admission_rx) = mpsc::channel(admission_channel_capacity);
         let cleanup = Arc::new(AdmissionCleanup::default());
+        let queue_wait_observer = Arc::new(OnceLock::new());
         let non_max_overlap_selection_observer = Arc::new(OnceLock::new());
         let actor = SchedulerQueueActor {
             pending,
@@ -593,6 +598,7 @@ impl<
             overlap_refresh_after,
             overloaded_worker_provider,
             available_worker_provider,
+            queue_wait_observer: Arc::clone(&queue_wait_observer),
             non_max_overlap_selection_observer: Arc::clone(&non_max_overlap_selection_observer),
         };
         tokio::spawn(actor.run(admission_rx));
@@ -606,6 +612,7 @@ impl<
             workers_with_configs,
             queueing_enabled,
             supports_overlap_refresh: overlap_refresh_after.is_some(),
+            queue_wait_observer,
             non_max_overlap_selection_observer,
             _marker: PhantomData,
         })
@@ -708,6 +715,13 @@ impl<
         self.non_max_overlap_selection_observer
             .set(observer)
             .is_ok()
+    }
+
+    /// Install the observer for time spent pending in the scheduler queue.
+    ///
+    /// Returns `false` when an observer is already installed.
+    pub fn set_queue_wait_observer(&self, observer: RouterQueueWaitObserver) -> bool {
+        self.queue_wait_observer.set(observer).is_ok()
     }
 
     /// Enqueue a new request.
@@ -1327,8 +1341,13 @@ impl<
             );
             self.pending_isl_tokens
                 .fetch_sub(snapshot.raw_isl_tokens, AtomicOrdering::Relaxed);
-            self.subtract_class_counters(popped.class_index(), snapshot);
+            let class_index = popped.class_index();
+            self.subtract_class_counters(class_index, snapshot);
             let queued = popped.payload_mut();
+            let queue_wait = decay_now.saturating_duration_since(queued.enqueue_at);
+            if let Some(observer) = self.queue_wait_observer.get() {
+                observer(class_index, queue_wait);
+            }
             // NOTE: Overlap refresh is expected to be very short. We intentionally
             // accept load crossing the class threshold during this await: busy
             // thresholds guide admission, not reservation. This differs from main
@@ -1342,7 +1361,7 @@ impl<
                 decay_now,
             )
             .await;
-            let wait_ms = queued.enqueue_at.elapsed().as_millis() as u64;
+            let wait_ms = queue_wait.as_millis() as u64;
             if let Some(snapshot) = refreshed {
                 tracing::info!(
                     request_id = queued.request.mode.request_id().unwrap_or("unknown"),
@@ -1357,7 +1376,6 @@ impl<
                 };
             }
             let admit_now = Instant::now();
-            let class_index = popped.class_index();
             let class = self.profile.class(class_index);
             let queued = popped.into_payload();
             let request = queued.request;
