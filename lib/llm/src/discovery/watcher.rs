@@ -1281,17 +1281,12 @@ fn materialization_fingerprint(
     card: &ModelDeploymentCard,
     default_router_config: &RouterConfig,
 ) -> anyhow::Result<String> {
-    // Hash the router config the frontend will actually serve with, not the one the
-    // worker advertised. `prepare` overlays the frontend-owned fields via
-    // `effective_router_config` before serving, so a worker that differs only in one of
-    // those fields serves identically and must not land in a rival cohort.
+    // Hash what the frontend serves with: `prepare` overlays the frontend-owned fields
+    // via `effective_router_config`, so those fields must not split a cohort.
     let mut effective_router =
         effective_router_config(card.router_config.as_ref(), default_router_config);
-    // Compatibility with pre-v1.4 workers that still advertise `enforce_disagg: true`
-    // during v1.5 rolling upgrades. The field is deprecated, nothing reads it, and the
-    // overlay above does not cover it, so clear it rather than let it split a cohort.
-    // TODO(v1.6): Remove when v1.3 falls outside the N-2 compatibility window, together
-    // with `RouterConfig::enforce_disagg`.
+    // Compatibility with pre-v1.4 workers advertising `enforce_disagg` during v1.5
+    // rolling upgrades. TODO(v1.6): Remove when v1.3 leaves the N-2 compatibility window.
     effective_router.to_mut().enforce_disagg = false;
     let mut value = serde_json::to_value(card)?;
     let object = value
@@ -2150,9 +2145,8 @@ mod tests {
     fn materialization_fingerprint_joins_router_config_across_generations() {
         use crate::session_affinity::SessionAffinityMode;
 
-        // An older worker predates `session_affinity_mode` and still advertises the
-        // deprecated `enforce_disagg`. Serde fills the absent key with `Hard`, which is
-        // how the same logical configuration ends up encoded two different ways.
+        // The older generation predates `session_affinity_mode`; serde fills the absent
+        // key with `Hard`, encoding the same logical config two different ways.
         let mut legacy_wire = serde_json::to_value(RouterConfig::default()).unwrap();
         let legacy_object = legacy_wire.as_object_mut().unwrap();
         legacy_object.remove("session_affinity_mode");
@@ -2174,9 +2168,8 @@ mod tests {
         let mut current = ModelDeploymentCard::with_name_only("model");
         current.router_config = Some(current_router);
 
-        // The frontend overlays its own `session_affinity_mode` onto both cards before
-        // serving, and nothing reads `enforce_disagg`, so the two workers serve
-        // identically and must share one cohort.
+        // The frontend overlays its own `session_affinity_mode` and nothing reads
+        // `enforce_disagg`, so both workers serve identically and share one cohort.
         let frontend = RouterConfig {
             session_affinity_mode: SessionAffinityMode::Soft,
             ..RouterConfig::default()
