@@ -300,6 +300,13 @@ navigation:
 
   - tab: developer-guide
     layout:
+      - section: Security
+        icon: shield-halved
+        collapsed: true
+        contents:
+          - page: Secure Deployment Guidelines
+            path: pages/developer-guide/security/secure-deployment-guidelines.md
+
       # ==================== Knowledge Base ====================
       - section: Knowledge Base
         icon: book-open
@@ -484,6 +491,8 @@ navigation:
                 contents:
                   - page: Overview
                     path: pages/developer-guide/knowledge-base/modular-components/planner/overview.md
+                  - page: Choose a Planner Mode
+                    path: pages/developer-guide/knowledge-base/modular-components/planner/choose-planner-mode.md
                   - page: Planner Guide
                     path: pages/developer-guide/knowledge-base/modular-components/planner/planner-guide.md
                   - page: Global Planner Guide
@@ -799,6 +808,9 @@ navigation:
           - page: DeepSeek-V4-Pro
             path: pages/recipes/model-recipes/deepseek-v4-pro.mdx
             slug: deepseek-v4-pro
+          - page: DeepSeek-V4-Pro-0813
+            path: pages/recipes/model-recipes/deepseek-v4-pro-0813.mdx
+            slug: deepseek-v4-pro-0813
           - page: DeepSeek-V4-Flash
             path: pages/recipes/model-recipes/deepseek-v4-flash.mdx
             slug: deepseek-v4-flash
@@ -817,6 +829,9 @@ navigation:
           - page: Qwen3-32B FP8
             path: pages/recipes/model-recipes/qwen3-32b-fp8.mdx
             slug: qwen3-32b-fp8
+          - page: Qwen3.6-35B-A3B
+            path: pages/recipes/model-recipes/qwen3-6-35b-a3b.mdx
+            slug: qwen3-6-35b-a3b
 
       # ==================== Kubernetes Templates ====================
       - section: Kubernetes Templates

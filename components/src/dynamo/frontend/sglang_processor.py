@@ -639,6 +639,8 @@ class SglangProcessor:
                 preproc_result: SglangPreprocessWorkerResult = (
                     await asyncio.wrap_future(future)
                 )
+        except InvalidArgument:
+            raise
         except PreprocessError as exc:
             raise InvalidArgument(str(exc)) from exc
         except Exception as exc:
