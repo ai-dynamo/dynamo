@@ -18,16 +18,15 @@ use std::time::Duration;
 
 use anyhow::Context;
 use bytes::Bytes;
-use futures::StreamExt;
 use reqwest::header::CONTENT_TYPE;
-use reqwest::{Client, StatusCode, Url};
+use reqwest::{Client, Url};
 use serde::Deserialize;
-use thiserror::Error;
 
-use crate::vllm_render_client::parse_tokenizer_service_base_url;
+use crate::render_http::{
+    RenderError, check_content_length, classify_transport_error, read_error_body, read_success_body,
+};
 
 const CHAT_RENDER_PATH: &str = "/v1/chat/completions/render";
-const MAX_ERROR_BODY_BYTES: usize = 1024;
 
 /// A reusable client for the sglang renderer's `/v1/chat/completions/render` endpoint.
 #[derive(Clone, Debug)]
@@ -36,36 +35,6 @@ pub struct SglangRendererClient {
     endpoint: Url,
     timeout: Duration,
     max_response_bytes: usize,
-}
-
-/// Failures returned by [`SglangRendererClient::render_chat`].
-#[derive(Debug, Error)]
-pub enum SglangRendererError {
-    /// The renderer could not be reached or the connection failed.
-    #[error("SGLang renderer is unavailable: {source}")]
-    Unavailable {
-        #[source]
-        source: reqwest::Error,
-    },
-    /// The renderer did not complete the request before the configured deadline.
-    #[error("SGLang render request timed out after {timeout:?}: {source}")]
-    Timeout {
-        timeout: Duration,
-        #[source]
-        source: reqwest::Error,
-    },
-    /// The renderer returned an HTTP error response.
-    #[error("SGLang renderer returned {status}: {body}")]
-    UpstreamStatus { status: StatusCode, body: String },
-    /// The renderer returned a successful response that did not match its contract.
-    #[error("SGLang renderer returned an invalid response: {source}")]
-    InvalidResponse {
-        #[source]
-        source: serde_json::Error,
-    },
-    /// The renderer returned a successful response larger than the configured limit.
-    #[error("SGLang renderer response is too large: {received} bytes exceeds the {limit}-byte limit")]
-    ResponseTooLarge { limit: usize, received: u64 },
 }
 
 /// Subset of the sglang renderer's `GenerateRequest` response.
@@ -98,7 +67,7 @@ impl SglangRendererClient {
             "SGLang render maximum response bytes must be greater than zero"
         );
 
-        let mut endpoint = parse_tokenizer_service_base_url(base_url)?;
+        let mut endpoint = crate::render_http::parse_render_base_url(base_url)?;
         {
             let mut path_segments = endpoint.path_segments_mut().map_err(|_| {
                 anyhow::anyhow!("SGLang renderer base URL cannot be used as a base URL")
@@ -126,7 +95,7 @@ impl SglangRendererClient {
     ///
     /// The body is sent unchanged so the sglang renderer remains responsible for
     /// chat template application and tokenization.
-    pub async fn render_chat(&self, request_body: Bytes) -> Result<Vec<u32>, SglangRendererError> {
+    pub async fn render_chat(&self, request_body: Bytes) -> Result<Vec<u32>, RenderError> {
         let response = self
             .client
             .post(self.endpoint.clone())
@@ -134,83 +103,22 @@ impl SglangRendererClient {
             .body(request_body)
             .send()
             .await
-            .map_err(|source| self.classify_transport_error(source))?;
+            .map_err(|e| classify_transport_error(e, self.timeout))?;
 
         let status = response.status();
         if !status.is_success() {
-            return Err(SglangRendererError::UpstreamStatus {
+            return Err(RenderError::UpstreamStatus {
                 status,
                 body: read_error_body(response).await,
             });
         }
 
-        match response.content_length() {
-            Some(received) if received > self.max_response_bytes as u64 => {
-                return Err(SglangRendererError::ResponseTooLarge {
-                    limit: self.max_response_bytes,
-                    received,
-                });
-            }
-            _ => {}
-        }
-
-        let body = self.read_success_body(response).await?;
-        let response: SglangRenderResponse = serde_json::from_slice(&body)
-            .map_err(|source| SglangRendererError::InvalidResponse { source })?;
-
-        Ok(response.input_ids)
+        check_content_length(&response, self.max_response_bytes)?;
+        let body = read_success_body(response, self.max_response_bytes, self.timeout).await?;
+        serde_json::from_slice::<SglangRenderResponse>(&body)
+            .map(|r| r.input_ids)
+            .map_err(|source| RenderError::InvalidResponse { source })
     }
-
-    async fn read_success_body(
-        &self,
-        response: reqwest::Response,
-    ) -> Result<Vec<u8>, SglangRendererError> {
-        let mut body = Vec::new();
-        let mut stream = response.bytes_stream();
-
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|source| self.classify_transport_error(source))?;
-            let received = body.len().saturating_add(chunk.len());
-            if received > self.max_response_bytes {
-                return Err(SglangRendererError::ResponseTooLarge {
-                    limit: self.max_response_bytes,
-                    received: received as u64,
-                });
-            }
-            body.extend_from_slice(&chunk);
-        }
-
-        Ok(body)
-    }
-
-    fn classify_transport_error(&self, source: reqwest::Error) -> SglangRendererError {
-        if source.is_timeout() {
-            SglangRendererError::Timeout {
-                timeout: self.timeout,
-                source,
-            }
-        } else {
-            SglangRendererError::Unavailable { source }
-        }
-    }
-}
-
-async fn read_error_body(response: reqwest::Response) -> String {
-    let mut body = Vec::new();
-    let mut stream = response.bytes_stream();
-
-    while body.len() < MAX_ERROR_BODY_BYTES {
-        let Some(chunk) = stream.next().await else {
-            break;
-        };
-        let Ok(chunk) = chunk else {
-            break;
-        };
-        let remaining = MAX_ERROR_BODY_BYTES - body.len();
-        body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-    }
-
-    String::from_utf8_lossy(&body).into_owned()
 }
 
 #[cfg(test)]
@@ -225,6 +133,7 @@ mod tests {
     use tokio::task::JoinHandle;
 
     use super::*;
+    use crate::render_http::RenderError;
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(5);
     const TEST_MAX_RESPONSE_BYTES: usize = 1024;
@@ -289,10 +198,10 @@ mod tests {
 
         assert!(matches!(
             error,
-            SglangRendererError::UpstreamStatus {
+            RenderError::UpstreamStatus {
                 status,
                 ..
-            } if status == StatusCode::SERVICE_UNAVAILABLE
+            } if status == reqwest::StatusCode::SERVICE_UNAVAILABLE
         ));
         server.abort();
     }
@@ -313,7 +222,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(error, SglangRendererError::InvalidResponse { .. }));
+        assert!(matches!(error, RenderError::InvalidResponse { .. }));
         server.abort();
     }
 
@@ -338,7 +247,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            SglangRendererError::Timeout { timeout: actual, .. } if actual == timeout
+            RenderError::Timeout { timeout: actual, .. } if actual == timeout
         ));
         server.abort();
     }

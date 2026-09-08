@@ -13,7 +13,7 @@
 use validator::Validate;
 use validator::ValidationError;
 
-use crate::vllm_render_client::parse_tokenizer_service_base_url;
+use crate::render_http::parse_render_base_url;
 
 const DEFAULT_KV_EVENT_PORT: u16 = 5557;
 const DEFAULT_REPLICA_SYNC_PORT: u16 = 9092;
@@ -272,7 +272,7 @@ fn validate_tokenizer_service_url(value: &str) -> Result<(), ValidationError> {
         return Ok(());
     }
 
-    parse_tokenizer_service_base_url(value)
+    parse_render_base_url(value)
         .map(|_| ())
         .map_err(|_| {
             let mut error = ValidationError::new("tokenizer_service_url_invalid");

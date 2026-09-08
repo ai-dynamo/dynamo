@@ -7,8 +7,8 @@
 //! no Dynamo `DistributedRuntime`, no etcd/NATS, and no embedded KV router.
 //! Instead it composes:
 //!
-//! - a [`VllmRenderClient`] tokenization,
-//! - a [`PodDiscovery`] that discovers Ready raw vLLM pods from Kubernetes,
+//! - a [`RenderClient`] that tokenizes prompts via a render sidecar,
+//! - a [`PodDiscovery`] that discovers Ready worker pods from Kubernetes,
 //! - a [`TopologyAdapter`] that registers those pods into the selector, and
 //! - a [`Selector`] (in-process, runtime-free selection service) that picks a
 //!   worker.
@@ -36,10 +36,11 @@ use serde::Deserialize;
 use crate::epp_standalone_config::{EppStandaloneConfig, TokenizerProtocol};
 use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo};
 use crate::pod_discovery::PodDiscovery;
-use crate::sglang_renderer_client::{SglangRendererClient, SglangRendererError};
+use crate::render_http::RenderError;
+use crate::sglang_renderer_client::SglangRendererClient;
 use crate::selector::{SelectRequest, Selector};
 use crate::topology_adapter::{RegistrationDefaults, TopologyAdapter};
-use crate::vllm_render_client::{VllmRenderClient, VllmRenderError};
+use crate::vllm_render_client::VllmRenderClient;
 
 /// Resolve the request's scheduling policy class from the Dynamo metadata
 /// headers. Goes through the frontend's metadata extractor (rather than a
@@ -52,33 +53,27 @@ fn requested_policy_class(headers: &[(String, String)]) -> Result<Option<String>
     Ok(metadata.get("policy-class").cloned())
 }
 
-/// Protocol-dispatched tokenizer client for the standalone EPP.
+/// Protocol-dispatched render client for the standalone EPP.
 ///
 /// Both backends expose the same `/v1/chat/completions/render` path; the difference
 /// is the response field: vLLM uses `token_ids`, the sglang renderer uses `input_ids`.
-enum TokenizerClient {
+enum RenderClient {
     Vllm(VllmRenderClient),
     Sglang(SglangRendererClient),
 }
 
-impl TokenizerClient {
-    async fn render_chat(&self, body: bytes::Bytes) -> Result<Vec<u32>, RendererError> {
+impl RenderClient {
+    async fn render_chat(&self, body: bytes::Bytes) -> Result<Vec<u32>, RenderError> {
         match self {
-            Self::Vllm(c) => c.render_chat(body).await.map_err(RendererError::Vllm),
-            Self::Sglang(c) => c.render_chat(body).await.map_err(RendererError::Sglang),
+            Self::Vllm(c) => c.render_chat(body).await,
+            Self::Sglang(c) => c.render_chat(body).await,
         }
     }
 }
 
-/// Unified render error for the two supported tokenizer backends.
-enum RendererError {
-    Vllm(VllmRenderError),
-    Sglang(SglangRendererError),
-}
-
 /// Standalone endpoint picker backed by the standalone selection service.
 pub struct EppRouter {
-    renderer: TokenizerClient,
+    renderer: RenderClient,
     reflector: Arc<PodDiscovery>,
     selector: Arc<Selector>,
     // Kept alive for the lifetime of the router; the reconcile loop runs on it.
@@ -104,13 +99,13 @@ impl EppRouter {
         let timeout = Duration::from_millis(cfg.tokenization_timeout_ms);
         let max_response_bytes = cfg.tokenizer_max_response_bytes;
         let renderer = match cfg.tokenizer_protocol {
-            TokenizerProtocol::VllmRender => TokenizerClient::Vllm(VllmRenderClient::new(
+            TokenizerProtocol::VllmRender => RenderClient::Vllm(VllmRenderClient::new(
                 &cfg.tokenizer_service_url,
                 timeout,
                 max_response_bytes,
             )?),
             TokenizerProtocol::SglangRenderer => {
-                TokenizerClient::Sglang(SglangRendererClient::new(
+                RenderClient::Sglang(SglangRendererClient::new(
                     &cfg.tokenizer_service_url,
                     timeout,
                     max_response_bytes,
@@ -471,7 +466,7 @@ enum TokenizeError {
     /// The request body could not be parsed — a genuine client (400) error.
     InvalidBody(serde_json::Error),
     /// The renderer call failed; the specific variant decides the status.
-    Render(RendererError),
+    Render(RenderError),
 }
 
 impl TokenizeError {
@@ -485,64 +480,27 @@ impl TokenizeError {
                 PickError::TokenizationFailed(format!("invalid request body: {e}"))
             }
             TokenizeError::Render(e) => {
-                // Map the unified RendererError to (is_unavailable, is_timeout, status_code, is_contract_error)
-                // for pick-error classification. Both backends have the same status-code semantics.
-                let (unavailable, timeout, upstream_status, contract_error, log_msg) = match &e {
-                    RendererError::Vllm(inner) => {
-                        let msg = format!("{inner}");
-                        match inner {
-                            VllmRenderError::Unavailable { .. } => (true, false, None, false, msg),
-                            VllmRenderError::Timeout { .. } => (false, true, None, false, msg),
-                            VllmRenderError::UpstreamStatus { status, .. } => {
-                                (false, false, Some(status.as_u16()), false, msg)
-                            }
-                            VllmRenderError::InvalidResponse { .. }
-                            | VllmRenderError::ResponseTooLarge { .. } => {
-                                (false, false, None, true, msg)
-                            }
+                tracing::warn!(request_id, error = %e, "Tokenization render failed");
+                match &e {
+                    RenderError::Unavailable { .. } => PickError::TokenizerUnavailable,
+                    RenderError::Timeout { .. } => PickError::TokenizerTimeout,
+                    RenderError::InvalidResponse { .. } | RenderError::ResponseTooLarge { .. } => {
+                        PickError::TokenizerUpstreamError
+                    }
+                    RenderError::UpstreamStatus { status, .. } => {
+                        match status.as_u16() {
+                            // Only payload-validation statuses (400/422) mean the
+                            // client's request was bad → surface as a client 400.
+                            // Auth/misconfig (401/403/404), overload (429/503), any
+                            // other 4xx, and 5xx are the renderer's or our own fault.
+                            400 | 422 => PickError::TokenizationFailed(
+                                "request rejected by tokenization service".to_string(),
+                            ),
+                            // Renderer overloaded / temporarily unavailable → retryable.
+                            429 | 503 => PickError::TokenizerUnavailable,
+                            _ => PickError::TokenizerUpstreamError,
                         }
                     }
-                    RendererError::Sglang(inner) => {
-                        let msg = format!("{inner}");
-                        match inner {
-                            SglangRendererError::Unavailable { .. } => {
-                                (true, false, None, false, msg)
-                            }
-                            SglangRendererError::Timeout { .. } => {
-                                (false, true, None, false, msg)
-                            }
-                            SglangRendererError::UpstreamStatus { status, .. } => {
-                                (false, false, Some(status.as_u16()), false, msg)
-                            }
-                            SglangRendererError::InvalidResponse { .. }
-                            | SglangRendererError::ResponseTooLarge { .. } => {
-                                (false, false, None, true, msg)
-                            }
-                        }
-                    }
-                };
-                tracing::warn!(request_id, error = %log_msg, "Tokenization render failed");
-                if unavailable {
-                    return PickError::TokenizerUnavailable;
-                }
-                if timeout {
-                    return PickError::TokenizerTimeout;
-                }
-                if contract_error {
-                    return PickError::TokenizerUpstreamError;
-                }
-                match upstream_status {
-                    // Only the renderer's payload-validation statuses (400/422)
-                    // mean the client's request was bad → surface as a client 400.
-                    // Auth/misconfig (401/403/404), overload (429/503), any other
-                    // 4xx, and 5xx are the renderer's or our own fault — never blame
-                    // the client's payload for those (`is_client_error()` would).
-                    Some(400 | 422) => PickError::TokenizationFailed(
-                        "request rejected by tokenization service".to_string(),
-                    ),
-                    // Renderer overloaded / temporarily unavailable → retryable.
-                    Some(429 | 503) => PickError::TokenizerUnavailable,
-                    _ => PickError::TokenizerUpstreamError,
                 }
             }
         }
@@ -590,14 +548,13 @@ mod tests {
 
     #[test]
     fn render_upstream_status_maps_to_correct_pick_error() {
-        use crate::vllm_render_client::VllmRenderError;
         use reqwest::StatusCode;
 
         let map = |status: StatusCode| {
-            TokenizeError::Render(RendererError::Vllm(VllmRenderError::UpstreamStatus {
+            TokenizeError::Render(RenderError::UpstreamStatus {
                 status,
                 body: String::new(),
-            }))
+            })
             .into_pick_error("req-1")
         };
 
