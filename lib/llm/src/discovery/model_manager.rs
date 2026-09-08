@@ -19,10 +19,11 @@ use dynamo_kv_router::{
 };
 use tokio_util::sync::CancellationToken;
 
+use super::runtime_configs::{RuntimeConfigSender, runtime_config_watch_with_sender};
 use super::worker_monitor::LoadThresholdConfig;
 use super::{
     GenerateEngineSelection, KvSourceMembershipWatch, Model, RuntimeConfigWatch, WorkerSet,
-    kv_source_watch::KvSourceMembershipCoordinator, runtime_config_watch,
+    kv_source_watch::KvSourceMembershipCoordinator,
 };
 
 use dynamo_runtime::{
@@ -144,6 +145,19 @@ struct PendingLoraProjection {
 
 type EndpointLoraProjection = HashMap<EndpointId, HashMap<WorkerWithDpRank, LoraWorkerProjection>>;
 
+/// The sender is weak so accounting does not keep the discovery task alive.
+struct EndpointRuntimeConfigs {
+    watch: RuntimeConfigWatch,
+    sender: Weak<RuntimeConfigSender>,
+    lifecycle: CancellationToken,
+}
+
+impl Drop for EndpointRuntimeConfigs {
+    fn drop(&mut self) {
+        self.lifecycle.cancel();
+    }
+}
+
 pub(crate) struct RemovedDiscoveryGroup {
     pub(crate) representative: ModelDeploymentCard,
     pub(crate) cards: Vec<ModelDeploymentCard>,
@@ -171,13 +185,12 @@ pub struct ModelManager {
 
     /// Per-endpoint runtime config watchers. Keyed by EndpointId (includes namespace).
     ///
-    /// NOTE: These shared receivers currently live for the manager lifetime. Rebinding to a new
-    /// endpoint therefore leaves the previous watcher cached; safe eviction requires shared
-    /// ownership tracking because multiple routers may consume the same endpoint watch.
-    runtime_configs: DashMap<EndpointId, RuntimeConfigWatch>,
+    /// Idle entries are evicted after their last consumer releases its receiver,
+    /// including consumers still preparing a WorkerSet or outside discovery.
+    runtime_configs: Arc<DashMap<EndpointId, EndpointRuntimeConfigs>>,
 
     /// Per-endpoint HiCache state and its one Mooncake event subscriber.
-    hicache_caches: DashMap<EndpointId, HicacheSharedKvCache>,
+    hicache_caches: Arc<DashMap<EndpointId, HicacheSharedKvCache>>,
 
     /// Shared KV-source membership coordinators, scoped by exact serving endpoint.
     /// Weak ownership lets the discovery loop stop when its last consumer goes away.
@@ -218,8 +231,8 @@ impl ModelManager {
             catalog: ArcSwap::from_pointee(CommittedCatalog::default()),
             cards: DashMap::new(),
             discovery_groups: DashMap::new(),
-            runtime_configs: DashMap::new(),
-            hicache_caches: DashMap::new(),
+            runtime_configs: Arc::new(DashMap::new()),
+            hicache_caches: Arc::new(DashMap::new()),
             kv_source_memberships: DashMap::new(),
             lora_domains: DashMap::new(),
             committed_lora_endpoints: parking_lot::Mutex::new(HashSet::new()),
@@ -2419,24 +2432,76 @@ impl ModelManager {
         let endpoint_id = endpoint.id();
 
         if let Some(existing) = self.runtime_configs.get(&endpoint_id) {
-            return Ok(existing.clone());
+            return Ok(existing.watch.clone());
         }
 
         // Slow path: create the watch (spawns a background task).
         // If another caller raced us, the entry() below picks up the winner;
-        // the loser's background task stops once its receivers are dropped.
-        // This registry is keyed by endpoint and outlives any one WorkerSet, so
-        // the watch is scoped to the process, not to a caller's own lifecycle.
-        let rx = runtime_config_watch(endpoint, endpoint.drt().primary_token()).await?;
-        let result = match self.runtime_configs.entry(endpoint_id) {
-            Entry::Occupied(e) => e.get().clone(),
+        // cancel the losing watch explicitly, including its base discovery task.
+        let lifecycle = endpoint.drt().primary_token().child_token();
+        let (rx, sender) = runtime_config_watch_with_sender(endpoint, lifecycle.clone()).await?;
+        let result = match self.runtime_configs.entry(endpoint_id.clone()) {
+            Entry::Occupied(e) => {
+                lifecycle.cancel();
+                e.get().watch.clone()
+            }
             Entry::Vacant(e) => {
-                e.insert(rx.clone());
+                e.insert(EndpointRuntimeConfigs {
+                    watch: rx.clone(),
+                    sender,
+                    lifecycle: lifecycle.clone(),
+                });
+                Self::spawn_endpoint_cleanup(
+                    endpoint_id,
+                    Arc::downgrade(&self.runtime_configs),
+                    Arc::downgrade(&self.hicache_caches),
+                    lifecycle,
+                );
                 rx
             }
         };
 
         Ok(result)
+    }
+
+    fn spawn_endpoint_cleanup(
+        endpoint_id: EndpointId,
+        runtime_configs: Weak<DashMap<EndpointId, EndpointRuntimeConfigs>>,
+        hicache_caches: Weak<DashMap<EndpointId, HicacheSharedKvCache>>,
+        lifecycle: CancellationToken,
+    ) {
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = lifecycle.cancelled() => break,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+                }
+                let (Some(runtime_configs), Some(hicache_caches)) =
+                    (runtime_configs.upgrade(), hicache_caches.upgrade())
+                else {
+                    break;
+                };
+                Self::evict_unused_endpoint_state(&endpoint_id, &runtime_configs, &hicache_caches);
+            }
+        });
+    }
+
+    fn evict_unused_endpoint_state(
+        endpoint_id: &EndpointId,
+        runtime_configs: &DashMap<EndpointId, EndpointRuntimeConfigs>,
+        hicache_caches: &DashMap<EndpointId, HicacheSharedKvCache>,
+    ) {
+        // Removing HiCache first stops its subscriber, which releases another
+        // runtime-config receiver asynchronously. The next pass can evict the watch.
+        hicache_caches.remove_if(endpoint_id, |_, cache| !cache.has_other_owners());
+        // Check and remove under the same entry lock used when cloning a cached
+        // receiver, so an acquiring router cannot race cancellation.
+        runtime_configs.remove_if(endpoint_id, |_, entry| {
+            entry
+                .sender
+                .upgrade()
+                .is_none_or(|sender| sender.receiver_count() == 1)
+        });
     }
 
     /// Get or create the reusable KV-source membership watch for one exact serving endpoint.
@@ -2498,7 +2563,7 @@ impl ModelManager {
         worker_id: WorkerId,
     ) -> Option<DisaggregatedEndpoint> {
         let rx = self.runtime_configs.get(endpoint_id)?;
-        let configs = rx.borrow();
+        let configs = rx.watch.borrow();
         configs.get(&worker_id)?.disaggregated_endpoint.clone()
     }
 
@@ -2512,7 +2577,7 @@ impl ModelManager {
         worker_id: WorkerId,
     ) -> Option<u32> {
         let rx = self.runtime_configs.get(endpoint_id)?;
-        let configs = rx.borrow();
+        let configs = rx.watch.borrow();
         Some(configs.get(&worker_id)?.data_parallel_size)
     }
 
@@ -2521,7 +2586,7 @@ impl ModelManager {
         let Some(rx) = self.runtime_configs.get(endpoint_id) else {
             return false;
         };
-        let configs = rx.borrow();
+        let configs = rx.watch.borrow();
         has_required_kv_transfer_policy(&configs)
     }
 
@@ -2535,7 +2600,7 @@ impl ModelManager {
             tracing::debug!(%endpoint_id, worker_id, "no runtime configs for topology routing");
             return Ok(None);
         };
-        let configs = rx.borrow();
+        let configs = rx.watch.borrow();
         let Some(config) = configs.get(&worker_id) else {
             tracing::debug!(
                 %endpoint_id,
@@ -2638,7 +2703,14 @@ mod tests {
         configs: HashMap<WorkerId, ModelRuntimeConfig>,
     ) {
         let (_tx, rx) = tokio::sync::watch::channel(configs);
-        mm.runtime_configs.insert(endpoint_id.clone(), rx);
+        mm.runtime_configs.insert(
+            endpoint_id.clone(),
+            EndpointRuntimeConfigs {
+                watch: rx,
+                sender: Weak::new(),
+                lifecycle: CancellationToken::new(),
+            },
+        );
     }
 
     #[tokio::test]
@@ -2953,6 +3025,98 @@ mod tests {
 
         // Model should still exist (ns1 still there)
         assert!(mm.get_model("llama").is_some());
+    }
+
+    #[tokio::test]
+    async fn endpoint_watches_are_evicted_after_last_consumer_drops() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let manager = ModelManager::new();
+        let component = distributed
+            .namespace("endpoint-cleanup".to_string())
+            .unwrap()
+            .component("worker".to_string())
+            .unwrap();
+        let endpoint = component.endpoint("generate".to_string());
+        let watch = manager
+            .get_or_create_runtime_config_watcher(&endpoint)
+            .await
+            .unwrap();
+        assert!(manager.runtime_configs.contains_key(&endpoint.id()));
+        drop(watch);
+        let evicted = tokio::time::timeout(std::time::Duration::from_secs(4), async {
+            while manager.runtime_configs.contains_key(&endpoint.id()) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        runtime.shutdown();
+        assert!(
+            evicted.is_ok(),
+            "the manager retains the last endpoint watch after its consumer drops"
+        );
+    }
+
+    #[tokio::test]
+    async fn endpoint_cleanup_preserves_shared_and_preparing_consumers() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let manager = ModelManager::new();
+        let component = distributed
+            .namespace("shared-cleanup".to_string())
+            .unwrap()
+            .component("worker".to_string())
+            .unwrap();
+        let endpoint = component.endpoint("generate".to_string());
+        let first = manager
+            .get_or_create_runtime_config_watcher(&endpoint)
+            .await
+            .unwrap();
+        let second = manager
+            .get_or_create_runtime_config_watcher(&endpoint)
+            .await
+            .unwrap();
+        assert!(first.same_channel(&second));
+        let first_cache = manager.hicache_cache_for(&endpoint, first.clone());
+        let second_cache = manager.hicache_cache_for(&endpoint, second.clone());
+        let cleanup = || {
+            ModelManager::evict_unused_endpoint_state(
+                &endpoint.id(),
+                &manager.runtime_configs,
+                &manager.hicache_caches,
+            )
+        };
+
+        drop(first);
+        drop(first_cache);
+        cleanup();
+        assert!(manager.runtime_configs.contains_key(&endpoint.id()));
+        assert!(manager.hicache_caches.contains_key(&endpoint.id()));
+        assert!(second.has_changed().is_ok());
+
+        // A caller preparing a router has no catalog entry yet, but its watch
+        // must keep the endpoint alive after the last HiCache consumer exits.
+        drop(second_cache);
+        cleanup();
+        assert!(!manager.hicache_caches.contains_key(&endpoint.id()));
+        assert!(manager.runtime_configs.contains_key(&endpoint.id()));
+        assert!(second.has_changed().is_ok());
+
+        drop(second);
+        tokio::time::timeout(std::time::Duration::from_secs(4), async {
+            while manager.runtime_configs.contains_key(&endpoint.id()) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the last consumer must release the endpoint watch");
+        runtime.shutdown();
     }
 
     #[test]
