@@ -295,7 +295,7 @@ func TestValidateComponentRolesRejectsDuplicateMultinodeRole(t *testing.T) {
 			{Name: nvidiacomv1beta1.ComponentRoleLeader},
 		},
 	}
-	validation := &sharedValidation{ctx: context.Background(), runtimeVersionSource: runtimeVersionSourceDisabled}
+	validation := &sharedValidation{ctx: context.Background()}
 
 	t.Log("Validate the closed multinode role schema independently of OpenAPI list-map checks")
 	errs := validation.validateComponentRoles(
