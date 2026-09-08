@@ -51,6 +51,9 @@ def create_config() -> DynamoVllmConfig:
     config.benchmark_mode = None
     config.use_vllm_tokenizer = False
     config.frontend_decoding = False
+    # Not optional on the real config: parse_args always attaches it before
+    # validate() runs, and the exclusivity rules read it unguarded.
+    config.engine_args = SimpleNamespace(enable_lora=False)
     return config
 
 
@@ -439,6 +442,50 @@ class TestClassifyWorkerExclusivity:
         config.benchmark_mode = "agg"
         config.headless = True
         config._validate_classify_worker_exclusivity()
+
+
+class TestParseArgsLoraExclusivity:
+    """The --enable-lora exclusivity rules must fire on the real CLI path.
+
+    The tests above call the validators directly with engine_args already set,
+    so they pass even when parse_args never supplies engine_args before
+    validate() runs. These drive the whole command line instead, which is the
+    only place that ordering is observable.
+    """
+
+    @staticmethod
+    def _parse(extra_argv):
+        from dynamo.vllm.args import parse_args
+
+        return parse_args(["--model", "Qwen/Qwen3-0.6B", *extra_argv])
+
+    def test_realtime_with_enable_lora_is_rejected(self):
+        with pytest.raises(ValueError, match="enable-lora"):
+            self._parse(["--realtime", "--enable-lora"])
+
+    def test_classify_worker_with_enable_lora_is_rejected(self):
+        """Kept separate from the --realtime case: the classify rule may be
+        removed once LoRA is supported on pooling-family workers, and the
+        --realtime rule is independent of that."""
+        with pytest.raises(ValueError, match="enable-lora"):
+            self._parse(["--classify-worker", "--enable-lora"])
+
+    def test_enable_lora_alone_is_accepted(self):
+        config = self._parse(["--enable-lora"])
+        assert config.engine_args.enable_lora is True
+
+    def test_realtime_alone_is_accepted(self):
+        config = self._parse(["--realtime"])
+        assert config.realtime is True
+        assert not config.engine_args.enable_lora
+
+    def test_prefill_still_requires_kv_transfer_config(self):
+        """update_dynamo_config_with_engine() compares disaggregation_mode
+        against DisaggregationMode.PREFILL, and validate() is what turns the
+        raw string into that enum. If validate() stopped running before this
+        comparison, the guard would silently stop firing."""
+        with pytest.raises(ValueError, match="kv-transfer-config"):
+            self._parse(["--disaggregation-mode", "prefill"])
 
 
 class TestValidateCustomEncoder:

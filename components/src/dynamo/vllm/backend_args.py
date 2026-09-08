@@ -950,7 +950,7 @@ class DynamoVllmConfig(ConfigBase):
             )
         if self.benchmark_mode is not None:
             raise ValueError("--realtime cannot be combined with --benchmark-mode.")
-        if getattr(getattr(self, "engine_args", None), "enable_lora", False):
+        if self.engine_args.enable_lora:
             raise ValueError("--realtime cannot be combined with --enable-lora.")
 
     def _validate_classify_worker_exclusivity(self) -> None:
@@ -986,7 +986,7 @@ class DynamoVllmConfig(ConfigBase):
                 "Headless mode returns before WorkerFactory.create(), so the "
                 "classify/pooling endpoint would never be registered."
             )
-        if getattr(getattr(self, "engine_args", None), "enable_lora", False):
+        if self.engine_args.enable_lora:
             raise ValueError(
                 "--classify-worker cannot be combined with --enable-lora. "
                 "The pooling-family handler does not forward lora_request to "
