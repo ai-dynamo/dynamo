@@ -40,7 +40,11 @@ _REPO_ROOT = Path(__file__).resolve().parent
 for _name in ("vllm", "sglang"):
     try:
         importlib.import_module(_name)
-    except Exception as _exc:  # noqa: BLE001 - best-effort seeding, see above
+    # ImportError is a missing engine; OSError is one whose sources are present
+    # but unreadable. A failure of any other kind comes from inside an engine
+    # that did start importing, and swallowing it here would run the suite
+    # against a half-initialized engine, so it propagates.
+    except (ImportError, OSError) as _exc:
         # A simply-absent engine is normal and stays quiet; anything else
         # means the install is broken, and one line here names the cause.
         if not (isinstance(_exc, ModuleNotFoundError) and _exc.name == _name):

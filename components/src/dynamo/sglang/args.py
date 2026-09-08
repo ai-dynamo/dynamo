@@ -444,7 +444,10 @@ async def parse_args(args: list[str]) -> Config:
 
     # Read off the parsed flags rather than ServerArgs: ServerArgs.from_cli_args
     # downloads the model, and the diffusion and video paths build a stub that
-    # carries neither flag, so both would leave this unchecked.
+    # carries neither flag, so both would leave this unchecked. getattr rather
+    # than direct access because this file supports SGLang N and N-1, and an
+    # older release that has not declared --elastic-ep-backend would otherwise
+    # raise AttributeError for every worker, not just the ones that asked for it.
     check_elastic_ep_backend(
         getattr(parsed_args, "elastic_ep_backend", None),
         getattr(parsed_args, "enable_dp_attention", False),

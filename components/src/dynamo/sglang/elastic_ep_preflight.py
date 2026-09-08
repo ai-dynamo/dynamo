@@ -15,6 +15,8 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import os
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _distribution_version
 from typing import Dict, List, Optional, Tuple
 
 MOONCAKE_BACKEND = "mooncake"
@@ -99,9 +101,6 @@ def _import_process_group_extension() -> Optional[str]:
 
 def _installed_mooncake_versions() -> Dict[str, str]:
     """Map each installed mooncake distribution to its version."""
-    from importlib.metadata import PackageNotFoundError
-    from importlib.metadata import version as _distribution_version
-
     found: Dict[str, str] = {}
     for distribution in _MOONCAKE_DISTRIBUTIONS:
         try:
