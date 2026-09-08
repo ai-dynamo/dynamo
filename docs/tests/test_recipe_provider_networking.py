@@ -738,11 +738,6 @@ def _forbidden_network_delta(name: str) -> list[dict[str, Any]]:
             "path": "/spec/components/1/podTemplate/spec/containers/0/securityContext/privileged",
             "value": True,
         },
-        "telemetry-env": {
-            "op": "add",
-            "path": "/spec/components/1/podTemplate/spec/containers/0/env/-",
-            "value": {"name": "NIXL_LOG_LEVEL", "value": "DEBUG"},
-        },
     }
     if name == "serving-command":
         path = "/spec/components/1/podTemplate/spec/containers/0/command"
@@ -765,7 +760,6 @@ def _forbidden_network_delta(name: str) -> list[dict[str, Any]]:
         "shared-memory",
         "serving-command",
         "security",
-        "telemetry-env",
     ),
 )
 def test_validator_rejects_forbidden_provider_concern_delta(
@@ -776,27 +770,100 @@ def test_validator_rejects_forbidden_provider_concern_delta(
     _assert_error(core._validate(case), "networking-delta")
 
 
-def test_validator_rejects_unapproved_provider_annotation(tmp_path: Path) -> None:
+def test_validator_accepts_provider_defined_annotation_key(tmp_path: Path) -> None:
     operations = _identity_guards(1, "PrefillWorker", "prefill") + [
         {
             "op": "add",
-            "path": "/spec/components/1/podTemplate/metadata/annotations/example.com~1unrelated",
-            "value": "true",
+            "path": (
+                "/spec/components/1/podTemplate/metadata/annotations/"
+                "k8s.v1.cni.cncf.io~1networks"
+            ),
+            "value": "rdma-net-0,rdma-net-1",
         }
     ]
     case, _ = _custom_networking_case(tmp_path, operations)
-    base_path = case / "base.yaml"
-    documents = core._documents(base_path)
-    dgd = next(
-        document
-        for document in documents
-        if document.get("kind") == "DynamoGraphDeployment"
-    )
-    dgd["spec"]["components"][1]["podTemplate"].setdefault(
-        "metadata", {"annotations": {}}
-    )
-    core._write_documents(base_path, documents)
 
+    result = core._validate(case)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_validator_accepts_provider_defined_environment_and_devices(
+    tmp_path: Path,
+) -> None:
+    main = "/spec/components/1/podTemplate/spec/containers/0"
+    operations = _identity_guards(1, "PrefillWorker", "prefill") + [
+        {
+            "op": "add",
+            "path": f"{main}/env/-",
+            "value": {"name": "FI_PROVIDER", "value": "efa"},
+        },
+        {
+            "op": "add",
+            "path": f"{main}/env/-",
+            "value": {"name": "FI_EFA_USE_DEVICE_RDMA", "value": "1"},
+        },
+        {
+            "op": "add",
+            "path": f"{main}/env/-",
+            "value": {"name": "NCCL_IB_HCA", "value": "mlx5_0"},
+        },
+        {
+            "op": "add",
+            "path": f"{main}/resources/requests/vpc.amazonaws.com~1efa",
+            "value": "1",
+        },
+        {
+            "op": "add",
+            "path": f"{main}/resources/limits/vpc.amazonaws.com~1efa",
+            "value": "1",
+        },
+        {
+            "op": "add",
+            "path": f"{main}/volumeMounts/-",
+            "value": {"name": "efa", "mountPath": "/dev/infiniband"},
+        },
+        {
+            "op": "add",
+            "path": "/spec/components/1/podTemplate/spec/volumes/-",
+            "value": {"name": "efa", "hostPath": {"path": "/dev/infiniband"}},
+        },
+    ]
+    case, _ = _custom_networking_case(tmp_path, operations)
+
+    result = core._validate(case)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_validator_accepts_provider_defined_host_path_mount(tmp_path: Path) -> None:
+    # GKE RoCE recipes expose the gIB NCCL plugin from a non-/dev host path.
+    main = "/spec/components/1/podTemplate/spec/containers/0"
+    operations = _identity_guards(1, "PrefillWorker", "prefill") + [
+        {
+            "op": "add",
+            "path": f"{main}/volumeMounts/-",
+            "value": {"name": "gib", "mountPath": "/usr/local/gib"},
+        },
+        {
+            "op": "add",
+            "path": "/spec/components/1/podTemplate/spec/volumes/-",
+            "value": {"name": "gib", "hostPath": {"path": "/home/kubernetes/bin/gib"}},
+        },
+    ]
+    case, _ = _custom_networking_case(tmp_path, operations)
+
+    result = core._validate(case)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_validator_rejects_unpaired_networking_host_volume(tmp_path: Path) -> None:
+    operations = _identity_guards(1, "PrefillWorker", "prefill") + [
+        {
+            "op": "add",
+            "path": "/spec/components/1/podTemplate/spec/volumes/-",
+            "value": {"name": "ib", "hostPath": {"path": "/dev/infiniband"}},
+        },
+    ]
+    case, _ = _custom_networking_case(tmp_path, operations)
     _assert_error(core._validate(case), "networking-delta")
 
 

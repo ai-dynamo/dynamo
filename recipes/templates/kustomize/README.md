@@ -165,14 +165,18 @@ Each Component owns one concern:
 | `provider-networking/ib` | Copy-and-fill source for one guarded IB resource pair plus optional socket, fixed-device, and `/dev/infiniband` blocks on disaggregated workers. |
 | `placement` | Optionally extends the worker affinity with a topology or clique constraint. It depends on `scheduling` having already created `affinity`. |
 
-Physical networking environment variables remain forbidden in portable bases.
-Qualified provider-networking Component operations are the carrier for
-`UCX_NET_DEVICES`, `NCCL_SOCKET_IFNAME`, and `GLOO_SOCKET_IFNAME`; the checked-in
-generic scaffold illustrates only the names that its operations actually
-carry. A site that needs `NCCL_IB_HCA` must qualify a provider operation and
-extend the networking allowlist and positive and negative tests before use.
-Support also requires a documented design decision. Do not remove the
-forbidden-name validation.
+Physical networking environment variables remain forbidden in portable bases:
+`NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`, `UCX_NET_DEVICES`, and `NCCL_IB_HCA`
+belong to the selected networking Component, never to the base. The validator
+does not maintain a provider capability list. A copied provider or private
+networking Component may add any worker annotation, environment variable,
+extended-resource request and limit pair, or name-matched host-path mount and
+volume pair that its provider requires, so an EFA, Multus, or GKE gIB Component
+needs no validator change. The validator enforces only the generic contract:
+worker-only `add` operations, matched request and limit pairs, name-matched
+mount and volume pairs, no duplicate environment names, and no physical
+networking name outside the networking slot. Do not remove the forbidden-name
+validation.
 
 The RDMA placeholder appears inside a JSON Pointer. Convert the discovered
 Kubernetes resource key to RFC 6901 form in both the request and limit paths:
@@ -414,8 +418,9 @@ The validator checks that the build targets exactly one beta DGD, verifies the
 canonical component positions, rejects base-owned cluster fields and duplicate
 environment names, replays the selected Component and case patch operations in
 order, and compares that replay with the Kustomize render. It also enforces the
-optional ordered networking slot, worker-only networking deltas, approved
-annotation and environment fields, and decoded request/limit equality. Failures
+optional ordered networking slot, worker-only networking deltas, the generic
+annotation, environment, extended-resource, and host-volume shapes, and
+decoded request/limit equality. Failures
 use stable diagnostics including `networking-slot`, `networking-delta`, and
 `networking-resource-pair`. Its supported patch target is deliberately limited
 to exact `group`, `version`, and `kind` fields; name, namespace, label,

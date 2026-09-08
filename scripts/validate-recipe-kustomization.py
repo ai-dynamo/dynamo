@@ -1166,22 +1166,6 @@ def _validate_guards(layer: _PatchLayer) -> None:
         }
 
 
-_NETWORK_ENV_NAMES = frozenset(
-    {
-        "NCCL_SOCKET_IFNAME",
-        "GLOO_SOCKET_IFNAME",
-        "NCCL_CROSS_NIC",
-        "UCX_NET_DEVICES",
-    }
-)
-_NETWORK_ANNOTATION_KEYS = frozenset(
-    {
-        "networking.gke.io/default-interface",
-        "networking.gke.io/interfaces",
-    }
-)
-
-
 def _source_has_networking_path(layer: _PatchLayer) -> bool:
     normalized = layer.source.resolve().as_posix()
     return bool(
@@ -1210,11 +1194,45 @@ def _preceding_env_name_test(
     return observed
 
 
+def _physical_network_env_name(
+    layer: _PatchLayer,
+    op_index: int,
+    operation: Mapping[str, Any],
+    tokens: Tuple[str, ...],
+) -> Optional[str]:
+    """Return the base-forbidden physical networking name an operation carries.
+
+    The validator keeps no provider capability list. The only environment names
+    it recognizes as networking-owned by value are the physical selections that
+    portable bases may never define.
+    """
+    name: Any = None
+    if len(tokens) >= 2 and tokens[-2:] == ("env", "-"):
+        value = operation.get("value")
+        name = value.get("name") if isinstance(value, dict) else None
+    elif (
+        len(tokens) >= 3
+        and tokens[-3] == "env"
+        and re.fullmatch(r"0|[1-9][0-9]*", tokens[-2])
+        and tokens[-1] == "value"
+    ):
+        name = _preceding_env_name_test(layer, op_index, tokens)
+    if isinstance(name, str) and name in FORBIDDEN_BASE_ENV_NAMES:
+        return name
+    return None
+
+
 def _network_operation_kind(
     layer: _PatchLayer,
     op_index: int,
     operation: Mapping[str, Any],
 ) -> Optional[str]:
+    """Classify the shape of a worker networking operation.
+
+    Classification is structural. Any annotation key, environment name,
+    extended-resource key, or host path may be carried by a networking
+    Component; the provider owns the concrete values.
+    """
     tokens = _pointer_tokens(operation["path"], layer=layer.label, op_index=op_index)
     if len(tokens) < 4 or tokens[:2] != ("spec", "components"):
         return None
@@ -1226,9 +1244,7 @@ def _network_operation_kind(
         "metadata",
         "annotations",
     ):
-        if tokens[6] in _NETWORK_ANNOTATION_KEYS and isinstance(
-            operation.get("value"), str
-        ):
+        if tokens[6] and isinstance(operation.get("value"), str):
             return "annotation"
         return None
 
@@ -1237,7 +1253,8 @@ def _network_operation_kind(
         if (
             isinstance(value, dict)
             and set(value) == {"name", "value"}
-            and value.get("name") in _NETWORK_ENV_NAMES
+            and isinstance(value.get("name"), str)
+            and value["name"]
             and isinstance(value.get("value"), str)
         ):
             return "env-append"
@@ -1249,7 +1266,7 @@ def _network_operation_kind(
         and tokens[len(main_prefix)] == "env"
         and re.fullmatch(r"0|[1-9][0-9]*", tokens[-2])
         and tokens[-1] == "value"
-        and _preceding_env_name_test(layer, op_index, tokens) in _NETWORK_ENV_NAMES
+        and _preceding_env_name_test(layer, op_index, tokens) is not None
     ):
         return "env-override"
 
@@ -1275,21 +1292,26 @@ def _network_operation_kind(
             and set(value) == {"name", "mountPath"}
             and isinstance(value.get("name"), str)
             and value["name"]
-            and value.get("mountPath") == "/dev/infiniband"
+            and isinstance(value.get("mountPath"), str)
+            and value["mountPath"].startswith("/")
         ):
-            return "infiniband-mount"
+            return "host-mount"
         return None
 
     if tokens == pod_prefix + ("spec", "volumes", "-"):
         value = operation.get("value")
+        host_path = value.get("hostPath") if isinstance(value, dict) else None
         if (
             isinstance(value, dict)
             and set(value) == {"name", "hostPath"}
             and isinstance(value.get("name"), str)
             and value["name"]
-            and value.get("hostPath") == {"path": "/dev/infiniband"}
+            and isinstance(host_path, dict)
+            and set(host_path) <= {"path", "type"}
+            and isinstance(host_path.get("path"), str)
+            and host_path["path"].startswith("/")
         ):
-            return "infiniband-volume"
+            return "host-volume"
         return None
     return None
 
@@ -1362,9 +1384,23 @@ def _validate_networking_contract(
                 operation["path"], layer=layer.label, op_index=op_index
             )
             kind = _network_operation_kind(layer, op_index, operation)
+            physical_name = _physical_network_env_name(
+                layer, op_index, operation, tokens
+            )
+            # A networking delta is recognized by its owner, its source path, a
+            # base-forbidden physical name, or an extended-resource shape; never
+            # by a provider-specific allowlist.
+            is_network_delta = (
+                owner_is_network
+                or source_has_networking_path
+                or physical_name is not None
+                or kind in {"resource", "resource-invalid"}
+            )
+            if not is_network_delta:
+                continue
+
             if (
-                kind is not None
-                and len(tokens) >= 3
+                len(tokens) >= 3
                 and tokens[:2] == ("spec", "components")
                 and tokens[2] not in {"1", "2"}
             ):
@@ -1374,27 +1410,16 @@ def _validate_networking_contract(
                     operation,
                     "networking may mutate only canonical worker positions",
                 )
+            if kind == "resource-invalid":
+                raise ValidationError(
+                    "networking-resource-pair",
+                    "network resource paths require one RFC 6901-encoded extended-resource key",
+                    layer=layer.label,
+                    op_index=op_index,
+                    path=operation["path"],
+                )
 
             if owner_is_network:
-                if (
-                    len(tokens) >= 3
-                    and tokens[:2] == ("spec", "components")
-                    and (tokens[2] not in {"1", "2"})
-                ):
-                    raise _networking_error(
-                        layer,
-                        op_index,
-                        operation,
-                        "networking may mutate only canonical worker positions",
-                    )
-                if kind == "resource-invalid":
-                    raise ValidationError(
-                        "networking-resource-pair",
-                        "network resource paths require one RFC 6901-encoded extended-resource key",
-                        layer=layer.label,
-                        op_index=op_index,
-                        path=operation["path"],
-                    )
                 if kind is None:
                     raise _networking_error(
                         layer,
@@ -1407,20 +1432,16 @@ def _validate_networking_contract(
                         layer,
                         op_index,
                         operation,
-                        "networking Components may only add approved worker fields",
+                        "networking Components may only add worker networking fields",
                     )
             elif layer.root_component is not None:
-                if kind is not None or source_has_networking_path:
-                    raise _networking_error(
-                        layer,
-                        op_index,
-                        operation,
-                        "networking delta is nested under an unrelated root concern",
-                    )
-                continue
+                raise _networking_error(
+                    layer,
+                    op_index,
+                    operation,
+                    "networking delta is nested under an unrelated root concern",
+                )
             else:
-                if kind is None and not source_has_networking_path:
-                    continue
                 if network_root is None:
                     raise _networking_error(
                         layer,
@@ -1428,20 +1449,12 @@ def _validate_networking_contract(
                         operation,
                         "root patch cannot serve as the networking slot",
                     )
-                if kind == "resource-invalid":
-                    raise ValidationError(
-                        "networking-resource-pair",
-                        "network resource paths require one RFC 6901-encoded extended-resource key",
-                        layer=layer.label,
-                        op_index=op_index,
-                        path=operation["path"],
-                    )
                 root_append_name = (
                     operation.get("value", {}).get("name")
                     if isinstance(operation.get("value"), dict)
                     else None
                 )
-                replaces_approved_value = (
+                replaces_selected_value = (
                     kind in {"annotation", "env-override", "resource"}
                     and operation["op"] == "replace"
                 )
@@ -1450,12 +1463,13 @@ def _validate_networking_contract(
                     and operation["op"] == "add"
                     and (tokens[2], root_append_name) in component_env_entries
                 )
-                if not replaces_approved_value and not repeats_component_env:
+                if not replaces_selected_value and not repeats_component_env:
                     raise _networking_error(
                         layer,
                         op_index,
                         operation,
-                        "root networking patches may only replace approved values",
+                        "root networking patches may only replace values the "
+                        "selected networking Component adds",
                     )
 
             if kind == "resource":
@@ -1465,11 +1479,11 @@ def _validate_networking_contract(
                 resource_values[(component_index, resource_key, scope)] = operation[
                     "value"
                 ]
-            elif kind in {"infiniband-mount", "infiniband-volume"}:
+            elif kind in {"host-mount", "host-volume"}:
                 component_index = tokens[2]
                 value = operation["value"]
                 key = (component_index, value["name"])
-                collection = mounts if kind == "infiniband-mount" else volumes
+                collection = mounts if kind == "host-mount" else volumes
                 collection[key] = collection.get(key, 0) + 1
 
     resource_pairs = {(index, key) for index, key, _ in resource_values}
@@ -1491,7 +1505,7 @@ def _validate_networking_contract(
     if mounts != volumes:
         raise ValidationError(
             "networking-delta",
-            "/dev/infiniband mount and host volume blocks must be complete and name-matched",
+            "networking host mount and volume blocks must be complete and name-matched",
             expected=mounts,
             actual=volumes,
         )
