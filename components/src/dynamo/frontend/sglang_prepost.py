@@ -347,14 +347,34 @@ def named_closed_zero_arg_tool(request: dict[str, Any]) -> str | None:
     return None
 
 
-def _guided_tool_choice_requires_reasoning(
+def _guided_output_requires_reasoning(
+    request: dict[str, Any],
+    force_reasoning: bool,
+    reasoning_parser_name: str | None = None,
+) -> bool:
+    """Return whether SGLang should reason before guided output."""
+    if not force_reasoning:
+        return False
+
+    tool_choice = request.get("tool_choice", "auto")
+    if tool_choice == "required" or _is_named_tool_choice(tool_choice):
+        return True
+
+    response_format = request.get("response_format")
+    if not isinstance(response_format, dict) or reasoning_parser_name == "gpt_oss":
+        return False
+    return response_format.get("type") != "text"
+
+
+def _needs_structured_json_fallback(
     request: dict[str, Any], force_reasoning: bool
 ) -> bool:
-    """Return whether SGLang should reason before guided tool-call JSON."""
-    tool_choice = request.get("tool_choice", "auto")
-    return force_reasoning and (
-        tool_choice == "required" or _is_named_tool_choice(tool_choice)
-    )
+    if not force_reasoning:
+        return False
+    response_format = request.get("response_format")
+    if not isinstance(response_format, dict):
+        return False
+    return response_format.get("type") in {"json_object", "json_schema"}
 
 
 def _normalize_deepseek_v4_hint(value: Any) -> str:
@@ -991,6 +1011,13 @@ def _try_parse_json_array(text: str) -> list | None:
     return None
 
 
+def _is_json_object_or_array(text: str) -> bool:
+    try:
+        return isinstance(json.loads(text), (dict, list))
+    except (json.JSONDecodeError, TypeError):
+        return False
+
+
 class SglangStreamingPostProcessor:
     """Streaming post-processor using SGLang parsers and HF tokenizer detokenization.
 
@@ -1013,6 +1040,7 @@ class SglangStreamingPostProcessor:
         eos_token_ids: list[int] | None = None,
         prompt_token_ids: list[int] | None = None,
         stop_strings: set[str] | None = None,
+        structured_guided_json: bool = False,
     ) -> None:
         self.tokenizer = tokenizer
         self.tool_call_parser = tool_call_parser
@@ -1028,11 +1056,13 @@ class SglangStreamingPostProcessor:
         # reasoning delimiters remain visible during incremental decoding.
         self._skip_special_tokens = self._fast_plain_text
         self._is_json_array_parser = isinstance(tool_call_parser, JsonArrayParser)
-        # Required/named guided output may be either bare JSON or
+        self._structured_guided_json = structured_guided_json
+        # Structured responses and required/named tools may emit bare JSON or
         # reasoning followed by JSON. Delay only the ambiguous bracket-leading
         # prefix so bare JSON does not get trapped as reasoning.
+        needs_guided_buffer = self._is_json_array_parser or structured_guided_json
         self._pending_guided_reasoning_parts: list[str] | None = (
-            [] if self._is_json_array_parser and reasoning_parser is not None else None
+            [] if needs_guided_buffer and reasoning_parser is not None else None
         )
         self._eos_token_ids = set(eos_token_ids or [])
         self._stop_strings = stop_strings or set()
@@ -1360,7 +1390,12 @@ class SglangStreamingPostProcessor:
             return None, ""
 
         self._pending_guided_reasoning_parts = None
-        if finish_reason and _try_parse_json_array(buffered) is not None:
+        bare_guided_json = (
+            _is_json_object_or_array(buffered)
+            if self._structured_guided_json
+            else _try_parse_json_array(buffered) is not None
+        )
+        if finish_reason and bare_guided_json:
             return None, buffered
 
         if finish_reason and stripped and stripped[0] in "[{" and not starts_reasoning:

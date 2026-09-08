@@ -14,6 +14,7 @@ import copy
 import json
 import sys
 import types
+from concurrent.futures import Future
 
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine, FakeRoutedItem
@@ -35,7 +36,7 @@ from dynamo.frontend.sglang_prepost import (
     SglangPreprocessResult,
     SglangStreamingPostProcessor,
     _flatten_message_content,
-    _guided_tool_choice_requires_reasoning,
+    _guided_output_requires_reasoning,
     _normalize_assistant_tool_call_arguments,
     _normalize_prompt_token_ids,
     _normalize_sglang_parser_name,
@@ -1009,7 +1010,7 @@ def test_qwen_separate_reasoning_false_keeps_generation_gate(tokenizer, tool_cho
 
     assert result.force_reasoning is True
     assert result.reasoning_parser is None
-    assert _guided_tool_choice_requires_reasoning(request, result.force_reasoning)
+    assert _guided_output_requires_reasoning(request, result.force_reasoning)
 
 
 @pytest.mark.parametrize(
@@ -1086,7 +1087,114 @@ def test_guided_tool_choice_requires_effective_reasoning(
 ):
     """Only reasoning-enabled required or named tools activate the gate."""
     request = {"tool_choice": tool_choice}
-    assert _guided_tool_choice_requires_reasoning(request, force_reasoning) is expected
+    assert _guided_output_requires_reasoning(request, force_reasoning) is expected
+
+
+@pytest.mark.core
+@pytest.mark.parametrize("response_type", ["json_schema", "json_object"])
+def test_structured_response_requires_effective_reasoning(response_type):
+    request = {"response_format": {"type": response_type}}
+
+    assert _guided_output_requires_reasoning(request, True, "deepseek_v4") is True
+    assert _guided_output_requires_reasoning(request, False, "deepseek_v4") is False
+    assert _guided_output_requires_reasoning(request, True, "gpt_oss") is False
+    assert not _guided_output_requires_reasoning(
+        {"response_format": {"type": "text"}}, True, "deepseek_v4"
+    )
+
+
+@pytest.mark.core
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("use_pool", [False, True], ids=["inline", "pool"])
+@pytest.mark.parametrize("response_type", ["json_schema", "json_object"])
+@pytest.mark.parametrize(
+    ("thinking", "separate_reasoning"),
+    [(True, True), (False, True), (True, False)],
+)
+def test_structured_response_generator_routes_json_and_preserves_streaming(
+    tokenizer, monkeypatch, use_pool, response_type, thinking, separate_reasoning
+):
+    """Exercise both generator paths, including real worker preprocessing."""
+    response_format = {"type": response_type}
+    if response_type == "json_schema":
+        response_format["json_schema"] = {
+            "name": "answer",
+            "schema": {
+                "type": "object",
+                "properties": {"answer": {"type": "integer"}},
+                "required": ["answer"],
+            },
+        }
+    request = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Return answer 42 as JSON."}],
+        "response_format": response_format,
+        "chat_template_kwargs": {"enable_thinking": thinking},
+        "separate_reasoning": separate_reasoning,
+        "stream": True,
+    }
+    response_json = '{"answer":42}'
+    routed_engine = FakeRoutedEngine(
+        items=[
+            {"token_ids": tokenizer.encode(response_json, add_special_tokens=False)},
+            {"token_ids": [], "finish_reason": "stop"},
+        ]
+    )
+
+    class InlinePreprocessPool:
+        # Keep the real worker and pool generator path without spawning processes.
+        def submit(self, fn, *args):
+            future = Future()
+            future.set_result(fn(*args))
+            return future
+
+    if use_pool:
+        monkeypatch.setattr(sglang_processor_module, "_w_tokenizer", tokenizer)
+        monkeypatch.setattr(sglang_processor_module, "_w_tool_call_parser_name", None)
+        monkeypatch.setattr(
+            sglang_processor_module, "_w_reasoning_parser_name", "qwen3"
+        )
+        monkeypatch.setattr(
+            sglang_processor_module, "_w_exclude_tools_when_tool_choice_none", True
+        )
+        monkeypatch.setattr(
+            sglang_processor_module, "_w_template_force_reasoning", False
+        )
+        monkeypatch.setattr(sglang_processor_module, "_w_default_thinking_mode", None)
+    processor = SglangProcessor(
+        tokenizer=tokenizer,
+        routed_engine=routed_engine,
+        tool_call_parser_name=None,
+        reasoning_parser_name="qwen3",
+        eos_token_ids=None,
+        preprocess_pool=InlinePreprocessPool() if use_pool else None,
+    )
+
+    async def collect():
+        responses = []
+        content_emission_positions = []
+        async for item in processor.generator(request):
+            if "data" not in item:
+                continue
+            for choice in item["data"]["choices"]:
+                responses.append(choice)
+                if choice["delta"].get("content"):
+                    content_emission_positions.append(routed_engine.yielded)
+        return responses, content_emission_positions
+
+    responses, content_emission_positions = asyncio.run(collect())
+    assert routed_engine.requests[0]["require_reasoning"] is thinking
+    content = "".join(choice["delta"].get("content", "") for choice in responses)
+    reasoning = "".join(
+        choice["delta"].get("reasoning_content", "") for choice in responses
+    )
+    assert content == response_json
+    assert reasoning == ""
+    assert responses[-1]["finish_reason"] == "stop"
+    if not thinking or not separate_reasoning:
+        assert content_emission_positions[0] == 1
+    else:
+        assert content_emission_positions == [2]
 
 
 class _CapturingReasoningParser:
@@ -4116,6 +4224,100 @@ class TestReasoningParsing:  # FRONTEND.9 — reasoning ↔ tool-call orchestrat
         assert json.loads(tool_calls[0]["function"]["arguments"]) == {
             "city": "New York"
         }
+
+    @pytest.mark.core
+    @pytest.mark.timeout(60)
+    @pytest.mark.parametrize("parser_name", ["qwen3", "deepseek-v4"])
+    @pytest.mark.parametrize(
+        ("chunk_size", "finish_with_tokens"), [(1, False), (10000, True)]
+    )
+    @pytest.mark.parametrize(
+        ("prefix", "response_json", "expected_reasoning", "finish_reason"),
+        [
+            ("", '{"answer":42}', "", "stop"),
+            (" \n", '[{"answer":42}]', "", "stop"),
+            (
+                "Check the request.</think>",
+                '{"answer":42}',
+                "Check the request.",
+                "stop",
+            ),
+            (
+                "[Check the request]</think>",
+                '{"answer":42}',
+                "[Check the request]",
+                "stop",
+            ),
+            ("", '{"answer":', '{"answer":', "length"),
+        ],
+    )
+    def test_structured_response_distinguishes_bare_json_from_reasoning(
+        self,
+        tokenizer,
+        parser_name,
+        chunk_size,
+        finish_with_tokens,
+        prefix,
+        response_json,
+        expected_reasoning,
+        finish_reason,
+    ):
+        _, reasoning_parser = create_parsers(
+            {},
+            tool_call_parser_name=None,
+            reasoning_parser_name=parser_name,
+            force_reasoning=True,
+        )
+        assert reasoning_parser is not None
+        case_tokenizer = copy.deepcopy(tokenizer)
+        detector = reasoning_parser.detector
+        case_tokenizer.add_special_tokens(
+            {
+                "additional_special_tokens": [
+                    detector.think_start_token,
+                    detector.think_end_token,
+                ]
+            }
+        )
+        post = SglangStreamingPostProcessor(
+            tokenizer=case_tokenizer,
+            tool_call_parser=None,
+            reasoning_parser=reasoning_parser,
+            structured_guided_json=True,
+        )
+        token_ids = case_tokenizer.encode(prefix + response_json)
+        responses = []
+        for offset in range(0, len(token_ids), chunk_size):
+            is_last = offset + chunk_size >= len(token_ids)
+            choice = post.process_output(
+                {
+                    "token_ids": token_ids[offset : offset + chunk_size],
+                    "finish_reason": (
+                        finish_reason if finish_with_tokens and is_last else None
+                    ),
+                }
+            )
+            if choice:
+                responses.append(choice)
+        if not finish_with_tokens:
+            terminal = post.process_output(
+                {"token_ids": [], "finish_reason": finish_reason}
+            )
+            assert terminal is not None
+            responses.append(terminal)
+        content = "".join(item["delta"].get("content", "") for item in responses)
+        reasoning = "".join(
+            item["delta"].get("reasoning_content", "") for item in responses
+        )
+        if finish_reason == "length":
+            # Incomplete JSON is not reclassified as a complete structured answer.
+            assert content == ""
+        else:
+            assert content == (
+                prefix + response_json if not expected_reasoning else response_json
+            )
+        assert reasoning == expected_reasoning
+        assert responses[-1]["finish_reason"] == finish_reason
 
 
 # ---------------------------------------------------------------------------
