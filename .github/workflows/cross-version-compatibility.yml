@@ -1,0 +1,81 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: Cross-version compatibility
+on:
+  workflow_dispatch:
+    inputs:
+      frontend_image:
+        description: Candidate frontend image (tag or digest; resolved once before testing)
+        required: true
+        type: string
+      worker_image:
+        description: Candidate SGLang image (tag or digest; resolved once before testing)
+        required: true
+        type: string
+      release_line:
+        description: Target release line (empty derives it from the checkout)
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      frontend_image:
+        required: true
+        type: string
+      worker_image:
+        required: true
+        type: string
+      release_line:
+        required: false
+        type: string
+        default: ''
+      source_ref:
+        required: false
+        type: string
+        default: ''
+    secrets:
+      HF_TOKEN:
+        required: false
+permissions:
+  contents: read
+jobs:
+  compatibility:
+    # Requires a Docker daemon with NVIDIA runtime, a runner that shares the daemon
+    # network namespace (local Docker or a DinD sidecar), for loopback ports.
+    # Override for installations with a dedicated lane.
+    runs-on: ${{ vars.N2_GPU_RUNNER || 'prod-tester-amd-gpu-v2' }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+      - name: Log in to candidate registry
+        uses: $/.github/actions/docker-login
+        with:
+          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+          ecr_registry: ${{ vars.ECR_REGISTRY }}
+      - name: Install isolated client dependencies
+        run: |
+          python3 -m venv "$RUNNER_TEMP/n2-client"
+          "$RUNNER_TEMP/n2-client/bin/pip" install requests==2.32.5 huggingface-hub==0.34.4
+      - name: Run CPU contract tests
+        run: "$RUNNER_TEMP/n2-client/bin/python -m unittest discover -s scripts/compatibility -v"
+      - name: Run both scenarios across the N-2 window
+        env:
+          FRONTEND_IMAGE: ${{ inputs.frontend_image }}
+          WORKER_IMAGE: ${{ inputs.worker_image }}
+          RELEASE_LINE: ${{ inputs.release_line }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          "$RUNNER_TEMP/n2-client/bin/python" scripts/compatibility/runner.py \
+            --frontend-image "$FRONTEND_IMAGE" --worker-image "$WORKER_IMAGE" \
+            --release-line "$RELEASE_LINE" --output "$RUNNER_TEMP/n2-results"
+      - name: Upload evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: n2-compatibility-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/n2-results/report.json
+            ${{ runner.temp }}/n2-results/*/embedding/*
+            ${{ runner.temp }}/n2-results/*/chat/*
+          if-no-files-found: warn

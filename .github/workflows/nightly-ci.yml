@@ -896,6 +896,17 @@ jobs:
       image_tag_suffix: '-nightly'
     secrets: inherit
 
+  cross-version-compatibility:
+    name: SGLang N-2 compatibility
+    needs: [sglang-build, frontend-build, resolve-source-sha, compute-release-mode]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    uses: $/.github/workflows/cross-version-compatibility.yml
+    with:
+      frontend_image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.resolve-source-sha.outputs.source_sha }}-${{ needs.frontend-build.outputs.target_tag_plain }}-nightly
+      worker_image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.resolve-source-sha.outputs.source_sha }}-${{ needs.sglang-build.outputs.target_tag_plain }}-nightly
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+    secrets: inherit
+
   sglang-test:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [sglang-build, resolve-source-sha, compute-release-mode]
