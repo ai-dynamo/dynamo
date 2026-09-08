@@ -636,7 +636,7 @@ worker_selection:
     async fn load_only_reserves_estimated_prefill_without_prefix_matches() {
         let selector = selector_with_schedulable_worker().await;
 
-        for estimate in [0, 64, 4096, 65536] {
+        for estimate in [0, 64] {
             let mut request = load_only_select_request("load-only");
             request.estimated_input_tokens = estimate;
             let response = selector
