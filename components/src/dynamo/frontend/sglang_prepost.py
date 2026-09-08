@@ -360,6 +360,10 @@ def _guided_output_requires_reasoning(
     if tool_choice == "required" or _is_named_tool_choice(tool_choice):
         return True
 
+    # Explicit legacy constraints take precedence over response_format.
+    if legacy_guided_decoding(request):
+        return False
+
     response_format = request.get("response_format")
     if not isinstance(response_format, dict) or reasoning_parser_name == "gpt_oss":
         return False
@@ -369,7 +373,7 @@ def _guided_output_requires_reasoning(
 def _needs_structured_json_fallback(
     request: dict[str, Any], force_reasoning: bool
 ) -> bool:
-    if not force_reasoning:
+    if not force_reasoning or legacy_guided_decoding(request):
         return False
     response_format = request.get("response_format")
     if not isinstance(response_format, dict):

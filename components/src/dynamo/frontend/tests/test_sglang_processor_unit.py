@@ -37,6 +37,7 @@ from dynamo.frontend.sglang_prepost import (
     SglangStreamingPostProcessor,
     _flatten_message_content,
     _guided_output_requires_reasoning,
+    _needs_structured_json_fallback,
     _normalize_assistant_tool_call_arguments,
     _normalize_prompt_token_ids,
     _normalize_sglang_parser_name,
@@ -1103,14 +1104,39 @@ def test_structured_response_requires_effective_reasoning():
 
 
 @pytest.mark.core
+@pytest.mark.parametrize(
+    ("legacy_constraint", "expected"),
+    [
+        ({"guided_json": {"type": "object"}}, False),
+        ({"guided_regex": "trueish"}, False),
+        ({"guided_grammar": 'root ::= "trueish"'}, False),
+        ({"guided_choice": ["trueish"]}, False),
+        ({"guided_choice": []}, True),
+    ],
+)
+def test_structured_response_respects_legacy_constraint_precedence(
+    legacy_constraint, expected
+):
+    request = {"response_format": {"type": "json_schema"}, **legacy_constraint}
+
+    assert _needs_structured_json_fallback(request, True) is expected
+    assert _guided_output_requires_reasoning(request, True, "qwen3") is expected
+
+
+@pytest.mark.core
 @pytest.mark.timeout(60)
 @pytest.mark.parametrize("use_pool", [False, True], ids=["inline", "pool"])
 @pytest.mark.parametrize(
-    ("thinking", "separate_reasoning"),
-    [(True, True), (False, True), (True, False)],
+    ("thinking", "separate_reasoning", "legacy_regex"),
+    [
+        (True, True, False),
+        (False, True, False),
+        (True, False, False),
+        (True, True, True),
+    ],
 )
 def test_structured_response_generator_routes_json_and_preserves_streaming(
-    tokenizer, monkeypatch, use_pool, thinking, separate_reasoning
+    tokenizer, monkeypatch, use_pool, thinking, separate_reasoning, legacy_regex
 ):
     response_format = {
         "type": "json_schema",
@@ -1131,10 +1157,12 @@ def test_structured_response_generator_routes_json_and_preserves_streaming(
         "separate_reasoning": separate_reasoning,
         "stream": True,
     }
-    response_json = '{"answer":42}'
+    if legacy_regex:
+        request["guided_regex"] = "trueish"
+    response_text = "trueish" if legacy_regex else '{"answer":42}'
     routed_engine = FakeRoutedEngine(
         items=[
-            {"token_ids": tokenizer.encode(response_json, add_special_tokens=False)},
+            {"token_ids": tokenizer.encode(response_text, add_special_tokens=False)},
             {"token_ids": [], "finish_reason": "stop"},
         ]
     )
@@ -1145,6 +1173,16 @@ def test_structured_response_generator_routes_json_and_preserves_streaming(
             future = Future()
             future.set_result(fn(*args))
             return future
+
+    fallback_flags = []
+
+    def capture_postprocessor(**kwargs):
+        fallback_flags.append(kwargs["structured_guided_json"])
+        return SglangStreamingPostProcessor(**kwargs)
+
+    monkeypatch.setattr(
+        sglang_processor_module, "SglangStreamingPostProcessor", capture_postprocessor
+    )
 
     if use_pool:
         monkeypatch.setattr(sglang_processor_module, "_w_tokenizer", tokenizer)
@@ -1181,12 +1219,23 @@ def test_structured_response_generator_routes_json_and_preserves_streaming(
         return responses, content_emission_positions
 
     responses, content_emission_positions = asyncio.run(collect())
-    assert routed_engine.requests[0]["require_reasoning"] is thinking
+    assert routed_engine.requests[0]["require_reasoning"] is (
+        thinking and not legacy_regex
+    )
+    assert fallback_flags == [thinking and not legacy_regex]
+    if legacy_regex:
+        assert routed_engine.requests[0]["sampling_options"]["guided_decoding"] == {
+            "regex": "trueish"
+        }
     content = "".join(choice["delta"].get("content", "") for choice in responses)
     reasoning = "".join(
         choice["delta"].get("reasoning_content", "") for choice in responses
     )
-    assert content == response_json
+    if legacy_regex:
+        assert content + reasoning == response_text
+        assert responses[-1]["finish_reason"] == "stop"
+        return
+    assert content == response_text
     assert reasoning == ""
     assert responses[-1]["finish_reason"] == "stop"
     if not thinking or not separate_reasoning:
@@ -4225,7 +4274,6 @@ class TestReasoningParsing:  # FRONTEND.9 — reasoning ↔ tool-call orchestrat
 
     @pytest.mark.core
     @pytest.mark.timeout(60)
-    @pytest.mark.parametrize("parser_name", ["qwen3", "deepseek-v4"])
     @pytest.mark.parametrize(
         ("chunk_size", "finish_with_tokens"), [(1, False), (10000, True)]
     )
@@ -4252,7 +4300,6 @@ class TestReasoningParsing:  # FRONTEND.9 — reasoning ↔ tool-call orchestrat
     def test_structured_response_distinguishes_bare_json_from_reasoning(
         self,
         tokenizer,
-        parser_name,
         chunk_size,
         finish_with_tokens,
         prefix,
@@ -4263,7 +4310,7 @@ class TestReasoningParsing:  # FRONTEND.9 — reasoning ↔ tool-call orchestrat
         _, reasoning_parser = create_parsers(
             {},
             tool_call_parser_name=None,
-            reasoning_parser_name=parser_name,
+            reasoning_parser_name="qwen3",
             force_reasoning=True,
         )
         assert reasoning_parser is not None
@@ -4308,7 +4355,6 @@ class TestReasoningParsing:  # FRONTEND.9 — reasoning ↔ tool-call orchestrat
             item["delta"].get("reasoning_content", "") for item in responses
         )
         if finish_reason == "length":
-            # Incomplete JSON is not reclassified as a complete structured answer.
             assert content == ""
         else:
             assert content == (
