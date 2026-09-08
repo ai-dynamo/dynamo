@@ -109,6 +109,8 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 
   Within a single worker, treat this as the **base** of a range rather than one port. SGLang runs one scheduler process per node-local GPU and each builds its own NIXL agent, so Dynamo gives node-local rank *i* the port `base + i` and the operator declares the whole range on the pod as `nixl`, `nixl-1`, … so Prometheus scrapes every rank. Leave room for as many consecutive ports as the pod has GPUs (up to 8).
 
+  Set it to a literal port between 1 and 65535. The operator reads this value to declare the range as container ports, so while NIXL Prometheus telemetry is on it rejects a value taken from `valueFrom`, and one that is not a usable port, rather than let the exporters bind a range nothing scrapes.
+
   **Operator preset:** `19090` on worker, prefill, and decode pods.
 </ParamField>
 

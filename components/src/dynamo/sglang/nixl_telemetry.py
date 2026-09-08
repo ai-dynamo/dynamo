@@ -33,6 +33,38 @@ from dynamo.common.utils.nixl_telemetry import (
 logger = logging.getLogger(__name__)
 
 
+def _node_local_launch_shape(server_args: Any) -> tuple[int, int]:
+    """Return SGLang's own split of the pipeline and tensor dimensions per node."""
+    nnodes = getattr(server_args, "nnodes", 1) or 1
+    tp_size = getattr(server_args, "tp_size", 1) or 1
+    pp_size = getattr(server_args, "pp_size", 1) or 1
+
+    pp_size_per_node = max(pp_size // nnodes, 1)
+    nnodes_per_tp_group = max(nnodes // pp_size, 1)
+    tp_size_per_node = max(tp_size // nnodes_per_tp_group, 1)
+    if getattr(server_args, "is_ep_scale_joiner", False):
+        # A scale joiner enumerates its whole tensor-parallel span on one node.
+        tp_size_per_node = tp_size
+
+    return pp_size_per_node, tp_size_per_node
+
+
+def _node_local_rank_count(server_args: Any, *, dp_rank: int | None) -> int:
+    """Return how many ranks this launch places on one node.
+
+    This is the width of the port range the pod reserves, so it has to count
+    the same schedulers ``_node_local_rank`` numbers: the launch places one on
+    each node-local pipeline and tensor position, and one such group per
+    data-parallel rank whenever ``dp_rank`` names a separate launch group.
+    """
+    pp_size_per_node, tp_size_per_node = _node_local_launch_shape(server_args)
+    ranks = pp_size_per_node * tp_size_per_node
+    if dp_rank is not None and not getattr(server_args, "enable_dp_attention", False):
+        ranks *= max(getattr(server_args, "dp_size", 1) or 1, 1)
+
+    return ranks
+
+
 def _node_local_rank(
     server_args: Any,
     *,
@@ -57,17 +89,7 @@ def _node_local_rank(
     derived from ``tp_rank``, so folding it in there would hand two schedulers
     the same number.
     """
-    nnodes = getattr(server_args, "nnodes", 1) or 1
-    tp_size = getattr(server_args, "tp_size", 1) or 1
-    pp_size = getattr(server_args, "pp_size", 1) or 1
-
-    # SGLang's own split of the pipeline and tensor dimensions across nodes.
-    pp_size_per_node = max(pp_size // nnodes, 1)
-    nnodes_per_tp_group = max(nnodes // pp_size, 1)
-    tp_size_per_node = max(tp_size // nnodes_per_tp_group, 1)
-    if getattr(server_args, "is_ep_scale_joiner", False):
-        # A scale joiner enumerates its whole tensor-parallel span on one node.
-        tp_size_per_node = tp_size
+    pp_size_per_node, tp_size_per_node = _node_local_launch_shape(server_args)
 
     rank = (pp_rank % pp_size_per_node) * tp_size_per_node + (
         tp_rank % tp_size_per_node
@@ -94,18 +116,24 @@ def _assign_nixl_prometheus_port(target: Any, args: tuple, kwargs: dict) -> None
     pp_rank = arguments.get("pp_rank") or 0
     dp_rank = arguments.get("dp_rank")
 
+    server_args = arguments["server_args"]
     local_rank = _node_local_rank(
-        arguments["server_args"], tp_rank=tp_rank, pp_rank=pp_rank, dp_rank=dp_rank
+        server_args, tp_rank=tp_rank, pp_rank=pp_rank, dp_rank=dp_rank
     )
-    port = derive_nixl_prometheus_port(base_port, local_rank)
+    # The reservation is as wide as this launch, not as wide as a pod may ever
+    # reserve: a four-rank launch that fits below the top of the port range, or
+    # beside another listener eight ports up, is one the maximum would refuse.
+    colocated_ranks = _node_local_rank_count(server_args, dp_rank=dp_rank)
+    port = derive_nixl_prometheus_port(base_port, local_rank, max_ranks=colocated_ranks)
     os.environ[NIXL_TELEMETRY_PROMETHEUS_PORT_ENV] = str(port)
     logger.info(
         "NIXL Prometheus exporter for tp_rank=%s pp_rank=%s dp_rank=%s is "
-        "node-local rank %s and listens on port %s (base %s)",
+        "node-local rank %s of %s and listens on port %s (base %s)",
         tp_rank,
         pp_rank,
         dp_rank,
         local_rank,
+        colocated_ranks,
         port,
         base_port,
     )

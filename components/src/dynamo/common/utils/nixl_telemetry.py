@@ -106,11 +106,27 @@ def derive_nixl_prometheus_port(
     port range is reserved per pod, so a multi-node deployment restarts the
     offset on every node.
 
+    ``max_ranks`` is how wide that reservation is. A caller that knows how many
+    ranks its launch actually places on a node should pass that count, because
+    the checks below are all range checks: assuming the maximum turns a base
+    port that leaves room for this launch into a rejected one, and widens the
+    span compared against every other listener in the container.
+
     Raises ValueError rather than returning a port that would leave the
     reserved range or land on another listener. A rank that cannot be given a
     port of its own must say so; falling back to the base port would recreate
     the bind collision this module exists to prevent.
     """
+    # A narrower reservation is the caller describing its own launch, but a
+    # wider one would hand out ports past the range the operator declares as
+    # container ports, which is the one thing no caller may narrow away.
+    if max_ranks < 1 or max_ranks > MAX_COLOCATED_NIXL_EXPORTERS:
+        raise ValueError(
+            f"a pod reserves between 1 and {MAX_COLOCATED_NIXL_EXPORTERS} NIXL "
+            f"exporter ports, so {max_ranks} co-located ranks cannot each be given "
+            f"a declared port to be scraped on."
+        )
+
     if base_port < 1:
         raise ValueError(
             f"{NIXL_TELEMETRY_PROMETHEUS_PORT_ENV}={base_port} is not a usable TCP "

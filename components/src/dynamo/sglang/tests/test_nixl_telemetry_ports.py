@@ -122,7 +122,9 @@ def _scheduler_calls(server_args) -> list[tuple[int, int, int, int | None]]:
     return calls
 
 
-def _port_for_scheduler(server_args, gpu_id, tp_rank, pp_rank, dp_rank) -> int:
+def _port_for_scheduler(
+    server_args, gpu_id, tp_rank, pp_rank, dp_rank, base_port=BASE_PORT
+) -> int:
     """The exporter port the wrapper installs in one scheduler's process.
 
     SGLang calls the scheduler entry point entirely positionally, so this passes
@@ -131,7 +133,7 @@ def _port_for_scheduler(server_args, gpu_id, tp_rank, pp_rank, dp_rank) -> int:
     # Every scheduler is its own process and reads the base the operator
     # injected. Sharing one interpreter across a launch would instead let each
     # call read the port the previous call installed.
-    os.environ[NIXL_TELEMETRY_PROMETHEUS_PORT_ENV] = str(BASE_PORT)
+    os.environ[NIXL_TELEMETRY_PROMETHEUS_PORT_ENV] = str(base_port)
 
     port_args, attn_cp_rank, moe_dp_rank, moe_ep_rank = SimpleNamespace(), 0, 0, 0
     _assign_nixl_prometheus_port(
@@ -153,9 +155,9 @@ def _port_for_scheduler(server_args, gpu_id, tp_rank, pp_rank, dp_rank) -> int:
     return int(os.environ[NIXL_TELEMETRY_PROMETHEUS_PORT_ENV])
 
 
-def _ports_for_launch(server_args) -> list[int]:
+def _ports_for_launch(server_args, base_port=BASE_PORT) -> list[int]:
     return [
-        _port_for_scheduler(server_args, *call)
+        _port_for_scheduler(server_args, *call, base_port=base_port)
         for call in _scheduler_calls(server_args)
     ]
 
@@ -232,6 +234,26 @@ class TestPerRankPortAssignment:
             for node_rank in (0, 1)
         )
         assert first == second == [19090, 19091, 19092, 19093]
+
+    def test_a_narrow_launch_fits_where_a_full_range_would_not(self, telemetry_env):
+        """The pod reserves one port per rank it launches, not eight regardless.
+
+        A four-rank launch is measured against the four ports it is given, so a
+        base leaving exactly that much room is usable rather than refused for
+        ranks this launch never places.
+        """
+        base = 65535 - 3
+        assert _ports_for_launch(_server_args(tp_size=4), base_port=base) == [
+            65532,
+            65533,
+            65534,
+            65535,
+        ]
+
+    def test_a_launch_with_no_room_for_its_own_ranks_is_rejected(self, telemetry_env):
+        """Rank 0 alone fits; the ranks after it are what have nowhere to bind."""
+        with pytest.raises(ValueError, match="exceeds the maximum port"):
+            _ports_for_launch(_server_args(tp_size=8), base_port=65535 - 3)
 
     def test_disabled_telemetry_leaves_the_environment_alone(self, telemetry_env):
         telemetry_env.setenv("NIXL_TELEMETRY_ENABLE", "n")

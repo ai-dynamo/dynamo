@@ -73,6 +73,29 @@ class TestDeriveNixlPrometheusPort:
         with pytest.raises(ValueError, match="exceeds the maximum port"):
             derive_nixl_prometheus_port(MAX_PORT, 0, env=OPERATOR_ENV)
 
+    def test_a_narrower_launch_is_measured_against_its_own_width(self):
+        """The pod reserves one port per rank it places, not the maximum."""
+        base = MAX_PORT - 3
+        ports = [
+            derive_nixl_prometheus_port(base, rank, max_ranks=4, env=OPERATOR_ENV)
+            for rank in range(4)
+        ]
+        assert ports == [MAX_PORT - 3, MAX_PORT - 2, MAX_PORT - 1, MAX_PORT]
+
+    def test_a_rank_outside_a_narrower_launch_is_rejected(self):
+        with pytest.raises(ValueError, match="outside the reserved"):
+            derive_nixl_prometheus_port(19090, 4, max_ranks=4, env=OPERATOR_ENV)
+
+    def test_a_launch_wider_than_the_pod_reserves_is_rejected(self):
+        """Ranks past the declared container ports would be scraped by nobody."""
+        with pytest.raises(ValueError, match="cannot each be given"):
+            derive_nixl_prometheus_port(
+                19090,
+                0,
+                max_ranks=MAX_COLOCATED_NIXL_EXPORTERS + 1,
+                env=OPERATOR_ENV,
+            )
+
 
 class TestNixlPrometheusBasePort:
     def test_operator_defaults_are_recognized(self):
