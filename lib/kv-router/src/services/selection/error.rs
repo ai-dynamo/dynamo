@@ -103,8 +103,12 @@ impl IntoResponse for SelectionError {
             Self::Scheduler(
                 KvSchedulerError::RequestClassifierPanicked(_)
                     | KvSchedulerError::RequestClassifierFailed(_)
+                    | KvSchedulerError::InvalidClassificationMetadata(_)
             )
         ) {
+            // Plugin-produced detail (its error text, or the metadata it
+            // returned) stays server-side: log it and return a fixed body.
+            tracing::warn!(error = %self, "request classifier failure sanitized from response");
             return (
                 self.status(),
                 Json(serde_json::json!({"error": "request classifier failed"})),
@@ -158,6 +162,20 @@ mod tests {
     async fn classifier_error_response_is_sanitized() {
         let response = SelectionError::Scheduler(KvSchedulerError::RequestClassifierFailed(
             std::sync::Arc::new(PrivateClassifierError),
+        ))
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), br#"{"error":"request classifier failed"}"#);
+    }
+
+    #[tokio::test]
+    async fn invalid_classification_metadata_response_is_sanitized() {
+        let response = SelectionError::Scheduler(KvSchedulerError::InvalidClassificationMetadata(
+            "unknown policy class \"plugin-private-class\"".to_string(),
         ))
         .into_response();
 
