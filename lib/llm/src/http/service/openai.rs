@@ -6819,6 +6819,7 @@ mod tests {
                 status: StatusCode::TOO_MANY_REQUESTS,
                 semantic: None,
                 sanitized: Some(SanitizedError::Overloaded),
+                metric_error_type: Some(ErrorType::Overload),
             },
             true,
         );
