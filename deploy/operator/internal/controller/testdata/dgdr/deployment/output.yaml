@@ -39,7 +39,7 @@ spec:
                 - --aic-backend
                 - vllm
                 - --aic-backend-version
-                - 0.14.0
+                - 0.24.0
                 - --aic-system
                 - h100_sxm
                 - --aic-tp-size
@@ -82,7 +82,7 @@ spec:
                 - --aic-backend
                 - vllm
                 - --aic-backend-version
-                - 0.14.0
+                - 0.24.0
                 - --aic-system
                 - h100_sxm
                 - --aic-tp-size
@@ -139,7 +139,7 @@ spec:
             - --aic-backend
             - vllm
             - --aic-backend-version
-            - 0.14.0
+            - 0.24.0
             - --aic-system
             - h100_sxm
             - --aic-tp-size
@@ -213,7 +213,7 @@ spec:
             - --aic-backend
             - vllm
             - --aic-backend-version
-            - 0.14.0
+            - 0.24.0
             - --aic-system
             - h100_sxm
             - --aic-tp-size
@@ -498,7 +498,7 @@ spec:
             - --aic-backend
             - vllm
             - --aic-backend-version
-            - 0.14.0
+            - 0.24.0
             - --aic-system
             - h100_sxm
             - --aic-tp-size
@@ -676,7 +676,7 @@ spec:
             - --aic-backend
             - vllm
             - --aic-backend-version
-            - 0.14.0
+            - 0.24.0
             - --aic-system
             - h100_sxm
             - --aic-tp-size

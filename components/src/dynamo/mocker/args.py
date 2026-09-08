@@ -344,8 +344,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--aic-backend-version",
         type=str,
         default=None,
-        help="AIC backend engine version (e.g., '0.19.0' for vLLM, '0.5.10' for SGLang, "
-        "'1.3.0rc10' for TRT-LLM). If not set, uses the default version for the backend.",
+        help="AIC backend engine version for perf database lookups (e.g. '0.24.0' "
+        "for vLLM). If not set, resolves to the maintained default version in the "
+        "installed aisimulate perf database for --aic-system/--aic-backend.",
     )
     parser.add_argument(
         "--aic-tp-size",
