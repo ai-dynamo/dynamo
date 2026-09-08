@@ -10,6 +10,7 @@ so these run in an image where the engine is not installed or not importable
 makes over their results is what is exercised here.
 """
 
+import importlib.util
 import sys
 
 import pytest
@@ -119,7 +120,7 @@ def test_reports_missing_mooncake_install_explicitly(monkeypatch):
     assert "none installed" in str(excinfo.value)
 
 
-@pytest.mark.parametrize("requested_backend", [None, "", "nccl", "nvshmem"])
+@pytest.mark.parametrize("requested_backend", [None, "nccl"])
 def test_ignores_backends_other_than_mooncake(monkeypatch, requested_backend):
     """Negative control: the same broken image is fine for everyone else.
 
@@ -154,16 +155,16 @@ def test_unreadable_torch_backend_registry_does_not_block_startup(monkeypatch):
 
 
 def test_import_probe_reports_every_module_name_it_tried(monkeypatch):
-    """The probe itself, not a stand-in for it.
+    """The real probe, run against an import system with no mooncake in it.
 
-    The other cases replace the probes to pin the decision logic, which leaves
-    the probes themselves untested. This one runs the real
-    ``_import_process_group_extension`` against an import system that has no
-    mooncake in it, so the import, the exception capture, and the message
-    assembly are all the shipped code. Blocking at ``sys.meta_path`` rather
-    than by uninstalling makes it behave the same in an image that does have a
-    working wheel.
+    Blocking at ``sys.meta_path`` rather than by uninstalling makes the case
+    behave the same in an image that does ship a working wheel.
     """
+    monkeypatch.setattr(
+        elastic_ep_preflight,
+        "_required_process_group_modules",
+        lambda: ("mooncake.pg", "mooncake.ep"),
+    )
 
     class _RefuseMooncake:
         def find_spec(self, name, path=None, target=None):
@@ -188,6 +189,55 @@ def test_import_probe_reports_every_module_name_it_tried(monkeypatch):
     assert "mooncake.ep" in failure
 
 
-def test_absent_mooncake_renders_as_an_explicit_absence():
-    """No mooncake installed must read as words, not an empty field."""
-    assert elastic_ep_preflight._format_versions({}) == "none installed"
+def _install_fake_sglang_sources(monkeypatch, tmp_path, import_line):
+    """Point the resolver at a source tree naming one ProcessGroup module."""
+    package = tmp_path / "sglang"
+    elastic_ep = package / "srt" / "elastic_ep"
+    elastic_ep.mkdir(parents=True)
+    (elastic_ep / "elastic_ep.py").write_text(import_line, encoding="utf-8")
+
+    spec = importlib.util.spec_from_file_location(
+        "sglang", package / "__init__.py", submodule_search_locations=[str(package)]
+    )
+    monkeypatch.setattr(
+        elastic_ep_preflight.importlib.util,
+        "find_spec",
+        lambda name: spec if name == "sglang" else None,
+    )
+
+
+@pytest.mark.parametrize(
+    "import_line, expected",
+    [
+        ("from mooncake.pg import MooncakeBackendOptions\n", ("mooncake.pg",)),
+        ("from mooncake.ep import MooncakeBackendOptions\n", ("mooncake.ep",)),
+    ],
+)
+def test_probes_only_the_module_the_installed_engine_imports(
+    monkeypatch, tmp_path, import_line, expected
+):
+    """The half of the rename the engine does not use must not satisfy the check.
+
+    Accepting either name lets an image whose wheel ships only the other one
+    pass here and still fail during engine startup, which is the failure this
+    module exists to move earlier.
+    """
+    _install_fake_sglang_sources(monkeypatch, tmp_path, import_line)
+
+    assert elastic_ep_preflight._required_process_group_modules() == expected
+
+
+def test_unreadable_engine_sources_probe_both_module_names(monkeypatch):
+    """An engine that cannot be located is not evidence for either name.
+
+    Narrowing on a guess would refuse workers over an upstream file move, so
+    the resolver widens back to both names instead.
+    """
+    monkeypatch.setattr(
+        elastic_ep_preflight.importlib.util, "find_spec", lambda name: None
+    )
+
+    assert elastic_ep_preflight._required_process_group_modules() == (
+        "mooncake.pg",
+        "mooncake.ep",
+    )

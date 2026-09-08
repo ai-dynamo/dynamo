@@ -442,6 +442,14 @@ async def parse_args(args: list[str]) -> Config:
         args_dict["disaggregation_bootstrap_port"] = bootstrap_port
         parsed_args = Namespace(**args_dict)
 
+    # Read off the parsed flags rather than ServerArgs: ServerArgs.from_cli_args
+    # downloads the model, and the diffusion and video paths build a stub that
+    # carries neither flag, so both would leave this unchecked.
+    check_elastic_ep_backend(
+        getattr(parsed_args, "elastic_ep_backend", None),
+        getattr(parsed_args, "enable_dp_attention", False),
+    )
+
     # Dynamo argument processing
     # If an endpoint is provided, validate and use it
     # otherwise fall back to default endpoints
@@ -628,11 +636,6 @@ async def parse_args(args: list[str]) -> Config:
         server_args = ServerArgs.from_cli_args(parsed_args)
         if get_sglang_model_config(server_args).is_multimodal:
             ensure_sglang_tensor_image_size()
-
-    check_elastic_ep_backend(
-        getattr(server_args, "elastic_ep_backend", None),
-        getattr(server_args, "enable_dp_attention", False),
-    )
 
     if getattr(server_args, "schedule_low_priority_values_first", False):
         raise ValueError(

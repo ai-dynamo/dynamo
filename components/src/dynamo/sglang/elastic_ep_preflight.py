@@ -4,18 +4,10 @@
 """Startup check for SGLang's ``--elastic-ep-backend mooncake``.
 
 SGLang builds its elastic-EP process groups from the mooncake transfer
-engine's torch ``ProcessGroup`` extension: ``backend="mooncake"`` for the
-device group and ``backend="mooncake-cpu"`` for the CPU group. That import
-and that group construction happen deep inside engine startup, well after
-the model is loaded, so a worker whose image cannot serve the requested
-backend only finds out late and reports it from inside upstream engine code
-that the deployer did not write. Checking the same preconditions while
-Dynamo is still assembling ``ServerArgs`` turns that into an argument error
-naming the flag that caused it.
-
-This module deliberately imports no ``sglang`` symbol, and imports ``torch``
-only inside the probe helpers. That keeps it usable -- and unit-testable --
-in an image where the engine is not importable.
+engine's torch ``ProcessGroup`` extension, deep inside engine startup and
+after the model is loaded. The check has to run before model load to be worth
+anything, and it must not import ``sglang`` or eagerly import ``torch``, so it
+still answers in an image whose engine is the broken part.
 """
 
 from __future__ import annotations
@@ -32,8 +24,16 @@ MOONCAKE_BACKEND = "mooncake"
 _MOONCAKE_DEVICE_BACKEND = "mooncake"
 
 # mooncake renamed this extension ``mooncake.ep`` -> ``mooncake.pg``; SGLang
-# v0.5.16 imports the old name and v0.5.18 the new one, so try both.
+# v0.5.16 imports the old name and v0.5.18 the new one.
 _PROCESS_GROUP_MODULES = ("mooncake.pg", "mooncake.ep")
+
+# Where SGLang names that extension. Read as text: importing them to ask would
+# need the working engine this check exists to doubt, and would pull in torch
+# and CUDA before it can answer.
+_SGLANG_ELASTIC_EP_SOURCES = (
+    "srt/elastic_ep/elastic_ep.py",
+    "srt/distributed/parallel_state.py",
+)
 
 # Both distributions ship the same extension; only one is normally installed.
 _MOONCAKE_DISTRIBUTIONS = (
@@ -46,6 +46,37 @@ _MOONCAKE_DISTRIBUTIONS = (
 _EXTENSION_PREFIXES = ("pg_", "ep_")
 
 
+def _required_process_group_modules() -> Tuple[str, ...]:
+    """The extension names the installed SGLang actually imports.
+
+    An image can hold the wrong half of the ``mooncake.ep`` -> ``mooncake.pg``
+    rename: the wheel imports cleanly and the engine still cannot start,
+    because it asks for the other name. Reading the engine's own import line
+    pins which name has to work. Falls back to accepting either when those
+    sources cannot be read, since refusing a worker over an upstream file move
+    would be worse than the late failure this check replaces.
+    """
+    try:
+        spec = importlib.util.find_spec("sglang")
+    except Exception:  # noqa: BLE001 - a broken engine must not mask the real error
+        return _PROCESS_GROUP_MODULES
+    if spec is None or not spec.submodule_search_locations:
+        return _PROCESS_GROUP_MODULES
+
+    required: List[str] = []
+    for location in spec.submodule_search_locations:
+        for relative in _SGLANG_ELASTIC_EP_SOURCES:
+            try:
+                with open(os.path.join(location, relative), encoding="utf-8") as handle:
+                    source = handle.read()
+            except OSError:
+                continue
+            for module_name in _PROCESS_GROUP_MODULES:
+                if module_name in source and module_name not in required:
+                    required.append(module_name)
+    return tuple(required) or _PROCESS_GROUP_MODULES
+
+
 def _import_process_group_extension() -> Optional[str]:
     """Return ``None`` when the extension imports, else the collected failures.
 
@@ -54,7 +85,7 @@ def _import_process_group_extension() -> Optional[str]:
     ``pg_<torch>`` module matches) before any GPU work has started.
     """
     failures: List[str] = []
-    for module_name in _PROCESS_GROUP_MODULES:
+    for module_name in _required_process_group_modules():
         try:
             importlib.import_module(module_name)
             return None
