@@ -329,6 +329,85 @@ def test_build_dgd_config_vllm_disagg_removes_legacy_role_flags() -> None:
         assert args[args.index("--disaggregation-mode") + 1] == expected_mode
 
 
+@pytest.mark.parametrize("mode", ["agg", "disagg"])
+def test_build_dgd_config_vllm_drops_generated_max_model_len(mode: str) -> None:
+    """A generated context cap would pin the deployment to one target ISL/OSL."""
+    modifier = CONFIG_MODIFIERS["vllm"]
+    worker_args = [
+        "--max-model-len",
+        "6500",
+        "--tensor-parallel-size",
+        "2",
+        "--max-model-len=6500",
+    ]
+    dgd_config = modifier.build_dgd_config(
+        mode=mode,
+        model_name="test/model",
+        image="example/vllm:test",
+        prefill_cli_args=list(worker_args),
+        decode_cli_args=list(worker_args),
+        agg_cli_args=list(worker_args),
+    )
+
+    workers = _worker_components(dgd_config)
+    assert workers
+    for worker in workers:
+        args = _main_container(worker)["args"]
+        assert not any(str(arg).startswith("--max-model-len") for arg in args)
+        assert args[args.index("--tensor-parallel-size") + 1] == "2"
+
+
+def test_materialize_dgd_keeps_overridden_max_model_len() -> None:
+    """An explicit context cap is merged after generation and stays intact."""
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
+    )
+
+    modifier = CONFIG_MODIFIERS["vllm"]
+    blueprint = modifier.build_dgd_config(
+        mode="agg",
+        model_name="test/model",
+        image="example/vllm:test",
+        agg_cli_args=["--max-model-len", "6500", "--tensor-parallel-size", "1"],
+    )
+
+    def _fake_apply_dgd_overrides(dgd_config: dict, overrides: dict) -> dict:
+        merged = copy.deepcopy(dgd_config)
+        for component in merged["spec"]["components"]:
+            if component.get("type") in ("worker", "prefill", "decode"):
+                _main_container(component)["args"] += ["--max-model-len", "4096"]
+        return merged
+
+    with (
+        patch(
+            "dynamo.profiler.utils.dgd_materialization.apply_dgd_overrides",
+            side_effect=_fake_apply_dgd_overrides,
+        ),
+        patch(
+            "dynamo.profiler.utils.config_modifiers.vllm.get_model_context_length",
+            return_value=8192,
+        ),
+        patch(
+            "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+            return_value=False,
+        ),
+    ):
+        result = materialize_dgd(
+            blueprint,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            override={"spec": {"services": {}}},
+            runtime_backend="vllm",
+            model_name_or_path="test/model",
+        )
+
+    workers = _worker_components(result)
+    assert workers
+    for worker in workers:
+        args = _main_container(worker)["args"]
+        assert args[args.index("--max-model-len") + 1] == "4096"
+
+
 def test_build_dgd_config_shapes_multinode_worker_resources() -> None:
     """DP-only workers keep per-node GPU shaping without multinode inflation."""
     modifier = CONFIG_MODIFIERS["sglang"]

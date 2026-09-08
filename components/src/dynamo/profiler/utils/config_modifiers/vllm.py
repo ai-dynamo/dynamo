@@ -131,6 +131,8 @@ class VllmV1ConfigModifier(BaseConfigModifier):
     BACKEND = "vllm"
     # vllm uses a different arg for model path
     WORKER_MODEL_PATH_ARG = "--model"
+    # vllm reads the context window cap from --max-model-len
+    GENERATED_CONTEXT_LENGTH_ARGS = ("--max-model-len",)
 
     @classmethod
     def load_default_config(cls, mode: str = "disagg") -> dict:
