@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: PR GPU compatibility
+on:
+  # Only copy-pr-bot's approved branches may execute on the trusted GPU runner.
+  push:
+    branches: ['pull-request/[0-9]+']
+    paths:
+      - 'scripts/compatibility/**'
+      - '.github/workflows/*compatibility*.yml'
+      - '.github/workflows/nightly-ci.yml'
+permissions:
+  contents: read
+concurrency:
+  group: pr-gpu-compatibility-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  released-window:
+    name: Published N-2 embedding and chat (GPU)
+    uses: $/.github/workflows/cross-version-compatibility.yml
+    with:
+      suite: released
+      source_ref: ${{ github.sha }}
+    secrets: inherit

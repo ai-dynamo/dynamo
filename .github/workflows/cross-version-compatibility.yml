@@ -4,25 +4,35 @@ name: Cross-version compatibility
 on:
   workflow_dispatch:
     inputs:
+      suite:
+        description: Published window or upcoming candidate compatibility
+        required: false
+        type: choice
+        options: [released, candidate]
+        default: released
       frontend_image:
-        description: Candidate frontend image (tag or digest; resolved once before testing)
-        required: true
+        description: Frontend image (required for candidate suite)
+        required: false
         type: string
       worker_image:
-        description: Candidate SGLang image (tag or digest; resolved once before testing)
-        required: true
+        description: SGLang image (required for candidate suite)
+        required: false
         type: string
       release_line:
-        description: Target release line (empty derives it from the checkout)
+        description: Release line override (released uses manifest; candidate uses checkout)
         required: false
         type: string
   workflow_call:
     inputs:
+      suite:
+        required: false
+        type: string
+        default: released
       frontend_image:
-        required: true
+        required: false
         type: string
       worker_image:
-        required: true
+        required: false
         type: string
       release_line:
         required: false
@@ -43,12 +53,13 @@ jobs:
     # network namespace (local Docker or a DinD sidecar), for loopback ports.
     # Override for installations with a dedicated lane.
     runs-on: ${{ vars.N2_GPU_RUNNER || 'prod-tester-amd-gpu-v2' }}
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: ${{ inputs.source_ref || github.sha }}
       - name: Log in to candidate registry
+        if: inputs.suite == 'candidate'
         uses: $/.github/actions/docker-login
         with:
           aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
@@ -61,19 +72,25 @@ jobs:
         run: "$RUNNER_TEMP/n2-client/bin/python -m unittest discover -s scripts/compatibility -v"
       - name: Run both scenarios across the N-2 window
         env:
+          SUITE: ${{ inputs.suite }}
           FRONTEND_IMAGE: ${{ inputs.frontend_image }}
           WORKER_IMAGE: ${{ inputs.worker_image }}
           RELEASE_LINE: ${{ inputs.release_line }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          "$RUNNER_TEMP/n2-client/bin/python" scripts/compatibility/runner.py \
-            --frontend-image "$FRONTEND_IMAGE" --worker-image "$WORKER_IMAGE" \
-            --release-line "$RELEASE_LINE" --output "$RUNNER_TEMP/n2-results"
+          args=(--suite "$SUITE" --release-line "$RELEASE_LINE" --output "$RUNNER_TEMP/n2-results")
+          if [[ "$SUITE" == candidate ]]; then
+            args+=(--frontend-image "$FRONTEND_IMAGE" --worker-image "$WORKER_IMAGE")
+          elif [[ -n "$FRONTEND_IMAGE" || -n "$WORKER_IMAGE" ]]; then
+            echo "::error::Image overrides require the candidate suite"
+            exit 1
+          fi
+          "$RUNNER_TEMP/n2-client/bin/python" scripts/compatibility/runner.py "${args[@]}"
       - name: Upload evidence even on failure
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
-          name: n2-compatibility-${{ github.run_id }}-${{ github.run_attempt }}
+          name: n2-compatibility-${{ inputs.suite }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/n2-results/report.json
             ${{ runner.temp }}/n2-results/*/embedding/*

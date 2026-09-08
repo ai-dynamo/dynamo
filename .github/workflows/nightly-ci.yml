@@ -897,11 +897,12 @@ jobs:
     secrets: inherit
 
   cross-version-compatibility:
-    name: SGLang N-2 compatibility
+    name: SGLang candidate compatibility
     needs: [sglang-build, frontend-build, resolve-source-sha, compute-release-mode]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: $/.github/workflows/cross-version-compatibility.yml
     with:
+      suite: candidate
       frontend_image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.resolve-source-sha.outputs.source_sha }}-${{ needs.frontend-build.outputs.target_tag_plain }}-nightly
       worker_image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.resolve-source-sha.outputs.source_sha }}-${{ needs.sglang-build.outputs.target_tag_plain }}-nightly
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}

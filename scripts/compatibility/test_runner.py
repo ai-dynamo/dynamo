@@ -13,6 +13,7 @@ from runner import (
     main,
     matrix,
     probe,
+    released_matrix,
     validate_chat,
     validate_embedding,
     validate_stream,
@@ -32,6 +33,35 @@ class CompatibilityTests(unittest.TestCase):
         )
         with self.assertRaises(KeyError):
             matrix(releases, "1.5", "fc", "wc")
+
+    def test_released_window_includes_all_pairs_and_controls_first(self):
+        releases = {
+            v: {"frontend": "f" + v, "worker": "w" + v} for v in ("1.2", "1.3", "1.4")
+        }
+        pairs = released_matrix(releases, "1.4")
+        self.assertEqual(len(pairs), 9)
+        self.assertEqual(
+            [(f, w) for _, f, w in pairs[:3]], [("f" + v, "w" + v) for v in releases]
+        )
+        self.assertEqual(
+            {(f, w) for _, f, w in pairs},
+            {("f" + f, "w" + w) for f in releases for w in releases},
+        )
+        self.assertIn(("frontend-1.2-worker-1.4", "f1.2", "w1.4"), pairs)
+        with self.assertRaises(KeyError):
+            released_matrix(releases, "1.5")
+
+    def test_default_suite_uses_published_manifest_not_cargo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "unused"
+            with patch(
+                "sys.argv", ["runner", "--plan", "--output", str(output)]
+            ), patch("builtins.print") as printed:
+                main()
+            pairs = json.loads(printed.call_args.args[0])
+            self.assertEqual(len(pairs), 9)
+            self.assertIn("frontend-1.2-worker-1.4", [p[0] for p in pairs])
+            self.assertFalse(output.exists())
 
     def test_float_contract_rejects_base64_and_nonfinite(self):
         body = {
@@ -139,9 +169,10 @@ class CompatibilityTests(unittest.TestCase):
 
     def test_all_pairs_run_and_failure_is_reported(self):
         config = {
+            "current_release_line": "1.4",
             "releases": {
                 line: {"frontend": "f" + line, "worker": "w" + line}
-                for line in ("1.2", "1.3")
+                for line in ("1.2", "1.3", "1.4")
             },
             "infrastructure": {"etcd": "etcd", "nats": "nats"},
             "models": {
@@ -153,14 +184,24 @@ class CompatibilityTests(unittest.TestCase):
             model_info=lambda *a, **kw: types.SimpleNamespace(sha="fixed")
         )
         hub.snapshot_download = lambda *a, **kw: None
-        for failed in (False, True):
-            with self.subTest(failed=failed), tempfile.TemporaryDirectory() as tmp:
+        for suite, failed in (
+            ("candidate", False),
+            ("candidate", True),
+            ("released", False),
+            ("released", True),
+        ):
+            runs = 18 if suite == "released" else 10
+            with self.subTest(
+                suite=suite, failed=failed
+            ), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 manifest = root / "config.json"
                 manifest.write_text(json.dumps(config))
                 output = root / "output"
                 argv = [
                     "runner",
+                    "--suite",
+                    suite,
                     "--config",
                     str(manifest),
                     "--release-line",
@@ -172,7 +213,10 @@ class CompatibilityTests(unittest.TestCase):
                     "--output",
                     str(output),
                 ]
-                effects = [[{"status": "passed"}]] * 10
+                if suite == "released":
+                    start = argv.index("--frontend-image")
+                    del argv[start : start + 4]
+                effects = [[{"status": "passed"}]] * runs
                 if failed:
                     effects[1] = RuntimeError("worker startup failed")
                     effects[2] = [{"status": "failed", "error": "expected float array"}]
@@ -188,11 +232,11 @@ class CompatibilityTests(unittest.TestCase):
                             main()
                     else:
                         main()
-                    self.assertEqual(execute.call_count, 10)
+                    self.assertEqual(execute.call_count, runs)
                     self.assertEqual(resolve.call_count, 8)
                 report = json.loads((output / "report.json").read_text())
                 self.assertEqual(report["status"], "failed" if failed else "passed")
-                self.assertEqual(len(report["runs"]), 10)
+                self.assertEqual(len(report["runs"]), runs)
                 if failed:
                     self.assertIn("startup failed", report["runs"][1]["error"])
                     self.assertEqual(report["runs"][2]["status"], "failed")

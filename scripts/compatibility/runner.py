@@ -37,6 +37,21 @@ def matrix(releases, line, frontend, worker):
     return pairs
 
 
+def released_matrix(releases, line):
+    """All combinations promised within the current published N-2 window."""
+    major, minor = map(int, line.split("."))
+    if minor < 2:
+        raise ValueError("Explicit same-major N-2 window requires minor >= 2")
+    lines = [f"{major}.{minor - age}" for age in (2, 1, 0)]
+    # Controls first, so failure evidence includes healthy same-version baselines.
+    combinations = [(v, v) for v in lines]
+    combinations += [(f, w) for f in lines for w in lines if f != w]
+    return [
+        (f"frontend-{f}-worker-{w}", releases[f]["frontend"], releases[w]["worker"])
+        for f, w in combinations
+    ]
+
+
 def validate_embedding(body, count, dimensions):
     assert body["object"] == "list", body
     assert len(body["data"]) == count, body
@@ -390,30 +405,45 @@ def main():
         "--config", type=Path, default=Path(__file__).with_name("releases.json")
     )
     parser.add_argument(
-        "--release-line", default="", help="Default: checkout Cargo.toml version"
+        "--release-line", default="", help="Override the suite release line"
     )
-    parser.add_argument("--frontend-image", required=True)
-    parser.add_argument("--worker-image", required=True)
+    parser.add_argument(
+        "--suite", choices=("released", "candidate"), default="released"
+    )
+    parser.add_argument("--frontend-image")
+    parser.add_argument("--worker-image")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
         "--plan", action="store_true", help="Validate/print matrix without Docker"
     )
     args = parser.parse_args()
     config = json.loads(args.config.read_text())
-    if not args.release_line:
-        cargo = Path(__file__).resolve().parents[2] / "Cargo.toml"
-        args.release_line = re.search(
-            r'^version = "(\d+\.\d+)\.', cargo.read_text(), re.M
-        )[1]
-    pairs = matrix(
-        config["releases"], args.release_line, args.frontend_image, args.worker_image
-    )
+    if args.suite == "released":
+        if args.frontend_image or args.worker_image:
+            parser.error("Image overrides require --suite candidate")
+        args.release_line = args.release_line or config["current_release_line"]
+        pairs = released_matrix(config["releases"], args.release_line)
+    else:
+        if not args.frontend_image or not args.worker_image:
+            parser.error("--suite candidate requires both component images")
+        if not args.release_line:
+            cargo = Path(__file__).resolve().parents[2] / "Cargo.toml"
+            args.release_line = re.search(
+                r'^version = "(\d+\.\d+)\.', cargo.read_text(), re.M
+            )[1]
+        pairs = matrix(
+            config["releases"],
+            args.release_line,
+            args.frontend_image,
+            args.worker_image,
+        )
     if args.plan:
         print(json.dumps(pairs, indent=2))
         return
     args.output.mkdir(parents=True, exist_ok=False)
     report = {
         "release_line": args.release_line,
+        "suite": args.suite,
         "pairs": pairs,
         "status": "failed",
         "runs": [],

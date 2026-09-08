@@ -1,4 +1,5 @@
 {
+  "current_release_line": "1.4",
   "releases": {
     "1.2": {
       "frontend": "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.1",
