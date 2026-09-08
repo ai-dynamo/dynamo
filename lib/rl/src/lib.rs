@@ -329,12 +329,8 @@ async fn workers_handler(State(state): State<RlDiscoveryState>) -> impl IntoResp
 
 async fn list_workers(state: &RlDiscoveryState) -> anyhow::Result<Vec<RlWorkerInfo>> {
     let config = &state.config;
-    // `DiscoveryQuery` has no prefix-scoped variant, so a prefix (or global) scope has to
-    // list everything and drop non-matching namespaces here — the same client-side
-    // filtering `ModelWatcher::normalize` in `dynamo-llm` already does. An exact scope
-    // keeps the narrow query, so the pre-existing path costs and returns exactly what it
-    // did before. `/v1/rl/workers` is a low-rate administrative endpoint, and the probe
-    // fan-out below stays bounded by `max_concurrent_probes` either way.
+    // `DiscoveryQuery` has no prefix-scoped variant, so a prefix or global scope lists
+    // everything and filters here; an exact scope keeps its narrow query unchanged.
     let (endpoint_query, model_query) = match &config.namespace_filter {
         NamespaceFilter::Exact(namespace) => (
             DiscoveryQuery::NamespacedEndpoints {
