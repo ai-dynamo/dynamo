@@ -1132,8 +1132,9 @@ fn anthropic_sanitized_error_with_details(
 /// Match `InvalidArgument` at top-level OR under `Backend()` anywhere in the
 /// error chain. Request validation surfaces `InvalidArgument`, while backends
 /// that reject bad input (e.g. Python `ValueError`/`TypeError` wrapped by
-/// `py_err_to_dynamo`) surface `Backend(InvalidArgument)`, which normalizes to
-/// `InvalidRequest` on the wire. All three are client input errors.
+/// `py_err_to_dynamo`) surface `Backend(InvalidArgument)`. The legacy subtype
+/// is preserved on the wire while `class()` exposes `InvalidRequest`. All three
+/// are client input errors.
 fn find_invalid_argument_in_chain<'a>(
     err: &'a (dyn std::error::Error + 'static),
 ) -> Option<&'a dynamo_runtime::error::DynamoError> {
@@ -1349,7 +1350,11 @@ mod tests {
             .build();
         let wire = serde_json::to_value(original).unwrap();
         let normalized: DynamoError = serde_json::from_value(wire).unwrap();
-        assert_eq!(normalized.error_type(), ErrorType::InvalidRequest);
+        assert_eq!(
+            normalized.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert_eq!(normalized.class(), ErrorType::InvalidRequest);
 
         let error = anyhow::Error::new(normalized).context("request validation failed");
         assert_eq!(
