@@ -192,17 +192,13 @@ def test_configured_capacity_sizes_the_cache(monkeypatch):
     assert cache.stats["capacity_bytes"] == int(0.25 * 1024**3)
 
 
-def test_unset_capacity_falls_back_to_a_bounded_default(monkeypatch):
+@pytest.mark.parametrize("capacity_gb", [0, -1.0])
+def test_non_positive_capacity_disables_the_cache(monkeypatch, capacity_gb):
+    # 0 is the flag's default and its documented 'disabled' value, so a stock
+    # deployment runs without this cache rather than with an implicit one.
     monkeypatch.setattr(encode_worker_handler, "ENABLE_ENCODER_CACHE", 1)
 
-    # A 0 capacity flag means 'unset', not 'disabled': the cache is still built
-    # and sized from DEFAULT_ENCODER_CACHE_CAPACITY_GB.
-    cache = encode_worker_handler._build_embedding_cache(0)
-
-    assert cache is not None
-    assert cache.stats["capacity_bytes"] == int(
-        encode_worker_handler.DEFAULT_ENCODER_CACHE_CAPACITY_GB * 1024**3
-    )
+    assert encode_worker_handler._build_embedding_cache(capacity_gb) is None
 
 
 def test_encoder_cache_switch_disables_the_cache(monkeypatch):

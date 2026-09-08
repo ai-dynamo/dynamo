@@ -52,10 +52,6 @@ CACHE_SIZE_MAXIMUM = 8
 ENABLE_ENCODER_CACHE = int(os.getenv("ENABLE_ENCODER_CACHE", 1))
 SPLIT_ENCODE = int(os.getenv("DYN_SPLIT_ENCODE", 1))
 
-# Used when --multimodal-embedding-cache-capacity-gb is left at its 0 default;
-# ENABLE_ENCODER_CACHE, not the capacity flag, is what disables the cache.
-DEFAULT_ENCODER_CACHE_CAPACITY_GB = 4.0
-
 
 def _load_image_processor(engine_args: AsyncEngineArgs):
     processor_kwargs = getattr(engine_args, "mm_processor_kwargs", None) or {}
@@ -125,14 +121,13 @@ def _build_embedding_cache(
 ) -> MultimodalEmbeddingCacheManager | None:
     """Build the encode worker's embedding cache, or ``None`` when disabled.
 
-    ``ENABLE_ENCODER_CACHE`` is the on/off switch operators already set in
-    deployment manifests; ``capacity_gb`` only sizes the cache once it is on, and
-    a non-positive value falls back to ``DEFAULT_ENCODER_CACHE_CAPACITY_GB``.
+    ``--multimodal-embedding-cache-capacity-gb`` defaults to 0 and documents 0 as
+    disabled, so a stock deployment runs without this cache, as it does on the
+    other backends. ``ENABLE_ENCODER_CACHE`` turns the cache off independently of
+    the capacity.
     """
-    if not ENABLE_ENCODER_CACHE:
+    if not ENABLE_ENCODER_CACHE or capacity_gb <= 0:
         return None
-    if capacity_gb <= 0:
-        capacity_gb = DEFAULT_ENCODER_CACHE_CAPACITY_GB
     logger.info("Encode worker embedding cache enabled: %.2f GB", capacity_gb)
     return MultimodalEmbeddingCacheManager(int(capacity_gb * 1024**3))
 
