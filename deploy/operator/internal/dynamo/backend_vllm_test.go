@@ -1049,7 +1049,7 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 			numberOfNodes:       2,
 			role:                RoleWorker,
 			multinodeDeployer:   &GroveMultinodeDeployer{},
-			initialPodSpec:      rayMultinodePodSpec("vllm:ray", "leader"),
+			initialPodSpec:      rayMultinodePodSpec("vllm:ray", "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE)"),
 			expectInitContainer: true,
 			expectedInitName:    "wait-for-leader-ray",
 			expectedInitImage:   "vllm:ray",
@@ -1061,7 +1061,7 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 			numberOfNodes:       2,
 			role:                RoleWorker,
 			multinodeDeployer:   &LWSMultinodeDeployer{},
-			initialPodSpec:      rayMultinodePodSpec("vllm:ray-v2", "leader"),
+			initialPodSpec:      rayMultinodePodSpec("vllm:ray-v2", "$(LWS_LEADER_ADDRESS)"),
 			expectInitContainer: true,
 			expectedInitName:    "wait-for-leader-ray",
 			expectedInitImage:   "vllm:ray-v2",
@@ -1083,6 +1083,19 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 					},
 				},
 			},
+			expectInitContainer: false,
+		},
+		{
+			// A hand-authored or externally-addressed Ray worker matches the same
+			// shape (single-arg "ray start --address=...:PORT --block" under
+			// /bin/sh -c) but joins a host the operator did not derive from this
+			// deployer/service. Injecting the wait-for-leader-ray init container
+			// here would make it wait on the wrong hostname and never succeed.
+			name:                "Ray worker joining a custom/external address does not inject init container",
+			numberOfNodes:       2,
+			role:                RoleWorker,
+			multinodeDeployer:   &GroveMultinodeDeployer{},
+			initialPodSpec:      rayMultinodePodSpec("vllm:ray-external", "external-ray-head.example.com"),
 			expectInitContainer: false,
 		},
 		{

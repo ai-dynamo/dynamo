@@ -3,6 +3,7 @@ package dynamo
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -146,13 +147,6 @@ const (
 	waitLeaderScriptKey       = "wait-for-leader.py"
 	waitLeaderVolumeName      = "wait-leader-script"
 	waitLeaderMountPath       = "/scripts"
-
-	// rayWorkerLaunchPrefix is the exact command injectRayDistributedLaunchFlags
-	// gives a plain TP/PP Ray multinode worker. It is distinct from the
-	// elastic-EP Ray worker command (prefixed by that path's own leader
-	// health-gate) and from the data-parallel-Ray path (which keeps the vLLM
-	// command intact), so matching it identifies this one launch shape only.
-	rayWorkerLaunchPrefix = "ray start --address="
 )
 
 // WaitLeaderScript is the Python script that verifies leader pod health via
@@ -262,13 +256,13 @@ func GenerateWaitLeaderConfigMap(dgdName, namespace string) *corev1.ConfigMap {
 }
 
 func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, _ *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
-	waitPort, initContainerName, ok := b.waitForLeaderPortAndName(podSpec, numberOfNodes, role)
+	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
+	waitPort, initContainerName, ok := b.waitForLeaderPortAndName(podSpec, numberOfNodes, role, leaderHostname)
 	if !ok {
 		return
 	}
 
 	mainContainer := &podSpec.Containers[0]
-	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
 	mainImage := mainContainer.Image
 	cmName := GetWaitLeaderConfigMapName(b.ParentGraphDeploymentName)
 
@@ -315,13 +309,16 @@ func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32
 // mp workers carry --distributed-executor-backend mp in their own launch
 // command (injectMpDistributedLaunchFlags) and wait on vLLM's MP master port.
 // Plain TP/PP Ray workers (injectRayDistributedLaunchFlags) are rewritten to
-// the exact single-argument `ray start --address=<host>:<port> --block` and
-// wait on the Ray GCS port instead; that exact shape is what distinguishes
-// them from the elastic-EP Ray worker (prefixed by its own leader health-gate)
-// and the data-parallel-Ray path (which keeps the full vLLM command), both of
-// which already handle leader readiness themselves and must not also get this
-// init container.
-func (b *VLLMBackend) waitForLeaderPortAndName(podSpec *corev1.PodSpec, numberOfNodes int32, role Role) (port, name string, ok bool) {
+// the exact command `ray start --address=<leaderHostname>:<port> --block`
+// under an explicit `/bin/sh -c`, and wait on the Ray GCS port instead.
+// Matching the complete generated command -- not just a prefix -- is what
+// distinguishes this from the elastic-EP Ray worker (prefixed by its own
+// leader health-gate), the data-parallel-Ray path (which keeps the full vLLM
+// command), and a hand-authored worker that happens to start with the same
+// prefix but joins a different (e.g. external) Ray address: any of those
+// would otherwise get an init container that waits on the wrong host and
+// leaves the pod pending forever.
+func (b *VLLMBackend) waitForLeaderPortAndName(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, leaderHostname string) (port, name string, ok bool) {
 	if b.ParentGraphDeploymentName == "" || numberOfNodes <= 1 || role != RoleWorker || len(podSpec.Containers) == 0 {
 		return "", "", false
 	}
@@ -330,7 +327,10 @@ func (b *VLLMBackend) waitForLeaderPortAndName(podSpec *corev1.PodSpec, numberOf
 	if containerCommandLineHasArg(container, distributedExecutorFlag, "mp") {
 		return commonconsts.VLLMMpMasterPort, "wait-for-leader-mp", true
 	}
-	if len(container.Args) == 1 && strings.HasPrefix(strings.TrimSpace(container.Args[0]), rayWorkerLaunchPrefix) {
+
+	expectedRayArgs := fmt.Sprintf("ray start --address=%s:%s --block", leaderHostname, VLLMPort)
+	if slices.Equal(container.Command, []string{"/bin/sh", "-c"}) &&
+		len(container.Args) == 1 && strings.TrimSpace(container.Args[0]) == expectedRayArgs {
 		return VLLMPort, "wait-for-leader-ray", true
 	}
 	return "", "", false
