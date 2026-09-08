@@ -173,10 +173,8 @@ fn user_stop_token_reports_distinct_trigger() {
     ));
 }
 
-/// Regression test for a hidden stop sequence split across several decode steps
-/// (https://github.com/ai-dynamo/dynamo/issues/14375). The stop sequence " zeta eta theta"
-/// arrives as three separate decoded fragments (" zeta", " eta", " theta"); none of the
-/// earlier fragments should reach the caller before the full sequence is recognized.
+/// A hidden stop sequence split across several decode fragments must not leak any
+/// fragment before the full sequence is recognized.
 #[test]
 fn hidden_stop_sequence_split_across_tokens_is_not_leaked() {
     let mut decoder = make_decoder(None, None, None, Some(vec![" zeta eta theta"]), false);
@@ -211,8 +209,6 @@ fn withheld_prefix_is_released_once_it_cannot_complete() {
     let mut decoder = make_decoder(None, None, None, Some(vec!["ozzy"]), false);
     let result = decoder.process_token_ids(&[OH, OTHER]).unwrap();
 
-    // "o" is a prefix of "ozzy" and is withheld after the first token; once "there" arrives
-    // the buffered text can no longer become "ozzy", so all of it is released together.
     assert_eq!(result.text.as_deref(), Some("othere"));
     assert!(result.stop_trigger.is_none());
     // Regression check: withholding used to bunch both tokens' text onto the releasing
@@ -231,14 +227,11 @@ fn flush_jailed_releases_incomplete_partial_match() {
     let mut decoder = make_decoder(None, None, None, Some(vec![" zeta eta theta"]), false);
     let result = decoder.process_token_ids(&[DELTA, ZETA, ETA]).unwrap();
 
-    // " zeta eta" is a genuine (incomplete) prefix of the stop sequence, so it must not be
-    // in the normal result text yet.
     assert_eq!(result.text.as_deref(), Some(" delta"));
     assert!(result.stop_trigger.is_none());
 
     let flushed = decoder.flush_jailed();
     assert_eq!(flushed.as_deref(), Some(" zeta eta"));
-    // A second flush has nothing left to give.
     assert_eq!(decoder.flush_jailed(), None);
 }
 
