@@ -9732,7 +9732,6 @@ mod tests {
                 trigger: Some("manual".to_string()),
                 ..Default::default()
             }),
-            kv_hints: None,
             input_trigger: None,
         };
         let mut context = PipelineContext::new(());

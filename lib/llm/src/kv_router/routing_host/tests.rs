@@ -1971,6 +1971,7 @@ async fn two_worker_migration_harness(
                 )),
                 nats_config: None,
                 request_plane: RequestPlaneMode::Tcp,
+                response_plane: None,
                 event_transport_kind: EventTransportKind::Zmq,
             },
         )
