@@ -878,8 +878,18 @@ class WorkerFactory:
             config.engine_args,
             config.embedding_transfer_mode,  # type: ignore[arg-type]
             enable_frontend_decoding=config.frontend_decoding,
+            embedding_cache_capacity_gb=config.multimodal_embedding_cache_capacity_gb,
         )
         await handler.async_init(runtime)
+
+        embedding_cache = getattr(handler, "embedding_cache_manager", None)
+        if embedding_cache is not None:
+            register_embedding_cache_metrics(
+                endpoint=generate_endpoint,
+                cache=embedding_cache,
+                model_name=config.served_model_name or config.model,
+                component_name=config.component,
+            )
 
         # Encode workers register a model card so the frontend's
         # serving-readiness gate can count them. The card carries no OpenAI

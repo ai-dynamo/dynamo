@@ -13,6 +13,10 @@ from transformers import AutoImageProcessor
 from vllm.engine.arg_utils import AsyncEngineArgs
 
 import dynamo.nixl_connect as connect
+from dynamo.common.memory.multimodal_embedding_cache_manager import (
+    CachedEmbedding,
+    MultimodalEmbeddingCacheManager,
+)
 from dynamo.common.multimodal import (
     LocalEmbeddingSender,
     NixlReadEmbeddingSender,
@@ -33,7 +37,7 @@ from ..multimodal_utils import (
     load_vision_model,
     vLLMMultimodalRequest,
 )
-from ..multimodal_utils.embedding_cache import EmbeddingCache
+from ..multimodal_utils.embedding_cache import generate_hash_key
 from ..multimodal_utils.model import ModelFamily, resolve_model_family
 
 logger = logging.getLogger(__name__)
@@ -47,6 +51,13 @@ CACHE_SIZE_MAXIMUM = 8
 # [gluo NOTE] default off to benchmark standalone encoder
 ENABLE_ENCODER_CACHE = int(os.getenv("ENABLE_ENCODER_CACHE", 1))
 SPLIT_ENCODE = int(os.getenv("DYN_SPLIT_ENCODE", 1))
+
+# Capacity used when ENABLE_ENCODER_CACHE is on but
+# --multimodal-embedding-cache-capacity-gb was left at its 0 default. Reading
+# that 0 as "disabled" here would switch off a cache that has been on by
+# default for every deployment that never passed the flag, so the cache is
+# bounded at this size instead. A positive flag value overrides it.
+DEFAULT_ENCODER_CACHE_CAPACITY_GB = 4.0
 
 
 def _load_image_processor(engine_args: AsyncEngineArgs):
@@ -112,6 +123,23 @@ def _prepare_embedding_transfers(
     return [transfer_tensor], [0, *([None] * (len(tensors) - 1))]
 
 
+def _build_embedding_cache(
+    capacity_gb: float,
+) -> MultimodalEmbeddingCacheManager | None:
+    """Build the encode worker's embedding cache, or ``None`` when disabled.
+
+    ``ENABLE_ENCODER_CACHE`` is the on/off switch operators already set in
+    deployment manifests; ``capacity_gb`` only sizes the cache once it is on, and
+    a non-positive value falls back to ``DEFAULT_ENCODER_CACHE_CAPACITY_GB``.
+    """
+    if not ENABLE_ENCODER_CACHE:
+        return None
+    if capacity_gb <= 0:
+        capacity_gb = DEFAULT_ENCODER_CACHE_CAPACITY_GB
+    logger.info("Encode worker embedding cache enabled: %.2f GB", capacity_gb)
+    return MultimodalEmbeddingCacheManager(int(capacity_gb * 1024**3))
+
+
 def _should_coalesce_embedding_transfers(model: str, item_count: int) -> bool:
     return (
         not SPLIT_ENCODE
@@ -126,6 +154,8 @@ class EncodeWorkerHandler:
         engine_args: AsyncEngineArgs,
         embedding_transfer_mode: EmbeddingTransferMode,
         enable_frontend_decoding: bool = False,
+        *,
+        embedding_cache_capacity_gb: float = 0.0,
     ) -> None:
         self.engine_args = engine_args
         self.model = self.engine_args.model
@@ -158,7 +188,11 @@ class EncodeWorkerHandler:
         self._accumulated_time = 0.0
         self._processed_requests = 0
         self.readables: list[Any] = []
-        self.embedding_cache = EmbeddingCache() if ENABLE_ENCODER_CACHE else None
+        # Named embedding_cache_manager because worker_factory looks the cache up
+        # by that attribute name to register the Prometheus cache metrics.
+        self.embedding_cache_manager = _build_embedding_cache(
+            embedding_cache_capacity_gb
+        )
         self.embedding_sender: AbstractEmbeddingSender
         if embedding_transfer_mode == EmbeddingTransferMode.LOCAL:
             self.embedding_sender = LocalEmbeddingSender()
@@ -214,7 +248,7 @@ class EncodeWorkerHandler:
                 "encode worker."
             )
         if has_url:
-            return EmbeddingCache.generate_hash_key(group_input.image_url)
+            return generate_hash_key(group_input.image_url)
         if not self._enable_frontend_decoding:
             raise ValueError(
                 "Received a frontend-decoded image but --frontend-decoding is "
@@ -224,7 +258,7 @@ class EncodeWorkerHandler:
         cache_key = decoded_content_hash_key(group_input.image_decoded)
         if (
             cache_key is None
-            and self.embedding_cache is not None
+            and self.embedding_cache_manager is not None
             and not self._decoded_content_hash_warning_emitted
         ):
             logger.warning(
@@ -235,6 +269,40 @@ class EncodeWorkerHandler:
             )
             self._decoded_content_hash_warning_emitted = True
         return cache_key
+
+    def _lookup_embedding_item(self, key: str | None) -> EmbeddingItem | None:
+        """Return the cached embedding for ``key``, or ``None`` on a miss.
+
+        One ``get()`` and no membership probe: the manager counts a hit or a
+        miss per ``get()``, so probing twice would record every hit as a miss
+        followed by a hit.
+        """
+        if self.embedding_cache_manager is None or key is None:
+            return None
+        cached = self.embedding_cache_manager.get(key)
+        if cached is None:
+            return None
+        return EmbeddingItem(key, cached.image_grid_thw or [], cached.tensor)
+
+    def _store_embedding_item(self, item: EmbeddingItem) -> None:
+        """Cache one freshly encoded embedding. Unkeyed items are skipped.
+
+        Uses ``set()`` rather than ``set_with_delta()``: ``set()`` is defined as
+        ``set_with_delta(...).stored`` and this worker has no cache-event
+        publisher to consume the delta.
+        """
+        if self.embedding_cache_manager is None or item.key is None:
+            return
+        # The manager asserts contiguity to size the entry. These tensors are
+        # split views of one encoder output, so they share its storage and the
+        # entry is sized per view.
+        self.embedding_cache_manager.set(
+            item.key,
+            CachedEmbedding(
+                tensor=item.embeddings.contiguous(),
+                image_grid_thw=item.image_grid_thw,
+            ),
+        )
 
     async def async_init(self, runtime: DistributedRuntime):
         """Initialize the connector for RDMA transfers"""
@@ -284,17 +352,9 @@ class EncodeWorkerHandler:
                 for idx in range(len(request.multimodal_inputs)):
                     group_input = request.multimodal_inputs[idx].multimodal_input
                     embedding_key = self._image_cache_key(group_input)
-                    if (
-                        self.embedding_cache is not None
-                        and embedding_key is not None
-                        and self.embedding_cache.has_key(embedding_key)
-                    ):
-                        (image_grid_thw, embeddings) = self.embedding_cache.get(
-                            embedding_key
-                        )
-                        embedding_lists[idx] = EmbeddingItem(
-                            embedding_key, image_grid_thw, embeddings
-                        )
+                    cached_item = self._lookup_embedding_item(embedding_key)
+                    if cached_item is not None:
+                        embedding_lists[idx] = cached_item
                     # compute
                     else:
                         # keep track of key to avoid recompute of it
@@ -377,20 +437,13 @@ class EncodeWorkerHandler:
 
             # fill in the embedding_lists with new computed embeddings and cache them
             for split_idx, (list_idx, key) in enumerate(need_encode_indexes):
-                embedding_lists[list_idx] = EmbeddingItem(
+                item = EmbeddingItem(
                     key,
                     [image_grid_thw[split_idx]] if image_grid_thw else [],
                     splitted_embeddings[split_idx].unsqueeze(0),
                 )
-                # Cache the computed value for future use (unkeyed items skip)
-                if self.embedding_cache is not None and key is not None:
-                    self.embedding_cache.set(
-                        embedding_lists[list_idx].key,  # type: ignore
-                        (
-                            embedding_lists[list_idx].image_grid_thw,  # type: ignore
-                            embedding_lists[list_idx].embeddings,  # type: ignore
-                        ),
-                    )
+                embedding_lists[list_idx] = item
+                self._store_embedding_item(item)
 
             before_transfer_time = time.perf_counter()
 

@@ -9,12 +9,15 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from dynamo.common.memory.multimodal_embedding_cache_manager import (
+    MultimodalEmbeddingCacheManager,
+)
 from dynamo.vllm.multimodal_handlers import encode_worker_handler
 from dynamo.vllm.multimodal_handlers.encode_worker_handler import (
     EmbeddingItem,
     EncodeWorkerHandler,
 )
-from dynamo.vllm.multimodal_utils.embedding_cache import EmbeddingCache
+from dynamo.vllm.multimodal_utils.embedding_cache import generate_hash_key
 from dynamo.vllm.multimodal_utils.protocol import MultiModalInput
 
 pytestmark = [
@@ -26,11 +29,19 @@ pytestmark = [
 ]
 
 
-def _handler(*, frontend_decoding: bool) -> EncodeWorkerHandler:
+def _handler(
+    *, frontend_decoding: bool, capacity_bytes: int = 1 << 20
+) -> EncodeWorkerHandler:
+    """Build a handler without running __init__.
+
+    The real __init__ loads an image processor and a vision tower from a
+    checkpoint, which a unit test has no way to provide; every attribute the
+    cache paths touch is set here instead.
+    """
     handler = EncodeWorkerHandler.__new__(EncodeWorkerHandler)
     handler._enable_frontend_decoding = frontend_decoding
     handler._decoded_content_hash_warning_emitted = False
-    handler.embedding_cache = EmbeddingCache()
+    handler.embedding_cache_manager = MultimodalEmbeddingCacheManager(capacity_bytes)
     return handler
 
 
@@ -112,12 +123,15 @@ def test_image_processor_receives_engine_mm_processor_kwargs(monkeypatch):
 
 
 def test_cache_key_for_url_image_is_unchanged():
+    # Pinned literal, not a call to the helper the handler itself uses: the
+    # digest is a persisted cache key, so a worker on a new release must derive
+    # the same key an older worker did for the same URL.
+    expected = "494a30704d4f32ac0b81739d18a66d3638d440cbc6f5669f6af66f840edee5ab"
     handler = _handler(frontend_decoding=False)
     group_input = MultiModalInput(image_url="https://example.com/a.png")
 
-    assert handler._image_cache_key(group_input) == EmbeddingCache.generate_hash_key(
-        "https://example.com/a.png"
-    )
+    assert handler._image_cache_key(group_input) == expected
+    assert generate_hash_key("https://example.com/a.png") == expected
 
 
 def test_cache_key_for_decoded_image_uses_content_hash():
@@ -168,3 +182,96 @@ def test_group_with_url_and_decoded_image_rejected():
 
     with pytest.raises(ValueError, match="Exactly one"):
         handler._image_cache_key(group_input)
+
+
+def test_configured_capacity_sizes_the_cache():
+    cache = encode_worker_handler._build_embedding_cache(0.25)
+
+    assert isinstance(cache, MultimodalEmbeddingCacheManager)
+    assert cache.stats["capacity_bytes"] == int(0.25 * 1024**3)
+
+
+def test_unset_capacity_falls_back_to_a_bounded_default():
+    # The capacity flag defaults to 0. Treating that as "disabled" here would
+    # turn off a cache that has always been on by default, so it is sized from
+    # DEFAULT_ENCODER_CACHE_CAPACITY_GB instead.
+    cache = encode_worker_handler._build_embedding_cache(0)
+
+    assert cache is not None
+    assert cache.stats["capacity_bytes"] == int(
+        encode_worker_handler.DEFAULT_ENCODER_CACHE_CAPACITY_GB * 1024**3
+    )
+
+
+def test_encoder_cache_switch_disables_the_cache(monkeypatch):
+    monkeypatch.setattr(encode_worker_handler, "ENABLE_ENCODER_CACHE", 0)
+
+    assert encode_worker_handler._build_embedding_cache(1.0) is None
+
+
+def test_store_path_evicts_instead_of_growing_past_capacity():
+    # Four 256 KiB embeddings through a 1 MiB cache fit; the fifth must push the
+    # oldest out rather than grow the cache, which is what the previous
+    # dict-backed cache did.
+    entry_bytes = 256 * 1024
+    element_count = entry_bytes // torch.tensor([], dtype=torch.float32).element_size()
+    handler = _handler(frontend_decoding=False, capacity_bytes=1 << 20)
+
+    for index in range(5):
+        handler._store_embedding_item(
+            EmbeddingItem(
+                key=f"key-{index}",
+                image_grid_thw=[[1, 2, 2]],
+                embeddings=torch.full((1, element_count), float(index)),
+            )
+        )
+
+    stats = handler.embedding_cache_manager.stats
+    assert stats["current_bytes"] <= stats["capacity_bytes"]
+    assert stats["entries"] == 4
+    assert stats["evictions"] == 1
+    assert handler._lookup_embedding_item("key-0") is None
+    assert handler._lookup_embedding_item("key-4") is not None
+
+
+def test_store_then_lookup_round_trips_tensor_and_grid():
+    handler = _handler(frontend_decoding=False)
+    embeddings = torch.arange(8, dtype=torch.float32).reshape(1, 8)
+    handler._store_embedding_item(
+        EmbeddingItem(key="k", image_grid_thw=[[1, 4, 4]], embeddings=embeddings)
+    )
+
+    item = handler._lookup_embedding_item("k")
+
+    assert item is not None
+    assert item.key == "k"
+    assert item.image_grid_thw == [[1, 4, 4]]
+    assert torch.equal(item.embeddings, embeddings)
+    assert handler.embedding_cache_manager.stats["hits"] == 1
+
+
+def test_unkeyed_item_is_not_cached():
+    handler = _handler(frontend_decoding=True)
+
+    handler._store_embedding_item(
+        EmbeddingItem(key=None, image_grid_thw=[], embeddings=torch.zeros(1, 4))
+    )
+
+    assert handler.embedding_cache_manager.stats["entries"] == 0
+    assert handler._lookup_embedding_item(None) is None
+
+
+def test_non_contiguous_embedding_is_stored():
+    # The manager asserts contiguity when sizing an entry; the old dict cache
+    # never did, so a transposed view must be made contiguous on the way in.
+    handler = _handler(frontend_decoding=False)
+    view = torch.arange(8, dtype=torch.float32).reshape(2, 4).t()
+    assert not view.is_contiguous()
+
+    handler._store_embedding_item(
+        EmbeddingItem(key="k", image_grid_thw=[], embeddings=view)
+    )
+
+    item = handler._lookup_embedding_item("k")
+    assert item is not None
+    assert torch.equal(item.embeddings, view)
