@@ -335,6 +335,7 @@ mod tests {
                     input_sequence_hashes: vec![11, 22],
                 }),
                 finish_reason_metadata: None,
+                routing_decision: None,
             }),
             tool: None,
             payload: None,

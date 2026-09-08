@@ -354,6 +354,7 @@ pub enum FindBestMatchOutcome {
         potential_decode_blocks: u64,
         routing_hashes: Option<RoutingDecisionHashes>,
         router_hint: Option<RouterHint>,
+        decision_trace: Option<Box<dynamo_kv_router::protocols::RoutingDecisionTrace>>,
     },
     QueueRejected {
         rejection: scheduling::QueueRejection,
@@ -373,6 +374,7 @@ pub enum FindBestMatchAdvisoryOutcome {
         potential_decode_blocks: u64,
         selected_worker_load: scheduling::AdvisoryWorkerLoad,
         routing_hashes: Option<RoutingDecisionHashes>,
+        decision_trace: Option<Box<dynamo_kv_router::protocols::RoutingDecisionTrace>>,
     },
     QueueRejected {
         rejection: scheduling::QueueRejection,
@@ -1769,6 +1771,7 @@ where
                         potential_decode_blocks: response.potential_decode_blocks as u64,
                         routing_hashes,
                         router_hint,
+                        decision_trace: response.decision_trace.map(Box::new),
                     },
                     attempt,
                 }),
@@ -1783,6 +1786,7 @@ where
                     selected_worker_load: selected_worker_load
                         .expect("without-admission selection returns advisory load"),
                     routing_hashes,
+                    decision_trace: response.decision_trace.map(Box::new),
                 }),
             ),
         }
@@ -2630,6 +2634,7 @@ mod tests {
                     .worker_load_for(self.selected_worker)
                     .potential_decode_blocks()
                     .saturating_add(request.isl_tokens.div_ceil(block_size as usize)),
+                decision_trace: None,
             })
         }
     }

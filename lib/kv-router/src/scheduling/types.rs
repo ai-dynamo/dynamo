@@ -138,6 +138,8 @@ pub struct SchedulingResponse {
     pub target_cached_prefix_blocks: u32,
     pub router_hint_candidates: Option<RouterHintRootCandidates>,
     pub potential_decode_blocks: usize,
+    /// Populated only by opt-in default-router decision tracing.
+    pub decision_trace: Option<crate::protocols::RoutingDecisionTrace>,
 }
 
 /// Internal result that pairs a public scheduling response with its attempt identity.

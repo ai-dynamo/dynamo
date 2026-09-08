@@ -229,6 +229,7 @@ pub(crate) fn request_metrics(
         worker,
         replay: None,
         finish_reason_metadata: None,
+        routing_decision: tracker.and_then(RequestTracker::routing_decision_trace),
     }
 }
 
