@@ -82,9 +82,8 @@ def test_merge_overrides_into_existing_override_engine_args():
 
 
 def test_merge_overrides_into_equals_spelled_override_engine_args():
-    """The equals spelling must merge too, not fall through to --trtllm.* flags.
+    """A DGD can carry the flag as one list element, `--override-engine-args={...}`.
 
-    A DGD can carry the flag as one list element, `--override-engine-args={...}`.
     Treating that as absent produces exactly the mutually exclusive pair this
     module exists to avoid, and silently drops the user's engine args.
     """
@@ -101,7 +100,6 @@ def test_merge_overrides_into_equals_spelled_override_engine_args():
 
 
 def test_enable_chunked_prefill_with_equals_spelled_override_engine_args():
-    """Same for the chunked-prefill entry point, which reads the flag itself."""
     user_args = {"kv_cache_config": {"free_gpu_memory_fraction": 0.5}}
     config = {
         "spec": {
@@ -247,3 +245,23 @@ def test_enable_chunked_prefill_preserves_shell_form_workers():
     override = json.loads(override_tokens[override_index + 1])
     assert override["enable_chunked_prefill"] is True
     assert override["kv_cache_config"]["tokens_per_block"] == 32
+
+
+def test_malformed_override_engine_args_raises_instead_of_being_dropped():
+    """A typo must not start the engine with the user's settings missing.
+
+    Every occurrence of the flag is stripped from the returned args, so
+    swallowing an unparseable value hands the engine only the profiler's own
+    overrides and loses the user's on the way.
+    """
+    args = ["--model-path", "m", "--override-engine-args={bad}"]
+
+    with pytest.raises(ValueError, match="not valid JSON"):
+        _merge_overrides_into_args(args, {"max_batch_size": 64})
+
+
+def test_non_object_override_engine_args_raises():
+    args = ["--model-path", "m", "--override-engine-args=[1, 2]"]
+
+    with pytest.raises(ValueError, match="must be a JSON object"):
+        _merge_overrides_into_args(args, {"max_batch_size": 64})
