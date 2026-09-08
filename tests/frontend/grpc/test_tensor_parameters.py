@@ -20,9 +20,15 @@ import pytest
 from packaging.requirements import Requirement
 
 try:
-    import tritonclient.grpc as grpcclient
+    from google.protobuf import any_pb2, empty_pb2, json_format
 except ImportError:
-    grpcclient = None
+    any_pb2 = empty_pb2 = json_format = None
+
+try:
+    import tritonclient.grpc as grpcclient
+    from tritonclient.grpc import service_pb2
+except ImportError:
+    grpcclient = service_pb2 = None
 
 from tests.utils.managed_process import ManagedProcess
 
@@ -56,9 +62,8 @@ def test_protobuf_requirements_exclude_vulnerable_versions(component: str) -> No
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
 @pytest.mark.parallel
+@pytest.mark.skipif(json_format is None, reason="protobuf is not installed")
 def test_protobuf_any_json_recursion_limit() -> None:
-    from google.protobuf import any_pb2, empty_pb2, json_format
-
     message = any_pb2.Any()
     message.Pack(empty_pb2.Empty())
     payload = json_format.MessageToDict(message)
@@ -75,9 +80,8 @@ def test_protobuf_any_json_recursion_limit() -> None:
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
 @pytest.mark.parallel
+@pytest.mark.skipif(grpcclient is None, reason="tritonclient.grpc is not installed")
 def test_triton_protobuf_json_roundtrip() -> None:
-    from tritonclient.grpc import service_pb2
-
     response = service_pb2.ModelInferResponse(model_name="identity", id="roundtrip")
     response.parameters["processed"].bool_param = True
     response.outputs.add(name="OUTPUT", datatype="INT32", shape=[2])
