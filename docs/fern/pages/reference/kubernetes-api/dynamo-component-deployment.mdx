@@ -105,7 +105,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 </ParamField>
 
 <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
-  Pod template for the component's pods. New components must include a container named `main` with a non-empty `image`; the operator injects command, environment, port, probe, resource, and volume-mount defaults into that container, merging your overrides by name. Existing components created without a main image may retain that omission on unrelated updates. For DGD components whose image has no parseable semantic-version tag, set `runtimeVersionOverride`. Every other container is treated as a user-managed sidecar and receives no injected defaults — sidecars must specify their own required fields such as `image`. Replaces the ten separate per-component fields (`resources`, `envs`, `livenessProbe`, and so on) that existed in `v1alpha1`.
+  Complete Pod template shared by all roles of the component. It is mutually exclusive with `roles[*].podTemplate`. New components must include a container named `main` with a non-empty `image`; the operator injects command, environment, port, probe, resource, and volume-mount defaults into that container, merging your overrides by name. Existing components created without a main image may retain that omission on unrelated updates. For DGD components whose image has no parseable semantic-version tag, set `runtimeVersionOverride`. Every other container is treated as a user-managed sidecar and receives no injected defaults — sidecars must specify their own required fields such as `image`. Replaces the ten separate per-component fields (`resources`, `envs`, `livenessProbe`, and so on) that existed in `v1alpha1`.
 
   For `type: lpx`, omit this field and use `roles[].podTemplate`. Every LPX role requires its own template with an explicit `main` container image.
 
@@ -122,8 +122,8 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
   </ParamField>
 </Indent>
 
-<ParamField path="roles" type="[]ComponentRoleSpec">
-  Named Pod-producing parts of a compound component, keyed by `name`. Multinode components must contain exactly one `leader` and one `worker`; omitted role counts default to `1` and `multinode.nodeCount - 1`, respectively. Omit the field to retain the implicit leader/worker layout.
+  <ParamField path="roles" type="[]ComponentRoleSpec">
+  Named Pod-producing parts of a compound component, keyed by `name`. Multinode components must contain exactly one `leader` and one `worker`; their cardinality is fixed by `multinode.nodeCount`, and omitted role counts default to `1` and `multinode.nodeCount - 1`, respectively. Omit the field to retain the implicit leader/worker layout. If either multinode role sets `podTemplate`, both roles must set one and the component-level `podTemplate` must be absent.
 
   LPX components use `agent` for Agent Pods and `conductor` for the serving runtime. Independent LPX components each declare a conductor role with an explicit template. In a speculative pair, the draft has only an agent role and the target declares both roles. A hybrid engine's GPU runtime uses the conductor template.
 
@@ -138,7 +138,11 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
     Logical cardinality of this role in one complete component instance; minimum `1`. For ordinary multinode components, admission defaults and persists an omitted value as `leader: 1` or `worker: multinode.nodeCount - 1`; an explicit value must match that fixed shape. For LPX, omitted conductor replicas use `1`, subject to runtime-specific limits. Agent replicas are derived from the model build; an explicit count must match the build.
   </ParamField>
   <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
-    Native Pod template for this role. LPX-only; required for every declared role. Each template requires a `main` container with an explicit image. Agent and conductor templates are independent.
+    Complete Pod template for this role. It must include a container named `main` with a non-empty `image`. Role templates do not inherit from each other or from the component-level template.
+
+    For multinode components, supplying complete role templates transfers ownership of backend-specific leader and worker commands and topology arguments to the user; Dynamo skips its vLLM, SGLang, and TensorRT-LLM role-dependent launch rewrites. Common Pod and workload wiring remains operator-owned. For vLLM multiprocessing, Dynamo still injects the shared coordination port `29500`. Multinode role templates cannot currently be combined with GMS or failover. The component remains the lifecycle, rollout, scaling, service, and status boundary.
+
+    For LPX components, every declared role requires its own template. Agent and conductor templates are independent.
 
     <a href="https://pkg.go.dev/k8s.io/api/core/v1#PodTemplateSpec" target="_blank">core/v1.PodTemplateSpec</a>
   </ParamField>
@@ -175,7 +179,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 </ParamField>
 
 <ParamField path="frontendSidecar" type="string">
-  Designates a container in `podTemplate.spec.containers` as the frontend sidecar. The value must match a container `name` in that list; the operator merges its frontend-sidecar defaults (Dynamo env vars, ports, health probes) into that container the same way it merges into `main`. The validation webhook rejects values that match no container.
+  Designates a container in each selected complete Pod template as the frontend sidecar. The value must match a container `name` in the component template or every role template; the operator merges its frontend-sidecar defaults (Dynamo env vars, ports, health probes) into that container the same way it merges into `main`.
 </ParamField>
 
 <ParamField path="compilationCache" type="CompilationCacheConfig">

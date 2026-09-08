@@ -432,6 +432,9 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 			},
 		)...)
 	}
+	if v.hasRuntimeVersionSource(runtimeVersionSourceV1Beta1) {
+		allErrs = append(allErrs, validateRolePodTemplatesPlannerRuntime(spec, fldPath)...)
+	}
 
 	// Validate conductor requirements on the converted graph.
 	for index := range spec.Components {
@@ -858,7 +861,6 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 	}
 
 	canModifyReplicas := v.userInfo != nil && internalwebhook.CanModifyDGDReplicas(v.operatorPrincipal, *v.userInfo)
-	const validateGPUMemoryServiceNewState = true // DGD updates do not run the stateless new-state traversal.
 	componentsPath := fldPath.Child("components")
 	for i := range newSpec.Components {
 		newComponent := &newSpec.Components[i]
@@ -879,6 +881,10 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 			componentsPath.Index(i).Child("multinode"),
 		)...)
 
+		// The stateless DGD validation run before this update traversal validates
+		// every complete role template. The legacy update path has only one
+		// component-level resource shape.
+		validateGPUMemoryServiceNewState := !dynamo.HasRolePodTemplates(newComponent)
 		allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpecUpdate(
 			newComponent,
 			oldComponent,
