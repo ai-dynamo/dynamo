@@ -273,7 +273,7 @@ fn responses_error_code(status_code: StatusCode) -> &'static str {
 
 /// Match `InvalidArgument` at top-level OR under `Backend()`.
 /// `py_err_to_dynamo` wraps Python `ValueError`/`TypeError` as
-/// `Backend(InvalidArgument)`; both variants are 400-worthy.
+/// `Backend(InvalidArgument)`, which normalizes to `InvalidRequest` on the wire.
 pub(crate) fn find_invalid_argument_in_chain<'a>(
     err: &'a (dyn std::error::Error + 'static),
 ) -> Option<&'a dynamo_runtime::error::DynamoError> {
@@ -281,10 +281,14 @@ pub(crate) fn find_invalid_argument_in_chain<'a>(
     let mut current = Some(err);
     while let Some(e) = current {
         if let Some(dynamo_err) = e.downcast_ref::<dynamo_runtime::error::DynamoError>()
-            && matches!(
+            && (matches!(
                 dynamo_err.error_type(),
                 ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument)
-            )
+            ) || (matches!(dynamo_err.error_type(), ErrorType::InvalidRequest)
+                && matches!(
+                    dynamo_err.reason().as_str(),
+                    "backend.invalid_argument" | "request.invalid_argument"
+                )))
         {
             return Some(dynamo_err);
         }
@@ -5145,6 +5149,33 @@ mod tests {
     };
 
     const BACKUP_ERROR_MESSAGE: &str = "Failed to generate completions";
+
+    #[test]
+    fn wire_normalized_invalid_request_is_found_through_error_context() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+
+        let original = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message("invalid request")
+            .build();
+        let wire = serde_json::to_value(original).unwrap();
+        let normalized: DynamoError = serde_json::from_value(wire).unwrap();
+        assert_eq!(normalized.error_type(), ErrorType::InvalidRequest);
+
+        let error = anyhow::Error::new(normalized).context("request validation failed");
+        assert_eq!(
+            find_invalid_argument_in_chain(error.as_ref()).map(DynamoError::message),
+            Some("invalid request")
+        );
+
+        let private_error = anyhow::Error::new(
+            DynamoError::builder()
+                .error_type(ErrorType::InvalidRequest)
+                .message("private diagnostic")
+                .build(),
+        );
+        assert!(find_invalid_argument_in_chain(private_error.as_ref()).is_none());
+    }
 
     fn binary_pooling_response() -> NvCreatePoolingResponse {
         NvCreatePoolingResponse {
