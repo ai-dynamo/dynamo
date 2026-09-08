@@ -412,7 +412,11 @@ async fn dispatch(
                 );
             }
             if was_unavailable {
-                tracing::warn!(%request_id, error = %format!("{error:#}"), "no worker available for SGLang generate request");
+                tracing::warn!(
+                    %request_id,
+                    error = %format!("{error:#}"),
+                    "no worker available for SGLang generate request"
+                );
                 return error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     SanitizedError::Unavailable.to_string(),

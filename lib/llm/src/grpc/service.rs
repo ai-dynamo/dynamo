@@ -7,6 +7,9 @@ pub mod tensor;
 
 use tonic::Status;
 
+use crate::http::service::error::SanitizedError;
+use crate::http::service::metrics::request_was_unavailable;
+
 /// Map a dispatch error that is not a client-visible rejection onto its gRPC status.
 ///
 /// Worker-scoped and pool-scoped unavailability both mean the request found no
@@ -15,10 +18,8 @@ use tonic::Status;
 /// message is sanitized to match the HTTP frontends; only the internal arm keeps
 /// the caller's context string.
 pub(crate) fn dispatch_error_status(error: &anyhow::Error, internal_context: &str) -> Status {
-    if crate::http::service::metrics::request_was_unavailable(error.as_ref()) {
-        return Status::unavailable(
-            crate::http::service::error::SanitizedError::Unavailable.to_string(),
-        );
+    if request_was_unavailable(error.as_ref()) {
+        return Status::unavailable(SanitizedError::Unavailable.to_string());
     }
     Status::internal(format!("{internal_context}: {error}"))
 }

@@ -1021,7 +1021,11 @@ async fn generate_dispatch(
                 );
             }
             if was_unavailable {
-                tracing::warn!(%request_id, error = %format!("{error:#}"), "no worker available for generate request");
+                tracing::warn!(
+                    %request_id,
+                    error = %format!("{error:#}"),
+                    "no worker available for generate request"
+                );
                 return generate_error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "service_unavailable",
