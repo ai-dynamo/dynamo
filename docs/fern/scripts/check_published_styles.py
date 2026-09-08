@@ -101,10 +101,16 @@ def as_rule_count(selector: str, html: str) -> int:
 
 
 def in_markup_count(selector: str, html: str) -> int:
-    """Return occurrences of ``selector``'s class name inside class=\"...\"."""
+    """Return occurrences of the selector's final class token in class attributes."""
     if not selector.startswith("."):
         return 0
-    return len(re.findall(r'class="[^"]*' + re.escape(selector[1:]), html))
+    class_name = selector.split()[-1].removeprefix(".")
+    if not class_name:
+        return 0
+    return sum(
+        class_name in class_names.split()
+        for class_names in re.findall(r'class=["\']([^"\']*)["\']', html)
+    )
 
 
 def url_from_base(base: str, path: str) -> str:
@@ -176,6 +182,29 @@ CSS_RULE_CASES: list[tuple[str, str, str, int, int]] = [
     ("rule after comma", ".foo", "h1,.foo{color:red}", 1, 0),
     ("only markup", ".foo", '<div class="foo">x</div>', 0, 1),
     ("substring class is not a rule", ".foo", ".foo-bar{color:red}", 0, 0),
+    (
+        "compound selector markup",
+        ".enum-values .enum-label",
+        '<span class="enum-values"><span class="enum-label">'
+        "Allowed values:</span></span>",
+        0,
+        1,
+    ),
+    (
+        "compound badge selector markup",
+        ".enum-values .fern-docs-badge",
+        '<span class="enum-values"><span class="fern-docs-badge">note</span>'
+        '<span class="fern-docs-badge">info</span></span>',
+        0,
+        2,
+    ),
+    (
+        "class name boundary",
+        ".foo",
+        '<div class="foo-bar">x</div>',
+        0,
+        0,
+    ),
     (
         "rule and markup both present",
         ".foo",
