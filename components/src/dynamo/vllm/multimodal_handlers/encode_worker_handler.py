@@ -130,9 +130,8 @@ class EncodeWorkerHandler:
 
         self._enable_frontend_decoding = enable_frontend_decoding
         self._decoded_content_hash_warning_emitted = False
-        # No cache_size here on purpose: ImageLoader's own default is derived
-        # from DYN_MM_IMAGE_CACHE_SIZE, so an operator who exports that
-        # variable also sizes the encode worker's image cache.
+        # No cache_size: ImageLoader's default reads DYN_MM_IMAGE_CACHE_SIZE,
+        # so passing one here would ignore the operator's setting.
         self.image_loader = ImageLoader(
             enable_frontend_decoding=enable_frontend_decoding,
         )
