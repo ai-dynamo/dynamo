@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use clap::ValueEnum;
@@ -82,36 +82,18 @@ impl Default for MockerServerConfig {
     }
 }
 
-/// Lifecycle of one in-flight request. `LiveEngine::cancel` tears the response
-/// channel down *before* it returns, so the abort reply and the terminal event
-/// have to be decided by a single atomic transition or they contradict each
-/// other: the stream would reach its tail before a flag set after `cancel` was
-/// visible, and report an internal error for a request the caller was told was
-/// cancelled.
-#[derive(Clone, Copy, Eq, PartialEq)]
-#[repr(u8)]
-enum RequestState {
-    Running = 0,
-    Aborting = 1,
-    Finished = 2,
-}
-
-impl RequestState {
-    fn from_u8(value: u8) -> Self {
-        match value {
-            1 => Self::Aborting,
-            2 => Self::Finished,
-            _ => Self::Running,
-        }
-    }
-}
-
 struct InFlight {
     uuid: Uuid,
     /// The session id the client knows this request by. Only a decode request
     /// has one it could name in an `Abort`, so this is `None` otherwise.
     session_id: Option<String>,
-    state: Arc<AtomicU8>,
+    /// Set by whichever of `Abort` and the response stream reaches the
+    /// request's end first. Both then agree on the outcome without a lock:
+    /// the winner picks the terminal event, the loser reports that it lost.
+    /// The claim has to be the single decision point because
+    /// `LiveEngine::cancel` tears the response channel down *before* it
+    /// returns, so anything derived from its result is already stale.
+    claimed: Arc<AtomicBool>,
 }
 
 /// Removes the in-flight entry however the response stream ends -- terminal
@@ -313,7 +295,7 @@ impl TrtllmMockerService {
             LiveRequest,
             OwnedSemaphorePermit,
             InFlightGuard,
-            Arc<AtomicU8>,
+            Arc<AtomicBool>,
         ),
         Status,
     > {
@@ -326,21 +308,13 @@ impl TrtllmMockerService {
         let request = request.into_inner();
         let prepared =
             PreparedRequest::new(request.clone(), &self.config).map_err(|status| *status)?;
-        {
-            let mut received = self.received.lock().expect("received lock poisoned");
-            if received.len() == MAX_RECORDED_REQUESTS {
-                received.pop_front();
-            }
-            received.push_back(request);
-        }
-
         // Claim the id before submitting: LiveEngine would otherwise reject the
         // duplicate with an anyhow that surfaces as an opaque INTERNAL.
-        let state = Arc::new(AtomicU8::new(RequestState::Running as u8));
+        let claimed = Arc::new(AtomicBool::new(false));
         let entry = InFlight {
             uuid: prepared.uuid,
             session_id: prepared.client_session_id.clone(),
-            state: Arc::clone(&state),
+            claimed: Arc::clone(&claimed),
         };
         match self.inflight.entry(prepared.request_id.clone()) {
             dashmap::mapref::entry::Entry::Occupied(_) => {
@@ -365,7 +339,14 @@ impl TrtllmMockerService {
             .map_err(|error| {
                 Status::internal(format!("Mocker request submission failed: {error}"))
             })?;
-        Ok((prepared, live, permit, guard, state))
+        {
+            let mut received = self.received.lock().expect("received lock poisoned");
+            if received.len() == MAX_RECORDED_REQUESTS {
+                received.pop_front();
+            }
+            received.push_back(request);
+        }
+        Ok((prepared, live, permit, guard, claimed))
     }
 
     async fn abort_uuid(&self, request_id: &str) -> Result<pb::AbortStatus, Status> {
@@ -373,10 +354,10 @@ impl TrtllmMockerService {
         // before the `.await` below. Do not restructure this into an `if let`
         // that spans the await: a live shard guard would block every task that
         // touches the same shard, including InFlightGuard::drop.
-        let Some((uuid, state)) = self
+        let Some((uuid, claimed)) = self
             .inflight
             .get(request_id)
-            .map(|entry| (entry.uuid, Arc::clone(&entry.state)))
+            .map(|entry| (entry.uuid, Arc::clone(&entry.claimed)))
         else {
             return Ok(pb::AbortStatus::AlreadyFinished);
         };
@@ -384,28 +365,18 @@ impl TrtllmMockerService {
         // response channel synchronously, so by the time it returns the stream
         // may already have reached its tail; a transition recorded afterwards
         // would arrive too late to shape the terminal event.
-        if state
-            .compare_exchange(
-                RequestState::Running as u8,
-                RequestState::Aborting as u8,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            )
-            .is_err()
-        {
+        if claimed.swap(true, Ordering::AcqRel) {
             return Ok(pb::AbortStatus::AlreadyFinished);
         }
-        let cancelled = self
-            .engine
+        // Only cleanup from here on. `cancel` reporting that it found nothing
+        // to stop does not mean the request finished normally -- the route is
+        // not registered until `submit` returns, so an abort that lands in
+        // that window would read as "already finished" and let the request
+        // stream out in full. The claim above is the decision.
+        self.engine
             .cancel(uuid)
             .await
             .map_err(|error| Status::internal(format!("Mocker abort failed: {error}")))?;
-        if !cancelled {
-            // The scheduler had already released it; the stream owns the
-            // terminal event and will report why it really ended.
-            state.store(RequestState::Finished as u8, Ordering::SeqCst);
-            return Ok(pb::AbortStatus::AlreadyFinished);
-        }
         Ok(pb::AbortStatus::Aborted)
     }
 }
@@ -453,7 +424,7 @@ impl pb::inference_server::Inference for TrtllmMockerService {
         &self,
         request: Request<pb::GenerateRequest>,
     ) -> Result<Response<Self::GenerateStream>, Status> {
-        let (prepared, mut live, permit, guard, state) = self.start_generation(request).await?;
+        let (prepared, mut live, permit, guard, claimed) = self.start_generation(request).await?;
         let config = Arc::clone(&self.config);
 
         // Decouple LiveEngine's small fixed per-request buffer from client and
@@ -497,27 +468,35 @@ impl pb::inference_server::Inference for TrtllmMockerService {
             let mut cached_tokens = None;
             while let Some(signal) = signal_rx.recv().await {
                 if signal.rejected {
-                    // An accepted request fails in-band and the RPC still closes
-                    // OK; a non-OK status is reserved for validation and
-                    // transport failures.
-                    yield engine_error(
-                        &request_id,
-                        pb::ErrorCode::Overloaded,
-                        "request exceeds the simulated KV-cache capacity",
-                        true,
-                    );
+                    if claimed.swap(true, Ordering::AcqRel) {
+                        yield prepared.finished(pb::FinishReason::Cancelled, generated, cached_tokens);
+                    } else {
+                        // An accepted request fails in-band and the RPC still
+                        // closes OK; a non-OK status is reserved for validation
+                        // and transport failures.
+                        yield engine_error(
+                            &request_id,
+                            pb::ErrorCode::Overloaded,
+                            "request exceeds the simulated KV-cache capacity",
+                            true,
+                        );
+                    }
                     return;
                 }
                 cached_tokens = cached_tokens.or(signal.cached_tokens);
                 let Some(token_id) = signal.token_id else {
-                    // Accepted requests report failure in-band, per the same
-                    // contract as the capacity rejection above.
-                    yield engine_error(
-                        &request_id,
-                        pb::ErrorCode::Internal,
-                        "Mocker output signal is missing a token ID",
-                        false,
-                    );
+                    if claimed.swap(true, Ordering::AcqRel) {
+                        yield prepared.finished(pb::FinishReason::Cancelled, generated, cached_tokens);
+                    } else {
+                        // Accepted requests report failure in-band, per the same
+                        // contract as the capacity rejection above.
+                        yield engine_error(
+                            &request_id,
+                            pb::ErrorCode::Internal,
+                            "Mocker output signal is missing a token ID",
+                            false,
+                        );
+                    }
                     return;
                 };
                 generated += 1;
@@ -527,20 +506,7 @@ impl pb::inference_server::Inference for TrtllmMockerService {
                 );
 
                 if signal.completed {
-                    // Losing this race only means an abort if the request was
-                    // actually claimed; an abort that arrived too late marks it
-                    // Finished and leaves the real terminal to the stream.
-                    let aborted = match state.compare_exchange(
-                        RequestState::Running as u8,
-                        RequestState::Finished as u8,
-                        Ordering::SeqCst,
-                        Ordering::SeqCst,
-                    ) {
-                        Ok(_) => false,
-                        Err(previous) => {
-                            RequestState::from_u8(previous) == RequestState::Aborting
-                        }
-                    };
+                    let aborted = claimed.swap(true, Ordering::AcqRel);
                     if config.mode == ServerMode::Prefill && !aborted {
                         // PrefillReady is the terminal event for a context
                         // request; a `finished` after it reads as "request
@@ -570,7 +536,7 @@ impl pb::inference_server::Inference for TrtllmMockerService {
 
             // The stream must never end without a terminal event: the sidecar
             // fails the request outright if it does.
-            if RequestState::from_u8(state.load(Ordering::SeqCst)) == RequestState::Aborting {
+            if claimed.swap(true, Ordering::AcqRel) {
                 yield prepared.finished(pb::FinishReason::Cancelled, generated, cached_tokens);
             } else {
                 yield engine_error(
@@ -618,8 +584,12 @@ impl pb::control_server::Control for TrtllmMockerService {
             timestamp_unix_nanos: None,
             running_requests: Some(metrics.running_requests as u32),
             queued_requests: Some(metrics.waiting_requests as u32),
-            active_kv_sessions: (self.config.mode != ServerMode::Aggregated)
-                .then(|| self.inflight.len() as u32),
+            active_kv_sessions: (self.config.mode != ServerMode::Aggregated).then(|| {
+                self.inflight
+                    .iter()
+                    .filter(|entry| entry.session_id.is_some())
+                    .count() as u32
+            }),
             used_kv_blocks: Some(metrics.active_decode_blocks),
             total_kv_blocks: Some(metrics.total_blocks),
             running_tokens: None,
