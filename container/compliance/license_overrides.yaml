@@ -90,6 +90,26 @@ overrides:
     license: LicenseRef-NVIDIA-Proprietary
     source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
 
+  - ecosystem: python
+    name: nvidia-nvjpeg
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-nvjpeg2k-cu13
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA nvJPEG2000 SDK license — https://docs.nvidia.com/cuda/nvjpeg2000/license.html"
+
+  - ecosystem: python
+    name: nvidia-nvtiff-cu13
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA nvTIFF SDK license — https://docs.nvidia.com/cuda/nvtiff/license.html"
+
+  - ecosystem: python
+    name: nvidia-libnvcomp-cu13
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA nvCOMP SDK license — https://docs.nvidia.com/cuda/nvcomp/license.html"
+
   # --- NVIDIA -cu12 wheel variants (sglang v0.5.11 cuda12.9 image installs these
   # alongside dynamo's own CUDA-12 wheels; mirrors the unsuffixed entries above)
   - ecosystem: python
@@ -354,6 +374,8 @@ overrides:
   - { ecosystem: python, name: blobfile,                  license: "MIT",       source: "blobfile upstream — https://github.com/christopher-hesse/blobfile/blob/master/LICENSE" }
   - { ecosystem: python, name: cache-dit,                 license: "Apache-2.0",  source: "cache-dit upstream — https://github.com/vipshop/cache-dit/blob/main/LICENSE" }
   - { ecosystem: python, name: deep-ep,                   license: "MIT",       source: "deep-ep upstream — https://github.com/deepseek-ai/DeepEP/blob/main/LICENSE" }
+  - { ecosystem: python, name: fla-core,                  license: "MIT",       source: "FLA upstream — https://github.com/fla-org/flash-linear-attention/blob/main/LICENSE" }
+  - { ecosystem: python, name: flash-linear-attention,    license: "MIT",       source: "FLA upstream — https://github.com/fla-org/flash-linear-attention/blob/main/LICENSE" }
   - { ecosystem: python, name: gguf,                      license: "MIT",       source: "gguf (llama.cpp Python binding) — https://github.com/ggerganov/llama.cpp/blob/master/LICENSE" }
   - { ecosystem: python, name: google-crc32c,             license: "Apache-2.0",  source: "google-crc32c upstream — https://github.com/googleapis/python-crc32c/blob/main/LICENSE" }
   - { ecosystem: python, name: helion,                    license: "BSD-3-Clause",  source: "PyTorch Helion — https://github.com/pytorch/helion/blob/main/LICENSE" }

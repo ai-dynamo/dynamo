@@ -1,0 +1,42 @@
+From bea7d4fbe4d167765fd4ed35f9da91560f8e2bf4 Mon Sep 17 00:00:00 2001
+From: Wei Zhao <weizha@oci-aga-slurm-1-vscode-02.cm.cluster>
+Date: Fri, 14 Aug 2026 13:21:34 -0700
+Subject: [PATCH 11/13] fix(mla): restore block-interleaved DCP speculation
+
+Advertise the existing FlashInfer and TokenSpeed MLA support for multi-token speculation when the DCP KV cache uses nontrivial block interleaving.
+
+Co-authored-by: OpenAI Codex <codex@openai.com>
+
+Signed-off-by: Shreyas Misra <shreyasm@nvidia.com>
+---
+ vllm/v1/attention/backends/mla/flashinfer_mla.py | 1 +
+ vllm/v1/attention/backends/mla/tokenspeed_mla.py | 1 +
+ 2 files changed, 2 insertions(+)
+
+diff --git a/vllm/v1/attention/backends/mla/flashinfer_mla.py b/vllm/v1/attention/backends/mla/flashinfer_mla.py
+index 64b7c793ad..9c15026e09 100644
+--- a/vllm/v1/attention/backends/mla/flashinfer_mla.py
++++ b/vllm/v1/attention/backends/mla/flashinfer_mla.py
+@@ -215,6 +215,7 @@ class FlashInferMLABackend(MLACommonBackend):
+ 
+ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
+     can_return_lse_for_decode: bool = True
++    supports_mtp_with_cp_non_trivial_interleave_size: bool = True
+     # trtllm-gen MLA decode emits LSE in log2 (per flashinfer's own
+     # reference at flashinfer/trace/templates/attention.py:81:
+     # `logsumexp / log(2.0)`). Override the AttentionImplBase default
+diff --git a/vllm/v1/attention/backends/mla/tokenspeed_mla.py b/vllm/v1/attention/backends/mla/tokenspeed_mla.py
+index 57a628b82b..97cf97e0b6 100644
+--- a/vllm/v1/attention/backends/mla/tokenspeed_mla.py
++++ b/vllm/v1/attention/backends/mla/tokenspeed_mla.py
+@@ -159,6 +159,7 @@ class TokenspeedMLABackend(MLACommonBackend):
+ 
+ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
+     can_return_lse_for_decode: bool = True
++    supports_mtp_with_cp_non_trivial_interleave_size: bool = True
+     # tokenspeed_mla_decode returns LSE in log2 units; its own DCP test merges
+     # partial outputs with exp2(lse).
+     lse_base_on_e: bool = False
+-- 
+2.34.1
+

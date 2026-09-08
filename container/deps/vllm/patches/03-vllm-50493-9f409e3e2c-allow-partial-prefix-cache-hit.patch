@@ -1,0 +1,59 @@
+From c28600180120f54038e66c21e361d3fe9cf33e50 Mon Sep 17 00:00:00 2001
+From: misunp <misunp@nvidia.com>
+Date: Sat, 8 Aug 2026 13:53:06 -0700
+Subject: [PATCH 02/13] vllm#50493 @9f409e3e2c -- allow partial prefix cache
+ hits under DCP
+
+Without it the hybrid coordinator falls back from the 1536-token hash block to
+the DCP-scaled group block, so prefix-match-unit is silently ignored at dcp>1.
+
+(cherry picked from commit df705e28b282e25d452b47e5c78c83cb0c38424e)
+
+Signed-off-by: Shreyas Misra <shreyasm@nvidia.com>
+---
+ vllm/v1/core/kv_cache_coordinator.py | 18 ++++++++++++------
+ 1 file changed, 12 insertions(+), 6 deletions(-)
+
+diff --git a/vllm/v1/core/kv_cache_coordinator.py b/vllm/v1/core/kv_cache_coordinator.py
+index db8a443a11..b4a4f43d44 100644
+--- a/vllm/v1/core/kv_cache_coordinator.py
++++ b/vllm/v1/core/kv_cache_coordinator.py
+@@ -642,15 +642,22 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
+                     "full-attention and Mamba groups, got: "
+                     f"{type(g.kv_cache_spec).__name__}."
+                 )
+-        # Fine-grained hash hits require Mamba "align", no context
+-        # parallelism, and compatible cache managers in every group.
+-        has_partial_mamba_group = any(
++        self.verify_and_split_kv_cache_groups()
++
++        # TP needs hashing finer than the Mamba block. DCP accepts equality
++        # because it scales the effective full-attention block instead. Every
++        # cache manager must also support the resulting lookup granularity.
++        self.enable_partial_hash_hits = any(
+             isinstance(g.kv_cache_spec, MambaSpec)
+             and g.kv_cache_spec.mamba_cache_mode == "align"
+-            and g.kv_cache_spec.block_size > hash_block_size
++            and (
++                (dcp_world_size == 1 and g.kv_cache_spec.block_size > hash_block_size)
++                or (
++                    dcp_world_size > 1 and g.kv_cache_spec.block_size >= hash_block_size
++                )
++            )
+             for g in kv_cache_config.kv_cache_groups
+         )
+-        self.enable_partial_hash_hits = dcp_world_size == 1 and has_partial_mamba_group
+         if self.enable_partial_hash_hits:
+             unsupported_partial_hit_managers = {
+                 type(manager).__name__
+@@ -665,7 +672,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
+                     "cache managers require block-aligned lookups: %s.",
+                     ", ".join(sorted(unsupported_partial_hit_managers)),
+                 )
+-        self.verify_and_split_kv_cache_groups()
+ 
+     @property
+     def _cache_hit_alignment_tokens(self) -> int:
+-- 
+2.34.1
+

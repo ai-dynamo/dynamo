@@ -1,0 +1,87 @@
+From e87fca359be2abf8468febb1434f995c0536bee4 Mon Sep 17 00:00:00 2001
+From: Wei Zhao <weizha@oci-aga-slurm-1-vscode-02.cm.cluster>
+Date: Wed, 12 Aug 2026 13:58:52 -0700
+Subject: [PATCH 07/13] fix(prefix-cache): preserve partial-hit CoW ownership
+
+Select the block at the exact resume boundary, acquire CoW targets through the block pool, and release retained references without leaking free blocks.
+
+Co-authored-by: OpenAI Codex <codex@openai.com>
+
+Signed-off-by: Wei Zhao <weizha@oci-aga-slurm-1-vscode-02.cm.cluster>
+
+Signed-off-by: Shreyas Misra <shreyasm@nvidia.com>
+---
+ vllm/v1/core/single_type_kv_cache_manager.py | 28 ++++++++++++++------
+ 1 file changed, 20 insertions(+), 8 deletions(-)
+
+diff --git a/vllm/v1/core/single_type_kv_cache_manager.py b/vllm/v1/core/single_type_kv_cache_manager.py
+index d496ecea3d..b1c2b3f04d 100644
+--- a/vllm/v1/core/single_type_kv_cache_manager.py
++++ b/vllm/v1/core/single_type_kv_cache_manager.py
+@@ -132,9 +132,13 @@ class SingleTypeKVCacheManager(ABC):
+     ) -> bool:
+         # The local prefix-cache hit ends inside one of this manager's
+         # blocks: the shared tail block needs CoW.
++        if num_local_computed_tokens % self.block_size == 0:
++            return False
++        block_idx = num_local_computed_tokens // self.block_size
+         return (
+-            len(new_computed_blocks) > 0
+-            and num_local_computed_tokens % self.block_size != 0
++            block_idx < len(new_computed_blocks)
++            and new_computed_blocks[block_idx].block_hash_num_tokens
++            == num_local_computed_tokens
+         )
+ 
+     def get_num_blocks_to_allocate(
+@@ -276,12 +280,12 @@ class SingleTypeKVCacheManager(ABC):
+         # them so cache_blocks() will not try to re-cache blocks that already
+         # have a block_hash set.
+         self.num_cached_block[request_id] = len(req_blocks)
+-        if self._has_partial_local_hit(new_computed_blocks, num_local_computed_tokens):
++        if self._has_partial_local_hit(req_blocks, num_local_computed_tokens):
+             # Record the partial tail for the CoW redirect in
+             # allocate_new_blocks; cap the cached count at the full blocks so
+             # cache_blocks() re-caches the private copy once full.
+             block_idx = num_local_computed_tokens // self.block_size
+-            self._partial_hit_reqs[request_id] = (block_idx, new_computed_blocks[-1])
++            self._partial_hit_reqs[request_id] = (block_idx, req_blocks[block_idx])
+             self.num_cached_block[request_id] = block_idx
+ 
+     def allocate_external_computed_blocks(
+@@ -413,12 +417,20 @@ class SingleTypeKVCacheManager(ABC):
+         request.
+         """
+         req_blocks = self.req_to_blocks[request_id]
+-        assert block_idx < len(req_blocks)
+-        assert req_blocks[block_idx] is source_block
++        assert block_idx < len(req_blocks), (
++            f"request={request_id}, group={self.kv_cache_group_id}, "
++            f"block_idx={block_idx}, num_blocks={len(req_blocks)}, "
++            f"source={source_block.block_id}"
++        )
++        assert req_blocks[block_idx] is source_block, (
++            f"request={request_id}, group={self.kv_cache_group_id}, "
++            f"block_idx={block_idx}, actual={req_blocks[block_idx].block_id}, "
++            f"source={source_block.block_id}, source_ref={source_block.ref_cnt}"
++        )
+         assert not source_block.is_null and source_block.ref_cnt > 0
+         req_blocks[block_idx] = cow_block
+         self._pending_cow_copies.append((source_block, cow_block))
+-        cow_block.ref_cnt += 1
++        self.block_pool.touch((cow_block,))
+ 
+     def cache_blocks(
+         self,
+@@ -1645,7 +1657,7 @@ class MambaManager(SingleTypeKVCacheManager):
+                         assert req_blocks[block_idx] is source_block
+                         self.block_pool.move_block_hashes(source_block, cow_block)
+                         self._pending_cow_copies.append((source_block, cow_block))
+-                        source_block.ref_cnt += 1
++                        self.block_pool.touch((source_block,))
+                         boundary_tokens = self._producer_partial_tail_reqs.pop(
+                             request_id, None
+                         )
+-- 
+2.34.1
+
