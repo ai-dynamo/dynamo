@@ -933,7 +933,9 @@ struct ExtProcError {
 impl ExtProcError {
     fn from_pick_error(e: PickError) -> Self {
         match e {
-            PickError::NoEndpoints => Self {
+            // Both mean "nothing to route to right now"; the role variant only
+            // carries a more specific message for the client.
+            PickError::NoEndpoints | PickError::RoleCatalogEmpty(_) => Self {
                 status_code: StatusCode::ServiceUnavailable,
                 message: e.to_string(),
             },
@@ -1580,12 +1582,28 @@ mod tests {
         assert_eq!(unique_prefilled, unique);
     }
 
-    /// A shed `PickError::Overloaded` maps to a retryable 503 (not a 4xx), so
-    /// clients back off and retry rather than treating the load-shed as their
-    /// own error.
+    /// Pick errors are never logged, so the 503 body is the only place the
+    /// role distinction reaches the caller.
     #[test]
-    fn overloaded_pick_error_maps_to_503() {
-        let err = ExtProcError::from_pick_error(PickError::Overloaded);
-        assert_eq!(err.status_code, StatusCode::ServiceUnavailable);
+    fn retryable_pick_errors_map_to_503_with_client_safe_message() {
+        use crate::worker_role::WorkerRole;
+
+        let cases = [
+            ("overloaded", PickError::Overloaded, "overloaded"),
+            (
+                "empty decode catalog",
+                PickError::RoleCatalogEmpty(WorkerRole::Decode),
+                "decode",
+            ),
+        ];
+        for (label, pick_error, want_fragment) in cases {
+            let err = ExtProcError::from_pick_error(pick_error);
+            assert_eq!(err.status_code, StatusCode::ServiceUnavailable, "{label}");
+            assert!(
+                err.message.contains(want_fragment),
+                "{label}: {:?} should contain {want_fragment:?}",
+                err.message
+            );
+        }
     }
 }

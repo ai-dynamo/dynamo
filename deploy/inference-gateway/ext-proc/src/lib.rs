@@ -21,11 +21,13 @@ pub mod peer_discovery;
 pub mod picker;
 pub mod pod_discovery;
 pub mod proto;
+mod role_config;
 mod runner;
 pub mod selector;
 pub mod server;
 pub mod topology_adapter;
 pub mod vllm_render_client;
+pub mod worker_role;
 
 pub use epp::Router;
 pub use epp_router::EppRouter;
@@ -40,3 +42,4 @@ pub use selector::{OverlapSummary, SelectRequest, SelectResponse, Selector, Work
 pub use server::ExtProcServer;
 pub use topology_adapter::{RegistrationDefaults, TopologyAdapter};
 pub use vllm_render_client::{VllmRenderClient, VllmRenderError};
+pub use worker_role::{RoleCounts, RoleLabelError, WorkerRole};

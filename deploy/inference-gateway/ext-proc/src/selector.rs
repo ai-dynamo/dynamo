@@ -13,7 +13,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 
 use dynamo_kv_router::WorkerType;
-use dynamo_kv_router::config::{KvRouterConfig, try_kv_router_config_from_dynamo_env};
+use dynamo_kv_router::config::{
+    KvRouterConfig, RouterConfigOverride, try_kv_router_config_from_dynamo_env,
+};
 use dynamo_kv_router::protocols::RoutingConstraints;
 use dynamo_kv_router::services::selection::{
     PromptRequest, SelectAndReserveRequest as CoreSelectAndReserveRequest, SelectionError,
@@ -25,6 +27,8 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::epp_standalone_config::EppStandaloneConfig;
+use crate::role_config::router_config_override_for_role;
+use crate::worker_role::WorkerRole;
 
 const DEFAULT_ROUTING_GROUP: &str = "default";
 
@@ -82,6 +86,9 @@ pub struct Selector {
     /// `Drop` tears down its core + replica-sync tasks.
     cancel: CancellationToken,
     reconcile_state: Mutex<ReconcileState>,
+    /// Per-request selection semantics for this selector's role, supplied on
+    /// every selection and booking; `None` for prefill and aggregated.
+    router_config_override: Option<RouterConfigOverride>,
 }
 
 /// Local bookkeeping for desired-state reconciliation.
@@ -103,16 +110,29 @@ impl Selector {
     ) -> Result<Self> {
         let kv_router_config =
             try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
-        Self::new_with_kv_router_config(cfg, kv_router_config, policy_registry).await
+        Self::new_with_kv_router_config(
+            cfg,
+            WorkerRole::Aggregated,
+            kv_router_config,
+            policy_registry,
+        )
+        .await
     }
 
-    async fn new_with_kv_router_config(
+    /// Build one role's selector from an already-derived router config.
+    pub(crate) async fn new_with_kv_router_config(
         cfg: &EppStandaloneConfig,
+        role: WorkerRole,
         kv_router_config: KvRouterConfig,
         policy_registry: WorkerSelectionPolicyRegistry,
     ) -> Result<Self> {
-        Self::validate_queueing_worker_capacity(cfg, &kv_router_config)?;
+        let queueing_enabled = kv_router_config
+            .queueing_enabled(Some(&cfg.model_name))
+            .map_err(|e| anyhow!("resolving router policy for model {}: {e}", cfg.model_name))?;
+        Self::validate_queueing_requirements(cfg, role, queueing_enabled)?;
 
+        // Every role resolves its worker-selection policy on the aggregated
+        // stage; per-role policies are not wired yet.
         warn_for_unserved_worker_selection_policies(&kv_router_config, &[WorkerType::Aggregated])?;
         let peer_replication = cfg.peer_replication.as_ref();
         let peer_client = if peer_replication.is_some() {
@@ -133,9 +153,16 @@ impl Selector {
             .await?;
         }
 
+        // Decode runs with KV events off, so its index is never fed and extra
+        // indexer threads would only idle.
+        let indexer_threads = match role {
+            WorkerRole::Decode => 1,
+            _ => cfg.selector_threads,
+        };
+
         let mut builder =
             SelectionServiceBuilder::new(kv_router_config, WorkerType::Aggregated, policy_registry)
-                .indexer_threads(cfg.selector_threads);
+                .indexer_threads(indexer_threads);
         if let Some(peer_replication) = peer_replication {
             builder = builder.replica_sync(peer_replication.sync_port, Vec::new());
         }
@@ -161,6 +188,7 @@ impl Selector {
         }
         tracing::info!(
             replicated = peer_replication.is_some(),
+            role = %role,
             "Initialized in-process selection service"
         );
 
@@ -168,20 +196,26 @@ impl Selector {
             service,
             cancel,
             reconcile_state: Mutex::new(ReconcileState::default()),
+            router_config_override: router_config_override_for_role(role),
         })
     }
 
-    fn validate_queueing_worker_capacity(
+    /// Fail fast when the policy queues but the role has no capacity figure.
+    ///
+    /// Kept a hard startup error rather than a warning: without it the service
+    /// still builds, every worker upsert then comes back `Incomplete`, the
+    /// catalog stays empty, health stays SERVING, and every request 503s with
+    /// only per-worker warns to explain it.
+    fn validate_queueing_requirements(
         cfg: &EppStandaloneConfig,
-        kv_router_config: &KvRouterConfig,
+        role: WorkerRole,
+        queueing_enabled: bool,
     ) -> Result<()> {
-        let queueing_enabled = kv_router_config
-            .queueing_enabled(Some(&cfg.model_name))
-            .map_err(|e| anyhow!("resolving router policy for model {}: {e}", cfg.model_name))?;
-        if queueing_enabled && cfg.max_num_batched_tokens.unwrap_or(0) == 0 {
+        if queueing_enabled && cfg.max_num_batched_tokens_for(role).unwrap_or(0) == 0 {
+            let var = EppStandaloneConfig::max_num_batched_tokens_env_for(role);
             anyhow::bail!(
-                "DYN_EPP_MAX_NUM_BATCHED_TOKENS is required (and must be > 0) because the router \
-                 scheduling policy enables queueing for model {}; set it to the engine's \
+                "{var} is required (and must be > 0) because the router scheduling policy enables \
+                 queueing for model {} on the {role} selector; set it to that role's engine \
                  --max-num-batched-tokens",
                 cfg.model_name
             );
@@ -287,7 +321,7 @@ impl Selector {
                 token_ids: Some(req.token_ids),
                 ..Default::default()
             },
-            router_config_override: None,
+            router_config_override: self.router_config_override.clone(),
             expected_output_tokens: None,
             session_id: None,
             priority_jump: req.priority_jump,
@@ -342,6 +376,77 @@ impl Selector {
     /// Returns `true` once the selector can schedule at least one worker.
     pub async fn any_ready(&self) -> bool {
         self.service.ready().ready
+    }
+
+    /// How many workers this selector can currently schedule for `model_name`.
+    /// Each selector serves exactly one role, so no role argument is needed.
+    #[cfg(test)]
+    pub(crate) fn schedulable_count(&self, model_name: &str) -> usize {
+        self.schedulable_records(model_name).count()
+    }
+
+    /// The worker ids this selector can currently schedule for `model_name`.
+    #[cfg(test)]
+    pub(crate) fn schedulable_worker_ids(&self, model_name: &str) -> HashSet<u64> {
+        self.schedulable_records(model_name)
+            .map(|record| record.worker_id)
+            .collect()
+    }
+
+    #[cfg(test)]
+    fn schedulable_records(
+        &self,
+        model_name: &str,
+    ) -> impl Iterator<Item = dynamo_kv_router::services::selection::WorkerCatalogRecord> {
+        self.service
+            .list_workers(Some(model_name), Some(DEFAULT_ROUTING_GROUP))
+            .into_iter()
+            .filter(|record| record.lifecycle == WorkerLifecycle::Schedulable)
+    }
+}
+
+/// The selectors this EPP owns — one in aggregated topology, one per role in
+/// disaggregated.
+#[derive(Clone)]
+pub enum RoleSelectors {
+    Aggregated(Arc<Selector>),
+    Disaggregated {
+        prefill: Arc<Selector>,
+        decode: Arc<Selector>,
+    },
+}
+
+impl RoleSelectors {
+    /// The selector that answers requests.
+    ///
+    /// Disaggregated serves from decode: a prefill worker is never a gateway
+    /// destination.
+    pub fn serving(&self) -> &Arc<Selector> {
+        match self {
+            Self::Aggregated(selector) => selector,
+            Self::Disaggregated { decode, .. } => decode,
+        }
+    }
+
+    /// The role [`Self::serving`] belongs to.
+    pub fn serving_role(&self) -> WorkerRole {
+        match self {
+            Self::Aggregated(_) => WorkerRole::Aggregated,
+            Self::Disaggregated { .. } => WorkerRole::Decode,
+        }
+    }
+
+    /// Every selector with its role, for fan-out over the whole topology.
+    pub fn each(&self) -> Vec<(WorkerRole, Arc<Selector>)> {
+        match self {
+            Self::Aggregated(selector) => {
+                vec![(WorkerRole::Aggregated, selector.clone())]
+            }
+            Self::Disaggregated { prefill, decode } => vec![
+                (WorkerRole::Prefill, prefill.clone()),
+                (WorkerRole::Decode, decode.clone()),
+            ],
+        }
     }
 }
 
@@ -409,23 +514,7 @@ models:
     /// `max_num_batched_tokens` is set so `Selector::new` never fails its
     /// fast-fail check regardless of the ambient router policy.
     fn test_config() -> EppStandaloneConfig {
-        EppStandaloneConfig {
-            selector_threads: 1,
-            peer_replication: None,
-            inference_pool_name: "test-pool".to_string(),
-            namespace: "test-ns".to_string(),
-            model_name: "test-model".to_string(),
-            tokenizer_service_url: "http://vllm-render:8000".to_string(),
-            tokenizer_protocol: crate::epp_standalone_config::TokenizerProtocol::VllmRender,
-            tokenizer_max_response_bytes: 16 * 1024 * 1024,
-            tokenization_timeout_ms: 5_000,
-            block_size: 16,
-            kv_event_port: 5557,
-            replay_port: None,
-            total_kv_blocks: None,
-            max_num_batched_tokens: Some(8192),
-            max_inflight_requests: 1024,
-        }
+        EppStandaloneConfig::for_test()
     }
 
     /// A registration the core marks `Incomplete`: `block_size = 0` fails the
@@ -556,6 +645,7 @@ worker_selection:
             .expect("register policy provider");
         let selector = Selector::new_with_kv_router_config(
             &test_config(),
+            WorkerRole::Aggregated,
             router_config_with_policy(&policy_file),
             registry,
         )
@@ -826,6 +916,7 @@ worker_selection:
 
         let error = Selector::new_with_kv_router_config(
             &cfg,
+            WorkerRole::Aggregated,
             router_config_with_policy(&policy_file),
             WorkerSelectionPolicyRegistry::default(),
         )
@@ -849,6 +940,7 @@ worker_selection:
 
         Selector::new_with_kv_router_config(
             &cfg,
+            WorkerRole::Aggregated,
             router_config_with_policy(&policy_file),
             WorkerSelectionPolicyRegistry::default(),
         )
@@ -869,5 +961,43 @@ worker_selection:
             .expect_err("duplicate IDs must be rejected");
         assert!(error.to_string().contains("duplicate worker_id 1"));
         assert!(selector.service.list_workers(None, None).is_empty());
+    }
+
+    /// The role's override reaches the core's booking path: decode carries
+    /// `track_prefill_tokens: Some(false)`, so the same 16-token prompt books
+    /// no prefill load there and all 16 tokens on prefill.
+    #[tokio::test]
+    async fn decode_selector_books_no_prefill_load_and_prefill_selector_books_it() {
+        use crate::role_config::kv_router_config_for_role;
+
+        let base = KvRouterConfig::default();
+        for (role, expected) in [(WorkerRole::Prefill, 16usize), (WorkerRole::Decode, 0usize)] {
+            let selector = Selector::new_with_kv_router_config(
+                &test_config(),
+                role,
+                kv_router_config_for_role(&base, role),
+                WorkerSelectionPolicyRegistry::default(),
+            )
+            .await
+            .expect("role selector should build");
+            selector
+                .reconcile(&[schedulable_registration(1)])
+                .await
+                .expect("reconcile");
+            selector
+                .select_and_reserve(select_request("res"))
+                .await
+                .expect("reserve");
+
+            let booked = selector
+                .service
+                .loads(Some("test-model"), Some(DEFAULT_ROUTING_GROUP))
+                .iter()
+                .flat_map(|model| model.loads.iter())
+                .find(|load| load.worker_id == 1)
+                .expect("worker load")
+                .potential_prefill_tokens;
+            assert_eq!(booked, expected, "{role}");
+        }
     }
 }

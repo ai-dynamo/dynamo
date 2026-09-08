@@ -26,6 +26,7 @@ use std::time::Duration;
 use anyhow::Result;
 use tokio::sync::Semaphore;
 
+use dynamo_kv_router::config::try_kv_router_config_from_dynamo_env;
 use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
 use dynamo_llm::protocols::common::extensions::{
     AgentHints, HEADER_REQUEST_PRIORITY, HEADER_REQUEST_STRICT_PRIORITY, resolve_request_priority,
@@ -35,18 +36,23 @@ use serde::Deserialize;
 use crate::epp_standalone_config::EppStandaloneConfig;
 use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo};
 use crate::pod_discovery::PodDiscovery;
-use crate::selector::{SelectRequest, Selector};
-use crate::topology_adapter::{RegistrationDefaults, TopologyAdapter};
+use crate::role_config::{kv_router_config_for_role, reject_unsupported_router_config};
+use crate::selector::{RoleSelectors, SelectRequest, Selector};
+use crate::topology_adapter::TopologyAdapter;
 use crate::vllm_render_client::{VllmRenderClient, VllmRenderError};
+use crate::worker_role::WorkerRole;
 
 /// Standalone endpoint picker backed by the standalone selection service.
 pub struct EppRouter {
     renderer: VllmRenderClient,
     reflector: Arc<PodDiscovery>,
-    selector: Arc<Selector>,
+    selectors: RoleSelectors,
     // Kept alive for the lifetime of the router; the reconcile loop runs on it.
     _adapter: TopologyAdapter,
     reflector_ready: Arc<AtomicBool>,
+    /// The only role this EPP will ever hand the gateway as a destination:
+    /// `Aggregated` in aggregated topology, `Decode` in disaggregated.
+    serving_role: WorkerRole,
     model_name: String,
     /// Bounds total concurrent in-flight `pick()`s. HTTP/2 stream multiplexing
     /// means the TCP-connection cap (`MAX_CONCURRENT_CONNECTIONS`) does NOT bound
@@ -63,30 +69,90 @@ impl EppRouter {
         cfg: EppStandaloneConfig,
         policy_registry: WorkerSelectionPolicyRegistry,
     ) -> Result<Self> {
-        let selector = Arc::new(Selector::new(&cfg, policy_registry).await?);
+        let selectors = Self::build_selectors(&cfg, policy_registry).await?;
         let renderer = VllmRenderClient::new(
             &cfg.tokenizer_service_url,
             Duration::from_millis(cfg.tokenization_timeout_ms),
             cfg.tokenizer_max_response_bytes,
         )?;
         let (reflector, reflector_ready) = PodDiscovery::spawn(&cfg).await?;
-        let reflector = Arc::new(reflector);
-        let defaults = RegistrationDefaults::from_config(&cfg);
-        let adapter =
-            TopologyAdapter::spawn(reflector.as_ref().clone(), selector.clone(), defaults);
+        Ok(Self::from_selector_parts(
+            cfg,
+            renderer,
+            Arc::new(reflector),
+            reflector_ready,
+            selectors,
+        ))
+    }
+
+    /// One selector per role in play.
+    ///
+    /// Disaggregated builds two `SelectionService`s: `use_kv_events` is fixed at
+    /// construction and differs per role, and the catalogs must be disjoint so a
+    /// decode pick can never see a prefill worker.
+    async fn build_selectors(
+        cfg: &EppStandaloneConfig,
+        policy_registry: WorkerSelectionPolicyRegistry,
+    ) -> Result<RoleSelectors> {
+        if !cfg.topology_mode.is_disaggregated() {
+            return Ok(RoleSelectors::Aggregated(Arc::new(
+                Selector::new(cfg, policy_registry).await?,
+            )));
+        }
+
+        // Parsed once and cloned per role: the parse both reads the process env
+        // and logs the resolved config, so doing it twice would double the
+        // startup block for no benefit.
+        let base = try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
+        reject_unsupported_router_config(cfg.topology_mode, &base)?;
+
+        let prefill = Selector::new_with_kv_router_config(
+            cfg,
+            WorkerRole::Prefill,
+            kv_router_config_for_role(&base, WorkerRole::Prefill),
+            policy_registry.clone(),
+        )
+        .await?;
+        let decode = Selector::new_with_kv_router_config(
+            cfg,
+            WorkerRole::Decode,
+            kv_router_config_for_role(&base, WorkerRole::Decode),
+            policy_registry,
+        )
+        .await?;
+
+        Ok(RoleSelectors::Disaggregated {
+            prefill: Arc::new(prefill),
+            decode: Arc::new(decode),
+        })
+    }
+
+    fn from_selector_parts(
+        cfg: EppStandaloneConfig,
+        renderer: VllmRenderClient,
+        reflector: Arc<PodDiscovery>,
+        reflector_ready: Arc<AtomicBool>,
+        selectors: RoleSelectors,
+    ) -> Self {
+        let serving_role = selectors.serving_role();
+        let adapter = TopologyAdapter::spawn(reflector.as_ref().clone(), selectors.clone(), &cfg);
 
         // Readiness is driven solely by the live pod+pool signal (see `is_ready`);
         // we do not block startup on a schedulable worker. A valid, empty pool is
-        // ready immediately and returns 503 per-request until capacity appears.
-        Ok(Self {
+        // ready immediately and returns 503 per-request until capacity appears —
+        // and in disaggregated topology that includes a pool whose decode role is
+        // empty, which is deliberately a per-request failure rather than a health
+        // flip, since the gateway fails closed and would drop everything.
+        Self {
             renderer,
             reflector,
-            selector,
+            selectors,
             _adapter: adapter,
             reflector_ready,
+            serving_role,
             model_name: cfg.model_name,
             inflight: Arc::new(Semaphore::new(cfg.max_inflight_requests)),
-        })
+        }
     }
 
     /// Overall EPP readiness for the gRPC health signal: the pod reflector has
@@ -135,9 +201,10 @@ impl EppRouter {
             .filter_map(|candidate| candidate.parse().ok())
             .collect();
         // Single index pass; the predicate borrows each endpoint (no clone).
-        self.reflector.ready_worker_ids_matching(|endpoint| {
-            endpoint_in_subset(endpoint, &candidates, &candidate_ips)
-        })
+        self.reflector
+            .ready_worker_ids_matching(self.serving_role, |endpoint| {
+                endpoint_in_subset(endpoint, &candidates, &candidate_ips)
+            })
     }
 }
 
@@ -197,8 +264,12 @@ impl EndpointPicker for EppRouter {
             ));
         }
 
-        if !self.reflector.has_ready_workers() {
-            return Err(PickError::NoEndpoints);
+        if !self.reflector.has_ready_workers(self.serving_role) {
+            // Distinguish "this role is empty" from "the pool is empty".
+            return Err(match self.serving_role {
+                WorkerRole::Aggregated => PickError::NoEndpoints,
+                role => PickError::RoleCatalogEmpty(role),
+            });
         }
 
         // Bound total in-flight picks. This caps the tokenizer/render fan-out,
@@ -248,12 +319,12 @@ impl EndpointPicker for EppRouter {
                 Some(ids) => {
                     let worker_id = *ids.iter().next().ok_or(PickError::NoEndpoints)?;
                     self.reflector
-                        .resolve_endpoint(worker_id)
+                        .resolve_endpoint(worker_id, self.serving_role)
                         .ok_or(PickError::NoEndpoints)?
                 }
                 None => self
                     .reflector
-                    .resolve_any_endpoint()
+                    .resolve_any_endpoint(self.serving_role)
                     .ok_or(PickError::NoEndpoints)?,
             };
             return Ok(PickResult {
@@ -284,7 +355,7 @@ impl EndpointPicker for EppRouter {
         // reclaimed by the queue's drop-retraction. Disarmed on the handled paths
         // below; until then, dropping this future frees the reservation.
         let mut reservation_guard =
-            ReservationGuard::new(self.selector.clone(), reservation_id.clone());
+            ReservationGuard::new(self.selectors.serving().clone(), reservation_id.clone());
 
         let select_req = SelectRequest {
             model_name: self.model_name.clone(),
@@ -299,7 +370,12 @@ impl EndpointPicker for EppRouter {
         };
 
         // On either error return below the guard (still armed) frees the booking.
-        let resp = match self.selector.select_and_reserve(select_req).await {
+        let resp = match self
+            .selectors
+            .serving()
+            .select_and_reserve(select_req)
+            .await
+        {
             Ok(resp) => resp,
             Err(e) => return Err(PickError::RoutingFailed(e.to_string())),
         };
@@ -307,7 +383,10 @@ impl EndpointPicker for EppRouter {
         // The reflector owns the address + readiness. If it can no longer resolve
         // the selected worker, the pod left Ready in the race, so the selection is
         // stale: refuse rather than route to a stale address.
-        let Some(endpoint) = self.reflector.resolve_endpoint(resp.worker_id) else {
+        let Some(endpoint) = self
+            .reflector
+            .resolve_endpoint(resp.worker_id, self.serving_role)
+        else {
             tracing::warn!(
                 worker_id = resp.worker_id,
                 "Selected worker no longer resolvable in reflector; treating selection as stale"
@@ -335,7 +414,7 @@ impl EndpointPicker for EppRouter {
     /// Response complete: release the booking from `pick`. `booking_id` is that
     /// reservation id; `free_reservation` is idempotent (body-less pick → no-op).
     async fn on_request_complete(&self, booking_id: &str) {
-        if let Err(e) = self.selector.free_reservation(booking_id).await {
+        if let Err(e) = self.selectors.serving().free_reservation(booking_id).await {
             tracing::warn!(reservation_id = booking_id, error = %e, "Failed to free reservation");
         }
     }
@@ -343,7 +422,7 @@ impl EndpointPicker for EppRouter {
     /// First token: release prefill load, keep decode booked until completion.
     /// `booking_id` is `pick`'s reservation id; `prefill_complete` is idempotent.
     async fn on_prefill_complete(&self, booking_id: &str) {
-        if let Err(e) = self.selector.prefill_complete(booking_id).await {
+        if let Err(e) = self.selectors.serving().prefill_complete(booking_id).await {
             tracing::warn!(reservation_id = booking_id, error = %e, "Failed to mark prefill complete");
         }
     }
@@ -558,5 +637,107 @@ mod tests {
             guard.disarm();
         }
         assert!(!fired.load(Ordering::SeqCst));
+    }
+
+    use crate::pod_discovery::RawWorker;
+    use crate::selector::RoleSelectors;
+    use dynamo_runtime::discovery::hash_pod_name;
+
+    fn disagg_config() -> EppStandaloneConfig {
+        EppStandaloneConfig {
+            topology_mode: crate::epp_standalone_config::EppTopologyMode::Disaggregated,
+            ..EppStandaloneConfig::for_test()
+        }
+    }
+
+    fn worker(name: &str, ip: &str, role: WorkerRole) -> RawWorker {
+        RawWorker {
+            worker_id: hash_pod_name(name),
+            pod_name: name.to_string(),
+            pod_ip: ip.to_string(),
+            role,
+            http_endpoint: format!("http://{ip}:8000"),
+            kv_events_endpoint: (role != WorkerRole::Decode).then(|| format!("tcp://{ip}:5557")),
+            replay_endpoint: None,
+        }
+    }
+
+    /// Assemble a router over a fixed catalog, bypassing `PodDiscovery::spawn` — the
+    /// only thing in the constructor that needs a cluster.
+    async fn router_over(cfg: EppStandaloneConfig, workers: Vec<RawWorker>) -> EppRouter {
+        let selectors = RoleSelectors::Aggregated(Arc::new(
+            Selector::new(&cfg, WorkerSelectionPolicyRegistry::default())
+                .await
+                .expect("selector should build"),
+        ));
+        let renderer = VllmRenderClient::new(
+            &cfg.tokenizer_service_url,
+            Duration::from_millis(cfg.tokenization_timeout_ms),
+            cfg.tokenizer_max_response_bytes,
+        )
+        .expect("render client construction does no I/O");
+        let (reflector, _changes_tx) = PodDiscovery::for_test(workers);
+        let ready = Arc::new(AtomicBool::new(true));
+        EppRouter::from_selector_parts(cfg, renderer, Arc::new(reflector), ready, selectors)
+    }
+
+    /// The body-less path resolves an arbitrary worker without consulting the
+    /// selector at all, which is exactly why it must be role-scoped.
+    #[tokio::test]
+    async fn decode_serving_pick_never_returns_a_prefill_endpoint() {
+        enum Expected {
+            Endpoint(&'static str),
+            NoEndpoints,
+            DecodeCatalogEmpty,
+        }
+        let prefill = || worker("p-0", "10.0.0.1", WorkerRole::Prefill);
+        let decode = || worker("d-0", "10.0.0.2", WorkerRole::Decode);
+        let cases = [
+            (
+                "body-less pick resolves the decode worker",
+                vec![prefill(), decode()],
+                vec![],
+                Expected::Endpoint("10.0.0.2:8000"),
+            ),
+            (
+                "subset hint naming only prefill pods refuses to route",
+                vec![prefill(), decode()],
+                vec!["10.0.0.1:8000".to_string()],
+                Expected::NoEndpoints,
+            ),
+            (
+                "prefill-only catalog reports the empty decode role",
+                vec![prefill()],
+                vec![],
+                Expected::DecodeCatalogEmpty,
+            ),
+        ];
+
+        for (label, workers, candidate_subset, expected) in cases {
+            let mut router = router_over(disagg_config(), workers).await;
+            router.serving_role = WorkerRole::Decode;
+            let req = RequestInfo {
+                request_id: "r1".to_string(),
+                headers: Vec::new(),
+                body: bytes::Bytes::new(),
+                model: String::new(),
+                candidate_subset,
+            };
+            let got = router.pick(&req, &[]).await;
+            match expected {
+                Expected::Endpoint(endpoint) => {
+                    assert_eq!(got.expect(label).endpoint, endpoint, "{label}");
+                }
+                Expected::NoEndpoints => {
+                    assert!(matches!(got, Err(PickError::NoEndpoints)), "{label}");
+                }
+                Expected::DecodeCatalogEmpty => {
+                    assert!(
+                        matches!(got, Err(PickError::RoleCatalogEmpty(WorkerRole::Decode))),
+                        "{label}"
+                    );
+                }
+            }
+        }
     }
 }

@@ -78,7 +78,11 @@ fn validate_kube_discovery_mode_value(mode: Option<&str>) -> Result<bool> {
     }
 }
 
-fn decode_router_config_override(is_disaggregated: bool) -> Option<RouterConfigOverride> {
+/// The decode leg's per-request selection semantics. Shared with the standalone
+/// path through `crate::role_config::router_config_override_for_role`.
+pub(crate) fn decode_router_config_override(
+    is_disaggregated: bool,
+) -> Option<RouterConfigOverride> {
     is_disaggregated.then_some(RouterConfigOverride {
         overlap_score_credit: Some(0.0),
         assume_kv_reuse: Some(false),
