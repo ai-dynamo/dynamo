@@ -49,21 +49,13 @@ use tokio_stream::{StreamExt, StreamNotifyClose, wrappers::ReceiverStream};
 use tracing::Instrument;
 
 /// Error types that must never be attached as the cause of a pre-stream
-/// failure.
+/// failure, because migration classification walks the whole cause chain.
 ///
-/// Retry classification is not decided by the outer error type alone.
-/// `is_migratable` in `lib/llm/src/migration.rs` calls
-/// [`crate::error::match_error_chain`], which walks the whole chain and returns
-/// `false` as soon as it meets a member whose type is in its exclusion set.
-/// Attaching a cause typed one of these would therefore turn a pre-stream
-/// failure that migrates today into one that does not.
-///
-/// This must hold the same set as `NON_MIGRATABLE` in
-/// `lib/llm/src/migration.rs`. It cannot simply *be* that constant: `dynamo-llm`
-/// depends on `dynamo-runtime` and not the reverse. It is `pub` so that the
-/// dependent crate can compare the two, and
-/// `migration_sensitive_types_match_the_exclusion_set` there fails if a type is
-/// ever added to one list and not the other.
+/// Must hold the same set as `NON_MIGRATABLE` in `lib/llm/src/migration.rs`,
+/// which cannot be reused directly because `dynamo-llm` depends on
+/// `dynamo-runtime` and not the reverse.
+/// `migration_sensitive_types_match_the_exclusion_set` there fails if the two
+/// lists ever disagree.
 pub const MIGRATION_SENSITIVE_ERROR_TYPES: &[ErrorType] =
     &[ErrorType::Cancelled, ErrorType::ResourceExhausted];
 
@@ -87,40 +79,15 @@ fn chain_is_migration_sensitive(err: &DynamoError) -> bool {
 
 /// Build the error returned when the worker fails before any response bytes.
 ///
-/// The outer type stays [`ErrorType::CannotConnect`]: the dominant cause of a
-/// pre-stream failure is a worker-local setup or version issue, and migrating
-/// is safe because no response bytes are visible yet. Changing which failures
-/// migrate is a separate decision from being able to see them, and is not made
-/// here -- see the follow-up note below.
+/// The outer type stays [`ErrorType::CannotConnect`], so retry classification
+/// of the outer error is unchanged. A typed error from the worker's prologue is
+/// attached as the cause, which consumers reach with
+/// [`crate::error::match_error_chain`].
 ///
-/// What is new is that when the worker sent a typed error in its prologue, that
-/// error is attached as the cause instead of being flattened into the message.
-/// A consumer walking the chain (`crate::error::match_error_chain`) can then
-/// classify the underlying failure -- for example, a backend refusing a request
-/// it can never serve, which should be reported to the caller as a bad request
-/// rather than as an internal error.
-///
-/// Retry classification stays unchanged, but not because the outer type is
-/// unchanged: consumers walk the whole chain, so an attached cause is as
-/// visible to them as the outer type. It stays unchanged because a cause whose
-/// chain carries a migration-sensitive type is not attached at all -- see
-/// [`MIGRATION_SENSITIVE_ERROR_TYPES`]. The worker's text is still in the
-/// message either way; only the machine-readable type is withheld, and only for
-/// the types that would flip migration.
-///
-/// The frontend's status classifiers walk the same chain
-/// (`lib/llm/src/http/service/metrics.rs`), so an attached cause deliberately
-/// widens what the caller sees past the bad-request case that motivated this
-/// function: a cause typed [`ErrorType::WorkerOverloaded`] now answers `529` and
-/// one typed [`ErrorType::Unavailable`] answers `503`, where both previously
-/// fell through to `500`. Each reports the worker's actual reason instead of a
-/// generic internal error, which is the point of carrying the type at all. The
-/// exclusion above also bounds this: a `Cancelled` cause is not attached, so a
-/// pre-stream failure cannot become a `499`.
-///
-/// Follow-up: promoting the outer error type based on the recovered cause (so
-/// that an unservable request is not retried at all) is a routing change with
-/// its own migration semantics and is deliberately left out of this function.
+/// Because that walk covers the whole chain, an attached cause is as visible as
+/// the outer type, so causes typed one of [`MIGRATION_SENSITIVE_ERROR_TYPES`]
+/// are withheld rather than attached. The worker's text stays in the message
+/// either way; only the machine-readable type is withheld.
 pub fn pre_stream_failure_error(error: &StreamPrologueError) -> DynamoError {
     let builder = DynamoError::builder()
         .error_type(ErrorType::CannotConnect)

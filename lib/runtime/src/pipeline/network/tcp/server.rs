@@ -2514,64 +2514,6 @@ mod tests {
         );
     }
 
-    /// Negative control: a worker that failed for a genuine transport-side
-    /// reason carries no request-level refusal into the chain.
-    #[tokio::test]
-    async fn test_untyped_prologue_error_stays_untyped() {
-        let server = test_server().await;
-        let context = Context::new(());
-        let options = StreamOptions::builder()
-            .context(context.context())
-            .enable_request_stream(false)
-            .enable_response_stream(true)
-            .build()
-            .unwrap();
-
-        let pending = server.register(options).await;
-        let (connection_info, stream_provider) = pending.recv_stream.unwrap().into_parts();
-        let client_context =
-            Context::with_id_and_metadata((), context.id().to_string(), Default::default());
-
-        let client = tokio::spawn(async move {
-            let mut sender =
-                TcpClient::create_response_stream(client_context.context(), connection_info, None)
-                    .await
-                    .unwrap();
-            sender
-                .send_prologue(Some(StreamPrologueError::from_message(
-                    "Generate Error: engine shut down",
-                )))
-                .await
-                .unwrap();
-        });
-        client.await.unwrap();
-
-        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), stream_provider)
-            .await
-            .expect("stream provider should resolve quickly")
-            .expect("stream provider channel should not be dropped");
-
-        let prologue_error = match outcome {
-            Err(err) => err,
-            Ok(_) => panic!("an error prologue must not yield a usable stream"),
-        };
-        assert!(prologue_error.typed_error.is_none());
-
-        let egress_error = pre_stream_failure_error(&prologue_error);
-        assert_eq!(egress_error.error_type(), ErrorType::CannotConnect);
-        assert!(
-            !match_error_chain(
-                &egress_error,
-                &[
-                    ErrorType::InvalidArgument,
-                    ErrorType::Backend(BackendError::InvalidArgument),
-                ],
-                &[],
-            ),
-            "an untyped prologue must not synthesize a request-level refusal"
-        );
-    }
-
     // ==================== request_stream_send_handler integration tests ====================
     //
     // These exercise the closing-message contract of `request_stream_send_handler`

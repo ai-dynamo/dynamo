@@ -767,17 +767,11 @@ where
 
 /// Recover the worker's typed error from a pipeline failure, for the prologue.
 ///
-/// This is the hop the whole pre-stream typing path depends on, and the obvious
-/// spelling of it is wrong. `PipelineError::GenerateError` holds an
-/// `anyhow::Error`, and `anyhow::Error` does not itself implement
-/// `std::error::Error`, so that variant exposes no `source()`:
-/// `DynamoError::from(&e)` on the `PipelineError` yields a bare
-/// `ErrorType::Unknown` carrying only the display text, losing exactly the type
-/// this path exists to carry. The anyhow payload has to be unwrapped first.
-///
-/// Any other variant is a transport-side or plumbing failure with no worker
-/// error behind it, and converts to `ErrorType::Unknown` -- the same untyped
-/// result the prologue carried before it could carry a type at all.
+/// `GenerateError` must unwrap its `anyhow::Error` payload first. `anyhow::Error`
+/// does not implement `std::error::Error`, so that variant exposes no `source()`
+/// and converting the enclosing `PipelineError` yields a bare
+/// `ErrorType::Unknown`, losing the worker error type. Any other variant carries
+/// no worker error and converts to `ErrorType::Unknown`.
 pub(crate) fn typed_error_from_pipeline_error(e: &PipelineError) -> DynamoError {
     let source: &(dyn std::error::Error + 'static) = match e {
         PipelineError::GenerateError(inner) => inner.as_ref(),
