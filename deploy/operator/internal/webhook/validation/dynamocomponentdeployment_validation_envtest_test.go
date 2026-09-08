@@ -71,6 +71,26 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
+			name: "v1beta1 explicit multinode roles are shared with standalone components",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4}
+				dcd.Spec.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
+					{Name: nvidiacomv1beta1.ComponentRoleLeader},
+					{Name: nvidiacomv1beta1.ComponentRoleWorker},
+				}
+			}),
+		},
+		{
+			name: "v1alpha1 explicit multinode roles convert for standalone components",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.Multinode = &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 4}
+				dcd.Spec.Roles = []nvidiacomv1alpha1.ComponentRoleSpec{
+					{Name: nvidiacomv1alpha1.ComponentRoleLeader},
+					{Name: nvidiacomv1alpha1.ComponentRoleWorker},
+				}
+			}),
+		},
+		{
 			name: "v1beta1 main image is required when pod template is absent on create",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.PodTemplate = nil
@@ -258,6 +278,46 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				}
 			}),
 			wantWebhookErrs: []string{"spec.experimental.checkpoint: Forbidden: checkpoint functionality is disabled in the operator configuration"},
+		},
+		{
+			name: "v1beta1 standalone worker checkpointRef is rejected",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{
+						Enabled:       true,
+						CheckpointRef: k8sptr.To("worker-snapshot"),
+					},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.experimental.checkpoint.checkpointRef: Forbidden: worker-class checkpointRef is supported only on DynamoGraphDeployment-managed components"},
+		},
+		{
+			name: "v1alpha1 standalone worker checkpointRef is rejected",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.Checkpoint = &nvidiacomv1alpha1.ServiceCheckpointConfig{
+					Enabled:       true,
+					CheckpointRef: k8sptr.To("worker-snapshot"),
+				}
+			}),
+			wantWebhookErrs: []string{"spec.checkpoint.checkpointRef: Forbidden: worker-class checkpointRef is supported only on DynamoGraphDeployment-managed components"},
+		},
+		{
+			name: "DGD-managed worker checkpointRef is accepted",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.OwnerReferences = []metav1.OwnerReference{{
+					APIVersion: nvidiacomv1beta1.GroupVersion.String(),
+					Kind:       nvidiacomv1beta1.DynamoGraphDeploymentGVK.Kind,
+					Name:       "graph",
+					UID:        "graph-uid",
+					Controller: k8sptr.To(true),
+				}}
+				dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{
+						Enabled:       true,
+						CheckpointRef: k8sptr.To("worker-snapshot"),
+					},
+				}
+			}),
 		},
 		{
 			name: "invalid replicas",
@@ -595,13 +655,19 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		},
 		{
 			name: "deprecated checkpoint mode with checkpointRef is accepted",
-			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeWorker,
-				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.OwnerReferences = []metav1.OwnerReference{{
+					APIVersion: nvidiacomv1alpha1.GroupVersion.String(),
+					Kind:       "DynamoGraphDeployment",
+					Name:       "graph",
+					UID:        "graph-uid",
+					Controller: k8sptr.To(true),
+				}}
+				dcd.Spec.Checkpoint = &nvidiacomv1alpha1.ServiceCheckpointConfig{
 					Enabled:       true,
 					Mode:          nvidiacomv1alpha1.CheckpointModeManual,
 					CheckpointRef: k8sptr.To("existing-checkpoint"),
-				},
+				}
 			}),
 		},
 		{
@@ -1521,6 +1587,24 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
 			}),
 			wantWebhookErrs: []string{`spec.multinode: Invalid value: {"nodeCount":2}: cannot change node topology between single-node and multi-node after creation`},
+		},
+		{
+			name: "v1beta1 implicit to semantically equivalent explicit roles is allowed",
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				setBetaExplicitMultinodeRoles(&dcd.Spec.DynamoComponentDeploymentSharedSpec, 2)
+			}),
+		},
+		{
+			name: "v1beta1 explicit to semantically equivalent implicit roles is allowed",
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				setBetaExplicitMultinodeRoles(&dcd.Spec.DynamoComponentDeploymentSharedSpec, 2)
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
 		},
 		{
 			name:               "v1alpha1 update aggregates create and DCD-specific update errors",

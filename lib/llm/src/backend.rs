@@ -609,14 +609,13 @@ impl Decoder {
         self.generated_tokens += 1;
 
         // decode the token
-        let detokenize_start = Instant::now();
+        let detokenize_start = self.tracker.as_ref().map(|_| Instant::now());
         let token = {
             let _nvtx = dynamo_nvtx_range!("detokenize");
             self.decode_stream.step(token_id)?
         };
-        let detokenize_elapsed = detokenize_start.elapsed();
-        if let Some(tracker) = &self.tracker {
-            tracker.record_detokenize_latency(detokenize_elapsed);
+        if let (Some(start), Some(tracker)) = (detokenize_start, &self.tracker) {
+            tracker.record_detokenize_latency(start.elapsed());
         }
 
         // stop conditions to not apply until the minimum number of tokens have been generated

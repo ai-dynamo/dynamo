@@ -396,6 +396,7 @@ async def async_main():
         config.discovery_backend,
         config.request_plane,
         event_plane=config.event_plane,
+        response_plane=config.response_plane,
     )
 
     def signal_handler():

@@ -462,6 +462,7 @@ jobs:
         compile_bench multiturn --bench multiturn_bench
         compile_bench satf --bin request_trace_to_satf
         compile_bench request-trace-to-mooncake --bin request_trace_to_mooncake
+        compile_bench weka-to-agentic-mooncake --bin weka_to_agentic_mooncake
         compile_bench offline-replay --bench offline_replay_bench
         compile_bench mooncake --bench mooncake_bench
         compile_bench active-sequences --bench active_sequences_bench
@@ -470,6 +471,9 @@ jobs:
 
         cargo test --locked --no-default-features -p dynamo-bench \
           --features request-trace-to-mooncake --test request_trace_to_mooncake
+
+        cargo test --locked --no-default-features -p dynamo-bench \
+          --features weka-to-agentic-mooncake --test weka_to_agentic_mooncake
 
         cargo test --locked -p dynamo-llm --no-default-features \
           --features kv-router-stress --bench kv_router_bench --no-run
@@ -538,6 +542,8 @@ jobs:
         lint_bench multiturn --bench multiturn_bench
         lint_bench satf --bin request_trace_to_satf
         lint_bench request-trace-to-mooncake --bin request_trace_to_mooncake
+        lint_bench weka-to-agentic-mooncake --bin weka_to_agentic_mooncake
+        lint_bench weka-to-agentic-mooncake --test weka_to_agentic_mooncake
         lint_bench offline-replay --bench offline_replay_bench
         lint_bench mooncake --bench mooncake_bench
         lint_bench active-sequences --bench active_sequences_bench
