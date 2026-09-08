@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use async_trait::async_trait;
 use futures_util::FutureExt;
 use parking_lot::Mutex;
-use tokio::sync::{Mutex as AsyncMutex, mpsc};
+use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
 use tokio::task::JoinHandle;
 // Deadline math across the scheduler uses `tokio::time::Instant` so
 // paused-clock tests stay coherent.
@@ -154,10 +154,11 @@ pub type AbortCause = dyn Error + Send + Sync + 'static;
 /// `Sent`: an attempt that recorded a worker via selection but was never
 /// dispatched still ends with `Completed`.
 ///
-/// Delivery is asynchronous, so a re-registered request id may be classified
-/// before the previous lifecycle's terminal event is delivered. A plugin
-/// keying state by request id must treat `classify` as the start of a new
-/// lifecycle rather than waiting for the prior terminal event.
+/// Delivery is asynchronous, but a re-registered request id is not classified
+/// until the previous lifecycle's terminal event has been delivered, so a
+/// plugin keying state by request id observes each lifecycle's `classify` and
+/// events in order and never receives a stale terminal event after the id's
+/// next `classify`.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ClassifyEvent {
@@ -243,6 +244,39 @@ struct LiveRequest {
     overrides: Option<ClassificationOverrides>,
 }
 
+/// Terminal events enqueued for delivery but not yet delivered, per request
+/// id. `classify_with` waits on this before invoking the plugin for a reused
+/// id, so the plugin never observes a lifecycle's `classify` ahead of the
+/// previous lifecycle's terminal event for the same id.
+#[derive(Default)]
+struct PendingTerminals {
+    counts: Mutex<HashMap<String, usize>>,
+    delivered: Notify,
+}
+
+impl PendingTerminals {
+    fn reserve(&self, request_id: &str) {
+        *self.counts.lock().entry(request_id.to_owned()).or_insert(0) += 1;
+    }
+
+    fn release(&self, request_id: &str) {
+        {
+            let mut counts = self.counts.lock();
+            if let Some(count) = counts.get_mut(request_id) {
+                *count -= 1;
+                if *count == 0 {
+                    counts.remove(request_id);
+                }
+            }
+        }
+        self.delivered.notify_waiters();
+    }
+
+    fn is_pending(&self, request_id: &str) -> bool {
+        self.counts.lock().contains_key(request_id)
+    }
+}
+
 pub(crate) struct RequestClassifierRuntime {
     // Box: the install seam is object-safe and `Mutex::new` needs `Sized`;
     // Arc: the delivery task holds its own handle to the classifier.
@@ -251,6 +285,9 @@ pub(crate) struct RequestClassifierRuntime {
     // router-wide, and the plugin owns its own state across an unwind.
     classifier: Arc<AsyncMutex<Box<dyn RequestClassifier>>>,
     live_requests: Mutex<HashMap<String, LiveRequest>>,
+    // Shared with the delivery task, which releases each terminal event once
+    // `on_event` has returned for it.
+    pending_terminals: Arc<PendingTerminals>,
     // Deliberately unbounded and lossless: dropping a lifecycle event (above
     // all a terminal one) silently corrupts plugin bookkeeping, and senders —
     // including `Drop` — must not await. The cost is unbounded growth while
@@ -272,7 +309,9 @@ impl RequestClassifierRuntime {
     ) -> Arc<Self> {
         let (events, mut receiver) = mpsc::unbounded_channel();
         let classifier = Arc::new(AsyncMutex::new(classifier));
+        let pending_terminals = Arc::new(PendingTerminals::default());
         let delivery_classifier = Arc::clone(&classifier);
+        let delivery_pending = Arc::clone(&pending_terminals);
         let delivery_shutdown = shutdown.clone();
         let delivery = tokio::spawn(async move {
             loop {
@@ -284,6 +323,7 @@ impl RequestClassifierRuntime {
                         None => break,
                     },
                 };
+                let terminal_request_id = terminal_request_id(&event);
                 // Shutdown must also interrupt a stuck `on_event`, not just
                 // fire between events: dropping this branch releases the
                 // classifier lock so callers queued on it can observe
@@ -304,11 +344,18 @@ impl RequestClassifierRuntime {
                         "Request classifier panicked while processing a lifecycle event"
                     );
                 }
+                // Released only after `on_event` returned (or unwound): the
+                // plugin has observed the terminal event, so the id's next
+                // lifecycle may now be classified.
+                if let Some(request_id) = terminal_request_id {
+                    delivery_pending.release(&request_id);
+                }
             }
         });
         Arc::new(Self {
             classifier,
             live_requests: Mutex::new(HashMap::new()),
+            pending_terminals,
             events,
             shutdown,
             delivery,
@@ -336,7 +383,7 @@ impl RequestClassifierRuntime {
         let classification_id = NEXT_CLASSIFICATION_ID.fetch_add(1, Ordering::Relaxed);
         request.classification_id = classification_id;
         let (classification, generation) = {
-            let mut classifier = self.classifier.lock().await;
+            let mut classifier = self.lock_classifier_for(request.request_id()).await?;
             // Re-check registration under the classifier lock: terminal events
             // are delivered under this same lock after the id leaves the live
             // set, so an id seen live here cannot have had its Aborted
@@ -429,6 +476,44 @@ impl RequestClassifierRuntime {
         self.live_requests.lock().contains_key(request_id)
     }
 
+    /// Take the classifier lock for a `classify` call. A reused id must not
+    /// reach the plugin ahead of the previous lifecycle's terminal event, so
+    /// wait for that id's pending terminals outside the lock (delivery needs
+    /// it), then re-check under it: a terminal enqueued in between cannot be
+    /// delivered while the lock is held, so release it and wait again.
+    async fn lock_classifier_for(
+        &self,
+        request_id: Option<&str>,
+    ) -> Result<tokio::sync::MutexGuard<'_, Box<dyn RequestClassifier>>, KvSchedulerError> {
+        loop {
+            if let Some(request_id) = request_id {
+                self.await_terminal_delivery(request_id).await?;
+            }
+            let classifier = self.classifier.lock().await;
+            if request_id.is_some_and(|request_id| self.pending_terminals.is_pending(request_id)) {
+                continue;
+            }
+            return Ok(classifier);
+        }
+    }
+
+    /// Wait until no terminal event for `request_id` is queued undelivered.
+    async fn await_terminal_delivery(&self, request_id: &str) -> Result<(), KvSchedulerError> {
+        loop {
+            // Register before checking so a release between the check and the
+            // await still wakes this waiter.
+            let delivered = self.pending_terminals.delivered.notified();
+            if !self.pending_terminals.is_pending(request_id) {
+                return Ok(());
+            }
+            tokio::select! {
+                biased;
+                _ = self.shutdown.cancelled() => return Err(KvSchedulerError::SubscriberShutdown),
+                _ = delivered => {}
+            }
+        }
+    }
+
     fn send_event(&self, event: ClassifyEvent) {
         let _ = self.events.send(event);
     }
@@ -437,7 +522,8 @@ impl RequestClassifierRuntime {
     /// terminal event before releasing the lock (the unbounded send cannot
     /// block). `begin_request` re-registers a reused id under the same lock,
     /// so the terminal event is always ordered ahead of any event from the
-    /// id's next lifecycle.
+    /// id's next lifecycle, and the pending-terminal reservation taken here
+    /// holds that lifecycle's `classify` until the event has been delivered.
     fn finish_request_and_send(
         &self,
         request_id: String,
@@ -447,6 +533,10 @@ impl RequestClassifierRuntime {
         if live_requests.remove(&request_id).is_none() {
             return;
         }
+        // Reserve before sending so delivery can never release first. A send
+        // only fails once delivery has ended (shutdown or Drop), and waiters
+        // observe shutdown rather than the reservation.
+        self.pending_terminals.reserve(&request_id);
         let _ = self.events.send(event(request_id));
     }
 }
@@ -587,6 +677,15 @@ impl RequestLifecycle {
 impl Drop for RequestLifecycle {
     fn drop(&mut self) {
         self.abort(None);
+    }
+}
+
+fn terminal_request_id(event: &ClassifyEvent) -> Option<String> {
+    match event {
+        ClassifyEvent::Completed { request_id, .. } | ClassifyEvent::Aborted { request_id, .. } => {
+            Some(request_id.clone())
+        }
+        ClassifyEvent::Sent { .. } | ClassifyEvent::Responding { .. } => None,
     }
 }
 
@@ -1223,6 +1322,94 @@ mod tests {
                 Some(RecordedEvent::Aborted("reused".to_string(), Some(worker)))
             );
         }
+    }
+
+    /// Records what the plugin observes, in order, and holds the `Sent`
+    /// callback open so a terminal event can queue behind it undelivered.
+    struct OrderingClassifier {
+        observed: mpsc::UnboundedSender<String>,
+        entered_sent: Arc<Notify>,
+        release_sent: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl RequestClassifier for OrderingClassifier {
+        fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+            let _ = self
+                .observed
+                .send(format!("classify:{}", request.request_id().unwrap_or("")));
+            Box::pin(async move { Ok(request) })
+        }
+
+        async fn on_event(&mut self, event: ClassifyEvent) {
+            match event {
+                ClassifyEvent::Sent { request_id, .. } => {
+                    self.entered_sent.notify_one();
+                    self.release_sent.notified().await;
+                    let _ = self.observed.send(format!("sent:{request_id}"));
+                }
+                ClassifyEvent::Completed { request_id, .. } => {
+                    let _ = self.observed.send(format!("completed:{request_id}"));
+                }
+                ClassifyEvent::Aborted { request_id, .. } => {
+                    let _ = self.observed.send(format!("aborted:{request_id}"));
+                }
+                ClassifyEvent::Responding { .. } => {}
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn reused_id_is_not_classified_before_the_prior_terminal_is_delivered() {
+        let (observed_tx, mut observed) = mpsc::unbounded_channel();
+        let entered_sent = Arc::new(Notify::new());
+        let release_sent = Arc::new(Notify::new());
+        let runtime = RequestClassifierRuntime::new(
+            Box::new(OrderingClassifier {
+                observed: observed_tx,
+                entered_sent: Arc::clone(&entered_sent),
+                release_sent: Arc::clone(&release_sent),
+            }),
+            CancellationToken::new(),
+        );
+        let worker = WorkerWithDpRank::new(1, 0);
+
+        // Park delivery inside the first lifecycle's `Sent` callback, then end
+        // that lifecycle: its `Completed` is queued but undelivered.
+        let mut first = runtime.begin_request("reused").unwrap();
+        first.sent(worker);
+        entered_sent.notified().await;
+        first.complete();
+
+        // Re-register the id and start classifying it while the terminal
+        // event is still queued. The classification is parked before delivery
+        // resumes, so without the gate the lock's FIFO hand-off would run it
+        // ahead of the queued `Completed`.
+        let _second = runtime.begin_request("reused").unwrap();
+        let classify_runtime = Arc::clone(&runtime);
+        let classify = tokio::spawn(async move {
+            classify_runtime
+                .classify_with(ClassifyRequest::new(1, 0).with_request_id("reused"))
+                .await
+        });
+        tokio::task::yield_now().await;
+
+        release_sent.notify_one();
+        classify.await.unwrap().unwrap();
+
+        let mut order = Vec::new();
+        for _ in 0..3 {
+            order.push(observed.recv().await.unwrap());
+        }
+        assert_eq!(
+            order,
+            vec![
+                "sent:reused".to_string(),
+                "completed:reused".to_string(),
+                "classify:reused".to_string(),
+            ],
+            "the prior lifecycle's terminal event must reach the plugin before the reused id's classify"
+        );
     }
 
     struct StuckOnEventClassifier {
