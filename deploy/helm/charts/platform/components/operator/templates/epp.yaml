@@ -47,6 +47,10 @@ rules:
 - apiGroups: [""]
   resources: ["pods"]
   verbs: ["get", "watch", "list"]
+# Peer Service lookup on replicated EPP startup (DYN_EPP_PEER_SERVICE)
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["get"]
 # Dynamo k8s service discovery - endpointslices
 - apiGroups: ["discovery.k8s.io"]
   resources: ["endpointslices"]
@@ -92,6 +96,10 @@ rules:
 - apiGroups: [""]
   resources: ["pods"]
   verbs: ["get", "watch", "list"]
+# Peer Service lookup on replicated EPP startup (DYN_EPP_PEER_SERVICE)
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["get"]
 # Dynamo k8s service discovery - endpointslices
 - apiGroups: ["discovery.k8s.io"]
   resources: ["endpointslices"]
