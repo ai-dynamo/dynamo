@@ -1043,7 +1043,8 @@ func firstPreservedCompilationCacheMatches(compilationCache *v1beta1.Compilation
 func compilationCacheMatchesVolumeMount(compilationCache *v1beta1.CompilationCacheConfig, mount VolumeMount) bool {
 	return compilationCache != nil &&
 		compilationCache.PVCName == mount.Name &&
-		compilationCache.MountPath == mount.MountPoint
+		compilationCache.MountPath == mount.MountPoint &&
+		compilationCache.SubPath == mount.SubPath
 }
 
 func restorablePreservedCompilationCacheMounts(src *v1beta1.DynamoComponentDeploymentSharedSpec, preserved *DynamoComponentDeploymentSharedSpec) []VolumeMount {
@@ -1103,6 +1104,7 @@ func volumeMountsEqual(a, b []VolumeMount) bool {
 	return slices.EqualFunc(a, b, func(left, right VolumeMount) bool {
 		return left.Name == right.Name &&
 			left.MountPoint == right.MountPoint &&
+			left.SubPath == right.SubPath &&
 			left.UseAsCompilationCache == right.UseAsCompilationCache
 	})
 }
