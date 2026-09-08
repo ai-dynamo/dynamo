@@ -298,8 +298,6 @@ func (v *sharedValidation) validateComponentRoles(
 
 	// Multinode explicit mode is a closed schema: exactly one leader and worker.
 	seen := make(map[string]struct{}, len(component.Roles))
-	replicasComplete := true
-	var replicaSum int32
 	for i := range component.Roles {
 		role := &component.Roles[i]
 		rolePath := fldPath.Index(i)
@@ -314,29 +312,6 @@ func (v *sharedValidation) validateComponentRoles(
 			allErrs = append(allErrs, field.Duplicate(rolePath.Child("name"), role.Name))
 		} else {
 			seen[role.Name] = struct{}{}
-		}
-
-		if role.Replicas == nil {
-			replicasComplete = false
-			allErrs = append(allErrs, field.Required(
-				rolePath.Child("replicas"),
-				"is required for explicit multinode roles",
-			))
-		} else {
-			replicaSum += *role.Replicas
-			if knownRole {
-				expected := int32(1)
-				if role.Name == nvidiacomv1beta1.ComponentRoleWorker {
-					expected = component.Multinode.NodeCount - 1
-				}
-				if *role.Replicas != expected {
-					allErrs = append(allErrs, field.Invalid(
-						rolePath.Child("replicas"),
-						*role.Replicas,
-						fmt.Sprintf("must equal %d for multinode role %q", expected, role.Name),
-					))
-				}
-			}
 		}
 
 		if knownRole {
@@ -363,13 +338,6 @@ func (v *sharedValidation) validateComponentRoles(
 				fmt.Sprintf("must contain the %q role", requiredRole),
 			))
 		}
-	}
-	if len(component.Roles) == 2 && len(seen) == 2 && replicasComplete && replicaSum != component.Multinode.NodeCount {
-		allErrs = append(allErrs, field.Invalid(
-			fldPath,
-			replicaSum,
-			fmt.Sprintf("role replicas must add up to multinode.nodeCount %d", component.Multinode.NodeCount),
-		))
 	}
 	return allErrs
 }
@@ -803,13 +771,10 @@ func validateComponentRolesUpdate(
 	// role-specific configuration changes to happen in a subsequent update.
 	if (newComponent.Roles == nil) != (oldComponent.Roles == nil) {
 		explicitComponent := newComponent
-		implicitComponent := oldComponent
 		if explicitComponent.Roles == nil {
-			explicitComponent, implicitComponent = implicitComponent, explicitComponent
+			explicitComponent = oldComponent
 		}
-		if explicitComponent.Multinode != nil && implicitComponent.Multinode != nil &&
-			explicitComponent.Multinode.NodeCount == implicitComponent.Multinode.NodeCount &&
-			dynamo.ExplicitMultinodeRolesMatchImplicit(explicitComponent) {
+		if dynamo.ExplicitMultinodeRolesMatchImplicit(explicitComponent) {
 			return nil
 		}
 		return field.ErrorList{field.Forbidden(

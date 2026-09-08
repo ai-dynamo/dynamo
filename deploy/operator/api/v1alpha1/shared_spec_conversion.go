@@ -875,10 +875,6 @@ func ConvertToMultinodeSpec(src *v1beta1.MultinodeSpec, dst *MultinodeSpec) {
 // v1alpha1 to v1beta1. src and dst must not be nil.
 func ConvertFromComponentRoleSpec(src *ComponentRoleSpec, dst *v1beta1.ComponentRoleSpec) {
 	*dst = v1beta1.ComponentRoleSpec{Name: src.Name}
-	if src.Replicas != nil {
-		replicas := *src.Replicas
-		dst.Replicas = &replicas
-	}
 
 	// Preserve the role-level provider schema and sparse value verbatim.
 	if src.ProviderOverride != nil {
@@ -891,10 +887,6 @@ func ConvertFromComponentRoleSpec(src *ComponentRoleSpec, dst *v1beta1.Component
 // v1beta1 to v1alpha1. src and dst must not be nil.
 func ConvertToComponentRoleSpec(src *v1beta1.ComponentRoleSpec, dst *ComponentRoleSpec) {
 	*dst = ComponentRoleSpec{Name: src.Name}
-	if src.Replicas != nil {
-		replicas := *src.Replicas
-		dst.Replicas = &replicas
-	}
 
 	// Preserve the role-level provider schema and sparse value verbatim.
 	if src.ProviderOverride != nil {

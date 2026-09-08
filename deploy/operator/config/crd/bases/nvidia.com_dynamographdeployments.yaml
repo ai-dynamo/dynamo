@@ -11815,7 +11815,7 @@ spec:
                         description: |-
                           Roles expose the named Pod-producing parts inside a compound component.
                           When set for a multinode component, this list must contain exactly one
-                          leader and one worker role whose replicas add up to multinode.nodeCount.
+                          leader and one worker role. Their cardinality is derived from multinode.nodeCount.
                           Omission preserves the implicit multinode role layout.
                         items:
                           description: |-
@@ -11859,14 +11859,6 @@ spec:
                                 - apiVersion
                                 - value
                               type: object
-                            replicas:
-                              description: |-
-                                Replicas is the number of Pods of this role in one complete component
-                                instance. The enclosing component type defines whether it is required and
-                                how it relates to other component fields.
-                              format: int32
-                              minimum: 1
-                              type: integer
                           required:
                             - name
                           type: object
@@ -21054,7 +21046,7 @@ spec:
                         description: |-
                           roles expose the named Pod-producing parts inside a compound component.
                           When set for a multinode component, this list must contain exactly one
-                          leader and one worker role whose replicas add up to multinode.nodeCount.
+                          leader and one worker role. Their cardinality is derived from multinode.nodeCount.
                           Omission preserves the implicit multinode role layout.
                         items:
                           description: |-
@@ -21098,14 +21090,6 @@ spec:
                                 - apiVersion
                                 - value
                               type: object
-                            replicas:
-                              description: |-
-                                replicas is the number of Pods of this role in one complete component
-                                instance. The enclosing component type defines whether it is required and
-                                how it relates to other component fields.
-                              format: int32
-                              minimum: 1
-                              type: integer
                           required:
                             - name
                           type: object

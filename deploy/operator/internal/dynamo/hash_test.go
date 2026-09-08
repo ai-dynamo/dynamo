@@ -101,8 +101,8 @@ func TestComputeBetaDGDWorkersSpecHash_EquivalentExplicitRolesDoNotRoll(t *testi
 	t.Log("Make the same semantic role structure explicit in reverse declaration order")
 	explicit := implicit.DeepCopy()
 	explicit.Spec.Components[0].Roles = []v1beta1.ComponentRoleSpec{
-		{Name: v1beta1.ComponentRoleWorker, Replicas: ptr.To(int32(3))},
-		{Name: v1beta1.ComponentRoleLeader, Replicas: ptr.To(int32(1))},
+		{Name: v1beta1.ComponentRoleWorker},
+		{Name: v1beta1.ComponentRoleLeader},
 	}
 
 	t.Log("Verify the representation-only migration keeps the worker generation stable")
