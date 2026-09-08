@@ -14,6 +14,7 @@ pub use dynamo_kv_router::scheduling::{
     ScheduleRequest, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
     WorkerAvailabilityProvider,
 };
+use dynamo_kv_router::scheduling::{RequestClassifier, RequestLifecycle};
 pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 use dynamo_kv_router::selector::WorkerSelector as WorkerSelectorTrait;
 
@@ -288,6 +289,23 @@ where
         let response = self.inner.schedule_request_admitted(request).await;
         self.observe_schedule_result(&response);
         response
+    }
+
+    // TODO: wire a production installer (Python bindings / router config); hidden until then.
+    #[doc(hidden)]
+    pub fn install_request_classifier(
+        &self,
+        classifier: Box<dyn RequestClassifier>,
+        shutdown: CancellationToken,
+    ) -> bool {
+        self.inner.install_request_classifier(classifier, shutdown)
+    }
+
+    pub(crate) fn begin_request_lifecycle(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<RequestLifecycle>, KvSchedulerError> {
+        self.inner.begin_request_lifecycle(request_id)
     }
 
     #[expect(clippy::too_many_arguments)]
