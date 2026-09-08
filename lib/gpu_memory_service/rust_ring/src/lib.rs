@@ -40,6 +40,7 @@
 use pyo3::buffer::PyBuffer;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 const HEADER_SIZE: usize = 64;
@@ -903,7 +904,11 @@ fn kv_lease_acquire_lockless_if_unreserved(
     }
 }
 
-/// Mark leased KV blocks as sealed.
+/// Atomically mark leased KV blocks as sealed.
+///
+/// Every requested record is first locked in TRANSITION. If any state or
+/// generation check fails, every lock is restored and no record is sealed.
+/// Re-sealing the same generation is idempotent.
 #[pyfunction]
 #[pyo3(signature = (buf, block_ids, generations))]
 fn kv_lease_seal(
@@ -918,48 +923,75 @@ fn kv_lease_seal(
             "block_ids and generations length mismatch",
         ));
     }
+    let mut unique_ids = HashSet::with_capacity(block_ids.len());
+    if block_ids
+        .iter()
+        .any(|block_id| !unique_ids.insert(*block_id))
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "duplicate block_ids are not allowed",
+        ));
+    }
     let ptr = buf.buf_ptr() as *mut u8;
     let buf_len = buf.len_bytes();
-    let mut sealed = 0u32;
     unsafe {
         let total_blocks = validate_lease_buffer(ptr, buf_len)?;
         let _mutation = enter_lease_mutation(ptr)?;
-        for (block_id, generation) in block_ids.into_iter().zip(generations) {
+        let mut locked: Vec<(u32, u32)> = Vec::with_capacity(block_ids.len());
+        for (block_id, generation) in block_ids.iter().copied().zip(generations) {
             if block_id >= total_blocks {
-                continue;
+                for (id, state) in locked.iter().copied() {
+                    let state_ptr = ptr.add(lease_record_off(id) + LR_STATE) as *const AtomicU32;
+                    (*state_ptr).store(state, Ordering::Release);
+                }
+                return Ok(0);
             }
             let base = lease_record_off(block_id);
             let generation_ptr = ptr.add(base + LR_GENERATION) as *const AtomicU32;
             if (*generation_ptr).load(Ordering::Acquire) != generation {
-                continue;
+                for (id, state) in locked.iter().copied() {
+                    let state_ptr = ptr.add(lease_record_off(id) + LR_STATE) as *const AtomicU32;
+                    (*state_ptr).store(state, Ordering::Release);
+                }
+                return Ok(0);
             }
             let state_ptr = ptr.add(base + LR_STATE) as *const AtomicU32;
-            // Lock the record in TRANSITION, then re-validate the generation
-            // before publishing SEALED. A fenced (stale) owner must not seal a
-            // block that changed hands between the pre-CAS generation check and
-            // the state transition: e.g. the new owner adopted it (bumping the
-            // generation) and the stale seal would otherwise mark unwritten
-            // bytes complete. Mirrors release_acquired_lease_blocks' post-CAS
-            // generation recheck under the TRANSITION lock.
-            if (*state_ptr)
-                .compare_exchange(
-                    LEASE_STATE_LEASED,
+            let mut state = (*state_ptr).load(Ordering::Acquire);
+            let mut acquired = false;
+            while state == LEASE_STATE_LEASED || state == LEASE_STATE_SEALED {
+                match (*state_ptr).compare_exchange(
+                    state,
                     LEASE_STATE_TRANSITION,
                     Ordering::AcqRel,
                     Ordering::Acquire,
-                )
-                .is_ok()
-            {
-                if (*generation_ptr).load(Ordering::Acquire) != generation {
-                    (*state_ptr).store(LEASE_STATE_LEASED, Ordering::Release);
-                } else {
-                    (*state_ptr).store(LEASE_STATE_SEALED, Ordering::Release);
-                    sealed = sealed.wrapping_add(1);
+                ) {
+                    Ok(_) => {
+                        acquired = true;
+                        break;
+                    }
+                    Err(observed) => state = observed,
                 }
             }
+            if !acquired || (*generation_ptr).load(Ordering::Acquire) != generation {
+                if acquired {
+                    (*state_ptr).store(state, Ordering::Release);
+                }
+                for (id, old_state) in locked.iter().copied() {
+                    let old_state_ptr =
+                        ptr.add(lease_record_off(id) + LR_STATE) as *const AtomicU32;
+                    (*old_state_ptr).store(old_state, Ordering::Release);
+                }
+                return Ok(0);
+            }
+            locked.push((block_id, state));
         }
+        let sealed = locked.len() as u32;
+        for (block_id, _old_state) in locked {
+            let state_ptr = ptr.add(lease_record_off(block_id) + LR_STATE) as *const AtomicU32;
+            (*state_ptr).store(LEASE_STATE_SEALED, Ordering::Release);
+        }
+        Ok(sealed)
     }
-    Ok(sealed)
 }
 
 /// Atomically transfer sealed or leased blocks to a new owner.

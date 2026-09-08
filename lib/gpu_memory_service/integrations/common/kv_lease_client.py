@@ -543,11 +543,17 @@ class SharedMemoryKVLeaseClient:
     def seal(self, leases: list[KVLease]) -> None:
         if not leases:
             return
-        self._rust.kv_lease_seal(
-            self._mmap,
-            [int(lease.block_id) for lease in leases],
-            [int(lease.generation) for lease in leases],
+        sealed = int(
+            self._rust.kv_lease_seal(
+                self._mmap,
+                [int(lease.block_id) for lease in leases],
+                [int(lease.generation) for lease in leases],
+            )
         )
+        if sealed != len(leases):
+            raise RuntimeError(
+                f"GMS KV lease seal committed {sealed}/{len(leases)} blocks"
+            )
 
     def adopt(self, leases: list[KVLease]) -> list[KVLease]:
         if not leases:
