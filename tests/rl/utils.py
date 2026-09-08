@@ -14,13 +14,6 @@ from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.payloads import check_models_api
 
 
-def check_ready(response: requests.Response) -> bool:
-    try:
-        return (response.json() or {}).get("status") == "ready"
-    except ValueError:
-        return False
-
-
 def check_model_registered(response: requests.Response, *, model: str) -> bool:
     if not check_models_api(response):
         return False
