@@ -24,9 +24,19 @@ use crate::{client, client::Discovery, protocol};
 const PAYLOAD_KEY: &str = "sglang_tito";
 const MAX_EVENT_BYTES: usize = 64 * 1024 * 1024;
 
+/// Mirrors `INPUT_LOGPROBS_UNAVAILABLE_KEY` /
+/// `INPUT_LOGPROBS_UNAVAILABLE_DISAGG_DECODE` in
+/// `components/src/dynamo/common/backend/logprobs.py`. Both implementations of
+/// the native `/generate` endpoint must emit the identical marker, so the pair
+/// is greppable across the two languages.
+const INPUT_LOGPROBS_UNAVAILABLE_KEY: &str = "input_logprobs_unavailable_reason";
+const INPUT_LOGPROBS_UNAVAILABLE_DISAGG_DECODE: &str = "disaggregated_decode";
+
 pub(crate) struct NativeRequest {
     body: Value,
     is_prefill: bool,
+    is_decode: bool,
+    input_logprobs_requested: bool,
     prefill_handoff: Option<Value>,
 }
 
@@ -122,11 +132,28 @@ pub(crate) fn request(
     } else {
         None
     };
+    let input_logprobs_requested = is_truthy(body.get("return_logprob"));
     Ok(Some(NativeRequest {
         body: Value::Object(body),
         is_prefill: mode.is_prefill(),
+        is_decode: mode.is_decode(),
+        input_logprobs_requested,
         prefill_handoff,
     }))
+}
+
+/// SGLang's `/generate` schema types `return_logprob` as a boolean, but the
+/// body is opaque client JSON. Accept the same values Python's `bool()` does so
+/// the two implementations of this endpoint agree on what "requested" means.
+fn is_truthy(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(flag)) => *flag,
+        Some(Value::Number(number)) => number.as_f64().is_some_and(|number| number != 0.0),
+        Some(Value::String(text)) => !text.is_empty(),
+        Some(Value::Array(items)) => !items.is_empty(),
+        Some(Value::Object(fields)) => !fields.is_empty(),
+    }
 }
 
 #[derive(Clone)]
@@ -245,6 +272,8 @@ impl NativeHttp {
     ) -> BoxStream<'static, Result<LLMEngineOutput, DynamoError>> {
         Box::pin(async_stream::stream! {
             let is_prefill = request.is_prefill;
+            let annotate_unavailable_input_logprobs =
+                request.is_decode && request.input_logprobs_requested;
             tracing::debug!(request_id = %ctx.id(), endpoint = %self.endpoint.with_path("/generate"), "sending native request to SGLang HTTP");
             let opened = tokio::select! {
                 biased;
@@ -329,7 +358,11 @@ impl NativeHttp {
                     }
                 };
                 let has_output = response_has_output(&response);
-                let (mut output, terminal) = output(response, &mut prefill_handoff);
+                let (mut output, terminal) = output(
+                    response,
+                    &mut prefill_handoff,
+                    annotate_unavailable_input_logprobs,
+                );
                 if !first_output_seen && has_output && (!is_prefill || terminal) {
                     ctx.notify_first_token();
                     first_output_seen = true;
@@ -360,28 +393,61 @@ fn response_has_output(response: &Value) -> bool {
         })
 }
 
-fn output(response: Value, prefill_handoff: &mut Option<Value>) -> (LLMEngineOutput, bool) {
-    let error = response.get("error");
-    let finished = error.is_some()
+fn output(
+    mut response: Value,
+    prefill_handoff: &mut Option<Value>,
+    annotate_unavailable_input_logprobs: bool,
+) -> (LLMEngineOutput, bool) {
+    let error_message = response.get("error").map(|error| {
+        error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("SGLang generation failed")
+            .to_string()
+    });
+    let finished = error_message.is_some()
         || response
             .pointer("/meta_info/finish_reason")
             .is_some_and(|reason| !reason.is_null());
-    let mut output = match error {
-        Some(error) => LLMEngineOutput::error(
-            error
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("SGLang generation failed")
-                .to_string(),
-        ),
+    let mut output = match error_message {
+        Some(message) => LLMEngineOutput::error(message),
         None if finished => LLMEngineOutput::stop(),
         None => LLMEngineOutput::default(),
     };
+    if annotate_unavailable_input_logprobs {
+        annotate_input_logprobs_unavailable(&mut response);
+    }
     output.engine_data = Some(serde_json::json!({"sglang_response": response}));
     if finished {
         output.disaggregated_params = prefill_handoff.take();
     }
     (output, finished)
+}
+
+/// Mirror of `annotate_input_logprobs_unavailable` in
+/// `components/src/dynamo/common/backend/logprobs.py`: mark prompt logprobs a
+/// decode worker structurally cannot produce, so a client can tell suppressed
+/// data from genuinely empty data.
+///
+/// The caller has already established that this worker is decode under
+/// disaggregation and that the client asked for logprobs. This function adds
+/// the remaining two conditions: the chunk must be terminal (`finish_reason`
+/// present and non-null -- an error response is terminal without one), and the
+/// response must not already carry input logprobs.
+fn annotate_input_logprobs_unavailable(response: &mut Value) {
+    let Some(meta_info) = response.get_mut("meta_info").and_then(Value::as_object_mut) else {
+        return;
+    };
+    let terminal = meta_info
+        .get("finish_reason")
+        .is_some_and(|reason| !reason.is_null());
+    if !terminal || is_truthy(meta_info.get("input_token_logprobs")) {
+        return;
+    }
+    meta_info.insert(
+        INPUT_LOGPROBS_UNAVAILABLE_KEY.to_string(),
+        Value::String(INPUT_LOGPROBS_UNAVAILABLE_DISAGG_DECODE.to_string()),
+    );
 }
 
 fn request_error(error: reqwest::Error) -> DynamoError {
@@ -420,20 +486,20 @@ mod tests {
 
     use dynamo_backend_common::engine::RoutingHints;
     use dynamo_backend_common::{
-        BackendError, DisaggregationMode, ErrorType, GenerateContext, OutputOptions,
-        PreprocessedRequest, SamplingOptions, StopConditions,
+        BackendError, BootstrapInfo, DisaggregationMode, ErrorType, GenerateContext,
+        LLMEngineOutput, OutputOptions, PreprocessedRequest, SamplingOptions, StopConditions,
     };
     use dynamo_sidecar_common::{GrpcEndpoint, HttpEndpoint};
     use futures::StreamExt;
     use reqwest::StatusCode;
-    use serde_json::json;
+    use serde_json::{Value, json};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::sync::watch;
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        NativeHttp, NativeRequest, authentication_error, request, response_error,
+        NativeHttp, NativeRequest, authentication_error, output, request, response_error,
         response_has_output,
     };
     use crate::client::Discovery;
@@ -520,6 +586,103 @@ mod tests {
         );
     }
 
+    /// `output()` moves the response into `engine_data`, so read the marker
+    /// back out of the value the frontend would actually forward.
+    fn unavailable_reason(output: &LLMEngineOutput) -> Option<String> {
+        output
+            .engine_data
+            .as_ref()?
+            .pointer("/sglang_response/meta_info/input_logprobs_unavailable_reason")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    }
+
+    fn terminal_decode_response() -> Value {
+        json!({
+            "output_ids": [102],
+            "meta_info": {
+                "id": "request-id",
+                "finish_reason": {"type": "stop"},
+                "output_token_logprobs": [[-0.5, 102, "b"]]
+            }
+        })
+    }
+
+    #[test]
+    fn decode_requesting_logprobs_is_recorded_on_the_request() {
+        let mut canonical = canonical_request();
+        // A decode request must arrive with a peer handoff; without one
+        // `request()` rejects it before reaching the logprob bookkeeping.
+        canonical.bootstrap_info = Some(BootstrapInfo {
+            bootstrap_host: "prefill".to_string(),
+            bootstrap_port: 5000,
+            bootstrap_room: 11,
+            handoff_id: None,
+        });
+        canonical.extra_args = Some(json!({
+            "sglang_tito": {"return_logprob": true}
+        }));
+
+        let native = request(
+            &canonical,
+            "request-id",
+            DisaggregationMode::Decode,
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(native.is_decode);
+        assert!(!native.is_prefill);
+        assert!(native.input_logprobs_requested);
+
+        canonical.extra_args = Some(json!({"sglang_tito": {}}));
+        let native = request(
+            &canonical,
+            "request-id",
+            DisaggregationMode::Decode,
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(native.is_decode);
+        assert!(!native.input_logprobs_requested);
+    }
+
+    #[test]
+    fn disaggregated_decode_marks_input_logprobs_unavailable() {
+        // Terminal chunk, decode worker, logprobs requested: the one case that
+        // annotates. `input_token_logprobs` is absent because the decode engine
+        // never prefilled the prompt.
+        let (annotated, finished) = output(terminal_decode_response(), &mut None, true);
+        assert!(finished);
+        assert_eq!(
+            unavailable_reason(&annotated).as_deref(),
+            Some("disaggregated_decode")
+        );
+
+        // Not decode, or logprobs never requested: the caller passes false and
+        // aggregated/prefill responses are untouched.
+        let (plain, _) = output(terminal_decode_response(), &mut None, false);
+        assert_eq!(unavailable_reason(&plain), None);
+
+        // Non-terminal chunk: input logprobs are terminal-only data, so an
+        // intermediate chunk is not yet evidence that they are missing.
+        let mut streaming = terminal_decode_response();
+        streaming["meta_info"]["finish_reason"] = Value::Null;
+        let (mid_stream, finished) = output(streaming, &mut None, true);
+        assert!(!finished);
+        assert_eq!(unavailable_reason(&mid_stream), None);
+
+        // Input logprobs actually present: never claim data is missing while it
+        // sits in the same object.
+        let mut with_input_logprobs = terminal_decode_response();
+        with_input_logprobs["meta_info"]["input_token_logprobs"] = json!([[-0.25, 101, "a"]]);
+        let (forwarded, _) = output(with_input_logprobs, &mut None, true);
+        assert_eq!(unavailable_reason(&forwarded), None);
+    }
+
     #[test]
     fn discovery_requires_incremental_streaming() {
         let grpc = GrpcEndpoint::parse("127.0.0.1:30001", "test").unwrap();
@@ -578,6 +741,8 @@ mod tests {
             NativeRequest {
                 body: json!({"input_ids": [1], "stream": true}),
                 is_prefill: false,
+                is_decode: false,
+                input_logprobs_requested: false,
                 prefill_handoff: None,
             },
             ctx,
@@ -600,6 +765,8 @@ mod tests {
             NativeRequest {
                 body: json!({"input_ids": [1], "stream": true}),
                 is_prefill: false,
+                is_decode: false,
+                input_logprobs_requested: false,
                 prefill_handoff: None,
             },
             ctx,

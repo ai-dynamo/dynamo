@@ -249,6 +249,19 @@ in `lib/llm/src/protocols/common.rs`).
 | `prompt_logprobs: M` | `return_logprob=True, logprob_start_len=0` | Compute from prompt start |
 | Both set | `top_logprobs_num=max(N, M)` | SGLang has a single top_logprobs_num for both |
 
+**Unavailable input logprobs (native `/generate` only)**: under disaggregation the prompt
+is prefilled on another worker, so the decode engine never computes prompt logprobs and
+its `meta_info` simply lacks `input_token_logprobs`. On the terminal chunk of such a
+request the handler writes `meta_info["input_logprobs_unavailable_reason"] =
+"disaggregated_decode"` -- read it as "this topology cannot serve prompt logprobs", as
+opposed to an absent key, which means the prompt genuinely produced none. The marker is
+written only when the client sent `return_logprob`, the chunk carries a non-null
+`finish_reason`, and `input_token_logprobs` is absent or empty; aggregated workers and the
+prefill worker's responses are untouched. `DecodeWorkerHandler._process_native_generate_stream`
+and the Rust sidecar's `native_http::output` both emit it (via
+`dynamo.common.backend.logprobs.annotate_input_logprobs_unavailable` and its mirror in
+`lib/sidecar/sglang/src/native_http.rs`) -- change the two together.
+
 `logprob_start_len` is SGLang-internal, not exposed in OutputOptions. It controls the
 absolute sequence position where logprob computation starts: `-1` (default) = output tokens
 only (`len(prompt) - 1`), `0` = from prompt start. We set it to 0 when `prompt_logprobs`

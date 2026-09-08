@@ -11,6 +11,7 @@ import pytest
 
 from dynamo.common.backend.logprobs import (
     DYN_SGL_ALLOW_TOP_LOGPROBS_ENV,
+    annotate_input_logprobs_unavailable,
     build_sglang_logprob_kwargs,
     extract_from_completion_output,
     extract_from_sglang_meta,
@@ -335,6 +336,91 @@ def test_prompt_logprobs_sglang_handles_missing_decoded_token():
     }
     payload = extract_prompt_logprobs_from_sglang_meta(meta)
     assert payload[1] == {"9": {"logprob": -0.7}}
+
+
+# ---------------------------------------------------------------------------
+# annotate_input_logprobs_unavailable
+# ---------------------------------------------------------------------------
+
+# The literals are spelled out rather than imported: they are the wire contract
+# a client matches on, so a rename must fail here instead of following along.
+_UNAVAILABLE_KEY = "input_logprobs_unavailable_reason"
+_UNAVAILABLE_DISAGG_DECODE = "disaggregated_decode"
+
+
+def _terminal_meta():
+    return {
+        "id": "request-id",
+        "finish_reason": {"type": "stop"},
+        "output_token_logprobs": [(-0.5, 102, "b")],
+    }
+
+
+def test_annotate_marks_terminal_decode_chunk():
+    meta = _terminal_meta()
+    assert (
+        annotate_input_logprobs_unavailable(
+            meta, requested=True, is_disaggregated_decode=True
+        )
+        is True
+    )
+    assert meta[_UNAVAILABLE_KEY] == _UNAVAILABLE_DISAGG_DECODE
+
+
+def test_annotate_skips_when_logprobs_were_not_requested():
+    meta = _terminal_meta()
+    assert (
+        annotate_input_logprobs_unavailable(
+            meta, requested=False, is_disaggregated_decode=True
+        )
+        is False
+    )
+    assert _UNAVAILABLE_KEY not in meta
+
+
+def test_annotate_skips_aggregated_worker():
+    # An aggregated worker prefills the prompt itself, so an empty
+    # input_token_logprobs there is a real answer, not a suppressed one.
+    meta = _terminal_meta()
+    assert (
+        annotate_input_logprobs_unavailable(
+            meta, requested=True, is_disaggregated_decode=False
+        )
+        is False
+    )
+    assert _UNAVAILABLE_KEY not in meta
+
+
+def test_annotate_skips_non_terminal_chunk():
+    # Input logprobs are terminal-chunk data; an intermediate chunk lacking
+    # them is not yet evidence of anything.
+    for finish_reason in (None, "absent"):
+        meta = _terminal_meta()
+        if finish_reason is None:
+            meta["finish_reason"] = None
+        else:
+            del meta["finish_reason"]
+        assert (
+            annotate_input_logprobs_unavailable(
+                meta, requested=True, is_disaggregated_decode=True
+            )
+            is False
+        )
+        assert _UNAVAILABLE_KEY not in meta
+
+
+def test_annotate_skips_when_input_logprobs_are_present():
+    # Should prefill-produced input logprobs ever reach decode, the marker
+    # stops appearing on its own rather than contradicting the same dict.
+    meta = _terminal_meta()
+    meta["input_token_logprobs"] = [(None, 6, None), (-0.25, 7, "a")]
+    assert (
+        annotate_input_logprobs_unavailable(
+            meta, requested=True, is_disaggregated_decode=True
+        )
+        is False
+    )
+    assert _UNAVAILABLE_KEY not in meta
 
 
 # ---------------------------------------------------------------------------

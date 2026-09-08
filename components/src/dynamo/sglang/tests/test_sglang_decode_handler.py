@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from dynamo.common.constants import DisaggregationMode
 from dynamo.common.metadata_upload import MetadataUploader
 from dynamo.llm import HttpError
 from dynamo.llm.exceptions import EngineShutdown
@@ -277,6 +278,9 @@ def _new_decode_handler(*, use_sglang_tokenizer: bool = False, enable_rl: bool =
     handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
     handler.shutdown_event = None
     handler.use_sglang_tokenizer = use_sglang_tokenizer
+    # Same default as a worker launched without --disaggregation-mode; the
+    # disaggregated-decode paths set this explicitly.
+    handler.serving_mode = DisaggregationMode.AGGREGATED
     handler.config = SimpleNamespace(
         server_args=SimpleNamespace(served_model_name="test-model"),
         dynamo_args=SimpleNamespace(enable_rl=enable_rl),
@@ -461,6 +465,7 @@ async def test_native_generate_stream_forwards_only_opaque_response():
         handler._process_native_generate_stream(
             native_generate_stream(engine, "native-request"),
             _Context(),
+            input_logprobs_requested=False,
         )
     )
 
@@ -468,6 +473,76 @@ async def test_native_generate_stream_forwards_only_opaque_response():
         {"token_ids": [], "engine_data": {"sglang_response": native_response}}
     ]
     assert chunks[0]["engine_data"]["sglang_response"] is native_response
+
+
+@pytest.mark.asyncio
+async def test_native_generate_stream_marks_input_logprobs_unavailable_on_decode():
+    # A disaggregated decode worker never prefills the prompt, so its terminal
+    # meta_info simply lacks input_token_logprobs. The marker makes that
+    # structural absence distinguishable from a genuinely empty result.
+    streaming_response = {
+        "output_ids": [101],
+        "meta_info": {"id": "request-1", "finish_reason": None},
+    }
+    terminal_response = {
+        "output_ids": [102],
+        "meta_info": {
+            "id": "request-1",
+            "finish_reason": {"type": "stop"},
+            "output_token_logprobs": [(-0.1, 102, "b")],
+        },
+    }
+
+    class TokenizerManager:
+        async def generate_request(self, request, request_context):
+            yield streaming_response
+            yield terminal_response
+
+    engine = SimpleNamespace(tokenizer_manager=TokenizerManager())
+    handler = _new_decode_handler()
+    handler.serving_mode = DisaggregationMode.DECODE
+    chunks = await _collect(
+        handler._process_native_generate_stream(
+            native_generate_stream(engine, "native-request"),
+            _Context(),
+            input_logprobs_requested=True,
+        )
+    )
+
+    responses = [chunk["engine_data"]["sglang_response"] for chunk in chunks]
+    assert responses == [streaming_response, terminal_response]
+    # Mutated in place, so the forwarded object is still the engine's own.
+    assert responses[1] is terminal_response
+    assert "input_logprobs_unavailable_reason" not in responses[0]["meta_info"]
+    assert (
+        responses[1]["meta_info"]["input_logprobs_unavailable_reason"]
+        == "disaggregated_decode"
+    )
+
+
+@pytest.mark.asyncio
+async def test_native_generate_stream_leaves_aggregated_response_untouched():
+    terminal_response = {
+        "output_ids": [102],
+        "meta_info": {"id": "request-1", "finish_reason": {"type": "stop"}},
+    }
+
+    class TokenizerManager:
+        async def generate_request(self, request, request_context):
+            yield terminal_response
+
+    engine = SimpleNamespace(tokenizer_manager=TokenizerManager())
+    handler = _new_decode_handler()
+    chunks = await _collect(
+        handler._process_native_generate_stream(
+            native_generate_stream(engine, "native-request"),
+            _Context(),
+            input_logprobs_requested=True,
+        )
+    )
+
+    response = chunks[0]["engine_data"]["sglang_response"]
+    assert "input_logprobs_unavailable_reason" not in response["meta_info"]
 
 
 def _new_token_input_handler(maximum_input_token_id: int = 151935):

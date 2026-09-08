@@ -553,7 +553,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 context,
                 priority,
             )
-            async for output in self._process_native_generate_stream(stream, context):
+            async for output in self._process_native_generate_stream(
+                stream,
+                context,
+                input_logprobs_requested=bool(native_payload.get("return_logprob")),
+            ):
                 yield output
             return
 
@@ -726,15 +730,26 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         self,
         stream_source: AsyncIterator[Dict[str, Any]],
         context: Context,
+        *,
+        input_logprobs_requested: bool,
     ) -> AsyncGenerator[Dict[str, Any], None]:
-        """Forward opaque SGLang chunks while retaining engine cancellation."""
+        """Forward opaque SGLang chunks while retaining engine cancellation.
+
+        ``input_logprobs_requested`` carries the client's ``return_logprob``
+        from the opaque native payload, which is not in scope here. It is
+        keyword-only and required because it cannot be derived inside this
+        method, and a default would silently disable the terminal-chunk
+        annotation for any future caller that forgot it.
+        """
         request_id_future: asyncio.Future[str] = asyncio.Future()
         first_output_seen = False
+        is_disaggregated_decode = self.serving_mode == DisaggregationMode.DECODE
         async with self._cancellation_monitor(request_id_future, context):
             async for chunk in stream_source:
                 native_response = chunk["engine_data"]["sglang_response"]
+                meta_info = native_response.get("meta_info", {})
                 if not request_id_future.done():
-                    sglang_request_id = native_response.get("meta_info", {}).get("id")
+                    sglang_request_id = meta_info.get("id")
                     if sglang_request_id:
                         request_id_future.set_result(sglang_request_id)
                         logging.debug(f"New SGLang Request ID: {sglang_request_id}")
@@ -743,6 +758,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 ):
                     first_output_seen = True
                     context.notify_first_token()
+                # Mutates meta_info in place, so the chunk keeps forwarding the
+                # engine's own response object rather than a re-wrapped copy.
+                _shared_logprobs.annotate_input_logprobs_unavailable(
+                    meta_info,
+                    requested=input_logprobs_requested,
+                    is_disaggregated_decode=is_disaggregated_decode,
+                )
                 if not context.is_stopped():
                     yield chunk
 

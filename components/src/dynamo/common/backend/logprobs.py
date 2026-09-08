@@ -234,6 +234,51 @@ def extract_prompt_logprobs_from_sglang_meta(
     return payload
 
 
+INPUT_LOGPROBS_UNAVAILABLE_KEY = "input_logprobs_unavailable_reason"
+INPUT_LOGPROBS_UNAVAILABLE_DISAGG_DECODE = "disaggregated_decode"
+
+
+def annotate_input_logprobs_unavailable(
+    meta_info: dict[str, Any],
+    *,
+    requested: bool,
+    is_disaggregated_decode: bool,
+) -> bool:
+    """Mark prompt logprobs a decode worker structurally cannot produce.
+
+    Under prefill/decode disaggregation the prompt is prefilled on another
+    worker, so the decode engine never computes prompt logprobs and its
+    ``meta_info`` simply lacks ``input_token_logprobs``. In JSON an absent
+    array is indistinguishable from an empty one, so a caller cannot tell
+    "the topology suppressed this" from "the prompt produced none". Writing
+    ``INPUT_LOGPROBS_UNAVAILABLE_KEY`` into ``meta_info`` makes the
+    difference machine-readable.
+
+    The key is written in place, and only when all four of these hold:
+
+    1. ``is_disaggregated_decode`` -- this worker is decode under disagg;
+    2. ``requested`` -- the client actually asked for logprobs;
+    3. ``meta_info["finish_reason"]`` is present and non-null, i.e. this is
+       the terminal chunk (input logprobs are terminal-only data);
+    4. ``meta_info["input_token_logprobs"]`` is absent or empty.
+
+    Condition 4 keeps the marker honest: once prefill-produced input
+    logprobs are forwarded to decode, the marker stops appearing on its own
+    rather than claiming data is missing while it sits in the same dict.
+
+    Returns whether the key was written.
+    """
+    if not (requested and is_disaggregated_decode):
+        return False
+    finish_reason = meta_info.get("finish_reason")
+    if finish_reason is None:
+        return False
+    if meta_info.get("input_token_logprobs"):
+        return False
+    meta_info[INPUT_LOGPROBS_UNAVAILABLE_KEY] = INPUT_LOGPROBS_UNAVAILABLE_DISAGG_DECODE
+    return True
+
+
 _SGLANG_TOP_LOGPROBS_UNSUPPORTED_MSG = (
     "Dynamo's SGLang backend does not currently support logprobs >= 1 due to "
     "an O(N) per-position detokenization in the upstream sglang tokenizer "
