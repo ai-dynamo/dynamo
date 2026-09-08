@@ -91,11 +91,15 @@ async def test_disagg_get_and_partial_patch_are_mode_shaped_and_atomic():
         "mode": "disagg",
         "prefill_min_endpoint": 3,
         "decode_min_endpoint": 2,
+        "min_gpu_budget": -1,
+        "max_gpu_budget": 20,
     }
     assert await planner.patch_min_endpoints({"decode_min_endpoint": 4}) == {
         "mode": "disagg",
         "prefill_min_endpoint": 3,
         "decode_min_endpoint": 4,
+        "min_gpu_budget": -1,
+        "max_gpu_budget": 20,
     }
     assert planner.config.prefill_min_endpoint == 3
     assert planner.config.decode_min_endpoint == 4
@@ -108,14 +112,154 @@ async def test_agg_runtime_patch_updates_min_endpoint():
     assert await planner.patch_min_endpoints({"min_endpoint": 5}) == {
         "mode": "agg",
         "min_endpoint": 5,
+        "min_gpu_budget": -1,
+        "max_gpu_budget": 20,
     }
     assert planner.config.min_endpoint == 5
 
     assert await planner.patch_min_endpoints({"min_endpoint": 0}) == {
         "mode": "agg",
         "min_endpoint": 0,
+        "min_gpu_budget": -1,
+        "max_gpu_budget": 20,
     }
     assert planner.config.min_endpoint == 0
+
+
+@pytest.mark.asyncio
+async def test_runtime_patch_updates_gpu_budgets_only():
+    planner = _planner("disagg")
+
+    assert await planner.patch_min_endpoints(
+        {"min_gpu_budget": 12, "max_gpu_budget": 24}
+    ) == {
+        "mode": "disagg",
+        "prefill_min_endpoint": 1,
+        "decode_min_endpoint": 1,
+        "min_gpu_budget": 12,
+        "max_gpu_budget": 24,
+    }
+    assert planner.config.min_gpu_budget == 12
+    assert planner.config.max_gpu_budget == 24
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_http_patch_updates_gpu_budgets_and_returns_complete_configuration():
+    from aiohttp.test_utils import TestClient, TestServer
+
+    planner = _planner("disagg")
+    client = TestClient(TestServer(_build_app(planner)))
+    await client.start_server()
+    try:
+        response = await client.patch(
+            "/v1/min-endpoints",
+            json={"min_gpu_budget": 16, "max_gpu_budget": 64},
+        )
+
+        assert response.status == 200
+        assert await response.json() == {
+            "mode": "disagg",
+            "prefill_min_endpoint": 1,
+            "decode_min_endpoint": 1,
+            "min_gpu_budget": 16,
+            "max_gpu_budget": 64,
+        }
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_patch_atomically_updates_endpoints_and_gpu_budgets():
+    planner = _planner(
+        "disagg", prefill_gpu_cost=1, decode_gpu_cost=1, max_gpu_budget=20
+    )
+
+    response = await planner.patch_min_endpoints(
+        {
+            "prefill_min_endpoint": 8,
+            "decode_min_endpoint": 8,
+            "min_gpu_budget": 16,
+            "max_gpu_budget": 64,
+        }
+    )
+
+    assert response == {
+        "mode": "disagg",
+        "prefill_min_endpoint": 8,
+        "decode_min_endpoint": 8,
+        "min_gpu_budget": 16,
+        "max_gpu_budget": 64,
+    }
+    assert planner.config.prefill_min_endpoint == 8
+    assert planner.config.decode_min_endpoint == 8
+    assert planner.config.min_gpu_budget == 16
+    assert planner.config.max_gpu_budget == 64
+
+
+@pytest.mark.asyncio
+async def test_runtime_patch_rejects_invalid_gpu_budget_band_without_mutation():
+    planner = _planner("disagg", min_endpoint=2)
+
+    with pytest.raises(ValueError, match="min_gpu_budget=24 exceeds max_gpu_budget=16"):
+        await planner.patch_min_endpoints(
+            {
+                "prefill_min_endpoint": 4,
+                "decode_min_endpoint": 4,
+                "min_gpu_budget": 24,
+                "max_gpu_budget": 16,
+            }
+        )
+
+    assert planner.config.prefill_min_endpoint is None
+    assert planner.config.decode_min_endpoint is None
+    assert planner.config.min_gpu_budget == -1
+    assert planner.config.max_gpu_budget == 20
+
+
+@pytest.mark.asyncio
+async def test_runtime_patch_uses_prospective_max_for_endpoint_footprint():
+    planner = _planner(
+        "disagg", prefill_gpu_cost=1, decode_gpu_cost=1, max_gpu_budget=20
+    )
+
+    with pytest.raises(
+        ValueError, match="requires 16 GPUs, exceeding max_gpu_budget=15"
+    ):
+        await planner.patch_min_endpoints(
+            {
+                "prefill_min_endpoint": 8,
+                "decode_min_endpoint": 8,
+                "max_gpu_budget": 15,
+            }
+        )
+
+    assert planner.config.prefill_min_endpoint is None
+    assert planner.config.decode_min_endpoint is None
+    assert planner.config.max_gpu_budget == 20
+
+
+@pytest.mark.asyncio
+async def test_runtime_patch_supports_disabling_each_gpu_budget():
+    planner = _planner("disagg", min_gpu_budget=12, max_gpu_budget=20)
+
+    response = await planner.patch_min_endpoints(
+        {"min_gpu_budget": -1, "max_gpu_budget": -1}
+    )
+
+    assert response["min_gpu_budget"] == -1
+    assert response["max_gpu_budget"] == -1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["prefill", "decode", "agg"])
+async def test_gpu_budget_fields_are_active_in_every_mode(mode):
+    planner = _planner(mode)
+
+    response = await planner.patch_min_endpoints({"max_gpu_budget": 24})
+
+    assert response["max_gpu_budget"] == 24
+    assert planner.config.max_gpu_budget == 24
 
 
 @pytest.mark.asyncio
@@ -132,11 +276,18 @@ async def test_http_validation_and_budget_rejection_leave_config_unchanged():
             "mode": "disagg",
             "prefill_min_endpoint": 1,
             "decode_min_endpoint": 1,
+            "min_gpu_budget": -1,
+            "max_gpu_budget": 8,
         }
 
-        for payload in ({}, {"unknown": 2}):
+        for payload in (
+            {},
+            {"unknown": 2},
+            {"min_gpu_budget": 4, "unknown": 2},
+        ):
             response = await client.patch("/v1/min-endpoints", json=payload)
             assert response.status == 400
+            assert planner.config.min_gpu_budget == -1
 
         for payload in (
             {"prefill_min_endpoint": None},
@@ -144,6 +295,8 @@ async def test_http_validation_and_budget_rejection_leave_config_unchanged():
             {"prefill_min_endpoint": "2"},
             {"prefill_min_endpoint": True},
             {"prefill_min_endpoint": 2.5},
+            {"min_gpu_budget": -2},
+            {"max_gpu_budget": -2},
         ):
             response = await client.patch("/v1/min-endpoints", json=payload)
             assert response.status == 422
@@ -164,18 +317,31 @@ async def test_http_validation_and_budget_rejection_leave_config_unchanged():
 
 
 @pytest.mark.asyncio
-async def test_http_rejects_fields_inactive_for_mode():
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize(
+    "mode,inactive_field",
+    [
+        ("disagg", "min_endpoint"),
+        ("prefill", "decode_min_endpoint"),
+        ("decode", "prefill_min_endpoint"),
+        ("agg", "decode_min_endpoint"),
+    ],
+)
+async def test_http_rejects_inactive_endpoint_without_applying_budget(
+    mode, inactive_field
+):
     from aiohttp.test_utils import TestClient, TestServer
 
-    planner = _planner("agg")
+    planner = _planner(mode)
     client = TestClient(TestServer(_build_app(planner)))
     await client.start_server()
     try:
         response = await client.patch(
-            "/v1/min-endpoints", json={"decode_min_endpoint": 2}
+            "/v1/min-endpoints",
+            json={inactive_field: 2, "max_gpu_budget": 32},
         )
         assert response.status == 422
-        assert planner.config.min_endpoint == 1
+        assert planner.config.max_gpu_budget == 20
     finally:
         await client.close()
 
@@ -184,6 +350,16 @@ def test_startup_validation_rejects_minimum_gpu_footprint():
     planner = _planner("disagg", max_gpu_budget=2)
 
     with pytest.raises(DeploymentValidationError, match="requires 3 GPUs"):
+        planner._validate_min_endpoint_budgets_at_startup()
+
+
+def test_startup_validation_rejects_invalid_gpu_budget_band():
+    planner = _planner("disagg", min_gpu_budget=21, max_gpu_budget=20)
+
+    with pytest.raises(
+        DeploymentValidationError,
+        match="min_gpu_budget=21 exceeds max_gpu_budget=20",
+    ):
         planner._validate_min_endpoint_budgets_at_startup()
 
 
@@ -226,7 +402,12 @@ async def test_runtime_patch_waits_for_tick_lock():
         await asyncio.sleep(0)
         assert not patch_task.done()
 
-    assert await patch_task == {"mode": "agg", "min_endpoint": 2}
+    assert await patch_task == {
+        "mode": "agg",
+        "min_endpoint": 2,
+        "min_gpu_budget": -1,
+        "max_gpu_budget": 20,
+    }
 
 
 @pytest.mark.asyncio
@@ -265,6 +446,25 @@ async def test_shutdown_finalizes_diagnostics_once():
     await planner._shutdown_runtime()
 
     planner._recorder.finalize.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_retrieves_completed_effect_submission_error(caplog):
+    planner = _planner("agg")
+
+    async def fail_submission():
+        raise RuntimeError("late submission failure")
+
+    submission_task = asyncio.create_task(fail_submission())
+    await asyncio.sleep(0)
+    assert submission_task.done()
+    planner._effect_submission_task = submission_task
+
+    await planner._shutdown_runtime()
+
+    assert planner._effect_submission_task is None
+    assert "Failed pending planner effect submission" in caplog.text
+    assert "late submission failure" in caplog.text
 
 
 @pytest.mark.asyncio
