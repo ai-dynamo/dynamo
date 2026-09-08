@@ -30,6 +30,87 @@ use http_harness::{
 
 const ENV: [(&str, Option<&str>); 1] = [(DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("0"))];
 
+#[tokio::test]
+#[serial]
+async fn unsupported_hosted_tools_fail_before_dispatch_or_streaming() {
+    temp_env::async_with_vars(ENV, async {
+        let svc = HarnessService::start([]).await;
+        for stream in [false, true] {
+            for (tools, tool_type) in [
+                (json!([{"type": "web_search"}]), "web_search"),
+                (
+                    json!([tool("read_file"), {"type": "web_search"}]),
+                    "web_search",
+                ),
+                (
+                    json!([{
+                        "type": "namespace", "name": "custom", "description": "Custom tools",
+                        "tools": [{"type": "custom", "name": "run", "format": {"type": "text"}}]
+                    }]),
+                    "custom",
+                ),
+            ] {
+                for choice in [
+                    None,
+                    Some(json!("auto")),
+                    Some(json!("required")),
+                    Some(json!("none")),
+                ] {
+                    let mut body = json!({
+                        "model": MODEL,
+                        "input": "ping",
+                        "stream": stream,
+                        "tools": tools,
+                    });
+                    if let Some(choice) = choice {
+                        body["tool_choice"] = choice;
+                    }
+                    let response = post_responses(&svc, &body).await;
+                    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+                    let error: Value = response.json().await.unwrap();
+                    assert!(error["message"].as_str().unwrap().contains(tool_type));
+                }
+            }
+        }
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn unsupported_tool_choices_fail_before_dispatch_or_streaming() {
+    temp_env::async_with_vars(ENV, async {
+        let svc = HarnessService::start([]).await;
+        for stream in [false, true] {
+            for choice in [
+                json!({"type": "web_search_preview"}),
+                json!({"type": "allowed_tools", "mode": "required", "tools": [{"type": "function", "name": "read_file"}]}),
+            ] {
+                for tools in [None, Some(json!([tool("read_file")]))] {
+                    let mut body = json!({
+                        "model": MODEL,
+                        "input": "ping",
+                        "stream": stream,
+                        "tool_choice": choice,
+                    });
+                    if let Some(tools) = tools {
+                        body["tools"] = tools;
+                    }
+                    let response = post_responses(&svc, &body).await;
+                    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+                    let error: Value = response.json().await.unwrap();
+                    assert!(error["message"].as_str().unwrap().contains("tool_choice"));
+                }
+            }
+        }
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
 async fn post_responses(svc: &HarnessService, body: &Value) -> reqwest::Response {
     svc.client
         .post(format!("{}/v1/responses", svc.base_url))
