@@ -748,7 +748,7 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 			expectedError: "cannot declare the exporter range",
 		},
 		{
-			name:  "a sourced base is tolerated when the enable value is unreadable too",
+			name:  "a sourced base is rejected even when the enable value is unreadable too",
 			ports: workerPorts,
 			telemetryValueFrom: &corev1.EnvVarSource{
 				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
@@ -763,7 +763,7 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 				},
 			},
 			containerGPUs: 8,
-			expectedPorts: allEightPorts,
+			expectedError: "cannot declare the exporter range",
 		},
 		{
 			name:            "an overridden base moves every declared port with it",

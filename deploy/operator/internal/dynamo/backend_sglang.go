@@ -101,15 +101,17 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 	override := findEnvVar(container.Env, "NIXL_TELEMETRY_PROMETHEUS_PORT")
 	if overridden, ok := literalPort(override); ok {
 		basePort.ContainerPort = overridden
-	} else if telemetryOn && override != nil && override.ValueFrom != nil {
+	} else if override != nil && override.ValueFrom != nil {
 		// A sourced base has no conservative fallback the way a sourced enable
 		// value does: the container resolves it and binds that range, while the
 		// declared ports and the PodMonitor stay on the base written here, so
-		// the metrics disappear instead of merely being over-declared.
+		// the metrics disappear instead of merely being over-declared. That
+		// holds however the enable value is written, so an unreadable one is no
+		// reason to accept the base and declare a range nothing binds.
 		return fmt.Errorf(
-			"NIXL_TELEMETRY_PROMETHEUS_PORT is set through valueFrom while NIXL Prometheus telemetry is enabled, "+
-				"so the operator cannot declare the exporter range as %s container ports and Prometheus would scrape "+
-				"a range no rank binds. Set NIXL_TELEMETRY_PROMETHEUS_PORT to a literal port, or set NIXL_TELEMETRY_ENABLE=n",
+			"NIXL_TELEMETRY_PROMETHEUS_PORT is set through valueFrom, so the operator cannot declare the exporter "+
+				"range as %s container ports and Prometheus would scrape a range no rank binds. Set "+
+				"NIXL_TELEMETRY_PROMETHEUS_PORT to a literal port, or set NIXL_TELEMETRY_ENABLE=n",
 			commonconsts.DynamoNixlPortName)
 	}
 
