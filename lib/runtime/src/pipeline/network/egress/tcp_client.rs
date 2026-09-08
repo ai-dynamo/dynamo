@@ -1734,83 +1734,12 @@ impl RequestPlaneClient for TcpRequestClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tls_utils::test_certs::{mtls_chain, self_signed_pair};
     use std::pin::Pin;
     use std::sync::atomic::AtomicUsize;
     use std::task::{Context, Poll};
     use tokio::io::{AsyncReadExt, AsyncWrite};
     use tokio::net::{TcpListener, TcpStream};
-
-    fn make_cert_files() -> (tempfile::NamedTempFile, tempfile::NamedTempFile) {
-        use std::io::Write as _;
-        let key_pair = rcgen::KeyPair::generate().unwrap();
-        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
-            .unwrap()
-            .self_signed(&key_pair)
-            .unwrap();
-        let mut cert_file = tempfile::NamedTempFile::new().unwrap();
-        cert_file.write_all(cert.pem().as_bytes()).unwrap();
-        let mut key_file = tempfile::NamedTempFile::new().unwrap();
-        key_file
-            .write_all(key_pair.serialize_pem().as_bytes())
-            .unwrap();
-        (cert_file, key_file)
-    }
-
-    // CA + server leaf (SAN=localhost) + client leaf, both signed by the CA.
-    // Returns PEM temp files: (ca, server_cert, server_key, client_cert, client_key).
-    fn make_mtls_cert_files() -> (
-        tempfile::NamedTempFile,
-        tempfile::NamedTempFile,
-        tempfile::NamedTempFile,
-        tempfile::NamedTempFile,
-        tempfile::NamedTempFile,
-    ) {
-        use std::io::Write as _;
-        fn write_pem(contents: &str) -> tempfile::NamedTempFile {
-            let mut f = tempfile::NamedTempFile::new().unwrap();
-            f.write_all(contents.as_bytes()).unwrap();
-            f
-        }
-
-        // Certificate Authority (self-signed, CA:TRUE).
-        let ca_key = rcgen::KeyPair::generate().unwrap();
-        let mut ca_params = rcgen::CertificateParams::new(Vec::new()).unwrap();
-        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        ca_params
-            .distinguished_name
-            .push(rcgen::DnType::CommonName, "Dynamo Test CA");
-        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
-
-        // Server leaf (SAN=localhost) signed by the CA, with serverAuth EKU.
-        let server_key = rcgen::KeyPair::generate().unwrap();
-        let mut server_params =
-            rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
-        server_params
-            .extended_key_usages
-            .push(rcgen::ExtendedKeyUsagePurpose::ServerAuth);
-        let server_cert = server_params
-            .signed_by(&server_key, &ca_cert, &ca_key)
-            .unwrap();
-
-        // Client leaf signed by the CA, with clientAuth EKU.
-        let client_key = rcgen::KeyPair::generate().unwrap();
-        let mut client_params =
-            rcgen::CertificateParams::new(vec!["dynamo-client".to_string()]).unwrap();
-        client_params
-            .extended_key_usages
-            .push(rcgen::ExtendedKeyUsagePurpose::ClientAuth);
-        let client_cert = client_params
-            .signed_by(&client_key, &ca_cert, &ca_key)
-            .unwrap();
-
-        (
-            write_pem(&ca_cert.pem()),
-            write_pem(&server_cert.pem()),
-            write_pem(&server_key.serialize_pem()),
-            write_pem(&client_cert.pem()),
-            write_pem(&client_key.serialize_pem()),
-        )
-    }
 
     // mTLS enforcement: a server built with a client CA must reject a client
     // that presents no certificate and one whose certificate is signed by an
@@ -1819,7 +1748,7 @@ mod tests {
     // flight before observing the server's rejection.
     #[tokio::test]
     async fn request_plane_mtls_rejects_untrusted_clients() {
-        let (ca, server_cert, server_key, _client_cert, _client_key) = make_mtls_cert_files();
+        let (ca, server_cert, server_key, _client_cert, _client_key) = mtls_chain();
         let server_config = crate::tls_utils::server_tls_config(
             server_cert.path(),
             server_key.path(),
@@ -1849,7 +1778,7 @@ mod tests {
             .await;
 
         // Client cert signed by an untrusted (self-signed) CA, not the server's.
-        let (wrong_cert, wrong_key) = make_cert_files();
+        let (wrong_cert, wrong_key) = self_signed_pair();
         let untrusted = crate::tls_utils::client_tls_config(
             Some(ca.path()),
             false,
@@ -2064,7 +1993,7 @@ mod tests {
     /// connector built.
     #[test]
     fn request_plane_tls_connector_from_env_parses() {
-        let (cert, key) = make_cert_files();
+        let (cert, key) = self_signed_pair();
         // Clear every var the builder reads (incl. the client-identity vars) so
         // ambient mTLS settings can't flip the "no TLS -> plaintext" assertion.
         temp_env::with_vars_unset(
@@ -2146,7 +2075,7 @@ mod tests {
 
     #[test]
     fn request_plane_tls_connector_rejects_client_identity_without_ca() {
-        let (cert, key) = make_cert_files();
+        let (cert, key) = self_signed_pair();
         // A client identity without a server CA (and not insecure) must fail closed.
         let error =
             build_request_plane_tls_connector(None, false, Some(cert.path()), Some(key.path()))
@@ -2193,7 +2122,7 @@ mod tests {
     #[tokio::test]
     async fn request_plane_tls_end_to_end() {
         // Self-signed cert (SAN=localhost), trusted as the CA by the client.
-        let (cert, key) = make_cert_files();
+        let (cert, key) = self_signed_pair();
         let server_config =
             crate::tls_utils::server_tls_config(cert.path(), key.path(), None).unwrap();
         let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server_config));
@@ -2243,7 +2172,7 @@ mod tests {
     /// when the server enforces mTLS.
     #[tokio::test]
     async fn request_plane_mtls_end_to_end() {
-        let (ca, server_cert, server_key, client_cert, client_key) = make_mtls_cert_files();
+        let (ca, server_cert, server_key, client_cert, client_key) = mtls_chain();
         let server_config = crate::tls_utils::server_tls_config(
             server_cert.path(),
             server_key.path(),

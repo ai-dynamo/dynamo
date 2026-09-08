@@ -17,7 +17,10 @@ from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.monitoring.worker_info import WorkerInfo
 
 if TYPE_CHECKING:
-    from dynamo.planner.monitoring.dgd_services import ComponentPowerConfig
+    from dynamo.planner.monitoring.dgd_services import (
+        ComponentGPUShape,
+        ComponentPowerConfig,
+    )
 
 
 class WorkerInfoProvider(Protocol):
@@ -46,11 +49,12 @@ class PlannerConnector(WorkerInfoProvider, Protocol):
 
     A clean return is not proof of the outcome. ``validate_deployment`` inspects
     the deployment only under Kubernetes and is a no-op in the other two modes.
-    ``get_gpu_counts`` yields ``(None, None)`` from ``VirtualConnector`` always
+    ``get_gpu_shapes`` yields ``(None, None)`` from ``VirtualConnector`` always
     and from ``GlobalPlannerConnector`` when it holds no pool-local Kubernetes
-    connector, while the Kubernetes implementation narrows the return to
-    ``tuple[int, int]`` and raises ``DeploymentValidationError`` rather than
-    reporting an unknown shape. ``get_model_name`` can return the placeholder
+    connector, while the Kubernetes implementation raises
+    ``DeploymentValidationError`` rather than reporting an unknown shape.
+    ``get_gpu_counts`` remains a compatibility view of per-engine width.
+    ``get_model_name`` can return the placeholder
     ``"managed-remotely"`` under a global planner.
     ``set_component_replicas`` may log and return without scaling when the
     deployment is not ready or the global planner rejects the request, though all
@@ -93,6 +97,13 @@ class PlannerConnector(WorkerInfoProvider, Protocol):
         require_prefill: bool = True,
         require_decode: bool = True,
     ) -> tuple[Optional[int], Optional[int]]:
+        pass
+
+    def get_gpu_shapes(
+        self,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+    ) -> tuple[Optional[ComponentGPUShape], Optional[ComponentGPUShape]]:
         pass
 
     async def get_actual_worker_counts(

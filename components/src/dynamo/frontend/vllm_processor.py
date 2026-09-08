@@ -45,6 +45,7 @@ from dynamo.vllm.errors import vllm_client_error_to_http_error
 from .prepost import StreamingPostProcessor, preprocess_chat_request
 from .thinking import runtime_default_thinking_mode
 from .utils import (
+    as_error_envelope,
     backend_invalid_argument_to_http_error,
     extract_mm_urls,
     handle_engine_error,
@@ -929,20 +930,24 @@ class VllmProcessor:
                         request_id,
                         message,
                     )
-                    yield make_internal_error(request_id, message)
+                    yield as_error_envelope(make_internal_error(request_id, message))
                     break
                 engine_response = dynamo_response.data()
 
                 if engine_response is None:
                     if dynamo_response.is_error():
-                        yield handle_engine_error(engine_response, request_id, logger)
+                        yield as_error_envelope(
+                            handle_engine_error(engine_response, request_id, logger)
+                        )
                         break
                     # No data or error fields, means we may have a comment or other kind of event.
                     # I'm not sure what those are used for, so TODO. Skip for now.
                     continue
 
                 if "token_ids" not in engine_response:
-                    yield handle_engine_error(engine_response, request_id, logger)
+                    yield as_error_envelope(
+                        handle_engine_error(engine_response, request_id, logger)
+                    )
                     break
 
                 # Count before any choice gate — tool/reasoning parsers may
@@ -953,15 +958,17 @@ class VllmProcessor:
                 output_idx = engine_response.get("index", 0) or 0
                 output_request_id = output_request_ids.get(output_idx)
                 if output_request_id is None:
-                    yield {
-                        "error": {
-                            "message": (
-                                f"Invalid engine choice index {output_idx} "
-                                f"for request {request_id}"
-                            ),
-                            "type": "internal_error",
+                    yield as_error_envelope(
+                        {
+                            "error": {
+                                "message": (
+                                    f"Invalid engine choice index {output_idx} "
+                                    f"for request {request_id}"
+                                ),
+                                "type": "internal_error",
+                            }
                         }
-                    }
+                    )
                     break
 
                 raw_finish_reason = engine_response.get("finish_reason")
@@ -998,15 +1005,17 @@ class VllmProcessor:
                     for output in vllm_out.request_outputs[0].outputs:
                         post = post_processors.get(output.index)
                         if post is None:
-                            yield {
-                                "error": {
-                                    "message": (
-                                        f"Invalid postprocessor choice index {output.index} "
-                                        f"for request {request_id}"
-                                    ),
-                                    "type": "internal_error",
+                            yield as_error_envelope(
+                                {
+                                    "error": {
+                                        "message": (
+                                            f"Invalid postprocessor choice index "
+                                            f"{output.index} for request {request_id}"
+                                        ),
+                                        "type": "internal_error",
+                                    }
                                 }
-                            }
+                            )
                             postprocess_error = True
                             break
                         choice = post.process_output(output)
@@ -1014,7 +1023,8 @@ class VllmProcessor:
                             choices.append(choice)
 
                 if postprocess_error:
-                    continue
+                    # Stop: the error frame is terminal, so do not read more.
+                    break
 
                 # One envelope per iteration carries both data and metrics so
                 # client cancellation can't drop the annotation between yields.
@@ -1067,7 +1077,7 @@ class VllmProcessor:
                 )
                 raise backend_error from e
             logger.exception("Error generating response for request %s", request_id)
-            yield make_internal_error(request_id, str(e))
+            yield as_error_envelope(make_internal_error(request_id, str(e)))
         finally:
             for output_request_id in registered_request_ids:
                 if output_request_id in self.output_processor.request_states:

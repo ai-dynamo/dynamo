@@ -177,12 +177,11 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 {% set pip_target = "--system" if device == "cuda" else "--python /opt/venv/bin/python" %}
 {% set python_executable = "python3" if device == "cuda" else "/opt/venv/bin/python" %}
 
-# The vLLM 0.27.1 CUDA and CPU release images resolve the unbounded
-# `transformers>=5.5.3` requirement to 5.15.0. That release changed Gemma 4 to
-# heterogeneous per-layer configs, but vLLM's corresponding support missed
-# 0.27.1 and the engine crashes during ModelConfig initialization. Install the
-# compatible version before layering vLLM-Omni so its dependency solve sees the
-# final Transformers invariant instead of resolving against 5.15.0 first.
+# The vLLM 0.28.0 release images resolve the unbounded `transformers>=5.5.3`
+# requirement to 5.15.1, but vLLM-Omni 0.28.0rc1 caps Transformers below 5.15.
+# Omni is layered against the installed Transformers version, so install the
+# compatible release first and its dependency solve sees the final Transformers
+# invariant instead of resolving against 5.15.1.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --no-deps \
@@ -243,11 +242,14 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 # libao*, libmad0, libid3tag0, libltdl7) we'd then be redistributing. SoX is
 # inherently GPL (no LGPL replacement), so the compliant fix is to not ship it.
 # (sglang_runtime.Dockerfile is the reference codec-compliance pattern.)
+# libjemalloc2 lets Dynamo processes opt into jemalloc via
+# LD_PRELOAD or DYN_FRONTEND_JEMALLOC; it is not preloaded by default.
 RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         jq \
-        libturbojpeg; \
+        libturbojpeg \
+        libjemalloc2; \
     ldconfig; \
     ldconfig -p | grep -q 'libturbojpeg.so.0'; \
     rm -rf /var/lib/apt/lists/*
@@ -350,12 +352,14 @@ RUN set -eux; \
 # (CPU-only) so a missing compiler aborts the build instead of shipping.
 RUN --mount=type=bind,source=./container/deps/vllm/validate_torch_compile_smoke.py,target=/tmp/validate_torch_compile_smoke.py,readonly \
     python3 /tmp/validate_torch_compile_smoke.py
+{% endif %}
 
 # Copy the LGPL ffmpeg from wheel_builder: versioned shared libs (libav*.so*,
 # libsw*.so*) + libvpx + the LGPL CLI binary that imageio/diffusers target via
-# IMAGEIO_FFMPEG_EXE. Ungated by enable_media_ffmpeg because the base GPL ffmpeg
-# was just purged, so the LGPL CLI must always be present for the omni
-# video-export path to have something to encode with.
+# IMAGEIO_FFMPEG_EXE. This remains ungated by enable_media_ffmpeg so the
+# media-enabled runtime wheel and the omni video-export path always have their
+# required shared libraries and CLI available.
+{% if device == "cuda" or device == "xpu" %}
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
     mkdir -p /usr/local/lib/pkgconfig && \
     cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
@@ -481,7 +485,7 @@ assert eps, 'modelexpress vllm.general_plugins entry point not found'; \
 # vLLM-Omni is installed with the current Transformers version in its protected
 # constraints file, so an incompatible Omni requirement fails during dependency
 # resolution. Check the completed image as well so a later package layer cannot
-# silently replace the vLLM 0.27.1-compatible Transformers release. A global
+# silently replace the vLLM-Omni-compatible Transformers release. A global
 # `uv pip check` is not appropriate here: the upstream runtime and Dynamo's
 # deliberate --no-deps layers contain unrelated package-metadata conflicts.
 RUN {{ python_executable }} - "${TRANSFORMERS_VERSION}" <<'PY'

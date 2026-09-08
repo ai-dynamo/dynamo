@@ -10,14 +10,13 @@ use parking_lot::Mutex;
 
 use super::policy::WorkerSelectionPolicyStateRef;
 use super::{
-    LogitWeights, MaterializedSelectionInput, ScoredWorkerCandidate, WorkerCandidate,
-    WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext, WorkerSelectionInput,
-    WorkerSelector, select_worker_with_policy,
+    LogitWeights, MaterializedSelectionInput, WorkerCandidate, WorkerInputs,
+    WorkerSelectionContext, WorkerSelectionInput, WorkerSelector, select_worker_with_policy,
 };
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 use crate::scheduling::config::KvRouterConfig;
 use crate::scheduling::filter::RoutingEligibility;
-use crate::scheduling::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
+use crate::scheduling::types::{KvSchedulerError, SchedulingRequest};
 
 #[cfg(any(test, feature = "bench"))]
 fn softmax_sample_entries<T: Copy>(
@@ -108,7 +107,6 @@ struct DefaultScoringContext {
 }
 
 pub(super) struct DefaultWorkerPicker {
-    default_temperature: f64,
     // Preserve DefaultWorkerSelector's Sync contract. Zero-temperature selection never locks.
     softmax_scratch: Mutex<DefaultSoftmaxScratch>,
     #[cfg(any(test, feature = "bench"))]
@@ -173,7 +171,6 @@ impl DefaultWorkerSelector {
         #[cfg(any(test, feature = "bench"))] deterministic_rng: Option<Arc<Mutex<fastrand::Rng>>>,
     ) -> Self {
         let picker = DefaultWorkerPicker::from_parts(
-            kv_router_config.router_temperature,
             #[cfg(any(test, feature = "bench"))]
             deterministic_rng,
         );
@@ -406,36 +403,12 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
 }
 
 impl DefaultWorkerPicker {
-    pub(super) fn new(default_temperature: f64) -> Self {
+    pub(super) fn new() -> Self {
         Self::from_parts(
-            default_temperature,
             #[cfg(any(test, feature = "bench"))]
             None,
         )
     }
-}
-
-fn minimum_cost_index(
-    candidates: &[ScoredWorkerCandidate],
-    mut random_index: impl FnMut(usize) -> usize,
-) -> usize {
-    let mut best_row = 0;
-    let mut best_cost = f64::INFINITY;
-    let mut tie_count = 0;
-    for (row, candidate) in candidates.iter().enumerate() {
-        let cost = candidate.cost;
-        if cost < best_cost {
-            best_row = row;
-            best_cost = cost;
-            tie_count = 1;
-        } else if cost == best_cost {
-            tie_count += 1;
-            if random_index(tie_count) == 0 {
-                best_row = row;
-            }
-        }
-    }
-    best_row
 }
 
 #[inline(always)]
@@ -555,11 +528,9 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
 
 impl DefaultWorkerPicker {
     fn from_parts(
-        default_temperature: f64,
         #[cfg(any(test, feature = "bench"))] deterministic_rng: Option<Arc<Mutex<fastrand::Rng>>>,
     ) -> Self {
         Self {
-            default_temperature,
             softmax_scratch: Mutex::default(),
             #[cfg(any(test, feature = "bench"))]
             deterministic_rng,
@@ -567,48 +538,11 @@ impl DefaultWorkerPicker {
     }
 }
 
-impl WorkerPicker for DefaultWorkerPicker {
-    fn pick(
-        &mut self,
-        context: &WorkerSelectionContext<'_>,
-        input: WorkerInputView<'_>,
-    ) -> Result<usize, WorkerSelectionPolicyError> {
-        let candidates = input.candidates();
-        let temperature = context
-            .router_temperature_override
-            .unwrap_or(self.default_temperature);
-        #[cfg(any(test, feature = "bench"))]
-        if let Some(rng) = &self.deterministic_rng {
-            let mut rng = rng.lock();
-            if temperature == 0.0 {
-                return Ok(minimum_cost_index(candidates, |count| rng.usize(0..count)));
-            }
-            let sample = rng.f64();
-            drop(rng);
-            return Ok(softmax_sample_index(
-                candidates,
-                |candidate| candidate.cost,
-                temperature,
-                sample,
-                &mut self.softmax_scratch.get_mut().probabilities,
-            ));
-        }
-        if temperature == 0.0 {
-            return Ok(minimum_cost_index(candidates, |count| {
-                fastrand::usize(0..count)
-            }));
-        }
-        Ok(softmax_sample_index(
-            candidates,
-            |candidate| candidate.cost,
-            temperature,
-            fastrand::f64(),
-            &mut self.softmax_scratch.get_mut().probabilities,
-        ))
-    }
-}
-
 impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
+    fn uses_exclusive_affinity_target(&self) -> bool {
+        true
+    }
+
     fn required_worker_inputs(&self) -> WorkerInputs {
         WorkerInputs::CACHE | WorkerInputs::LOAD
     }
@@ -742,8 +676,8 @@ mod tests {
                 effective_overlap_blocks: HashMap::default(),
                 effective_cached_tokens: HashMap::default(),
             },
-            router_hint_candidates: None,
-            retain_router_hint_chain: false,
+            kv_transfer_candidates: None,
+            retain_kv_transfer_chain: false,
             worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
@@ -753,6 +687,7 @@ mod tests {
             policy_class: None,
             session_context: None,
             expected_output_tokens: None,
+            affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
@@ -1024,6 +959,81 @@ mod tests {
     }
 
     #[test]
+    fn default_policy_retains_eligible_affinity_and_falls_back_when_overloaded() {
+        use crate::protocols::WorkerAffinityTarget;
+        use crate::test_utils::SimpleWorkerConfig;
+
+        let selector = DefaultWorkerSelector::new(
+            Some(KvRouterConfig {
+                router_temperature: 0.0,
+                ..Default::default()
+            }),
+            "test",
+        );
+        let worker0 = WorkerWithDpRank::from_worker_id(0);
+        let worker1 = WorkerWithDpRank::from_worker_id(1);
+        let workers = HashMap::from([
+            (
+                0,
+                SimpleWorkerConfig {
+                    data_parallel_size: 2,
+                    ..Default::default()
+                },
+            ),
+            (1, SimpleWorkerConfig::default()),
+        ]);
+        let mut request = base_request(16);
+        request.affinity_target = Some(worker1.into());
+        request.worker_loads =
+            worker_loads_with_active_decode(FxHashMap::from_iter([(worker0, 0), (worker1, 100)]));
+        let eligibility = request
+            .eligibility()
+            .with_affinity_target(request.affinity_target.unwrap());
+
+        let result = selector
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                eligibility,
+                16,
+            ))
+            .unwrap();
+
+        assert_eq!(result.worker, worker1);
+
+        request.affinity_target = Some(WorkerAffinityTarget::new(0, None));
+        let eligibility = request
+            .eligibility()
+            .with_affinity_target(request.affinity_target.unwrap());
+
+        let result = selector
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                eligibility,
+                16,
+            ))
+            .unwrap();
+
+        assert_eq!(result.worker.worker_id, 0);
+        assert!(result.worker.dp_rank < 2);
+
+        request.affinity_target = Some(worker1.into());
+        let overloaded_worker_ids = HashSet::from([1]);
+
+        let result = selector
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility_with_overloaded(Some(&overloaded_worker_ids)),
+                16,
+            ))
+            .unwrap();
+
+        assert_eq!(result.worker.worker_id, worker0.worker_id);
+    }
+
+    #[test]
     fn test_overloaded_pinned_worker_is_not_rerouted() {
         use crate::test_utils::SimpleWorkerConfig;
 
@@ -1069,8 +1079,8 @@ mod tests {
                 effective_overlap_blocks: HashMap::default(),
                 effective_cached_tokens: HashMap::default(),
             },
-            router_hint_candidates: None,
-            retain_router_hint_chain: false,
+            kv_transfer_candidates: None,
+            retain_kv_transfer_chain: false,
             worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
@@ -1080,6 +1090,7 @@ mod tests {
             policy_class: None,
             session_context: None,
             expected_output_tokens: None,
+            affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints {
@@ -1127,8 +1138,8 @@ mod tests {
                 effective_overlap_blocks: HashMap::default(),
                 effective_cached_tokens: HashMap::default(),
             },
-            router_hint_candidates: None,
-            retain_router_hint_chain: false,
+            kv_transfer_candidates: None,
+            retain_kv_transfer_chain: false,
             worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
@@ -1138,6 +1149,7 @@ mod tests {
             policy_class: None,
             session_context: None,
             expected_output_tokens: None,
+            affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints {
@@ -1203,8 +1215,8 @@ mod tests {
                     effective_overlap_blocks: HashMap::default(),
                     effective_cached_tokens: HashMap::default(),
                 },
-                router_hint_candidates: None,
-                retain_router_hint_chain: false,
+                kv_transfer_candidates: None,
+                retain_kv_transfer_chain: false,
                 worker_loads: worker_loads_with_active_decode(decode_blocks),
                 track_prefill_tokens: true,
                 router_config_override: None,
@@ -1214,6 +1226,7 @@ mod tests {
                 policy_class: None,
                 session_context: None,
                 expected_output_tokens: None,
+                affinity_target: None,
                 pinned_worker: None,
                 allowed_worker_ids: None,
                 routing_constraints: crate::protocols::RoutingConstraints {
@@ -1277,8 +1290,8 @@ mod tests {
                 effective_overlap_blocks: HashMap::default(),
                 effective_cached_tokens: HashMap::default(),
             },
-            router_hint_candidates: None,
-            retain_router_hint_chain: false,
+            kv_transfer_candidates: None,
+            retain_kv_transfer_chain: false,
             worker_loads: worker_loads_with_active_decode(decode_blocks),
             track_prefill_tokens: true,
             router_config_override: None,
@@ -1288,6 +1301,7 @@ mod tests {
             policy_class: None,
             session_context: None,
             expected_output_tokens: None,
+            affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints {
@@ -1347,8 +1361,8 @@ mod tests {
                 effective_overlap_blocks: HashMap::default(),
                 effective_cached_tokens: HashMap::default(),
             },
-            router_hint_candidates: None,
-            retain_router_hint_chain: false,
+            kv_transfer_candidates: None,
+            retain_kv_transfer_chain: false,
             worker_loads: worker_loads_with_active_decode(decode_blocks),
             track_prefill_tokens: true,
             router_config_override: None,
@@ -1358,6 +1372,7 @@ mod tests {
             policy_class: None,
             session_context: None,
             expected_output_tokens: None,
+            affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints {
@@ -1433,8 +1448,8 @@ mod tests {
                 effective_overlap_blocks,
                 effective_cached_tokens,
             },
-            router_hint_candidates: None,
-            retain_router_hint_chain: false,
+            kv_transfer_candidates: None,
+            retain_kv_transfer_chain: false,
             worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
@@ -1444,6 +1459,7 @@ mod tests {
             policy_class: None,
             session_context: None,
             expected_output_tokens: None,
+            affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
@@ -1510,8 +1526,8 @@ mod tests {
                 effective_overlap_blocks: HashMap::new(),
                 effective_cached_tokens,
             },
-            router_hint_candidates: None,
-            retain_router_hint_chain: false,
+            kv_transfer_candidates: None,
+            retain_kv_transfer_chain: false,
             worker_loads: worker_loads_with_active_decode(decode_blocks),
             track_prefill_tokens: true,
             router_config_override: None,
@@ -1521,6 +1537,7 @@ mod tests {
             policy_class: None,
             session_context: None,
             expected_output_tokens: None,
+            affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
@@ -1811,8 +1828,8 @@ mod tests {
                 effective_overlap_blocks,
                 effective_cached_tokens: HashMap::new(),
             },
-            router_hint_candidates: None,
-            retain_router_hint_chain: false,
+            kv_transfer_candidates: None,
+            retain_kv_transfer_chain: false,
             worker_loads: worker_loads_with_active_decode(decode_blocks),
             track_prefill_tokens: true,
             router_config_override: None,
@@ -1822,6 +1839,7 @@ mod tests {
             policy_class: None,
             session_context: None,
             expected_output_tokens: None,
+            affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
@@ -1900,8 +1918,8 @@ mod tests {
                 effective_overlap_blocks,
                 effective_cached_tokens: HashMap::new(),
             },
-            router_hint_candidates: None,
-            retain_router_hint_chain: false,
+            kv_transfer_candidates: None,
+            retain_kv_transfer_chain: false,
             worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
@@ -1911,6 +1929,7 @@ mod tests {
             policy_class: None,
             session_context: None,
             expected_output_tokens: None,
+            affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),

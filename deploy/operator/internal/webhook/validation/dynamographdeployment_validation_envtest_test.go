@@ -141,6 +141,163 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
+			name: "existing v1beta1 DGD with a 1.4 Go EPP remains editable after operator upgrade",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				worker.Replicas = k8sptr.To(int32(1))
+				worker.RuntimeVersionOverride = ""
+				worker.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
+				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+				}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Labels = map[string]string{"updated": "true"}
+				worker := betaWorkerComponent(dgd)
+				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				worker.Replicas = k8sptr.To(int32(1))
+				worker.RuntimeVersionOverride = ""
+				worker.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
+				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+				}
+			}),
+		},
+		{
+			name: "existing v1alpha1 DGD with a 1.4 Go EPP remains editable after operator upgrade",
+			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				worker.ComponentType = consts.ComponentTypeEPP
+				worker.Replicas = k8sptr.To(int32(1))
+				worker.RuntimeVersionOverride = ""
+				worker.ExtraPodSpec.MainContainer.Image = legacyEPPImage140
+				worker.EPPConfig = &nvidiacomv1alpha1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+				}
+			}),
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Labels = map[string]string{"updated": "true"}
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				worker.ComponentType = consts.ComponentTypeEPP
+				worker.Replicas = k8sptr.To(int32(1))
+				worker.RuntimeVersionOverride = ""
+				worker.ExtraPodSpec.MainContainer.Image = legacyEPPImage140
+				worker.EPPConfig = &nvidiacomv1alpha1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+				}
+			}),
+		},
+		{
+			name:               "unrelated DGD update ratchets an identical pre-existing native image and eppConfig mismatch",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				worker.Replicas = k8sptr.To(int32(1))
+				worker.RuntimeVersionOverride = ""
+				worker.PodTemplate.Spec.Containers[0].Image = frontendImage150
+				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+				}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Labels = map[string]string{"updated": "true"}
+				worker := betaWorkerComponent(dgd)
+				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				worker.Replicas = k8sptr.To(int32(1))
+				worker.RuntimeVersionOverride = ""
+				worker.PodTemplate.Spec.Containers[0].Image = frontendImage150
+				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+				}
+			}),
+		},
+		{
+			name:               "unrelated alpha DGD update ratchets an identical pre-existing native image and eppConfig mismatch",
+			seedWithoutWebhook: true,
+			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				worker.ComponentType = consts.ComponentTypeEPP
+				worker.Replicas = k8sptr.To(int32(1))
+				worker.RuntimeVersionOverride = ""
+				worker.ExtraPodSpec.MainContainer.Image = frontendImage150
+				worker.EPPConfig = &nvidiacomv1alpha1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+				}
+			}),
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Labels = map[string]string{"updated": "true"}
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				worker.ComponentType = consts.ComponentTypeEPP
+				worker.Replicas = k8sptr.To(int32(1))
+				worker.RuntimeVersionOverride = ""
+				worker.ExtraPodSpec.MainContainer.Image = frontendImage150
+				worker.EPPConfig = &nvidiacomv1alpha1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+				}
+			}),
+		},
+		{
+			// type is immutable once set, so the only transition into EPP starts
+			// from an unset type; it must still validate the complete contract.
+			name: "setting a previously unset DGD component type to EPP validates the complete runtime contract",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.ComponentType = ""
+				worker.RuntimeVersionOverride = ""
+				worker.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				worker.Replicas = k8sptr.To(int32(1))
+				worker.RuntimeVersionOverride = ""
+				worker.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
+			}),
+			wantWebhookErrs: []string{"spec.components[1].eppConfig: Required value: is required for legacy Go EPP images with runtime version earlier than 1.5.0"},
+		},
+		{
+			name: "DGD atomically migrates from a 1.4 Go EPP to a 1.5 Rust EPP",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				worker.Replicas = k8sptr.To(int32(1))
+				worker.RuntimeVersionOverride = ""
+				worker.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
+				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+				}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				worker.Replicas = k8sptr.To(int32(1))
+				worker.RuntimeVersionOverride = ""
+				worker.PodTemplate.Spec.Containers[0].Image = frontendImage150
+			}),
+		},
+		{
+			name: "DGD atomically rolls back from a 1.5 Rust EPP to a 1.4 Go EPP",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				worker.Replicas = k8sptr.To(int32(1))
+				worker.RuntimeVersionOverride = ""
+				worker.PodTemplate.Spec.Containers[0].Image = frontendImage150
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				worker.Replicas = k8sptr.To(int32(1))
+				worker.RuntimeVersionOverride = ""
+				worker.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
+				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+				}
+			}),
+		},
+		{
 			name: "beta component image change to custom requires runtime version override",
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
@@ -306,8 +463,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name:          "v1beta1 introducing case-insensitive component names is rejected by CEL on update",
 			oldDeployment: betaDGDForAdmission(nil),
 			deployment: dgdAdmissionWithLabel(t, betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Spec.Components[0].ComponentName = dgdAdmissionWorkerName
-				dgd.Spec.Components[1].ComponentName = dgdAdmissionUpperWorkerName
+				dgd.Spec.Components[0].ComponentName = dgdAdmissionUpperWorkerName
 			})),
 			wantCELErr: "spec.components: Invalid value: component names must be unique case-insensitively",
 		},
@@ -504,6 +660,22 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				betaWorkerComponent(dgd).MinAvailable = k8sptr.To(int32(2))
 			}),
 			wantCELErr: "spec.components[1]: Invalid value: minAvailable is immutable after creation",
+		},
+		{
+			name:          "v1alpha1 componentType change is rejected by CEL",
+			oldDeployment: alphaDGDForAdmission(nil),
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services[dgdAdmissionWorkerName].ComponentType = consts.ComponentTypeEPP
+			}),
+			wantCELErr: "spec.services[worker]: Invalid value: componentType is immutable after it is set",
+		},
+		{
+			name:          "v1beta1 type change is rejected by CEL",
+			oldDeployment: betaDGDForAdmission(nil),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+			}),
+			wantCELErr: "spec.components[1]: Invalid value: type is immutable after it is set",
 		},
 		{
 			name: "v1beta1 removed minAvailable update is restored by defaulting",
@@ -828,6 +1000,66 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 
+		// Compound component role rules.
+		{
+			name: "multinode component without explicit roles preserves implicit behavior",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4}
+			}),
+		},
+		{
+			name: "complete explicit multinode roles are admitted",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaExplicitMultinodeRoles(betaWorkerComponent(dgd), 4)
+			}),
+		},
+		{
+			name: "v1alpha1 explicit multinode roles convert and are admitted",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				worker.Multinode = &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 4}
+				worker.Roles = []nvidiacomv1alpha1.ComponentRoleSpec{
+					{Name: nvidiacomv1alpha1.ComponentRoleLeader},
+					{Name: nvidiacomv1alpha1.ComponentRoleWorker},
+				}
+			}),
+		},
+		{
+			name: "roles require a component role schema",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
+					{Name: nvidiacomv1beta1.ComponentRoleLeader},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.components[1].roles: Forbidden: roles are supported only for component shapes that define a role schema; this release supports multinode components"},
+		},
+		{
+			name: "explicit multinode roles require the complete role set",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4}
+				worker.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
+					{Name: nvidiacomv1beta1.ComponentRoleLeader},
+				}
+			}),
+			wantWebhookErrs: []string{`spec.components[1].roles: Required value: must contain the "worker" role`},
+		},
+		{
+			name: "explicit multinode roles reject unknown role names",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4}
+				worker.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
+					{Name: "coordinator"},
+				}
+			}),
+			wantWebhookErrs: []string{
+				`spec.components[1].roles[0].name: Unsupported value: "coordinator": supported values: "leader", "worker"`,
+				`spec.components[1].roles: Required value: must contain the "leader" role`,
+				`spec.components[1].roles: Required value: must contain the "worker" role`,
+			},
+		},
 		// Checkpoint rules.
 		{
 			name: "v1beta1 valid checkpoint configuration reaches the webhook",
@@ -1235,6 +1467,10 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{"spec.services[worker].volumeMounts[0].mountPoint: Required value: is required when useAsCompilationCache is false"},
 		},
 		{
+			// eppConfig stays in the API while Go EPP is deprecated, so its
+			// v1alpha1 source-exclusivity rule must keep its coverage. A
+			// pre-1.5.0 runtime is a legacy Go EPP, so eppConfig is expected
+			// here and only its shape is at fault.
 			name: "alpha EPP config sources are mutually exclusive",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				worker := dgd.Spec.Services["worker"]
@@ -1248,6 +1484,40 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				}
 			}),
 			wantWebhookErrs: []string{"spec.services[worker].eppConfig: Forbidden: exactly one of configMapRef or config is required"},
+		},
+		{
+			name: "alpha DGD EPP config map requires a name at the submitted source path",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				worker.ComponentType = consts.ComponentTypeEPP
+				worker.EPPConfig = &nvidiacomv1alpha1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.services[worker].eppConfig.configMapRef.name: Required value: is required"},
+		},
+		{
+			name: "alpha DGD legacy EPP contract error uses the submitted source path",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				worker.ComponentType = consts.ComponentTypeEPP
+				worker.RuntimeVersionOverride = ""
+				worker.ExtraPodSpec.MainContainer.Image = legacyEPPImage140
+			}),
+			wantWebhookErrs: []string{"spec.services[worker].eppConfig: Required value: is required for legacy Go EPP images with runtime version earlier than 1.5.0"},
+		},
+		{
+			name: "alpha DGD native EPP contract error uses the submitted source path",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				worker.ComponentType = consts.ComponentTypeEPP
+				worker.RuntimeVersionOverride = ""
+				worker.ExtraPodSpec.MainContainer.Image = frontendImage150
+				worker.EPPConfig = &nvidiacomv1alpha1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.services[worker].eppConfig: Forbidden: must be omitted for native Rust EPP images with runtime version 1.5.0 or later"},
 		},
 		{
 			name: "alpha intra-pod failover shadow maximum is preserved structurally",
@@ -1424,6 +1694,9 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantCELErr: "spec.components[1].eppConfig: Invalid value: exactly one of configMapRef or config must be specified",
 		},
 		{
+			// A well-formed eppConfig on a pre-1.5.0 runtime is still the
+			// supported legacy Go EPP shape and must keep being accepted
+			// while the field is only deprecated.
 			name: "v1beta1 valid EPP config reaches the webhook",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
@@ -1655,17 +1928,15 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					"",
 					`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}`,
 				)
-				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{
-					NodeCount: 2,
-					Leader: &nvidiacomv1beta1.MultinodeRoleSpec{ProviderOverride: groveProviderOverride(
-						"",
-						`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
-					)},
-					Worker: &nvidiacomv1beta1.MultinodeRoleSpec{ProviderOverride: groveProviderOverride(
-						"",
-						`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
-					)},
-				}
+				setBetaExplicitMultinodeRoles(worker, 2)
+				worker.Roles[0].ProviderOverride = groveProviderOverride(
+					"",
+					`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
+				)
+				worker.Roles[1].ProviderOverride = groveProviderOverride(
+					"",
+					`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
+				)
 			}),
 		},
 		{
@@ -1761,32 +2032,28 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name:               "legacy multinode role provider identity is immutable during repair",
+			name:               "legacy component role provider identity is immutable during repair",
 			seedWithoutWebhook: true,
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
-				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{
-					NodeCount: 2,
-					Leader: &nvidiacomv1beta1.MultinodeRoleSpec{ProviderOverride: groveProviderOverride(
-						provideroverride.TargetPodCliqueSet,
-						`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
-					)},
-				}
-				worker.Multinode.Leader.ProviderOverride.APIVersion = "grove.io/v2"
+				setBetaExplicitMultinodeRoles(worker, 2)
+				worker.Roles[0].ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueSet,
+					`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
+				)
+				worker.Roles[0].ProviderOverride.APIVersion = "grove.io/v2"
 			}),
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
-				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{
-					NodeCount: 2,
-					Leader: &nvidiacomv1beta1.MultinodeRoleSpec{ProviderOverride: groveProviderOverride(
-						provideroverride.TargetPodCliqueTemplateSpec,
-						`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
-					)},
-				}
+				setBetaExplicitMultinodeRoles(worker, 2)
+				worker.Roles[0].ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueTemplateSpec,
+					`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
+				)
 			}),
 			wantWebhookErrs: []string{
-				`spec.components[1].multinode.leader.providerOverride.apiVersion: Invalid value: "grove.io/v1alpha1": ` + apivalidation.FieldImmutableErrorMsg,
-				`spec.components[1].multinode.leader.providerOverride.target: Invalid value: "PodCliqueTemplateSpec": ` + apivalidation.FieldImmutableErrorMsg,
+				`spec.components[1].roles[0].providerOverride.apiVersion: Invalid value: "grove.io/v1alpha1": ` + apivalidation.FieldImmutableErrorMsg,
+				`spec.components[1].roles[0].providerOverride.target: Invalid value: "PodCliqueTemplateSpec": ` + apivalidation.FieldImmutableErrorMsg,
 			},
 		},
 
@@ -2054,6 +2321,52 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 3}
+			}),
+		},
+		{
+			name: "node count update with explicit roles is allowed",
+			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				setBetaExplicitMultinodeRoles(worker, 2)
+			}),
+			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				setBetaExplicitMultinodeRoles(worker, 3)
+			}),
+		},
+		{
+			name: "implicit to semantically equivalent explicit roles is allowed",
+			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				setBetaExplicitMultinodeRoles(worker, 2)
+			}),
+		},
+		{
+			name: "explicit to semantically equivalent implicit roles is allowed",
+			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				setBetaExplicitMultinodeRoles(worker, 2)
+			}),
+			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+		},
+		{
+			name: "implicit to explicit roles can accompany a node count update",
+			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				setBetaExplicitMultinodeRoles(worker, 3)
+			}),
+		},
+		{
+			name: "explicit role list reorder is allowed",
+			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				setBetaExplicitMultinodeRoles(worker, 2)
+			}),
+			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				setBetaExplicitMultinodeRoles(worker, 2)
+				worker.Roles[0], worker.Roles[1] = worker.Roles[1], worker.Roles[0]
 			}),
 		},
 
@@ -2763,6 +3076,17 @@ func betaWorkerComponent(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
 	return dgd.GetComponentByName("worker")
+}
+
+func setBetaExplicitMultinodeRoles(
+	worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	nodeCount int32,
+) {
+	worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: nodeCount}
+	worker.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
+		{Name: nvidiacomv1beta1.ComponentRoleLeader},
+		{Name: nvidiacomv1beta1.ComponentRoleWorker},
+	}
 }
 
 func setBetaWorkerPowerInputs(
