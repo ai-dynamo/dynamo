@@ -583,21 +583,25 @@ worker_selection:
     }
 
     #[tokio::test]
-    async fn load_only_empty_tokens_can_be_reserved() {
+    async fn load_only_reserves_estimated_prefill_without_prefix_matches() {
         let selector = selector_with_schedulable_worker().await;
 
-        let response = selector
-            .select_and_reserve(load_only_select_request("load-only"))
-            .await
-            .expect("load-only fallback should still reserve a worker");
-        assert_eq!(response.worker_id, 1);
-        assert_eq!(response.overlap.longest_matched, 0);
-        assert_eq!(response.effective_prefill_tokens, 1);
+        for estimate in [0, 64, 4096, 65536] {
+            let mut request = load_only_select_request("load-only");
+            request.estimated_input_tokens = estimate;
+            let response = selector
+                .select_and_reserve(request)
+                .await
+                .expect("load-only fallback should still reserve a worker");
+            assert_eq!(response.worker_id, 1);
+            assert_eq!(response.overlap.longest_matched, 0);
+            assert_eq!(response.effective_prefill_tokens, estimate.max(1));
 
-        selector
-            .free_reservation("load-only")
-            .await
-            .expect("load-only reservation should be releasable");
+            selector
+                .free_reservation("load-only")
+                .await
+                .expect("load-only reservation should be releasable");
+        }
     }
 
     /// Item 5: prefill completion releases prompt load exactly once and is

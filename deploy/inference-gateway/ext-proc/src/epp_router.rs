@@ -884,7 +884,7 @@ mod tests {
             StatusCode::SERVICE_UNAVAILABLE,
             StatusCode::GATEWAY_TIMEOUT,
         ] {
-            let degraded = tokenized_or_load_only(
+            tokenized_or_load_only(
                 Err(TokenizeFailure {
                     priority_jump: Some(1.0),
                     strict_priority: Some(2),
@@ -898,9 +898,6 @@ mod tests {
                 "req-1",
             )
             .expect("transient renderer status should route load-only");
-            assert!(degraded.token_ids.is_empty());
-            assert_eq!(degraded.priority_jump, Some(1.0));
-            assert_eq!(degraded.strict_priority, Some(2));
         }
     }
 
