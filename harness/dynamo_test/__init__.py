@@ -33,6 +33,7 @@ from .site import (
     Topology,
     UnknownSite,
 )
+from .stack import DYNAMO_DEFAULTS, Defaults, Render, Stack
 from .sut import Handle, NotGranted, PhaseError, Provider, Sut
 from .verbs import (
     REGISTRY,
@@ -103,4 +104,9 @@ __all__ = [
     "Contribution",
     "VerbSpec",
     "verb",
+    # stacks: a plan plus the defaults the operator would have supplied
+    "DYNAMO_DEFAULTS",
+    "Defaults",
+    "Render",
+    "Stack",
 ]

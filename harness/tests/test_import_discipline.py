@@ -37,6 +37,7 @@ TIER_0 = {
     "dialect.py",
     "evidence.py",
     "site.py",
+    "stack.py",
     "sut.py",
     "local.py",
 }
