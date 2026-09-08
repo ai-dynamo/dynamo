@@ -75,14 +75,8 @@ def _pod_spec(component: dict) -> dict:
 
 
 def test_tp_sweep_overrides_an_equals_spelled_user_value() -> None:
-    """The swept TP must win over a user's --tp=N, not lose to it.
-
-    set_argument_value cannot match the equals spelling, so it replaced the
-    stock `--tp 1` in place and left the user's `--tp=N` sitting after it.
-    SGLang's parser takes the last occurrence, so the worker ran the user's
-    value while the point was recorded against the swept one, with GPU
-    resources sized for the swept one.
-    """
+    """SGLang's parser takes the last `--tp` occurrence, so a user's
+    `--tp=N` left sitting after the swept value silently wins."""
     from dynamo.planner.config.defaults import SubComponentType
 
     modifier = CONFIG_MODIFIERS["sglang"]
