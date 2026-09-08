@@ -39,6 +39,7 @@ struct FakeTrtllm {
     requests: Arc<Mutex<Vec<pb::GenerateRequest>>>,
     aborts: Arc<Mutex<Vec<String>>>,
     peers: Arc<Mutex<Vec<SocketAddr>>>,
+    dp_ranks: Arc<Mutex<Vec<Option<String>>>>,
     reject: Arc<AtomicBool>,
     hang: Arc<AtomicBool>,
     /// Simulates a server whose Control service is not implemented.
@@ -86,6 +87,13 @@ impl pb::inference_server::Inference for FakeTrtllm {
         if let Some(peer) = request.remote_addr() {
             self.peers.lock().await.push(peer);
         }
+        self.dp_ranks.lock().await.push(
+            request
+                .metadata()
+                .get("openengine-target-dp-rank")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string),
+        );
         let request = request.into_inner();
         self.requests.lock().await.push(request.clone());
         if self.reject.load(Ordering::SeqCst) {
@@ -830,6 +838,105 @@ async fn cancellation_yields_a_cancelled_terminal() {
     assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
 }
 
+/// `dp_rank` names the decode worker and `prefill_dp_rank` the prefill one, so
+/// which of them routes a request depends on the leg. Forwarding the prefill
+/// rank to a decode engine points the request at the wrong shard.
+#[tokio::test]
+async fn each_leg_forwards_its_own_data_parallel_rank() {
+    let server = FakeServer::start(FakeTrtllm::default()).await;
+    let hints = dynamo_backend_common::engine::RoutingHints {
+        dp_rank: Some(3),
+        prefill_dp_rank: Some(7),
+        ..Default::default()
+    };
+
+    for (mode, expected) in [
+        (DisaggregationMode::Prefill, "7"),
+        (DisaggregationMode::Decode, "3"),
+        (AGG, "3"),
+    ] {
+        let engine = engine_in_mode(&server.endpoint, 1, mode);
+        engine.start(0).await.expect("start");
+        let mut req = request();
+        req.routing = Some(hints.clone());
+        collect(&engine, req).await;
+        assert_eq!(
+            server
+                .service
+                .dp_ranks
+                .lock()
+                .await
+                .last()
+                .unwrap()
+                .as_deref(),
+            Some(expected),
+            "{mode:?} must route by its own rank"
+        );
+    }
+
+    // A decode leg with only the prefill worker's rank has no decode target;
+    // inventing one from the prefill hint would misroute the request.
+    let engine = engine_in_mode(&server.endpoint, 1, DisaggregationMode::Decode);
+    engine.start(0).await.expect("start");
+    let mut req = request();
+    req.routing = Some(dynamo_backend_common::engine::RoutingHints {
+        prefill_dp_rank: Some(7),
+        ..Default::default()
+    });
+    collect(&engine, req).await;
+    assert_eq!(
+        server
+            .service
+            .dp_ranks
+            .lock()
+            .await
+            .last()
+            .unwrap()
+            .as_deref(),
+        None
+    );
+}
+
+/// A decode request holding transferred KV blocks must outlive its client until
+/// the first token proves the transfer landed -- dropping the stream earlier
+/// strands the prefill worker's blocks. It must not outlive it any longer than
+/// that, or a cancelled request generates its whole budget with no consumer.
+#[tokio::test]
+async fn a_cancelled_decode_request_survives_only_until_the_transfer_lands() {
+    let service = FakeTrtllm::default();
+    service.hang.store(true, Ordering::SeqCst);
+    let server = FakeServer::start(service).await;
+    let engine = engine_in_mode(&server.endpoint, 1, DisaggregationMode::Decode);
+    engine.start(0).await.expect("start");
+
+    let context = dynamo_backend_common::testing::mock_context();
+    let mut req = request();
+    req.prefill_result = Some(dynamo_backend_common::PrefillResult {
+        disaggregated_params: crate::disagg::session_to_json(fake_session()).expect("handoff"),
+        prompt_tokens_details: None,
+    });
+    let mut stream = engine
+        .generate(req, GenerateContext::new(context.clone(), None))
+        .await
+        .expect("generate");
+
+    context.stop_generating();
+    // Still deferring: nothing has confirmed the KV transfer yet.
+    let first = stream.next().await.unwrap().unwrap();
+    assert_eq!(
+        first.finish_reason, None,
+        "the deferral outlasts the client"
+    );
+    assert!(!first.token_ids.is_empty());
+
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        .await
+        .expect("the deferral lifts once a token lands")
+        .unwrap()
+        .unwrap();
+    assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
+}
+
 #[tokio::test]
 async fn abort_sends_the_abort_rpc_to_the_server() {
     let server = FakeServer::start(FakeTrtllm::default()).await;
@@ -1350,6 +1457,67 @@ fn prefill_terminal_without_a_handoff_is_rejected() {
     assert!(
         error.to_string().contains("without a kv_session handoff"),
         "unexpected error: {error}"
+    );
+}
+
+/// Cache hits are measured during the context phase, so a decode worker can
+/// only report them by carrying the handoff's count through to its terminal.
+/// An aggregated worker reads its own engine's count off the same terminal.
+#[test]
+fn cached_prompt_tokens_reach_the_client_on_both_paths() {
+    let terminal = |mut state: ResponseState, reported: Option<u32>| {
+        let response = pb::GenerateResponse {
+            request_id: "req".to_string(),
+            event: Some(pb::generate_response::Event::Finished(
+                pb::GenerationFinished {
+                    output_index: Some(0),
+                    reason: pb::FinishReason::Stop as i32,
+                    ..Default::default()
+                },
+            )),
+            usage: Some(pb::Usage {
+                prompt_tokens: 11,
+                completion_tokens: 3,
+                total_tokens: 14,
+                cached_prompt_tokens: reported,
+                reasoning_tokens: None,
+            }),
+        };
+        state
+            .convert(response)
+            .expect("finished converts")
+            .expect("finished yields a terminal")
+            .completion_usage
+            .expect("usage is set")
+            .prompt_tokens_details
+            .and_then(|details| details.cached_tokens)
+    };
+
+    assert_eq!(
+        terminal(ResponseState::new(&request(), AGG), Some(7)),
+        Some(7)
+    );
+
+    let mut decode_request = request();
+    decode_request.prefill_result = Some(dynamo_backend_common::PrefillResult {
+        disaggregated_params: crate::disagg::session_to_json(fake_session()).expect("handoff"),
+        prompt_tokens_details: Some(dynamo_backend_common::PromptTokensDetails {
+            audio_tokens: None,
+            cached_tokens: Some(5),
+        }),
+    });
+    let state = ResponseState::new(&decode_request, DisaggregationMode::Decode);
+    assert_eq!(
+        terminal(state, None),
+        Some(5),
+        "the decode leg reports the prefill leg's cache hits"
+    );
+
+    // A count measured against an expanded prompt must not exceed the prompt
+    // the client sent.
+    assert_eq!(
+        terminal(ResponseState::new(&request(), AGG), Some(9_999)),
+        Some(11)
     );
 }
 

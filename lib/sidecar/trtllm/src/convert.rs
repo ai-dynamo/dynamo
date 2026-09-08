@@ -405,6 +405,9 @@ pub(crate) struct ResponseState {
     /// Prefill workers terminate on `PrefillReady` instead of `finished`, and
     /// stream no tokens to the client.
     is_prefill: bool,
+    /// Cache hits are measured during the context phase, so on a decode worker
+    /// they arrive with the handoff rather than from the local engine.
+    cached_tokens: Option<u32>,
 }
 
 impl ResponseState {
@@ -414,6 +417,11 @@ impl ResponseState {
             completion_tokens: 0,
             output_logprobs: request.output_options.logprobs,
             is_prefill: mode.is_prefill(),
+            cached_tokens: request
+                .prefill_result
+                .as_ref()
+                .and_then(|prefill| prefill.prompt_tokens_details.as_ref())
+                .and_then(|details| details.cached_tokens),
         }
     }
 
@@ -550,6 +558,7 @@ impl ResponseState {
             if reported.completion_tokens != 0 {
                 self.completion_tokens = reported.completion_tokens;
             }
+            self.cached_tokens = reported.cached_prompt_tokens.or(self.cached_tokens);
         }
 
         let finish_reason = match pb::FinishReason::try_from(finished.reason).map_err(|_| {
@@ -570,7 +579,10 @@ impl ResponseState {
         let mut terminal = LLMEngineOutput {
             index: Some(0),
             finish_reason: Some(finish_reason),
-            completion_usage: Some(usage(self.prompt_tokens, self.completion_tokens)),
+            completion_usage: Some(CompletionUsage {
+                prompt_tokens_details: cached_prompt_tokens(self.cached_tokens, self.prompt_tokens),
+                ..usage(self.prompt_tokens, self.completion_tokens)
+            }),
             ..Default::default()
         };
         terminal.stop_reason = finished
@@ -633,7 +645,6 @@ impl ResponseState {
     }
 }
 
-/// Maps a terminal `EngineError` event onto a Dynamo error.
 /// Usage for the prefill terminal. `PrefillReady` *is* the final response for a
 /// context request, so it carries the engine's authoritative counts; the
 /// client-side prompt length is only a fallback for a server that omits them.
@@ -647,14 +658,18 @@ fn prefill_usage(reported: Option<pb::Usage>, prompt_tokens: u32) -> CompletionU
         prompt_tokens
     };
     CompletionUsage {
-        prompt_tokens_details: reported.cached_prompt_tokens.map(|cached_tokens| {
-            PromptTokensDetails {
-                audio_tokens: None,
-                cached_tokens: Some(cached_tokens),
-            }
-        }),
+        prompt_tokens_details: cached_prompt_tokens(reported.cached_prompt_tokens, prompt_tokens),
         ..usage(prompt_tokens, 0)
     }
+}
+
+/// A server that counts cache hits against an expanded prompt would otherwise
+/// report more cached tokens than the prompt the client actually sent.
+fn cached_prompt_tokens(cached: Option<u32>, prompt_tokens: u32) -> Option<PromptTokensDetails> {
+    cached.map(|cached_tokens| PromptTokensDetails {
+        audio_tokens: None,
+        cached_tokens: Some(cached_tokens.min(prompt_tokens)),
+    })
 }
 
 pub(crate) fn engine_error(error: pb::EngineError) -> DynamoError {

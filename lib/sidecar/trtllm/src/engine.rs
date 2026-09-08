@@ -198,18 +198,24 @@ impl LLMEngine for TrtllmSidecarEngine {
             self.mode,
         )?;
         // Routing targets travel as protocol metadata, not in the request body.
-        let target_dp_rank = request
-            .routing
-            .as_ref()
-            .and_then(|routing| routing.dp_rank.or(routing.prefill_dp_rank));
+        let target_dp_rank = request.routing.as_ref().and_then(|routing| {
+            if self.mode.is_prefill() {
+                routing.prefill_dp_rank.or(routing.dp_rank)
+            } else {
+                routing.dp_rank
+            }
+        });
         let mut state = ResponseState::new(&request, self.mode);
         let cancel = self.cancel.clone();
-        // A decode request has already had KV transferred to it, and the
-        // transceiver releases those blocks when the engine finishes the
+        // A decode request that took a handoff has KV transferred into it, and
+        // the transceiver releases those blocks when the engine finishes the
         // request -- not when the client goes away. Dropping the stream on
-        // cancellation would strand the prefill worker's blocks, so let the
-        // decode leg run to its terminal event instead.
-        let defer_request_cancellation = self.mode.is_decode();
+        // cancellation would strand the prefill worker's blocks. Defer only
+        // until the first token proves the transfer landed; deferring past
+        // that would let a cancelled request generate its whole budget with no
+        // consumer. A decode-mode request without a handoff ran locally and
+        // has nothing to strand.
+        let defer_request_cancellation = self.mode.is_decode() && request.prefill_result.is_some();
         let stopped_ctx = ctx.inner_arc();
         // Hoisted: `stopped()` is an async-trait method, so re-creating it per
         // streamed chunk costs a boxed future and a waker registration on every
@@ -230,10 +236,11 @@ impl LLMEngine for TrtllmSidecarEngine {
         };
 
         Ok(Box::pin(async_stream::stream! {
+            let mut transfer_settled = false;
             loop {
                 tokio::select! {
                     biased;
-                    _ = &mut request_cancellation, if !defer_request_cancellation => {
+                    _ = &mut request_cancellation, if !defer_request_cancellation || transfer_settled => {
                         yield Ok(cancelled(&state));
                         break;
                     }
@@ -245,6 +252,7 @@ impl LLMEngine for TrtllmSidecarEngine {
                         match message {
                             Ok(Some(response)) => match state.convert(response) {
                                 Ok(Some(output)) => {
+                                    transfer_settled |= !output.token_ids.is_empty();
                                     let terminal = output.finish_reason.is_some();
                                     yield Ok(output);
                                     if terminal {

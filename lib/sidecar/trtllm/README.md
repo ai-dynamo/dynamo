@@ -142,8 +142,10 @@ interpreted between the two workers. See `src/disagg.rs`.
 `deploy/agg.yaml` deploys a frontend and one worker pod. The worker runs the
 sidecar next to a TensorRT-LLM engine and serves `Qwen/Qwen3-0.6B` on one GPU.
 
-There is no published sidecar image yet (see [Packaging](#packaging)), so you
-build and push your own.
+There is no published sidecar image yet (see [Packaging](#packaging)), so build
+and push the image from `lib/sidecar/Dockerfile`. It contains all three
+engine-specific sidecar executables; this manifest runs `dynamo-trtllm-sidecar`
+as the container command.
 
 ### Prerequisites
 
@@ -167,12 +169,13 @@ Build a multi-arch image so it runs on any node — `amd64` (x86) or `arm64`
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -f lib/sidecar/trtllm/Dockerfile \
-  -t <your-registry>/dynamo-trtllm-sidecar:1.3.0 --push .
+  -f lib/sidecar/Dockerfile \
+  -t <your-registry>/dynamo-sidecar:1.3.0 --push .
 ```
 
 To build faster for one arch, pass just that platform (e.g. `linux/arm64` for
-GB200/Grace).
+GB200/Grace). See [Build the image](../README.md#build-the-image) for a
+single-architecture build.
 
 ### 2. Point the manifest at your image
 
@@ -235,6 +238,7 @@ all the gain.
 
 ## Packaging
 
-There is no published image yet. That is deferred to a follow-up change. Once
-the sidecar crate is published, you just install it onto a minimal base image.
-Until then, build and push your own as shown above.
+There is no published sidecar image yet. The image contains the vLLM,
+SGLang, and TensorRT-LLM executables and uses a minimal CPU-only base. Until
+official packaging is available, build and push the sidecar image as described
+in [Build the image](../README.md#build-the-image).

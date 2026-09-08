@@ -63,18 +63,9 @@ impl TrtllmClient {
         // request body; `KvSessionRef.dp_rank` stays authoritative for a
         // session's KV affinity.
         if let Some(rank) = target_dp_rank {
-            match rank.to_string().parse() {
-                Ok(value) => {
-                    request
-                        .metadata_mut()
-                        .insert("openengine-target-dp-rank", value);
-                }
-                Err(_) => {
-                    return Err(invalid_argument(format!(
-                        "data-parallel rank {rank} is not valid gRPC metadata"
-                    )));
-                }
-            }
+            request
+                .metadata_mut()
+                .insert("openengine-target-dp-rank", rank.into());
         }
         self.inference()
             .generate(request)

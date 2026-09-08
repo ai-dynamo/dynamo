@@ -221,7 +221,7 @@ impl pb::inference_server::Inference for FakeVllm {
                 yield encode_response(ec);
             } else {
                 let kv = is_prefill.then(|| {
-                    json_to_struct(handoff.clone(), "ec_transfer_params").expect("encode handoff")
+                    json_to_struct(handoff.clone(), "kv_transfer_params").expect("kv handoff")
                 });
                 yield sequence_response(true, wants_logprobs, kv);
             }
