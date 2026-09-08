@@ -642,12 +642,12 @@ impl Metrics {
     /// All histograms use log-spaced buckets rounded to 2 significant figures. Bucket configuration
     /// can be customized via environment variables (MIN: minimum value, MAX: maximum value, COUNT: number of buckets):
     ///
-    /// - `DYN_METRICS_REQUEST_DURATION_{MIN,MAX,COUNT}` - Request duration histogram (defaults: 1.0, 256.0, 10)
-    /// - `DYN_METRICS_INPUT_SEQUENCE_{MIN,MAX,COUNT}` - Input sequence length histogram (defaults: 50.0, 128000.0, 12)
-    /// - `DYN_METRICS_OUTPUT_SEQUENCE_{MIN,MAX,COUNT}` - Output sequence length histogram (defaults: 50.0, 32000.0, 10)
-    /// - `DYN_METRICS_TTFT_{MIN,MAX,COUNT}` - Time to first token histogram (defaults: 0.001, 480.0, 18)
-    /// - `DYN_METRICS_ITL_{MIN,MAX,COUNT}` - Inter-token latency histogram (defaults: 0.001, 2.0, 13)
-    /// - `DYN_METRICS_EMBEDDING_LATENCY_{MIN,MAX,COUNT}` - End-to-end `/v1/embeddings` latency histogram (defaults: 0.001, 10.0, 14)
+    /// - `DYN_HISTOGRAM_REQUEST_DURATION_{MIN,MAX,COUNT}` - Request duration histogram (defaults: 1.0, 512.0, 10)
+    /// - `DYN_HISTOGRAM_INPUT_SEQUENCE_{MIN,MAX,COUNT}` - Input sequence length histogram (defaults: 50.0, 128000.0, 12)
+    /// - `DYN_HISTOGRAM_OUTPUT_SEQUENCE_{MIN,MAX,COUNT}` - Output sequence length histogram (defaults: 50.0, 32000.0, 10)
+    /// - `DYN_HISTOGRAM_TTFT_{MIN,MAX,COUNT}` - Time to first token histogram (defaults: 0.001, 480.0, 18)
+    /// - `DYN_HISTOGRAM_ITL_{MIN,MAX,COUNT}` - Inter-token latency histogram (defaults: 0.001, 2.0, 13)
+    /// - `DYN_HISTOGRAM_EMBEDDING_LATENCY_{MIN,MAX,COUNT}` - End-to-end `/v1/embeddings` latency histogram (defaults: 0.001, 10.0, 14)
     ///
     /// ## Model Configuration Metrics
     ///
@@ -741,7 +741,7 @@ impl Metrics {
         )
         .unwrap();
 
-        // Request duration buckets: configurable via DYN_METRICS_REQUEST_DURATION_{MIN,MAX,COUNT}
+        // Request duration buckets: configurable via DYN_HISTOGRAM_REQUEST_DURATION_{MIN,MAX,COUNT}
         let (req_dur_min, req_dur_max, req_dur_count) =
             parse_bucket_config("REQUEST_DURATION", 1.0, 512.0, 10);
         let request_duration_buckets =
@@ -757,7 +757,7 @@ impl Metrics {
         )
         .unwrap();
 
-        // Input sequence length buckets: configurable via DYN_METRICS_INPUT_SEQUENCE_{MIN,MAX,COUNT}
+        // Input sequence length buckets: configurable via DYN_HISTOGRAM_INPUT_SEQUENCE_{MIN,MAX,COUNT}
         let (isl_min, isl_max, isl_count) =
             parse_bucket_config("INPUT_SEQUENCE", 50.0, 128000.0, 12);
         let input_sequence_buckets = generate_log_buckets(isl_min, isl_max, isl_count);
@@ -772,7 +772,7 @@ impl Metrics {
         )
         .unwrap();
 
-        // Output sequence length buckets: configurable via DYN_METRICS_OUTPUT_SEQUENCE_{MIN,MAX,COUNT}
+        // Output sequence length buckets: configurable via DYN_HISTOGRAM_OUTPUT_SEQUENCE_{MIN,MAX,COUNT}
         let (osl_min, osl_max, osl_count) =
             parse_bucket_config("OUTPUT_SEQUENCE", 50.0, 32000.0, 10);
         let output_sequence_buckets = generate_log_buckets(osl_min, osl_max, osl_count);
@@ -796,7 +796,7 @@ impl Metrics {
         )
         .unwrap();
 
-        // Time to first token buckets: configurable via DYN_METRICS_TTFT_{MIN,MAX,COUNT}
+        // Time to first token buckets: configurable via DYN_HISTOGRAM_TTFT_{MIN,MAX,COUNT}
         let (ttft_min, ttft_max, ttft_count) = parse_bucket_config("TTFT", 0.001, 480.0, 18);
         let time_to_first_token_buckets = generate_log_buckets(ttft_min, ttft_max, ttft_count);
 
@@ -810,7 +810,7 @@ impl Metrics {
         )
         .unwrap();
 
-        // Inter-token latency buckets: configurable via DYN_METRICS_ITL_{MIN,MAX,COUNT}
+        // Inter-token latency buckets: configurable via DYN_HISTOGRAM_ITL_{MIN,MAX,COUNT}
         let (itl_min, itl_max, itl_count) = parse_bucket_config("ITL", 0.001, 2.0, 13);
         let inter_token_latency_buckets = generate_log_buckets(itl_min, itl_max, itl_count);
 
