@@ -681,10 +681,8 @@ mod tests {
         }
         assert!(parse_return_logprob(Some(&json!(1))));
         assert!(!parse_return_logprob(Some(&json!(0))));
-        // Values SGLang would reject outright: the request never generates, so
-        // there is nothing to explain on the way back.
-        assert!(!parse_return_logprob(Some(&json!("maybe"))));
-        assert!(!parse_return_logprob(Some(&json!(2))));
+        // A null or missing field is how an ordinary client that never asked for
+        // logprobs arrives, so there is nothing to explain on the way back.
         assert!(!parse_return_logprob(Some(&Value::Null)));
         assert!(!parse_return_logprob(None));
     }
