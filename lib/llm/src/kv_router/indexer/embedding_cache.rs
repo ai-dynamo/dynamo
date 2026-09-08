@@ -27,7 +27,6 @@ fn multimodal_cache_key_from_url(url: &str) -> String {
     blake3::hash(url.as_bytes()).to_hex().to_string()
 }
 
-/// Cancels the token when the last indexer reference is dropped.
 #[derive(Debug, Default)]
 struct CancelOnDrop(CancellationToken);
 
