@@ -152,7 +152,7 @@ The RL listener reads the set of Dynamo namespaces it searches from its own proc
 | `DYN_NAMESPACE_WORKER_SUFFIX` | Match the single namespace `{DYN_NAMESPACE}-{DYN_NAMESPACE_WORKER_SUFFIX}` |
 | `DYN_NAMESPACE` | Match this exact namespace. It falls back to `dynamo` only when unset, so setting it to an empty value searches the same empty namespace the workers register under |
 
-An unset variable and an empty value both count as absent.
+An empty `DYN_NAMESPACE_PREFIX` or `DYN_NAMESPACE_WORKER_SUFFIX` counts as absent, exactly as an unset one does. An empty `DYN_NAMESPACE` does not: it is the namespace to search.
 
 This ordering matters because a worker that is given `DYN_NAMESPACE_WORKER_SUFFIX` registers under `{DYN_NAMESPACE}-{suffix}`, not under `{DYN_NAMESPACE}`. A listener configured for the bare namespace would find none of those workers.
 
