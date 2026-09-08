@@ -372,6 +372,26 @@ def _short_rpc_directory() -> tempfile.TemporaryDirectory:
     return rpc_directory
 
 
+def _unpack_core_engine_launch(launch: Any) -> tuple[Any, Any, Any, Any]:
+    """Normalize what ``launch_core_engines`` yields across vLLM releases.
+
+    vLLM 0.28 yields a ``CoreEngineLaunch`` dataclass, which defines no
+    ``__iter__``; earlier releases, including the 0.27.1 that the XPU images
+    are built on, yield a plain 4-tuple. Duck-typing on the yielded object
+    rather than importing ``CoreEngineLaunch`` keeps both working: that name
+    does not exist before 0.28, so importing it would turn this into an
+    ``ImportError`` on the XPU images.
+    """
+    if isinstance(launch, tuple):
+        return launch
+    return (
+        launch.engine_manager,
+        launch.coordinator,
+        launch.addresses,
+        launch.tensor_queue,
+    )
+
+
 def create_shared_embedding_engine_client(
     *,
     vllm_config: VllmConfig,
@@ -438,8 +458,13 @@ def create_shared_embedding_engine_client(
                 executor_class,
                 not disable_log_stats,
                 addresses,
-                process_count,
-            ) as (engine_manager, coordinator, addresses, tensor_queue):
+            ) as core_engine_launch:
+                (
+                    engine_manager,
+                    coordinator,
+                    addresses,
+                    tensor_queue,
+                ) = _unpack_core_engine_launch(core_engine_launch)
                 if coordinator is not None or tensor_queue is not None:
                     raise RuntimeError(
                         "--embedding-worker-processes currently supports one "

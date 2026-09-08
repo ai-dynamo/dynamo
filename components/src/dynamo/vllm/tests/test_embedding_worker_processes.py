@@ -36,6 +36,25 @@ def _vllm_config():
     )
 
 
+def _core_engine_launch_object(engine_manager, addresses):
+    """The shape vLLM 0.28 yields: a ``CoreEngineLaunch`` dataclass.
+
+    Reproduced locally rather than imported, because the name does not exist
+    in the vLLM releases that yield the tuple below.
+    """
+    return SimpleNamespace(
+        engine_manager=engine_manager,
+        coordinator=None,
+        addresses=addresses,
+        tensor_queue=None,
+    )
+
+
+def _core_engine_launch_tuple(engine_manager, addresses):
+    """The shape vLLM yields before 0.28, including the 0.27.1 XPU images."""
+    return (engine_manager, None, addresses, None)
+
+
 def test_child_environment_offsets_system_port_by_index(monkeypatch):
     monkeypatch.setenv("DYN_SYSTEM_PORT", "19401")
     env = processes._child_environment(
@@ -193,7 +212,12 @@ def test_process_group_reports_unexpected_child_exit():
     group._stopping.set()
 
 
-def test_parent_launches_n_minus_one_children_and_one_engine(monkeypatch):
+@pytest.mark.parametrize(
+    "make_launch",
+    [_core_engine_launch_object, _core_engine_launch_tuple],
+    ids=["core-engine-launch-object", "legacy-tuple"],
+)
+def test_parent_launches_n_minus_one_children_and_one_engine(monkeypatch, make_launch):
     process_count = 4
     addresses = SimpleNamespace(
         inputs=[f"in{i}" for i in range(process_count)],
@@ -210,9 +234,12 @@ def test_parent_launches_n_minus_one_children_and_one_engine(monkeypatch):
         children.append(child)
         return child
 
+    # The parameters mirror vLLM's own launch_core_engines signature exactly.
+    # A permissive *args stub here is what let a call with one argument too
+    # many pass this test while crashing at startup, so keep it strict.
     @contextmanager
-    def launch_context(*_args, **_kwargs):
-        yield engine_manager, None, addresses, None
+    def launch_context(vllm_config, executor_class, log_stats, addresses):
+        yield make_launch(engine_manager, addresses)
 
     parent_client = Mock()
     parent_config = _vllm_config()
