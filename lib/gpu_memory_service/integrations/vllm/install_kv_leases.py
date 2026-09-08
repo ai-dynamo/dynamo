@@ -5,11 +5,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import logging
 import os
-from typing import Callable
 
 from gms_kv_ring.common.content_directory import ContentDirectory
+
 from gpu_memory_service.integrations.common.kv_lease_client import (
     GMSKVLeaseClient,
     KVLease,
@@ -25,6 +26,7 @@ _patched = False
 _factory: Callable[[int], KVLeaseClient] | None = None
 _engine_core_hook_patched = False
 _original_run_engine_core = None
+_gms_block_pool_class = None
 
 
 class GMSKVLeaseUnavailable(ValueError):
@@ -231,15 +233,9 @@ def install_engine_core_hook() -> bool:
     return True
 
 
-
-# Originals captured by `install()` before the BlockPool methods are replaced.
-# They are module globals rather than closure cells so the patched methods
-# below can live at module scope, where they are importable and reviewable.
-orig_init = None
-orig_get_new_blocks = None
-orig_free_blocks = None
-orig_get_num_free_blocks = None
-orig_get_cached_block = None
+# The one remaining vLLM method wrapper translates an atomic lease race into
+# the scheduler's existing backpressure result. BlockPool behavior itself is
+# provided by a subclass installed at its single construction site.
 orig_allocate_slots = None
 
 
@@ -270,8 +266,7 @@ def _make_directory(hash_block_size: int) -> ContentDirectory:
         standby=_failover_directory_standby(),
     )
 
-def patched_init(self, *args, **kwargs):
-    orig_init(self, *args, **kwargs)
+def _initialize_gms_block_pool(self) -> None:
     client = _make_client(int(self.num_gpu_blocks))
     self._gms_kv_lease_client = client
     self._gms_kv_leases_by_block: dict[int, KVLease] = {}
@@ -533,8 +528,8 @@ def _hydrate_hbm_directory(self, exclude: set[bytes]) -> int:
         if token is not None:
             directory.release_claim(token)
 
-def patched_get_cached_block(self, block_hash, kv_cache_group_ids):
-    local = orig_get_cached_block(self, block_hash, kv_cache_group_ids)
+def _get_cached_block(self, native_get_cached_block, block_hash, kv_cache_group_ids):
+    local = native_get_cached_block(block_hash, kv_cache_group_ids)
     if local is not None:
         return local
     directory = getattr(self, "_gms_kv_directory", None)
@@ -685,21 +680,20 @@ def _reserve_dormant_headroom(self, recent_blocks: int) -> int:
         return 0
     return _evict_dormant_directory_blocks(self, shortage)
 
-def patched_get_num_free_blocks(self) -> int:
+def _get_num_free_blocks(self, native_get_num_free_blocks) -> int:
     client = getattr(self, "_gms_kv_lease_client", None)
     if client is None:
-        return orig_get_num_free_blocks(self)
-    local_free = orig_get_num_free_blocks(self)
+        return native_get_num_free_blocks()
+    local_free = native_get_num_free_blocks()
     directory = getattr(self, "_gms_kv_directory", None)
     if directory is not None and directory.authoritative:
         return local_free
     return min(local_free, int(client.free_count()))
 
-def patched_get_new_blocks(self, num_blocks: int):
+def _get_new_blocks(self, native_get_num_free_blocks, num_blocks: int):
     client = getattr(self, "_gms_kv_lease_client", None)
-    if client is None:
-        return orig_get_new_blocks(self, num_blocks)
-    local_free = orig_get_num_free_blocks(self)
+    assert client is not None
+    local_free = native_get_num_free_blocks()
     if num_blocks > local_free:
         log_lease_pressure(
             logger,
@@ -810,10 +804,9 @@ def patched_get_new_blocks(self, num_blocks: int):
     return ret
 
 
-def patched_free_blocks(self, ordered_blocks):
+def _free_blocks(self, ordered_blocks):
     client = getattr(self, "_gms_kv_lease_client", None)
-    if client is None:
-        return orig_free_blocks(self, ordered_blocks)
+    assert client is not None
 
     blocks_list = list(ordered_blocks)
     for block in blocks_list:
@@ -940,12 +933,45 @@ def patched_allocate_slots(self, *args, **kwargs):
 
 
 
-def install(factory: Callable[[int], KVLeaseClient] | None = None) -> bool:
-    """Patch vLLM's BlockPool so block allocation is lease-gated."""
+def _build_gms_block_pool_class(block_pool_class):
+    """Build the lease-aware BlockPool without modifying vLLM's base class."""
 
-    global _patched, _factory
-    global orig_init, orig_get_new_blocks, orig_free_blocks
-    global orig_get_num_free_blocks, orig_get_cached_block, orig_allocate_slots
+    class GMSBlockPool(block_pool_class):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            _initialize_gms_block_pool(self)
+
+        def get_cached_block(self, block_hash, kv_cache_group_ids):
+            return _get_cached_block(
+                self,
+                super().get_cached_block,
+                block_hash,
+                kv_cache_group_ids,
+            )
+
+        def get_num_free_blocks(self) -> int:
+            return _get_num_free_blocks(self, super().get_num_free_blocks)
+
+        def get_new_blocks(self, num_blocks: int):
+            return _get_new_blocks(
+                self,
+                super().get_num_free_blocks,
+                num_blocks,
+            )
+
+        def free_blocks(self, ordered_blocks):
+            return _free_blocks(self, ordered_blocks)
+
+    GMSBlockPool.__name__ = "GMSBlockPool"
+    GMSBlockPool.__qualname__ = "GMSBlockPool"
+    GMSBlockPool.__module__ = __name__
+    return GMSBlockPool
+
+
+def install(factory: Callable[[int], KVLeaseClient] | None = None) -> bool:
+    """Install a lease-aware BlockPool at vLLM's construction site."""
+
+    global _patched, _factory, _gms_block_pool_class, orig_allocate_slots
 
     if factory is not None:
         _factory = factory
@@ -955,31 +981,37 @@ def install(factory: Callable[[int], KVLeaseClient] | None = None) -> bool:
         return False
 
     try:
+        from vllm.v1.core import kv_cache_coordinator
         from vllm.v1.core.block_pool import BlockPool
-    except Exception:  # noqa: BLE001
-        logger.debug("[GMS-KVLease] vLLM BlockPool not importable", exc_info=True)
-        return False
-
-    orig_init = BlockPool.__init__
-    orig_get_new_blocks = BlockPool.get_new_blocks
-    orig_free_blocks = BlockPool.free_blocks
-    orig_get_num_free_blocks = BlockPool.get_num_free_blocks
-    orig_get_cached_block = BlockPool.get_cached_block
-
-    try:
         from vllm.v1.core.kv_cache_manager import KVCacheManager
     except Exception:  # noqa: BLE001
-        KVCacheManager = None  # type: ignore[assignment]
+        logger.debug(
+            "[GMS-KVLease] vLLM scheduler allocation API not importable",
+            exc_info=True,
+        )
+        return False
 
-    if KVCacheManager is not None:
-        orig_allocate_slots = KVCacheManager.allocate_slots
-        KVCacheManager.allocate_slots = patched_allocate_slots  # type: ignore[method-assign]
-
-    BlockPool.__init__ = patched_init  # type: ignore[method-assign]
-    BlockPool.get_new_blocks = patched_get_new_blocks  # type: ignore[method-assign]
-    BlockPool.free_blocks = patched_free_blocks  # type: ignore[method-assign]
-    BlockPool.get_num_free_blocks = patched_get_num_free_blocks  # type: ignore[method-assign]
-    BlockPool.get_cached_block = patched_get_cached_block  # type: ignore[method-assign]
+    orig_allocate_slots = KVCacheManager.allocate_slots
+    KVCacheManager.allocate_slots = patched_allocate_slots  # type: ignore[method-assign]
+    _gms_block_pool_class = _build_gms_block_pool_class(BlockPool)
+    kv_cache_coordinator.BlockPool = _gms_block_pool_class
     _patched = True
-    logger.info("[GMS-KVLease] patched vLLM BlockPool")
+    logger.info("[GMS-KVLease] installed vLLM GMSBlockPool")
     return True
+
+
+def lease_hooks_installed() -> bool:
+    """Verify the construction binding and atomic-contention guard."""
+    try:
+        from vllm.v1.core import kv_cache_coordinator
+        from vllm.v1.core.block_pool import BlockPool
+        from vllm.v1.core.kv_cache_manager import KVCacheManager
+    except Exception:  # noqa: BLE001
+        return False
+    installed = kv_cache_coordinator.BlockPool
+    return bool(
+        installed is _gms_block_pool_class
+        and installed is not BlockPool
+        and issubclass(installed, BlockPool)
+        and KVCacheManager.allocate_slots is patched_allocate_slots
+    )
