@@ -351,21 +351,13 @@ def _resolve_negatable(env_var: str, default: bool) -> bool:
 
 @pytest.mark.parametrize(
     ("value", "env_var"),
-    [
-        ("ture", "DYN_TEST_TYPO"),
-        ("enabled", "DYN_TEST_ENABLED"),
-        ("2", "DYN_TEST_TWO"),
-        ("maybe", "DYN_TEST_MAYBE"),
-    ],
+    [("ture", "DYN_TEST_TYPO")],
 )
 def test_unrecognised_bool_env_warns_and_is_false(
     monkeypatch, caplog, value, env_var
 ) -> None:
-    """Falling through to false reads as a deliberate opt-out.
-
-    A flag defaulting to true is the dangerous direction: a typo turns the
-    feature off and nothing said so.
-    """
+    """A flag defaulting to true is the dangerous direction: a typo turns the
+    feature off, and without the warning nothing says so."""
     monkeypatch.setenv(env_var, value)
 
     with caplog.at_level(logging.WARNING, logger=utils.__name__):

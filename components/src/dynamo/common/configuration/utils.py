@@ -54,11 +54,9 @@ _unrecognized_bool_warned: set[str] = set()
 def _warn_unrecognized_bool(env_var: str, value: str) -> None:
     """Warn once per variable that a boolean value was not understood.
 
-    Falling through to false reads as the operator having turned the feature
-    off deliberately, so a typo disables it with no signal. Warn rather than
-    raise: a worker should not fail to start over a malformed flag, and
-    ``DYN_FPM_TRACE`` already established warn-and-disable as the house
-    behaviour for this case.
+    Warn rather than raise: a malformed flag should not stop a worker starting,
+    and falling through to false is indistinguishable from a deliberate opt-out
+    without the warning.
     """
     if env_var in _unrecognized_bool_warned:
         return
