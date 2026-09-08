@@ -42,8 +42,12 @@
 #       - mooncake renamed the module mooncake.ep -> mooncake.pg; SGLang
 #         v0.5.16 imports the old name and v0.5.18 the new one, so the engine
 #         and the wheel have to agree on which one exists.
-#     The Dynamo SGLang worker checks both while parsing arguments and refuses
-#     to start with a diagnostic rather than failing after the model loads.
+#     While parsing arguments the Dynamo SGLang worker tries both module names
+#     and refuses to start with a diagnostic if neither resolves, so the first
+#     case fails fast instead of after the model loads. It does NOT catch the
+#     second: either name resolving is accepted, so a wheel that ships only the
+#     name this engine does not import still passes the check and then fails
+#     inside the engine. Match the wheel to the engine version by hand.
 #   * DYN_SYSTEM_ENABLED=true so the leader exposes the :9090 system server that
 #     serves /engine/control/*.
 #

@@ -10,6 +10,8 @@ so these run in an image where the engine is not installed or not importable
 makes over their results is what is exercised here.
 """
 
+import sys
+
 import pytest
 
 from dynamo.sglang import elastic_ep_preflight
@@ -134,3 +136,58 @@ def test_accepts_mooncake_when_the_image_can_serve_it(monkeypatch):
     _simulate_healthy_mooncake(monkeypatch)
 
     check_elastic_ep_backend("mooncake", True)
+
+
+def test_unreadable_torch_backend_registry_does_not_block_startup(monkeypatch):
+    """A registry that cannot be read is not evidence that mooncake is absent.
+
+    ``Backend.backend_capability`` is a torch internal. Reading it and failing
+    must not be worth more than the extension importing cleanly, or a torch-side
+    rename refuses every worker on this transport.
+    """
+    _simulate_broken_mooncake(monkeypatch, import_failure=None)
+    monkeypatch.setattr(
+        elastic_ep_preflight, "_registered_torch_backends", lambda: None
+    )
+
+    check_elastic_ep_backend("mooncake", True)
+
+
+def test_import_probe_reports_every_module_name_it_tried(monkeypatch):
+    """The probe itself, not a stand-in for it.
+
+    The other cases replace the probes to pin the decision logic, which leaves
+    the probes themselves untested. This one runs the real
+    ``_import_process_group_extension`` against an import system that has no
+    mooncake in it, so the import, the exception capture, and the message
+    assembly are all the shipped code. Blocking at ``sys.meta_path`` rather
+    than by uninstalling makes it behave the same in an image that does have a
+    working wheel.
+    """
+
+    class _RefuseMooncake:
+        def find_spec(self, name, path=None, target=None):
+            if name == "mooncake" or name.startswith("mooncake."):
+                raise ImportError(f"blocked for this test: {name}")
+            return None
+
+    monkeypatch.setattr(sys, "meta_path", [_RefuseMooncake(), *sys.meta_path])
+    for cached in [
+        name
+        for name in sys.modules
+        if name == "mooncake" or name.startswith("mooncake.")
+    ]:
+        monkeypatch.delitem(sys.modules, cached)
+
+    failure = elastic_ep_preflight._import_process_group_extension()
+
+    assert failure is not None
+    # Both names have to appear: which one an image ships is the first thing
+    # an operator needs to compare against the engine version.
+    assert "mooncake.pg" in failure
+    assert "mooncake.ep" in failure
+
+
+def test_absent_mooncake_renders_as_an_explicit_absence():
+    """No mooncake installed must read as words, not an empty field."""
+    assert elastic_ep_preflight._format_versions({}) == "none installed"

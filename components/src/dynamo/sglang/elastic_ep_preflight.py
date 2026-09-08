@@ -107,14 +107,21 @@ def _available_extension_modules() -> List[str]:
     return sorted(modules)
 
 
-def _registered_torch_backends() -> Dict[str, Tuple[str, ...]]:
-    """torch's backend -> supported-device map, or empty when torch is absent."""
+def _registered_torch_backends() -> Optional[Dict[str, Tuple[str, ...]]]:
+    """torch's backend -> supported-device map, or ``None`` when unreadable.
+
+    ``Backend.backend_capability`` is a torch internal. Reporting "could not
+    read the registry" as "mooncake is not registered" would let a rename in
+    somebody else's private attribute refuse every worker that asked for this
+    transport, which is more fatal than the failure being guarded against.
+    ``None`` keeps the two apart so the caller can skip only this assertion.
+    """
     try:
         import torch.distributed as torch_distributed
 
         return dict(torch_distributed.Backend.backend_capability)
-    except Exception:  # noqa: BLE001 - reported as "nothing registered"
-        return {}
+    except Exception:  # noqa: BLE001 - unreadable, not "nothing registered"
+        return None
 
 
 def _torch_version() -> str:
@@ -189,9 +196,17 @@ def check_elastic_ep_backend(
         return
 
     import_failure = _import_process_group_extension()
-    registered_backends = {} if import_failure else _registered_torch_backends()
-    if import_failure is None and _MOONCAKE_DEVICE_BACKEND in registered_backends:
-        return
+    registered_backends: Dict[str, Tuple[str, ...]] = {}
+    if import_failure is None:
+        readable_backends = _registered_torch_backends()
+        # An unreadable registry fails open: the import above is what catches
+        # the reported failure, and refusing startup because torch moved a
+        # private attribute would block images that are perfectly fine.
+        if readable_backends is None:
+            return
+        if _MOONCAKE_DEVICE_BACKEND in readable_backends:
+            return
+        registered_backends = readable_backends
 
     raise ValueError(
         _build_diagnostic(import_failure, registered_backends, enable_dp_attention)

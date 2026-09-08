@@ -42,8 +42,17 @@ _REPO_ROOT = Path(__file__).resolve().parent
 for _name in ("vllm", "sglang"):
     try:
         importlib.import_module(_name)
-    except Exception:
-        pass
+    except Exception as _exc:  # noqa: BLE001 - best-effort seeding, see above
+        # An engine that is simply absent is the normal case and stays quiet.
+        # Anything else means the install is present but broken, and every
+        # `import <engine>` downstream will fail as an ordinary-looking
+        # collection error; one line here names the single root cause.
+        if not (isinstance(_exc, ModuleNotFoundError) and _exc.name == _name):
+            print(
+                f"conftest: {_name} is installed but could not be imported, so "
+                f"tests that import it will fail: {type(_exc).__name__}: {_exc}",
+                file=sys.stderr,
+            )
 
 # Suppress ImportPathMismatchError when pytest later loads dynamo.vllm
 # under the bare name "vllm".
