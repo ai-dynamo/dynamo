@@ -63,6 +63,18 @@ impl HasTokenIds for LLMEngineOutput {
     }
 }
 
+/// Error types that make a request non-migratable wherever they appear in the
+/// chain.
+///
+/// Module-level rather than local to [`is_migratable`] so that it can be
+/// compared against `MIGRATION_SENSITIVE_ERROR_TYPES` in
+/// `lib/runtime/src/pipeline/network/egress/addressed_router.rs`, which must
+/// hold the same set: that module withholds exactly these types from the cause
+/// it attaches to a pre-stream failure, so that attaching a cause cannot change
+/// migration. `migration_sensitive_types_match_the_exclusion_set` in this file
+/// fails if the two ever disagree.
+const NON_MIGRATABLE: &[ErrorType] = &[ErrorType::Cancelled, ErrorType::ResourceExhausted];
+
 /// Check if an error chain indicates the request should be migrated.
 fn is_migratable(err: &(dyn StdError + 'static)) -> bool {
     const MIGRATABLE: &[ErrorType] = &[
@@ -80,7 +92,6 @@ fn is_migratable(err: &(dyn StdError + 'static)) -> bool {
         // ResourceExhausted below and stays non-migratable.
         ErrorType::WorkerOverloaded,
     ];
-    const NON_MIGRATABLE: &[ErrorType] = &[ErrorType::Cancelled, ErrorType::ResourceExhausted];
     error::match_error_chain(err, MIGRATABLE, NON_MIGRATABLE)
 }
 
@@ -771,17 +782,20 @@ mod tests {
     // addressed_router.rs dispatch-permit exhaustion), so this is reachable,
     // not hypothetical.
     //
-    // pre_stream_failure_error withholds exactly these types instead of
-    // attaching them (MIGRATION_SENSITIVE_ERROR_TYPES in addressed_router.rs
-    // mirrors NON_MIGRATABLE above), so the failure must still migrate. This
-    // test is the pin on that pairing: add a type to NON_MIGRATABLE without
-    // mirroring it there and this fails.
+    // pre_stream_failure_error withholds these types instead of attaching them,
+    // so the failure must still migrate. This test asserts that behavior for
+    // each type currently in the set; it does not by itself detect a type added
+    // to NON_MIGRATABLE and not mirrored into MIGRATION_SENSITIVE_ERROR_TYPES.
+    // That drift is caught by
+    // migration_sensitive_types_match_the_exclusion_set below.
     #[test]
     fn pre_stream_failure_with_migration_sensitive_cause_is_still_migratable() {
         use dynamo_runtime::pipeline::network::StreamPrologueError;
-        use dynamo_runtime::pipeline::network::egress::addressed_router::pre_stream_failure_error;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::{
+            MIGRATION_SENSITIVE_ERROR_TYPES, pre_stream_failure_error,
+        };
 
-        for error_type in [ErrorType::Cancelled, ErrorType::ResourceExhausted] {
+        for &error_type in MIGRATION_SENSITIVE_ERROR_TYPES {
             let worker_error = DynamoError::builder()
                 .error_type(error_type)
                 .message("no capacity on the downstream worker")
@@ -821,6 +835,41 @@ mod tests {
         assert!(
             is_migratable(&err),
             "a nested ResourceExhausted must not make a pre-stream failure stop migrating"
+        );
+    }
+
+    // The drift pin. dynamo-runtime cannot import NON_MIGRATABLE -- dynamo-llm
+    // depends on it and not the reverse -- so addressed_router.rs keeps its own
+    // copy of the set and withholds exactly those types from the cause it
+    // attaches. Duplicated state is only safe if something fails when the copies
+    // disagree, and that is this assertion: add a type to either list without
+    // the other and it fails here, naming the missing entries.
+    //
+    // Order is not part of the contract, only membership, so this compares as
+    // sets. ErrorType is Eq but not Hash, so the comparison is by containment
+    // rather than through a HashSet -- deriving Hash on a public error type to
+    // shorten a test would be the wrong trade.
+    #[test]
+    fn migration_sensitive_types_match_the_exclusion_set() {
+        use dynamo_runtime::pipeline::network::egress::addressed_router::MIGRATION_SENSITIVE_ERROR_TYPES;
+
+        let missing_from_router: Vec<_> = NON_MIGRATABLE
+            .iter()
+            .filter(|t| !MIGRATION_SENSITIVE_ERROR_TYPES.contains(t))
+            .collect();
+        let missing_from_here: Vec<_> = MIGRATION_SENSITIVE_ERROR_TYPES
+            .iter()
+            .filter(|t| !NON_MIGRATABLE.contains(t))
+            .collect();
+
+        assert!(
+            missing_from_router.is_empty() && missing_from_here.is_empty(),
+            "NON_MIGRATABLE and MIGRATION_SENSITIVE_ERROR_TYPES must hold the same \
+             set: a type excluded from migration but still attachable as a \
+             pre-stream cause would stop that failure migrating. Missing from \
+             MIGRATION_SENSITIVE_ERROR_TYPES in addressed_router.rs: \
+             {missing_from_router:?}; missing from NON_MIGRATABLE here: \
+             {missing_from_here:?}"
         );
     }
 

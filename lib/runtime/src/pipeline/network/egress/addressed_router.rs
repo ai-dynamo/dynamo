@@ -56,11 +56,15 @@ use tracing::Instrument;
 /// [`crate::error::match_error_chain`], which walks the whole chain and returns
 /// `false` as soon as it meets a member whose type is in its exclusion set.
 /// Attaching a cause typed one of these would therefore turn a pre-stream
-/// failure that migrates today into one that does not. This list mirrors
-/// `NON_MIGRATABLE` in `lib/llm/src/migration.rs`; the pairing is pinned by
-/// `pre_stream_failure_with_migration_sensitive_cause_is_still_migratable`
-/// in that file.
-const MIGRATION_SENSITIVE_ERROR_TYPES: &[ErrorType] =
+/// failure that migrates today into one that does not.
+///
+/// This must hold the same set as `NON_MIGRATABLE` in
+/// `lib/llm/src/migration.rs`. It cannot simply *be* that constant: `dynamo-llm`
+/// depends on `dynamo-runtime` and not the reverse. It is `pub` so that the
+/// dependent crate can compare the two, and
+/// `migration_sensitive_types_match_the_exclusion_set` there fails if a type is
+/// ever added to one list and not the other.
+pub const MIGRATION_SENSITIVE_ERROR_TYPES: &[ErrorType] =
     &[ErrorType::Cancelled, ErrorType::ResourceExhausted];
 
 /// Whether any link of `err`'s chain carries a migration-sensitive type.
