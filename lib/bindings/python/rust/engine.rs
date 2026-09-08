@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
 
-use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+use dynamo_runtime::error::{BackendError, DynamoError, ErrorClass, ErrorType};
 use dynamo_runtime::logging::get_distributed_tracing_context;
 pub use dynamo_runtime::{
     pipeline::{
@@ -383,27 +383,24 @@ pub(crate) fn map_python_exception(error: PyErr) -> DynamoError {
         error.display(py);
 
         if let Some((backend_err, message)) = py_exception_to_backend_error(py, &error) {
-            return DynamoError::builder()
+            let mut builder = DynamoError::builder()
                 .error_type(ErrorType::Backend(backend_err))
-                .message(message)
-                .build();
+                .message(message.clone());
+            if backend_err == BackendError::InvalidArgument {
+                builder = builder.public_message(message);
+            }
+            return builder.build();
         }
 
         if let Some((code, message)) = extract_http_like_error(py, &error) {
-            let backend_err = if (400..500).contains(&code) {
-                BackendError::InvalidArgument
-            } else {
-                BackendError::Unknown
-            };
-            let json_msg = serde_json::json!({
-                "message": message,
-                "code": code,
-            })
-            .to_string();
-            return DynamoError::builder()
-                .error_type(ErrorType::Backend(backend_err))
-                .message(json_msg)
-                .build();
+            let class = error_class_for_http_status(code);
+            let mut builder = DynamoError::builder()
+                .class(class)
+                .diagnostic(format!("Python HTTP {code}: {message}"));
+            if (400..499).contains(&code) {
+                builder = builder.public_message(message);
+            }
+            return builder.build();
         }
 
         if error.is_instance_of::<pyo3::exceptions::PyGeneratorExit>(py) {
@@ -432,11 +429,49 @@ pub(crate) fn map_python_exception(error: PyErr) -> DynamoError {
             BackendError::Unknown
         };
 
-        DynamoError::builder()
+        let message = error.to_string();
+        let mut builder = DynamoError::builder()
             .error_type(ErrorType::Backend(backend_err))
-            .message(error.to_string())
-            .build()
+            .message(message.clone());
+        if backend_err == BackendError::InvalidArgument {
+            builder = builder.public_message(message);
+        }
+        builder.build()
     })
+}
+
+fn error_class_for_http_status(code: u16) -> ErrorClass {
+    match code {
+        400 => ErrorClass::InvalidRequest,
+        401 => ErrorClass::Unauthenticated,
+        403 => ErrorClass::PermissionDenied,
+        404 => ErrorClass::NotFound,
+        409 => ErrorClass::Conflict,
+        413 => ErrorClass::PayloadTooLarge,
+        415 => ErrorClass::UnsupportedMedia,
+        429 => ErrorClass::RateLimited,
+        499 => ErrorClass::Cancelled,
+        400..=498 => ErrorClass::InvalidRequest,
+        _ => ErrorClass::Internal,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_statuses_map_to_semantic_classes() {
+        assert_eq!(error_class_for_http_status(400), ErrorClass::InvalidRequest);
+        assert_eq!(
+            error_class_for_http_status(415),
+            ErrorClass::UnsupportedMedia
+        );
+        assert_eq!(error_class_for_http_status(429), ErrorClass::RateLimited);
+        assert_eq!(error_class_for_http_status(499), ErrorClass::Cancelled);
+        assert_eq!(error_class_for_http_status(418), ErrorClass::InvalidRequest);
+        assert_eq!(error_class_for_http_status(503), ErrorClass::Internal);
+    }
 }
 
 /// Channel depth between the response-forwarding task and the consumer of
