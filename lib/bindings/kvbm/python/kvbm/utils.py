@@ -47,6 +47,33 @@ def get_port_from_env(key: str, default_port: int) -> int:
     return port
 
 
+CONSOLIDATOR_PORT_OFFSET = 1000
+
+
+def derive_consolidator_port() -> tuple[int, int]:
+    """The KVBM leader pub port and the consolidator output port derived from it.
+
+    Both integrations derive the same pair with the same offset, so it lives
+    here. Keeping two copies in step by comment is what let the TRT-LLM path
+    ship without the range check the vLLM path already had.
+
+    Raises:
+        ValueError: the derived port is above 65535. ``get_port_from_env``
+                    accepts any base in 1-65535, so a base above 64535 passes
+                    it and then overflows the offset.
+    """
+    base = get_port_from_env(
+        "DYN_KVBM_LEADER_ZMQ_PUB_PORT", DEFAULT_LEADER_ZMQ_PUB_PORT
+    )
+    output_port = base + CONSOLIDATOR_PORT_OFFSET
+    if output_port > 65535:
+        raise ValueError(
+            f"Derived consolidator port {output_port} exceeds maximum (65535). "
+            f"KVBM port {base} is too high. Use a lower base port."
+        )
+    return base, output_port
+
+
 def get_consolidator_mode() -> str:
     """Return the KV event consolidator mode from DYN_KVBM_KV_EVENTS_CONSOLIDATOR_MODE.
 
