@@ -5,6 +5,10 @@ title: Planner Configuration (PlannerConfig)
 subtitle: Field reference for the PlannerConfig JSON/YAML object consumed by the Dynamo Planner service.
 ---
 
+import { EnumStyles } from "@/components/EnumStyles";
+
+<EnumStyles />
+
 `PlannerConfig` is the configuration object for the Dynamo Planner. The Planner service parses it with [Pydantic](https://docs.pydantic.dev/), so every field, type, default, and constraint on this page comes from the [`PlannerConfig` model](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/config/planner_config.py). For the deployment workflow and scaling-mode concepts, see the [Planner Guide](../../developer-guide/knowledge-base/modular-components/planner/planner-guide.md); for the autoscaler overview, see the [Planner overview](../../developer-guide/knowledge-base/modular-components/planner/overview.md).
 
 ## How the config is loaded

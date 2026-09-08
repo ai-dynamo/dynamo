@@ -69,6 +69,17 @@ CHECKS: list[tuple[str, str, str]] = [
     ("community", ".dynamo-community-page", "LandingStyles"),
     ("digest", ".dynamo-blog-art__grid", "BlogStyles"),
     ("reference/compatibility", ".dynref-panel", "ReferenceStyles"),
+    ("reference/components/frontend-configuration", ".enum-values", "EnumStyles"),
+    (
+        "reference/components/frontend-configuration",
+        ".enum-values .enum-label",
+        "EnumStyles",
+    ),
+    (
+        "reference/components/frontend-configuration",
+        ".enum-values .fern-docs-badge",
+        "EnumStyles",
+    ),
     # URL from the nav's explicit slugs (section `benchmarks`, page
     # `llama-3-70b-topology`), not the page's file path.
     (
