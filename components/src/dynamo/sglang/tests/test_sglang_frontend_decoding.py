@@ -624,14 +624,9 @@ class _GenerateRecorder:
     """Stands in for ``sgl.Engine``, recording each ``async_generate`` call.
 
     ``calls`` holds one keyword-argument dict per call, so a test can assert both
-    what reached the engine and that the engine was reached exactly once.
-
-    The ``**kwargs`` signature is required. All three engine call sites splat
-    their keyword arguments straight into the call — ``sampling_params``,
-    ``stream``, ``bootstrap_*``, ``external_trace_header``, ``rid``,
-    ``data_parallel_rank``, ``lora_path``, and more — so a stub that named its
-    parameters would raise ``TypeError`` on the first one it had not listed, and
-    would need editing every time a handler adds a keyword argument.
+    what reached the engine and that the engine was reached exactly once. The
+    ``**kwargs`` signature accepts whatever keyword arguments a call site passes,
+    so the recorder stays compatible as those call sites evolve.
     """
 
     def __init__(self) -> None:
@@ -644,7 +639,14 @@ class _GenerateRecorder:
         return _empty_stream()
 
 
-_SESSION_AGENT_CONTEXT = {"agent_context": {"session_id": "s-1"}}
+@pytest.fixture
+def session_agent_context() -> Dict[str, Any]:
+    """Request fields carrying a session id, rebuilt for each test.
+
+    The nested ``agent_context`` mapping reaches the handler by reference, so
+    each test needs its own copy.
+    """
+    return {"agent_context": {"session_id": "s-1"}}
 
 
 def _enable_session_radix_cache(handler: Any) -> None:
@@ -662,11 +664,7 @@ def _enable_session_radix_cache(handler: Any) -> None:
 
 
 def _new_prefill_handler() -> PrefillWorkerHandler:
-    """Build a PrefillWorkerHandler without invoking sgl.Engine.
-
-    Same bypass-``__init__`` pattern as ``_new_decode_handler`` above and as
-    test_sglang_decode_handler.py.
-    """
+    """Build a PrefillWorkerHandler without invoking sgl.Engine."""
     handler = PrefillWorkerHandler.__new__(PrefillWorkerHandler)
     handler.use_sglang_tokenizer = False
     handler.enable_trace = False
@@ -716,17 +714,11 @@ async def _capture_aggregated_kwargs(
 
 
 @pytest.mark.asyncio
-async def test_aggregated_decode_omits_session_params_for_agent_context():
+async def test_aggregated_decode_omits_session_params_for_agent_context(
+    session_agent_context: Dict[str, Any],
+):
     """Aggregated decode must not turn ``agent_context.session_id`` into
     ``session_params`` (NVBug 6418893).
-
-    The absent-key assertion is deliberate, not a stale leftover. It goes red if
-    the wiring commit ``d245a5be3`` removed is reintroduced into production code:
-    a new ``session_params`` splat at this call site puts the key into the
-    recorded kwargs. (A literal ``git revert`` of ``d245a5be3`` would not turn it
-    red, because that commit also deleted a ``handler._session_kwargs = lambda
-    req: {}`` stub from ``_new_decode_handler`` in this file, and reverting
-    restores the stub.)
     """
     handler = _new_decode_handler(enable_frontend_decoding=False)
     _enable_session_radix_cache(handler)
@@ -736,7 +728,7 @@ async def test_aggregated_decode_omits_session_params_for_agent_context():
     request = {
         "token_ids": [1, 2, 3],
         "multi_modal_data": {},
-        **_SESSION_AGENT_CONTEXT,
+        **session_agent_context,
     }
 
     async for _ in handler.generate(request, _Context()):
@@ -749,14 +741,14 @@ async def test_aggregated_decode_omits_session_params_for_agent_context():
 
 
 @pytest.mark.asyncio
-async def test_disaggregated_decode_omits_session_params_for_agent_context():
+async def test_disaggregated_decode_omits_session_params_for_agent_context(
+    session_agent_context: Dict[str, Any],
+):
     """Disaggregated decode must not attach ``session_params`` either
     (NVBug 6418893).
 
-    Commit ``d245a5be3`` removed a separate ``_session_kwargs`` call site on this
-    branch of ``DecodeWorkerHandler.generate``, so it needs its own test: a
-    reintroduction that only re-wires the aggregated branch would leave this one
-    green, and the reverse.
+    ``DecodeWorkerHandler.generate`` reaches the engine through a separate
+    disaggregated branch, so that call site needs its own coverage.
     """
     handler = _new_decode_handler(enable_frontend_decoding=False)
     handler.serving_mode = DisaggregationMode.DECODE
@@ -772,7 +764,7 @@ async def test_disaggregated_decode_omits_session_params_for_agent_context():
             "bootstrap_port": 1234,
             "bootstrap_room": 7,
         },
-        **_SESSION_AGENT_CONTEXT,
+        **session_agent_context,
     }
 
     async for _ in handler.generate(request, _Context()):
@@ -786,13 +778,13 @@ async def test_disaggregated_decode_omits_session_params_for_agent_context():
 
 
 @pytest.mark.asyncio
-async def test_prefill_omits_session_params_for_agent_context():
+async def test_prefill_omits_session_params_for_agent_context(
+    session_agent_context: Dict[str, Any],
+):
     """Prefill must not attach ``session_params`` either (NVBug 6418893).
 
-    The third ``_session_kwargs`` call site removed by commit ``d245a5be3`` was
-    in ``PrefillWorkerHandler.generate``. ``_new_prefill_handler`` builds its own
-    handler, so this test is unaffected by the decode-side stub that a literal
-    revert of that commit would restore.
+    ``PrefillWorkerHandler.generate`` has its own engine call site, so it needs
+    coverage independent of the decode handler.
     """
     handler = _new_prefill_handler()
     _enable_session_radix_cache(handler)
@@ -803,7 +795,7 @@ async def test_prefill_omits_session_params_for_agent_context():
         "token_ids": [1, 2, 3],
         "sampling_options": {},
         "stop_conditions": {},
-        **_SESSION_AGENT_CONTEXT,
+        **session_agent_context,
     }
 
     async for _ in handler.generate(request, _Context()):
@@ -816,17 +808,13 @@ async def test_prefill_omits_session_params_for_agent_context():
 
 
 @pytest.mark.asyncio
-async def test_agent_context_contributes_no_engine_kwargs():
-    """Control: an ``agent_context`` changes nothing about the engine payload.
-
-    Asserting only that ``session_params`` is absent would still pass if a
-    handler grew some other ``agent_context``-derived keyword argument.
-    Comparing the whole key set against an otherwise identical request pins that
-    ``agent_context`` contributes nothing. This control stays green under
-    refactors of the kwargs assembly and goes red only when ``agent_context``
-    starts contributing a key.
+async def test_agent_context_contributes_no_engine_kwargs(
+    session_agent_context: Dict[str, Any],
+):
+    """Control: an ``agent_context`` contributes no engine keyword argument at
+    all, not merely no ``session_params``.
     """
-    with_context = await _capture_aggregated_kwargs(_SESSION_AGENT_CONTEXT)
+    with_context = await _capture_aggregated_kwargs(session_agent_context)
     without_context = await _capture_aggregated_kwargs({})
 
     assert set(with_context) == set(without_context)
