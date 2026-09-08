@@ -38,6 +38,7 @@ TIER_0 = {
     "evidence.py",
     "site.py",
     "stack.py",
+    "bringup.py",
     "sut.py",
     "local.py",
 }

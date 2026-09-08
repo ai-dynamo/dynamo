@@ -10,6 +10,7 @@ impossible to point one suite at an older release.
 
 from . import catalog as _catalog  # noqa: F401  (registers the standard verbs)
 from .argv import ArgForm, ArgV, is_shell_command_flag
+from .bringup import BringUp, bring_up
 from .dialect import DIALECTS, Dialect, EngineDialect, detect, for_backend
 from .evidence import Evidence, Outcome, Producer, Promise, Recorder, Seal, Verdict
 from .facts import Fact, FactNotKnown, Status
@@ -109,4 +110,7 @@ __all__ = [
     "Defaults",
     "Render",
     "Stack",
+    # bring-up
+    "BringUp",
+    "bring_up",
 ]
