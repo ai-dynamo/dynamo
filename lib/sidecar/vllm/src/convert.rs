@@ -83,8 +83,7 @@ pub(crate) fn build_generate_request(
     let stop_conditions = request.stop_conditions;
     let encoder_result = request.encoder_result;
     let mut extra_args = request.extra_args;
-    let skip_special_tokens =
-        consume_vllm_tito(&mut extra_args, dynamo_priority, skip_special_tokens)?;
+    let skip_special_tokens = consume_vllm_tito(&mut extra_args, skip_special_tokens)?;
     consume_redundant_nvext(&mut extra_args, cache_salt.as_deref())?;
     if has_media && let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() {
         // These fields are already represented by token_ids and media.
@@ -158,7 +157,6 @@ pub(crate) fn data_parallel_rank(
 
 fn consume_vllm_tito(
     extra_args: &mut Option<serde_json::Value>,
-    canonical_priority: i32,
     canonical_skip_special_tokens: Option<bool>,
 ) -> Result<Option<bool>, DynamoError> {
     let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() else {
@@ -241,21 +239,6 @@ fn consume_vllm_tito(
             ));
         }
     };
-    if let Some(value) = envelope.get("priority") {
-        let priority = value
-            .as_i64()
-            .and_then(|priority| i32::try_from(priority).ok())
-            .ok_or_else(|| {
-                client::invalid_argument(
-                    "extra_args.vllm_tito.priority must be a signed 32-bit integer",
-                )
-            })?;
-        if priority.saturating_neg() != canonical_priority {
-            return Err(client::invalid_argument(
-                "extra_args.vllm_tito.priority does not match the canonical Dynamo routing priority",
-            ));
-        }
-    }
     if sampling
         .get("return_token_ids")
         .is_some_and(|value| value != &serde_json::Value::Bool(true))
