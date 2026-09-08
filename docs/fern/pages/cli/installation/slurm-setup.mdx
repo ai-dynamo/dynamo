@@ -69,9 +69,18 @@ srun --container-image="$IMAGE" \
 Or name the container once and attach later steps to that name:
 
 ```bash
+# Create the container once. This step exits immediately; it exists only so the
+# later steps have a name to attach to.
 srun --container-image="$IMAGE" --container-name=dynamo \
-     --container-mounts="$SHARED:$SHARED" true
+     --container-mounts="$SHARED:$SHARED" echo "container up"
 
+# The control plane comes first. See the next section for what this script
+# contains and for the health gate it has to pass.
+srun --container-name=dynamo --container-mounts="$SHARED:$SHARED" \
+     bash start_control_plane.sh &
+
+# Workloads follow, and each one waits for the endpoints it was given rather
+# than assuming they are already up.
 srun --container-name=dynamo --container-mounts="$SHARED:$SHARED" \
      --container-env ETCD_ENDPOINTS,NATS_SERVER \
      bash launch_frontend.sh &
@@ -86,8 +95,17 @@ server has to be backgrounded with `&`; a step left in the foreground blocks the
 next one. For the same reason each step needs its own `--container-env`, because
 environment variables do not carry over from a previous step.
 
+Backgrounding the control-plane step is what keeps it alive: the processes it
+starts belong to that step, so they end when it does. Ordering the `srun` calls
+is not enough on its own, because a backgrounded step returns before its
+services are listening. Each workload has to wait on the endpoints it was
+handed.
+
 The named form is the better fit for multiple nodes and for steps that need
-different environment variables.
+different environment variables. **Everything measured for this page used the
+single-`srun` shape**; the named-container shape here follows the pattern in
+`examples/backends/trtllm/performance_sweeps/benchmark_disagg.slurm` and was
+not exercised end to end.
 
 Do not pass `--mpi=none` to work around MPI errors. Pyxis mounts the PMIx
 application directory, and suppressing PMI leaves that path missing, so the
@@ -119,9 +137,20 @@ for _ in $(seq 1 40); do
   curl -sf http://127.0.0.1:2379/health >/dev/null && break
   sleep 1
 done
+
+# Exhausting the retries is not a failure on its own; check once more and stop
+# here if it did not come up, or the workers start against nothing.
+curl -sf http://127.0.0.1:2379/health >/dev/null || {
+  echo "etcd did not become healthy" >&2
+  exit 1
+}
 ```
 
-Wait for the health endpoint before starting a worker. A worker that starts first can exit with `Could not connect to etcd`.
+Wait for the health endpoint before starting a worker. A worker that starts
+first can exit with `Could not connect to etcd`. The check after the loop
+matters as much as the loop: `for ... && break` leaves the same exit status
+whether it broke early or ran out of attempts, so without it the script
+continues as if etcd were up.
 
 Give each job its own working directory. etcd writes `default.etcd/` into the current directory, so a second job that shares a directory fails on the leftover data directory. `--container-workdir` set to a per-job path handles both that and the log files.
 
@@ -156,7 +185,12 @@ DYN_SYSTEM_PORT=8082 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 CUDA_VISIBLE_DEVICES=1 \
 python3 -m dynamo.vllm --model "$MODEL" --enforce-eager \
   --disaggregation-mode prefill \
   --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' > prefill.log 2>&1 &
+PREFILL_PID=$!
 ```
+
+Record `PREFILL_PID` here rather than later. The verification step below needs
+the PID of *this* worker, and a second worker started for the check would leave
+this one running.
 
 TensorRT-LLM, following `examples/backends/trtllm/launch/disagg.sh`. Prefill takes device 0 here, the opposite of the vLLM script, and the KV transport is configured in the YAML through `cache_transceiver_config` rather than on the command line:
 
@@ -167,6 +201,7 @@ CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.trtllm \
   --model-path "$MODEL" --served-model-name "$MODEL" \
   --extra-engine-args "$CONFIG_DIR/prefill.yaml" \
   --disaggregation-mode prefill > prefill.log 2>&1 &
+PREFILL_PID=$!
 
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.trtllm \
   --model-path "$MODEL" --served-model-name "$MODEL" \
@@ -181,14 +216,21 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.trtllm \
 `/v1/models` answers `200` with an empty `data` array while the worker is still loading. A readiness check that only looks at the status code lets the job finish as `COMPLETED` without having served anything, which is harder to notice than a crash. Require both a registered model and a real completion:
 
 ```bash
-n=$(curl -sf --max-time 5 "http://127.0.0.1:$PORT/v1/models" \
-    | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("data",[])))')
-[ "${n:-0}" -gt 0 ] || continue
-
-curl -sf --max-time 60 "http://127.0.0.1:$PORT/v1/chat/completions" \
-  -H 'Content-Type: application/json' \
-  -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":8}" \
-  | grep -q '"choices"' && ready=1
+ready=0
+for _ in $(seq 1 240); do
+  n=$(curl -sf --max-time 5 "http://127.0.0.1:$PORT/v1/models" \
+      | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("data",[])))')
+  if [ "${n:-0}" -gt 0 ] &&
+     curl -sf --max-time 60 "http://127.0.0.1:$PORT/v1/chat/completions" \
+       -H 'Content-Type: application/json' \
+       -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":8}" \
+       | grep -q '"choices"'; then
+    ready=1
+    break
+  fi
+  sleep 5
+done
+[ "$ready" = "1" ] || { echo "never became ready" >&2; exit 1; }
 ```
 
 Read the count into a variable before comparing it. Reading `$?` after a pipe gives the exit status of the last command in the pipe, and appending `|| echo 0` under `set -o pipefail` can emit two lines, which turns the comparison into `integer expression expected`.
@@ -206,10 +248,9 @@ Withdrawing the prefill worker answers the question directly and does not
 depend on any log string:
 
 ```bash
-python3 -m dynamo.vllm ... --disaggregation-mode prefill > prefill.log 2>&1 &
-PREFILL_PID=$!
-
-# ... after a completion succeeds ...
+# PREFILL_PID comes from the launch above. Do not start another worker here:
+# killing a second one would leave the first serving, and the check would then
+# report a working setup as broken.
 kill "$PREFILL_PID"
 for _ in $(seq 1 20); do kill -0 "$PREFILL_PID" 2>/dev/null || break; sleep 1; done
 
