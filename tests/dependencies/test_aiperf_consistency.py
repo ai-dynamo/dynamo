@@ -3,6 +3,7 @@
 
 """Keep AIPerf install requirements compatible across the source tree."""
 
+import ast
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,21 @@ pytestmark = [
 ]
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_epd_aiperf_version_gate_matches_release() -> None:
+    path = ROOT / "benchmarks/multimodal/sweep/experiments/epd/run_experiment.py"
+    module = ast.parse(path.read_text(encoding="utf-8"))
+    versions = [
+        ast.literal_eval(node.value)
+        for node in module.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "EXPECTED_AIPERF_VERSION"
+            for target in node.targets
+        )
+    ]
+    assert versions == ["0.12.0"]
 
 
 def test_aiperf_install_pins_match() -> None:
@@ -59,4 +75,4 @@ def test_zstandard_pin_accepts_aiperf_requirement(component: str) -> None:
         for line in requirements.read_text(encoding="utf-8").splitlines()
         if line.startswith("zstandard==")
     )
-    assert "0.25.0" in pin.specifier
+    assert pin.specifier == SpecifierSet("==0.25.0")
