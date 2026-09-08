@@ -980,6 +980,40 @@ fn discovery_rejects_incompatible_model_metadata() {
     }
 }
 
+#[test]
+fn engine_config_normalizes_total_kv_blocks_per_dp_rank() {
+    let mut server = server_info();
+    server
+        .parallelism
+        .as_mut()
+        .expect("parallelism metadata")
+        .data_parallel_size = 2;
+    server.total_kv_blocks = 4096;
+
+    let model =
+        DiscoveredModel::from_proto(model_info(), server).expect("valid discovery metadata");
+    let registration = model.engine_config().llm.expect("LLM registration");
+
+    assert_eq!(registration.total_kv_blocks, Some(2048));
+}
+
+#[test]
+fn engine_config_handles_zero_and_inexact_aggregate_kv_capacity() {
+    for (aggregate_blocks, expected_per_rank_blocks) in [(0, None), (4097, Some(2048))] {
+        let mut server = server_info();
+        server.total_kv_blocks = aggregate_blocks;
+
+        let model =
+            DiscoveredModel::from_proto(model_info(), server).expect("valid discovery metadata");
+        let registration = model.engine_config().llm.expect("LLM registration");
+
+        assert_eq!(
+            registration.total_kv_blocks, expected_per_rank_blocks,
+            "aggregate blocks {aggregate_blocks}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn startup_rejects_model_identity_change_after_bootstrap() {
     let server = FakeServer::start(FakeVllm::default()).await;
@@ -1038,7 +1072,7 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     let registration = config.llm.expect("LLM registration");
     assert_eq!(registration.context_length, Some(8192));
     assert_eq!(registration.kv_cache_block_size, Some(16));
-    assert_eq!(registration.total_kv_blocks, Some(4096));
+    assert_eq!(registration.total_kv_blocks, Some(2048));
     assert_eq!(registration.max_num_seqs, Some(128));
     assert_eq!(registration.max_num_batched_tokens, Some(2048));
     assert_eq!(registration.data_parallel_size, Some(2));
