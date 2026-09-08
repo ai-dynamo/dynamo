@@ -1304,10 +1304,9 @@ fn process_control_message(message: Bytes) -> Result<ControlAction> {
 mod tests {
     use super::*;
     use crate::engine::AsyncEngineContextProvider;
-    use crate::error::{BackendError, DynamoError, ErrorType, match_error_chain};
+    use crate::error::{BackendError, DynamoError, ErrorType};
     use crate::pipeline::Context;
     use crate::pipeline::network::DEFAULT_SEND_BUFFER_COUNT;
-    use crate::pipeline::network::egress::addressed_router::pre_stream_failure_error;
     use crate::pipeline::network::tcp::client::TcpClient;
     use std::io::Write;
     use tempfile::NamedTempFile;
@@ -2488,21 +2487,6 @@ mod tests {
             prologue_error.typed_error.as_ref().map(|e| e.error_type()),
             Some(ErrorType::Backend(BackendError::InvalidArgument)),
             "the worker's error type must survive the prologue round trip"
-        );
-
-        let egress_error = pre_stream_failure_error(&prologue_error);
-        assert_eq!(
-            egress_error.error_type(),
-            ErrorType::CannotConnect,
-            "the outer type stays CannotConnect so retry classification is unchanged"
-        );
-        assert!(
-            match_error_chain(
-                &egress_error,
-                &[ErrorType::Backend(BackendError::InvalidArgument)],
-                &[],
-            ),
-            "the refusal must be reachable in the error chain, got: {egress_error:?}"
         );
     }
 

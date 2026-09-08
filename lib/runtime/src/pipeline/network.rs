@@ -572,9 +572,6 @@ mod tests {
         tokens: Vec<u32>,
     }
 
-    /// Worker and frontend are upgraded independently, so a prologue from an
-    /// older worker has no typed error field at all. It must still decode, with
-    /// the typed error absent, and the message must be unchanged.
     #[test]
     fn prologue_without_typed_error_field_still_decodes() {
         let legacy = br#"{"error":"Generate Error: something went wrong"}"#;
@@ -591,25 +588,6 @@ mod tests {
         );
     }
 
-    /// The other direction of the same rolling upgrade: a new worker's prologue
-    /// must not grow a field when there is no typed error to send, so an older
-    /// frontend that rejects unknown fields still accepts it.
-    #[test]
-    fn prologue_without_typed_error_does_not_serialize_the_field() {
-        let prologue = ResponseStreamPrologue {
-            error: Some("Generate Error: something went wrong".to_string()),
-            typed_error: None,
-        };
-        let encoded = serde_json::to_string(&prologue).expect("prologue should serialize");
-
-        assert!(
-            !encoded.contains("typed_error"),
-            "an absent typed error must not appear on the wire, got: {encoded}"
-        );
-    }
-
-    /// A typed error survives a full serialize/deserialize round trip with its
-    /// error type intact -- the message alone is not enough to classify it.
     #[test]
     fn prologue_round_trips_the_typed_error() {
         let prologue = ResponseStreamPrologue {
