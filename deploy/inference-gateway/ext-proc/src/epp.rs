@@ -1410,7 +1410,7 @@ impl EndpointPicker for Router {
         }
 
         let body_str = std::str::from_utf8(&req.body)
-            .map_err(|e| PickError::TokenizationFailed(format!("Invalid UTF-8: {e}")))?;
+            .map_err(|e| PickError::InvalidRequest(format!("Invalid UTF-8: {e}")))?;
 
         let (
             tokens,
@@ -1422,7 +1422,7 @@ impl EndpointPicker for Router {
         ) = self
             .tokenize(body_str)
             .await
-            .map_err(|e| PickError::TokenizationFailed(e.to_string()))?;
+            .map_err(|e| PickError::InvalidRequest(e.to_string()))?;
         let cache_namespace =
             cache_namespace_with_header_override(&req.headers, body_cache_namespace);
         let reservation_id = Uuid::new_v4().to_string();

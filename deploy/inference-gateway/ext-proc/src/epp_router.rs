@@ -33,7 +33,7 @@ use dynamo_llm::protocols::common::extensions::{
 };
 use serde::Deserialize;
 
-use crate::epp_standalone_config::{EppStandaloneConfig, TokenizerProtocol};
+use crate::epp_standalone_config::{EppStandaloneConfig, RendererProtocol};
 use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo};
 use crate::pod_discovery::PodDiscovery;
 use crate::render_http::RenderError;
@@ -54,9 +54,6 @@ fn requested_policy_class(headers: &[(String, String)]) -> Result<Option<String>
 }
 
 /// Protocol-dispatched render client for the standalone EPP.
-///
-/// Both backends expose the same `/v1/chat/completions/render` path; the difference
-/// is the response field: vLLM uses `token_ids`, the sglang renderer uses `input_ids`.
 enum RenderClient {
     Vllm(VllmRenderClient),
     Sglang(SglangRendererClient),
@@ -98,13 +95,13 @@ impl EppRouter {
         let selector = Arc::new(Selector::new(&cfg, policy_registry).await?);
         let timeout = Duration::from_millis(cfg.tokenization_timeout_ms);
         let max_response_bytes = cfg.tokenizer_max_response_bytes;
-        let renderer = match cfg.tokenizer_protocol {
-            TokenizerProtocol::VllmRender => RenderClient::Vllm(VllmRenderClient::new(
+        let renderer = match cfg.renderer_protocol {
+            RendererProtocol::VllmRender => RenderClient::Vllm(VllmRenderClient::new(
                 &cfg.tokenizer_service_url,
                 timeout,
                 max_response_bytes,
             )?),
-            TokenizerProtocol::SglangRenderer => {
+            RendererProtocol::SglangRenderer => {
                 RenderClient::Sglang(SglangRendererClient::new(
                     &cfg.tokenizer_service_url,
                     timeout,
@@ -477,7 +474,7 @@ impl TokenizeError {
             // The serde message describes the client's own JSON, not our
             // internals, so it is safe to surface as a 400.
             TokenizeError::InvalidBody(e) => {
-                PickError::TokenizationFailed(format!("invalid request body: {e}"))
+                PickError::InvalidRequest(format!("invalid request body: {e}"))
             }
             TokenizeError::Render(e) => {
                 tracing::warn!(request_id, error = %e, "Tokenization render failed");
@@ -493,7 +490,7 @@ impl TokenizeError {
                             // client's request was bad → surface as a client 400.
                             // Auth/misconfig (401/403/404), overload (429/503), any
                             // other 4xx, and 5xx are the renderer's or our own fault.
-                            400 | 422 => PickError::TokenizationFailed(
+                            400 | 422 => PickError::InvalidRequest(
                                 "request rejected by tokenization service".to_string(),
                             ),
                             // Renderer overloaded / temporarily unavailable → retryable.
@@ -561,11 +558,11 @@ mod tests {
         // Renderer validated the client's payload and rejected it → client 400.
         assert!(matches!(
             map(StatusCode::BAD_REQUEST),
-            PickError::TokenizationFailed(_)
+            PickError::InvalidRequest(_)
         ));
         assert!(matches!(
             map(StatusCode::UNPROCESSABLE_ENTITY),
-            PickError::TokenizationFailed(_)
+            PickError::InvalidRequest(_)
         ));
 
         // Auth / misconfiguration is NOT an invalid client payload → upstream 502,
