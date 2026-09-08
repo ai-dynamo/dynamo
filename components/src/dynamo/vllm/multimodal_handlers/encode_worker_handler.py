@@ -290,12 +290,16 @@ class EncodeWorkerHandler:
         """
         if self.embedding_cache_manager is None or item.key is None:
             return
-        # The manager asserts contiguity when sizing an entry. These tensors are
-        # split views sharing one encoder output's storage, so sizing is per view.
+        # These arrive as split views over one encoder output, and the manager
+        # sizes an entry from its own element count. Caching a view would charge
+        # for the view while pinning the whole batch's storage, so an entry gets
+        # storage of its own. clone() also satisfies the manager's contiguity
+        # assertion in one copy, which contiguous() would not: on an already
+        # contiguous view it returns the view itself.
         self.embedding_cache_manager.set(
             item.key,
             CachedEmbedding(
-                tensor=item.embeddings.contiguous(),
+                tensor=item.embeddings.clone(memory_format=torch.contiguous_format),
                 image_grid_thw=item.image_grid_thw,
             ),
         )

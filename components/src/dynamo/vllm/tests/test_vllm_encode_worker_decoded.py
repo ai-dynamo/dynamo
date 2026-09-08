@@ -233,6 +233,29 @@ def test_store_path_evicts_instead_of_growing_past_capacity():
     assert handler._lookup_embedding_item("key-4") is not None
 
 
+def test_store_path_does_not_pin_the_encoder_batch():
+    # Embeddings reach the cache as split views over one encoder output, which
+    # are already contiguous. Storing the view would charge the manager for one
+    # image while keeping the whole batch's storage alive.
+    handler = _handler(frontend_decoding=False)
+    batch = torch.arange(8 * 1024, dtype=torch.float32).reshape(8, 1024)
+    view = batch.split([1] * 8)[1].unsqueeze(0)
+    assert view.is_contiguous()
+
+    handler._store_embedding_item(
+        EmbeddingItem(key="key", image_grid_thw=[[1, 1, 1]], embeddings=view)
+    )
+
+    cached = handler._lookup_embedding_item("key").embeddings
+    assert torch.equal(cached, view)
+    assert cached.untyped_storage().data_ptr() != batch.untyped_storage().data_ptr()
+    # The entry owns exactly the bytes the manager charged for it.
+    assert cached.untyped_storage().nbytes() == cached.element_size() * cached.numel()
+    assert handler.embedding_cache_manager.stats["current_bytes"] == (
+        cached.element_size() * cached.numel()
+    )
+
+
 def test_store_then_lookup_round_trips_tensor_and_grid():
     handler = _handler(frontend_decoding=False)
     embeddings = torch.arange(8, dtype=torch.float32).reshape(1, 8)
