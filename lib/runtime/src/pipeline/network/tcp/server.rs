@@ -1083,9 +1083,8 @@ async fn tcp_listener(
         // is both complete and ready for data flow; awaiting here is not a performance hit or problem and it allows
         // us to trace the initial setup time vs the time to prologue
         if let Some(error) = &prologue.error {
-            // Forward the worker's typed error when it sent one, so the requesting
-            // side can classify the failure instead of parsing the message. An older
-            // worker sends no typed error and this stays `None`.
+            // Forward the worker's typed error so the requesting side can classify
+            // the failure instead of parsing the message. An older worker sends none.
             let _ = connection.send(Err(StreamPrologueError {
                 message: error.clone(),
                 typed_error: prologue.typed_error.clone(),

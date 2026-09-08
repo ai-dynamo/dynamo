@@ -680,9 +680,8 @@ where
                     tracing::error!("Failed to generate response stream: {error_string}");
                 }
 
-                // Send the worker's own error type along with the display text, so a
-                // frontend can tell a request the backend can never serve apart from a
-                // transport failure.
+                // Send the worker's error type with the display text, so a frontend
+                // can tell a request the backend cannot serve from a transport failure.
                 let prologue_error =
                     StreamPrologueError::new(error_string, typed_error_from_pipeline_error(&e));
 

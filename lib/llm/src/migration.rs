@@ -741,13 +741,8 @@ mod tests {
         );
     }
 
-    // Guard: the case this fix exists for -- a backend refusing a request it
-    // can never serve -- keeps migrating exactly like today's bare
-    // CannotConnect. Backend(InvalidArgument) is in neither MIGRATABLE nor
-    // NON_MIGRATABLE, so this pins the specific error the fix produces. It
-    // cannot detect a regression in the general invariant, because
-    // Backend(_) can never reach the exclusion set; the test below covers
-    // the types that can.
+    // Pins the specific error this path produces. The general invariant is
+    // covered by the next test, on the types that can actually break it.
     #[test]
     fn pre_stream_failure_with_typed_cause_is_still_migratable() {
         use dynamo_runtime::pipeline::network::StreamPrologueError;
@@ -772,22 +767,8 @@ mod tests {
         );
     }
 
-    // Guard: the general invariant, on the types that can actually break it.
-    //
-    // is_migratable walks the whole chain and short-circuits to false on the
-    // first member whose type is in NON_MIGRATABLE, so the outer CannotConnect
-    // does not protect anything -- an attached cause decides. A worker that
-    // itself dispatches to another worker can fail pre-stream with a top-level
-    // ResourceExhausted or Cancelled (see push_router.rs and
-    // addressed_router.rs dispatch-permit exhaustion), so this is reachable,
-    // not hypothetical.
-    //
-    // pre_stream_failure_error withholds these types instead of attaching them,
-    // so the failure must still migrate. This test asserts that behavior for
-    // each type currently in the set; it does not by itself detect a type added
-    // to NON_MIGRATABLE and not mirrored into MIGRATION_SENSITIVE_ERROR_TYPES.
-    // That drift is caught by
-    // migration_sensitive_types_match_the_exclusion_set below.
+    // is_migratable short-circuits on any chain member, so an attached cause
+    // decides. pre_stream_failure_error withholds these types, so this migrates.
     #[test]
     fn pre_stream_failure_with_migration_sensitive_cause_is_still_migratable() {
         use dynamo_runtime::pipeline::network::StreamPrologueError;
@@ -815,9 +796,8 @@ mod tests {
             );
         }
 
-        // The same holds one link down: match_error_chain walks the whole
-        // chain, so a nested excluded type short-circuits it just as an outer
-        // one does.
+        // The same holds one link down: match_error_chain walks the whole chain,
+        // so a nested excluded type short-circuits it just as an outer one does.
         let nested = DynamoError::builder()
             .error_type(ErrorType::Backend(BackendError::InvalidArgument))
             .message("downstream worker rejected the request")
@@ -838,17 +818,8 @@ mod tests {
         );
     }
 
-    // The drift pin. dynamo-runtime cannot import NON_MIGRATABLE -- dynamo-llm
-    // depends on it and not the reverse -- so addressed_router.rs keeps its own
-    // copy of the set and withholds exactly those types from the cause it
-    // attaches. Duplicated state is only safe if something fails when the copies
-    // disagree, and that is this assertion: add a type to either list without
-    // the other and it fails here, naming the missing entries.
-    //
-    // Order is not part of the contract, only membership, so this compares as
-    // sets. ErrorType is Eq but not Hash, so the comparison is by containment
-    // rather than through a HashSet -- deriving Hash on a public error type to
-    // shorten a test would be the wrong trade.
+    // dynamo-runtime cannot import NON_MIGRATABLE, so addressed_router.rs keeps
+    // a copy. This fails when the two drift, naming the missing entries.
     #[test]
     fn migration_sensitive_types_match_the_exclusion_set() {
         use dynamo_runtime::pipeline::network::egress::addressed_router::MIGRATION_SENSITIVE_ERROR_TYPES;
