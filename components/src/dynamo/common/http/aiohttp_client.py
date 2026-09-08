@@ -57,10 +57,7 @@ class AiohttpClient(HttpClient):
             keepalive_timeout=self._config.keepalive_timeout,
             enable_cleanup_closed=True,
         )
-        # Connect-time SSRF backstop: filter blocked IPs at resolve time so a
-        # DNS-rebinding answer can't slip an internal address past the pre-check
-        # in validate_url (mirrors the Rust frontend's BlocklistResolver).
-        # allow_private_ips follows the same env knob the fetch policy uses.
+        # Connect-time SSRF backstop against DNS rebinding (see _ssrf_resolver).
         if BlocklistResolver is not None:
             connector_kwargs["resolver"] = BlocklistResolver(
                 allow_private_ips=UrlValidationPolicy.from_env().allow_private_ips

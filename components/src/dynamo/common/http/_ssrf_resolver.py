@@ -3,23 +3,12 @@
 
 """Connect-time SSRF backstop shared by the HTTP backends.
 
-``validate_url`` resolves a hostname and checks its IPs against the blocklist,
-but the HTTP backend re-resolves the name when it actually connects. A DNS
-server the attacker controls can answer with a public IP during the check and
-an internal one at connect (DNS rebinding), so the pre-check alone has a
-time-of-check/time-of-use gap.
-
-These shims re-apply the blocklist at resolve time, right before the socket is
-dialed, so the backend never learns a blocked address. They mirror the Rust
-frontend's ``BlocklistResolver`` (``lib/llm/src/preprocessor/media/loader.rs``),
-which attaches the same filter to reqwest's ``dns_resolver`` — same division of
-labour: ``validate_url`` is the pre-check, the resolver is the connect-time
-backstop. Both reuse :func:`url_validator.is_blocked_ip`, so the two paths share
-one blocklist.
-
-``allow_private_ips`` is read from ``UrlValidationPolicy.from_env()`` at client
-construction, matching how the Rust ``MediaFetcher::from_env`` builds its client
-and how the backend callers build their per-request policy.
+``validate_url`` checks a hostname's resolved IPs, but the backend re-resolves
+at connect, so a DNS-rebinding server can return a public IP on the check and an
+internal one at connect. These shims re-apply the blocklist at resolve time,
+mirroring the Rust frontend's ``BlocklistResolver``
+(``lib/llm/src/preprocessor/media/loader.rs``). Both reuse
+:func:`url_validator.is_blocked_ip`.
 """
 
 from __future__ import annotations
@@ -36,23 +25,12 @@ class SsrfBlockedAddress(OSError):
     """Raised at connect time when every resolved IP is in a blocked range."""
 
 
-def _filter_allowed(ips: list[str], *, allow_private_ips: bool) -> list[str]:
-    if allow_private_ips:
-        return ips
-    return [ip for ip in ips if not is_blocked_ip(ip)]
-
-
-try:  # aiohttp is the default backend; guard the import so httpx-only envs load.
+try:  # aiohttp is the default backend; httpx-only envs still import this module.
     from aiohttp.abc import AbstractResolver
     from aiohttp.resolver import DefaultResolver
 
     class BlocklistResolver(AbstractResolver):
-        """aiohttp resolver that drops blocked IPs before the connector dials.
-
-        Wraps aiohttp's default resolver: resolve as usual, then filter the
-        answers. If nothing survives, raise so the fetch fails closed instead of
-        connecting to an internal address.
-        """
+        """aiohttp resolver that drops blocked IPs before the connector dials."""
 
         def __init__(self, *, allow_private_ips: bool) -> None:
             self._inner = DefaultResolver()
@@ -66,9 +44,7 @@ try:  # aiohttp is the default backend; guard the import so httpx-only envs load
                 return hosts
             allowed = [h for h in hosts if not is_blocked_ip(h["host"])]
             if not allowed:
-                raise SsrfBlockedAddress(
-                    f"host {host!r} resolves only to blocked addresses"
-                )
+                raise SsrfBlockedAddress(f"host {host!r} resolves only to blocked IPs")
             return allowed
 
         async def close(self) -> None:
@@ -79,15 +55,12 @@ except ImportError:  # pragma: no cover - aiohttp always present in practice
 
 
 async def resolve_allowed_ip(host: str, *, allow_private_ips: bool) -> str:
-    """Resolve ``host`` and return one non-blocked IP for a pinned connect.
+    """Resolve ``host`` to one non-blocked IP for a pinned connect (httpx path).
 
-    Used by the httpx backend, which has no resolver hook: we resolve here,
-    filter, and hand the backend a specific IP to dial (with the original host
-    preserved for SNI / ``Host`` / cert verification). An IP literal is checked
-    directly without a lookup. Raises :class:`SsrfBlockedAddress` if nothing
-    non-blocked remains.
+    httpx has no resolver hook, so we resolve + filter here and hand the backend
+    a specific IP to dial. An IP literal is checked without a lookup. Raises
+    :class:`SsrfBlockedAddress` if nothing non-blocked remains.
     """
-    # An IP literal needs no lookup: check it directly and dial it as-is.
     try:
         ipaddress.ip_address(host)
     except ValueError:
@@ -97,10 +70,9 @@ async def resolve_allowed_ip(host: str, *, allow_private_ips: bool) -> str:
             raise SsrfBlockedAddress(f"IP literal {host!r} is in a blocked range")
         return host
 
-    loop = asyncio.get_running_loop()
-    infos = await loop.getaddrinfo(host, None)
-    ips = [info[4][0] for info in infos]
-    allowed = _filter_allowed(ips, allow_private_ips=allow_private_ips)
-    if not allowed:
-        raise SsrfBlockedAddress(f"host {host!r} resolves only to blocked addresses")
-    return allowed[0]
+    infos = await asyncio.get_running_loop().getaddrinfo(host, None)
+    for info in infos:
+        ip = info[4][0]
+        if allow_private_ips or not is_blocked_ip(ip):
+            return ip
+    raise SsrfBlockedAddress(f"host {host!r} resolves only to blocked IPs")

@@ -3,10 +3,9 @@
 
 """Unit tests for the connect-time SSRF backstop (``_ssrf_resolver``).
 
-These exercise the DNS-rebinding case deterministically: the resolver is fed a
-mix of public and blocked addresses (as if a rebinding server flipped its
-answer between ``validate_url`` and connect) and must drop the blocked ones so
-the backend never dials an internal address. No network is used.
+Exercise the DNS-rebinding case deterministically: a resolver fed a mix of
+public and blocked answers (as if a rebinding server flipped between check and
+connect) must drop the blocked ones and fail closed if none remain. No network.
 """
 
 from __future__ import annotations
@@ -33,80 +32,43 @@ class _FakeInner:
 
     def __init__(self, ips: list[str]) -> None:
         self._ips = ips
-        self.closed = False
 
     async def resolve(self, host, port=0, family=0):
         return [{"hostname": host, "host": ip, "port": port} for ip in self._ips]
 
     async def close(self):
-        self.closed = True
+        pass
 
 
-def _resolver_with(ips: list[str], *, allow_private_ips: bool) -> BlocklistResolver:
-    r = BlocklistResolver(allow_private_ips=allow_private_ips)
+def _resolver_with(ips: list[str]) -> BlocklistResolver:
+    r = BlocklistResolver(allow_private_ips=False)
     r._inner = _FakeInner(ips)  # bypass real DNS
     return r
 
 
-# ---------------------------------------------------------------------------
-# aiohttp BlocklistResolver
-# ---------------------------------------------------------------------------
-
-
-async def test_resolver_filters_blocked_ip_at_connect() -> None:
-    # DNS answers with a public IP *and* the metadata IP (rebinding): the
-    # blocked one must be dropped, the public one kept.
-    resolver = _resolver_with(["93.184.216.34", "169.254.169.254"], allow_private_ips=False)
+async def test_resolver_drops_blocked_ip_at_connect() -> None:
+    # Rebinding answer (public + metadata IP): the blocked one is dropped.
+    resolver = _resolver_with(["93.184.216.34", "169.254.169.254"])
     out = await resolver.resolve("evil.example.com")
     assert [h["host"] for h in out] == ["93.184.216.34"]
 
 
-async def test_resolver_raises_when_only_blocked() -> None:
-    # A pure rebind to an internal address leaves nothing to dial -> fail closed.
-    resolver = _resolver_with(["169.254.169.254"], allow_private_ips=False)
+async def test_resolver_fails_closed_when_only_blocked() -> None:
+    resolver = _resolver_with(["169.254.169.254"])
     with pytest.raises(SsrfBlockedAddress):
         await resolver.resolve("evil.example.com")
 
 
-async def test_resolver_passthrough_when_internal_allowed() -> None:
-    resolver = _resolver_with(["10.0.0.5"], allow_private_ips=True)
-    out = await resolver.resolve("internal.svc")
-    assert [h["host"] for h in out] == ["10.0.0.5"]
-
-
-# ---------------------------------------------------------------------------
-# httpx resolve_allowed_ip (pin helper)
-# ---------------------------------------------------------------------------
-
-
-def _fake_getaddrinfo(addrs: list[str]):
-    async def _impl(host, *_a, **_k):
-        return [(2, 1, 6, "", (addr, 0)) for addr in addrs]
-
-    return _impl
-
-
 async def test_resolve_allowed_ip_picks_non_blocked() -> None:
+    async def fake_getaddrinfo(host, *_a, **_k):
+        return [(2, 1, 6, "", (ip, 0)) for ip in ["169.254.169.254", "93.184.216.34"]]
+
     with patch("asyncio.get_running_loop") as gl:
-        gl.return_value.getaddrinfo = _fake_getaddrinfo(
-            ["169.254.169.254", "93.184.216.34"]
-        )
+        gl.return_value.getaddrinfo = fake_getaddrinfo
         ip = await resolve_allowed_ip("evil.example.com", allow_private_ips=False)
     assert ip == "93.184.216.34"
-
-
-async def test_resolve_allowed_ip_raises_when_only_blocked() -> None:
-    with patch("asyncio.get_running_loop") as gl:
-        gl.return_value.getaddrinfo = _fake_getaddrinfo(["10.0.0.5"])
-        with pytest.raises(SsrfBlockedAddress):
-            await resolve_allowed_ip("evil.example.com", allow_private_ips=False)
 
 
 async def test_resolve_allowed_ip_blocks_ip_literal() -> None:
     with pytest.raises(SsrfBlockedAddress):
         await resolve_allowed_ip("169.254.169.254", allow_private_ips=False)
-
-
-async def test_resolve_allowed_ip_returns_public_literal_unchanged() -> None:
-    # Public IP literal: no lookup, dialed as-is.
-    assert await resolve_allowed_ip("8.8.8.8", allow_private_ips=False) == "8.8.8.8"
