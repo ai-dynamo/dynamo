@@ -120,6 +120,13 @@ type ComponentRoleSpec struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Name string `json:"name"`
 
+	// replicas optionally declares the number of Pods of this role in one complete
+	// component instance. When omitted, the enclosing component type must define
+	// the derived count and its relationship to other component fields.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	Replicas *int32 `json:"replicas,omitempty"`
+
 	// providerOverride configures the provider workload unit generated for this
 	// role. It is supported only for components embedded in a DGD.
 	// +optional

@@ -320,6 +320,20 @@ func (v *sharedValidation) validateComponentRoles(
 			seen[role.Name] = struct{}{}
 		}
 
+		if role.Replicas != nil && knownRole {
+			expected := int32(1)
+			if role.Name == nvidiacomv1beta1.ComponentRoleWorker {
+				expected = component.Multinode.NodeCount - 1
+			}
+			if *role.Replicas != expected {
+				allErrs = append(allErrs, field.Invalid(
+					rolePath.Child("replicas"),
+					*role.Replicas,
+					fmt.Sprintf("must equal %d for multinode role %q", expected, role.Name),
+				))
+			}
+		}
+
 		if knownRole {
 			allErrs = append(allErrs, v.validateComponentRoleSpec(
 				role,
@@ -788,10 +802,13 @@ func validateComponentRolesUpdate(
 	// role-specific configuration changes to happen in a subsequent update.
 	if (newComponent.Roles == nil) != (oldComponent.Roles == nil) {
 		explicitComponent := newComponent
+		implicitComponent := oldComponent
 		if explicitComponent.Roles == nil {
-			explicitComponent = oldComponent
+			explicitComponent, implicitComponent = implicitComponent, explicitComponent
 		}
-		if dynamo.ExplicitMultinodeRolesMatchImplicit(explicitComponent) {
+		if explicitComponent.Multinode != nil && implicitComponent.Multinode != nil &&
+			explicitComponent.Multinode.NodeCount == implicitComponent.Multinode.NodeCount &&
+			dynamo.ExplicitMultinodeRolesMatchImplicit(explicitComponent) {
 			return nil
 		}
 		return field.ErrorList{field.Forbidden(

@@ -280,10 +280,12 @@ func TestDGDDefaulter_DefaultsProviderOverrideTargets(t *testing.T) {
 					Roles: []nvidiacomv1beta1.ComponentRoleSpec{
 						{
 							Name:             nvidiacomv1beta1.ComponentRoleLeader,
+							Replicas:         ptr.To(int32(1)),
 							ProviderOverride: providerOverrideForDefaulting(`{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"host"}}}`),
 						},
 						{
 							Name:             nvidiacomv1beta1.ComponentRoleWorker,
+							Replicas:         ptr.To(int32(1)),
 							ProviderOverride: providerOverrideForDefaulting(`{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"host"}}}`),
 						},
 					},

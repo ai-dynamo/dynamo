@@ -78,12 +78,15 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 </Indent>
 
 <ParamField path="roles" type="[]ComponentRoleSpec">
-  Optional explicit structure of a compound component. In this release, roles are supported for multinode components and must contain exactly one `leader` and one `worker`. Their cardinality remains derived from `multinode.nodeCount`. Omit the field to retain the implicit leader/worker layout.
+  Optional explicit structure of a compound component. In this release, roles are supported for multinode components and must contain exactly one `leader` and one `worker`. Omit the field to retain the implicit leader/worker layout.
 </ParamField>
 
 <Indent>
   <ParamField path="name" type="string" required={true}>
     Semantic role name. Multinode components allow `leader` and `worker`.
+  </ParamField>
+  <ParamField path="replicas" type="integer">
+    Optional number of Pods of this role in one complete component instance. For multinode, omission derives `leader: 1` and `worker: multinode.nodeCount - 1`; an explicit value must match that fixed shape.
   </ParamField>
   <ParamField path="providerOverride" type="ProviderOverride">
     Provider configuration for the workload unit generated for this role. Available only on components embedded in a DGD; standalone DCD OpenAPI omits this field.

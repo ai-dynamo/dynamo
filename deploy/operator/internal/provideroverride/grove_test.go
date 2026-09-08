@@ -26,6 +26,7 @@ import (
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/utils/ptr"
 )
 
 func TestComposeGroveOverrides(t *testing.T) {
@@ -52,11 +53,11 @@ func TestComposeGroveOverrides(t *testing.T) {
 					),
 					Multinode: &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
 					Roles: []nvidiacomv1beta1.ComponentRoleSpec{
-						{Name: nvidiacomv1beta1.ComponentRoleLeader, ProviderOverride: providerOverrideFixture(
+						{Name: nvidiacomv1beta1.ComponentRoleLeader, Replicas: ptr.To(int32(1)), ProviderOverride: providerOverrideFixture(
 							TargetPodCliqueTemplateSpec,
 							`{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"host"}}}`,
 						)},
-						{Name: nvidiacomv1beta1.ComponentRoleWorker, ProviderOverride: providerOverrideFixture(
+						{Name: nvidiacomv1beta1.ComponentRoleWorker, Replicas: ptr.To(int32(1)), ProviderOverride: providerOverrideFixture(
 							TargetPodCliqueTemplateSpec,
 							`{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"host"},"newProviderField":"preserved"}}`,
 						)},

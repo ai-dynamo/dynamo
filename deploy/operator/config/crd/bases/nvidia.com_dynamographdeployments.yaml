@@ -11823,7 +11823,7 @@ spec:
                         description: |-
                           Roles expose the named Pod-producing parts inside a compound component.
                           When set for a multinode component, this list must contain exactly one
-                          leader and one worker role. Their cardinality is derived from multinode.nodeCount.
+                          leader and one worker role whose resolved replica counts add up to multinode.nodeCount.
                           Omission preserves the implicit multinode role layout.
                         items:
                           description: |-
@@ -11867,6 +11867,14 @@ spec:
                                 - apiVersion
                                 - value
                               type: object
+                            replicas:
+                              description: |-
+                                Replicas optionally declares the number of Pods of this role in one complete
+                                component instance. When omitted, the enclosing component type must define
+                                the derived count and its relationship to other component fields.
+                              format: int32
+                              minimum: 1
+                              type: integer
                           required:
                             - name
                           type: object
@@ -21088,7 +21096,7 @@ spec:
                         description: |-
                           roles expose the named Pod-producing parts inside a compound component.
                           When set for a multinode component, this list must contain exactly one
-                          leader and one worker role. Their cardinality is derived from multinode.nodeCount.
+                          leader and one worker role whose resolved replica counts add up to multinode.nodeCount.
                           Omission preserves the implicit multinode role layout.
                         items:
                           description: |-
@@ -21132,6 +21140,14 @@ spec:
                                 - apiVersion
                                 - value
                               type: object
+                            replicas:
+                              description: |-
+                                replicas optionally declares the number of Pods of this role in one complete
+                                component instance. When omitted, the enclosing component type must define
+                                the derived count and its relationship to other component fields.
+                              format: int32
+                              minimum: 1
+                              type: integer
                           required:
                             - name
                           type: object

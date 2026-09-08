@@ -75,8 +75,8 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4}
 				dcd.Spec.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
-					{Name: nvidiacomv1beta1.ComponentRoleLeader},
-					{Name: nvidiacomv1beta1.ComponentRoleWorker},
+					{Name: nvidiacomv1beta1.ComponentRoleLeader, Replicas: k8sptr.To(int32(1))},
+					{Name: nvidiacomv1beta1.ComponentRoleWorker, Replicas: k8sptr.To(int32(3))},
 				}
 			}),
 		},
@@ -85,8 +85,8 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
 				dcd.Spec.Multinode = &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 4}
 				dcd.Spec.Roles = []nvidiacomv1alpha1.ComponentRoleSpec{
-					{Name: nvidiacomv1alpha1.ComponentRoleLeader},
-					{Name: nvidiacomv1alpha1.ComponentRoleWorker},
+					{Name: nvidiacomv1alpha1.ComponentRoleLeader, Replicas: k8sptr.To(int32(1))},
+					{Name: nvidiacomv1alpha1.ComponentRoleWorker, Replicas: k8sptr.To(int32(3))},
 				}
 			}),
 		},
