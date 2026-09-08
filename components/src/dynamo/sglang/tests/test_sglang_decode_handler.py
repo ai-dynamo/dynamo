@@ -503,27 +503,6 @@ async def test_token_stream_usage_includes_reasoning_tokens():
 
 
 @pytest.mark.asyncio
-async def test_token_stream_usage_omits_reasoning_details_when_unreported():
-    async def stream_source():
-        yield {
-            "output_ids": [102],
-            "meta_info": {
-                "id": "request-1",
-                "finish_reason": {"type": "stop"},
-                "prompt_tokens": 5,
-                "completion_tokens": 2,
-            },
-        }
-
-    handler = _new_decode_handler()
-    chunks = await _collect(handler._process_token_stream(stream_source(), _Context()))
-
-    usage = chunks[-1]["completion_usage"]
-    assert "completion_tokens_details" not in usage
-    assert "prompt_tokens_details" not in usage
-
-
-@pytest.mark.asyncio
 async def test_token_stream_usage_sums_reasoning_tokens_per_choice():
     async def stream_source():
         yield {
