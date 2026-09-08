@@ -73,11 +73,10 @@ Keep `pvc-helper` to fetch artifacts, or delete it after staging.
 Before benchmarking, uncomment the synthetic acceptance-length settings in the
 selected recipe's `deploy.yaml`, then restart the DGD so they take effect.
 
-Before applying, set `INFERENCE_URL` to
-`http://YOUR_DGD_NAME-frontend:8000/v1/chat/completions`, set the pod-affinity
-`nvidia.com/dynamo-graph-deployment-name` value to the same `YOUR_DGD_NAME`, and
-edit `CONCURRENCY` and `ARTIFACT_DIR` for the target run. The affinity
-co-locates the benchmark pod with the selected frontend.
+`perf.yaml` defaults to the SGLang GB300 aggregated target at concurrency 54.
+For every other target, set `INFERENCE_URL`, the pod-affinity DGD name,
+`CONCURRENCY`, and `ARTIFACT_DIR` before you apply the Job. The affinity places
+the benchmark pod with the selected frontend.
 
 ```bash
 kubectl apply -f perf.yaml -n "${NAMESPACE}"
@@ -133,7 +132,7 @@ kubectl wait --for=condition=Complete job/kimi-k3-sglang-gb300-agg-bench \
 | `TOKENIZER` | `moonshotai/Kimi-K3` | Tokenizer repository or path |
 | `INFERENCE_URL` | `http://kimi-k3-sglang-gb300-agg-agentic-frontend:8000/v1/chat/completions` | DGD chat-completions endpoint |
 | `TRACE_FILE` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` | Mooncake trace on the PVC |
-| `CONCURRENCY` | `64` | Profiling concurrency |
+| `CONCURRENCY` | `54` | Warmup and profiling concurrency |
 | `MAX_ISL` | `1048576` | Maximum synthesized input length |
 | `CAP_OSL` | `12000` | Maximum synthesized output length cap|
 | `ARTIFACT_DIR` | `/model-cache/aiperf-artifacts` | Use a unique directory per run |
