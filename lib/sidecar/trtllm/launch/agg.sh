@@ -39,7 +39,7 @@ while [[ $# -gt 0 ]]; do
             echo "  DYN_HTTP_PORT           Dynamo frontend port (default: 8000)"
             echo "  DYN_SYSTEM_PORT         Dynamo sidecar system port (default: 8081)"
             echo "  TRTLLM_GRPC_PORT        TensorRT-LLM gRPC port (default: 50051)"
-            echo "  TRTLLM_CONTEXT_LENGTH   Registered model context length (default: 4096)"
+            echo "  TRTLLM_CONTEXT_LENGTH   Model context length; overrides what the engine reports (default: 4096)"
             exit 0
             ;;
         *)

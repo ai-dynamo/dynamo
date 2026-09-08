@@ -256,12 +256,22 @@ fn transport(connections: usize) -> GrpcTransportConfig {
 }
 
 fn engine(endpoint: &str, connections: usize) -> TrtllmSidecarEngine {
+    engine_with_context_length(endpoint, connections, None)
+}
+
+/// `engine` with an explicit `--context-length`, as `from_parsed` would build it
+/// when the operator supplied one.
+fn engine_with_context_length(
+    endpoint: &str,
+    connections: usize,
+    context_length: Option<u32>,
+) -> TrtllmSidecarEngine {
     TrtllmSidecarEngine::new(
         GrpcEndpoint::parse(endpoint, "--grpc-endpoint").expect("valid test endpoint"),
         transport(connections),
         ConfiguredModel {
             source: "model-source".to_string(),
-            context_length: None,
+            context_length,
         },
     )
 }
@@ -630,6 +640,31 @@ async fn aggregated_generation_streams_delta_then_terminal() {
         sent.tokenized.as_ref().unwrap().input_token_ids,
         [11, 22, 33]
     );
+}
+
+#[tokio::test]
+async fn configured_context_length_overrides_the_engine_report() {
+    let server = FakeServer::start(FakeTrtllm::default()).await;
+    // The fake's GetModelInfo reports 4096, standing in for a release that
+    // under-reports `max_seq_len`; the operator configured 8192.
+    let engine = engine_with_context_length(&server.endpoint, 1, Some(8192));
+    let config = engine.start(0).await.expect("start");
+    assert_eq!(config.llm.unwrap().context_length, Some(8192));
+
+    let mut omits_max_tokens = request();
+    omits_max_tokens.stop_conditions.max_tokens = None;
+    let outputs = collect(&engine, omits_max_tokens).await;
+    assert_eq!(
+        outputs.last().unwrap().finish_reason,
+        Some(FinishReason::Stop)
+    );
+
+    let requests = server.service.requests.lock().await;
+    let sent = requests.first().expect("recorded request");
+    // The derived default is `context_length - prompt_len` over request()'s
+    // three prompt tokens: 8189 from the configured 8192, not the 4093 the
+    // engine-reported 4096 would give.
+    assert_eq!(sent.max_tokens, 8189);
 }
 
 #[tokio::test]

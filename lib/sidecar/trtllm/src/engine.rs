@@ -139,15 +139,29 @@ impl LLMEngine for TrtllmSidecarEngine {
         let client = TrtllmClient::connect(&self.endpoint, self.transport).await?;
         let connection_count = client.connection_count();
 
-        // Prefer a server-reported context length; fall back to the configured
-        // `--context-length`. GetModelInfo returns zero on current TRT-LLM
-        // releases, so the argument is currently the only source. The resolved
+        // An explicitly configured `--context-length` wins; the server-reported
+        // value is adopted only when the argument was omitted. Some TensorRT-LLM
+        // releases report `max_input_len` rather than the real maximum sequence
+        // length in `GetModelInfo.max_seq_len` (others return zero), so the
+        // operator must be able to correct what the server claims. The resolved
         // value backs the default-`max_tokens` path in `convert::max_tokens`.
         let mut model = self.model.clone();
-        match client.model_info().await {
-            Ok(Some(context_length)) => model.context_length = Some(context_length),
-            Ok(None) => {}
-            Err(error) => tracing::warn!(%error, "GetModelInfo failed; using --context-length"),
+        let reported = match client.model_info().await {
+            Ok(reported) => reported,
+            Err(error) => {
+                tracing::warn!(%error, "GetModelInfo failed; using --context-length");
+                None
+            }
+        };
+        match (model.context_length, reported) {
+            (Some(configured), Some(reported)) if configured != reported => tracing::warn!(
+                configured_context_length = configured,
+                engine_context_length = reported,
+                "--context-length disagrees with the context length TensorRT-LLM reported; \
+                 using the configured --context-length"
+            ),
+            (None, Some(reported)) => model.context_length = Some(reported),
+            _ => {}
         }
         if let Some(context_length) = model.context_length {
             let _ = self.context_length.set(context_length);

@@ -18,9 +18,12 @@ pub(crate) struct Args {
 
     /// Model maximum sequence length (input + output). Used to register the
     /// context length and to derive a default `max_tokens` when a request omits
-    /// one. TensorRT-LLM's `GetModelInfo` gRPC does not report this on current
-    /// releases (it returns zero), so supply it here; otherwise requests that
-    /// omit `max_tokens` are rejected. See the note in `convert.rs`.
+    /// one. A value supplied here takes precedence over the context length
+    /// TensorRT-LLM's `GetModelInfo` gRPC reports; that report is used only when
+    /// this argument is omitted, and a disagreement is logged at WARN. Current
+    /// releases report nothing usable (zero) or the maximum *input* length, so
+    /// supply it here; otherwise requests that omit `max_tokens` are rejected.
+    /// See the note in `convert.rs`.
     #[arg(long, env = "TRTLLM_CONTEXT_LENGTH")]
     pub context_length: Option<u32>,
 }
