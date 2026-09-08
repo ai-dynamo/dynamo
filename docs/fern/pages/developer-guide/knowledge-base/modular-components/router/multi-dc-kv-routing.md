@@ -11,7 +11,7 @@ Cuckoo-filter (CKF) projection for each pool, avoiding replication of every work
 stream across the WAN. Consumers decide how to query and use the published facts.
 
 For deployment, see [Deploy the DC KV Relay](../../../../kubernetes/kv-aware-routing/kv-dc-relay.md).
-For flags and defaults, see [DC KV Relay Configuration](../../../../reference/components/kv-dc-relay-configuration.md).
+For flags and defaults, see [Multi-Datacenter KV Relay Configuration](../../../../reference/components/kv-dc-relay-configuration.md).
 
 ## Architecture
 

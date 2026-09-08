@@ -1,12 +1,15 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: DC KV Relay Configuration
+title: Multi-Datacenter KV Relay Configuration
 subtitle: CLI arguments, environment variables, resource limits, and diagnostic endpoints
 ---
 
-**Experimental.** This reference describes `python -m dynamo.kv_dc_relay`. For deployment, see
-[Deploy the DC KV Relay](../../kubernetes/kv-aware-routing/kv-dc-relay.md); for the producer model,
+**Experimental.** The DC KV Relay collects worker KV-cache events within a data center and
+publishes compact cache-locality, serving-readiness, and load information for external consumers.
+
+This reference describes `python -m dynamo.kv_dc_relay`. For deployment, see
+[Deploy the DC KV Relay](../../kubernetes/kv-aware-routing/kv-dc-relay.md); for an overview and architecture,
 see [DC KV Relay Concepts](../../developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md).
 
 ## CLI Arguments

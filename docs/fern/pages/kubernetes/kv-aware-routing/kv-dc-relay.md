@@ -367,4 +367,4 @@ Remove only the resources created by this guide; retain the existing workers and
 kubectl -n dynamo delete -f kv-dc-relay.yaml
 ```
 
-For all CLI and tuning options, see [DC KV Relay Configuration](../../reference/components/kv-dc-relay-configuration.md).
+For all CLI and tuning options, see [Multi-Datacenter KV Relay Configuration](../../reference/components/kv-dc-relay-configuration.md).
