@@ -11,6 +11,7 @@ Following the torch_memory_saver pattern of using pure setuptools for extension 
 
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
+from setuptools_rust import Binding, RustExtension
 
 
 class BuildExtension(build_ext):
@@ -124,5 +125,13 @@ setup(
         ],
     },
     ext_modules=_create_ext_modules(),
+    rust_extensions=[
+        RustExtension(
+            "gms_rust_ring",
+            path="rust_ring/Cargo.toml",
+            binding=Binding.PyO3,
+        )
+    ],
     cmdclass={"build_ext": BuildExtension},
+    zip_safe=False,
 )
