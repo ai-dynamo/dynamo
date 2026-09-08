@@ -117,12 +117,14 @@ fill the local network Component according to the provider's documentation.
    directories from the private copy. For disaggregated provider networking,
    retain at most one of `provider-networking/gke-roce` or
    `provider-networking/ib` and delete the other provider source.
-4. Select exactly one networking concern: the generic `network-interface`
-   Component, one copied provider-networking Component, or a private
-   `components/networking/<topology>` leaf. Replace every placeholder in every
-   retained YAML file with discovered cluster values. Delete the unselected
-   networking directories and hook snippets. The copied tree must not retain
-   dormant, unfilled YAML that the preflight scan would report.
+4. Select at most one networking concern when the cluster requires one: the
+   generic `network-interface` Component, one copied provider-networking
+   Component, or a private `components/networking/<topology>` leaf. A portable
+   recipe that needs no cluster networking selects none. Replace every
+   placeholder in every retained YAML file with discovered cluster values.
+   Delete the unselected networking directories and hook snippets. The copied
+   tree must not retain dormant, unfilled YAML that the preflight scan would
+   report.
 5. Add only the guarded case-local patches required by that recipe.
 6. Run the placeholder scan, validator, render inspection, server-side dry run,
    and apply commands in this README.
@@ -202,8 +204,8 @@ List Components in this exact order:
 2. `registry-credentials`
 3. `probes`, when required
 4. `scheduling`
-5. exactly one generic `network-interface`, provider-networking, or private
-   networking Component
+5. at most one generic `network-interface`, provider-networking, or private
+   networking Component, when required
 6. `placement`, when required
 
 The order is part of the contract. In particular, never place `placement`
@@ -218,8 +220,11 @@ Aggregate placement requires Kubernetes 1.33+ with
 must omit the aggregate placement Component or use a separately qualified
 alternative.
 
-The one networking slot must follow `scheduling` and precede `placement`; a
-root `patches:` entry cannot replace that Component slot.
+A selected networking Component must follow `scheduling` and precede
+`placement`; a root `patches:` entry cannot replace that Component slot. The
+validator reports more than one networking Component, mixed generic and
+provider or private networking, or a misplaced networking Component as
+`networking-slot`.
 
 ### Root aggregate example
 
@@ -409,7 +414,7 @@ The validator checks that the build targets exactly one beta DGD, verifies the
 canonical component positions, rejects base-owned cluster fields and duplicate
 environment names, replays the selected Component and case patch operations in
 order, and compares that replay with the Kustomize render. It also enforces the
-single ordered networking slot, worker-only networking deltas, approved
+optional ordered networking slot, worker-only networking deltas, approved
 annotation and environment fields, and decoded request/limit equality. Failures
 use stable diagnostics including `networking-slot`, `networking-delta`, and
 `networking-resource-pair`. Its supported patch target is deliberately limited

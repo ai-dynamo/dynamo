@@ -1184,7 +1184,7 @@ fi"""
         "2. `registry-credentials`",
         "3. `probes`, when required",
         "4. `scheduling`",
-        "5. exactly one generic `network-interface`",
+        "5. at most one generic `network-interface`",
         "6. `placement`, when required",
     )
     component_positions = [readme.index(item) for item in ordered_components]

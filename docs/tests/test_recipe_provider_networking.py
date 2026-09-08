@@ -595,6 +595,18 @@ def test_validator_rejects_generic_and_provider_networking_slots(
     _assert_error(core._validate(case), "networking-slot")
 
 
+def test_validator_accepts_case_without_networking_component(tmp_path: Path) -> None:
+    case = core._filled_disagg_case(
+        tmp_path,
+        "trtllm/disagg/deploy-v1beta1.template.yaml",
+        None,
+    )
+    _remove_networking_component(case)
+
+    result = core._validate(case)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_validator_rejects_network_delta_hidden_under_scheduling_root(
     tmp_path: Path,
 ) -> None:

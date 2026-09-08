@@ -1312,32 +1312,11 @@ def _networking_error(
 def _validate_networking_contract(
     layers: Sequence[_PatchLayer], root_components: Sequence[_RootComponent]
 ) -> None:
-    network_roots = [
-        root for root in root_components if root.concern in _NETWORK_ROOT_CONCERNS
-    ]
-    if len(network_roots) > 1:
-        raise ValidationError(
-            "networking-slot",
-            "select at most one generic, provider, or private networking Component",
-            actual=[root.reference for root in network_roots],
-        )
-
-    network_root = network_roots[0] if network_roots else None
-    if network_root is not None:
-        scheduling_indices = [
-            root.index for root in root_components if root.concern == "scheduling"
-        ]
-        placement_indices = [
-            root.index for root in root_components if root.concern == "placement"
-        ]
-        if (scheduling_indices and network_root.index <= max(scheduling_indices)) or (
-            placement_indices and network_root.index >= min(placement_indices)
-        ):
-            raise ValidationError(
-                "networking-slot",
-                "networking must follow scheduling and precede placement",
-                actual=network_root.reference,
-            )
+    # _validate_root_contract owns the networking slot count and ordering rules.
+    network_root = next(
+        (root for root in root_components if root.concern in _NETWORK_ROOT_CONCERNS),
+        None,
+    )
 
     resource_values: Dict[Tuple[str, str, str], Any] = {}
     mounts: Dict[Tuple[str, str], int] = {}
