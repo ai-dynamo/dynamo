@@ -2793,6 +2793,10 @@ fn backend_error_response(backend_error: BackendErrorInfo, record_failure: bool)
             if render_record_failure {
                 record_local_failure(backend_http_error_class(status));
             }
+            let message = status
+                .canonical_reason()
+                .unwrap_or("Client error")
+                .to_string();
             (
                 status,
                 Json(ErrorMessage {
@@ -6084,7 +6088,7 @@ mod tests {
     }
 
     #[test]
-    fn unclassified_backend_error_preserves_trusted_client_message() {
+    fn unclassified_backend_error_hides_unmarked_message() {
         let backend_payload = std::io::Error::other("backend payload");
         let response = backend_error_response(
             BackendErrorInfo {
@@ -6099,7 +6103,8 @@ mod tests {
         );
 
         assert_eq!(response.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
-        assert_eq!(response.1.message, "unsupported image format");
+        assert_eq!(response.1.message, "Unsupported Media Type");
+        assert!(!response.1.message.contains("unsupported image format"));
     }
 
     #[test]
@@ -6596,16 +6601,32 @@ mod tests {
     }
 
     #[test]
-    fn frontend_invalid_argument_does_not_expose_diagnostic_details() {
-        const DIAGNOSTIC: &str = "request.messages must not be empty at /srv/frontend.rs:42";
+    fn frontend_invalid_argument_exposes_client_safe_details() {
+        const DIAGNOSTIC: &str = "request.messages must not be empty";
         let response =
             ErrorMessage::from_anyhow(invalid_argument(DIAGNOSTIC).into(), BACKUP_ERROR_MESSAGE);
 
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
-        assert_eq!(response.1.message, "Invalid request");
+        assert_eq!(response.1.message, DIAGNOSTIC);
         assert!(response.1.details.is_none());
         let body = serde_json::to_string(&response.1.0).expect("error response serializes");
-        assert!(!body.contains(DIAGNOSTIC));
+        assert!(body.contains(DIAGNOSTIC));
+    }
+
+    #[test]
+    fn frontend_public_message_hides_private_diagnostic() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .error_type(ErrorClass::InvalidRequest)
+            .diagnostic("PRIVATE_DIAGNOSTIC_SENTINEL=/srv/frontend.rs:42")
+            .public_message("request.messages must not be empty")
+            .build();
+        let response = ErrorMessage::from_anyhow(error.into(), BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.message, "request.messages must not be empty");
+        let body = serde_json::to_string(&response.1.0).expect("error response serializes");
+        assert!(!body.contains("PRIVATE_DIAGNOSTIC_SENTINEL"));
+        assert!(!body.contains("/srv/frontend.rs"));
     }
 
     #[test]
@@ -7939,6 +7960,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(error_response.1.code, 400);
             assert_eq!(error_response.1.message, "Bad Request");
+            assert!(!error_response.1.message.contains("bad input from client"));
         }
     }
 
