@@ -162,6 +162,98 @@ func TestComputeBetaDGDWorkersSpecHash_CanonicalizesExplicitRoleOrder(t *testing
 	assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, dgd), mustComputeBetaDGDWorkersSpecHash(t, reordered))
 }
 
+func TestComputeBetaDGDWorkersSpecHash_RolePodTemplatesCreateRollout(t *testing.T) {
+	t.Log("Build the same multinode role cardinality with a global template")
+	global := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: commonconsts.ComponentTypeWorker,
+			Multinode:     &v1alpha1.MultinodeSpec{NodeCount: 2},
+		},
+	}))
+	global.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+		Name: commonconsts.MainContainerName, Image: "global:1.5.0",
+	}}}}
+
+	t.Log("Replace the global source with complete role templates")
+	roleTemplates := global.DeepCopy()
+	roleTemplates.Spec.Components[0].PodTemplate = nil
+	roleTemplates.Spec.Components[0].Roles = []v1beta1.ComponentRoleSpec{
+		{
+			Name: v1beta1.ComponentRoleLeader,
+			PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+				Name: commonconsts.MainContainerName, Image: "leader:1.5.0",
+			}}}},
+		},
+		{
+			Name: v1beta1.ComponentRoleWorker,
+			PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+				Name: commonconsts.MainContainerName, Image: "worker:1.5.0",
+			}}}},
+		},
+	}
+
+	t.Log("Verify the template-source transition creates a worker generation")
+	assert.NotEqual(t, mustComputeBetaDGDWorkersSpecHash(t, global), mustComputeBetaDGDWorkersSpecHash(t, roleTemplates))
+}
+
+func TestComputeBetaDGDWorkersSpecHash_RolePodTemplatesAreOrderIndependent(t *testing.T) {
+	dgd := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: commonconsts.ComponentTypeWorker,
+			Multinode:     &v1alpha1.MultinodeSpec{NodeCount: 2},
+		},
+	}))
+	dgd.Spec.Components[0].PodTemplate = nil
+	dgd.Spec.Components[0].Roles = []v1beta1.ComponentRoleSpec{
+		{Name: v1beta1.ComponentRoleLeader, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: commonconsts.MainContainerName, Image: "leader:1.5.0"}}}}},
+		{Name: v1beta1.ComponentRoleWorker, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: commonconsts.MainContainerName, Image: "worker:1.5.0"}}}}},
+	}
+	reordered := dgd.DeepCopy()
+	reordered.Spec.Components[0].Roles[0], reordered.Spec.Components[0].Roles[1] = reordered.Spec.Components[0].Roles[1], reordered.Spec.Components[0].Roles[0]
+
+	assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, dgd), mustComputeBetaDGDWorkersSpecHash(t, reordered))
+}
+
+func TestComputeBetaDGDWorkersSpecHash_RoleRuntimeVersionOverrideCreatesRollout(t *testing.T) {
+	dgd := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: commonconsts.ComponentTypeWorker,
+			Multinode:     &v1alpha1.MultinodeSpec{NodeCount: 2},
+		},
+	}))
+	dgd.Spec.Components[0].PodTemplate = nil
+	dgd.Spec.Components[0].RuntimeVersionOverride = "1.5.0"
+	dgd.Spec.Components[0].Roles = []v1beta1.ComponentRoleSpec{
+		{Name: v1beta1.ComponentRoleLeader, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: commonconsts.MainContainerName, Image: "leader:latest"}}}}},
+		{Name: v1beta1.ComponentRoleWorker, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: commonconsts.MainContainerName, Image: "worker:latest"}}}}},
+	}
+	updated := dgd.DeepCopy()
+	updated.Spec.Components[0].RuntimeVersionOverride = "1.6.0"
+
+	assert.NotEqual(t, mustComputeBetaDGDWorkersSpecHash(t, dgd), mustComputeBetaDGDWorkersSpecHash(t, updated))
+}
+
+func TestComputeBetaDGDWorkersSpecHash_FlagsInjectionDefaultIsStable(t *testing.T) {
+	dgd := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: commonconsts.ComponentTypeWorker,
+			Multinode:     &v1alpha1.MultinodeSpec{NodeCount: 2},
+		},
+	}))
+
+	automatic := dgd.DeepCopy()
+	automatic.Spec.Components[0].Experimental = &v1beta1.ExperimentalSpec{
+		FlagsInjection: v1beta1.FlagsInjectionModeAutomatic,
+	}
+	assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, dgd), mustComputeBetaDGDWorkersSpecHash(t, automatic))
+
+	manual := dgd.DeepCopy()
+	manual.Spec.Components[0].Experimental = &v1beta1.ExperimentalSpec{
+		FlagsInjection: v1beta1.FlagsInjectionModeManual,
+	}
+	assert.NotEqual(t, mustComputeBetaDGDWorkersSpecHash(t, dgd), mustComputeBetaDGDWorkersSpecHash(t, manual))
+}
+
 func TestComputeBetaDGDWorkersSpecHash_IgnoresNonWorkers(t *testing.T) {
 	withFrontend := baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker":   {ComponentType: commonconsts.ComponentTypeWorker},

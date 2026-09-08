@@ -16,6 +16,37 @@ const (
 	mpiRunSecretName = "mpi-run-ssh-secret"
 )
 
+func TestTRTLLMBackend_ManualFlagsPreservesLaunchAndRetainsPodWiring(t *testing.T) {
+	backend := &TRTLLMBackend{MpiRunSecretName: mpiRunSecretName}
+	container := &corev1.Container{
+		Command:        []string{"python3"},
+		Args:           []string{"-m", "dynamo.trtllm", "--user-owned-multinode"},
+		LivenessProbe:  &corev1.Probe{},
+		ReadinessProbe: &corev1.Probe{},
+		StartupProbe:   &corev1.Probe{},
+	}
+	wantCommand := append([]string(nil), container.Command...)
+	wantArgs := append([]string(nil), container.Args...)
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		Experimental: &v1alpha1.ExperimentalSpec{FlagsInjection: v1alpha1.FlagsInjectionModeManual},
+		Multinode:    &v1alpha1.MultinodeSpec{NodeCount: 2},
+	})
+
+	require.NoError(t, backend.UpdateContainer(container, 2, RoleWorker, component, "test-service", &GroveMultinodeDeployer{}, staticContainerGPUCount(0)))
+	require.Equal(t, wantCommand, container.Command)
+	require.Equal(t, wantArgs, container.Args)
+	require.Nil(t, container.LivenessProbe)
+	require.NotNil(t, container.ReadinessProbe)
+	require.Nil(t, container.StartupProbe)
+	require.Len(t, container.VolumeMounts, 1)
+	require.Equal(t, mpiRunSecretName, container.VolumeMounts[0].Name)
+
+	podSpec := &corev1.PodSpec{Containers: []corev1.Container{*container}}
+	backend.UpdatePodSpec(podSpec, 2, RoleWorker, component, "test-service", &GroveMultinodeDeployer{})
+	require.Len(t, podSpec.Volumes, 1)
+	require.Equal(t, mpiRunSecretName, podSpec.Volumes[0].Name)
+}
+
 func TestShellQuoteForBashC(t *testing.T) {
 	tests := []struct {
 		name     string

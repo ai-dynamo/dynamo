@@ -7,6 +7,7 @@ package dynamo
 
 import (
 	"encoding/json"
+	"fmt"
 	"maps"
 
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -15,6 +16,89 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
+
+// EffectiveFlagsInjectionMode returns Automatic for a component that omits
+// the experimental flag-injection API, including a nil component.
+func EffectiveFlagsInjectionMode(component *v1beta1.DynamoComponentDeploymentSharedSpec) v1beta1.FlagsInjectionMode {
+	if component == nil || component.Experimental == nil || component.Experimental.FlagsInjection == "" {
+		return v1beta1.FlagsInjectionModeAutomatic
+	}
+	return component.Experimental.FlagsInjection
+}
+
+// IsManualFlagsInjection reports whether backend-specific multinode launch
+// injection is disabled for the component.
+func IsManualFlagsInjection(component *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+	return EffectiveFlagsInjectionMode(component) == v1beta1.FlagsInjectionModeManual
+}
+
+// ComponentPodTemplates returns every authored complete PodTemplate source.
+// A valid component has either the component template or role templates, never
+// both. The broader result keeps dependency discovery complete for invalid
+// objects observed before admission is active.
+func ComponentPodTemplates(component *v1beta1.DynamoComponentDeploymentSharedSpec) []*corev1.PodTemplateSpec {
+	if component == nil {
+		return nil
+	}
+	templates := make([]*corev1.PodTemplateSpec, 0, 1+len(component.Roles))
+	if component.PodTemplate != nil {
+		templates = append(templates, component.PodTemplate)
+	}
+	for i := range component.Roles {
+		if component.Roles[i].PodTemplate != nil {
+			templates = append(templates, component.Roles[i].PodTemplate)
+		}
+	}
+	return templates
+}
+
+// HasRolePodTemplates reports whether at least one authored role defines a
+// complete PodTemplate source.
+func HasRolePodTemplates(component *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+	if component == nil {
+		return false
+	}
+	for i := range component.Roles {
+		if component.Roles[i].PodTemplate != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// EffectiveComponentForRole returns an independently owned component whose
+// component-level PodTemplate is the complete source selected for role.
+// component must not be nil. Invalid or incomplete template-source modes are
+// returned as errors rather than repaired during lowering.
+func EffectiveComponentForRole(
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	role Role,
+) (*v1beta1.DynamoComponentDeploymentSharedSpec, error) {
+	if component == nil {
+		return nil, fmt.Errorf("component is nil")
+	}
+
+	// Global-template mode uses the same complete source for every role.
+	if component.PodTemplate != nil || !HasRolePodTemplates(component) {
+		return component.DeepCopy(), nil
+	}
+
+	// Role-template mode selects by semantic role name, not generated workload name.
+	for i := range component.Roles {
+		roleSpec := &component.Roles[i]
+		if roleSpec.Name != string(role) {
+			continue
+		}
+		if roleSpec.PodTemplate == nil {
+			return nil, fmt.Errorf("role %q has no podTemplate", role)
+		}
+		effective := component.DeepCopy()
+		effective.PodTemplate = roleSpec.PodTemplate.DeepCopy()
+		effective.Roles = nil
+		return effective, nil
+	}
+	return nil, fmt.Errorf("role %q has no complete podTemplate source", role)
+}
 
 // ComponentsByName returns the graph deployment components indexed by their
 // stable v1beta1 component name.
@@ -97,6 +181,18 @@ func GetMainContainerResources(component *v1beta1.DynamoComponentDeploymentShare
 // GetDCDKubeLabels returns the labels rendered onto Kubernetes workloads for a
 // DCD before controller-specific role labels are added.
 func GetDCDKubeLabels(dcd *v1beta1.DynamoComponentDeployment) map[string]string {
+	if dcd == nil {
+		return map[string]string{}
+	}
+	return GetDCDKubeLabelsForComponent(dcd, &dcd.Spec.DynamoComponentDeploymentSharedSpec)
+}
+
+// GetDCDKubeLabelsForComponent returns workload labels using component as the
+// selected PodTemplate metadata source.
+func GetDCDKubeLabelsForComponent(
+	dcd *v1beta1.DynamoComponentDeployment,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+) map[string]string {
 	labels := map[string]string{}
 	if dcd == nil {
 		return labels
@@ -105,7 +201,7 @@ func GetDCDKubeLabels(dcd *v1beta1.DynamoComponentDeployment) map[string]string 
 	objectLabels := dcd.GetLabels()
 	maps.Copy(labels, objectLabels)
 	maps.Copy(labels, GetDCDPreservedAlphaLabels(dcd))
-	maps.Copy(labels, GetPodTemplateLabels(&dcd.Spec.DynamoComponentDeploymentSharedSpec))
+	maps.Copy(labels, GetPodTemplateLabels(component))
 	AddBaseModelLabel(labels, dcd.Spec.ModelRef)
 	if subComponentType := GetDCDSubComponentType(dcd); subComponentType != "" {
 		labels[commonconsts.KubeLabelDynamoSubComponentType] = subComponentType
@@ -133,13 +229,25 @@ func GetDCDKubeLabels(dcd *v1beta1.DynamoComponentDeployment) map[string]string 
 // GetDCDKubeAnnotations returns the annotations rendered onto Kubernetes
 // workloads for a DCD.
 func GetDCDKubeAnnotations(dcd *v1beta1.DynamoComponentDeployment) map[string]string {
+	if dcd == nil {
+		return map[string]string{}
+	}
+	return GetDCDKubeAnnotationsForComponent(dcd, &dcd.Spec.DynamoComponentDeploymentSharedSpec)
+}
+
+// GetDCDKubeAnnotationsForComponent returns workload annotations using
+// component as the selected PodTemplate metadata source.
+func GetDCDKubeAnnotationsForComponent(
+	dcd *v1beta1.DynamoComponentDeployment,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+) map[string]string {
 	annotations := map[string]string{}
 	if dcd == nil {
 		return annotations
 	}
 
 	maps.Copy(annotations, GetDCDPreservedAlphaAnnotations(dcd))
-	maps.Copy(annotations, GetPodTemplateAnnotations(&dcd.Spec.DynamoComponentDeploymentSharedSpec))
+	maps.Copy(annotations, GetPodTemplateAnnotations(component))
 	AddBaseModelAnnotation(annotations, dcd.Spec.ModelRef)
 	delete(annotations, commonconsts.KubeAnnotationDynamoOperatorOriginVersion)
 	for _, annotationKey := range commonconsts.KubeTopologySourceAnnotationKeys() {

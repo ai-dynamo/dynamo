@@ -258,6 +258,9 @@ func restoreSharedAlphaOnlySimpleFields(dst *DynamoComponentDeploymentSharedSpec
 	if len(dst.Labels) == 0 {
 		dst.Labels = maps.Clone(preserved.Labels)
 	}
+	if dst.Experimental == nil && preserved.Experimental != nil {
+		dst.Experimental = preserved.Experimental.DeepCopy()
+	}
 }
 
 func restoreSharedAlphaOnlyPodFields(dst *DynamoComponentDeploymentSharedSpec, preserved *DynamoComponentDeploymentSharedSpec, mainContainerPresent bool) {
@@ -339,6 +342,12 @@ func saveSharedAlphaOnlySpec(src, save *DynamoComponentDeploymentSharedSpec, inc
 	}
 	if src.Ingress != nil {
 		save.Ingress = src.Ingress.DeepCopy()
+		hasSave = true
+	}
+	if src.Experimental != nil && src.Experimental.FlagsInjection == "" && alphaLegacyExperimentalPopulatesHub(src) {
+		// Preserve an explicitly empty nested block when legacy experimental
+		// fields make its v1beta1 representation otherwise indistinguishable.
+		save.Experimental = src.Experimental.DeepCopy()
 		hasSave = true
 	}
 	if len(src.Annotations) > 0 {
@@ -618,7 +627,7 @@ func saveSharedHubOnlySpec(src *v1beta1.DynamoComponentDeploymentSharedSpec, con
 			return err
 		}
 	}
-	if experimentalIsHubOnlyShape(src.Experimental) {
+	if experimentalNeedsWholeHubPreservation(src.Experimental) {
 		save.Experimental = src.Experimental.DeepCopy()
 	} else if src.Experimental != nil && src.Experimental.Grove != nil {
 		// The grove block has no v1alpha1 representation; preserve it sparsely
@@ -881,6 +890,9 @@ func ConvertFromComponentRoleSpec(src *ComponentRoleSpec, dst *v1beta1.Component
 		dst.ProviderOverride = &v1beta1.ProviderOverride{}
 		ConvertFromProviderOverride(src.ProviderOverride, dst.ProviderOverride)
 	}
+	if src.PodTemplate != nil {
+		dst.PodTemplate = src.PodTemplate.DeepCopy()
+	}
 }
 
 // ConvertToComponentRoleSpec converts one explicit component role from
@@ -892,6 +904,9 @@ func ConvertToComponentRoleSpec(src *v1beta1.ComponentRoleSpec, dst *ComponentRo
 	if src.ProviderOverride != nil {
 		dst.ProviderOverride = &ProviderOverride{}
 		ConvertToProviderOverride(src.ProviderOverride, dst.ProviderOverride)
+	}
+	if src.PodTemplate != nil {
+		dst.PodTemplate = src.PodTemplate.DeepCopy()
 	}
 }
 
@@ -1395,10 +1410,20 @@ func convertExperimentalToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1b
 		ConvertFromServiceCheckpointConfig(src.Checkpoint, exp.Checkpoint)
 	}
 
+	if src.Experimental != nil {
+		ensureExp().FlagsInjection = v1beta1.FlagsInjectionMode(src.Experimental.FlagsInjection)
+	}
+
 	dst.Experimental = exp
 }
 
 func convertExperimentalFromHub(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst *DynamoComponentDeploymentSharedSpec) {
+	if experimentalHasFlagsInjection(src.Experimental) || experimentalIsEmpty(src.Experimental) {
+		dst.Experimental = &ExperimentalSpec{
+			FlagsInjection: FlagsInjectionMode(src.Experimental.FlagsInjection),
+		}
+	}
+
 	if src.Experimental != nil && src.Experimental.GPUMemoryService != nil {
 		dst.GPUMemoryService = &GPUMemoryServiceSpec{}
 		ConvertToGPUMemoryServiceSpec(src.Experimental.GPUMemoryService, dst.GPUMemoryService)
@@ -1689,7 +1714,7 @@ func restoreSharedHubOnlyFields(dst, preserved *v1beta1.DynamoComponentDeploymen
 	}
 	dst.PodTemplate = podTemplate
 	restoreSharedHubOnlyFrontendSidecar(dst, preserved)
-	if dst.Experimental == nil && experimentalIsHubOnlyShape(preserved.Experimental) {
+	if dst.Experimental == nil && experimentalNeedsWholeHubPreservation(preserved.Experimental) {
 		dst.Experimental = preserved.Experimental.DeepCopy()
 	} else if dst.Experimental != nil && preserved.Experimental != nil &&
 		dst.Experimental.Grove == nil && preserved.Experimental.Grove != nil {
@@ -2021,11 +2046,33 @@ func hasContainerNamed(containers []corev1.Container, name string) bool {
 	return false
 }
 
-func experimentalIsHubOnlyShape(src *v1beta1.ExperimentalSpec) bool {
+func experimentalHasFlagsInjection(src *v1beta1.ExperimentalSpec) bool {
+	return src != nil && src.FlagsInjection != ""
+}
+
+func alphaLegacyExperimentalPopulatesHub(src *DynamoComponentDeploymentSharedSpec) bool {
 	return src != nil &&
+		(src.GPUMemoryService != nil && src.GPUMemoryService.Enabled ||
+			src.Failover != nil && src.Failover.Enabled ||
+			src.Checkpoint != nil)
+}
+
+func experimentalIsEmpty(src *v1beta1.ExperimentalSpec) bool {
+	return src != nil &&
+		src.FlagsInjection == "" &&
 		src.GPUMemoryService == nil &&
 		src.Failover == nil &&
-		src.Checkpoint == nil
+		src.Checkpoint == nil &&
+		src.Grove == nil
+}
+
+func experimentalNeedsWholeHubPreservation(src *v1beta1.ExperimentalSpec) bool {
+	return src != nil &&
+		src.FlagsInjection == "" &&
+		src.GPUMemoryService == nil &&
+		src.Failover == nil &&
+		src.Checkpoint == nil &&
+		src.Grove != nil
 }
 
 func nilIfEmptyPodTemplate(podTemplate *corev1.PodTemplateSpec) *corev1.PodTemplateSpec {

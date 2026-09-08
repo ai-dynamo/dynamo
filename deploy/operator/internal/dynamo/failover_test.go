@@ -428,7 +428,8 @@ func TestGmsResourceClaimTemplateConfigs_SingleNode(t *testing.T) {
 		{Name: "svc", Role: RoleMain, Rank: 0, Replicas: 2},
 	}
 
-	configs, err := gmsResourceClaimTemplateConfigs("VllmWorker", gmsSpec, resources, roles)
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{PodTemplate: podTemplateWithResources(resources)}
+	configs, err := gmsResourceClaimTemplateConfigs("VllmWorker", gmsSpec, component, roles)
 	require.NoError(t, err)
 
 	require.Len(t, configs, 1)
@@ -452,7 +453,8 @@ func TestGmsResourceClaimTemplateConfigs_Multinode(t *testing.T) {
 	}
 
 	t.Log("Build ResourceClaimTemplate configs from a mixed-case service name")
-	configs, err := gmsResourceClaimTemplateConfigs("VllmDecodeWorker", &v1beta1.GPUMemoryServiceSpec{}, resources, roles)
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{PodTemplate: podTemplateWithResources(resources)}
+	configs, err := gmsResourceClaimTemplateConfigs("VllmDecodeWorker", &v1beta1.GPUMemoryServiceSpec{}, component, roles)
 	require.NoError(t, err)
 
 	t.Log("Verify every rank has a normalized RFC 1123-compliant name")
@@ -471,6 +473,34 @@ func TestGmsResourceClaimTemplateConfigs_Multinode(t *testing.T) {
 	require.NotNil(t, req.Exactly)
 	assert.Equal(t, "gpu.nvidia.com", req.Exactly.DeviceClassName)
 	assert.Equal(t, int64(4), req.Exactly.Count)
+}
+
+func TestGmsResourceClaimTemplateConfigs_RoleSpecificGPUs(t *testing.T) {
+	leaderGPUs := corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): k8sresource.MustParse("8")}}
+	workerGPUs := corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): k8sresource.MustParse("4")}}
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{Roles: []v1beta1.ComponentRoleSpec{
+		{Name: v1beta1.ComponentRoleLeader, PodTemplate: podTemplateWithResources(leaderGPUs)},
+		{Name: v1beta1.ComponentRoleWorker, PodTemplate: podTemplateWithResources(workerGPUs)},
+	}}
+	roles := []ServiceRole{
+		{Name: "svc-gms-0", Role: RoleGMS, Rank: 0, Replicas: 1},
+		{Name: "svc-ldr", Role: RoleLeader, Rank: 0, Replicas: 1},
+		{Name: "svc-gms-1", Role: RoleGMS, Rank: 1, Replicas: 1},
+		{Name: "svc-wkr-1", Role: RoleWorker, Rank: 1, Replicas: 1},
+	}
+
+	configs, err := gmsResourceClaimTemplateConfigs("svc", &v1beta1.GPUMemoryServiceSpec{}, component, roles)
+	require.NoError(t, err)
+	require.Len(t, configs, 2)
+	assert.Equal(t, int64(8), configs[0].TemplateSpec.Spec.Devices.Requests[0].Exactly.Count)
+	assert.Equal(t, int64(4), configs[1].TemplateSpec.Spec.Devices.Requests[0].Exactly.Count)
+}
+
+func podTemplateWithResources(resources corev1.ResourceRequirements) *corev1.PodTemplateSpec {
+	return &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+		Name:      commonconsts.MainContainerName,
+		Resources: resources,
+	}}}}
 }
 
 func TestGmsResourceSharingEntries_SingleNode(t *testing.T) {

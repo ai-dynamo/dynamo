@@ -10,11 +10,11 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 3 Kubernetes API packages with 166 typed CRD and config sections.
+Dynamo publishes 3 Kubernetes API packages with 169 typed CRD and config sections.
 
 <CardGroup cols={3}>
-<Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">69 types</Card>
-<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">69 types</Card>
+<Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">71 types</Card>
+<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">70 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">28 types</Card>
 </CardGroup>
 
@@ -152,6 +152,12 @@ Name identifies the role within the enclosing component independently of generat
 <ParamField path="providerOverride" type="ProviderOverride">
 ProviderOverride configures the provider workload unit generated for this role. It is supported only for components embedded in a DGD.
 See [ProviderOverride](#provideroverride).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="podTemplate" type="PodTemplateSpec">
+PodTemplate defines the complete Pod configuration for this role. When any role supplies a PodTemplate, the component-level Pod configuration must be absent and every required Pod-producing role must supply one.
+See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -374,7 +380,7 @@ SubComponentType indicates the sub-role of this component (for example, "prefill
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
+RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when the main image in extraPodSpec or the selected role PodTemplates has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when a parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with every selected template's runtime version.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -462,6 +468,12 @@ See [MultinodeSpec](#multinodespec).
 <ParamField path="roles" type="ComponentRoleSpec array">
 Roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Their cardinality is derived from multinode.nodeCount. Omission preserves the implicit multinode role layout.
 See [ComponentRoleSpec](#componentrolespec).
+**Validation:** MaxItems: 2  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="experimental" type="ExperimentalSpec">
+Experimental groups opt-in preview features whose API shape and behavior may change without notice.
+See [ExperimentalSpec](#experimentalspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
@@ -541,7 +553,7 @@ SubComponentType indicates the sub-role of this component (for example, "prefill
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
+RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when the main image in extraPodSpec or the selected role PodTemplates has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when a parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with every selected template's runtime version.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -628,6 +640,12 @@ See [MultinodeSpec](#multinodespec).
 
 <ParamField path="roles" type="object array">
 Roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Their cardinality is derived from multinode.nodeCount. Omission preserves the implicit multinode role layout. Standalone DCD roles accept only `name`; `providerOverride` is a DGD-only provider context.
+**Validation:** MaxItems: 2  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="experimental" type="ExperimentalSpec">
+Experimental groups opt-in preview features whose API shape and behavior may change without notice.
+See [ExperimentalSpec](#experimentalspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
@@ -1220,6 +1238,21 @@ LoRAFallbackCovered indicates a legacy prefill endpoint that cannot manage LoRAs
 </ParamField>
 </Accordion>
 
+<Accordion id="experimentalspec" title="ExperimentalSpec">
+ExperimentalSpec groups opt-in preview features whose API shape and behavior
+may change without notice.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
+
+<ParamField path="flagsInjection" type="FlagsInjectionMode" default="Automatic">
+FlagsInjection controls backend-specific multinode launch injection. Automatic preserves operator-generated launch commands and topology flags; Manual preserves the authored role commands and arguments.
+See [FlagsInjectionMode](#flagsinjectionmode).
+**Validation:** Enum: [Automatic Manual]  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
 <Accordion id="extrapodmetadata" title="ExtraPodMetadata">
 
 **Kind:** `type`
@@ -1267,6 +1300,21 @@ See [GPUMemoryServiceMode](#gpumemoryservicemode).
 NumShadows is the number of shadow (standby) engine pods per rank. Total engine pods per rank = NumShadows + 1 (1 primary + NumShadows shadows). NumShadows is only meaningful for mode=interPod; intraPod uses a fixed 1 primary + 1 shadow sidecar layout and any value other than 1 is rejected at admission time.
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
+</Accordion>
+
+<Accordion id="flagsinjectionmode" title="FlagsInjectionMode">
+FlagsInjectionMode controls automatic backend-specific multinode launch injection.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [Automatic Manual]
+**Appears in:** [ExperimentalSpec](#experimentalspec)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>Automatic</Badge> FlagsInjectionModeAutomatic keeps backend-specific multinode launch injection enabled.
+- <Badge intent="note" minimal>Manual</Badge> FlagsInjectionModeManual disables backend-specific multinode launch injection.
 </Accordion>
 
 <Accordion id="frontendsidecarspec" title="FrontendSidecarSpec">
@@ -2224,7 +2272,7 @@ ComponentCheckpointConfig configures checkpointing for a DGD component.
 
 
 **Kind:** `type`
-**Appears in:** [ExperimentalSpec](#experimentalspec)
+**Appears in:** [ExperimentalSpec](#v1beta1-experimentalspec)
 
 <ParamField path="enabled" type="boolean" required={true}>
 enabled indicates whether checkpointing is enabled for this component. When true, omit checkpointRef for a DGD-managed automatic checkpoint or set checkpointRef to restore an existing PodSnapshot in the same namespace. Omit the checkpoint block, or set enabled=false, to disable checkpointing.
@@ -2411,6 +2459,12 @@ name identifies the role within the enclosing component independently of generat
 <ParamField path="providerOverride" type="ProviderOverride">
 providerOverride configures the provider workload unit generated for this role. It is supported only for components embedded in a DGD.
 See [ProviderOverride](#v1beta1-provideroverride).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="podTemplate" type="PodTemplateSpec">
+podTemplate defines the complete Pod configuration for this role. When any role supplies a podTemplate, the component-level podTemplate must be absent and every required Pod-producing role must supply one.
+See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -2606,7 +2660,7 @@ See [ComponentType](#componenttype).
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
+RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when the main image in the selected component or role PodTemplates has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when a parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with every selected template's runtime version.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2616,7 +2670,7 @@ globalDynamoNamespace places the component in the global Dynamo namespace rather
 </ParamField>
 
 <ParamField path="podTemplate" type="PodTemplateSpec">
-podTemplate defines the component's Pod configuration. New components must include a container named "main" with a non-empty image. Existing components created without a podTemplate may remain unchanged. The operator merges defaults into the main container. For DGD components whose main image tag is not a Dynamo semantic version, set runtimeVersionOverride explicitly. All other containers are user-managed sidecars and must specify their required fields, including image.
+podTemplate defines the complete Pod configuration shared by every role. It is mutually exclusive with roles[].podTemplate. New components must include a container named "main" with a non-empty image. Existing components created without a podTemplate may remain unchanged. The operator merges defaults into the main container. For DGD components whose main image tag is not a Dynamo semantic version, set runtimeVersionOverride explicitly. All other containers are user-managed sidecars and must specify their required fields, including image.
 See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -2640,7 +2694,7 @@ See [MultinodeSpec](#v1beta1-multinodespec).
 <ParamField path="roles" type="ComponentRoleSpec array">
 roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Their cardinality is derived from multinode.nodeCount. Omission preserves the implicit multinode role layout.
 See [ComponentRoleSpec](#v1beta1-componentrolespec).
-**Validation:** Optional: \&#123;\&#125;
+**Validation:** MaxItems: 2  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="sharedMemorySize" type="Quantity">
@@ -2668,7 +2722,7 @@ See [EPPConfig](#v1beta1-eppconfig).
 </ParamField>
 
 <ParamField path="frontendSidecar" type="string">
-frontendSidecar optionally designates a container in `podTemplate.spec.containers` as the frontend sidecar. The value must match the `name` of a container in that list; the operator merges its frontend-sidecar defaults (auto-generated Dynamo env vars, ports, health probes) into that container the same way it merges into `"main"`. The full container definition (image, args, envFrom, env) lives in `podTemplate` -- this eliminates the redundant `image`, `args`, `envFromSecret`, and `envs` fields from v1alpha1's `FrontendSidecarSpec`. The validation webhook rejects values that do not match any container name in `podTemplate.spec.containers`.
+frontendSidecar optionally designates a container in each selected PodTemplate as the frontend sidecar. The value must match the `name` of a container in the component-level podTemplate, or in every role podTemplate when those are used. The operator merges its frontend-sidecar defaults (auto-generated Dynamo env vars, ports, health probes) into that container the same way it merges into `"main"`. The full container definition (image, args, envFrom, env) lives in `podTemplate` -- this eliminates the redundant `image`, `args`, `envFromSecret`, and `envs` fields from v1alpha1's `FrontendSidecarSpec`. The validation webhook rejects values that do not match the selected templates.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2685,8 +2739,8 @@ See [TopologyConstraint](#v1beta1-topologyconstraint).
 </ParamField>
 
 <ParamField path="experimental" type="ExperimentalSpec">
-experimental groups opt-in preview features whose API shape and behavior may change in breaking ways between v1beta1 releases, including disappearing without a name-preserving graduation path. In v1beta1 this block holds `gpuMemoryService` and `failover` (which remain tightly coupled -- failover requires GMS -- and are expected to evolve together as the DRA-based GPU sharing story matures), and `checkpoint` (whose API shape is still settling). Fields here are explicitly NOT covered by the normal v1beta1 deprecation policy; do not depend on them for production workloads.
-See [ExperimentalSpec](#experimentalspec).
+experimental groups opt-in preview features whose API shape and behavior may change in breaking ways between v1beta1 releases, including disappearing without a name-preserving graduation path. In v1beta1 this block holds `flagsInjection`; `gpuMemoryService` and `failover` (which remain tightly coupled -- failover requires GMS -- and are expected to evolve together as the DRA-based GPU sharing story matures); and `checkpoint` (whose API shape is still settling). Fields here are explicitly NOT covered by the normal v1beta1 deprecation policy; do not depend on them for production workloads.
+See [ExperimentalSpec](#v1beta1-experimentalspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -2715,7 +2769,7 @@ See [ComponentType](#componenttype).
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
+RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when the main image in the selected component or role PodTemplates has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when a parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with every selected template's runtime version.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2725,7 +2779,7 @@ globalDynamoNamespace places the component in the global Dynamo namespace rather
 </ParamField>
 
 <ParamField path="podTemplate" type="PodTemplateSpec">
-podTemplate defines the component's Pod configuration. New components must include a container named "main" with a non-empty image. Existing components created without a podTemplate may remain unchanged. The operator merges defaults into the main container. For DGD components whose main image tag is not a Dynamo semantic version, set runtimeVersionOverride explicitly. All other containers are user-managed sidecars and must specify their required fields, including image.
+podTemplate defines the complete Pod configuration shared by every role. It is mutually exclusive with roles[].podTemplate. New components must include a container named "main" with a non-empty image. Existing components created without a podTemplate may remain unchanged. The operator merges defaults into the main container. For DGD components whose main image tag is not a Dynamo semantic version, set runtimeVersionOverride explicitly. All other containers are user-managed sidecars and must specify their required fields, including image.
 See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -2748,7 +2802,7 @@ See [MultinodeSpec](#v1beta1-multinodespec).
 
 <ParamField path="roles" type="object array">
 roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Their cardinality is derived from multinode.nodeCount. Omission preserves the implicit multinode role layout. Standalone DCD roles accept only `name`; `providerOverride` is a DGD-only provider context.
-**Validation:** Optional: \&#123;\&#125;
+**Validation:** MaxItems: 2  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="sharedMemorySize" type="Quantity">
@@ -2776,7 +2830,7 @@ See [EPPConfig](#v1beta1-eppconfig).
 </ParamField>
 
 <ParamField path="frontendSidecar" type="string">
-frontendSidecar optionally designates a container in `podTemplate.spec.containers` as the frontend sidecar. The value must match the `name` of a container in that list; the operator merges its frontend-sidecar defaults (auto-generated Dynamo env vars, ports, health probes) into that container the same way it merges into `"main"`. The full container definition (image, args, envFrom, env) lives in `podTemplate` -- this eliminates the redundant `image`, `args`, `envFromSecret`, and `envs` fields from v1alpha1's `FrontendSidecarSpec`. The validation webhook rejects values that do not match any container name in `podTemplate.spec.containers`.
+frontendSidecar optionally designates a container in each selected PodTemplate as the frontend sidecar. The value must match the `name` of a container in the component-level podTemplate, or in every role podTemplate when those are used. The operator merges its frontend-sidecar defaults (auto-generated Dynamo env vars, ports, health probes) into that container the same way it merges into `"main"`. The full container definition (image, args, envFrom, env) lives in `podTemplate` -- this eliminates the redundant `image`, `args`, `envFromSecret`, and `envs` fields from v1alpha1's `FrontendSidecarSpec`. The validation webhook rejects values that do not match the selected templates.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2793,8 +2847,8 @@ See [TopologyConstraint](#v1beta1-topologyconstraint).
 </ParamField>
 
 <ParamField path="experimental" type="ExperimentalSpec">
-experimental groups opt-in preview features whose API shape and behavior may change in breaking ways between v1beta1 releases, including disappearing without a name-preserving graduation path. In v1beta1 this block holds `gpuMemoryService` and `failover` (which remain tightly coupled -- failover requires GMS -- and are expected to evolve together as the DRA-based GPU sharing story matures), and `checkpoint` (whose API shape is still settling). Fields here are explicitly NOT covered by the normal v1beta1 deprecation policy; do not depend on them for production workloads.
-See [ExperimentalSpec](#experimentalspec).
+experimental groups opt-in preview features whose API shape and behavior may change in breaking ways between v1beta1 releases, including disappearing without a name-preserving graduation path. In v1beta1 this block holds `flagsInjection`; `gpuMemoryService` and `failover` (which remain tightly coupled -- failover requires GMS -- and are expected to evolve together as the DRA-based GPU sharing story matures); and `checkpoint` (whose API shape is still settling). Fields here are explicitly NOT covered by the normal v1beta1 deprecation policy; do not depend on them for production workloads.
+See [ExperimentalSpec](#v1beta1-experimentalspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -3268,7 +3322,7 @@ config allows specifying EPP `EndpointPickerConfig` directly as a structured obj
 </ParamField>
 </Accordion>
 
-<Accordion id="experimentalspec" title="ExperimentalSpec">
+<Accordion id="v1beta1-experimentalspec" title="ExperimentalSpec">
 ExperimentalSpec groups opt-in preview features whose API shape and behavior
 may change in breaking ways between v1beta1 releases (including disappearing
 without a name-preserving graduation path). Fields placed under
@@ -3280,6 +3334,12 @@ spec) once their API is considered stable.
 
 **Kind:** `type`
 **Appears in:** [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#v1beta1-dynamocomponentdeploymentspec)
+
+<ParamField path="flagsInjection" type="FlagsInjectionMode" default="Automatic">
+flagsInjection controls backend-specific multinode launch injection. Automatic preserves the operator-generated launch commands and topology flags. Manual preserves the authored role commands and arguments while retaining operator-owned Pod wiring.
+See [FlagsInjectionMode](#v1beta1-flagsinjectionmode).
+**Validation:** Enum: [Automatic Manual]  Optional: \&#123;\&#125;
+</ParamField>
 
 <ParamField path="gpuMemoryService" type="GPUMemoryServiceSpec">
 gpuMemoryService configures the GPU Memory Service (GMS). When set, GPU access for GMS clients is managed via DRA.
@@ -3317,7 +3377,7 @@ See ExperimentalSpec for the stability caveat.
 
 
 **Kind:** `type`
-**Appears in:** [ExperimentalSpec](#experimentalspec)
+**Appears in:** [ExperimentalSpec](#v1beta1-experimentalspec)
 
 <ParamField path="mode" type="GPUMemoryServiceMode" default="IntraPod">
 mode selects the failover deployment topology. Must match `spec.experimental.gpuMemoryService.mode` (or `spec.components[*].experimental.gpuMemoryService.mode` inside a DynamoGraphDeployment).
@@ -3355,6 +3415,21 @@ Mocker configures the simulated (mocker) backend for testing without GPUs.
 See [MockerSpec](#mockerspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
+</Accordion>
+
+<Accordion id="v1beta1-flagsinjectionmode" title="FlagsInjectionMode">
+FlagsInjectionMode controls automatic backend-specific multinode launch injection.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [Automatic Manual]
+**Appears in:** [ExperimentalSpec](#v1beta1-experimentalspec)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>Automatic</Badge> FlagsInjectionModeAutomatic keeps backend-specific multinode launch injection enabled.
+- <Badge intent="note" minimal>Manual</Badge> FlagsInjectionModeManual disables backend-specific multinode launch injection.
 </Accordion>
 
 <Accordion id="v1beta1-gmsclientpodspec" title="GMSClientPodSpec">
@@ -3398,7 +3473,7 @@ See ExperimentalSpec for the stability caveat.
 
 
 **Kind:** `type`
-**Appears in:** [ExperimentalSpec](#experimentalspec)
+**Appears in:** [ExperimentalSpec](#v1beta1-experimentalspec)
 
 <ParamField path="mode" type="GPUMemoryServiceMode" default="IntraPod">
 mode selects the GMS deployment topology.
@@ -3412,7 +3487,7 @@ deviceClassName is the DRA `DeviceClass` to request GPUs from.
 </ParamField>
 
 <ParamField path="extraClientContainers" type="string array">
-extraClientContainers lists additional user-declared containers that should be wired as GMS clients in service pods. SnapshotJob capture Pod clients are declared under checkpoint.job.gmsClientContainers. Every name must match a container in the enclosing component's podTemplate.spec.containers.
+extraClientContainers lists additional user-declared containers that should be wired as GMS clients in service pods. SnapshotJob capture Pod clients are declared under checkpoint.job.gmsClientContainers. Every name must match a container in the enclosing component's podTemplate, or in every role podTemplate when those are used.
 **Validation:** items:MaxLength: 63  items:MinLength: 1  items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -3458,7 +3533,7 @@ GroveSpec groups experimental Grove-specific rendering options.
 
 
 **Kind:** `type`
-**Appears in:** [ExperimentalSpec](#experimentalspec)
+**Appears in:** [ExperimentalSpec](#v1beta1-experimentalspec)
 
 <ParamField path="forceScalingGroup" type="boolean">
 forceScalingGroup opts a single-node component into rendering as a PodCliqueScalingGroup with one single-pod PodClique per replica. Scaling changes the scaling-group replica count. The first `minAvailable` replicas join the deployment's base PodGang together with its other base workloads; each replica beyond `minAvailable` gets its own PodGang, gang-scheduled separately from the rest of the deployment. `false` or omitted means automatic selection (multi-node and inter-pod GMS components use a scaling group, other single-node components a standalone PodClique), not "force PodClique". The pointer preserves field presence on the wire: `nil` and `false` are semantically identical, and consumers must dereference with `false`. Immutable after creation.

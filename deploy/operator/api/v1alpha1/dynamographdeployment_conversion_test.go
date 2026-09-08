@@ -152,6 +152,48 @@ func TestDGD_RoundTrip_Minimal(t *testing.T) {
 	}
 }
 
+func TestDGD_RoundTrip_RolePodTemplatesAndFlagsInjection(t *testing.T) {
+	for _, mode := range []v1beta1.FlagsInjectionMode{
+		"",
+		v1beta1.FlagsInjectionModeAutomatic,
+		v1beta1.FlagsInjectionModeManual,
+	} {
+		t.Run(string(mode), func(t *testing.T) {
+			src := &v1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "roles", Namespace: "ns"},
+				Spec: v1beta1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+						ComponentName: "decode",
+						ComponentType: v1beta1.ComponentTypeDecode,
+						Multinode:     &v1beta1.MultinodeSpec{NodeCount: 2},
+						Roles: []v1beta1.ComponentRoleSpec{
+							{
+								Name: v1beta1.ComponentRoleLeader,
+								PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+									Name: "main", Image: "leader:1.5.0",
+								}}}},
+							},
+							{
+								Name: v1beta1.ComponentRoleWorker,
+								PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+									Name: "main", Image: "worker:1.5.0",
+								}}}},
+							},
+						},
+						Experimental: &v1beta1.ExperimentalSpec{FlagsInjection: mode},
+					}},
+				},
+			}
+
+			got := roundTripFromV1beta1(t, src)
+			if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 func TestDGD_IntermediateHubEditsWinOverPreservedSpoke(t *testing.T) {
 	src := &DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "edit", Namespace: "ns"},

@@ -84,7 +84,7 @@ func ResolveGroveGPUShapes(
 type PodSpecMultiplicity = dra.PodSpecMultiplicity
 
 // ResolveGPUShape computes the engine width from the component's main
-// container and the replica cost from rendered Pod specs.
+// containers and the replica cost from rendered Pod specs.
 func ResolveGPUShape(
 	ctx context.Context,
 	reader client.Reader,
@@ -95,19 +95,11 @@ func ResolveGPUShape(
 	if component == nil {
 		return GPUShape{}, fmt.Errorf("component is nil")
 	}
-	enginePodSpec := &corev1.PodSpec{}
-	if component.PodTemplate != nil {
-		enginePodSpec = component.PodTemplate.Spec.DeepCopy()
-		enginePodSpec.Containers = nil
-		enginePodSpec.InitContainers = nil
-		if main := GetMainContainer(component); main != nil {
-			enginePodSpec.Containers = []corev1.Container{*main.DeepCopy()}
-		}
+	enginePods, err := engineMainContainerPods(component)
+	if err != nil {
+		return GPUShape{}, err
 	}
-	engineGPUs, err := dra.ResolvePodSetGPUCount(ctx, reader, namespace, []dra.PodSpecMultiplicity{{
-		PodSpec: enginePodSpec,
-		Count:   component.GetNumberOfNodes(),
-	}})
+	engineGPUs, err := dra.ResolvePodSetGPUCount(ctx, reader, namespace, enginePods)
 	if err != nil {
 		return GPUShape{}, err
 	}
@@ -118,4 +110,50 @@ func ResolveGPUShape(
 	}
 	shape.GPUsPerReplica = int64(replicaGPUs)
 	return shape, nil
+}
+
+// engineMainContainerPods returns only the engine containers and their
+// structural role multiplicities. Sidecar GPUs contribute to replica cost but
+// are not part of the inference-engine width.
+func engineMainContainerPods(component *v1beta1.DynamoComponentDeploymentSharedSpec) ([]dra.PodSpecMultiplicity, error) {
+	if !HasRolePodTemplates(component) {
+		return []dra.PodSpecMultiplicity{{
+			PodSpec: mainContainerPodSpec(component),
+			Count:   component.GetNumberOfNodes(),
+		}}, nil
+	}
+
+	roleCounts := []struct {
+		role  Role
+		count int32
+	}{
+		{role: RoleLeader, count: 1},
+		{role: RoleWorker, count: component.GetNumberOfNodes() - 1},
+	}
+	enginePods := make([]dra.PodSpecMultiplicity, 0, len(roleCounts))
+	for _, roleCount := range roleCounts {
+		effective, err := EffectiveComponentForRole(component, roleCount.role)
+		if err != nil {
+			return nil, err
+		}
+		enginePods = append(enginePods, dra.PodSpecMultiplicity{
+			PodSpec: mainContainerPodSpec(effective),
+			Count:   roleCount.count,
+		})
+	}
+	return enginePods, nil
+}
+
+func mainContainerPodSpec(component *v1beta1.DynamoComponentDeploymentSharedSpec) *corev1.PodSpec {
+	podSpec := &corev1.PodSpec{}
+	if component.PodTemplate == nil {
+		return podSpec
+	}
+	podSpec = component.PodTemplate.Spec.DeepCopy()
+	podSpec.Containers = nil
+	podSpec.InitContainers = nil
+	if main := GetMainContainer(component); main != nil {
+		podSpec.Containers = []corev1.Container{*main.DeepCopy()}
+	}
+	return podSpec
 }

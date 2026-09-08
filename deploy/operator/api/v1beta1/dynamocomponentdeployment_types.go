@@ -72,6 +72,7 @@ type DynamoComponentDeploymentSpec struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas unless replicas is 0"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)",message="minAvailable is immutable after creation"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.type) || (has(self.type) && self.type == oldSelf.type)",message="type is immutable after it is set"
+// +kubebuilder:validation:XValidation:rule="!has(self.roles) || !self.roles.exists(r, has(r.podTemplate)) || (!has(self.podTemplate) && self.roles.all(r, has(r.podTemplate)))",message="use either component podTemplate or complete role podTemplates"
 type DynamoComponentDeploymentSharedSpec struct {
 	// providerOverride configures the primary Grove unit representing this DGD
 	// component. With apiVersion `grove.io/v1alpha1`, target is
@@ -108,11 +109,12 @@ type DynamoComponentDeploymentSharedSpec struct {
 	ComponentType ComponentType `json:"type,omitempty"`
 
 	// RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's
-	// main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has
-	// no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the
-	// parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for
-	// example "1.4.0". It does not change the image. Setting or changing an override that resolves to
-	// version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
+	// main image. DGD admission requires it when the main image in the selected component or role
+	// PodTemplates has no parseable semantic-version tag; controller-generated DCDs may omit it. Set
+	// it also when a parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH
+	// value, for example "1.4.0". It does not change the image. Setting or changing an override that
+	// resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with every selected
+	// template's runtime version.
 	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`
 	// +optional
 	RuntimeVersionOverride string `json:"runtimeVersionOverride,omitempty"`
@@ -123,10 +125,11 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	GlobalDynamoNamespace bool `json:"globalDynamoNamespace,omitempty"`
 
-	// podTemplate defines the component's Pod configuration. New components must
-	// include a container named "main" with a non-empty image. Existing components
-	// created without a podTemplate may remain unchanged. The operator merges
-	// defaults into the main container.
+	// podTemplate defines the complete Pod configuration shared by every role. It
+	// is mutually exclusive with roles[].podTemplate. New components must include
+	// a container named "main" with a non-empty image. Existing components created
+	// without a podTemplate may remain unchanged. The operator merges defaults into
+	// the main container.
 	// For DGD components whose main image tag is not a Dynamo semantic version,
 	// set runtimeVersionOverride explicitly.
 	//
@@ -171,6 +174,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// leader and one worker role. Their cardinality is derived from multinode.nodeCount.
 	// Omission preserves the implicit multinode role layout.
 	// +optional
+	// +kubebuilder:validation:MaxItems=2
 	// +listType=map
 	// +listMapKey=name
 	Roles []ComponentRoleSpec `json:"roles,omitempty"`
@@ -205,16 +209,16 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	EPPConfig *EPPConfig `json:"eppConfig,omitempty"`
 
-	// frontendSidecar optionally designates a container in
-	// `podTemplate.spec.containers` as the frontend sidecar. The value must
-	// match the `name` of a container in that list; the operator merges its
+	// frontendSidecar optionally designates a container in each selected PodTemplate
+	// as the frontend sidecar. The value must match the `name` of a container in the
+	// component-level podTemplate, or in every role podTemplate when those are used.
+	// The operator merges its
 	// frontend-sidecar defaults (auto-generated Dynamo env vars, ports,
 	// health probes) into that container the same way it merges into `"main"`.
 	// The full container definition (image, args, envFrom, env) lives in
 	// `podTemplate` -- this eliminates the redundant `image`, `args`,
 	// `envFromSecret`, and `envs` fields from v1alpha1's `FrontendSidecarSpec`.
-	// The validation webhook rejects values that do not match any container
-	// name in `podTemplate.spec.containers`.
+	// The validation webhook rejects values that do not match the selected templates.
 	// +optional
 	FrontendSidecar *string `json:"frontendSidecar,omitempty"`
 
@@ -235,10 +239,10 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// experimental groups opt-in preview features whose API shape and
 	// behavior may change in breaking ways between v1beta1 releases,
 	// including disappearing without a name-preserving graduation path.
-	// In v1beta1 this block holds `gpuMemoryService` and `failover` (which
-	// remain tightly coupled -- failover requires GMS -- and are expected to
-	// evolve together as the DRA-based GPU sharing story matures), and
-	// `checkpoint` (whose API shape is still settling). Fields here are
+	// In v1beta1 this block holds `flagsInjection`; `gpuMemoryService` and
+	// `failover` (which remain tightly coupled -- failover requires GMS -- and
+	// are expected to evolve together as the DRA-based GPU sharing story
+	// matures); and `checkpoint` (whose API shape is still settling). Fields here are
 	// explicitly NOT covered by the normal v1beta1 deprecation policy; do not
 	// depend on them for production workloads.
 	// +optional

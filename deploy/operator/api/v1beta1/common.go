@@ -124,6 +124,12 @@ type ComponentRoleSpec struct {
 	// role. It is supported only for components embedded in a DGD.
 	// +optional
 	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
+
+	// podTemplate defines the complete Pod configuration for this role. When
+	// any role supplies a podTemplate, the component-level podTemplate must be
+	// absent and every required Pod-producing role must supply one.
+	// +optional
+	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 }
 
 // MultinodeSpec configures a multinode component.
@@ -253,6 +259,14 @@ type GroveSpec struct {
 // graduate out of this block (and become first-class fields on the shared
 // spec) once their API is considered stable.
 type ExperimentalSpec struct {
+	// flagsInjection controls backend-specific multinode launch injection.
+	// Automatic preserves the operator-generated launch commands and topology
+	// flags. Manual preserves the authored role commands and arguments while
+	// retaining operator-owned Pod wiring.
+	// +optional
+	// +kubebuilder:default=Automatic
+	FlagsInjection FlagsInjectionMode `json:"flagsInjection,omitempty"`
+
 	// gpuMemoryService configures the GPU Memory Service (GMS). When set, GPU
 	// access for GMS clients is managed via DRA.
 	// +optional
@@ -280,6 +294,17 @@ type ExperimentalSpec struct {
 	Checkpoint *ComponentCheckpointConfig `json:"checkpoint,omitempty"`
 }
 
+// FlagsInjectionMode controls automatic backend-specific multinode launch injection.
+// +kubebuilder:validation:Enum=Automatic;Manual
+type FlagsInjectionMode string
+
+const (
+	// FlagsInjectionModeAutomatic keeps backend-specific multinode launch injection enabled.
+	FlagsInjectionModeAutomatic FlagsInjectionMode = "Automatic"
+	// FlagsInjectionModeManual disables backend-specific multinode launch injection.
+	FlagsInjectionModeManual FlagsInjectionMode = "Manual"
+)
+
 // GPUMemoryServiceSpec configures the GPU Memory Service (GMS) for a
 // worker component. The operator injects GMS wiring and replaces the main
 // container's GPU resources with a DRA `ResourceClaim` for shared GPU access.
@@ -302,7 +327,7 @@ type GPUMemoryServiceSpec struct {
 	// extraClientContainers lists additional user-declared containers that should
 	// be wired as GMS clients in service pods. SnapshotJob capture Pod clients are
 	// declared under checkpoint.job.gmsClientContainers. Every name must match a container
-	// in the enclosing component's podTemplate.spec.containers.
+	// in the enclosing component's podTemplate, or in every role podTemplate when those are used.
 	// +optional
 	// +listType=set
 	// +kubebuilder:validation:items:MinLength=1

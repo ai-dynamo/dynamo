@@ -15,6 +15,64 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
+func TestVLLMBackendManualFlagsInjectionAddsOnlyMPMasterPort(t *testing.T) {
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		Experimental: &v1alpha1.ExperimentalSpec{FlagsInjection: v1alpha1.FlagsInjectionModeManual},
+		Multinode:    &v1alpha1.MultinodeSpec{NodeCount: 2},
+	})
+	for _, role := range []Role{RoleLeader, RoleWorker} {
+		t.Run(string(role), func(t *testing.T) {
+			container := &corev1.Container{
+				Command: []string{"vllm", "serve"},
+				Args:    []string{"test", "--distributed-executor-backend=mp"},
+			}
+			require.NoError(t, (&VLLMBackend{}).UpdateContainer(
+				container, 2, role, component, "engine", &GroveMultinodeDeployer{}, staticContainerGPUCount(0),
+			))
+
+			require.True(t, containerCommandLineHasArg(container, "--master-port", commonconsts.VLLMMpMasterPort))
+			commandLine := strings.Join(append(append([]string{}, container.Command...), container.Args...), " ")
+			for _, operatorGeneratedFlag := range []string{"--nnodes", "--node-rank", "--master-addr", "--headless"} {
+				require.NotContains(t, commandLine, operatorGeneratedFlag)
+			}
+		})
+	}
+}
+
+func TestVLLMBackendManualFlagsInjectionAddsMPMasterPortToShellCommand(t *testing.T) {
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		Experimental: &v1alpha1.ExperimentalSpec{FlagsInjection: v1alpha1.FlagsInjectionModeManual},
+		Multinode:    &v1alpha1.MultinodeSpec{NodeCount: 2},
+	})
+	container := &corev1.Container{
+		Command: []string{"/usr/bin/bash", "-c"},
+		Args:    []string{"exec vllm serve test --distributed-executor-backend=mp"},
+	}
+
+	require.NoError(t, (&VLLMBackend{}).UpdateContainer(
+		container, 2, RoleWorker, component, "engine", &GroveMultinodeDeployer{}, staticContainerGPUCount(0),
+	))
+	require.Equal(t, []string{"/usr/bin/bash", "-c"}, container.Command)
+	require.Len(t, container.Args, 1)
+	require.Contains(t, container.Args[0], "--master-port "+commonconsts.VLLMMpMasterPort)
+}
+
+func TestVLLMBackendManualFlagsInjectionAddsMPMasterPortToShellCommandOperand(t *testing.T) {
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		Experimental: &v1alpha1.ExperimentalSpec{FlagsInjection: v1alpha1.FlagsInjectionModeManual},
+		Multinode:    &v1alpha1.MultinodeSpec{NodeCount: 2},
+	})
+	container := &corev1.Container{
+		Command: []string{"/usr/bin/bash", "-c", "exec vllm serve test --distributed-executor-backend=mp"},
+	}
+
+	require.NoError(t, (&VLLMBackend{}).UpdateContainer(
+		container, 2, RoleWorker, component, "engine", &GroveMultinodeDeployer{}, staticContainerGPUCount(0),
+	))
+	require.Empty(t, container.Args)
+	require.Contains(t, container.Command[2], "--master-port "+commonconsts.VLLMMpMasterPort)
+}
+
 // TestShellQuotePOSIX_ArgvRoundTrip re-parses the quoted tokens through a real
 // /bin/sh and verifies every original argv element comes back byte-for-byte —
 // including embedded single quotes, whitespace, newlines, shell control

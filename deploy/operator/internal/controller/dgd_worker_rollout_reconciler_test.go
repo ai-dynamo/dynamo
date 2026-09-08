@@ -251,6 +251,49 @@ func TestGroveRenderDeploymentWorkerHashSuffix(t *testing.T) {
 	}
 }
 
+func TestGroveRenderDeploymentWorkerHashSuffixAppliesToEveryRoleTemplate(t *testing.T) {
+	t.Log("Build a multinode worker with complete leader and worker PodTemplates")
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: consts.ComponentTypeWorker,
+			Multinode:     &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2},
+			Roles: []nvidiacomv1alpha1.ComponentRoleSpec{
+				{
+					Name: nvidiacomv1alpha1.ComponentRoleLeader,
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name: consts.MainContainerName, Image: "leader:1.5.0",
+					}}}},
+				},
+				{
+					Name: nvidiacomv1alpha1.ComponentRoleWorker,
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name: consts.MainContainerName, Image: "worker:1.5.0",
+					}}}},
+				},
+			},
+		},
+	})
+
+	t.Log("Render the Grove worker hash suffix")
+	rendered, err := groveRenderDeployment(dgd, nil, true)
+	require.NoError(t, err)
+	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
+	require.NoError(t, err)
+
+	t.Log("Verify both complete sources receive the managed hash without creating a global template")
+	worker := rendered.GetComponentByName("worker")
+	require.NotNil(t, worker)
+	assert.Nil(t, worker.PodTemplate)
+	require.Len(t, worker.Roles, 2)
+	for i := range worker.Roles {
+		require.NotNil(t, worker.Roles[i].PodTemplate)
+		assert.Equal(t, wantHash, worker.Roles[i].PodTemplate.Labels[consts.KubeLabelDynamoWorkerHash])
+	}
+	for i := range dgd.GetComponentByName("worker").Roles {
+		assert.Empty(t, dgd.GetComponentByName("worker").Roles[i].PodTemplate.Labels)
+	}
+}
+
 func TestShouldTriggerRollingUpdate(t *testing.T) {
 	tests := []struct {
 		name         string

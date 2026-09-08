@@ -57,7 +57,7 @@ spec:
 </ParamField>
 
 <ParamField path="annotations" type="map[string]string">
-  Annotations propagated to all child resources (scaling adapters, DCDs, Deployments, and pod templates). Component-level `podTemplate` values take precedence on conflict.
+  Annotations propagated to all child resources (scaling adapters, DCDs, Deployments, and pod templates). Values on the selected component or role `podTemplate` take precedence on conflict.
 </ParamField>
 
 <ParamField path="labels" type="map[string]string">

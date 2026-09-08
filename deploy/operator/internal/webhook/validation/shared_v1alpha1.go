@@ -87,7 +87,9 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecV1alpha1(
 		); err != nil {
 			allErrs = append(allErrs, err)
 		}
-		if image == "" {
+		if hasRolePodTemplatesV1Alpha1(spec) {
+			allErrs = append(allErrs, v.validateRolePodTemplateRuntimeVersionV1Alpha1(spec, fldPath)...)
+		} else if image == "" {
 			allErrs = append(allErrs, field.Required(imagePath, "is required"))
 		} else if !v.toleratesMissingRuntimeVersionOverride(spec.ComponentType) &&
 			runtimeVersionOverrideRequired(image, spec.RuntimeVersionOverride) {
@@ -116,7 +118,9 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdateV1al
 		oldImage, _ := runtimeVersionImageAndPathV1Alpha1(oldSpec, fldPath)
 		overrideChanged := newSpec.RuntimeVersionOverride != oldSpec.RuntimeVersionOverride
 
-		if newImage == "" && oldImage != "" {
+		if hasRolePodTemplatesV1Alpha1(newSpec) {
+			allErrs = append(allErrs, v.validateRolePodTemplateRuntimeVersionUpdateV1Alpha1(newSpec, oldSpec, fldPath)...)
+		} else if newImage == "" && oldImage != "" {
 			allErrs = append(allErrs, field.Required(imagePath, "is required"))
 		} else if !v.toleratesMissingRuntimeVersionOverride(newSpec.ComponentType) &&
 			runtimeVersionOverrideRequired(newImage, newSpec.RuntimeVersionOverride) &&
@@ -138,6 +142,72 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdateV1al
 	}
 
 	return allErrs
+}
+
+func (v *sharedValidation) validateRolePodTemplateRuntimeVersionV1Alpha1(
+	spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	if v.toleratesMissingRuntimeVersionOverride(spec.ComponentType) || spec.RuntimeVersionOverride != "" {
+		return nil
+	}
+	for i := range spec.Roles {
+		image := rolePodTemplateMainImageV1Alpha1(&spec.Roles[i])
+		if image != "" && runtimeVersionOverrideRequired(image, spec.RuntimeVersionOverride) {
+			return field.ErrorList{field.Required(
+				fldPath.Child("runtimeVersionOverride"),
+				runtimeVersionOverrideRequiredMessage,
+			)}
+		}
+	}
+	return nil
+}
+
+func (v *sharedValidation) validateRolePodTemplateRuntimeVersionUpdateV1Alpha1(
+	newSpec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
+	oldSpec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	if v.toleratesMissingRuntimeVersionOverride(newSpec.ComponentType) || newSpec.RuntimeVersionOverride != "" {
+		return nil
+	}
+
+	oldImages := make(map[string]string, len(oldSpec.Roles))
+	for i := range oldSpec.Roles {
+		oldImages[oldSpec.Roles[i].Name] = rolePodTemplateMainImageV1Alpha1(&oldSpec.Roles[i])
+	}
+	for i := range newSpec.Roles {
+		role := &newSpec.Roles[i]
+		newImage := rolePodTemplateMainImageV1Alpha1(role)
+		if newImage != "" && runtimeVersionOverrideRequired(newImage, newSpec.RuntimeVersionOverride) &&
+			(newImage != oldImages[role.Name] || newSpec.RuntimeVersionOverride != oldSpec.RuntimeVersionOverride) {
+			return field.ErrorList{field.Required(
+				fldPath.Child("runtimeVersionOverride"),
+				runtimeVersionOverrideRequiredMessage,
+			)}
+		}
+	}
+	return nil
+}
+
+func rolePodTemplateMainImageV1Alpha1(role *nvidiacomv1alpha1.ComponentRoleSpec) string {
+	if role == nil || role.PodTemplate == nil {
+		return ""
+	}
+	index := mainContainerIndex(role.PodTemplate.Spec.Containers)
+	if index < 0 {
+		return ""
+	}
+	return role.PodTemplate.Spec.Containers[index].Image
+}
+
+func hasRolePodTemplatesV1Alpha1(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) bool {
+	for i := range spec.Roles {
+		if spec.Roles[i].PodTemplate != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // validateVolumeMountV1alpha1 validates volumeMount. volumeMount and fldPath must not be nil.

@@ -105,6 +105,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 			options.workloadProvider,
 		)...)
 	}
+	allErrs = append(allErrs, validateComponentPodTemplateMode(spec, fldPath)...)
 
 	// Reject invalid shared-memory quantities before resource-specific validation.
 	if spec.SharedMemorySize != nil && spec.SharedMemorySize.Sign() < 0 {
@@ -139,13 +140,24 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 
 	if spec.FrontendSidecar != nil {
 		frontendSidecarPath := fldPath.Child("frontendSidecar")
-		if spec.PodTemplate == nil {
+		if *spec.FrontendSidecar == "" {
+			allErrs = append(allErrs, field.Invalid(frontendSidecarPath, *spec.FrontendSidecar, "must not be empty"))
+		} else if dynamo.HasRolePodTemplates(spec) {
+			for i := range spec.Roles {
+				role := &spec.Roles[i]
+				if role.PodTemplate != nil && !hasContainerNamed(role.PodTemplate.Spec.Containers, *spec.FrontendSidecar) {
+					allErrs = append(allErrs, field.Invalid(
+						fldPath.Child("roles").Index(i).Child("podTemplate", "spec", "containers"),
+						*spec.FrontendSidecar,
+						"must contain the container named by frontendSidecar",
+					))
+				}
+			}
+		} else if spec.PodTemplate == nil {
 			allErrs = append(allErrs, field.Required(
 				fldPath.Child("podTemplate", "spec", "containers"),
 				"is required when frontendSidecar is set",
 			))
-		} else if *spec.FrontendSidecar == "" {
-			allErrs = append(allErrs, field.Invalid(frontendSidecarPath, *spec.FrontendSidecar, "must not be empty"))
 		} else if !hasContainerNamed(spec.PodTemplate.Spec.Containers, *spec.FrontendSidecar) {
 			allErrs = append(allErrs, field.Invalid(
 				frontendSidecarPath,
@@ -163,7 +175,9 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 				componentType: spec.ComponentType,
 				resources:     dynamo.GetMainContainerResources(spec),
 				containers:    podTemplateContainers(spec.PodTemplate),
+				podTemplates:  dynamo.ComponentPodTemplates(spec),
 				grovePathway:  options.grovePathway,
+				multinode:     spec.Multinode != nil,
 			},
 		)...)
 	}
@@ -177,7 +191,9 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		); err != nil {
 			allErrs = append(allErrs, err)
 		}
-		if image == "" {
+		if dynamo.HasRolePodTemplates(spec) {
+			allErrs = append(allErrs, v.validateRolePodTemplateRuntimeVersion(spec, fldPath)...)
+		} else if image == "" {
 			allErrs = append(allErrs, field.Required(imagePath, "is required"))
 		} else if !v.toleratesMissingRuntimeVersionOverride(string(spec.ComponentType)) &&
 			runtimeVersionOverrideRequired(image, spec.RuntimeVersionOverride) {
@@ -188,6 +204,26 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		}
 	}
 
+	return allErrs
+}
+
+// validateComponentPodTemplateMode enforces the two complete template-source
+// modes: one component template or one template on every required role.
+func validateComponentPodTemplateMode(
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	if !dynamo.HasRolePodTemplates(component) {
+		return nil
+	}
+
+	allErrs := field.ErrorList{}
+	if component.PodTemplate != nil {
+		allErrs = append(allErrs, field.Forbidden(
+			fldPath.Child("podTemplate"),
+			"cannot be combined with roles[].podTemplate; choose one complete PodTemplate source mode",
+		))
+	}
 	return allErrs
 }
 
@@ -307,6 +343,12 @@ func (v *sharedValidation) validateComponentRoles(
 	for i := range component.Roles {
 		role := &component.Roles[i]
 		rolePath := fldPath.Index(i)
+		if dynamo.HasRolePodTemplates(component) && role.PodTemplate == nil {
+			allErrs = append(allErrs, field.Required(
+				rolePath.Child("podTemplate"),
+				"is required on every role when role-specific PodTemplates are used",
+			))
+		}
 		scope, knownRole := provideroverride.ScopeForComponentRole(role.Name)
 		if !knownRole {
 			allErrs = append(allErrs, field.NotSupported(
@@ -362,12 +404,58 @@ func (v *sharedValidation) validateComponentRoleSpec(
 	fldPath *field.Path,
 	options componentRoleSpecValidationOptions,
 ) field.ErrorList {
+	allErrs := field.ErrorList{}
+	if role.PodTemplate != nil {
+		podTemplatePath := fldPath.Child("podTemplate")
+		allErrs = append(allErrs, apivalidation.ValidateAnnotations(
+			role.PodTemplate.Annotations,
+			podTemplatePath.Child("metadata", "annotations"),
+		)...)
+		if value, invalid := invalidVLLMDistributedExecutorBackendAnnotation(role.PodTemplate.Annotations); invalid {
+			allErrs = append(allErrs, field.Invalid(
+				podTemplatePath.Child("metadata", "annotations").Key(consts.KubeAnnotationVLLMDistributedExecutorBackend),
+				value,
+				`must be "mp" or "ray"`,
+			))
+		}
+		if _, exists := role.PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit]; exists {
+			allErrs = append(allErrs, field.Forbidden(
+				podTemplatePath.Child("metadata", "annotations").Key(consts.KubeAnnotationGPUPowerLimit),
+				"role-specific power limits are not supported by power-aware planning",
+			))
+		}
+
+		containersPath := podTemplatePath.Child("spec", "containers")
+		for i := range role.PodTemplate.Spec.Containers {
+			container := &role.PodTemplate.Spec.Containers[i]
+			if container.Name != consts.MainContainerName && container.Image == "" {
+				allErrs = append(allErrs, field.Required(
+					containersPath.Index(i).Child("image"),
+					"is required for sidecar containers",
+				))
+			}
+		}
+		for i := range role.PodTemplate.Spec.InitContainers {
+			if role.PodTemplate.Spec.InitContainers[i].Image == "" {
+				allErrs = append(allErrs, field.Required(
+					podTemplatePath.Child("spec", "initContainers").Index(i).Child("image"),
+					"is required for init containers",
+				))
+			}
+		}
+		mainIndex := mainContainerIndex(role.PodTemplate.Spec.Containers)
+		if mainIndex < 0 {
+			allErrs = append(allErrs, field.Required(containersPath, `must contain a container named "main"`))
+		} else if role.PodTemplate.Spec.Containers[mainIndex].Image == "" {
+			allErrs = append(allErrs, field.Required(containersPath.Index(mainIndex).Child("image"), "is required"))
+		}
+	}
 	if role.ProviderOverride == nil {
-		return nil
+		return allErrs
 	}
 
 	// Validate the provider fragment against this exact multinode role.
-	return v.validateProviderOverride(
+	return append(allErrs, v.validateProviderOverride(
 		role.ProviderOverride,
 		fldPath.Child("providerOverride"),
 		providerOverrideValidationOptions{
@@ -376,7 +464,7 @@ func (v *sharedValidation) validateComponentRoleSpec(
 			scope:            options.scope,
 			component:        options.component,
 		},
-	)
+	)...)
 }
 
 // validateEPPConfig validates deprecated Go-EPP config. config and fldPath must not be nil.
@@ -429,7 +517,32 @@ type experimentalSpecValidationOptions struct {
 	componentType nvidiacomv1beta1.ComponentType
 	resources     corev1.ResourceRequirements
 	containers    []corev1.Container
+	podTemplates  []*corev1.PodTemplateSpec
 	grovePathway  bool
+	multinode     bool
+}
+
+type podValidationShape struct {
+	resources  corev1.ResourceRequirements
+	containers []corev1.Container
+}
+
+func experimentalPodValidationShapes(options experimentalSpecValidationOptions) []podValidationShape {
+	if len(options.podTemplates) == 0 {
+		return []podValidationShape{{resources: options.resources, containers: options.containers}}
+	}
+	shapes := make([]podValidationShape, 0, len(options.podTemplates))
+	for _, podTemplate := range options.podTemplates {
+		shape := podValidationShape{containers: podTemplateContainers(podTemplate)}
+		for i := range shape.containers {
+			if shape.containers[i].Name == consts.MainContainerName {
+				shape.resources = shape.containers[i].Resources
+				break
+			}
+		}
+		shapes = append(shapes, shape)
+	}
+	return shapes
 }
 
 // validateExperimentalSpec validates experimental. experimental and fldPath must not be nil.
@@ -439,23 +552,63 @@ func (v *sharedValidation) validateExperimentalSpec(
 	options experimentalSpecValidationOptions,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
-	if experimental.GPUMemoryService != nil {
-		allErrs = append(allErrs, v.validateGPUMemoryServiceSpec(
-			experimental.GPUMemoryService,
-			fldPath.Child("gpuMemoryService"),
-			options.componentType,
-			options.resources,
-			options.containers,
-		)...)
+	if experimental.FlagsInjection == nvidiacomv1beta1.FlagsInjectionModeManual {
+		if !options.multinode || !dynamo.IsWorkerComponent(string(options.componentType)) {
+			allErrs = append(allErrs, field.Forbidden(
+				fldPath.Child("flagsInjection"),
+				"Manual is supported only for multinode worker, prefill, or decode components",
+			))
+		}
+		if experimental.GPUMemoryService != nil || experimental.Failover != nil {
+			allErrs = append(allErrs, field.Forbidden(
+				fldPath.Child("flagsInjection"),
+				"Manual cannot be combined with gpuMemoryService or failover because those layouts require operator-managed launch wiring",
+			))
+		}
 	}
-	if experimental.Failover != nil {
-		allErrs = append(allErrs, v.validateFailoverSpec(
-			experimental.Failover,
-			fldPath.Child("failover"),
-			experimental.GPUMemoryService,
-			options.componentType,
-			options.resources,
-		)...)
+	podShapes := experimentalPodValidationShapes(options)
+	if experimental.GPUMemoryService != nil &&
+		effectiveGMSMode(experimental.GPUMemoryService.Mode) == nvidiacomv1beta1.GMSModeIntraPod &&
+		len(podShapes) > 1 {
+		var commonGPUCount *int
+		for _, shape := range podShapes {
+			gpuCount, err := dra.ExtractGPUCountFromResourceRequirements(shape.resources)
+			if err != nil {
+				continue
+			}
+			if commonGPUCount == nil {
+				commonGPUCount = k8sptr.To(gpuCount)
+				continue
+			}
+			if *commonGPUCount != gpuCount {
+				allErrs = append(allErrs, field.Invalid(
+					fldPath.Child("gpuMemoryService"),
+					"",
+					"requires the same main-container GPU limit in every role PodTemplate for intra-pod GMS",
+				))
+				break
+			}
+		}
+	}
+	for _, shape := range podShapes {
+		if experimental.GPUMemoryService != nil {
+			allErrs = append(allErrs, v.validateGPUMemoryServiceSpec(
+				experimental.GPUMemoryService,
+				fldPath.Child("gpuMemoryService"),
+				options.componentType,
+				shape.resources,
+				shape.containers,
+			)...)
+		}
+		if experimental.Failover != nil {
+			allErrs = append(allErrs, v.validateFailoverSpec(
+				experimental.Failover,
+				fldPath.Child("failover"),
+				experimental.GPUMemoryService,
+				options.componentType,
+				shape.resources,
+			)...)
+		}
 	}
 	if experimental.Grove != nil {
 		allErrs = append(allErrs, v.validateGroveSpec(
@@ -754,7 +907,13 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 		oldImage, _ := runtimeVersionImageAndPath(oldComponent, fldPath)
 		overrideChanged := newComponent.RuntimeVersionOverride != oldComponent.RuntimeVersionOverride
 
-		if newImage == "" && oldImage != "" {
+		if dynamo.HasRolePodTemplates(newComponent) {
+			allErrs = append(allErrs, v.validateRolePodTemplateRuntimeVersionUpdate(
+				newComponent,
+				oldComponent,
+				fldPath,
+			)...)
+		} else if newImage == "" && oldImage != "" {
 			allErrs = append(allErrs, field.Required(imagePath, "is required"))
 		} else if !v.toleratesMissingRuntimeVersionOverride(string(newComponent.ComponentType)) &&
 			runtimeVersionOverrideRequired(newImage, newComponent.RuntimeVersionOverride) &&
@@ -777,6 +936,63 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 	return allErrs
 }
 
+func (v *sharedValidation) validateRolePodTemplateRuntimeVersionUpdate(
+	newComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	oldComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	if v.toleratesMissingRuntimeVersionOverride(string(newComponent.ComponentType)) || newComponent.RuntimeVersionOverride != "" {
+		return nil
+	}
+
+	oldImages := make(map[string]string, len(oldComponent.Roles))
+	for i := range oldComponent.Roles {
+		oldImages[oldComponent.Roles[i].Name] = rolePodTemplateMainImage(&oldComponent.Roles[i])
+	}
+	for i := range newComponent.Roles {
+		role := &newComponent.Roles[i]
+		newImage := rolePodTemplateMainImage(role)
+		if newImage != "" && runtimeVersionOverrideRequired(newImage, newComponent.RuntimeVersionOverride) &&
+			(newImage != oldImages[role.Name] || newComponent.RuntimeVersionOverride != oldComponent.RuntimeVersionOverride) {
+			return field.ErrorList{field.Required(
+				fldPath.Child("runtimeVersionOverride"),
+				runtimeVersionOverrideRequiredMessage,
+			)}
+		}
+	}
+	return nil
+}
+
+func rolePodTemplateMainImage(role *nvidiacomv1beta1.ComponentRoleSpec) string {
+	if role == nil || role.PodTemplate == nil {
+		return ""
+	}
+	index := mainContainerIndex(role.PodTemplate.Spec.Containers)
+	if index < 0 {
+		return ""
+	}
+	return role.PodTemplate.Spec.Containers[index].Image
+}
+
+func (v *sharedValidation) validateRolePodTemplateRuntimeVersion(
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	if v.toleratesMissingRuntimeVersionOverride(string(component.ComponentType)) || component.RuntimeVersionOverride != "" {
+		return nil
+	}
+	for i := range component.Roles {
+		image := rolePodTemplateMainImage(&component.Roles[i])
+		if image != "" && runtimeVersionOverrideRequired(image, component.RuntimeVersionOverride) {
+			return field.ErrorList{field.Required(
+				fldPath.Child("runtimeVersionOverride"),
+				runtimeVersionOverrideRequiredMessage,
+			)}
+		}
+	}
+	return nil
+}
+
 // validateComponentRolesUpdate permits equivalent role-mode migrations and
 // otherwise keeps explicit role names stable. Inputs must not be nil.
 func validateComponentRolesUpdate(
@@ -784,14 +1000,19 @@ func validateComponentRolesUpdate(
 	oldComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
 ) field.ErrorList {
-	// Permit representation-only implicit/explicit migrations, but require
-	// role-specific configuration changes to happen in a subsequent update.
+	// Permit implicit/explicit migrations with the same role cardinality.
+	// Role PodTemplates may be introduced in the same update and create a
+	// component rollout; provider identity changes remain separate.
 	if (newComponent.Roles == nil) != (oldComponent.Roles == nil) {
 		explicitComponent := newComponent
 		if explicitComponent.Roles == nil {
 			explicitComponent = oldComponent
 		}
-		if dynamo.ExplicitMultinodeRolesMatchImplicit(explicitComponent) {
+		roleShape := explicitComponent.DeepCopy()
+		for i := range roleShape.Roles {
+			roleShape.Roles[i].PodTemplate = nil
+		}
+		if dynamo.ExplicitMultinodeRolesMatchImplicit(roleShape) {
 			return nil
 		}
 		return field.ErrorList{field.Forbidden(

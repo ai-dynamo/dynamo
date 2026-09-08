@@ -12,6 +12,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -42,28 +43,30 @@ func componentReferencesDRAClaim(
 	objectName string,
 	template bool,
 ) bool {
-	if component.PodTemplate == nil {
+	if component == nil {
 		return false
 	}
-	containerClaimNames := make(map[string]struct{})
-	for _, container := range dra.AllContainers(&component.PodTemplate.Spec) {
-		for _, claim := range container.Resources.Claims {
-			containerClaimNames[claim.Name] = struct{}{}
+	for _, podTemplate := range dynamo.ComponentPodTemplates(component) {
+		containerClaimNames := make(map[string]struct{})
+		for _, container := range dra.AllContainers(&podTemplate.Spec) {
+			for _, claim := range container.Resources.Claims {
+				containerClaimNames[claim.Name] = struct{}{}
+			}
 		}
-	}
-	if len(containerClaimNames) == 0 {
-		return false
-	}
-
-	for _, podClaim := range component.PodTemplate.Spec.ResourceClaims {
-		if _, ok := containerClaimNames[podClaim.Name]; !ok {
+		if len(containerClaimNames) == 0 {
 			continue
 		}
-		if template && podClaim.ResourceClaimTemplateName != nil && *podClaim.ResourceClaimTemplateName == objectName {
-			return true
-		}
-		if !template && podClaim.ResourceClaimName != nil && *podClaim.ResourceClaimName == objectName {
-			return true
+
+		for _, podClaim := range podTemplate.Spec.ResourceClaims {
+			if _, ok := containerClaimNames[podClaim.Name]; !ok {
+				continue
+			}
+			if template && podClaim.ResourceClaimTemplateName != nil && *podClaim.ResourceClaimTemplateName == objectName {
+				return true
+			}
+			if !template && podClaim.ResourceClaimName != nil && *podClaim.ResourceClaimName == objectName {
+				return true
+			}
 		}
 	}
 	return false
@@ -72,12 +75,14 @@ func componentReferencesDRAClaim(
 // componentUsesDRAClaims reports whether any application or init container in the non-nil
 // component references DRA claims.
 func componentUsesDRAClaims(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) bool {
-	if component.PodTemplate == nil {
+	if component == nil {
 		return false
 	}
-	for _, container := range dra.AllContainers(&component.PodTemplate.Spec) {
-		if len(container.Resources.Claims) > 0 {
-			return true
+	for _, podTemplate := range dynamo.ComponentPodTemplates(component) {
+		for _, container := range dra.AllContainers(&podTemplate.Spec) {
+			if len(container.Resources.Claims) > 0 {
+				return true
+			}
 		}
 	}
 	return false
