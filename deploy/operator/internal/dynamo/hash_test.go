@@ -310,12 +310,20 @@ func TestComputeBetaDGDWorkersSpecHash_UsesResolvedRuntimeVersion(t *testing.T) 
 }
 
 func TestRuntimeFeatureGatesDoNotPrecedeVersionHashing(t *testing.T) {
-	t.Log("ensure runtime-gated rendering cannot change a legacy unhashed worker generation")
-	assert.GreaterOrEqual(
-		t,
-		runtimefeatures.CanaryHealthChecks.MinRuntimeVersion.Compare(minimumHashedRuntimeVersion),
-		0,
-	)
+	tests := []struct {
+		name string
+		gate runtimefeatures.Gate
+	}{
+		{name: "canary health checks", gate: runtimefeatures.CanaryHealthChecks},
+		{name: "increased worker failure threshold", gate: runtimefeatures.IncreasedWorkerFailureThreshold},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("ensure runtime-gated rendering cannot change a legacy unhashed worker generation")
+			assert.GreaterOrEqual(t, tt.gate.MinRuntimeVersion.Compare(minimumHashedRuntimeVersion), 0)
+		})
+	}
 }
 
 func TestComputeBetaDGDWorkersSpecHash_TracksPreservedAlphaResourceMetadata(t *testing.T) {
