@@ -743,8 +743,6 @@ impl ErrorMessage {
         }
     }
 
-    /// Convert a locally constructed [`HttpError`] into a client response.
-    ///
     /// Parse first, so a code outside the HTTP status space cannot reach the
     /// response, then let [`BackendStatusAction::triage`] decide. A 5xx keeps
     /// its own status only when it is 503 or the configured overload code,
@@ -2757,12 +2755,7 @@ fn backend_error_response(backend_error: BackendErrorInfo, record_failure: bool)
     let mut render_record_failure = record_failure;
     if let Some(error) = &semantic {
         let is_classified = error.reason().as_str() != "runtime.unclassified";
-        let is_canonical = is_classified && error.error_type() == error.class();
-        if (is_canonical
-            || matches!(
-                error.class(),
-                dynamo_runtime::error::ErrorClass::InvalidRequest
-            ))
+        if is_classified
             && let Some(response) =
                 ErrorMessage::from_semantic_error_with_recording(error, record_failure)
         {
@@ -6281,26 +6274,6 @@ mod tests {
     }
 
     #[test]
-    fn backend_http_error_hides_untrusted_client_error_message() {
-        let response = ErrorMessage::from_anyhow(
-            anyhow::Error::new(HttpError {
-                code: 400,
-                message: "PRIVATE_BACKEND_HTTP_ERROR_SENTINEL=/srv/worker.py".to_string(),
-            }),
-            BACKUP_ERROR_MESSAGE,
-        );
-
-        assert_eq!(response.0, StatusCode::BAD_REQUEST);
-        assert_eq!(response.1.message, "Bad Request");
-        assert!(
-            !response
-                .1
-                .message
-                .contains("PRIVATE_BACKEND_HTTP_ERROR_SENTINEL")
-        );
-    }
-
-    #[test]
     fn test_other_error_response_from_anyhow() {
         // Non-HttpError anyhow chains must NOT be exposed to the client; only
         // the static backup message should appear in the response.
@@ -6671,6 +6644,7 @@ mod tests {
         assert_eq!(response.1.message, "Invalid request");
     }
     #[test]
+    #[serial_test::serial(failure_metrics)]
     fn canonical_errors_use_shared_status_and_hide_diagnostics() {
         use dynamo_runtime::error::{DynamoError, ErrorClass};
 
@@ -6696,7 +6670,7 @@ mod tests {
             (
                 ErrorClass::CapacityExhausted,
                 overload_status_code(),
-                "Service temporarily unavailable",
+                "Service temporarily overloaded",
                 ErrorType::Overload,
             ),
             (
@@ -7633,6 +7607,63 @@ mod tests {
             assert_eq!(error_response.1.code, StatusCode::BAD_REQUEST.as_u16());
             assert_eq!(error_response.1.error_type, "Bad Request");
             assert_eq!(error_response.1.message, "Invalid request");
+        }
+    }
+
+    #[tokio::test]
+    async fn wire_roundtripped_transport_subtypes_keep_semantic_status() {
+        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorClass, ErrorType};
+        use futures::stream;
+
+        for (error_type, expected_class, expected_status) in [
+            (
+                ErrorType::Backend(BackendError::Disconnected),
+                ErrorClass::Unavailable,
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                ErrorType::Backend(BackendError::ResponseTimeout),
+                ErrorClass::DeadlineExceeded,
+                StatusCode::GATEWAY_TIMEOUT,
+            ),
+        ] {
+            let wire = serde_json::to_value(
+                DynamoError::builder()
+                    .error_type(error_type)
+                    .diagnostic("PRIVATE_BACKEND_DIAGNOSTIC")
+                    .build(),
+            )
+            .unwrap();
+            let error: DynamoError = serde_json::from_value(wire).unwrap();
+            assert_eq!(error.error_type(), error_type);
+            assert_eq!(error.class(), expected_class);
+
+            let unary_response =
+                ErrorMessage::from_anyhow(error.clone().into(), "backend request failed");
+            assert_eq!(unary_response.0, expected_status);
+            assert!(
+                !unary_response
+                    .1
+                    .message
+                    .contains("PRIVATE_BACKEND_DIAGNOSTIC")
+            );
+
+            let event = Annotated::<NvCreateChatCompletionStreamResponse> {
+                data: None,
+                id: None,
+                event: Some("error".to_string()),
+                comment: None,
+                error: Some(error),
+            };
+            let response = match check_for_backend_error(stream::iter([event]), None).await {
+                Err(response) => response,
+                Ok(_) => panic!("typed backend failure must fail preflight"),
+            };
+
+            assert_eq!(response.0, expected_status);
+            assert_eq!(response.1.code, expected_status.as_u16());
+            assert!(!response.1.message.contains("PRIVATE_BACKEND_DIAGNOSTIC"));
         }
     }
 

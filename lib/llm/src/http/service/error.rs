@@ -73,7 +73,7 @@ pub(crate) fn http_action_for_class(class: dynamo_runtime::error::ErrorClass) ->
         }
         ErrorClass::RateLimited => response(StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded"),
         ErrorClass::CapacityExhausted => {
-            response(overload_status_code(), "Service temporarily unavailable")
+            response(overload_status_code(), "Service temporarily overloaded")
         }
         ErrorClass::Unavailable => response(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -98,8 +98,7 @@ pub(crate) fn http_action_for_error(error: &DynamoError) -> ClientErrorAction {
     http_action_for_class(error.class())
 }
 
-/// Return the first DynamoError only when it already uses the canonical class
-/// vocabulary. Legacy variants continue through compatibility handling.
+/// Return the first classified DynamoError using its fail-closed semantic accessors.
 pub(crate) fn find_canonical_error_in_chain<'a>(
     err: &'a (dyn std::error::Error + 'static),
 ) -> Option<&'a DynamoError> {
@@ -108,14 +107,13 @@ pub(crate) fn find_canonical_error_in_chain<'a>(
     let mut current = Some(err);
     let mut fallback = None;
     while let Some(error) = current {
-        if let Some(dynamo_error) = error.downcast_ref::<DynamoError>() {
-            let raw_class = dynamo_error.error_type();
-            if raw_class == raw_class.normalized() && raw_class != ErrorClass::Cancelled {
-                if dynamo_error.reason().as_str() == "runtime.unclassified" {
-                    fallback.get_or_insert(dynamo_error);
-                } else {
-                    return Some(dynamo_error);
-                }
+        if let Some(dynamo_error) = error.downcast_ref::<DynamoError>()
+            && dynamo_error.class() != ErrorClass::Cancelled
+        {
+            if dynamo_error.reason().as_str() == "runtime.unclassified" {
+                fallback.get_or_insert(dynamo_error);
+            } else {
+                return Some(dynamo_error);
             }
         }
         current = error.source();

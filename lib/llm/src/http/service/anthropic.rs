@@ -774,34 +774,7 @@ async fn anthropic_messages(
         // Non-streaming path: aggregate stream into single response
 
         // Check first event for backend errors using the openai helper
-        let stream_with_check = super::openai::check_for_backend_error(engine_stream, None)
-            .await
-            .map_err(|(status, _json_err)| {
-                // check_for_backend_error has already sanitized the body and
-                // logged the backend detail; preserve its status when
-                // re-wrapping in Anthropic format. Status classification is
-                // delegated to SanitizedError::for_backend_status so the
-                // openai and anthropic surfaces stay aligned.
-                let details = format!("backend error event (status {})", status.as_u16());
-                match SanitizedError::for_backend_status(status) {
-                    Some(variant) => anthropic_sanitized_error_with_details(variant, details),
-                    // 4xx (non-499): preserve the client-error status; the
-                    // message is the canonical reason so we don't smuggle
-                    // backend text through. The "invalid_request_error"
-                    // argument is a fallback — anthropic_error remaps
-                    // 401/403/404/429 to their spec-correct types from the
-                    // status code itself.
-                    None => {
-                        tracing::error!(%status, "Anthropic backend error event");
-                        anthropic_error(
-                            ErrorClass::InvalidRequest,
-                            status,
-                            "invalid_request_error",
-                            status.canonical_reason().unwrap_or("Client error"),
-                        )
-                    }
-                }
-            })?;
+        let stream_with_check = check_for_anthropic_backend_error(engine_stream).await?;
 
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream_with_check.inspect(move |response| {
@@ -1148,6 +1121,33 @@ fn apply_anthropic_nvext_policy(
     };
 }
 
+async fn check_for_anthropic_backend_error<T>(
+    stream: impl futures::Stream<Item = Annotated<T>> + Send + 'static,
+) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Annotated<T>> + Send>>, Response>
+where
+    T: serde::Serialize + Send + 'static,
+{
+    super::openai::check_for_backend_error(stream, None)
+        .await
+        .map_err(|(status, _json_error)| anthropic_backend_error_response(status))
+}
+
+/// Re-render a backend error event whose semantic failure was already recorded.
+fn anthropic_backend_error_response(status: StatusCode) -> Response {
+    let details = format!("backend error event (status {})", status.as_u16());
+    match SanitizedError::for_backend_status(status) {
+        Some(variant) => anthropic_sanitized_error_with_details_unrecorded(variant, details),
+        None => {
+            tracing::error!(%status, "Anthropic backend error event");
+            anthropic_error_unrecorded(
+                status,
+                "invalid_request_error",
+                status.canonical_reason().unwrap_or("Client error"),
+            )
+        }
+    }
+}
+
 /// Build an Anthropic-formatted error response from a canonical
 /// [`SanitizedError`] variant. The status, public message, and Anthropic
 /// `error_type` all come from the variant; `details` are logged
@@ -1156,7 +1156,6 @@ fn anthropic_sanitized_error_with_details(
     err: SanitizedError,
     details: impl std::fmt::Display,
 ) -> Response {
-    let status = err.status();
     let class = match err {
         SanitizedError::Cancelled => ErrorClass::Cancelled,
         SanitizedError::Overloaded => ErrorClass::CapacityExhausted,
@@ -1164,6 +1163,14 @@ fn anthropic_sanitized_error_with_details(
         SanitizedError::Internal | SanitizedError::PreserveServerError(_) => ErrorClass::Internal,
     };
     super::openai::record_local_failure(class);
+    anthropic_sanitized_error_with_details_unrecorded(err, details)
+}
+
+fn anthropic_sanitized_error_with_details_unrecorded(
+    err: SanitizedError,
+    details: impl std::fmt::Display,
+) -> Response {
+    let status = err.status();
     if err.log_as_error() {
         tracing::error!(status = %status, "Anthropic {err}: {details}");
     } else {
@@ -1312,6 +1319,42 @@ mod tests {
             }
         }))
         .unwrap()
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(failure_metrics)]
+    async fn anthropic_backend_error_rewrap_records_once() {
+        use dynamo_runtime::error::{DynamoError, ErrorClass};
+
+        let error = DynamoError::builder()
+            .class(ErrorClass::BackendProtocol)
+            .diagnostic("PRIVATE_BACKEND_DIAGNOSTIC")
+            .build();
+        let counter = super::super::metrics::DYNAM_FAILURES_TOTAL
+            .with_label_values(&[error.class().as_str(), error.reason().as_str()]);
+        let before = counter.get();
+        let event = Annotated::<NvCreateChatCompletionStreamResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(error),
+        };
+        let response = match check_for_anthropic_backend_error(futures::stream::iter([event])).await
+        {
+            Err(response) => response,
+            Ok(_) => panic!("typed backend failure must fail preflight"),
+        };
+
+        assert_eq!(counter.get() - before, 1);
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body = axum::body::to_bytes(response.into_body(), get_body_limit())
+            .await
+            .unwrap();
+        let body: AnthropicErrorResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.error.error_type, "api_error");
+        assert_eq!(body.error.message, "Internal server error");
+        assert!(!body.error.message.contains("PRIVATE_BACKEND_DIAGNOSTIC"));
     }
 
     #[test]
