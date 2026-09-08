@@ -40,7 +40,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date
 from pathlib import Path
 
@@ -227,9 +227,21 @@ def pretty_date(yyyymmdd: str) -> str:
     return f"{MONTHS[d.month - 1]} {d.day}, {d.year}"
 
 
-def build() -> list[dict]:
+@dataclass(frozen=True)
+class NightlyBackendBuild:
+    """One selector row. Field names are the generated TS property names."""
+
+    backend: str
+    backendVersion: str
+    dynamo: str | None
+    date: str
+    tag: str
+    latest: bool
+
+
+def build() -> list[NightlyBackendBuild]:
     published = published_wheels()
-    rows: list[dict] = []
+    rows: list[NightlyBackendBuild] = []
 
     for fw in FRAMEWORKS:
         tags = dated_tags(fw.image)
@@ -295,20 +307,20 @@ def build() -> list[dict]:
                     chosen = (nights[0][0], nights[0][1], None)
                 yyyymmdd, sha, wheel = chosen
             rows.append(
-                {
-                    "backend": fw.backend,
-                    "backendVersion": version,
-                    "dynamo": wheel,
-                    "date": pretty_date(yyyymmdd),
-                    "tag": f"{yyyymmdd}-{sha}",
-                    "latest": index == 0,
-                }
+                NightlyBackendBuild(
+                    backend=fw.backend,
+                    backendVersion=version,
+                    dynamo=wheel,
+                    date=pretty_date(yyyymmdd),
+                    tag=f"{yyyymmdd}-{sha}",
+                    latest=index == 0,
+                )
             )
 
     return rows
 
 
-def as_ts(rows: list[dict]) -> str:
+def as_ts(rows: list[NightlyBackendBuild]) -> str:
     def ts(value) -> str:
         if value is None:
             return "null"
@@ -343,7 +355,7 @@ def as_ts(rows: list[dict]) -> str:
     for row in rows:
         fields = ", ".join(
             f"{key}: {ts(value)}"
-            for key, value in row.items()
+            for key, value in asdict(row).items()
             if not (key == "latest" and not value)
         )
         lines.append(f"  {{ {fields} }},")
@@ -357,8 +369,17 @@ def main() -> int:
     args = parser.parse_args()
 
     rows = build()
-    module = as_ts(rows)
+    if not rows:
+        # Every backend skipped. An empty module would reach the publish job's
+        # component sync and replace the live selector's nightly rows with
+        # nothing, so fail instead and leave the last published copy in place.
+        print(
+            "error: no nightly data resolved; refusing to write an empty module",
+            file=sys.stderr,
+        )
+        return 1
 
+    module = as_ts(rows)
     if args.stdout:
         print(module)
         return 0
@@ -366,8 +387,6 @@ def main() -> int:
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(module)
     print(f"{OUT.relative_to(REPO_ROOT)}: wrote {len(rows)} nightly build(s)")
-    if not rows:
-        warn("no nightly data resolved; the selector will hide its nightly channel")
     return 0
 
 
