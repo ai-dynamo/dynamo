@@ -114,6 +114,14 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
             raise ValueError(
                 "--tls-cert-path and --tls-key-path must be provided together"
             )
+        if self.frontend_route_extensions and (
+            self.interactive or self.kserve_grpc_server
+        ):
+            mode_flag = "--interactive" if self.interactive else "--kserve-grpc-server"
+            raise ValueError(
+                "--frontend-route-extension is only supported by the HTTP frontend, "
+                f"so it cannot be combined with {mode_flag}"
+            )
         if self.migration_limit < 0 or self.migration_limit > _U32_MAX:
             raise ValueError(
                 f"--migration-limit must be between 0 and {_U32_MAX} (0=disabled)"
