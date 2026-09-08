@@ -23,6 +23,7 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/n2-client"
           "$RUNNER_TEMP/n2-client/bin/pip" install requests==2.32.5
           "$RUNNER_TEMP/n2-client/bin/python" -m unittest discover -s scripts/compatibility -v
+          "$RUNNER_TEMP/n2-client/bin/python" -O -m unittest discover -s scripts/compatibility -v
           "$RUNNER_TEMP/n2-client/bin/python" scripts/compatibility/runner.py \
             --frontend-image candidate-frontend --worker-image candidate-worker \
             --output "$RUNNER_TEMP/unused" --plan

@@ -46,7 +46,7 @@ runs at a time, using GPU 0.
   and indices. HTTP errors and strings returned for float requests fail; the
   client does not normalize an incompatible response.
 - **Chat Completions:** Qwen2.5-0.5B-Instruct; unary, streaming, `max_tokens=1`,
-  a repeated request, and `stop`. Validate content, token limits, finish reasons,
+  and `stop`. Validate content, token limits, finish reasons,
   stream errors and `[DONE]`. Derive a stop string from the unary response's
   prefix and repeat at temperature 0; require an empty stopped response with
   finish reason `stop`. This assumes deterministic greedy output for the same
@@ -83,7 +83,8 @@ manifest. The supplied images must correspond to the target release line.
 
 ## CI and evidence
 
-`compatibility-contract-tests.yml` runs CPU harness tests on relevant PRs.
+`compatibility-contract-tests.yml` runs CPU harness tests on relevant PRs in
+both normal and optimized (`python -O`) mode.
 The GPU job lives in `pr.yaml`, on approved `pull-request/N` pushes, and waits
 for both `frontend-build` and `sglang-build`. It passes the runtime images tagged
 with that exact PR source SHA to `cross-version-compatibility.yml`; it never

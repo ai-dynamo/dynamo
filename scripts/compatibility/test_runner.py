@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from runner import (
+    ContractError,
     DockerStack,
     main,
     matrix,
@@ -65,7 +66,7 @@ class CompatibilityTests(unittest.TestCase):
         validate_embedding(body, 1, 2)
         for value in ("AACAPwAAAEA=", [float("nan"), 2], [True, 2], [1.0]):
             body["data"][0]["embedding"] = value
-            with self.assertRaises(AssertionError):
+            with self.assertRaises(ContractError):
                 validate_embedding(body, 1, 2)
 
     def test_chat_contract(self):
@@ -80,10 +81,10 @@ class CompatibilityTests(unittest.TestCase):
             "usage": {"completion_tokens": 2},
         }
         validate_chat(body, 32)
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(ContractError):
             validate_chat(body, 1)
         body["choices"][0]["finish_reason"] = "error"
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(ContractError):
             validate_chat(body, 32)
 
     def test_stop_contract(self):
@@ -99,11 +100,11 @@ class CompatibilityTests(unittest.TestCase):
         }
         validate_chat(body, 32, "Hello")
         body["choices"][0]["message"]["content"] = "Hello world"
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(ContractError):
             validate_chat(body, 32, "Hello")
         body["choices"][0]["message"]["content"] = ""
         body["choices"][0]["finish_reason"] = "length"
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(ContractError):
             validate_chat(body, 32, "Hello")
 
     def test_stream_must_finish_and_not_hide_errors(self):
@@ -121,7 +122,7 @@ class CompatibilityTests(unittest.TestCase):
             ["event: error"],
             valid + [valid[0]],
         ]:
-            with self.assertRaises(AssertionError):
+            with self.assertRaises(ContractError):
                 validate_stream(invalid)
 
     def test_probe_records_failures_and_runs_remaining_cases(self):
@@ -160,6 +161,59 @@ class CompatibilityTests(unittest.TestCase):
             self.assertEqual(len(results), 3)
             self.assertTrue(all(r["status"] == "failed" for r in results))
             self.assertEqual(len(list(Path(directory).glob("*.json"))), 3)
+
+    def test_chat_probe_runs_derived_stop_exactly_once(self):
+        seen = []
+
+        class Response:
+            status_code = 200
+
+            def __init__(self, body):
+                self.text = json.dumps(
+                    {
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "" if "stop" in body else "Hello",
+                                },
+                                "finish_reason": "stop",
+                            }
+                        ],
+                        "usage": {"completion_tokens": 1},
+                    }
+                )
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return json.loads(self.text)
+
+            def iter_lines(self):
+                yield b'data: {"choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":"stop"}]}'
+                yield b"data: [DONE]"
+
+        def post(url, json, **kwargs):
+            seen.append(json)
+            return Response(json)
+
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "runner.requests.post", side_effect=post
+        ):
+            result = probe("http://unused", "chat", {"id": "model"}, Path(directory))
+        self.assertEqual(
+            [r["name"] for r in result], ["unary", "stream", "limited", "stop"]
+        )
+        self.assertTrue(all(r["status"] == "passed" for r in result), result)
+        self.assertEqual([r["stop"] for r in seen if "stop" in r], ["Hell"])
 
     def test_all_pairs_run_and_failure_is_reported(self):
         config = {

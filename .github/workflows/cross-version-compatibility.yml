@@ -58,7 +58,8 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/n2-client"
           "$RUNNER_TEMP/n2-client/bin/pip" install requests==2.32.5 huggingface-hub==0.34.4
       - name: Run CPU contract tests
-        run: "$RUNNER_TEMP/n2-client/bin/python -m unittest discover -s scripts/compatibility -v"
+        run: |
+          "$RUNNER_TEMP/n2-client/bin/python" -m unittest discover -s scripts/compatibility -v
       - name: Run both scenarios across the N-2 window
         env:
           FRONTEND_IMAGE: ${{ inputs.frontend_image }}
