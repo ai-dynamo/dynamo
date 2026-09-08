@@ -69,6 +69,10 @@ type CompilationCacheConfig struct {
 	// framework.
 	// +optional
 	MountPath string `json:"mountPath,omitempty"`
+
+	// subPath override for the complication cache volume mount.
+	// +optional
+	SubPath string `json:"subPath,omitempty"`
 }
 
 // ProviderOverride carries a sparse provider-native fragment for its DGD context.
