@@ -96,7 +96,20 @@ class SelectionRecorder:
         self.out_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
 
 
+ENV_SITE = "DYNAMO_TEST_SITE"
+
+
 def pytest_addoption(parser):
+    parser.addoption(
+        "--site",
+        default=None,
+        help=(
+            "Which site to run against: where the system under test lives and "
+            "who owns its lifecycle. Falls back to $DYNAMO_TEST_SITE, then to "
+            "the built-in 'local' (all-in-one, impose). Selecting a site must "
+            "never change which tests are selected -- only what they can do."
+        ),
+    )
     parser.addoption(
         "--dynamo-selection-out",
         default=None,
@@ -108,6 +121,22 @@ def pytest_addoption(parser):
 
 
 def pytest_configure(config):
+    # Resolve the site once, here, so a failure names an unknown site at startup
+    # rather than in the middle of a run. Stashed rather than global: two pytest
+    # sessions in one process must not share it.
+    from .site import UnknownSite, resolve
+
+    try:
+        config._dynamo_site = resolve(  # noqa: SLF001 - pytest's own stash idiom
+            config.getoption("--site", default=None) or os.environ.get(ENV_SITE)
+        )
+    except UnknownSite as exc:
+        # A mistyped option is a usage error, not a harness crash. Raising
+        # UnknownSite out of pytest_configure gets reported as INTERNALERROR
+        # with a traceback, which buries the one useful line -- the list of
+        # sites that do exist.
+        raise pytest.UsageError(str(exc).strip('"')) from None
+
     out = config.getoption("--dynamo-selection-out", default=None) or os.environ.get(
         ENV_OUT
     )

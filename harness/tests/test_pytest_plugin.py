@@ -165,3 +165,66 @@ def test_the_plugin_is_inert_without_the_option(project):
     )
     assert result.returncode == 0, result.stdout
     assert not (project / "selection.json").exists()
+
+
+# ----------------------------------------------------------------- --site
+
+
+def run_pytest(project, *args):
+    return subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            str(project),
+            "-p",
+            "dynamo_test.pytest_plugin",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            *args,
+        ],
+        cwd=project,
+        env={"PYTHONPATH": HARNESS, "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_an_unknown_site_is_a_usage_error_not_a_crash(project):
+    """A mistyped option must not read as a harness bug.
+
+    Letting `UnknownSite` escape `pytest_configure` gets reported as
+    INTERNALERROR with a traceback, which buries the one useful line: the list
+    of sites that do exist.
+    """
+    result = run_pytest(project, "--site", "nosuch")
+    combined = result.stdout + result.stderr
+    assert "INTERNALERROR" not in combined
+    assert "no site named 'nosuch'" in combined
+    assert "known sites: local" in combined
+
+
+def test_selecting_a_site_does_not_change_which_tests_run(project):
+    """The invariant that makes the ladder safe to adopt incrementally.
+
+    A site decides what a test *can do*, never which tests are chosen. If
+    picking a site silently dropped tests, every tier comparison would be
+    measuring a different suite and the whole ladder would be untrustworthy.
+    """
+    bare = collect(project, "--dry-run")
+    sited = collect(project, "--dry-run", "--site", "local")
+    assert bare["selected"] == sited["selected"]
+    assert [t["nodeid"] for t in bare["tests"]] == [t["nodeid"] for t in sited["tests"]]
+
+
+def test_the_default_site_needs_no_flag(project):
+    """Running as the suite runs today must require no site definition.
+
+    Exit 5 is "no tests ran", which is what this fixture project produces under
+    --dry-run because its conftest clears the item list. What matters is that
+    the plugin contributed neither a usage error (4) nor an internal error (3).
+    """
+    result = run_pytest(project, "--dry-run")
+    assert result.returncode not in (3, 4), result.stdout + result.stderr
+    assert "INTERNALERROR" not in result.stdout + result.stderr

@@ -24,6 +24,15 @@ from .roles import (
     UnknownRole,
     at,
 )
+from .site import (
+    BUILTIN_SITES,
+    LOCAL,
+    Capability,
+    Ownership,
+    Site,
+    Topology,
+    UnknownSite,
+)
 from .sut import Handle, NotGranted, PhaseError, Provider, Sut
 from .verbs import (
     REGISTRY,
@@ -75,6 +84,14 @@ __all__ = [
     "RoleTable",
     "Sel",
     "UnknownRole",
+    # sites and topology
+    "BUILTIN_SITES",
+    "LOCAL",
+    "Capability",
+    "Ownership",
+    "Site",
+    "Topology",
+    "UnknownSite",
     "at",
     # verbs
     "REGISTRY",
