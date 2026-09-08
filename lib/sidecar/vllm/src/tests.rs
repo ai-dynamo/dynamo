@@ -851,13 +851,6 @@ fn request() -> PreprocessedRequest {
 fn skip_special_tokens_is_forwarded_without_compatibility_envelope() {
     let mut request = request();
     request.output_options.skip_special_tokens = Some(false);
-    request
-        .extra_args
-        .as_mut()
-        .and_then(serde_json::Value::as_object_mut)
-        .expect("object extra_args")
-        .insert("vllm_tito".to_string(), json!({"sampling_params": {}}));
-
     let wire = build_generate_request(
         request,
         "request-1".to_string(),

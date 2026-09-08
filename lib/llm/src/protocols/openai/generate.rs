@@ -94,6 +94,12 @@ impl GenerateRequest {
             return Err("sampling_params.max_tokens must be greater than 0.".to_string());
         }
 
+        if self.sampling_params.thinking_token_budget.is_some() {
+            return Err(
+                "sampling_params.thinking_token_budget is not supported by vLLM gRPC.".to_string(),
+            );
+        }
+
         validate::validate_temperature(self.sampling_params.temperature)
             .map_err(|error| error.to_string())?;
         validate::validate_top_p(self.sampling_params.top_p).map_err(|error| error.to_string())?;
@@ -841,6 +847,13 @@ mod tests {
                     "sampling_params": {"max_tokens": 0}
                 }),
                 "max_tokens",
+            ),
+            (
+                json!({
+                    "token_ids": [1],
+                    "sampling_params": {"thinking_token_budget": 32}
+                }),
+                "thinking_token_budget",
             ),
             (
                 json!({
