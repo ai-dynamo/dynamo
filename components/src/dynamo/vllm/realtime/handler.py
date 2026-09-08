@@ -215,6 +215,44 @@ class _TextTurn(RealtimeTurn):
             ),
         }
 
+    def final_events(
+        self,
+        *,
+        status: str,
+        status_details: dict[str, Any] | None = None,
+        usage: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Close the response item and update server-side conversation state."""
+        item = self.item("completed" if status == "completed" else "incomplete")
+        events = [
+            response_output_text_event(
+                "response.output_text.done", self.response_id, self.item_id, self.text
+            ),
+            response_content_part_event(
+                "response.content_part.done", self.response_id, self.item_id, self.text
+            ),
+            response_output_item_done_event(self.response_id, item),
+        ]
+        if self.add_to_conversation:
+            self.items.append(item)
+            self.conversation_messages.append(
+                {"role": "assistant", "content": self.text}
+            )
+            events.append(conversation_item_done_event(item, self.previous_item_id))
+        events.append(
+            response_done_event(
+                self.response_id,
+                output_modalities=["text"],
+                max_output_tokens=self.wire_max_output_tokens,
+                output=[item],
+                status=status,
+                status_details=status_details,
+                usage=_realtime_usage(usage),
+            )
+        )
+        self.finished = True
+        return events
+
 
 class _TextPrefill:
     """Queue incremental text for one best-effort prefill request."""
@@ -415,59 +453,26 @@ class RealtimeTextHandler:
                             )
 
             incomplete = finish_reason == "length"
-            item = turn.item("incomplete" if incomplete else "completed")
-            completed = [
-                response_output_text_event(
-                    "response.output_text.done",
-                    turn.response_id,
-                    turn.item_id,
-                    turn.text,
-                ),
-                response_content_part_event(
-                    "response.content_part.done",
-                    turn.response_id,
-                    turn.item_id,
-                    turn.text,
-                ),
-                response_output_item_done_event(turn.response_id, item),
-            ]
-            if turn.add_to_conversation:
-                turn.items.append(item)
-                turn.conversation_messages.append(
-                    {"role": "assistant", "content": turn.text}
-                )
-                completed.append(
-                    conversation_item_done_event(item, turn.previous_item_id)
-                )
             status = "incomplete" if incomplete else "completed"
-            completed.append(
-                response_done_event(
-                    turn.response_id,
-                    output_modalities=["text"],
-                    max_output_tokens=turn.wire_max_output_tokens,
-                    output=[item],
+            await _emit_events(
+                turn,
+                *turn.final_events(
                     status=status,
                     status_details=(
                         {"type": "incomplete", "reason": "max_output_tokens"}
                         if incomplete
                         else None
                     ),
-                    usage=_realtime_usage(usage),
-                )
+                    usage=usage,
+                ),
             )
-            turn.finished = True
-            await _emit_events(turn, *completed)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - isolate engine failures per response
             logger.exception("realtime text generation failed: %s", exc)
-            turn.finished = True
-            await turn.events.put(
-                response_done_event(
-                    turn.response_id,
-                    output_modalities=["text"],
-                    max_output_tokens=turn.wire_max_output_tokens,
-                    output=[turn.item("incomplete")],
+            await _emit_events(
+                turn,
+                *turn.final_events(
                     status="failed",
                     status_details={
                         "type": "failed",
@@ -476,7 +481,7 @@ class RealtimeTextHandler:
                             "code": "generation_error",
                         },
                     },
-                )
+                ),
             )
 
     async def generate(
@@ -712,20 +717,18 @@ class RealtimeTextHandler:
                     )
                     return
                 active_response = None
-                connection.cancel_turn(running)
-                connection.emit(
-                    response_done_event(
-                        running.response_id,
-                        output_modalities=["text"],
-                        max_output_tokens=running.wire_max_output_tokens,
-                        output=[running.item("incomplete")],
-                        status="cancelled",
-                        status_details={
-                            "type": "cancelled",
-                            "reason": "client_cancelled",
-                        },
-                    )
-                )
+                # Preserve response.created and any text deltas already queued;
+                # Realtime clients must receive terminal item/content events even
+                # when generation is cancelled.
+                await connection.cancel_turn_preserving_output(running)
+                for terminal_event in running.final_events(
+                    status="cancelled",
+                    status_details={
+                        "type": "cancelled",
+                        "reason": "client_cancelled",
+                    },
+                ):
+                    connection.emit(terminal_event)
             else:
                 emit_error(
                     event,

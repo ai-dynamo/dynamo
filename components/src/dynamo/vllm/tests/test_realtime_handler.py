@@ -496,6 +496,7 @@ def test_response_cancel_aborts_generation():
 
             async def frames():
                 started.set()
+                yield 'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
                 await asyncio.Event().wait()
                 yield "data: [DONE]\n\n"
 
@@ -524,6 +525,57 @@ def test_response_cancel_aborts_generation():
         "type": "cancelled",
         "reason": "client_cancelled",
     }
+    response_events = [
+        event["type"] for event in result if event["type"].startswith("response.")
+    ]
+    assert response_events == [
+        "response.created",
+        "response.output_item.added",
+        "response.content_part.added",
+        "response.output_text.delta",
+        "response.output_text.done",
+        "response.content_part.done",
+        "response.output_item.done",
+        "response.done",
+    ]
+    assert done[0]["response"]["output"][0]["status"] == "incomplete"
+    assert done[0]["response"]["output"][0]["content"] == [
+        {"type": "output_text", "text": "partial"}
+    ]
+
+
+def test_generation_failure_closes_announced_response_item():
+    async def failed_chat_completion(messages, max_output_tokens):
+        del messages, max_output_tokens
+        raise RuntimeError("engine unavailable")
+
+    result = asyncio.run(
+        _drive(
+            RealtimeTextHandler(
+                model_name=TEXT_MODEL,
+                chat_completion_factory=failed_chat_completion,
+            ),
+            [
+                {"type": "session.update", "session": _text_session()},
+                _text_item("Hello"),
+                {"type": "response.create"},
+            ],
+        )
+    )
+
+    response_events = [
+        event["type"] for event in result if event["type"].startswith("response.")
+    ]
+    assert response_events == [
+        "response.created",
+        "response.output_item.added",
+        "response.content_part.added",
+        "response.output_text.done",
+        "response.content_part.done",
+        "response.output_item.done",
+        "response.done",
+    ]
+    assert result[-1]["response"]["status"] == "failed"
 
 
 def test_text_session_starts_next_turn_immediately_after_response_done():

@@ -103,6 +103,15 @@ class RealtimeConnection(Generic[TurnT]):
             drain_queue(turn.events)
             turn.events.put_nowait(None)
 
+    async def cancel_turn_preserving_output(self, turn: TurnT) -> None:
+        """Cancel a turn after retaining all output it has already produced."""
+        if turn.task is not None:
+            turn.task.cancel()
+            await asyncio.gather(turn.task, return_exceptions=True)
+            # _drive_turn normally closes the queue. Add a marker as well for a
+            # task cancelled before its coroutine had a chance to start.
+            await turn.events.put(None)
+
     async def _drive_turn(self, turn: TurnT) -> None:
         try:
             async with self._engine_slots:
