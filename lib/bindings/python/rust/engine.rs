@@ -451,26 +451,8 @@ fn error_class_for_http_status(code: u16) -> ErrorClass {
         415 => ErrorClass::UnsupportedMedia,
         429 => ErrorClass::RateLimited,
         499 => ErrorClass::Cancelled,
-        400..=498 => ErrorClass::InvalidRequest,
+        402 | 405..=408 | 410..=412 | 414 | 416..=428 | 430..=498 => ErrorClass::InvalidRequest,
         _ => ErrorClass::Internal,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn http_statuses_map_to_semantic_classes() {
-        assert_eq!(error_class_for_http_status(400), ErrorClass::InvalidRequest);
-        assert_eq!(
-            error_class_for_http_status(415),
-            ErrorClass::UnsupportedMedia
-        );
-        assert_eq!(error_class_for_http_status(429), ErrorClass::RateLimited);
-        assert_eq!(error_class_for_http_status(499), ErrorClass::Cancelled);
-        assert_eq!(error_class_for_http_status(418), ErrorClass::InvalidRequest);
-        assert_eq!(error_class_for_http_status(503), ErrorClass::Internal);
     }
 }
 
@@ -777,5 +759,23 @@ impl AsyncEngine<ManyIn<PythonPayload>, ManyOut<PythonResponseItem>, Error>
 
         let response_stream = unbuffered_python_response_stream(stream, ctx.clone(), request_id);
         Ok(ResponseStream::new(response_stream, ctx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_statuses_map_to_semantic_classes() {
+        assert_eq!(error_class_for_http_status(400), ErrorClass::InvalidRequest);
+        assert_eq!(
+            error_class_for_http_status(415),
+            ErrorClass::UnsupportedMedia
+        );
+        assert_eq!(error_class_for_http_status(429), ErrorClass::RateLimited);
+        assert_eq!(error_class_for_http_status(499), ErrorClass::Cancelled);
+        assert_eq!(error_class_for_http_status(418), ErrorClass::InvalidRequest);
+        assert_eq!(error_class_for_http_status(503), ErrorClass::Internal);
     }
 }
