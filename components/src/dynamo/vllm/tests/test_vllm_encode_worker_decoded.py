@@ -183,14 +183,18 @@ def test_group_with_url_and_decoded_image_rejected():
         handler._image_cache_key(group_input)
 
 
-def test_configured_capacity_sizes_the_cache():
+def test_configured_capacity_sizes_the_cache(monkeypatch):
+    monkeypatch.setattr(encode_worker_handler, "ENABLE_ENCODER_CACHE", 1)
+
     cache = encode_worker_handler._build_embedding_cache(0.25)
 
     assert isinstance(cache, MultimodalEmbeddingCacheManager)
     assert cache.stats["capacity_bytes"] == int(0.25 * 1024**3)
 
 
-def test_unset_capacity_falls_back_to_a_bounded_default():
+def test_unset_capacity_falls_back_to_a_bounded_default(monkeypatch):
+    monkeypatch.setattr(encode_worker_handler, "ENABLE_ENCODER_CACHE", 1)
+
     # A 0 capacity flag means 'unset', not 'disabled': the cache is still built
     # and sized from DEFAULT_ENCODER_CACHE_CAPACITY_GB.
     cache = encode_worker_handler._build_embedding_cache(0)
@@ -208,11 +212,9 @@ def test_encoder_cache_switch_disables_the_cache(monkeypatch):
 
 
 def test_store_path_evicts_instead_of_growing_past_capacity():
-    # Four 256 KiB embeddings fill the 1 MiB cache exactly; the fifth must evict
-    # the oldest rather than grow it.
     entry_bytes = 256 * 1024
     element_count = entry_bytes // torch.tensor([], dtype=torch.float32).element_size()
-    handler = _handler(frontend_decoding=False, capacity_bytes=1 << 20)
+    handler = _handler(frontend_decoding=False, capacity_bytes=4 * entry_bytes)
 
     for index in range(5):
         handler._store_embedding_item(

@@ -882,7 +882,7 @@ class WorkerFactory:
         )
         await handler.async_init(runtime)
 
-        embedding_cache = getattr(handler, "embedding_cache_manager", None)
+        embedding_cache = handler.embedding_cache_manager
         if embedding_cache is not None:
             register_embedding_cache_metrics(
                 endpoint=generate_endpoint,
