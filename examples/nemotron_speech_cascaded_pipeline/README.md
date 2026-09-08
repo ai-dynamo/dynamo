@@ -312,12 +312,13 @@ python3 examples/nemotron_speech_cascaded_pipeline/smoke_speech_loop.py \
   --llm-transport realtime
 ```
 
-Pipecat remains the orchestrator in the UI deployment. It opens separate ASR
-and LLM WebSockets through the Dynamo frontend, forwards ASR deltas with
-Dynamo's `input_text.append` extension, commits the final transcript,
-and then requests a response. If ASR revises an interim hypothesis, the client
-clears the speculative text and replays the final transcript before commit.
-This smoke client mirrors that endpoint flow without running Pipecat.
+The smoke client demonstrates the endpoint flow an external orchestrator can
+use: it opens separate ASR and LLM WebSockets through the Dynamo frontend,
+forwards ASR deltas with Dynamo's `input_text.append` extension, commits the
+final transcript, and then requests a response. If ASR revises an interim
+hypothesis, it clears the speculative text and replays the final transcript
+before commit. The pinned Blueprint Pipecat profile continues to use streamed
+chat completions and does not yet implement this experimental handoff.
 
 For an established Realtime connection without overlapping prefill, run
 `--llm-transport realtime-atomic`. Compare it with `realtime` using the same
