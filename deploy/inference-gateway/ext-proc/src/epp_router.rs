@@ -44,7 +44,9 @@ use crate::vllm_render_client::{VllmRenderClient, VllmRenderError};
 /// headers. Goes through the frontend's metadata extractor (rather than a
 /// hardcoded header name) so custom `DYN_METADATA_HEADER` prefixes, trimming,
 /// and duplicate handling stay aligned with the integrated router.
-fn requested_policy_class(headers: &[(String, String)]) -> Result<Option<String>, PickError> {
+pub(crate) fn requested_policy_class(
+    headers: &[(String, String)],
+) -> Result<Option<String>, PickError> {
     let metadata =
         extract_metadata_from_header_pairs(headers.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .map_err(|e| PickError::MetadataHeadersInvalid(e.to_string()))?;
