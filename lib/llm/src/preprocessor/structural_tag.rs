@@ -67,7 +67,7 @@ fn should_skip_tool_call_ban(exclude_tools_when_none: bool, tool_choice: &ToolCh
 ///
 /// This is the single owner of "is a structural tag applicable and available" —
 /// covering the operator's global `structural_tag_mode`/`structural_tag_scope`,
-/// backend transport support, the `tool_choice=None` ban-tag exclusion, and real
+/// the `tool_choice=None` ban-tag exclusion, and real
 /// parser-registry builder availability. A caller can only
 /// reach `Required` by way of a real, registered
 /// [`dynamo_parsers::tool_calling::StructuralTagBuilder`] — it cannot ask for the
@@ -98,7 +98,6 @@ impl StructuralTagDecision {
 /// (`http::service::apply_request_tool_call_parsing_options`) must propagate
 /// this error rather than falling back to `NotApplicable`, or an invalid forced
 /// choice would silently install a structural tag anyway.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn structural_tag_decision(
     parser_name: Option<&str>,
     tool_choice: &ToolChoice,
@@ -107,13 +106,12 @@ pub(crate) fn structural_tag_decision(
     mode: StructuralTagMode,
     scope: StructuralTagScope,
     exclude_tools_when_tool_choice_none: bool,
-    backend_supports_structural_tags: bool,
 ) -> Result<StructuralTagDecision, DynamoError> {
-    // Validate before any policy or capability gate. Kimi K3 required requests use a
+    // Validate before any policy gate. Kimi K3 required requests use a
     // prompt-level XTML path, but they still need an actual tool to require.
     validate_forced_tool_choice(tool_choice, tools)?;
 
-    if mode == StructuralTagMode::Off || !backend_supports_structural_tags {
+    if mode == StructuralTagMode::Off {
         return Ok(StructuralTagDecision::NotApplicable);
     }
 
@@ -174,7 +172,6 @@ impl OpenAIPreprocessor {
             self.runtime_config.structural_tag_mode,
             self.runtime_config.structural_tag_scope,
             self.runtime_config.exclude_tools_when_tool_choice_none,
-            self.runtime_config.tool_call_structural_tag_supported(),
         )?
         else {
             return Ok(false);
@@ -323,7 +320,6 @@ mod tests {
     use std::{path::PathBuf, sync::Arc};
 
     use crate::{
-        local_model::runtime_config::TOOL_CALL_STRUCTURAL_TAG_SUPPORTED_RUNTIME_KEY,
         model_card::ModelDeploymentCard,
         protocols::common::{OutputOptions, SamplingOptions, StopConditions},
     };
@@ -683,61 +679,6 @@ mod tests {
             &tools,
             None,
         ));
-    }
-
-    #[test]
-    fn backend_capability_false_skips_structural_tag() {
-        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
-        let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
-        mdc.runtime_config.structural_tag_mode = StructuralTagMode::On;
-        mdc.runtime_config.structural_tag_scope = StructuralTagScope::Always;
-        mdc.runtime_config.tool_call_parser = Some("qwen3_coder".to_string());
-        mdc.runtime_config
-            .set_engine_specific(TOOL_CALL_STRUCTURAL_TAG_SUPPORTED_RUNTIME_KEY, false)
-            .unwrap();
-        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
-        let tools = [ToolDefinition {
-            name: "get_weather".to_string(),
-            parameters: None,
-            strict: None,
-        }];
-        let mut request = preprocessed_request();
-
-        let applied = preprocessor
-            .apply_tool_choice_structural_tag(&ToolChoice::Auto, &tools, None, false, &mut request)
-            .unwrap();
-
-        assert!(!applied);
-        assert!(request.sampling_options.guided_decoding.is_none());
-    }
-
-    #[test]
-    fn malformed_backend_capability_skips_structural_tag() {
-        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
-        let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
-        mdc.runtime_config.structural_tag_mode = StructuralTagMode::On;
-        mdc.runtime_config.structural_tag_scope = StructuralTagScope::Always;
-        mdc.runtime_config.tool_call_parser = Some("qwen3_coder".to_string());
-        mdc.runtime_config.runtime_data.insert(
-            TOOL_CALL_STRUCTURAL_TAG_SUPPORTED_RUNTIME_KEY.to_string(),
-            serde_json::json!("not-a-boolean"),
-        );
-        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
-        let tools = [ToolDefinition {
-            name: "get_weather".to_string(),
-            parameters: None,
-            strict: None,
-        }];
-        let mut request = preprocessed_request();
-
-        let applied = preprocessor
-            .apply_tool_choice_structural_tag(&ToolChoice::Auto, &tools, None, false, &mut request)
-            .unwrap();
-
-        assert!(!applied);
-        assert!(request.sampling_options.guided_decoding.is_none());
     }
 
     #[test]

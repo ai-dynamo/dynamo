@@ -167,7 +167,7 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
 </ParamField>
 
 <ParamField path="--dyn-enable-structural-tag" type="boolean" default="true">
-  Enable structural tag guided decoding for tool calls when the configured parser and backend support it. On the Rust frontend preprocessing path, explicitly setting this option to `false` is authoritative: Dynamo does not inject a structural tag and uses the parser's compatibility fallback. Legacy inline Python preprocessing paths retain their existing engine-specific constraint behavior.
+  Enable structural tag guided decoding for tool calls when the configured parser and backend support it. The Rust, Python vLLM, and Python SGLang frontend preprocessing paths use this setting for `auto`, required, and named tool choices. Explicitly setting it to `false` is authoritative: Dynamo does not inject a tool-call structural tag and uses the existing compatibility fallback. Native Rust sidecars retain their conservative `off`/`auto` behavior and are not included in the default change.
 
   Environment variable: `DYN_ENABLE_STRUCTURAL_TAG`
 </ParamField>

@@ -284,8 +284,9 @@ class DynamoRuntimeArgGroup(ArgGroup):
             env_var="DYN_ENABLE_STRUCTURAL_TAG",
             default=True,
             help="Enable structural tag guided decoding for tool calls when the configured "
-            "parser and backend support it. On the Rust frontend preprocessing path, "
-            "explicitly disabling this flag is authoritative.",
+            "parser and backend support it. Explicitly disabling this flag is "
+            "authoritative for Rust, Python vLLM, and Python SGLang frontend "
+            "preprocessing.",
         )
         add_argument(
             g,

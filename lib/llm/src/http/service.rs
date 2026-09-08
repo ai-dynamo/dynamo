@@ -71,7 +71,6 @@ fn apply_request_tool_call_parsing_options(
         parsing_options.structural_tag_mode,
         parsing_options.structural_tag_scope,
         parsing_options.exclude_tools_when_tool_choice_none,
-        parsing_options.structural_tag_supported,
     )?
     .is_required();
     let guided_tool_constraint = crate::preprocessor::tool_choice::guided_tool_constraint(
@@ -197,11 +196,12 @@ mod tests {
         );
     }
 
-    // With the operator default (`structural_tag_mode = Off`), the same non-Kimi
-    // parser must NOT get a structural tag — confirms the mode gate above is real,
-    // not a permanently-on regression.
+    // With the low-level ParsingOptions default (`structural_tag_mode = Off`),
+    // the same non-Kimi parser must NOT get a structural tag. Regular workers
+    // explicitly publish the deployment's default-on policy into the model card;
+    // native sidecars that do not do so retain this conservative default.
     #[test]
-    fn operator_default_mode_off_does_not_resolve_structural_tag_for_a_non_kimi_parser() {
+    fn parsing_options_default_mode_off_does_not_resolve_structural_tag() {
         let parsing_options = ParsingOptions {
             tool_call_parser: Some("qwen3_coder".to_string()),
             ..Default::default()

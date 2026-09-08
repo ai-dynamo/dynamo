@@ -25,7 +25,7 @@ Benefits:
 
 ## Prerequisites
 
-- A backend engine and transport with structural-tag/xgrammar support.
+- A backend engine that accepts structural-tag/xgrammar guided decoding.
 - A Dynamo tool call parser that provides a structural tag config (see
   [Supported Parsers](#supported-parsers) below).
 
@@ -80,15 +80,15 @@ decoding. See [Activation Scope](#activation-scope) for the exact policy.
 
 | Flag | Values | Default | Description |
 |---|---|---|---|
-| `--dyn-enable-structural-tag` | bool | `true` | Master switch. On the Rust frontend preprocessing path, explicitly disabling it prevents all structural-tag injection. |
+| `--dyn-enable-structural-tag` | bool | `true` | Master switch for the Rust, Python vLLM, and Python SGLang frontend preprocessing paths. Explicitly disabling it prevents tool-call structural-tag injection. |
 | `--dyn-structural-tag-scope` | `auto`, `always` | `always` | Controls when structural tags are activated (see [Activation Scope](#activation-scope)). |
 | `--dyn-structural-tag-schema` | `auto`, `strict` | `auto` | Controls parameter schema strictness inside structural tags (see [Schema Modes](#schema-modes)). |
 
 ## Supported Parsers
 
-Not all parsers support structural tags. Parsers without a structural tag
-config fall back to standard behaviour (a diagnostic is logged if structural
-tags are enabled but the parser does not support them).
+Not all parsers support structural tags. Parsers without a structural-tag
+builder fall back to their existing best-effort tool-calling behavior without
+rejecting the request.
 
 Currently tested and supported:
 
@@ -100,15 +100,16 @@ Currently tested and supported:
 
 Contributions adding structural tag support for new parsers are welcome.
 
-Parser support and backend support are separate. If the parser has no builder,
-or the backend transport reports that it cannot carry structural tags, Dynamo
-uses the existing best-effort tool-calling path instead of rejecting the
-request.
+This list describes Dynamo's Rust parser registry. The Python vLLM and SGLang
+frontend processors apply the same mode, scope, and schema policy through the
+tool parser supplied by their installed engine version. Parser availability can
+therefore differ by backend and engine version.
 
 > [!NOTE]
-> The activation and fallback policy on this page describes Dynamo's Rust
-> frontend preprocessing path. Legacy inline Python preprocessing paths retain
-> their existing engine-specific constraint behavior.
+> Native Rust sidecars retain their existing conservative `off`/`auto`
+> settings and are not included in this default change. The default-on policy
+> applies when regular vLLM or SGLang workers publish the deployment runtime
+> configuration consumed by frontend preprocessing.
 
 ## Activation Scope
 
@@ -121,7 +122,7 @@ based on the request's `tool_choice`:
 |---|---|
 | `required` / `named` | Always |
 | `auto` | Always |
-| `none` | Exclusion tag only |
+| `none` | Exclusion tag on the Rust path only |
 
 ### `auto` (legacy conditional activation)
 
@@ -129,7 +130,7 @@ based on the request's `tool_choice`:
 |---|---|
 | `required` / `named` | Always |
 | `auto` | Only when any tool has `strict: true` or `parallel_tool_calls` is `false` |
-| `none` | Exclusion tag only (bans tool call tokens, see [below](#tool_choicenone-and-token-banning)) |
+| `none` | Exclusion tag on the Rust path only (see [below](#tool_choicenone-and-token-banning)) |
 
 ## Schema Modes
 
@@ -149,14 +150,19 @@ tool arguments inside the structural tag:
   flag.
 
 If a model-native builder cannot safely represent part of a schema, it keeps
-the strongest safe tool envelope and relaxes that argument section. Dynamo logs
-the compatibility fallback rather than introducing a new request error.
+the strongest safe tool envelope and relaxes that argument section. If the
+builder cannot produce a structural tag at all, Dynamo uses the existing
+compatibility path rather than introducing a new request error; automatic tool
+choice may therefore remain unconstrained for that parser/schema combination.
 
 ## `tool_choice="none"` and Token Banning
 
-When `tool_choice="none"` and structural tags are enabled, Dynamo injects an
-exclusion structural tag that bans parser-specific tool-call start tokens (for
-example `<tool_call>`) so the model cannot start native tool-call syntax.
+On the Rust frontend preprocessing path, when `tool_choice="none"` and
+structural tags are enabled, Dynamo injects an exclusion structural tag that
+bans parser-specific tool-call start tokens (for example `<tool_call>`) so the
+model cannot start native tool-call syntax. The Python vLLM and SGLang frontend
+processors continue to handle `none` through their existing prompt and response
+shaping; this release does not add token banning to those paths.
 
 **Quality trade-off**. If tools remain in the prompt on `none` (often via
 `--no-exclude-tools-when-tool-choice-none` to keep the chat prefix stable for KV
