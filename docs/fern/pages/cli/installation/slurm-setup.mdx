@@ -351,6 +351,42 @@ after=$(curl -sf --max-time 30 "http://127.0.0.1:$PORT/v1/chat/completions" \
 
 Save the PID when the worker starts and kill that PID. A pattern-based `pkill -f` can match the shell that runs the script. Bound the follow-up request with `--max-time`, because a request issued after the worker is gone may otherwise hang until the job's wall clock expires.
 
+### Confirm Which Path the KV Transfer Took
+
+Everything above runs on one node, where prefill and decode reach each other through shared
+memory. The moment they sit on different nodes, a completed request stops being evidence that the
+fabric carried the KV cache: the transport falls back to sockets silently and the request still
+succeeds.
+
+Check in this order. Each step rules out a different cause, and a partition named after your
+fabric is not one of them.
+
+1. `rdma link show` on the host: is there a device at all.
+2. `ls /dev/infiniband` inside the container: `uverbs0` has to be there. Only `rdma_cm` means the
+   host has no device, not that the container is missing a mount.
+3. `ibv_devinfo -d <dev>`: `PORT_ACTIVE`, and a `link_layer` that matches the fabric you
+   believe you are on.
+4. `NCCL_DEBUG=INFO`: `NET/IB` or `NET/Socket`. Collective traffic only, and log strings move
+   between versions, so this narrows the answer rather than settling it.
+5. The device counters, read outside the job before and after the run. This is the one that
+   settles it.
+
+**Read the right counter.** They do not all count the same thing. In a run interrupted during
+inference, `rdma_sends` did not move on either node while `rdma_recvs` rose by 2436 on both, which
+is not a direction traffic can flow; those counters track particular opcodes and miss the RDMA
+WRITEs. In a separate run that completed, `sent_pkts` and `rcvd_pkts` each rose by 1066175 on both
+nodes. Prefer the packet counters for the question "did anything cross this device", and keep the
+error counters (`send_err`, `retry_exceeded_err`, `rcvd_seq_err`) for the question "did it cross
+cleanly". Counter names differ by driver, so list the directory before picking.
+
+**The RDMA device name is not the network interface.** `NCCL_IB_HCA` wants the device
+(`roce0`), `ip addr` shows the interface (`enp1s0`). Passing one where the other belongs drops
+you onto sockets with no error.
+
+> These checks were exercised on a software RoCE (`rdma_rxe`) setup across two VMs. They say
+> nothing about a lossless fabric: PFC, ECN, and DSCP exist only on real adapters, and the `rate`
+> a software device reports is a placeholder rather than a measurement.
+
 ## Troubleshoot
 
 | Symptom | Check first |
