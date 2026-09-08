@@ -89,6 +89,10 @@ if ! "$PY" -c 'import griffe' 2>/dev/null; then
 fi
 "$PY" "$SRC/scripts/gen_python_api.py"
 "$PY" "$SRC/scripts/gen_rust_api.py"
+# The nightly selector data is a publish-time artifact too, and the components
+# copy below carries it. Offline: this gate checks composition, not nightly
+# freshness, so it must not depend on NGC being reachable.
+"$PY" "$SRC/scripts/gen_nightly_selector.py" --offline
 rm -rf "$WT/fern/pages-dev"; mkdir -p "$WT/fern/pages-dev"
 rsync -a --exclude='/home/index.mdx' "$SRC/pages/" "$WT/fern/pages-dev/"
 "$PY" "$SRC/scripts/rewrite_snapshot_paths.py" "$WT/fern/pages-dev"

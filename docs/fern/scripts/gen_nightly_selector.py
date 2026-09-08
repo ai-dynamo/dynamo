@@ -29,6 +29,7 @@ the commit lookups silently lose old nightlies.
 Usage:
     gen_nightly_selector.py            # write the TS module
     gen_nightly_selector.py --stdout   # print it instead
+    gen_nightly_selector.py --offline  # write an empty module, no network
 """
 
 from __future__ import annotations
@@ -366,18 +367,30 @@ def as_ts(rows: list[NightlyBackendBuild]) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stdout", action="store_true", help="print instead of write")
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="skip the network and write an empty module",
+    )
     args = parser.parse_args()
 
-    rows = build()
-    if not rows:
-        # Every backend skipped. An empty module would reach the publish job's
-        # component sync and replace the live selector's nightly rows with
-        # nothing, so fail instead and leave the last published copy in place.
-        print(
-            "error: no nightly data resolved; refusing to write an empty module",
-            file=sys.stderr,
-        )
-        return 1
+    rows: list[NightlyBackendBuild] = []
+    if args.offline:
+        # Local previews and the composition replay only need the module to
+        # exist so the component import resolves; the selector renders its
+        # unavailable state from an empty list.
+        warn("offline: writing an empty module, nightly rows omitted")
+    else:
+        rows = build()
+        if not rows:
+            # Every backend skipped. An empty module would reach the publish
+            # job's component sync and replace the live selector's nightly rows
+            # with nothing, so fail and leave the last published copy in place.
+            print(
+                "error: no nightly data resolved; refusing to write an empty module",
+                file=sys.stderr,
+            )
+            return 1
 
     module = as_ts(rows)
     if args.stdout:
