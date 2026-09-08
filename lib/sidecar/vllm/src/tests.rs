@@ -873,6 +873,74 @@ fn skip_special_tokens_is_forwarded_without_compatibility_envelope() {
 }
 
 #[test]
+fn compatibility_envelope_projects_skip_special_tokens() {
+    let mut request = request();
+    request
+        .extra_args
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("object extra_args")
+        .insert(
+            "vllm_tito".to_string(),
+            json!({"sampling_params": {"skip_special_tokens": false}}),
+        );
+
+    let wire = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("compatibility option should be projected");
+
+    assert_eq!(
+        wire.response
+            .and_then(|response| response.skip_special_tokens),
+        Some(false)
+    );
+}
+
+#[test]
+fn compatibility_envelope_rejects_conflicting_skip_special_tokens() {
+    let mut request = request();
+    request.output_options.skip_special_tokens = Some(false);
+    request
+        .extra_args
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("object extra_args")
+        .insert(
+            "vllm_tito".to_string(),
+            json!({"sampling_params": {"skip_special_tokens": true}}),
+        );
+
+    let error = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("conflicting compatibility option should fail");
+
+    assert!(error.to_string().contains("skip_special_tokens"));
+}
+
+#[test]
+fn canonical_dynamo_priority_is_converted_for_vllm() {
+    for (dynamo_priority, vllm_priority) in [(-7, 7), (7, -7), (i32::MIN, i32::MAX)] {
+        let mut request = request();
+        request.routing.as_mut().expect("routing").priority = Some(dynamo_priority);
+
+        let wire = build_generate_request(
+            request,
+            "request-1".to_string(),
+            DisaggregationMode::Aggregated,
+        )
+        .expect("canonical priority should be converted");
+
+        assert_eq!(wire.priority, vllm_priority);
+    }
+}
+
+#[test]
 fn unprojected_generate_controls_are_rejected() {
     let mut request = request();
     request
