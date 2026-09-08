@@ -760,6 +760,7 @@ where
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use tokio::sync::{mpsc, watch};
@@ -767,6 +768,7 @@ mod tests {
     use super::*;
     use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
     use crate::scheduling::PrefillLoadEstimator;
+    use crate::scheduling::request_classifier::ClassifyFuture;
     use crate::scheduling::selector::DefaultWorkerSelector;
     use crate::sequences::SequenceSubscriber;
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
@@ -957,6 +959,55 @@ mod tests {
 
         let loads = scheduler.get_potential_loads(None, 0, HashMap::new(), false);
         assert_eq!(loads[0].active_requests, 0);
+        cancel_token.cancel();
+    }
+
+    struct CountingClassifier {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl RequestClassifier for CountingClassifier {
+        fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async move { Ok(request) })
+        }
+    }
+
+    /// A tracked admission with no registered lifecycle takes the default
+    /// path without reaching the plugin; only `begin_request_lifecycle` opts
+    /// a request into classification. The runtime itself rejects ids it does
+    /// not know, so this bypass lives here in the scheduler.
+    #[tokio::test]
+    async fn tracked_request_without_lifecycle_bypasses_the_classifier() {
+        let workers = HashMap::from([(0, SimpleWorkerConfig::default())]);
+        let (scheduler, _slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true, None);
+        let calls = Arc::new(AtomicUsize::new(0));
+        assert!(scheduler.install_request_classifier(
+            Box::new(CountingClassifier {
+                calls: Arc::clone(&calls),
+            }),
+            cancel_token.clone(),
+        ));
+
+        scheduler
+            .schedule_request(request(ScheduleMode::Tracked {
+                request_id: "unregistered".to_string(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+
+        let _lifecycle = scheduler
+            .begin_request_lifecycle("registered")
+            .unwrap()
+            .unwrap();
+        scheduler
+            .schedule_request(request(ScheduleMode::TrackedWithLifecycle {
+                request_id: "registered".to_string(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
         cancel_token.cancel();
     }
 

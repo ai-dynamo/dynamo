@@ -128,6 +128,9 @@ pub enum KvSchedulerError {
     #[error("invalid request classification metadata: {0}")]
     InvalidClassificationMetadata(String),
 
+    #[error("request lifecycle for request ID {0:?} ended before classification completed")]
+    ClassificationLifecycleEnded(String),
+
     #[error("request deadline exceeded")]
     DeadlineExceeded,
 

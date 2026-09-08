@@ -234,9 +234,10 @@ pub trait RequestClassifier: Send + 'static {
     async fn on_event(&mut self, _event: ClassifyEvent) {}
 }
 
-/// One live lifecycle's bookkeeping. `generation` fences the overrides
-/// write-back in `classify_with` against a lifecycle that released this
-/// request id and a new one that re-registered it mid-classification.
+/// One live lifecycle's bookkeeping. `generation` fences `classify_with`
+/// against a lifecycle that released this request id and a new one that
+/// re-registered it mid-classification: only the lifecycle a classification
+/// started under may receive its overrides or enter Order.
 struct LiveRequest {
     generation: u64,
     overrides: Option<ClassificationOverrides>,
@@ -344,8 +345,12 @@ impl RequestClassifierRuntime {
                 Some(request_id) => match self.live_requests.lock().get(request_id) {
                     Some(live) => Some(live.generation),
                     // The lifecycle ended while this caller waited for the
-                    // lock; skip the plugin and take the default inputs.
-                    None => return Ok(request),
+                    // lock: only a still-live request may enter Order.
+                    None => {
+                        return Err(KvSchedulerError::ClassificationLifecycleEnded(
+                            request_id.to_owned(),
+                        ));
+                    }
                 },
                 None => None,
             };
@@ -371,15 +376,22 @@ impl RequestClassifierRuntime {
                 "classifier replaced the logical request".to_string(),
             ));
         }
-        // Write back only onto the lifecycle the classification started under:
-        // the id may have been released and re-registered while the plugin ran,
-        // and stale overrides must not leak onto the new lifecycle.
-        if let Some(request_id) = classified.request_id()
-            && let Some(generation) = generation
-            && let Some(live) = self.live_requests.lock().get_mut(request_id)
-            && live.generation == generation
-        {
-            live.overrides = Some(classified.overrides.clone());
+        // Only the lifecycle the classification started under may enter Order:
+        // the id may have been released, and re-registered, while the plugin
+        // ran. Write the overrides back onto that lifecycle; otherwise reject,
+        // so a request whose lifecycle ended can neither reserve capacity nor
+        // leak stale overrides onto the id's next lifecycle.
+        if let (Some(generation), Some(request_id)) = (generation, classified.request_id()) {
+            match self.live_requests.lock().get_mut(request_id) {
+                Some(live) if live.generation == generation => {
+                    live.overrides = Some(classified.overrides.clone());
+                }
+                _ => {
+                    return Err(KvSchedulerError::ClassificationLifecycleEnded(
+                        request_id.to_owned(),
+                    ));
+                }
+            }
         }
         Ok(classified)
     }
@@ -934,8 +946,12 @@ mod tests {
         lifecycle.abort(None);
     }
 
+    // `LocalScheduler::classify_request` routes ids with no registered
+    // lifecycle to the default path before reaching the runtime, so at this
+    // level an unregistered id is indistinguishable from one whose lifecycle
+    // ended: neither may enter Order, and the plugin is never invoked.
     #[tokio::test]
-    async fn unregistered_request_id_skips_the_plugin() {
+    async fn unregistered_request_id_is_rejected_without_calling_the_plugin() {
         let calls = Arc::new(AtomicUsize::new(0));
         let runtime = RequestClassifierRuntime::new(
             Box::new(CountingClassifier {
@@ -946,11 +962,13 @@ mod tests {
 
         let result = runtime
             .classify_with(ClassifyRequest::new(4, 0).with_request_id("ghost"))
-            .await
-            .unwrap();
+            .await;
 
+        assert!(matches!(
+            result,
+            Err(KvSchedulerError::ClassificationLifecycleEnded(_))
+        ));
         assert_eq!(calls.load(Ordering::Relaxed), 0);
-        assert_eq!(result.into_queue_inputs(), (None, None, None));
     }
 
     struct GatedClassifier {
@@ -1001,7 +1019,11 @@ mod tests {
         drop(lifecycle);
         let _reused = runtime.begin_request("reused").unwrap();
         release.notify_one();
-        stale.await.unwrap().unwrap();
+        // The stale lifecycle may not enter Order.
+        assert!(matches!(
+            stale.await.unwrap(),
+            Err(KvSchedulerError::ClassificationLifecycleEnded(_))
+        ));
 
         // The stale result must not be cached onto the new lifecycle: its
         // classification reaches the plugin instead of reusing overrides.
@@ -1012,6 +1034,70 @@ mod tests {
             .unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 2);
         assert_eq!(second.scheduling_cost_tokens(), 2);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_ended_while_waiting_for_the_classifier_lock_is_rejected() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let runtime = RequestClassifierRuntime::new(
+            Box::new(CountingClassifier {
+                calls: Arc::clone(&calls),
+            }),
+            CancellationToken::new(),
+        );
+        let lifecycle = runtime.begin_request("ended").unwrap();
+
+        // Hold the classifier lock so the classification parks ahead of the
+        // plugin call, then end the lifecycle while it waits.
+        let guard = runtime.classifier.lock().await;
+        let ended_runtime = Arc::clone(&runtime);
+        let ended = tokio::spawn(async move {
+            ended_runtime
+                .classify_with(ClassifyRequest::new(1, 0).with_request_id("ended"))
+                .await
+        });
+        tokio::task::yield_now().await;
+        drop(lifecycle);
+        drop(guard);
+
+        assert!(matches!(
+            ended.await.unwrap(),
+            Err(KvSchedulerError::ClassificationLifecycleEnded(_))
+        ));
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_ended_during_classification_is_rejected() {
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let runtime = RequestClassifierRuntime::new(
+            Box::new(GatedClassifier {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            CancellationToken::new(),
+        );
+        let lifecycle = runtime.begin_request("ended").unwrap();
+        let ended_runtime = Arc::clone(&runtime);
+        let ended = tokio::spawn(async move {
+            ended_runtime
+                .classify_with(ClassifyRequest::new(1, 0).with_request_id("ended"))
+                .await
+        });
+        entered.notified().await;
+
+        // End the lifecycle while the plugin still holds the request, without
+        // re-registering the id.
+        drop(lifecycle);
+        release.notify_one();
+
+        assert!(matches!(
+            ended.await.unwrap(),
+            Err(KvSchedulerError::ClassificationLifecycleEnded(_))
+        ));
+        assert!(!runtime.has_request("ended"));
     }
 
     #[derive(Debug, PartialEq, Eq)]

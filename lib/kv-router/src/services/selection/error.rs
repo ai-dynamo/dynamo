@@ -74,10 +74,12 @@ fn scheduler_error_status(error: &KvSchedulerError) -> StatusCode {
         | KvSchedulerError::DeadlineExceeded => StatusCode::TOO_MANY_REQUESTS,
         KvSchedulerError::QueueRejected(_) => StatusCode::SERVICE_UNAVAILABLE,
         KvSchedulerError::PinnedWorkerNotAllowed { .. } => StatusCode::BAD_REQUEST,
-        // A duplicate live request id is caller-induced, like `BookingFailed`
-        // and `SequenceError::DuplicateRequest`.
+        // A duplicate live request id, or a lifecycle the caller ended (or
+        // re-registered) mid-classification, is caller-induced, like
+        // `BookingFailed` and `SequenceError::DuplicateRequest`.
         KvSchedulerError::BookingFailed(_)
-        | KvSchedulerError::DuplicateClassificationRequestId(_) => StatusCode::CONFLICT,
+        | KvSchedulerError::DuplicateClassificationRequestId(_)
+        | KvSchedulerError::ClassificationLifecycleEnded(_) => StatusCode::CONFLICT,
         KvSchedulerError::RequestClassifierPanicked(_)
         | KvSchedulerError::RequestClassifierFailed(_)
         | KvSchedulerError::InvalidClassificationMetadata(_) => StatusCode::INTERNAL_SERVER_ERROR,
