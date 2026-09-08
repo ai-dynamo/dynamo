@@ -129,6 +129,17 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 					"or set NIXL_TELEMETRY_ENABLE=n",
 				colocatedRanks, commonconsts.DynamoMaxNixlPorts, commonconsts.DynamoMaxNixlPorts, commonconsts.DynamoMaxNixlPorts)
 		}
+
+		// Admitting the deployment leaves one outcome admission cannot rule
+		// out, so say so here rather than let it surface as an unexplained
+		// startup failure: an enable value that resolves to y gives the ranks
+		// past the reserved range no port, and each of those refuses to start.
+		log.Log.WithName("sglang-backend").Info(
+			"co-located GPUs exceed the NIXL exporter ports the operator declares, and NIXL_TELEMETRY_ENABLE is set through valueFrom, "+
+				"so the deployment is admitted with the supported range reserved; if that value resolves to y, the ranks past it fail to start",
+			"colocatedGPUs", colocatedRanks,
+			"reservedPorts", commonconsts.DynamoMaxNixlPorts)
+
 		colocatedRanks = int64(commonconsts.DynamoMaxNixlPorts)
 	}
 
