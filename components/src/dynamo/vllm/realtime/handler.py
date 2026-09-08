@@ -223,6 +223,9 @@ class _TextTurn(RealtimeTurn):
         usage: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Close the response item and update server-side conversation state."""
+        if self.finished:
+            return []
+        self.finished = True
         item = self.item("completed" if status == "completed" else "incomplete")
         events = [
             response_output_text_event(
@@ -250,7 +253,6 @@ class _TextTurn(RealtimeTurn):
                 usage=_realtime_usage(usage),
             )
         )
-        self.finished = True
         return events
 
 

@@ -15,6 +15,7 @@ from dynamo.vllm.realtime import (
     RealtimeTextHandler,
     RealtimeTranscriptionHandler,
 )
+from dynamo.vllm.realtime.handler import _TextTurn
 
 pytestmark = [
     pytest.mark.unit,
@@ -170,6 +171,27 @@ def _text_item(text: str, *, item_id: str = "user_1") -> dict:
             "content": [{"type": "input_text", "text": text}],
         },
     }
+
+
+def test_text_turn_finalization_is_idempotent():
+    items = []
+    messages = []
+    turn = _TextTurn(
+        messages=[],
+        max_output_tokens=32,
+        wire_max_output_tokens=32,
+        add_to_conversation=True,
+        items=items,
+        conversation_messages=messages,
+    )
+
+    first = turn.final_events(status="completed")
+    second = turn.final_events(status="cancelled")
+
+    assert first[-1]["response"]["status"] == "completed"
+    assert second == []
+    assert len(items) == 1
+    assert messages == [{"role": "assistant", "content": ""}]
 
 
 def test_text_session_streams_canonical_response_and_preserves_usage():

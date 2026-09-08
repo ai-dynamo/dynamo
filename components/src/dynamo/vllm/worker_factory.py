@@ -818,7 +818,7 @@ class WorkerFactory:
 
         model_name = config.served_model_name or config.model
         supported_tasks = await engine_client.get_supported_tasks()
-        handlers = {}
+        handlers: dict[str, RealtimeTextHandler | RealtimeTranscriptionHandler] = {}
         if "generate" in supported_tasks:
             handlers["realtime"] = RealtimeTextHandler.from_engine(
                 engine_client=engine_client,
