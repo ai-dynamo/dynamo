@@ -1327,25 +1327,9 @@ mod tests {
     use crate::pipeline::Context;
     use crate::pipeline::network::DEFAULT_SEND_BUFFER_COUNT;
     use crate::pipeline::network::tcp::client::TcpClient;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
+    use crate::tls_utils::test_certs::self_signed_pair;
     use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
     use tokio::net::TcpStream;
-
-    fn make_cert_files() -> (NamedTempFile, NamedTempFile) {
-        let key_pair = rcgen::KeyPair::generate().unwrap();
-        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
-            .unwrap()
-            .self_signed(&key_pair)
-            .unwrap();
-        let mut cert_file = NamedTempFile::new().unwrap();
-        cert_file.write_all(cert.pem().as_bytes()).unwrap();
-        let mut key_file = NamedTempFile::new().unwrap();
-        key_file
-            .write_all(key_pair.serialize_pem().as_bytes())
-            .unwrap();
-        (cert_file, key_file)
-    }
 
     #[test]
     fn build_tls_acceptor_no_env_vars_is_plaintext() {
@@ -1365,7 +1349,7 @@ mod tests {
 
     #[test]
     fn build_tls_acceptor_partial_config_errors() {
-        let (cert, key) = make_cert_files();
+        let (cert, key) = self_signed_pair();
         let cert_str = cert.path().to_str().unwrap();
         let key_str = key.path().to_str().unwrap();
         // only cert
@@ -1388,7 +1372,7 @@ mod tests {
 
     #[test]
     fn build_tls_acceptor_both_paths_is_tls() {
-        let (cert, key) = make_cert_files();
+        let (cert, key) = self_signed_pair();
         temp_env::with_vars(
             [
                 ("DYN_TCP_TLS_CERT_PATH", Some(cert.path().to_str().unwrap())),
@@ -1401,7 +1385,7 @@ mod tests {
     #[test]
     fn build_tls_acceptor_with_client_ca_is_mtls() {
         // A client CA turns the response-stream server into an mTLS acceptor.
-        let (cert, key) = make_cert_files();
+        let (cert, key) = self_signed_pair();
         temp_env::with_vars(
             [
                 ("DYN_TCP_TLS_CERT_PATH", Some(cert.path().to_str().unwrap())),
@@ -1417,7 +1401,7 @@ mod tests {
 
     #[test]
     fn build_tls_acceptor_client_ca_without_server_identity_errors() {
-        let (cert, _key) = make_cert_files();
+        let (cert, _key) = self_signed_pair();
         temp_env::with_vars(
             [
                 ("DYN_TCP_TLS_CERT_PATH", None),
