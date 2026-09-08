@@ -4,11 +4,9 @@
 """Per-rank NIXL exporter ports for co-located SGLang schedulers.
 
 These tests replay the arguments SGLang hands each scheduler process rather
-than calling the derivation with hand-picked ranks, because the bug being fixed
-is about which SGLang argument identifies a rank -- not about the arithmetic.
-``tp_rank`` restarts at 0 in every data-parallel group, so a derivation keyed on
-it looks correct for plain tensor parallelism and hands every attention-DP rank
-the same port, which is the deployment that reported this.
+than calling the derivation with hand-picked ranks, because what has to hold is
+that every scheduler a real launch starts gets a port of its own inside the
+range the pod reserves.
 """
 
 from __future__ import annotations
@@ -33,7 +31,23 @@ pytestmark = [
     pytest.mark.pre_merge,
 ]
 
-GPUS_PER_NODE = 8
+BASE_PORT = 19090
+
+
+def _server_args(**overrides) -> SimpleNamespace:
+    """A ServerArgs stand-in carrying only the fields the derivation reads."""
+    fields = {
+        "nnodes": 1,
+        "node_rank": 0,
+        "tp_size": 1,
+        "pp_size": 1,
+        "dp_size": 1,
+        "base_gpu_id": 0,
+        "gpu_id_step": 1,
+        "enable_dp_attention": False,
+    }
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
 
 
 def _run_scheduler_process(
@@ -51,40 +65,74 @@ def _run_scheduler_process(
     """Stands in for ``sglang.srt.managers.scheduler.run_scheduler_process``.
 
     Mirrors that function's parameter list because the wrapper binds the call by
-    signature: it reads ``server_args`` and ``gpu_id`` by name out of a purely
-    positional call, so the position of every other parameter matters too.
+    signature: it reads the rank arguments by name out of a purely positional
+    call, so the position of every other parameter matters too.
     """
 
 
-def _scheduler_gpu_id(
-    server_args, tp_rank: int, dp_group_offset: int = 0, pp_rank: int = 0
-) -> int:
-    """The gpu_id SGLang computes for one scheduler on a single node.
+def _scheduler_calls(server_args) -> list[tuple[int, int, int, int | None]]:
+    """The ``(gpu_id, tp_rank, pp_rank, dp_rank)`` tuples one node launches.
 
-    Mirrors ``Engine._launch_scheduler_processes`` and the data-parallel
-    controller's ``launch_tensor_parallel_group``. A pipeline stage shifts the
-    device by a whole tensor-parallel group and that shift is deliberately not
-    multiplied by ``gpu_id_step``, so a stepped pipeline's devices are dense
-    while a stepped tensor-parallel group's are not.
+    Mirrors ``DataParallelController.launch_dp_schedulers`` and
+    ``launch_tensor_parallel_group``, which the non-data-parallel path in
+    ``Engine._launch_subprocesses`` reproduces with ``dp_rank`` left unset.
+    Under ``--enable-dp-attention`` there is one launch group and the scheduler
+    is handed a ``dp_rank`` recomputed from its ``tp_rank``.
     """
-    tp_size_per_node = min(server_args.tp_size, GPUS_PER_NODE)
-    return (
-        server_args.base_gpu_id
-        + dp_group_offset
-        + pp_rank * tp_size_per_node
-        + (tp_rank % tp_size_per_node) * server_args.gpu_id_step
+    pp_size_per_node = max(server_args.pp_size // server_args.nnodes, 1)
+    nnodes_per_pp_rank = max(server_args.nnodes // server_args.pp_size, 1)
+    tp_size_per_node = server_args.tp_size // nnodes_per_pp_rank
+    pp_ranks = range(
+        pp_size_per_node * (server_args.node_rank // nnodes_per_pp_rank),
+        pp_size_per_node * (server_args.node_rank // nnodes_per_pp_rank + 1),
+    )
+    tp_ranks = range(
+        tp_size_per_node * (server_args.node_rank % nnodes_per_pp_rank),
+        tp_size_per_node * (server_args.node_rank % nnodes_per_pp_rank + 1),
     )
 
+    attn_tp_size = max(server_args.tp_size // server_args.dp_size, 1)
+    dp_groups: list[tuple[int, int | None]] = [(0, None)]
+    if server_args.dp_size > 1 and not server_args.enable_dp_attention:
+        dp_groups = [
+            (
+                dp_rank
+                * server_args.tp_size
+                * server_args.pp_size
+                * server_args.gpu_id_step,
+                dp_rank,
+            )
+            for dp_rank in range(server_args.dp_size)
+        ]
 
-def _port_for_scheduler(
-    monkeypatch, server_args, gpu_id, tp_rank, dp_rank, pp_rank: int = 0
-) -> int:
+    calls = []
+    for group_gpu_offset, dp_rank in dp_groups:
+        for pp_rank in pp_ranks:
+            for tp_rank in tp_ranks:
+                gpu_id = (
+                    server_args.base_gpu_id
+                    + group_gpu_offset
+                    + (pp_rank % pp_size_per_node) * tp_size_per_node
+                    + (tp_rank % tp_size_per_node) * server_args.gpu_id_step
+                )
+                launched_dp_rank = dp_rank
+                if server_args.enable_dp_attention:
+                    launched_dp_rank = tp_rank // attn_tp_size
+                calls.append((gpu_id, tp_rank, pp_rank, launched_dp_rank))
+    return calls
+
+
+def _port_for_scheduler(server_args, gpu_id, tp_rank, pp_rank, dp_rank) -> int:
     """The exporter port the wrapper installs in one scheduler's process.
 
     SGLang calls the scheduler entry point entirely positionally, so this passes
     positionally too rather than by keyword.
     """
-    monkeypatch.setenv(NIXL_TELEMETRY_PROMETHEUS_PORT_ENV, "19090")
+    # Every scheduler is its own process and reads the base the operator
+    # injected. Sharing one interpreter across a launch would instead let each
+    # call read the port the previous call installed.
+    os.environ[NIXL_TELEMETRY_PROMETHEUS_PORT_ENV] = str(BASE_PORT)
+
     port_args, attn_cp_rank, moe_dp_rank, moe_ep_rank = SimpleNamespace(), 0, 0, 0
     _assign_nixl_prometheus_port(
         _run_scheduler_process,
@@ -105,6 +153,13 @@ def _port_for_scheduler(
     return int(os.environ[NIXL_TELEMETRY_PROMETHEUS_PORT_ENV])
 
 
+def _ports_for_launch(server_args) -> list[int]:
+    return [
+        _port_for_scheduler(server_args, *call)
+        for call in _scheduler_calls(server_args)
+    ]
+
+
 class _LazyProxyModule:
     """Stands in for ``sglang``, whose ``Engine`` is a lazy import proxy.
 
@@ -121,97 +176,66 @@ class _LazyProxyModule:
 def telemetry_env(monkeypatch):
     monkeypatch.setenv("NIXL_TELEMETRY_ENABLE", "y")
     monkeypatch.setenv("NIXL_TELEMETRY_EXPORTER", "prometheus")
+    monkeypatch.setenv(NIXL_TELEMETRY_PROMETHEUS_PORT_ENV, str(BASE_PORT))
     monkeypatch.setenv("DYN_SYSTEM_PORT", "9090")
     monkeypatch.setenv("DYN_FORWARDPASS_METRIC_PORT", "20380")
-    monkeypatch.delenv("SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS", raising=False)
     return monkeypatch
 
 
 class TestPerRankPortAssignment:
-    def test_tensor_parallel_ranks_get_distinct_ports(self, telemetry_env):
-        server_args = SimpleNamespace(tp_size=8, base_gpu_id=0, gpu_id_step=1)
-        ports = {
-            _port_for_scheduler(
-                telemetry_env,
-                server_args,
-                _scheduler_gpu_id(server_args, tp_rank),
-                tp_rank,
-                dp_rank=None,
-            )
-            for tp_rank in range(8)
-        }
-        assert len(ports) == 8
+    @pytest.mark.parametrize(
+        "name,server_args,expected_ranks",
+        [
+            ("tensor parallel", _server_args(tp_size=8), 8),
+            ("data parallel", _server_args(tp_size=1, dp_size=8), 8),
+            (
+                "attention data parallel",
+                _server_args(tp_size=8, dp_size=8, enable_dp_attention=True),
+                8,
+            ),
+            ("offset devices", _server_args(tp_size=4, base_gpu_id=4), 4),
+            (
+                "stepped pipeline with data parallelism",
+                _server_args(tp_size=1, pp_size=2, dp_size=2, gpu_id_step=2),
+                4,
+            ),
+            (
+                "stepped pipeline with tensor parallelism",
+                _server_args(tp_size=4, pp_size=2, gpu_id_step=2),
+                8,
+            ),
+            (
+                "pipeline split across nodes",
+                _server_args(tp_size=4, pp_size=2, nnodes=2),
+                4,
+            ),
+            ("tensor group split across nodes", _server_args(tp_size=8, nnodes=2), 4),
+        ],
+    )
+    def test_every_scheduler_gets_its_own_port_in_the_reserved_range(
+        self, telemetry_env, name, server_args, expected_ranks
+    ):
+        """A pod reserves one consecutive port per node-local rank and no more.
 
-    def test_attention_dp_ranks_get_distinct_ports(self, telemetry_env):
-        """Every scheduler here has ``tp_rank == 0``; only gpu_id separates them."""
-        server_args = SimpleNamespace(tp_size=1, base_gpu_id=0, gpu_id_step=1)
-        ports = {
-            _port_for_scheduler(
-                telemetry_env,
-                server_args,
-                _scheduler_gpu_id(server_args, tp_rank=0, dp_group_offset=dp_rank),
-                tp_rank=0,
-                dp_rank=dp_rank,
-            )
-            for dp_rank in range(8)
-        }
-        assert len(ports) == 8
-
-    def test_offset_devices_still_start_at_the_reserved_base(self, telemetry_env):
-        """``base_gpu_id`` shifts devices, not the pod's reserved port range."""
-        server_args = SimpleNamespace(tp_size=4, base_gpu_id=4, gpu_id_step=1)
-        ports = [
-            _port_for_scheduler(
-                telemetry_env,
-                server_args,
-                _scheduler_gpu_id(server_args, tp_rank),
-                tp_rank,
-                dp_rank=None,
-            )
-            for tp_rank in range(4)
-        ]
-        assert ports == [19090, 19091, 19092, 19093]
-
-    def test_stepped_pipeline_stages_get_distinct_ports(self, telemetry_env):
-        """A pipeline shift is not scaled by ``gpu_id_step``, so it is already dense.
-
-        These two schedulers hold devices 0 and 1, and dividing either by the
-        step would put both on the base port and back on one bind.
+        Two schedulers on one port leave the second unable to bind, and a rank
+        past the reserved range has no declared container port to be scraped on,
+        so the ports a node hands out have to be exactly ``base .. base + n-1``.
         """
-        server_args = SimpleNamespace(
-            tp_size=1, pp_size=2, base_gpu_id=0, gpu_id_step=2
-        )
-        ports = {
-            _port_for_scheduler(
-                telemetry_env,
-                server_args,
-                _scheduler_gpu_id(server_args, tp_rank=0, pp_rank=pp_rank),
-                tp_rank=0,
-                dp_rank=None,
-                pp_rank=pp_rank,
-            )
-            for pp_rank in range(2)
-        }
-        assert ports == {19090, 19091}
+        ports = _ports_for_launch(server_args)
+        assert len(ports) == expected_ranks
+        assert set(ports) == set(range(BASE_PORT, BASE_PORT + expected_ranks))
 
-    def test_hidden_device_index_is_rejected(self, telemetry_env):
-        """With devices reindexed per process every gpu_id is 0; refuse to collide."""
-        telemetry_env.setenv("SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS", "1")
-        server_args = SimpleNamespace(tp_size=8, base_gpu_id=0, gpu_id_step=1)
-        with pytest.raises(ValueError, match="SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS"):
-            _port_for_scheduler(
-                telemetry_env, server_args, gpu_id=0, tp_rank=0, dp_rank=None
-            )
+    def test_each_node_restarts_at_the_reserved_base(self, telemetry_env):
+        """The range is reserved per pod, so node 1 uses the same ports as node 0."""
+        first, second = (
+            _ports_for_launch(_server_args(tp_size=8, nnodes=2, node_rank=node_rank))
+            for node_rank in (0, 1)
+        )
+        assert first == second == [19090, 19091, 19092, 19093]
 
     def test_disabled_telemetry_leaves_the_environment_alone(self, telemetry_env):
         telemetry_env.setenv("NIXL_TELEMETRY_ENABLE", "n")
-        server_args = SimpleNamespace(tp_size=8, base_gpu_id=0, gpu_id_step=1)
-        assert (
-            _port_for_scheduler(
-                telemetry_env, server_args, gpu_id=3, tp_rank=3, dp_rank=None
-            )
-            == 19090
-        )
+        assert _ports_for_launch(_server_args(tp_size=8)) == [BASE_PORT] * 8
 
 
 class TestInstall:

@@ -84,8 +84,6 @@ func findEnvVar(env []corev1.EnvVar, name string) *corev1.EnvVar {
 	return nil
 }
 
-// findContainerPort returns the named container port, or nil when the container
-// does not declare it.
 func findContainerPort(container *corev1.Container, name string) *corev1.ContainerPort {
 	for i := range container.Ports {
 		if container.Ports[i].Name == name {

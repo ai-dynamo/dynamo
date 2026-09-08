@@ -670,6 +670,7 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 		telemetryEnable    string
 		telemetryValueFrom *corev1.EnvVarSource
 		telemetryPort      string
+		portValueFrom      *corev1.EnvVarSource
 		containerGPUs      int64
 		expectedPorts      map[string]int32
 		expectedError      string
@@ -689,11 +690,11 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 			expectedPorts:   allEightPorts,
 		},
 		{
-			name:            "more GPUs than the reserved range stops at the cap",
+			name:            "more ranks than the reserved range is rejected",
 			ports:           workerPorts,
 			telemetryEnable: "y",
 			containerGPUs:   16,
-			expectedPorts:   allEightPorts,
+			expectedError:   "16 co-located GPUs each need a NIXL exporter port",
 		},
 		{
 			name:            "the operator default of disabled telemetry reserves nothing",
@@ -716,6 +717,49 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
 					LocalObjectReference: corev1.LocalObjectReference{Name: "telemetry"},
 					Key:                  "nixl-enable",
+				},
+			},
+			containerGPUs: 8,
+			expectedPorts: allEightPorts,
+		},
+		{
+			name:  "a sourced enable value reserves the whole range rather than refusing the deployment",
+			ports: workerPorts,
+			telemetryValueFrom: &corev1.EnvVarSource{
+				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "telemetry"},
+					Key:                  "nixl-enable",
+				},
+			},
+			containerGPUs: 16,
+			expectedPorts: allEightPorts,
+		},
+		{
+			name:            "a sourced base the operator cannot declare is rejected",
+			ports:           workerPorts,
+			telemetryEnable: "y",
+			portValueFrom: &corev1.EnvVarSource{
+				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "telemetry"},
+					Key:                  "nixl-port",
+				},
+			},
+			containerGPUs: 4,
+			expectedError: "cannot declare the exporter range",
+		},
+		{
+			name:  "a sourced base is tolerated when the enable value is unreadable too",
+			ports: workerPorts,
+			telemetryValueFrom: &corev1.EnvVarSource{
+				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "telemetry"},
+					Key:                  "nixl-enable",
+				},
+			},
+			portValueFrom: &corev1.EnvVarSource{
+				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "telemetry"},
+					Key:                  "nixl-port",
 				},
 			},
 			containerGPUs: 8,
@@ -745,7 +789,12 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Render the container the way the component defaults do")
 			telemetryPort := tt.telemetryPort
-			if telemetryPort == "" {
+			switch {
+			case tt.portValueFrom != nil:
+				// The API rejects a variable carrying both, so a sourced base has
+				// no inline value for the operator to fall back on.
+				telemetryPort = ""
+			case telemetryPort == "":
 				telemetryPort = strconv.Itoa(commonconsts.DynamoNixlPort)
 			}
 			container := &corev1.Container{
@@ -754,7 +803,7 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 					{Name: "DYN_SYSTEM_PORT", Value: strconv.Itoa(commonconsts.DynamoSystemPort)},
 					{Name: "NIXL_TELEMETRY_ENABLE", Value: tt.telemetryEnable, ValueFrom: tt.telemetryValueFrom},
 					{Name: "NIXL_TELEMETRY_EXPORTER", Value: "prometheus"},
-					{Name: "NIXL_TELEMETRY_PROMETHEUS_PORT", Value: telemetryPort},
+					{Name: "NIXL_TELEMETRY_PROMETHEUS_PORT", Value: telemetryPort, ValueFrom: tt.portValueFrom},
 				},
 			}
 

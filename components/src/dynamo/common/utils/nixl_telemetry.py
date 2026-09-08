@@ -20,7 +20,7 @@ find a rank index live in the per-backend packages.
 from __future__ import annotations
 
 import os
-from typing import Mapping
+from collections.abc import Mapping
 
 MAX_PORT = 65535
 

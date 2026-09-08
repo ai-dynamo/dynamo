@@ -67,12 +67,11 @@ class TestDeriveNixlPrometheusPort:
         with pytest.raises(ValueError, match=env_name):
             derive_nixl_prometheus_port(overlapping_base, local_rank, env=OPERATOR_ENV)
 
-    @pytest.mark.parametrize("local_rank", [0, 1])
-    def test_base_too_high_for_the_reserved_range_is_rejected(self, local_rank):
+    def test_base_too_high_for_the_reserved_range_is_rejected(self):
         # Rank 0 fits at MAX_PORT on its own; rejecting it is what stops the pod
         # from starting one scheduler and failing every rank after it.
         with pytest.raises(ValueError, match="exceeds the maximum port"):
-            derive_nixl_prometheus_port(MAX_PORT, local_rank, env=OPERATOR_ENV)
+            derive_nixl_prometheus_port(MAX_PORT, 0, env=OPERATOR_ENV)
 
 
 class TestNixlPrometheusBasePort:

@@ -32,27 +32,50 @@ from dynamo.common.utils.nixl_telemetry import (
 
 logger = logging.getLogger(__name__)
 
-# SGLang reindexes CUDA_VISIBLE_DEVICES per child when this is set, collapsing every
-# scheduler's gpu_id to 0 -- the only node-local rank index the process is handed.
-_ONE_VISIBLE_DEVICE_ENV = "SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS"
 
-_TRUTHY = frozenset({"1", "true", "yes", "y", "on"})
-
-
-def _node_local_rank(server_args: Any, gpu_id: int) -> int:
+def _node_local_rank(
+    server_args: Any,
+    *,
+    tp_rank: int,
+    pp_rank: int,
+    dp_rank: int | None,
+) -> int:
     """Return the scheduler's index among the ranks sharing this node.
 
-    ``gpu_id`` is the argument that stays distinct per co-located scheduler in
-    every parallelism mode, which is what keeps two ranks off one port;
-    ``tp_rank`` restarts at 0 in each data-parallel group. Pipeline stages are
-    already numbered densely, because SGLang does not scale a stage's device
-    shift by ``gpu_id_step``, so only the other modes divide the step out.
+    SGLang places a scheduler on a device with ``gpu_id = base_gpu_id +
+    dp_offset + (pp_rank % pp_size_per_node) * tp_size_per_node + (tp_rank %
+    tp_size_per_node) * gpu_id_step``. That device index is not a port index:
+    ``gpu_id_step`` spaces it out, ``base_gpu_id`` and the data-parallel offset
+    shift it, and nothing bounds it by the number of ports the pod reserves.
+    The rank arguments the same launch already computes give the position
+    directly, and counting the pairs this node launches numbers them 0, 1, 2,
+    ... with no gaps.
+
+    ``dp_rank`` names a separate launch group only when SGLang's data-parallel
+    controller starts one tensor-parallel group per data-parallel rank. Under
+    ``--enable-dp-attention`` all ranks share one group and ``dp_rank`` is
+    derived from ``tp_rank``, so folding it in there would hand two schedulers
+    the same number.
     """
-    base_gpu_id = getattr(server_args, "base_gpu_id", 0) or 0
-    gpu_id_step = getattr(server_args, "gpu_id_step", 1) or 1
+    nnodes = getattr(server_args, "nnodes", 1) or 1
+    tp_size = getattr(server_args, "tp_size", 1) or 1
     pp_size = getattr(server_args, "pp_size", 1) or 1
-    offset = gpu_id - base_gpu_id
-    return offset if pp_size > 1 else offset // gpu_id_step
+
+    # SGLang's own split of the pipeline and tensor dimensions across nodes.
+    pp_size_per_node = max(pp_size // nnodes, 1)
+    nnodes_per_tp_group = max(nnodes // pp_size, 1)
+    tp_size_per_node = max(tp_size // nnodes_per_tp_group, 1)
+    if getattr(server_args, "is_ep_scale_joiner", False):
+        # A scale joiner enumerates its whole tensor-parallel span on one node.
+        tp_size_per_node = tp_size
+
+    rank = (pp_rank % pp_size_per_node) * tp_size_per_node + (
+        tp_rank % tp_size_per_node
+    )
+    if dp_rank is not None and not getattr(server_args, "enable_dp_attention", False):
+        rank += dp_rank * pp_size_per_node * tp_size_per_node
+
+    return rank
 
 
 def _assign_nixl_prometheus_port(target: Any, args: tuple, kwargs: dict) -> None:
@@ -61,25 +84,28 @@ def _assign_nixl_prometheus_port(target: Any, args: tuple, kwargs: dict) -> None
     if base_port is None:
         return
 
-    if os.environ.get(_ONE_VISIBLE_DEVICE_ENV, "").strip().lower() in _TRUTHY:
-        raise ValueError(
-            f"{_ONE_VISIBLE_DEVICE_ENV} hides each scheduler's device index, so "
-            f"co-located ranks cannot be given distinct "
-            f"{NIXL_TELEMETRY_PROMETHEUS_PORT_ENV} values and all but one would "
-            f"fail to bind. Unset {_ONE_VISIBLE_DEVICE_ENV} or disable NIXL "
-            f"Prometheus telemetry."
-        )
-
+    # SGLang moves scheduler arguments between releases, and a rank this
+    # process was not given is a dimension it does not participate in, which is
+    # what the defaults below describe.
     bound = inspect.signature(target).bind(*args, **kwargs)
     bound.apply_defaults()
-    server_args = bound.arguments["server_args"]
-    gpu_id = bound.arguments["gpu_id"]
+    arguments = bound.arguments
+    tp_rank = arguments.get("tp_rank") or 0
+    pp_rank = arguments.get("pp_rank") or 0
+    dp_rank = arguments.get("dp_rank")
 
-    port = derive_nixl_prometheus_port(base_port, _node_local_rank(server_args, gpu_id))
+    local_rank = _node_local_rank(
+        arguments["server_args"], tp_rank=tp_rank, pp_rank=pp_rank, dp_rank=dp_rank
+    )
+    port = derive_nixl_prometheus_port(base_port, local_rank)
     os.environ[NIXL_TELEMETRY_PROMETHEUS_PORT_ENV] = str(port)
     logger.info(
-        "NIXL Prometheus exporter for gpu_id=%s listens on port %s (base %s)",
-        gpu_id,
+        "NIXL Prometheus exporter for tp_rank=%s pp_rank=%s dp_rank=%s is "
+        "node-local rank %s and listens on port %s (base %s)",
+        tp_rank,
+        pp_rank,
+        dp_rank,
+        local_rank,
         port,
         base_port,
     )

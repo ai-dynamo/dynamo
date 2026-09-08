@@ -85,7 +85,8 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 	// The operator cannot resolve valueFrom, so reserve the range rather than
 	// assume telemetry is off: an unused declaration is harmless, a missing one
 	// leaves every rank past the base unscrapeable.
-	if enabled.ValueFrom == nil && !strings.EqualFold(strings.TrimSpace(enabled.Value), "y") {
+	telemetryOn := enabled.ValueFrom == nil
+	if telemetryOn && !strings.EqualFold(strings.TrimSpace(enabled.Value), "y") {
 		return nil
 	}
 
@@ -97,11 +98,38 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 	// Rank i binds NIXL_TELEMETRY_PROMETHEUS_PORT+i, so a literal override moves
 	// the whole range: realign `nixl` with it or it advertises a port rank 0
 	// never binds.
-	if override, ok := literalPort(findEnvVar(container.Env, "NIXL_TELEMETRY_PROMETHEUS_PORT")); ok {
-		basePort.ContainerPort = override
+	override := findEnvVar(container.Env, "NIXL_TELEMETRY_PROMETHEUS_PORT")
+	if overridden, ok := literalPort(override); ok {
+		basePort.ContainerPort = overridden
+	} else if telemetryOn && override != nil && override.ValueFrom != nil {
+		// A sourced base has no conservative fallback the way a sourced enable
+		// value does: the container resolves it and binds that range, while the
+		// declared ports and the PodMonitor stay on the base written here, so
+		// the metrics disappear instead of merely being over-declared.
+		return fmt.Errorf(
+			"NIXL_TELEMETRY_PROMETHEUS_PORT is set through valueFrom while NIXL Prometheus telemetry is enabled, "+
+				"so the operator cannot declare the exporter range as %s container ports and Prometheus would scrape "+
+				"a range no rank binds. Set NIXL_TELEMETRY_PROMETHEUS_PORT to a literal port, or set NIXL_TELEMETRY_ENABLE=n",
+			commonconsts.DynamoNixlPortName)
 	}
 
-	colocatedRanks := min(containerGPUs, int64(commonconsts.DynamoMaxNixlPorts))
+	// Every co-located rank needs a port of its own, and the runtime refuses a
+	// rank past the reserved range rather than share one: truncating the count
+	// here would fail startup on the ranks that lost their port. An unreadable
+	// enable value is exempt, because refusing a deployment that may not use
+	// telemetry at all costs more than the over-declaration above.
+	colocatedRanks := containerGPUs
+	if colocatedRanks > int64(commonconsts.DynamoMaxNixlPorts) {
+		if telemetryOn {
+			return fmt.Errorf(
+				"%d co-located GPUs each need a NIXL exporter port, but only %d consecutive ports are declared and scraped, "+
+					"so the ranks past the %dth would fail to start. Run at most %d ranks per container, "+
+					"or set NIXL_TELEMETRY_ENABLE=n",
+				colocatedRanks, commonconsts.DynamoMaxNixlPorts, commonconsts.DynamoMaxNixlPorts, commonconsts.DynamoMaxNixlPorts)
+		}
+		colocatedRanks = int64(commonconsts.DynamoMaxNixlPorts)
+	}
+
 	if last := int64(basePort.ContainerPort) + colocatedRanks - 1; last > maxTCPPort {
 		return fmt.Errorf(
 			"NIXL_TELEMETRY_PROMETHEUS_PORT=%d with %d co-located ranks needs ports %d-%d, which exceeds the maximum port %d",
