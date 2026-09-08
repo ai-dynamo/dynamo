@@ -1618,7 +1618,7 @@ fn ensure_token_ids_in_vocab(
     if let Some(vocab_size) = vocab_size {
         if let Some(&bad) = tokens.iter().find(|&&t| t as usize >= vocab_size) {
             return Err(invalid_argument_error(format!(
-                "nvext.token_data token id {bad} exceeds vocab_size {vocab_size}"
+                "nvext.token_data token id {bad} is out of range (must be < vocab_size {vocab_size})"
             )));
         }
     }
