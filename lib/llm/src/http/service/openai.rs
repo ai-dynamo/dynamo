@@ -6196,6 +6196,7 @@ mod tests {
             message: "Worker local total request limit reached (32/32)".to_string(),
             status: StatusCode::TOO_MANY_REQUESTS,
             sanitized: Some(SanitizedError::Overloaded),
+            metric_error_type: Some(ErrorType::Overload),
         });
 
         assert_eq!(response.0, overload_status_code());

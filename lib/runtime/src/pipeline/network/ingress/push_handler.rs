@@ -1026,6 +1026,7 @@ mod tests {
             let publisher = MismatchPublisher::default();
             let prologue = publisher.prologue.clone();
             let finished = publisher.finished.clone();
+            let lifecycle = LifecycleTrace::from_environment();
 
             let error = ingress
                 .generate_and_publish(
@@ -1034,6 +1035,7 @@ mod tests {
                     Instant::now(),
                     configured,
                     advertised,
+                    &lifecycle,
                     publisher,
                 )
                 .await
