@@ -26,6 +26,7 @@ import (
 	runtimefeatures "github.com/ai-dynamo/dynamo/deploy/operator/internal/features/runtime"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
@@ -87,6 +88,57 @@ func TestComputeBetaDGDWorkersSpecHash_Deterministic(t *testing.T) {
 	h2 := mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, dgd))
 	assert.Equal(t, h1, h2)
 	assert.Len(t, h1, 8)
+}
+
+func TestComputeBetaDGDWorkersSpecHash_EquivalentExplicitRolesDoNotRoll(t *testing.T) {
+	t.Log("Build a multinode worker with the established implicit leader and worker layout")
+	implicit := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: commonconsts.ComponentTypeWorker,
+			Multinode:     &v1alpha1.MultinodeSpec{NodeCount: 4},
+		},
+	}))
+
+	t.Log("Make the same semantic role structure explicit in reverse declaration order")
+	explicit := implicit.DeepCopy()
+	explicit.Spec.Components[0].Roles = []v1beta1.ComponentRoleSpec{
+		{Name: v1beta1.ComponentRoleWorker},
+		{Name: v1beta1.ComponentRoleLeader},
+	}
+
+	t.Log("Verify the representation-only migration keeps the worker generation stable")
+	assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, implicit), mustComputeBetaDGDWorkersSpecHash(t, explicit))
+}
+
+func TestComputeBetaDGDWorkersSpecHash_CanonicalizesExplicitRoleOrder(t *testing.T) {
+	t.Log("Build explicit multinode roles with a worker provider override")
+	dgd := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: commonconsts.ComponentTypeWorker,
+			Multinode:     &v1alpha1.MultinodeSpec{NodeCount: 4},
+		},
+	}))
+	dgd.Spec.Components[0].Roles = []v1beta1.ComponentRoleSpec{
+		{Name: v1beta1.ComponentRoleLeader},
+		{
+			Name: v1beta1.ComponentRoleWorker,
+			ProviderOverride: &v1beta1.ProviderOverride{
+				APIVersion: "grove.io/v1alpha1",
+				Target:     "PodCliqueTemplateSpec",
+				Value: apiextensionsv1.JSON{Raw: []byte(
+					`{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"rack"}}}`,
+				)},
+			},
+		},
+	}
+
+	t.Log("Reverse the map-list declaration order without changing its semantic content")
+	reordered := dgd.DeepCopy()
+	reordered.Spec.Components[0].Roles[0], reordered.Spec.Components[0].Roles[1] =
+		reordered.Spec.Components[0].Roles[1], reordered.Spec.Components[0].Roles[0]
+
+	t.Log("Verify the order-only update keeps the worker generation stable")
+	assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, dgd), mustComputeBetaDGDWorkersSpecHash(t, reordered))
 }
 
 func TestComputeBetaDGDWorkersSpecHash_IgnoresNonWorkers(t *testing.T) {
