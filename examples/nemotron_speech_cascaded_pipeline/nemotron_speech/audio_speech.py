@@ -87,6 +87,16 @@ class SpeechNimAudioSpeechBackend:
                     continue
             return False
 
+        def get_output() -> bytes | Exception | None:
+            # A cancelled ``asyncio.to_thread(output.get)`` cannot stop the
+            # underlying blocking thread. Poll so disconnects release it.
+            while not stopped.is_set():
+                try:
+                    return output.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+            return None
+
         def synthesize() -> None:
             call = None
             try:
@@ -113,7 +123,7 @@ class SpeechNimAudioSpeechBackend:
 
         task = asyncio.create_task(asyncio.to_thread(synthesize))
         try:
-            while (item := await asyncio.to_thread(output.get)) is not None:
+            while (item := await asyncio.to_thread(get_output)) is not None:
                 if isinstance(item, Exception):
                     raise item
                 yield NvAudioSpeechResponse(
