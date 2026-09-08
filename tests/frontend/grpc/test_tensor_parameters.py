@@ -13,9 +13,11 @@
 import logging
 import os
 import shutil
+from pathlib import Path
 
 import numpy as np
 import pytest
+from packaging.requirements import Requirement
 
 try:
     import tritonclient.grpc as grpcclient
@@ -25,6 +27,68 @@ except ImportError:
 from tests.utils.managed_process import ManagedProcess
 
 logger = logging.getLogger(__name__)
+
+
+@pytest.mark.unit
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.parallel
+@pytest.mark.parametrize("component", ["common", "frontend", "planner"])
+def test_protobuf_requirements_exclude_vulnerable_versions(component: str) -> None:
+    path = (
+        Path(__file__).resolve().parents[3]
+        / "container/deps"
+        / f"requirements.{component}.txt"
+    )
+    requirement = Requirement(
+        next(
+            line
+            for line in path.read_text().splitlines()
+            if line.startswith("protobuf")
+        )
+    )
+    assert "6.33.6" in requirement.specifier
+    for version in ("5.29.5", "6.30.0", "6.31.1", "6.32.1", "6.33.4", "7.0.0"):
+        assert version not in requirement.specifier, f"{path} allows protobuf {version}"
+
+
+@pytest.mark.unit
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.parallel
+def test_protobuf_any_json_recursion_limit() -> None:
+    from google.protobuf import any_pb2, empty_pb2, json_format
+
+    message = any_pb2.Any()
+    message.Pack(empty_pb2.Empty())
+    payload = json_format.MessageToDict(message)
+    assert (
+        json_format.ParseDict(payload, any_pb2.Any(), max_recursion_depth=5) == message
+    )
+    for _ in range(10):
+        payload = {"@type": "type.googleapis.com/google.protobuf.Any", "value": payload}
+    with pytest.raises(json_format.ParseError, match="[Rr]ecursion"):
+        json_format.ParseDict(payload, any_pb2.Any(), max_recursion_depth=5)
+
+
+@pytest.mark.unit
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.parallel
+def test_triton_protobuf_json_roundtrip() -> None:
+    from tritonclient.grpc import service_pb2
+
+    response = service_pb2.ModelInferResponse(model_name="identity", id="roundtrip")
+    response.parameters["processed"].bool_param = True
+    response.outputs.add(name="OUTPUT", datatype="INT32", shape=[2])
+    response.raw_output_contents.append(np.array([3, 7], dtype=np.int32).tobytes())
+    wire_response = service_pb2.ModelInferResponse.FromString(
+        response.SerializeToString()
+    )
+    result = grpcclient.InferResult(wire_response)
+    assert result.get_response(as_json=True)["parameters"]["processed"]["bool_param"]
+    assert result.get_response().id == "roundtrip"
+    np.testing.assert_array_equal(result.as_numpy("OUTPUT"), [3, 7])
 
 
 class EchoTensorWorkerProcess(ManagedProcess):
