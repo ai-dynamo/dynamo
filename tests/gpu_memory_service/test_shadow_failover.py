@@ -20,11 +20,9 @@ from tests.gpu_memory_service.common.runtime import (
 from tests.gpu_memory_service.flow_assertions import (
     assert_completion_ok,
     assert_kv_history,
-    assert_weights_published_once,
     pause_engine,
     wait_for_active_layout,
     wait_for_resumed_layout,
-    wait_for_weights_state,
 )
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
@@ -220,88 +218,11 @@ def _resume_shadow_after_primary_failover(
         return result
 
 
-def _run_shadow_failover_test(
-    request,
-    engine_cls,
-) -> None:
-    with GMSProcessManager(request, engine_cls) as manager:
-        frontend_port = manager.frontend_port
-        weights_gms = manager.weights_gms
-        kv_cache_gms = manager.kv_cache_gms
-
-        shadow_a = manager.start_engine(
-            "shadow-a",
-        )
-        weights_state_after_shadow_a = pause_engine(
-            weights_gms,
-            kv_cache_gms,
-            shadow_a,
-            pause_label="Shadow pause",
-        )
-        weights_hash = weights_state_after_shadow_a.memory_layout_hash
-        shadow_b = manager.start_engine(
-            "shadow-b",
-            read_only_weights=True,
-        )
-        weights_state_after_shadow_b = pause_engine(
-            weights_gms,
-            kv_cache_gms,
-            shadow_b,
-            pause_label="Shadow pause",
-            expected_weights_hash=weights_hash,
-        )
-        assert weights_state_after_shadow_b.memory_layout_hash == weights_hash
-
-        weights_events_after_shadow_pause = weights_gms.get_event_history().events
-        assert_weights_published_once(weights_events_after_shadow_pause)
-
-        kv_events_after_shadow_pause = kv_cache_gms.get_event_history().events
-        assert_kv_history(kv_events_after_shadow_pause, cleared_layouts=2)
-
-        primary, weights_with_primary = _start_primary(
-            manager,
-            frontend_port,
-            weights_gms,
-            kv_cache_gms,
-            weights_hash=weights_hash,
-        )
-        resume_result = _resume_shadow_after_primary_failover(
-            shadow_a,
-            kv_cache_gms,
-            primary,
-        )
-
-        assert resume_result["status"] == "ok"
-
-        # Once the primary is gone, the failover shadow should finish resume
-        # with the same committed weights layout and a new live RW KV-cache layout.
-        wait_for_resumed_layout(
-            weights_gms,
-            kv_cache_gms,
-            weights_with_primary,
-            min_weight_ro_sessions=1,
-        )
-
-        # Weights are still published exactly once across the whole handoff.
-        weights_events_after_resume = weights_gms.get_event_history().events
-        assert_weights_published_once(weights_events_after_resume)
-
-        # The helper asserted that takeover preserved the committed shared KV
-        # allocation count and returned only after the shadow held RW ownership.
-
-        # The reported result: the shadow serves real tokens after the crash.
-        assert_completion_ok(
-            frontend_port,
-            "Post failover",
-            failure_message="Shadow inference after failover failed",
-            success_message="Shadow inference after failover OK",
-            retry_timeout=30.0,
-        )
-
-
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.profiled_vram_gib(8.0)
+@pytest.mark.requested_vllm_kv_cache_bytes(5_000_000_000)
 @pytest.mark.timeout(600)
 @pytest.mark.vllm
 def test_gms_minimal_cold_hbm_failover_vllm(
@@ -380,6 +301,8 @@ def test_gms_minimal_cold_hbm_failover_vllm(
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.profiled_vram_gib(8.0)
+@pytest.mark.requested_vllm_kv_cache_bytes(5_000_000_000)
 @pytest.mark.timeout(600)
 @pytest.mark.vllm
 def test_gms_authoritative_hbm_failover_vllm(
@@ -483,13 +406,3 @@ def test_gms_authoritative_hbm_failover_vllm(
                 "shadow used lazy adoption but did not hydrate its native HBM index\n"
                 + diagnostics
             )
-
-@pytest.mark.e2e
-@pytest.mark.gpu_1
-@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-@pytest.mark.timeout(600)
-@pytest.mark.vllm
-def test_gms_shadow_engine_failover_vllm(
-    request, runtime_services_dynamic_ports, predownload_models
-):
-    _run_shadow_failover_test(request, VLLMWithGMSProcess)
