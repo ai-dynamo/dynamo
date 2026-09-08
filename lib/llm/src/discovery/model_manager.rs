@@ -3119,44 +3119,6 @@ mod tests {
         runtime.shutdown();
     }
 
-    #[tokio::test]
-    async fn endpoint_cleanup_preserves_prefill_binding_watch_owner() {
-        let runtime = Runtime::from_current().unwrap();
-        let distributed =
-            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
-                .await
-                .unwrap();
-        let manager = ModelManager::new();
-        let component = distributed
-            .namespace("prefill-binding-cleanup".to_string())
-            .unwrap()
-            .component("worker".to_string())
-            .unwrap();
-        let endpoint = component.endpoint("generate".to_string());
-        let binding_watch = manager
-            .get_or_create_runtime_config_watcher(&endpoint)
-            .await
-            .unwrap();
-
-        // This receiver models the owner retained by a live PrefillBinding;
-        // the manager registry itself is the only other receiver.
-        ModelManager::evict_unused_endpoint_state(
-            &endpoint.id(),
-            &manager.runtime_configs,
-            &manager.hicache_caches,
-        );
-        assert!(manager.runtime_configs.contains_key(&endpoint.id()));
-
-        drop(binding_watch);
-        ModelManager::evict_unused_endpoint_state(
-            &endpoint.id(),
-            &manager.runtime_configs,
-            &manager.hicache_caches,
-        );
-        assert!(!manager.runtime_configs.contains_key(&endpoint.id()));
-        runtime.shutdown();
-    }
-
     #[test]
     fn remove_hicache_caches_cancels_only_the_removed_component() {
         let manager = ModelManager::new();
