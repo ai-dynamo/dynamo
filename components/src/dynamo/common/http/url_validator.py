@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
+from dynamo.common.configuration.utils import env_or_default
+
 
 class UrlValidationError(ValueError):
     """Raised when a URL or filesystem path fails the configured policy."""
@@ -31,10 +33,7 @@ class UrlValidationError(ValueError):
 # an arbitrarily large payload in a single request and force the worker to hold
 # it (and its base64-decoded form) in memory. Default 16 MiB, overridable via
 # ``DYN_MM_MAX_DATA_URL_MB``.
-try:
-    _MAX_DATA_URL_MB = int(os.getenv("DYN_MM_MAX_DATA_URL_MB", "16"))
-except ValueError:
-    _MAX_DATA_URL_MB = 16
+_MAX_DATA_URL_MB = env_or_default("DYN_MM_MAX_DATA_URL_MB", 16, int)
 if _MAX_DATA_URL_MB <= 0:  # a non-positive cap would reject every data: URL
     _MAX_DATA_URL_MB = 16
 _MAX_DATA_URL_BYTES = _MAX_DATA_URL_MB * 1024 * 1024
