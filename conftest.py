@@ -35,18 +35,14 @@ _UNMANAGED_ROOTS = frozenset({"examples", "skills", ".agents"})
 _REPO_ROOT = Path(__file__).resolve().parent
 
 # Seed sys.modules with the venv copies before pytest collection runs.
-# Best-effort by construction: an engine that is present but not importable --
-# an editable install whose source tree is unreadable raises PermissionError,
-# not ImportError -- must not abort collection of the entire suite, so catch
-# everything the import can raise rather than ImportError alone.
+# Best-effort: an engine that is present but not importable (an editable install
+# with an unreadable source tree raises PermissionError) must not abort collection.
 for _name in ("vllm", "sglang"):
     try:
         importlib.import_module(_name)
     except Exception as _exc:  # noqa: BLE001 - best-effort seeding, see above
-        # An engine that is simply absent is the normal case and stays quiet.
-        # Anything else means the install is present but broken, and every
-        # `import <engine>` downstream will fail as an ordinary-looking
-        # collection error; one line here names the single root cause.
+        # A simply-absent engine is normal and stays quiet; anything else
+        # means the install is broken, and one line here names the cause.
         if not (isinstance(_exc, ModuleNotFoundError) and _exc.name == _name):
             print(
                 f"conftest: {_name} is installed but could not be imported, so "

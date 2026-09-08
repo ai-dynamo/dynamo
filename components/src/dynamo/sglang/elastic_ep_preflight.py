@@ -28,15 +28,11 @@ from typing import Dict, List, Optional, Tuple
 MOONCAKE_BACKEND = "mooncake"
 
 # The torch backend name SGLang registers the elastic-EP *device* group under
-# (sglang/srt/distributed/parallel_state.py). The CPU group's "mooncake-cpu" is
-# reported for context but not required: an engine/wheel pairing that only needs
-# the device group must not be blocked here.
+# (sglang/srt/distributed/parallel_state.py). "mooncake-cpu" is not required.
 _MOONCAKE_DEVICE_BACKEND = "mooncake"
 
 # mooncake renamed this extension ``mooncake.ep`` -> ``mooncake.pg``; SGLang
-# v0.5.16 imports the old name and v0.5.18 the new one. Either resolving is
-# enough, so try both rather than pinning the engine version this Dynamo build
-# happens to sit next to.
+# v0.5.16 imports the old name and v0.5.18 the new one, so try both.
 _PROCESS_GROUP_MODULES = ("mooncake.pg", "mooncake.ep")
 
 # Both distributions ship the same extension; only one is normally installed.
@@ -199,9 +195,8 @@ def check_elastic_ep_backend(
     registered_backends: Dict[str, Tuple[str, ...]] = {}
     if import_failure is None:
         readable_backends = _registered_torch_backends()
-        # An unreadable registry fails open: the import above is what catches
-        # the reported failure, and refusing startup because torch moved a
-        # private attribute would block images that are perfectly fine.
+        # An unreadable registry fails open: the import above already catches
+        # the reported failure, and torch could rename a private attribute.
         if readable_backends is None:
             return
         if _MOONCAKE_DEVICE_BACKEND in readable_backends:
