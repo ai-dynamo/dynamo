@@ -747,12 +747,13 @@ async fn zero_max_tokens_is_rejected_rather_than_defaulted() {
     assert!(error.message().contains("greater than zero"), "{error}");
 }
 
-/// Once the engine has finished, an abort must not claim it cancelled the
-/// request -- the stream is about to report LENGTH, and the two answers would
-/// contradict each other. The pump makes this window wide: the engine can run
-/// to completion while the client has read nothing.
+/// The engine finishing is not the same as the client being told. The pump
+/// makes that window wide -- the engine can run to completion while the
+/// consumer has read nothing -- and an abort landing inside it is honoured,
+/// because no terminal event has reached the client yet. What must never
+/// happen is the two disagreeing.
 #[tokio::test]
-async fn abort_after_the_engine_finished_reports_already_finished() {
+async fn abort_before_the_terminal_reaches_the_client_cancels_it() {
     let service = service();
     let mut stream = service
         .generate(Request::new(request("req-raced", 4)))
@@ -773,7 +774,7 @@ async fn abort_after_the_engine_finished_reports_already_finished() {
         .unwrap()
         .into_inner()
         .status;
-    assert_eq!(status, pb::AbortStatus::AlreadyFinished as i32);
+    assert_eq!(status, pb::AbortStatus::Aborted as i32);
 
     let mut terminal = None;
     while let Some(item) = stream.next().await {
@@ -783,8 +784,8 @@ async fn abort_after_the_engine_finished_reports_already_finished() {
     }
     assert_eq!(
         terminal.expect("the request still terminates").reason,
-        pb::FinishReason::Length as i32,
-        "a finished request must report LENGTH, matching the ALREADY_FINISHED abort"
+        pb::FinishReason::Cancelled as i32,
+        "the terminal must match the ABORTED the caller was given"
     );
 }
 
