@@ -35,6 +35,9 @@ A passing result covers the exercised path, not other models, topologies, Dynamo
 - **Enroot 4.0 or newer** if you intend to pull a runtime image tagged `1.0.2` or later; see the `enroot import` row in [Troubleshoot](#troubleshoot)
 - A shared filesystem readable from the compute nodes for images, model cache, and job output
 - Enough free space for a squashed image; the runtime images used here are 20-26 GB each
+- On more than one node, the image path has to resolve identically everywhere.
+  Copying an image of this size to node-local disk is usually not an option, so
+  it belongs on the shared filesystem along with the Enroot data directory
 
 ## Prepare the Image
 
@@ -114,6 +117,12 @@ last step happened to return. The `sleep` is not padding: Pyxis initializes the
 container namespace asynchronously, and launching the next step immediately
 races that setup.
 
+**Use a fixed container name, not one derived from the job ID.** Pyxis does not
+remove a named container when the job ends, so a per-job name leaves one behind
+every run. With images this size that reaches `No space left on device` within a
+handful of jobs. A fixed name also skips the unpack on every run after the
+first.
+
 The named form is the better fit for multiple nodes and for steps that need
 different environment variables. **Everything measured for this page used the
 single-`srun` shape.** The named-container shape, the two flags above, and the
@@ -178,6 +187,54 @@ continues as if etcd were up.
 
 Give each job its own working directory. etcd writes `default.etcd/` into the current directory, so a second job that shares a directory fails on the leftover data directory. `--container-workdir` set to a per-job path handles both that and the log files.
 
+## Give the Container a Writable Home
+
+Two libraries write into `$HOME` at runtime, and whether that succeeds depends
+on the site's Enroot configuration rather than on anything in the job script.
+
+- **FlashInfer writes `$HOME/.cache/flashinfer` at import time.** The
+  `os.makedirs` sits at module top level in `flashinfer/jit/core.py`, and vLLM
+  imports the module unconditionally from `topk_topp_sampler.py`, so
+  `VLLM_USE_FLASHINFER_SAMPLER=0` does not prevent it.
+- **Triton writes `$HOME/.triton` on the first inference.** Model registration
+  succeeds before that point, so a readiness check that stops at a registered
+  model reports success on a worker that cannot serve. This is one of the cases
+  the two-stage gate below catches.
+
+Whether you hit this depends on two Enroot settings, both of which default to
+off:
+
+| Setting | Default | Controls |
+| --- | --- | --- |
+| `ENROOT_ROOTFS_WRITABLE` | `no` | whether the container filesystem accepts writes |
+| `ENROOT_MOUNT_HOME` | `no` | whether the host home directory is bind-mounted |
+
+Check `/etc/enroot/enroot.conf` before assuming which case you are in. A
+DeepOps-provisioned cluster turns both on, and the runs behind this page had
+them on: inside the job `HOME` was `/root`, the root filesystem was writable,
+and neither library failed. A hand-built cluster tends to leave them off, and
+both failures above have been reported there.
+
+`enroot start --rw` overrides the writable setting for that one invocation,
+which is why the same image can work by hand and fail under Slurm. Pyxis has
+its own flags for both, so you do not have to edit the config file:
+
+```bash
+srun --container-name=dynamo --container-writable --container-mount-home \
+     --container-env HOME,ETCD_ENDPOINTS,NATS_SERVER \
+     bash launch_worker.sh
+```
+
+Chasing the individual cache variables does not scale, because each library
+picks its own name. The alternative that survives both settings being off is to
+point `HOME` at a bind-mounted path and pass `HOME` through `--container-env`,
+which also keeps the caches out of the container filesystem so a named
+container does not grow every run.
+
+> **Not verified here.** The flags above are present in `srun --help` on
+> Enroot 4.2.1 with Pyxis, but the runs behind this page did not need them, so
+> they are reported from the interface rather than from a passing job.
+
 ## Aggregated Serving
 
 ```bash
@@ -237,7 +294,7 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.trtllm \
 
 ### Gate on a Completion, Not on a Status Code
 
-`/v1/models` answers `200` with an empty `data` array while the worker is still loading. A readiness check that only looks at the status code lets the job finish as `COMPLETED` without having served anything, which is harder to notice than a crash. Require both a registered model and a real completion:
+`/v1/models` answers `200` with an empty `data` array while the worker is still loading. A readiness check that only looks at the status code lets the job finish as `COMPLETED` without having served anything, which is harder to notice than a crash. The Triton cache failure above lands in the same window: registration succeeds and the first inference does not. Require both a registered model and a real completion:
 
 ```bash
 ready=0
@@ -298,6 +355,9 @@ Save the PID when the worker starts and kill that PID. A pattern-based `pkill -f
 | Second run fails on the etcd data directory | `default.etcd/` from the previous run is in the working directory. Use a per-job `--container-workdir` |
 | Frontend and worker cannot see each other | They were started in separate `srun` steps with `--container-image`. Use one `srun`, or `--container-name` |
 | Startup is unexpectedly slow | The step received one CPU. Set `--cpus-per-gpu` in the batch header; a cluster-wide default may not apply to the step |
+| Worker dies at import with a permission error under `$HOME/.cache` | FlashInfer creates its cache directory at import time and `VLLM_USE_FLASHINFER_SAMPLER=0` does not stop it. See [writable home](#give-the-container-a-writable-home) |
+| Model registers, then the first inference fails | Triton writes `$HOME/.triton` at that point, not at import. Same cause. Check `ENROOT_ROOTFS_WRITABLE` and `ENROOT_MOUNT_HOME` in `/etc/enroot/enroot.conf`; both default to off |
+| `No space left on device` after a few jobs | Pyxis keeps a named container after the job ends. A container name derived from the job ID leaves one behind per run; use a fixed name |
 | `nats: dead` while etcd reports healthy | Two jobs on the same node are sharing fixed ports. The second process attaches to the first job's control plane instead of failing to bind, so both logs look normal while the measurements are mixed. Run one job per node, or offset every port |
 | `enroot import` fails within seconds on a `404` for a manifest digest | Enroot 3.x sends only the Docker v2 media type in `Accept`, and Dynamo runtime images from `1.0.2` onward are published as OCI image indexes. The manifest list request still succeeds, because the registry ignores the header there, and the `jq` that selects the per-architecture child also succeeds because an OCI index carries the same `.manifests[].platform` shape. The failure lands on the child manifest request, which has no ignore rule. Reproduce it with the child digest, not the index digest: the index answers `200` for any `Accept`. Enroot 4.x sends both media types |
 | Blackwell Ultra worker dies with `PTXAS error: Internal Triton PTX codegen error` | The `ptxas` bundled with Triton in the image is older than the GPU. Calling it directly reports `Value 'sm_103a' is not defined for option 'gpu-name'`. The PTX comes from FlashInfer's JIT autotuner rather than from Triton itself, despite the message. Either point `TRITON_PTXAS_PATH` at a newer `ptxas` present in the same image, or use an image whose FlashInfer does not take that path. Newer images stopped hitting it, but FlashInfer and torch moved together between the two images tested, so the responsible change was not isolated |
