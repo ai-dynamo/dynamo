@@ -48,7 +48,7 @@ use crate::pipeline::{
     },
 };
 use crate::utils::ip_resolver::resolve_host_or_interface;
-use anyhow::{Context, Result, anyhow as error};
+use anyhow::{Result, anyhow as error};
 
 pub use crate::utils::ip_resolver::{DefaultIpResolver, IpResolver};
 
@@ -159,6 +159,10 @@ fn prune_tombstones(tombstones: &mut HashMap<EndpointInstanceId, Instant>, now: 
 }
 
 impl TcpStreamServer {
+    pub fn local_address(&self) -> Result<SocketAddr> {
+        Ok(SocketAddr::new(self.local_ip, self.local_port))
+    }
+
     pub fn options_builder() -> ServerOptionsBuilder {
         ServerOptionsBuilder::default()
     }
@@ -276,6 +280,27 @@ impl TcpStreamServer {
         if let Some(s) = send_subject {
             entry.insert((StreamType::Request, s.to_string()));
         }
+        true
+    }
+
+    /// Associate a request-only callback registration with a backend instance.
+    /// QUIC response mode still uses TCP for bidirectional request callbacks.
+    pub async fn associate_request_instance(&self, subject: &str, id: &EndpointInstanceId) -> bool {
+        let mut state = self.state.lock();
+        let now = Instant::now();
+        prune_tombstones(&mut state.removed_instances, now);
+        if state.removed_instances.contains_key(id) {
+            state.tx_subjects.remove(subject);
+            return false;
+        }
+        state
+            .subject_instance
+            .insert(subject.to_string(), id.clone());
+        state
+            .instance_subjects
+            .entry(id.clone())
+            .or_default()
+            .insert((StreamType::Request, subject.to_string()));
         true
     }
 

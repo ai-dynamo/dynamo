@@ -350,36 +350,18 @@ impl RadixTree {
                 break;
             };
 
-            let (edge_len, match_len, mismatch) = {
+            let (edge_len, match_len) = {
                 let child_ref = child.borrow();
                 let edge_len = child_ref.state.edge.len();
-                let mut mismatch = None;
                 let match_len = child_ref
                     .state
                     .edge
                     .iter()
                     .zip(remaining)
-                    .take_while(|((local_hash, existing_hash), block)| {
-                        if local_hash != &block.tokens_hash {
-                            return false;
-                        }
-                        if existing_hash != &block.block_hash && mismatch.is_none() {
-                            mismatch = Some((block.block_hash, *existing_hash));
-                        }
-                        true
-                    })
+                    .take_while(|((local_hash, _), block)| *local_hash == block.tokens_hash)
                     .count();
-                (edge_len, match_len, mismatch)
+                (edge_len, match_len)
             };
-
-            if let Some((expected, actual)) = mismatch {
-                duplicate_store = false;
-                tracing::warn!(
-                    ?expected,
-                    ?actual,
-                    "block_hash mismatch: sequence hashes should be uniform across workers"
-                );
-            }
 
             if match_len < edge_len {
                 if match_len == remaining.len() {
