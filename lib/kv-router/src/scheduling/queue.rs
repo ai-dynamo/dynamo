@@ -19,7 +19,7 @@ use super::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, read_overlap_refresh_after, refresh_overlap,
 };
 use super::policy_config::{PolicyClassConfig, PolicyProfile};
-use super::policy_queue::{PolicyQueue, QueueSnapshot};
+use super::policy_queue::{PolicyQueue, QueueMetadata, QueueSnapshot};
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::queue_admission::WorkerPlacement;
 use super::selector::{DefaultWorkerSelector, WorkerSelectionInput, WorkerSelector};
@@ -61,6 +61,7 @@ struct QueuedRequest {
     attempt_tx: Option<oneshot::Sender<AttemptId>>,
     lifecycle_transfer: Option<Arc<AdmissionLifecycleTransfer>>,
     enqueue_at: Instant,
+    due_at: Option<Instant>,
     block_hashes: Option<Vec<LocalBlockHash>>,
 }
 
@@ -133,6 +134,7 @@ enum AdmissionCommand {
         request: SchedulingRequest,
         attempt_tx: Option<oneshot::Sender<AttemptId>>,
         block_hashes: Option<Vec<LocalBlockHash>>,
+        queue_metadata: QueueMetadata,
         lease: Option<Box<RequestLifecycleLease>>,
         ack_tx: oneshot::Sender<Option<Box<RequestLifecycleLease>>>,
     },
@@ -418,7 +420,6 @@ struct SchedulerQueueActor<
     class_counters: Arc<Vec<ClassQueueCounters>>,
     slots: Arc<ActiveSequencesMultiWorker<P>>,
     workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
-    start_time: Instant,
     block_size: u32,
     selector: Sel,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
@@ -450,6 +451,8 @@ pub struct SchedulerQueue<
     class_counters: Arc<Vec<ClassQueueCounters>>,
     slots: Arc<ActiveSequencesMultiWorker<P>>,
     workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
+    profile: PolicyProfile,
+    start_time: Instant,
     queueing_enabled: bool,
     supports_overlap_refresh: bool,
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
@@ -576,16 +579,16 @@ impl<
         let (admission_tx, admission_rx) = mpsc::channel(admission_channel_capacity);
         let cleanup = Arc::new(AdmissionCleanup::default());
         let non_max_overlap_selection_observer = Arc::new(OnceLock::new());
+        let start_time = Instant::now();
         let actor = SchedulerQueueActor {
             pending,
             cleanup: Arc::clone(&cleanup),
-            profile,
+            profile: profile.clone(),
             pending_count: Arc::clone(&pending_count),
             pending_isl_tokens: Arc::clone(&pending_isl_tokens),
             class_counters: Arc::clone(&class_counters),
             slots: Arc::clone(&slots),
             workers_with_configs: workers_with_configs.clone(),
-            start_time: Instant::now(),
             block_size,
             selector,
             prefill_load_estimator,
@@ -604,6 +607,8 @@ impl<
             class_counters,
             slots,
             workers_with_configs,
+            profile,
+            start_time,
             queueing_enabled,
             supports_overlap_refresh: overlap_refresh_after.is_some(),
             non_max_overlap_selection_observer,
@@ -710,9 +715,15 @@ impl<
             .is_ok()
     }
 
-    /// Enqueue a new request.
-    /// If queueing is disabled or workers have capacity, schedule immediately.
-    /// Otherwise park in the pending heap.
+    /// Enqueue a new request through the router-owned policy queue.
+    ///
+    /// Every request enters the policy queue and the actor drains the ready
+    /// backlog in the same turn, so an uncontended request is admitted before
+    /// the enqueue acknowledgement returns. Two direct-admission carve-outs
+    /// bypass the queue: classes with any zero per-worker limit (which can
+    /// never hold a queued entry) and windows with zero discovered workers
+    /// (so selection reports `NoEndpoints` instead of a scaled-to-zero
+    /// queue-limit rejection).
     pub async fn enqueue(&self, request: SchedulingRequest) {
         self.enqueue_with_block_hashes(request, None).await;
     }
@@ -752,6 +763,8 @@ impl<
             return None;
         }
 
+        let queue_metadata = self.default_queue_metadata(&request);
+
         let eligibility = request.eligibility();
 
         if let Err(error) = eligibility.validate_pinned_worker_allowed() {
@@ -764,6 +777,7 @@ impl<
             request,
             attempt_tx,
             block_hashes: self.prepare_block_hashes_for_refresh(block_hashes),
+            queue_metadata,
             lease,
             ack_tx,
         };
@@ -782,6 +796,53 @@ impl<
                 tracing::warn!("scheduler queue actor dropped enqueue acknowledgement");
                 None
             }
+        }
+    }
+
+    /// Enqueue a request with `due_at` for actor-expiry tests.
+    #[cfg(test)]
+    pub(crate) async fn enqueue_with_due_at_for_test(
+        &self,
+        request: SchedulingRequest,
+        due_at: Instant,
+    ) {
+        let mut queue_metadata = self.default_queue_metadata(&request);
+        queue_metadata.due_at = Some(due_at);
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let command = AdmissionCommand::Enqueue {
+            request,
+            attempt_tx: None,
+            block_hashes: None,
+            queue_metadata,
+            lease: None,
+            ack_tx,
+        };
+        self.admission_tx
+            .send(command)
+            .await
+            .expect("scheduler queue actor gone");
+        let _ = ack_rx.await;
+    }
+
+    fn default_queue_metadata(&self, request: &SchedulingRequest) -> QueueMetadata {
+        let workers = self.workers_with_configs.borrow();
+        let snapshot = QueueSnapshot::new(
+            request.isl_tokens,
+            SchedulingContext::new(request, &workers).best_cached_tokens(),
+        );
+        let class_index = self
+            .profile
+            .resolve_class_index(request.policy_class.as_deref(), snapshot.uncached_tokens);
+        QueueMetadata {
+            class_index,
+            snapshot,
+            due_at: None,
+            // "Arrival" is the moment the caller hands the request to the
+            // scheduler handle, stamped before the admission channel. Two
+            // racing callers can therefore enqueue in the opposite order of
+            // their offsets; `enqueue_seq` stays the authoritative FCFS
+            // tiebreak for same-score entries.
+            arrival_offset_secs: self.start_time.elapsed().as_secs_f64(),
         }
     }
 
@@ -952,7 +1013,22 @@ impl<
 {
     async fn run(mut self, mut rx: mpsc::Receiver<AdmissionCommand>) {
         let mut commands_since_cleanup = 0usize;
-        while let Some(command) = rx.recv().await {
+        loop {
+            let command = match self.pending.next_due_at() {
+                Some(due_at) => {
+                    tokio::select! {
+                        command = rx.recv() => command,
+                        _ = tokio::time::sleep_until(due_at) => {
+                            self.handle_update(None).await;
+                            continue;
+                        }
+                    }
+                }
+                None => rx.recv().await,
+            };
+            let Some(command) = command else {
+                break;
+            };
             commands_since_cleanup += 1;
             let drain_cleanup = rx.is_empty() || commands_since_cleanup == 256;
             if drain_cleanup {
@@ -963,18 +1039,25 @@ impl<
                     request,
                     attempt_tx,
                     block_hashes,
+                    queue_metadata,
                     lease,
                     ack_tx,
                 } => {
                     let lifecycle_transfer = lease
                         .as_ref()
                         .and_then(|lease| lease.transfer.as_ref().map(Arc::clone));
-                    let enqueue_ready =
-                        self.handle_enqueue(request, attempt_tx, lifecycle_transfer, block_hashes);
+                    let enqueue_ready = self.handle_enqueue(
+                        request,
+                        attempt_tx,
+                        lifecycle_transfer,
+                        block_hashes,
+                        queue_metadata,
+                    );
                     let cleanup_ready = drain_cleanup && self.drain_cleanup();
-                    let made_ready = enqueue_ready || cleanup_ready;
-                    if made_ready {
+                    if cleanup_ready {
                         self.handle_update(None).await;
+                    } else if enqueue_ready {
+                        self.handle_enqueued().await;
                     }
                     let _ = ack_tx.send(lease);
                 }
@@ -1056,38 +1139,50 @@ impl<
 
     fn handle_enqueue(
         &mut self,
-        request: SchedulingRequest,
+        mut request: SchedulingRequest,
         attempt_tx: Option<oneshot::Sender<AttemptId>>,
         lifecycle_transfer: Option<Arc<AdmissionLifecycleTransfer>>,
         block_hashes: Option<Vec<LocalBlockHash>>,
+        queue_metadata: QueueMetadata,
     ) -> bool {
         let decay_now = Instant::now();
-        // Synthetic and explicit selections avoid cache work. Family classification
-        // samples overlap once and reuses it if the request enters queue storage.
-        let (class_index, snapshot) = if let Some(class_index) = self
-            .profile
-            .direct_class_index(request.policy_class.as_deref())
+        if queue_metadata
+            .due_at
+            .is_some_and(|due_at| due_at <= decay_now)
         {
-            (class_index, None)
-        } else {
-            let workers = self.workers_with_configs.borrow();
-            let snapshot = Self::snapshot_for_with(&request, &workers);
-            let class_index = self
-                .profile
-                .resolve_class_index(request.policy_class.as_deref(), snapshot.uncached_tokens);
-            (class_index, Some(snapshot))
-        };
+            request.respond(Err(KvSchedulerError::DeadlineExceeded));
+            return false;
+        }
+        let class_index = queue_metadata.class_index;
+        let snapshot = queue_metadata.snapshot;
         let class = self.profile.class(class_index);
-        let should_queue = self.should_queue(class_index, class, || {
-            self.all_workers_prefill_busy(class, request.eligibility(), decay_now)
-        });
-        if !should_queue {
+        // With zero discovered workers every per-worker limit scales to zero and
+        // `queue_rejection` would reject with `limit: 0`. Admit directly instead
+        // so selection reports the real condition, `NoEndpoints`.
+        if self.workers_with_configs.borrow().is_empty() {
             return self.admit_one(request, attempt_tx, lifecycle_transfer, decay_now);
         }
-
-        let snapshot = snapshot.unwrap_or_else(|| self.snapshot_for(&request));
-        tracing::debug!(policy_class = class.name, "queueing request");
-        let arrival_offset = self.start_time.elapsed().as_secs_f64();
+        // A class with any zero per-worker limit never queues: keep the direct
+        // admission semantics by admitting while a worker has prefill capacity,
+        // and otherwise fall through so `queue_rejection` produces the same
+        // limit-zero rejection the queued path always has.
+        if class.never_queues() {
+            let should_queue = class.queueing_enabled()
+                && (self.pending.has_backlog(class_index) || {
+                    let active_tokens = self.slots.active_tokens(decay_now);
+                    let configs = self.workers_with_configs.borrow();
+                    Self::all_workers_prefill_busy_with(
+                        &active_tokens,
+                        &configs,
+                        class,
+                        request.eligibility(),
+                    )
+                });
+            if !should_queue {
+                return self.admit_one(request, attempt_tx, lifecycle_transfer, decay_now);
+            }
+        }
+        tracing::trace!(policy_class = class.name, "ordering request");
         let priority_jump = request.priority_jump;
         let strict_priority = request.strict_priority;
         let placement = request
@@ -1098,14 +1193,13 @@ impl<
             attempt_tx,
             lifecycle_transfer: lifecycle_transfer.clone(),
             enqueue_at: decay_now,
+            due_at: queue_metadata.due_at,
             block_hashes,
         };
         let worker_count = self.workers_with_configs.borrow().len();
-        if let Err((rejection, queued)) = self.pending.enqueue(
-            class_index,
+        if let Err((rejection, queued)) = self.pending.enqueue_with_due_at(
+            queue_metadata,
             worker_count,
-            snapshot,
-            arrival_offset,
             priority_jump,
             strict_priority,
             placement,
@@ -1122,33 +1216,16 @@ impl<
         self.pending_isl_tokens
             .fetch_add(snapshot.raw_isl_tokens, AtomicOrdering::Relaxed);
         self.add_class_counters(class_index, snapshot);
-        false
+        true
     }
 
-    fn should_queue(
-        &self,
-        class_index: usize,
-        class: &PolicyClassConfig,
-        all_workers_busy: impl FnOnce() -> bool,
-    ) -> bool {
-        // Preserve backlog anti-bypass and lazily avoid worker scans when an
-        // earlier condition already decides admission.
-        class.queueing_enabled() && (self.pending.has_backlog(class_index) || all_workers_busy())
-    }
-
-    fn snapshot_for(&self, request: &SchedulingRequest) -> QueueSnapshot {
-        let workers = self.workers_with_configs.borrow();
-        Self::snapshot_for_with(request, &workers)
-    }
-
-    fn snapshot_for_with(
-        request: &SchedulingRequest,
-        workers: &HashMap<WorkerId, C>,
-    ) -> QueueSnapshot {
-        // Cache overlap is sampled once and reused for classification, queue
-        // limits, ordering, DRR cost, and counters.
-        let context = SchedulingContext::new(request, workers);
-        QueueSnapshot::new(request.isl_tokens, context.best_cached_tokens())
+    fn reject_expired(&mut self, now: Instant) {
+        for entry in self.pending.take_expired(now) {
+            let class_index = entry.class_index();
+            self.subtract_pending_counters(class_index, entry.snapshot());
+            let mut request = entry.into_payload().request;
+            request.respond(Err(KvSchedulerError::DeadlineExceeded));
+        }
     }
 
     fn drain_cleanup(&mut self) -> bool {
@@ -1277,6 +1354,7 @@ impl<
     }
 
     async fn handle_update(&mut self, worker: Option<WorkerWithDpRank>) {
+        self.reject_expired(Instant::now());
         if !self.pending.has_ready() {
             return;
         }
@@ -1289,9 +1367,29 @@ impl<
             self.pending.recheck_all_workers();
         }
 
+        self.drain_ready().await;
+    }
+
+    /// Drain after an enqueue. An arrival adds work but never frees worker
+    /// capacity, so the blocked-lane recheck is skipped: every capacity change
+    /// (update, prefill completion, cleanup) arrives with its own recheck, and
+    /// shared-lane heads are re-evaluated against the dispatch predicate on
+    /// every pop regardless.
+    async fn handle_enqueued(&mut self) {
+        self.reject_expired(Instant::now());
+        if !self.pending.has_ready() {
+            return;
+        }
+        self.drain_ready().await;
+    }
+
+    async fn drain_ready(&mut self) {
         // Continuation draining stays actor-local; never self-send through the
         // bounded command channel while processing an update.
         loop {
+            if !self.pending.has_ready() {
+                break;
+            }
             let decay_now = Instant::now();
             let active_tokens = self.slots.active_tokens(decay_now);
             let popped = {
@@ -1342,6 +1440,14 @@ impl<
                 decay_now,
             )
             .await;
+            if queued.due_at.is_some_and(|due_at| due_at <= Instant::now()) {
+                // The pop already charged this entry's scheduling cost against
+                // the class deficit; the credit is intentionally not refunded,
+                // matching every other post-pop terminal outcome.
+                let mut request = popped.into_payload().request;
+                request.respond(Err(KvSchedulerError::DeadlineExceeded));
+                continue;
+            }
             let wait_ms = queued.enqueue_at.elapsed().as_millis() as u64;
             if let Some(snapshot) = refreshed {
                 tracing::info!(
@@ -1360,13 +1466,12 @@ impl<
             let class_index = popped.class_index();
             let class = self.profile.class(class_index);
             let queued = popped.into_payload();
-            let request = queued.request;
-            tracing::debug!(
+            tracing::trace!(
                 policy_class = class.name,
                 "scheduling request from pending queue"
             );
             self.admit_one(
-                request,
+                queued.request,
                 queued.attempt_tx,
                 queued.lifecycle_transfer,
                 admit_now,
@@ -1652,23 +1757,6 @@ impl<
             initial_effective_prefill_tokens: effective_isl,
             expected_prefill_duration,
         })
-    }
-
-    /// Check if all eligible workers are prefill-busy based on threshold.
-    /// When `pinned_worker` is `Some`, only that exact worker/rank is considered.
-    /// Otherwise when `allowed` is `Some`, only those worker IDs are considered;
-    /// otherwise all registered workers are checked.
-    /// Returns false when no eligible workers exist so the request falls
-    /// through to `schedule`, which returns a proper `NoEndpoints` error.
-    fn all_workers_prefill_busy(
-        &self,
-        class: &PolicyClassConfig,
-        eligibility: RoutingEligibility<'_>,
-        decay_now: Instant,
-    ) -> bool {
-        let active_tokens = self.slots.active_tokens(decay_now);
-        let configs = self.workers_with_configs.borrow();
-        Self::all_workers_prefill_busy_with(&active_tokens, &configs, class, eligibility)
     }
 
     fn all_workers_prefill_busy_with(
@@ -2337,6 +2425,154 @@ mod tests {
         (req, rx)
     }
 
+    #[tokio::test]
+    async fn expired_deadline_is_rejected_at_enqueue() {
+        let (queue, _slots) = make_queue(1, 16, 64, Some(0.0));
+        let (request, response_rx) = make_request("expired-on-arrival", 64);
+        queue
+            .enqueue_with_due_at_for_test(request, Instant::now())
+            .await;
+        assert!(matches!(
+            response_rx.await.unwrap(),
+            Err(KvSchedulerError::DeadlineExceeded)
+        ));
+        assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn parked_request_expires_via_actor_timer() {
+        let (queue, _slots) = make_queue(1, 16, 64, Some(0.0));
+        let (active, active_rx) = make_request("active", 64);
+        queue.enqueue(active).await;
+        active_rx.await.unwrap().unwrap();
+
+        // The worker is busy, so the deadline-bearing request parks; the actor
+        // timer must fire at due_at and reject it without any further command.
+        let (parked, parked_rx) = make_request("parked-deadline", 64);
+        queue
+            .enqueue_with_due_at_for_test(parked, Instant::now() + Duration::from_secs(5))
+            .await;
+        assert_eq!(queue.pending_count(), 1);
+
+        assert!(matches!(
+            parked_rx.await.unwrap(),
+            Err(KvSchedulerError::DeadlineExceeded)
+        ));
+        assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn zero_class_queue_limit_never_queues() {
+        let profile = policy_profile(
+            r#"
+default_policy_family: capped
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: capped
+    policy_family: capped
+    cache_bucket: all
+    quantum: 1
+    prefill_busy_threshold: 0
+    request_queue_limit_per_worker: 0
+"#,
+        );
+        let (queue, slots) = make_queue_with_profile(1, 16, 64, profile);
+
+        // An idle worker admits a zero-limit request directly, bypassing the
+        // policy queue.
+        let (admitted, admitted_rx) = make_request("admitted-idle", 64);
+        queue.enqueue(admitted).await;
+        admitted_rx.await.unwrap().unwrap();
+        assert_eq!(queue.pending_count(), 0);
+
+        // With every worker busy the request would have to queue, so the zero
+        // limit rejects it instead of parking it.
+        let (rejected, rejected_rx) = make_request("rejected-busy", 64);
+        queue.enqueue(rejected).await;
+        assert!(matches!(
+            rejected_rx.await.unwrap(),
+            Err(KvSchedulerError::QueueRejected(_))
+        ));
+        assert_eq!(queue.pending_count(), 0);
+
+        slots
+            .mark_prefill_completed(&"admitted-idle".to_string(), decay_now())
+            .unwrap();
+        slots
+            .free(&"admitted-idle".to_string(), decay_now())
+            .unwrap();
+        slots.assert_completely_drained(decay_now());
+    }
+
+    #[tokio::test]
+    async fn zero_token_queue_limit_admits_idle_workers() {
+        let profile = policy_profile(
+            r#"
+default_policy_family: capped
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: capped
+    policy_family: capped
+    cache_bucket: all
+    quantum: 1
+    prefill_busy_threshold: 0
+    raw_isl_token_queue_limit_per_worker: 0
+"#,
+        );
+        let (queue, _slots) = make_queue_with_profile(1, 16, 64, profile);
+
+        // A zero token limit means the class can never hold a queued entry, so
+        // an idle worker must still admit directly instead of tripping the
+        // limit-zero rejection.
+        let (admitted, admitted_rx) = make_request("admitted-idle-token-limit", 64);
+        queue.enqueue(admitted).await;
+        admitted_rx.await.unwrap().unwrap();
+        assert_eq!(queue.pending_count(), 0);
+
+        let (rejected, rejected_rx) = make_request("rejected-busy-token-limit", 64);
+        queue.enqueue(rejected).await;
+        assert!(matches!(
+            rejected_rx.await.unwrap(),
+            Err(KvSchedulerError::QueueRejected(_))
+        ));
+        assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn zero_workers_report_no_endpoints_not_queue_rejection() {
+        let profile = policy_profile(
+            r#"
+default_policy_family: capped
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: capped
+    policy_family: capped
+    cache_bucket: all
+    quantum: 1
+    prefill_busy_threshold: 0
+    request_queue_limit_per_worker: 4
+"#,
+        );
+        let (queue, _slots) = make_queue_with_profile(0, 16, 64, profile);
+
+        // With zero discovered workers every per-worker limit scales to zero;
+        // the request must surface the real condition instead of a
+        // `QueueRejected { limit: 0 }`.
+        let (request, response_rx) = make_request("no-workers", 64);
+        queue.enqueue(request).await;
+        assert!(matches!(
+            response_rx.await.unwrap(),
+            Err(KvSchedulerError::NoEndpoints)
+        ));
+        assert_eq!(queue.pending_count(), 0);
+    }
+
     #[test]
     fn non_max_overlap_selection_ignores_ties_pins_and_ineligible_workers() {
         let workers = HashMap::from([
@@ -2941,13 +3177,9 @@ policy_classes:
         queue.enqueue(queued_second).await;
         assert_eq!(
             queue.pending_count(),
-            2,
-            "new arrivals must not bypass backlog"
+            1,
+            "enqueue should admit the existing head before the new arrival"
         );
-        assert!(queued_first_rx.try_recv().is_err());
-        assert!(queued_second_rx.try_recv().is_err());
-
-        queue.update().await;
         queued_first_rx
             .try_recv()
             .expect("first queued request should be admitted")
@@ -2965,6 +3197,63 @@ policy_classes:
             .unwrap();
         queue.update().await;
         queued_second_rx.await.unwrap().unwrap();
+    }
+
+    // No-bypass ordering per DEP #13891: freed capacity goes to the queued
+    // head, never to the arriving request.
+    #[tokio::test]
+    async fn arrival_drains_other_class_backlog_instead_of_bypassing() {
+        let profile = policy_profile(
+            r#"
+default_policy_family: latency
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: latency
+    policy_family: latency
+    cache_bucket: all
+    quantum: 1
+    prefill_busy_threshold: 1024
+  - name: bulk
+    policy_family: bulk
+    cache_bucket: all
+    quantum: 1
+    prefill_busy_threshold: 0
+"#,
+        );
+        let (queue, slots) = make_queue_with_profile(1, 16, 64, profile);
+
+        let (mut active, active_rx) = make_request("active", 64);
+        active.policy_class = Some("latency".to_string());
+        queue.enqueue(active).await;
+        active_rx.await.unwrap().unwrap();
+
+        // The bulk class sees the worker as busy, so its request parks.
+        let (mut bulk_head, mut bulk_head_rx) = make_request("bulk-head", 64);
+        bulk_head.policy_class = Some("bulk".to_string());
+        queue.enqueue(bulk_head).await;
+        assert_eq!(queue.pending_count(), 1);
+
+        // Free the worker without emitting a capacity update; the parked head
+        // stays queued until something drains.
+        slots
+            .mark_prefill_completed(&"active".to_string(), decay_now())
+            .unwrap();
+        slots.free(&"active".to_string(), decay_now()).unwrap();
+        assert_eq!(queue.pending_count(), 1);
+
+        // A latency arrival must not bypass the bulk backlog: its enqueue-turn
+        // drain admits the parked bulk head alongside the arrival itself.
+        let (mut arrival, arrival_rx) = make_request("latency-arrival", 64);
+        arrival.policy_class = Some("latency".to_string());
+        queue.enqueue(arrival).await;
+        assert_eq!(queue.pending_count(), 0);
+        bulk_head_rx
+            .try_recv()
+            .expect("parked bulk head should drain on the arrival's turn")
+            .expect("bulk head failed");
+        arrival_rx.await.unwrap().unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3152,7 +3441,7 @@ policy_classes:
         queue.enqueue(active).await;
         active_rx.await.unwrap().unwrap();
 
-        let (first, _first_rx) = make_request("first", 64);
+        let (first, mut first_rx) = make_request("first", 64);
         queue.enqueue(first).await;
 
         cfg_tx.send_modify(|configs| {
@@ -3166,7 +3455,11 @@ policy_classes:
         });
         let (second, _second_rx) = make_request("second", 64);
         queue.enqueue(second).await;
-        assert_eq!(queue.pending_count(), 2);
+        first_rx
+            .try_recv()
+            .expect("new worker capacity should admit the existing head")
+            .expect("first queued request failed");
+        assert_eq!(queue.pending_count(), 1);
 
         cfg_tx.send_modify(|configs| {
             configs.remove(&1);
@@ -3177,9 +3470,9 @@ policy_classes:
         let KvSchedulerError::QueueRejected(rejection) = error else {
             panic!("expected queue rejection, got {error:?}");
         };
-        assert_eq!(rejection.current, 2);
+        assert_eq!(rejection.current, 1);
         assert_eq!(rejection.limit, 1);
-        assert_eq!(queue.pending_count(), 2);
+        assert_eq!(queue.pending_count(), 1);
     }
 
     #[tokio::test(start_paused = true)]
@@ -3381,7 +3674,7 @@ policy_classes:
         queue.enqueue(active_b).await;
         active_b_rx.await.unwrap().unwrap();
 
-        let (backlog_head, backlog_head_rx) = make_request("backlog-head", isl);
+        let (backlog_head, mut backlog_head_rx) = make_request("backlog-head", isl);
         queue.enqueue(backlog_head).await;
         assert_eq!(queue.pending_count(), 1);
 
@@ -3395,16 +3688,15 @@ policy_classes:
         queue.enqueue(allowed).await;
         assert_eq!(
             queue.pending_count(),
-            2,
-            "allow-list request must not bypass the existing class backlog"
+            1,
+            "enqueue should dispatch the existing head before the allow-list request"
         );
         assert!(allowed_rx.try_recv().is_err());
 
-        queue.update().await;
         let backlog_head_worker = backlog_head_rx
-            .await
-            .unwrap()
-            .unwrap()
+            .try_recv()
+            .expect("existing backlog head should be admitted")
+            .expect("backlog head failed")
             .best_worker
             .worker_id;
         assert!(allowed_rx.try_recv().is_err());
@@ -3507,10 +3799,6 @@ policy_classes:
         let (mut other_worker, mut other_worker_rx) = make_request("pinned-0", 256);
         other_worker.pinned_worker = Some(WorkerWithDpRank::new(0, 0));
         queue.enqueue(other_worker).await;
-        assert_eq!(queue.pending_count(), 2);
-
-        queue.update().await;
-
         assert_eq!(queue.pending_count(), 1);
         let other_worker_resp = other_worker_rx
             .try_recv()

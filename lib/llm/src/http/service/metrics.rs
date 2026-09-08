@@ -49,6 +49,15 @@ pub fn request_was_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
     dynamo_runtime::error::match_error_chain(err, REJECTION, NON_REJECTION)
 }
 
+/// User-facing body for a request whose caller-supplied deadline elapsed
+/// before dispatch; shared by every HTTP surface so the wording stays uniform.
+pub(crate) const REQUEST_DEADLINE_EXCEEDED_MESSAGE: &str = "request deadline exceeded";
+
+pub fn request_deadline_exceeded(err: &(dyn std::error::Error + 'static)) -> bool {
+    const DEADLINE: &[DynamoErrorType] = &[DynamoErrorType::DeadlineExceeded];
+    dynamo_runtime::error::match_error_chain(err, DEADLINE, &[])
+}
+
 /// Check whether an error chain indicates that no backend worker is available.
 pub fn request_was_unavailable(err: &(dyn std::error::Error + 'static)) -> bool {
     const UNAVAILABLE: &[DynamoErrorType] = &[DynamoErrorType::Unavailable];
