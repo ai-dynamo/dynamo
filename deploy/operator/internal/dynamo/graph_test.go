@@ -6530,7 +6530,7 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 							},
 							PeriodSeconds:    5,
 							TimeoutSeconds:   4,
-							FailureThreshold: 1,
+							FailureThreshold: 3,
 						},
 						ReadinessProbe: &corev1.Probe{
 							ProbeHandler: corev1.ProbeHandler{
@@ -6667,6 +6667,43 @@ func TestGenerateBasePodSpec_WorkerPreservesHealthCheckOverride(t *testing.T) {
 			t.Fatal("expected DYN_HEALTH_CHECK_ENABLED in main container")
 		})
 	}
+}
+
+func TestGenerateBasePodSpec_WorkerPreservesLivenessProbeOverride(t *testing.T) {
+	t.Log("configure a new runtime with a user-specified liveness failure threshold")
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		ComponentType:   commonconsts.ComponentTypeWorker,
+		DynamoNamespace: ptr.To("default-test-deployment"),
+		ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+			MainContainer: &corev1.Container{
+				Image: "test-image:1.5.0",
+				LivenessProbe: &corev1.Probe{
+					FailureThreshold: 5,
+				},
+			},
+		},
+	})
+
+	t.Log("render the worker pod specification")
+	podSpec, err := GenerateBasePodSpec(
+		component,
+		BackendFrameworkSGLang,
+		&mockSecretsRetriever{},
+		"test-deployment",
+		"default",
+		RoleMain,
+		1,
+		&configv1alpha1.OperatorConfiguration{},
+		commonconsts.MultinodeDeploymentTypeGrove,
+		"test-service",
+		nil,
+		staticContainerGPUCount(0),
+	)
+	require.NoError(t, err)
+
+	t.Log("verify the user-specified threshold takes precedence over the gated default")
+	require.NotNil(t, podSpec.Containers[0].LivenessProbe)
+	require.EqualValues(t, 5, podSpec.Containers[0].LivenessProbe.FailureThreshold)
 }
 
 func TestGenerateBasePodSpec_GPUMemoryServiceExtraClientContainers(t *testing.T) {
