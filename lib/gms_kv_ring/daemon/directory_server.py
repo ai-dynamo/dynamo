@@ -11,14 +11,13 @@ full KV daemon composes the same RPC handlers when those tiers are enabled.
 from __future__ import annotations
 
 import asyncio
-import json
 import os
-import struct
 import threading
 import time
 from collections import deque
 from typing import Optional
 
+from gms_kv_ring.daemon.framing import FrameProtocolError, read_frame, write_frame
 from gms_kv_ring.daemon.rpc_directory import DIRECTORY_HANDLERS
 from gms_kv_ring.daemon.rpc_types import error_response
 
@@ -90,7 +89,7 @@ class DirectoryDaemon:
     async def _handle(self, reader, writer) -> None:
         try:
             while True:
-                msg = await _read_frame(reader)
+                msg = await read_frame(reader, allow_eof=True)
                 if msg is None:
                     return
                 response = await asyncio.get_running_loop().run_in_executor(
@@ -99,8 +98,8 @@ class DirectoryDaemon:
                     msg,
                 )
                 response["daemon_epoch"] = self.state.epoch
-                await _write_frame(writer, response)
-        except (asyncio.IncompleteReadError, ConnectionResetError):
+                await write_frame(writer, response)
+        except (ConnectionResetError, FrameProtocolError):
             return
         finally:
             writer.close()
@@ -108,18 +107,3 @@ class DirectoryDaemon:
                 await writer.wait_closed()
             except Exception:  # noqa: BLE001
                 pass
-
-
-async def _read_frame(reader) -> Optional[dict]:
-    try:
-        header = await reader.readexactly(4)
-    except asyncio.IncompleteReadError:
-        return None
-    length = struct.unpack("<I", header)[0]
-    return json.loads((await reader.readexactly(length)).decode("utf-8"))
-
-
-async def _write_frame(writer, message: dict) -> None:
-    body = json.dumps(message).encode("utf-8")
-    writer.write(struct.pack("<I", len(body)) + body)
-    await writer.drain()

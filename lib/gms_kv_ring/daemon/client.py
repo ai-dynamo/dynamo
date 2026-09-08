@@ -13,12 +13,12 @@ No hot-path methods here. The rings are the hot path.
 
 from __future__ import annotations
 
-import json
 import socket
-import struct
 import threading
 import time
 from typing import Optional
+
+from gms_kv_ring.daemon.framing import encode_frame, recv_frame
 
 
 class DaemonError(RuntimeError):
@@ -85,23 +85,15 @@ class DaemonClient:
         self.close()
 
     def _call(self, msg: dict) -> dict:
-        body = json.dumps(msg).encode("utf-8")
+        frame = encode_frame(msg)
         with self._call_lock:
-            self._sock.sendall(struct.pack("<I", len(body)) + body)
-            header = b""
-            while len(header) < 4:
-                chunk = self._sock.recv(4 - len(header))
-                if not chunk:
-                    raise DaemonError("daemon closed connection")
-                header += chunk
-            n = struct.unpack("<I", header)[0]
-            body = b""
-            while len(body) < n:
-                chunk = self._sock.recv(n - len(body))
-                if not chunk:
-                    raise DaemonError("daemon closed mid-response")
-                body += chunk
-        resp = json.loads(body.decode("utf-8"))
+            try:
+                self._sock.sendall(frame)
+                resp = recv_frame(self._sock)
+            except Exception:
+                self._sock.close()
+                self._sock = None
+                raise
         # Capture the daemon epoch on every response. Older daemons
         # omit the field — leave the last-seen value unchanged in
         # that case (graceful rolling upgrade).
