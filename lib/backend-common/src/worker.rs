@@ -1847,7 +1847,6 @@ fn wrap_engine_control_callback(
                             "engine resumed but re-registration failed after /engine/control/{control_name}: {e}; retry /engine/control/{control_name} to rejoin discovery"
                         )));
                     }
-                    // Back in discovery and serving-safe, so routable again.
                     set_process_health(&endpoint, HealthStatus::Ready);
                     Ok(response)
                 }
