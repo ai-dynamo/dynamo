@@ -23,7 +23,7 @@ The checkpoint natively supports 262,144 tokens (extensible to 1M with YaRN). We
 
 ## Configurations
 
-Dynamo + vLLM deployment profiles for the B200 agentic workload (64K ISL / 400 OSL, 90% KV cache reuse):
+Dynamo + vLLM deployment profiles for the B200 agentic workload (Mooncake trace: 64K median ISL / 400 median OSL, constructed for ~90% prefix reuse):
 
 |                          | B200 Aggregated (4-GPU)                      | B200 Aggregated (8-GPU)                         | B200 Aggregated (12-GPU)                        | B200 Disaggregated (1P1D)                       | B200 Disaggregated (2P1D)                       |
 | ------------------------ | -------------------------------------------- | ------------------------------------------------ | ------------------------------------------------ | ------------------------------------------------ | ------------------------------------------------ |
@@ -59,8 +59,7 @@ Dynamo + vLLM deployment profiles for the B200 agentic workload (64K ISL / 400 O
 
 1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx).
 2. **vLLM image**: `vllm/vllm-openai:qwen38-flash-next` — a model-specific vLLM build with GDN/QSA
-   kernels. `ai-dynamo` is pip-installed at pod startup. The frontend uses
-   `nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.2` (ai-dynamo baked in, no pip install).
+   kernels. `ai-dynamo` is pip-installed at pod startup.
 3. **Hugging Face access** to `Inferact/Qwen3.8-Flash-Next-NVFP4`.
 4. **Host memory**: ≥ 51 GB per worker for N-gram embedding offload (`VLLM_PLE_CPU_OFFLOAD=1`).
 5. **RDMA device plugin** (disaggregated only): The disagg manifests request
@@ -232,7 +231,7 @@ A correct response should describe the visual content of the video frames.
 
 ## Performance results
 
-Benchmarked on B200, AIPerf trace-replay with 64K agentic trace (15% subset, 3,541 requests, 90% KV cache hit). ~130 requests exceeded the 262K context limit and were rejected (400 errors); ~3,411 requests completed successfully. All numbers below are from AIPerf's official `profile_export_aiperf.json` summary.
+Benchmarked on B200, AIPerf trace-replay with Mooncake agentic trace (15% subset, 3,541 requests). The trace is constructed for ~90% prefix reuse (shared ~57.6K-token system prompt); measured prefix-cache hit at C=24 is 68–77%. MTP3 is organic (built-in `method: mtp`, not synthetic acceptance-length). C=24 is the only concurrency measured. All numbers below are from AIPerf's official `profile_export_aiperf.json` summary.
 
 | Recipe               | SKU  | Workers | GPUs | Concurrency | System output tok/s | Per-GPU tok/s | User output tok/s (P50) | TTFT P50 (ms) | TTFT P90 (ms) | ITL P50 (ms) | ITL P90 (ms) | Prefix cache hit |
 |----------------------|------|---------|------|-------------|---------------------|---------------|-------------------------|---------------|---------------|--------------|--------------|-----------------|
@@ -271,10 +270,9 @@ Non-obvious knobs, all already set in the manifest:
   uses the built-in Multi-Token Prediction module for 3 draft tokens per step.
 - **Event-driven KV routing.** Workers publish KV events (`--kv-events-config` over ZMQ), and the
   frontend uses `--router-mode kv --router-kv-events` for prefix-cache-aware routing.
-- **Image.** The frontend uses `nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.2` (ai-dynamo
-  baked in). Workers use `vllm/vllm-openai:qwen38-flash-next` — a model-specific vLLM build with
-  GDN/QSA kernels. `ai-dynamo==1.4.2` is pip-installed at worker pod startup because the
-  upstream image does not ship dynamo.
+- **Image.** `vllm/vllm-openai:qwen38-flash-next` is a model-specific vLLM build with GDN/QSA kernels.
+  `ai-dynamo==1.4.2` is pip-installed at pod startup because the upstream image does not ship dynamo.
+  The worker image is pinned by digest (`@sha256:0aea30240f3e...`) for reproducibility.
 - **Runtime version override.** `runtimeVersionOverride: "1.4.2"` is required on each component
   when using a non-semver image tag (e.g. `qwen38-flash-next`). The DGD operator uses this to
   determine API compatibility.

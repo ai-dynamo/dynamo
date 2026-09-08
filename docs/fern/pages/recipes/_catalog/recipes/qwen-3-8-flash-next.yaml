@@ -26,7 +26,7 @@ targets:
       - ngram-embedding-offload
     workload:
       type: agentic
-      traffic: 64K ISL / 400 OSL, 90% KV cache hit (shared system prompt)
+      traffic: Mooncake 64K ISL / 400 OSL, constructed for ~90% prefix reuse (measured 68-77%)
     deploy:
       asset: recipes/qwen3.8-flash-next/vllm/agg-b200-agentic/deploy.yaml
     benchmark:
@@ -50,7 +50,7 @@ targets:
       - ngram-embedding-offload
     workload:
       type: agentic
-      traffic: 64K ISL / 400 OSL, 90% KV cache hit (shared system prompt)
+      traffic: Mooncake 64K ISL / 400 OSL, constructed for ~90% prefix reuse (measured 68-77%)
     deploy:
       asset: recipes/qwen3.8-flash-next/vllm/agg-b200-agentic-8gpu/deploy.yaml
     benchmark:
@@ -74,7 +74,7 @@ targets:
       - ngram-embedding-offload
     workload:
       type: agentic
-      traffic: 64K ISL / 400 OSL, 90% KV cache hit (shared system prompt)
+      traffic: Mooncake 64K ISL / 400 OSL, constructed for ~90% prefix reuse (measured 68-77%)
     deploy:
       asset: recipes/qwen3.8-flash-next/vllm/agg-b200-agentic-12gpu/deploy.yaml
     benchmark:
@@ -99,7 +99,7 @@ targets:
       - ngram-embedding-offload
     workload:
       type: agentic
-      traffic: 64K ISL / 400 OSL, 90% KV cache hit (shared system prompt)
+      traffic: Mooncake 64K ISL / 400 OSL, constructed for ~90% prefix reuse (measured 68-77%)
     deploy:
       asset: recipes/qwen3.8-flash-next/vllm/disagg-b200-agentic/deploy.yaml
     benchmark:
@@ -124,7 +124,7 @@ targets:
       - ngram-embedding-offload
     workload:
       type: agentic
-      traffic: 64K ISL / 400 OSL, 90% KV cache hit (shared system prompt)
+      traffic: Mooncake 64K ISL / 400 OSL, constructed for ~90% prefix reuse (measured 68-77%)
     deploy:
       asset: recipes/qwen3.8-flash-next/vllm/disagg-b200-agentic-2p1d/deploy.yaml
     benchmark:
@@ -136,7 +136,8 @@ targets:
 related_benchmarks: []
 maintainer: null
 gaps:
-  - Uses upstream vllm/vllm-openai:qwen38-flash-next image (not a dynamo-built
-    image); ai-dynamo is pip-installed at pod startup
+  - All containers use upstream vllm/vllm-openai:qwen38-flash-next (model-specific GDN/QSA
+    kernels, not a dynamo-built image); ai-dynamo==1.4.2 is pip-installed at pod startup.
+    Worker image is pinned by digest for reproducibility.
   - Disaggregated recipe uses reduced prefill --max-num-seqs 32 (OOM avoidance
     on 260K-token prompts with 4 GPUs); async scheduling is enabled

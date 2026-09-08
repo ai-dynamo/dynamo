@@ -51,7 +51,9 @@ spec:
                     values:
                       - qwen38fn-agg-b200-agentic
                       - qwen38fn-agg-b200-agentic-8gpu
+                      - qwen38fn-agg-b200-agentic-12gpu
                       - qwen38fn-disagg-b200-agentic
+                      - qwen38fn-disagg-b200-agentic-2p1d
               topologyKey: kubernetes.io/hostname
       # tolerations: # uncomment to populate any tolerations for the gpu nodes
       containers:
@@ -119,13 +121,14 @@ spec:
               -m "${TARGET_MODEL}" \
               --tokenizer "${TARGET_MODEL}" \
               --tokenizer-trust-remote-code \
+              --input-file "${TRACE_FILE}" \
+              --custom-dataset-type mooncake_trace \
+              --num-requests 32 \
               --url "http://${ENDPOINT}" \
               --streaming \
               --ui simple \
-              --isl 8000 \
-              --osl 1000 \
-              --concurrency 1 \
-              --request-count 5 \
+              --concurrency 24 \
+              --random-seed 42 \
               --artifact-dir "${WARMUP_DIR}"
               echo "Warmup complete"
               MODEL_BASE="${TARGET_MODEL##*/}"
@@ -161,7 +164,7 @@ spec:
             - name: TRACE_FILE
               value: /model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
             - name: TRACE_URL
-              value: https://media.githubusercontent.com/media/ai-dynamo/dynamo/main/recipes/qwen3.8-flash-next/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
+              value: https://media.githubusercontent.com/media/ai-dynamo/dynamo/main/recipes/kimi-k2.6/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
             - name: TRACE_SHA256
               value: f20d3f2bc83dd1306cda659fbe34e7c4d85ca5497626c98bc0b1c4d2211379d0
             - name: CONCURRENCY

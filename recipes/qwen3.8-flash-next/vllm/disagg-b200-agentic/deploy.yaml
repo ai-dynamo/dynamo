@@ -95,13 +95,14 @@ spec:
         spec:
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.2
+              image: vllm/vllm-openai:qwen38-flash-next@sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3
               imagePullPolicy: IfNotPresent
               workingDir: /workspace
               command: ["/bin/bash", "-lc"]
               args:
                 - |
                   set -Eeuo pipefail
+                  pip install --no-cache-dir ai-dynamo==1.4.2
                   exec python3 -m dynamo.frontend \
                     --router-mode kv \
                     --router-kv-events \
@@ -177,7 +178,7 @@ spec:
                     topologyKey: kubernetes.io/hostname
           containers:
             - name: main
-              image: vllm/vllm-openai:qwen38-flash-next
+              image: vllm/vllm-openai:qwen38-flash-next@sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3
               imagePullPolicy: IfNotPresent
               workingDir: /workspace
               command: ["/bin/bash", "-lc"]
@@ -317,7 +318,7 @@ spec:
                     topologyKey: kubernetes.io/hostname
           containers:
             - name: main
-              image: vllm/vllm-openai:qwen38-flash-next
+              image: vllm/vllm-openai:qwen38-flash-next@sha256:0aea30240f3e3d9ffae8526643950e170eb5fa07fc427016a9dd90892afa2aa3
               imagePullPolicy: IfNotPresent
               workingDir: /workspace
               command: ["/bin/bash", "-lc"]

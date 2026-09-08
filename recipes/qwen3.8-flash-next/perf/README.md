@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Qwen3.8-Flash-Next Benchmark Recipe
 
-A single [AIPerf](https://github.com/ai-dynamo/aiperf) trace-replay Job — [perf.yaml](perf.yaml) — covers every Qwen3.8-Flash-Next DGD variant (agg/disagg × chat/agent traces). The benchmark is identical across variants; only `ENDPOINT`, `TRACE_FILE`, and `TARGET_MODEL` need to change.
+A single [AIPerf](https://github.com/ai-dynamo/aiperf) trace-replay Job — [perf.yaml](perf.yaml) — covers every Qwen3.8-Flash-Next DGD variant. The benchmark is identical across variants; only `ENDPOINT`, `TRACE_FILE`, `TRACE_URL`, `TRACE_SHA256`, and `TARGET_MODEL` need to change.
 
 The Job waits for `GET /v1/models` on the DGD frontend to return the configured `TARGET_MODEL` (up to ~1h by default), runs a short warmup, then replays the configured trace at a single `CONCURRENCY` value and writes raw artifacts to the shared `model-cache` PVC.
 
@@ -15,11 +15,13 @@ The bench pod is **co-located with the DGD frontend** (`podAffinity` on the fron
 
 Edit the `env` block in [perf.yaml](perf.yaml):
 
-| Variant target | `ENDPOINT` | `TARGET_MODEL` | `TRACE_FILE` (chat / agent) |
+| Variant target | `ENDPOINT` | `TARGET_MODEL` | `TRACE_FILE` |
 | ------------------------ | -------------------------------------------------- | ----------------------------------- | ----------------------------------------------------------------------- |
-| B200 agg (4-GPU), agent | `qwen38fn-agg-b200-agentic-frontend:8000` | `Inferact/Qwen3.8-Flash-Next-NVFP4` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
-| B200 agg (8-GPU), agent | `qwen38fn-agg-b200-agentic-8gpu-frontend:8000` | `Inferact/Qwen3.8-Flash-Next-NVFP4` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
-| B200 disagg, agent | `qwen38fn-disagg-b200-agentic-frontend:8000` | `Inferact/Qwen3.8-Flash-Next-NVFP4` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
+| B200 agg (4-GPU) | `qwen38fn-agg-b200-agentic-frontend:8000` | `Inferact/Qwen3.8-Flash-Next-NVFP4` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
+| B200 agg (8-GPU) | `qwen38fn-agg-b200-agentic-8gpu-frontend:8000` | `Inferact/Qwen3.8-Flash-Next-NVFP4` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
+| B200 agg (12-GPU) | `qwen38fn-agg-b200-agentic-12gpu-frontend:8000` | `Inferact/Qwen3.8-Flash-Next-NVFP4` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
+| B200 disagg (1P1D) | `qwen38fn-disagg-b200-agentic-frontend:8000` | `Inferact/Qwen3.8-Flash-Next-NVFP4` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
+| B200 disagg (2P1D) | `qwen38fn-disagg-b200-agentic-2p1d-frontend:8000` | `Inferact/Qwen3.8-Flash-Next-NVFP4` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
 
 Also update the `podAffinity` `values` list to include your deployed DGD name, and `metadata.name` / `labels.app` if you run multiple jobs in the same namespace.
 
@@ -36,7 +38,7 @@ The benchmark replays a [Mooncake-format](https://github.com/kvcache-ai/Mooncake
 | ISL p90 | 101,392 |
 | OSL median | 399 |
 | OSL p90 | 6,943 |
-| KV cache hit rate | 90% (prefix reuse) |
+| Prefix reuse (trace design) | ~90% (shared ~57.6K-token system prompt) |
 | Shared system prompt | ~57,600 tokens |
 
 For shorter runs (smoke tests, faster iteration), use a smaller subset. Typical staging:
