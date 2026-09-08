@@ -282,12 +282,10 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 ],
             ),
             "epd_video": TopologyConfig(
-                # Critical E/P/D regression gate: the decode handoff must retain
-                # both the reconstructed image placeholder and reloaded video.
-                # Keep this pre-merge despite its runtime because a unit test
-                # cannot prove the NIXL handoff and vLLM prompt agree.
+                # E/P/D regression gate: the decode handoff must retain both
+                # the reconstructed image placeholder and reloaded video.
                 marks=[
-                    pytest.mark.pre_merge,
+                    pytest.mark.post_merge,
                     pytest.mark.installs_extra_dependencies,
                 ],
                 timeout_s=600,
