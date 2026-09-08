@@ -1265,6 +1265,11 @@ impl HttpServiceConfigBuilder {
                 state.clone(),
                 None,
             ));
+            system_routes.push(super::reset_prefix_cache::reset_prefix_cache_router(
+                state.clone(),
+                config.runtime.clone(),
+                None,
+            ));
         } else {
             tracing::info!(
                 env = env_llm::DYN_DISABLE_FRONTEND_ADMIN_API,
