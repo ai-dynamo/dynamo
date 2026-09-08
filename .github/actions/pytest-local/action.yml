@@ -1,8 +1,9 @@
 name: 'Pytest'
 description: 'Run pytest on pre-built container images'
-# Keep this a single shell step: each step in a `container:` job is a separate
-# exec into the job pod with significant fixed overhead. Artifact uploads live
-# in shared-test.yml so they happen once per job.
+# Keep the test run a single shell step: each step in a `container:` job is a
+# separate exec into the job pod with significant fixed overhead. The JUnit
+# upload lives in shared-test.yml so it happens once per job; Allure and
+# coverage are uploaded per stage below for the external CI-metrics pipeline.
 inputs:
   pytest_marks:
     description: 'Pytest marks'
@@ -103,8 +104,10 @@ runs:
         HF_XET_HIGH_PERFORMANCE: 1
         PYTEST_DD_FLAKY_RETRY_ENABLED: ${{ inputs.dd_flaky_retry_enabled }}
       run: |
-        # Sanitize test_type for filenames: remove commas and spaces.
+        # Sanitize test_type for filenames: remove commas and spaces. Exported
+        # for the per-stage upload steps' artifact names.
         STR_TEST_TYPE=$(echo "${TEST_TYPE}" | tr ', ' '_')
+        echo "STR_TEST_TYPE=${STR_TEST_TYPE}" >> $GITHUB_ENV
 
         if [[ "${GPU_TESTS}" == "true" ]]; then
           # Only GPU tests require MinIO (LoRA tests). Wait for the job service.
@@ -289,3 +292,26 @@ runs:
         fi
 
         exit ${TEST_EXIT_CODE}
+
+    # Allure results and coverage data are uploaded per stage, under the same
+    # artifact names as before the step collapse, because an external CI-metrics
+    # pipeline consumes them by name. `always()` because the step above exits
+    # with the pytest status. The JUnit upload happens once per job in
+    # shared-test.yml.
+    - name: Upload Coverage Data
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      if: always() && inputs.enable_coverage == 'true'
+      with:
+        name: coverage-python-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: test-results/
+        include-hidden-files: true
+        retention-days: 7
+
+    - name: Upload Allure Results
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      if: always()
+      with:
+        name: allure-results-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: test-results/allure-results/
+        retention-days: 7
+        if-no-files-found: ignore

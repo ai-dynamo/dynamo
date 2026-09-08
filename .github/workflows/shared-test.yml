@@ -288,8 +288,9 @@ jobs:
           parallel_mode: 'none'
           enable_coverage: ${{ inputs.enable_coverage }}
           gpu_tests: 'true'
-      # Artifact names must keep the test-results-* / allure-results-* /
-      # coverage-python-* prefixes consumed by the report and coverage workflows.
+      # One JUnit upload per job (one XML per stage inside). The name must keep
+      # the test-results-* prefix consumed by the report workflows. Allure and
+      # coverage are uploaded per stage by the pytest-local action.
       - name: Upload Test Results
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
@@ -298,19 +299,3 @@ jobs:
           path: test-results/pytest_test_report_*.xml
           retention-days: 7
           if-no-files-found: warn
-      - name: Upload Allure Results
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
-        with:
-          name: allure-results-${{ inputs.test_suite_name }}-${{ matrix.platform }}-${{ github.run_id }}-${{ job.check_run_id }}
-          path: test-results/allure-results/
-          retention-days: 7
-          if-no-files-found: ignore
-      - name: Upload Coverage Data
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && inputs.enable_coverage == 'true' }}
-        with:
-          name: coverage-python-${{ inputs.test_suite_name }}-${{ matrix.platform }}-${{ github.run_id }}-${{ job.check_run_id }}
-          path: test-results/
-          include-hidden-files: true
-          retention-days: 7
