@@ -2,27 +2,27 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Operator Metrics
-subtitle: Kubernetes-only dynamo_operator_* metrics and the annotations and Helm values that enable metrics collection.
+subtitle: Kubernetes-only controller and Dynamo metrics, plus the annotations and Helm values that enable collection.
 ---
 
-The Dynamo Operator exposes its own Prometheus metrics for controller reconciliation, webhook validation, and resource inventory. These are **Kubernetes-scoped** — they exist only where the operator runs, and are separate from the application metrics emitted by frontends and workers (see [Metrics Catalog](metrics-catalog.mdx)). For enablement and dashboards (including the operator dashboard), see the [Kubernetes observability guide](../../kubernetes/operations/observability.mdx).
+The Dynamo Operator exposes controller-runtime reconciliation metrics and Dynamo-specific Prometheus metrics for webhook validation and resource inventory. These are **Kubernetes-scoped** — they exist only where the operator runs, and are separate from the application metrics emitted by frontends and workers (see [Metrics Catalog](metrics-catalog.mdx)). For enablement and dashboards (including the operator dashboard), see the [Kubernetes observability guide](../../kubernetes/operations/observability.mdx).
 
-All operator metrics use the `dynamo_operator` prefix. Unlike application metrics (which use a PodMonitor), the operator is scraped via a ServiceMonitor created by the Helm chart.
+Reconciliation metrics use the controller-runtime `controller_runtime` prefix. Webhook and resource inventory metrics use the `dynamo_operator` prefix. Unlike application metrics (which use a PodMonitor), the operator is scraped via a ServiceMonitor created by the Helm chart.
 
 ## Reconciliation metrics
 
-Track how efficiently controllers process `DynamoGraphDeployment`, `DynamoComponentDeployment`, `DynamoModel`, `DynamoGraphDeploymentRequest`, and `DynamoGraphDeploymentScalingAdapter` resources.
+Track how efficiently controllers process `DynamoGraphDeployment`, `DynamoComponentDeployment`, `DynamoModel`, `DynamoGraphDeploymentRequest`, and `DynamoGraphDeploymentScalingAdapter` resources. These metrics are cluster-wide and do not carry target namespace or error-category labels.
 
-<ParamField path="dynamo_operator_reconcile_duration_seconds" type="histogram">
-  Duration of reconciliation loops. Labeled by `resource_type`, `namespace`, and `result`.
+<ParamField path="controller_runtime_reconcile_time_seconds" type="histogram">
+  Duration of reconciliation loops. Labeled by `controller`.
 </ParamField>
 
-<ParamField path="dynamo_operator_reconcile_total" type="counter">
-  Total number of reconciliations. Labeled by `resource_type`, `namespace`, and `result`.
+<ParamField path="controller_runtime_reconcile_total" type="counter">
+  Total number of reconciliations. Labeled by `controller` and `result`.
 </ParamField>
 
-<ParamField path="dynamo_operator_reconcile_errors_total" type="counter">
-  Total reconciliation errors by type. Labeled by `resource_type`, `namespace`, and `error_type`.
+<ParamField path="controller_runtime_reconcile_errors_total" type="counter">
+  Total reconciliation errors. Labeled by `controller`.
 </ParamField>
 
 ## Webhook metrics
@@ -51,22 +51,20 @@ Track performance and outcomes of admission webhook requests.
 
 These labels are specific to operator metrics and are distinct from the application [Metric Labels](metric-labels.mdx).
 
+<ParamField path="controller" type="string">
+  The controller name: `DynamoGraphDeployment`, `DynamoComponentDeployment`, `DynamoModel`, `DynamoGraphDeploymentRequest`, or `DynamoGraphDeploymentScalingAdapter`.
+</ParamField>
+
 <ParamField path="resource_type" type="string">
-  The managed CRD: `DynamoGraphDeployment`, `DynamoComponentDeployment`, `DynamoModel`, `DynamoGraphDeploymentRequest`, or `DynamoGraphDeploymentScalingAdapter`.
+  The managed CRD on Dynamo-specific webhook and resource inventory metrics.
 </ParamField>
 
 <ParamField path="namespace" type="string">
-  Target Kubernetes namespace of the resource.
+  Target Kubernetes namespace on `dynamo_operator_resources_total`.
 </ParamField>
 
 <ParamField path="result" type="string">
-  Outcome of the operation. On reconcile metrics: `success`, `error`, `requeue`. On webhook metrics: `allowed`, `denied`.
-</ParamField>
-
-<ParamField path="error_type" type="string">
-  On `dynamo_operator_reconcile_errors_total` — the failure category.
-
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>not_found</Badge> <Badge intent="note" minimal>already_exists</Badge> <Badge intent="note" minimal>conflict</Badge> <Badge intent="note" minimal>validation</Badge> <Badge intent="note" minimal>bad_request</Badge> <Badge intent="note" minimal>unauthorized</Badge> <Badge intent="note" minimal>forbidden</Badge> <Badge intent="note" minimal>timeout</Badge> <Badge intent="note" minimal>server_timeout</Badge> <Badge intent="note" minimal>unavailable</Badge> <Badge intent="note" minimal>rate_limited</Badge> <Badge intent="note" minimal>internal</Badge></span>
+  Outcome of the operation. On `controller_runtime_reconcile_total`: `success`, `error`, `requeue`, or `requeue_after`. On webhook metrics: `allowed` or `denied`.
 </ParamField>
 
 <ParamField path="operation" type="string">
