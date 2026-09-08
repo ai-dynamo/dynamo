@@ -33,11 +33,11 @@ from ..constants import EmbeddingTransferMode
 from ..multimodal_utils import (
     ImageLoader,
     encode_image_embeddings,
+    get_embedding_hash,
     get_encoder_components,
     load_vision_model,
     vLLMMultimodalRequest,
 )
-from ..multimodal_utils.embedding_cache import generate_hash_key
 from ..multimodal_utils.model import ModelFamily, resolve_model_family
 
 logger = logging.getLogger(__name__)
@@ -240,7 +240,7 @@ class EncodeWorkerHandler:
                 "encode worker."
             )
         if has_url:
-            return generate_hash_key(group_input.image_url)
+            return get_embedding_hash(group_input.image_url)
         if not self._enable_frontend_decoding:
             raise ValueError(
                 "Received a frontend-decoded image but --frontend-decoding is "
@@ -284,6 +284,19 @@ class EncodeWorkerHandler:
         publisher to consume the delta.
         """
         if self.embedding_cache_manager is None or item.key is None:
+            return
+        # Size the incoming view, not the copy, so admission is decided before
+        # the copy exists: clone(memory_format=torch.contiguous_format) keeps
+        # dtype and element count, so the two are the same number of bytes.
+        # The view's own size is computed here rather than through the manager,
+        # whose sizing asserts contiguity that a view need not have.
+        size_bytes = item.embeddings.element_size() * item.embeddings.numel()
+        # An entry over capacity is rejected outright, and a cache with no room
+        # for one under capacity evicts first, so the device never holds the
+        # whole cache plus this copy at once.
+        if not self.embedding_cache_manager.make_room_for(
+            item.key, size_bytes
+        ).admitted:
             return
         # These arrive as split views over one encoder output, and the manager
         # sizes an entry from its own element count. Caching a view would charge

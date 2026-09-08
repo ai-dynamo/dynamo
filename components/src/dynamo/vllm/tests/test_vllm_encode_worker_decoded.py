@@ -17,7 +17,7 @@ from dynamo.vllm.multimodal_handlers.encode_worker_handler import (
     EmbeddingItem,
     EncodeWorkerHandler,
 )
-from dynamo.vllm.multimodal_utils.embedding_cache import generate_hash_key
+from dynamo.vllm.multimodal_utils.encode_utils import get_embedding_hash
 from dynamo.vllm.multimodal_utils.protocol import MultiModalInput
 
 pytestmark = [
@@ -130,7 +130,7 @@ def test_cache_key_for_url_image_is_unchanged():
     group_input = MultiModalInput(image_url="https://example.com/a.png")
 
     assert handler._image_cache_key(group_input) == expected
-    assert generate_hash_key("https://example.com/a.png") == expected
+    assert get_embedding_hash("https://example.com/a.png") == expected
 
 
 def test_cache_key_for_decoded_image_uses_content_hash():
@@ -227,6 +227,130 @@ def test_store_path_evicts_instead_of_growing_past_capacity():
     assert stats["evictions"] == 1
     assert handler._lookup_embedding_item("key-0") is None
     assert handler._lookup_embedding_item("key-4") is not None
+
+
+class _RecordingEmbedding:
+    """Stand-in embedding that records cache state at the moment it is copied.
+
+    Whether the cache had room before the copy was made is not recoverable
+    from its final state, so the assertion has to be made between the
+    admission decision and the copy. Only the three members the store path
+    uses are implemented; everything else about a tensor is out of scope.
+    """
+
+    def __init__(
+        self, tensor: torch.Tensor, manager: MultimodalEmbeddingCacheManager
+    ) -> None:
+        self._tensor = tensor
+        self._manager = manager
+        self.clone_calls = 0
+        self.stats_at_clone: dict | None = None
+
+    def element_size(self) -> int:
+        return self._tensor.element_size()
+
+    def numel(self) -> int:
+        return self._tensor.numel()
+
+    def clone(self, memory_format=None) -> torch.Tensor:
+        self.clone_calls += 1
+        self.stats_at_clone = self._manager.stats
+        return self._tensor.clone(memory_format=memory_format)
+
+
+def _float32_element_count(entry_bytes: int) -> int:
+    return entry_bytes // torch.tensor([], dtype=torch.float32).element_size()
+
+
+def _fill_cache(handler: EncodeWorkerHandler, count: int, element_count: int) -> None:
+    for index in range(count):
+        handler._store_embedding_item(
+            EmbeddingItem(
+                key=f"key-{index}",
+                image_grid_thw=[[1, 2, 2]],
+                embeddings=torch.full((1, element_count), float(index)),
+            )
+        )
+
+
+def test_store_path_makes_room_before_copying_into_the_cache():
+    entry_bytes = 256 * 1024
+    element_count = _float32_element_count(entry_bytes)
+    handler = _handler(frontend_decoding=False, capacity_bytes=4 * entry_bytes)
+    _fill_cache(handler, 4, element_count)
+    assert handler.embedding_cache_manager.stats["current_bytes"] == 4 * entry_bytes
+
+    probe = _RecordingEmbedding(
+        torch.full((1, element_count), 4.0), handler.embedding_cache_manager
+    )
+    handler._store_embedding_item(
+        EmbeddingItem(key="key-4", image_grid_thw=[[1, 2, 2]], embeddings=probe)
+    )
+
+    assert probe.clone_calls == 1
+    # The bytes this entry needs were already free when the copy was made, so a
+    # full cache never holds its whole capacity and the new copy at once.
+    assert (
+        probe.stats_at_clone["current_bytes"] + entry_bytes
+        <= probe.stats_at_clone["capacity_bytes"]
+    )
+    assert probe.stats_at_clone["evictions"] == 1
+    # Evicting early neither counts the eviction twice nor changes what the
+    # cache ends up holding.
+    stats = handler.embedding_cache_manager.stats
+    assert stats["evictions"] == 1
+    assert stats["entries"] == 4
+    assert stats["current_bytes"] == stats["capacity_bytes"]
+    assert handler._lookup_embedding_item("key-0") is None
+    assert handler._lookup_embedding_item("key-4") is not None
+
+
+def test_store_path_rejects_an_oversize_entry_without_copying_it():
+    entry_bytes = 256 * 1024
+    element_count = _float32_element_count(entry_bytes)
+    handler = _handler(frontend_decoding=False, capacity_bytes=entry_bytes // 2)
+    probe = _RecordingEmbedding(
+        torch.zeros(1, element_count), handler.embedding_cache_manager
+    )
+
+    handler._store_embedding_item(
+        EmbeddingItem(key="key", image_grid_thw=[[1, 2, 2]], embeddings=probe)
+    )
+
+    # Rejected on its byte count alone, so the copy that the cache would have
+    # refused to keep is never allocated.
+    assert probe.clone_calls == 0
+    stats = handler.embedding_cache_manager.stats
+    assert stats["entries"] == 0
+    assert stats["current_bytes"] == 0
+    assert stats["evictions"] == 0
+
+
+def test_restoring_a_cached_key_evicts_nothing():
+    # The cache refunds the bytes of an entry it replaces, so making room for a
+    # re-store must count that refund or it evicts entries needlessly.
+    entry_bytes = 256 * 1024
+    element_count = _float32_element_count(entry_bytes)
+    handler = _handler(frontend_decoding=False, capacity_bytes=4 * entry_bytes)
+    _fill_cache(handler, 4, element_count)
+
+    handler._store_embedding_item(
+        EmbeddingItem(
+            key="key-1",
+            image_grid_thw=[[1, 2, 2]],
+            embeddings=torch.full((1, element_count), 9.0),
+        )
+    )
+
+    stats = handler.embedding_cache_manager.stats
+    assert stats["evictions"] == 0
+    assert stats["entries"] == 4
+    assert stats["current_bytes"] == 4 * entry_bytes
+    assert handler._lookup_embedding_item("key-0") is not None
+    assert torch.equal(
+        handler._lookup_embedding_item("key-1").embeddings,
+        torch.full((1, element_count), 9.0),
+    )
 
 
 def test_store_path_does_not_pin_the_encoder_batch():
