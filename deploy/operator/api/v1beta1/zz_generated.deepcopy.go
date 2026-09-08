@@ -138,6 +138,16 @@ func (in *ComponentReplicaStatus) DeepCopyInto(out *ComponentReplicaStatus) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
+	if in.GPUsPerEngine != nil {
+		in, out := &in.GPUsPerEngine, &out.GPUsPerEngine
+		*out = new(int64)
+		**out = **in
+	}
+	if in.GPUsPerReplica != nil {
+		in, out := &in.GPUsPerReplica, &out.GPUsPerReplica
+		*out = new(int64)
+		**out = **in
+	}
 	if in.ReadyReplicas != nil {
 		in, out := &in.ReadyReplicas, &out.ReadyReplicas
 		*out = new(int32)

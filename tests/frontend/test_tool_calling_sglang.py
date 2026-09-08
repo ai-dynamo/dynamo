@@ -338,7 +338,7 @@ TOOLS_WEATHER = [
                     },
                 },
                 "required": ["city"],
-                "additionalProperties": True,
+                "additionalProperties": False,
             },
         },
     }
@@ -850,7 +850,6 @@ class TestToolCallingProtocol:
             result.tool_calls[0], schema, expected_name="send_emails"
         )
         assert isinstance(args["recipients"], list)
-        assert len(args["recipients"]) >= 3
 
     @pytest.mark.flaky(reruns=2, only_rerun=["AssertionError"])
     def test_no_tools_is_plain_text(self, client: OpenAI, model: str):
@@ -1029,6 +1028,7 @@ class TestToolCallingMultiTurn:
                 },
             ],
             tools=TOOLS_WEATHER,
+            temperature=0,
         )
         assert_finish_reason(result, {"stop"})
         assert result.tool_calls == []

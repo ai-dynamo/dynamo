@@ -2,24 +2,33 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Mocker CLI Reference
-subtitle: Command-line flags for the python -m dynamo.mocker simulated worker.
+subtitle: Command-line flags for live Mocker workers
 ---
 
-`python -m dynamo.mocker` launches a simulated Dynamo worker that registers with the frontend,
+`python3 -m dynamo.mocker` launches a simulated Dynamo worker that registers with the frontend,
 publishes KV events, and exercises the router and planner paths without a GPU. This page is the flag
 reference. For the deployment workflow and local/Kubernetes launch recipes, see
 [Simulate a Kubernetes Deployment](../../kubernetes/operations/simulation-with-dynosim/mocker-live-simulation.mdx) or
 [Simulate a Local Deployment](../../cli/operations/simulation-with-dynosim/mocker-live-simulation.mdx); for the engine internals these flags
 configure, see [Mocker Engine Architecture](../../developer-guide/knowledge-base/modular-components/backends/mocker/mocker-engine-architecture.md).
 
-The same engine settings apply to [DynoSim Runs](../../cli/operations/simulation-with-dynosim/dynosim-replay.mdx): `python -m dynamo.replay`
-reuses the mocker engine and accepts these values as JSON through `--extra-engine-args`,
-`--prefill-engine-args`, and `--decode-engine-args` rather than as individual flags.
+Run `python3 -m dynamo.mocker --help` for the complete option list supported by the installed
+version.
+
+AISimulate reuses the same engine core for offline virtual-clock prediction and recommendation, but
+its public YAML is separate from these live-worker flags. See the
+[DynoSim Replay CLI Reference](dynosim-replay-cli-reference.mdx) for the offline contract. The
+former public Replay online CLI remains unavailable, although the Python replay SDK retains online
+mode.
 
 ## Core and model
 
-<ParamField path="--model-path" type="string" required={true}>
-  HuggingFace model ID or local path for the tokenizer.
+<ParamField path="--version" type="boolean" default="false">
+  Print the Dynamo Mocker version and exit.
+</ParamField>
+
+<ParamField path="--model-path" type="string" default="null">
+  Hugging Face model ID or local path for the tokenizer. Set this for normal frontend requests.
 </ParamField>
 
 <ParamField path="--model-name" type="string" default="derived from --model-path">
@@ -34,7 +43,7 @@ reuses the mocker engine and accepts these values as JSON through `--extra-engin
 <ParamField path="--engine-type" type="string" default="vllm">
   Engine simulation type.
 
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>sglang</Badge></span>
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>sglang</Badge> <Badge intent="note" minimal>trtllm</Badge></span>
 </ParamField>
 
 <ParamField path="--extra-engine-args" type="path" default="null">
@@ -43,13 +52,18 @@ reuses the mocker engine and accepts these values as JSON through `--extra-engin
 
 ## KV cache
 
-<ParamField path="--num-gpu-blocks-override" type="integer" default="16384">
-  Number of KV cache blocks.
+<ParamField path="--num-gpu-blocks-override" type="integer" default="auto">
+  Usable KV cache blocks per data-parallel rank. Non-AIC timing defaults to 16,384 blocks; AIC
+  timing estimates capacity when this option is omitted.
 </ParamField>
 
-<ParamField path="--block-size" type="integer" default="64 (vllm) / engine-specific">
-  Tokens per KV cache block. For `sglang`, when omitted, the effective page/block size defaults to 1
-  or to `--sglang-page-size` when provided.
+<ParamField path="--block-size" type="integer" default="engine-specific">
+  Tokens per KV cache block. Defaults are 64 for vLLM, 1 for SGLang, and 32 for TensorRT-LLM.
+</ParamField>
+
+<ParamField path="--max-model-len" type="integer" default="null">
+  Maximum sequence length, including prompt and generated tokens. Omitting the option leaves the
+  simulated engine without a model-length limit.
 </ParamField>
 
 <ParamField path="--enable-prefix-caching" type="boolean" default="true">
@@ -124,19 +138,32 @@ reuses the mocker engine and accepts these values as JSON through `--extra-engin
   `end_thinking_token_id`, and `thinking_ratio`.
 </ParamField>
 
+<ParamField path="--response-replay-trace-path" type="path" default="null">
+  Mooncake JSONL trace whose `output_token_ids` provide response replay annotations.
+</ParamField>
+
 ## AIC performance model
 
-Opt-in flags for the NVIDIA AI Configurator (AIC) latency model. Default mocker runs do not use AIC.
+Opt-in flags for the AIConfigurator (AIC) latency model. Live Mocker workers do not use AIC by
+default.
 For the timing-model design, see [Mocker Engine Architecture](../../developer-guide/knowledge-base/modular-components/backends/mocker/mocker-engine-architecture.md#performance-model).
 
 <ParamField path="--aic-perf-model" type="boolean" default="false">
-  Use the AIC SDK for latency prediction instead of the interpolated or polynomial models. Opt-in
-  only: default mocker and DynoSim run paths do not use AIC. Requires `aiconfigurator` installed and
-  usable AIC systems/perf data for the requested `system/backend/version` tuple.
+  Use the AIC compatibility API in the AISimulate wheel for latency prediction instead of the
+  interpolated or polynomial models. Install `aisimulate` and use a supported
+  `system/backend/version` tuple.
 </ParamField>
 
-<ParamField path="--aic-system" type="string" default="h200_sxm">
-  AIC system name, for example `h200_sxm`. Used with `--aic-perf-model`.
+<ParamField path="--aic-system" type="string" default="h200_sxm when AIC is enabled">
+  AIC system name used with `--aic-perf-model`. The raw CLI value is unset when omitted; runtime
+  resolution uses `h200_sxm` when AIC modeling is enabled.
+</ParamField>
+
+<ParamField path="--aic-backend" type="string" default="--engine-type">
+  Backend used for AIC performance-data lookup. Set it only to model timing for a different backend
+  than the simulated scheduler.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>sglang</Badge> <Badge intent="note" minimal>trtllm</Badge></span>
 </ParamField>
 
 <ParamField path="--aic-backend-version" type="string" default="auto">
@@ -161,12 +188,46 @@ For the timing-model design, see [Mocker Engine Architecture](../../developer-gu
   Attention data-parallel size for AIC latency prediction. Required by some MoE models.
 </ParamField>
 
+<ParamField path="--gpu-memory-utilization" type="float" default="0.9">
+  vLLM GPU memory fraction used for AIC KV-capacity estimation.
+</ParamField>
+
+<ParamField path="--mem-fraction-static" type="float" default="0.88">
+  SGLang static memory fraction used for AIC KV-capacity estimation.
+</ParamField>
+
+<ParamField path="--free-gpu-memory-fraction" type="float" default="0.9">
+  TensorRT-LLM fraction of post-model-load free GPU memory used for AIC KV-capacity estimation.
+</ParamField>
+
+<ParamField path="--aic-nextn" type="integer" default="null">
+  Experimental Multi-Token Prediction (MTP) draft length, from 1 through 5.
+</ParamField>
+
+<ParamField path="--aic-nextn-accept-rates" type="string" default="null">
+  Experimental comma-separated conditional MTP acceptance rates.
+</ParamField>
+
+<ParamField path="--aic-mtp-seed" type="integer" default="42">
+  Base random seed for Mocker MTP burst sampling.
+</ParamField>
+
 ## Disaggregation
 
 <ParamField path="--disaggregation-mode" type="string" default="agg">
   Worker mode.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>agg</Badge> <Badge intent="note" minimal>prefill</Badge> <Badge intent="note" minimal>decode</Badge></span>
+</ParamField>
+
+<ParamField path="--is-prefill-worker" type="boolean" default="false">
+  Deprecated alias for `--disaggregation-mode=prefill`. Do not combine it with
+  `--disaggregation-mode` or `--is-decode-worker`.
+</ParamField>
+
+<ParamField path="--is-decode-worker" type="boolean" default="false">
+  Deprecated alias for `--disaggregation-mode=decode`. Do not combine it with
+  `--disaggregation-mode` or `--is-prefill-worker`.
 </ParamField>
 
 <ParamField path="--bootstrap-ports" type="string" default="null">
@@ -177,10 +238,17 @@ For the timing-model design, see [Mocker Engine Architecture](../../developer-gu
   KV cache transfer bandwidth in GB/s. Set to `0` to disable.
 </ParamField>
 
+<ParamField path="--kv-transfer-timing-mode" type="string" default="full_prompt">
+  Prompt footprint charged to a coordinated prefill/decode transfer.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>full_prompt</Badge> <Badge intent="note" minimal>destination_missing</Badge></span>
+</ParamField>
+
 ## Event and request transport
 
-<ParamField path="--event-plane" type="string" default="env-driven (nats)">
-  Event transport.
+<ParamField path="--event-plane" type="string" default="auto">
+  Event transport. When the environment does not set a value, Mocker uses ZMQ with file or memory
+  discovery and NATS with etcd or Kubernetes discovery.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>nats</Badge> <Badge intent="note" minimal>zmq</Badge></span>
 </ParamField>
@@ -236,6 +304,29 @@ Apply only when `--engine-type sglang`.
   SGLang schedule conservativeness factor.
 </ParamField>
 
+## TensorRT-LLM-specific
+
+Apply only when `--engine-type trtllm`.
+
+<ParamField path="--trtllm-capacity-scheduler-policy" type="string" default="guaranteed_no_evict">
+  TensorRT-LLM capacity scheduler policy. The Mocker currently supports only
+  `guaranteed_no_evict`.
+</ParamField>
+
+## Router advertisement
+
+Mocker accepts the same `--router-*` worker-advertisement options as the real backend launchers.
+Use them to override Router behavior for this worker set. See
+[Router Configuration and Tuning](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md)
+for the shared fields.
+
+<ParamField path="--router-mode" type="string" default="inherit frontend">
+  Advertise a Router configuration for this worker set. When omitted, the worker advertises no
+  Router configuration and inherits the Frontend configuration.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>round-robin</Badge> <Badge intent="note" minimal>random</Badge> <Badge intent="note" minimal>power-of-two</Badge> <Badge intent="note" minimal>kv</Badge> <Badge intent="note" minimal>direct</Badge> <Badge intent="note" minimal>least-loaded</Badge> <Badge intent="note" minimal>device-aware-weighted</Badge></span>
+</ParamField>
+
 ## Environment variables
 
 | Variable | Default | Description |
@@ -252,7 +343,7 @@ Apply only when `--engine-type sglang`.
     Run a frontend and Mocker worker from the command line.
   </Card>
   <Card title="Run a DynoSim Simulation" icon="play" href="../../cli/operations/simulation-with-dynosim/dynosim-replay.mdx">
-    Run one workload through a simulated configuration with `python -m dynamo.replay`.
+    Run one workload through an offline simulated configuration with `aisimulate predict --stack dynamo`.
   </Card>
   <Card title="Mocker Engine Architecture" icon="diagram-project" href="../../developer-guide/knowledge-base/modular-components/backends/mocker/mocker-engine-architecture.md">
     Scheduler, KV block manager, eviction, and timing internals.

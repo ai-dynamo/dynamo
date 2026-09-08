@@ -142,11 +142,19 @@ The following Kubernetes and local workflows use vLLM. For the aggregated SGLang
     | `DYN_LORA_PATH` | Local cache directory for downloaded LoRAs | `~/.cache/dynamo_loras` |
     | `DYN_SYSTEM_ENABLED` | Expose worker load/unload API | `false` |
     | `DYN_SYSTEM_PORT` | System API port | — |
-    | `AWS_ACCESS_KEY_ID` | S3 access key (for `s3://` URIs) | — |
-    | `AWS_SECRET_ACCESS_KEY` | S3 secret key (for `s3://` URIs) | — |
-    | `AWS_ENDPOINT` | Custom S3 endpoint (MinIO, etc.) | — |
+    | `AWS_ACCESS_KEY_ID` | S3 access key from the environment credential provider | — |
+    | `AWS_SECRET_ACCESS_KEY` | S3 secret key from the environment credential provider | — |
+    | `AWS_PROFILE` | Shared AWS configuration and credentials profile | `default` |
+    | `AWS_SHARED_CREDENTIALS_FILE` | Shared credentials file path | `~/.aws/credentials` |
+    | `AWS_CONFIG_FILE` | Shared configuration file path | `~/.aws/config` |
+    | `AWS_ENDPOINT_URL_S3` | Service-specific custom S3 endpoint | — |
+    | `AWS_ENDPOINT_URL` | Generic custom AWS endpoint | — |
+    | `AWS_ENDPOINT` | Legacy custom S3 endpoint fallback | — |
     | `AWS_REGION` | AWS region | `us-east-1` |
     | `AWS_ALLOW_HTTP` | Allow HTTP (non-TLS) connections | `false` |
+    | `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` | Use bucket-qualified virtual-hosted requests | `false` |
+
+    For `s3://` sources, Dynamo uses the standard AWS credential provider chain, including environment variables, shared configuration and credentials files, web identity, container credentials, and Amazon EC2 instance metadata. Endpoint precedence is `AWS_ENDPOINT_URL_S3`, the active profile's S3 service endpoint, `AWS_ENDPOINT_URL`, the active profile's generic `endpoint_url`, then the legacy `AWS_ENDPOINT` fallback.
 
     **vLLM worker arguments**
 
@@ -161,13 +169,13 @@ The following Kubernetes and local workflows use vLLM. For the aggregated SGLang
 
     <AccordionGroup>
       <Accordion title="S3 or MinIO credentials on the worker">
-        Store secret keys in a Kubernetes Secret and set non-secret endpoint/region inline:
+        Mount shared AWS files and set `AWS_PROFILE`, or store environment credentials in a Kubernetes Secret. Set non-secret endpoint and region values inline:
 
         ```yaml
                   env:
                   - name: DYN_LORA_ENABLED
                     value: "true"
-                  - name: AWS_ENDPOINT
+                  - name: AWS_ENDPOINT_URL
                     value: http://minio:9000        # for MinIO; omit for AWS S3
                   - name: AWS_REGION
                     value: us-east-1
@@ -422,7 +430,7 @@ This section describes the validated vLLM path. KV-aware routing with SGLang LoR
     **Check S3 connectivity:**
 
     ```bash
-    aws --endpoint-url=$AWS_ENDPOINT s3 ls s3://my-loras/ --recursive
+    aws s3 ls s3://my-loras/ --recursive
     ```
 
     **Check the cache directory:**

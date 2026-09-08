@@ -66,6 +66,7 @@ from dynamo.frontend.utils import (
     random_call_id,
     random_uuid,
 )
+from dynamo.llm.exceptions import InvalidArgument
 
 # Needs sglang packages (gpu_1 container), but does not allocate GPU VRAM.
 pytestmark = [
@@ -1381,6 +1382,51 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
         assert isinstance(guided, dict)
         assert "json" in guided
 
+    def test_named_closed_zero_arg_tool_uses_exact_regex_guidance(self):
+        tools = convert_tools(
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_server_time",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                            "required": [],
+                            "additionalProperties": False,
+                        },
+                    },
+                }
+            ]
+        )
+
+        guided = build_tool_call_guided_decoding(
+            {
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_server_time",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {},
+                                "required": [],
+                                "additionalProperties": False,
+                            },
+                        },
+                    }
+                ],
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "get_server_time"},
+                },
+            },
+            tool_call_parser_name="hermes",
+            sglang_tools=tools,
+        )
+
+        assert guided == {"regex": r"\{\}"}
+
     def test_required_tool_choice_supports_older_sglang_constraint_signature(
         self, monkeypatch
     ):
@@ -1804,6 +1850,136 @@ class TestRuntimeConfigParserName:  # FRONTEND.2 — parser name resolution from
 class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preprocessing (multi-turn assistant tool_calls, role handling)
     """Test end-to-end preprocessing with a real tokenizer."""
 
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"guided_json": {"type": "object"}, "guided_regex": "a+"},
+            {"guided_regex": "a+", "guided_grammar": 'root ::= "a"'},
+        ],
+    )
+    def test_legacy_guided_constraints_reject_conflicts(self, tokenizer, payload):
+        with pytest.raises(
+            InvalidArgument,
+            match="Only one guided-decoding constraint can be set; received:",
+        ):
+            preprocess_chat_request(
+                {
+                    "model": MODEL,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    **payload,
+                },
+                tokenizer=tokenizer,
+                tool_call_parser_name=None,
+                reasoning_parser_name=None,
+            )
+
+    def test_legacy_guided_constraint_matching_forced_tool_is_allowed(self, tokenizer):
+        """An explicit constraint identical to the generated one displaces nothing.
+
+        A named zero-argument tool builds {"regex": r"\\{\\}"}, and a caller may send
+        exactly that as guided_regex. Rejecting it would refuse a request both
+        sides agree on, and would break the named_zero_arg_tool reconstruction
+        that keys off this exact value.
+        """
+        result = preprocess_chat_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_server_time",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {},
+                                "required": [],
+                                "additionalProperties": False,
+                            },
+                        },
+                    }
+                ],
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "get_server_time"},
+                },
+                "guided_regex": r"\{\}",
+            },
+            tokenizer=tokenizer,
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+        )
+
+        assert result.guided_decoding == {"regex": r"\{\}"}
+        assert result.named_zero_arg_tool == "get_server_time"
+
+    @pytest.mark.parametrize(
+        "tool_choice",
+        ["required", {"type": "function", "function": {"name": "get_weather"}}],
+    )
+    def test_legacy_guided_constraint_conflicts_with_forced_tool_choice(
+        self, tokenizer, tool_choice
+    ):
+        """A forced tool choice and a legacy guided_* constrain the same tokens.
+
+        Honoring the guided_* constraint would drop the tool constraint while the
+        forced-tool response parser stays selected, so the model's output could not
+        satisfy the parser. prepost.py and preprocessor/tool_choice.rs both reject
+        this combination; SGLang must agree.
+        """
+        with pytest.raises(
+            InvalidArgument,
+            match="tool_choice forces a tool call",
+        ):
+            preprocess_chat_request(
+                {
+                    "model": MODEL,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "parameters": {"type": "object", "properties": {}},
+                            },
+                        }
+                    ],
+                    "tool_choice": tool_choice,
+                    "guided_regex": "foo",
+                },
+                tokenizer=tokenizer,
+                tool_call_parser_name=None,
+                reasoning_parser_name=None,
+            )
+
+    @pytest.mark.parametrize(
+        ("payload", "expected"),
+        [
+            (
+                {"guided_json": {"type": "object"}},
+                {"json": {"type": "object"}},
+            ),
+            ({"guided_regex": "a+"}, {"regex": "a+"}),
+            ({"guided_grammar": 'root ::= "a"'}, {"grammar": 'root ::= "a"'}),
+            ({"guided_choice": ["a", "b"]}, {"choice": ["a", "b"]}),
+        ],
+    )
+    def test_legacy_guided_constraints_are_forwarded(
+        self, tokenizer, payload, expected
+    ):
+        result = preprocess_chat_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                **payload,
+            },
+            tokenizer=tokenizer,
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+        )
+
+        assert result.guided_decoding == expected
+
     def test_basic_chat(self, tokenizer):
         """Simple user message preprocesses to non-empty token IDs."""
         request = {
@@ -1915,6 +2091,40 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
             "Tool-call guided decoding will be ignored because of response_format already exists."
             in caplog.text
         )
+
+    def test_response_format_disables_named_zero_arg_tool_reconstruction(
+        self, tokenizer
+    ):
+        result = preprocess_chat_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "response_format": {"type": "json_object"},
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_server_time",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {},
+                                "additionalProperties": False,
+                            },
+                        },
+                    }
+                ],
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "get_server_time"},
+                },
+            },
+            tokenizer=tokenizer,
+            tool_call_parser_name="hermes",
+            reasoning_parser_name=None,
+        )
+
+        assert result.guided_decoding == {"json": {"type": "object"}}
+        assert result.named_zero_arg_tool is None
 
     def test_assistant_tool_calls_with_string_arguments(self, tokenizer):
         """Multi-turn with prior assistant tool_calls renders without raising.

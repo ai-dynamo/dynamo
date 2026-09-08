@@ -5,6 +5,7 @@ import argparse
 import importlib
 import importlib.util
 import json
+import sys
 from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ import pytest
 from dynamo.llm import EngineType, EntrypointArgs
 from dynamo.mocker import MockEngineArgs
 from dynamo.mocker.args import parse_args
+from dynamo.mocker.utils import kv_cache
 
 MODULE_PATH = Path(__file__).resolve().parents[2] / "config.py"
 SPEC = importlib.util.spec_from_file_location("dynamo_mocker_config", MODULE_PATH)
@@ -87,7 +89,7 @@ def _load_replay_main():
         pytest.skip(
             "Dynamo replay CLI tests require the optional AISimulate distribution"
         )
-    return importlib.import_module("dynamo.replay.main")
+    return importlib.import_module("dynamo.replay.config")
 
 
 def test_build_runtime_config_uses_normalized_sglang_page_size_alias():
@@ -404,7 +406,7 @@ def test_build_mocker_engine_args_preserves_explicit_max_model_len():
 def test_replay_engine_args_keeps_max_model_len_explicit_only():
     replay_main = _load_replay_main()
 
-    engine_args = replay_main._load_engine_args(
+    engine_args = replay_main.load_engine_args(
         json.dumps(
             {
                 "num_gpu_blocks": 4096,
@@ -420,7 +422,7 @@ def test_replay_engine_args_keeps_max_model_len_explicit_only():
 def test_replay_engine_args_preserves_explicit_max_model_len():
     replay_main = _load_replay_main()
 
-    engine_args = replay_main._load_engine_args(
+    engine_args = replay_main.load_engine_args(
         json.dumps(
             {
                 "num_gpu_blocks": 4096,
@@ -437,7 +439,7 @@ def test_replay_engine_args_preserves_explicit_max_model_len():
 def test_replay_attention_dp_sets_rank_topology_with_explicit_kv_capacity():
     replay_main = _load_replay_main()
 
-    engine_args = replay_main._load_engine_args(
+    engine_args = replay_main.load_engine_args(
         json.dumps(
             {
                 "num_gpu_blocks": 4096,
@@ -455,7 +457,7 @@ def test_replay_rejects_mismatched_dp_topology():
     replay_main = _load_replay_main()
 
     with pytest.raises(ValueError, match="dp_size must match"):
-        replay_main._load_engine_args(
+        replay_main.load_engine_args(
             json.dumps(
                 {
                     "num_gpu_blocks": 4096,
@@ -471,7 +473,7 @@ def test_replay_rejects_dp_topology_without_aic_attention_dp():
     replay_main = _load_replay_main()
 
     with pytest.raises(ValueError, match="dp_size must match"):
-        replay_main._load_engine_args(
+        replay_main.load_engine_args(
             json.dumps(
                 {
                     "num_gpu_blocks": 4096,
@@ -496,10 +498,47 @@ def test_get_kv_cache_dtype_bytes_supports_int8():
     assert get_kv_cache_dtype_bytes(cfg, "auto") == 2  # model default dtype
 
 
-def test_compute_kv_bytes_uses_transformers_text_config(monkeypatch):
-    """Use the language-model config when Transformers exposes a multimodal wrapper."""
-    from dynamo.mocker.utils import kv_cache
+def test_compute_kv_bytes_reads_local_config_json_without_transformers(
+    monkeypatch, tmp_path
+):
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "num_hidden_layers": 2,
+                "num_key_value_heads": 4,
+                "num_attention_heads": 8,
+                "hidden_size": 64,
+                "torch_dtype": "bfloat16",
+            }
+        )
+    )
+    monkeypatch.setitem(sys.modules, "transformers", None)
 
+    assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) == 256
+
+
+def test_compute_kv_bytes_unwraps_multimodal_text_config_json(tmp_path):
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "some_vlm",
+                "vision_config": {"hidden_size": 1},
+                "text_config": {
+                    "num_hidden_layers": 2,
+                    "num_key_value_heads": 4,
+                    "num_attention_heads": 8,
+                    "hidden_size": 64,
+                    "dtype": "bfloat16",
+                },
+            }
+        )
+    )
+
+    assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) == 256
+
+
+def test_compute_kv_bytes_uses_transformers_text_config_for_hub_ids(monkeypatch):
+    """A bare hub ID still resolves through transformers, unwrapping wrappers."""
     text_config = SimpleNamespace(
         num_hidden_layers=2,
         num_key_value_heads=4,
@@ -508,13 +547,108 @@ def test_compute_kv_bytes_uses_transformers_text_config(monkeypatch):
         dtype="bfloat16",
     )
     config = SimpleNamespace(get_text_config=lambda: text_config)
-    monkeypatch.setattr(
-        kv_cache.AutoConfig,
-        "from_pretrained",
-        lambda *args, **kwargs: config,
+
+    class FakeAutoConfig:
+        @staticmethod
+        def from_pretrained(model_path, **kwargs):
+            assert model_path == "org/model"
+            return config
+
+    monkeypatch.setitem(
+        sys.modules, "transformers", SimpleNamespace(AutoConfig=FakeAutoConfig)
     )
 
-    assert kv_cache.compute_kv_bytes_per_token("model") == 256
+    assert kv_cache.compute_kv_bytes_per_token("org/model") == 256
+
+
+_KV_TEXT_CONFIG = {
+    "num_hidden_layers": 2,
+    "num_key_value_heads": 4,
+    "num_attention_heads": 8,
+    "hidden_size": 64,
+    "torch_dtype": "bfloat16",
+}
+
+
+def _fake_transformers(from_pretrained):
+    return SimpleNamespace(AutoConfig=SimpleNamespace(from_pretrained=from_pretrained))
+
+
+def test_compute_kv_bytes_unwraps_nested_thinker_text_config(monkeypatch, tmp_path):
+    # Qwen2.5-Omni keeps the serving LLM under thinker_config.text_config.
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "qwen2_5_omni",
+                "thinker_config": {
+                    "model_type": "qwen2_5_omni_thinker",
+                    "audio_config": {"d_model": 1},
+                    "vision_config": {"hidden_size": 1},
+                    "text_config": _KV_TEXT_CONFIG,
+                },
+                "talker_config": {"hidden_size": 1, "num_hidden_layers": 1},
+            }
+        )
+    )
+    monkeypatch.setitem(sys.modules, "transformers", None)
+
+    assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) == 256
+
+
+def test_compute_kv_bytes_falls_back_to_transformers_for_gpt2_style_config(
+    monkeypatch, tmp_path
+):
+    # GPT-2 stores n_layer/n_head/n_embd; only transformers' attribute_map maps
+    # them, so the raw config.json must not be trusted for this layout.
+    (tmp_path / "config.json").write_text(
+        json.dumps({"model_type": "gpt2", "n_layer": 2, "n_head": 8, "n_embd": 64})
+    )
+    seen = []
+
+    def from_pretrained(model_path, **kwargs):
+        seen.append(model_path)
+        return SimpleNamespace(
+            num_hidden_layers=2, num_attention_heads=8, hidden_size=64
+        )
+
+    monkeypatch.setitem(
+        sys.modules, "transformers", _fake_transformers(from_pretrained)
+    )
+
+    # No num_key_value_heads: defaults to num_attention_heads; no dtype: float16.
+    assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) == 2 * 2 * 8 * 8 * 2
+    assert seen == [str(tmp_path)]
+
+
+def test_compute_kv_bytes_returns_none_for_unreadable_or_incomplete_config(
+    monkeypatch, tmp_path
+):
+    def from_pretrained(model_path, **kwargs):
+        return SimpleNamespace(model_type="unknown")  # no size fields
+
+    monkeypatch.setitem(
+        sys.modules, "transformers", _fake_transformers(from_pretrained)
+    )
+
+    assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) is None  # no config
+
+    (tmp_path / "config.json").write_text("{not json")
+    assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) is None
+
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "unknown"}))
+    assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) is None
+
+
+def test_compute_kv_bytes_propagates_unexpected_errors(monkeypatch):
+    def from_pretrained(model_path, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setitem(
+        sys.modules, "transformers", _fake_transformers(from_pretrained)
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        kv_cache.compute_kv_bytes_per_token("org/model")
 
 
 def test_build_mocker_engine_args_estimates_aic_blocks(monkeypatch):

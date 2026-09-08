@@ -9,7 +9,9 @@ use super::{
     DefaultWorkerPicker, LogitWeights, MaterializedSelectionInput, WorkerSelectionInput,
     WorkerSelector, select_worker_with_policy,
 };
-use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
+use crate::protocols::{
+    WorkerAffinityTarget, WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank,
+};
 use crate::scheduling::config::KvRouterConfig;
 use crate::scheduling::filter::RoutingEligibility;
 use crate::scheduling::types::{
@@ -172,6 +174,14 @@ impl WorkerSelectionContext<'_> {
     /// Return the session metadata available to worker selection.
     pub fn session_context(&self) -> Option<&SessionContext> {
         self.request.session_context.as_ref()
+    }
+
+    /// Return the session-affinity target resolved by the request host.
+    ///
+    /// The default selector treats an eligible target as exclusive. Custom policies receive it as
+    /// advisory context; it may be absent from their candidate set when unavailable or filtered.
+    pub fn affinity_target(&self) -> Option<WorkerAffinityTarget> {
+        self.request.affinity_target
     }
 
     /// Return the expected output length, if the request supplies one.
@@ -417,7 +427,7 @@ impl WorkerSelectionPolicy {
     /// `worker_label` selects the built-in scoring and logging contract. Typed hosts use
     /// [`crate::WorkerType::default_selector_label`] to preserve Dynamo's historical behavior.
     pub fn default(kv_router_config: KvRouterConfig, worker_label: &'static str) -> Self {
-        let picker = DefaultWorkerPicker::new(kv_router_config.router_temperature);
+        let picker = DefaultWorkerPicker::new();
         Self {
             kv_router_config,
             worker_label,
@@ -579,6 +589,10 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
 }
 
 impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
+    fn uses_exclusive_affinity_target(&self) -> bool {
+        matches!(&self.state, WorkerSelectionPolicyState::Default(_))
+    }
+
     fn required_worker_inputs(&self) -> WorkerInputs {
         match &self.state {
             WorkerSelectionPolicyState::Default(_) => WorkerInputs::CACHE | WorkerInputs::LOAD,
@@ -624,10 +638,26 @@ mod tests {
 
     use rustc_hash::FxHashMap;
 
+    use super::super::DefaultWorkerSelector;
     use super::super::test_support::*;
-    use super::super::{DefaultWorkerPicker, DefaultWorkerSelector};
     use super::*;
     use crate::scheduling::{WorkerSelectionInputTrigger, WorkerSelectionKvHints};
+
+    fn uses_exclusive_affinity(selector: &impl WorkerSelector<TaintedWorkerConfig>) -> bool {
+        selector.uses_exclusive_affinity_target()
+    }
+
+    struct FirstPicker;
+
+    impl WorkerPicker for FirstPicker {
+        fn pick(
+            &mut self,
+            _context: &WorkerSelectionContext<'_>,
+            _input: WorkerInputView<'_>,
+        ) -> Result<usize, WorkerSelectionPolicyError> {
+            Ok(0)
+        }
+    }
 
     #[test]
     fn default_policy_matches_default_selector() {
@@ -654,6 +684,7 @@ mod tests {
             ))
             .unwrap();
         let policy = WorkerSelectionPolicy::default(config, "test");
+        assert!(uses_exclusive_affinity(&policy));
         let actual = policy
             .select_worker(WorkerSelectionInput::configured(
                 &workers,
@@ -971,6 +1002,59 @@ mod tests {
     }
 
     #[test]
+    fn custom_picker_receives_affinity_target_without_narrowing_candidates() {
+        struct AffinityPicker;
+
+        impl WorkerPicker for AffinityPicker {
+            fn pick(
+                &mut self,
+                context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                let target = context.affinity_target().expect("affinity target");
+                assert_eq!(input.candidates().len(), 2);
+                input
+                    .candidates()
+                    .iter()
+                    .position(|candidate| {
+                        candidate.worker().worker_id == target.worker_id
+                            && target
+                                .dp_rank
+                                .is_none_or(|rank| candidate.worker().dp_rank == rank)
+                    })
+                    .ok_or_else(|| {
+                        WorkerSelectionPolicyError::failed("affinity target unavailable")
+                    })
+            }
+        }
+
+        let worker1 = WorkerWithDpRank::from_worker_id(1);
+        let workers = HashMap::from([
+            (0, TaintedWorkerConfig::default()),
+            (1, TaintedWorkerConfig::default()),
+        ]);
+        let mut request = base_request(16);
+        request.affinity_target = Some(worker1.into());
+        let policy = WorkerSelectionPolicy::new(
+            KvRouterConfig::default(),
+            "test",
+            Vec::new(),
+            Box::new(AffinityPicker),
+        );
+        assert!(!uses_exclusive_affinity(&policy));
+
+        let selected = policy
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
+            .unwrap();
+        assert_eq!(selected.worker, worker1);
+    }
+
+    #[test]
     fn rejected_filters_do_not_materialize_scorer_inputs() {
         struct RejectWithoutSignals;
 
@@ -1010,7 +1094,7 @@ mod tests {
             "test",
             vec![Box::new(RejectWithoutSignals)],
             vec![Box::new(CacheScorer)],
-            Box::new(DefaultWorkerPicker::new(0.0)),
+            Box::new(FirstPicker),
         );
 
         assert!(matches!(
@@ -1053,17 +1137,6 @@ mod tests {
                 _candidate: &WorkerCandidate,
             ) -> Result<f64, WorkerSelectionPolicyError> {
                 Ok(0.0)
-            }
-        }
-
-        struct FirstPicker;
-        impl WorkerPicker for FirstPicker {
-            fn pick(
-                &mut self,
-                _context: &WorkerSelectionContext<'_>,
-                _input: WorkerInputView<'_>,
-            ) -> Result<usize, WorkerSelectionPolicyError> {
-                Ok(0)
             }
         }
 

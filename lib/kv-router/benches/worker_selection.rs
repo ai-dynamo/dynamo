@@ -181,6 +181,7 @@ fn fixture_with_preferred_taints(
         isl_tokens: 2_048,
         lora_name: None,
         expected_output_tokens: Some(256),
+        affinity_target: None,
         pinned_worker: None,
         allowed_worker_ids: None,
         routing_constraints: RoutingConstraints {

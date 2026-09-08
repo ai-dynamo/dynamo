@@ -106,6 +106,7 @@ pub struct KvStateAgentVllmSource {
     pub endpoint: String,
     pub topic: String,
     pub image_token_id: Option<u32>,
+    pub video_token_id: Option<u32>,
     pub ingress_protocol: KvStateIngressProtocol,
 }
 
@@ -1576,10 +1577,12 @@ async fn run_vllm_listener(task: VllmListenerTask<'_>) -> Result<()> {
         status,
         cancel,
     } = task;
-    let mut framework_normalizer =
-        ZmqEventNormalizer::new(kv_block_size).with_image_token_id(source.image_token_id);
-    let mut cache_owner_normalizer =
-        ZmqEventNormalizer::new(kv_block_size).with_image_token_id(source.image_token_id);
+    let mut framework_normalizer = ZmqEventNormalizer::new(kv_block_size)
+        .with_image_token_id(source.image_token_id)
+        .with_video_token_id(source.video_token_id);
+    let mut cache_owner_normalizer = ZmqEventNormalizer::new(kv_block_size)
+        .with_image_token_id(source.image_token_id)
+        .with_video_token_id(source.video_token_id);
     loop {
         if !status
             .load()

@@ -66,6 +66,7 @@ async def init_multimodal_encode_worker(
         cache_publisher,
         shutdown_event,
     )
+    server_args = config.use_resolved_server_args(handler.encoder.server_args)
 
     if handler._embedding_cache is not None:
         register_embedding_cache_metrics(
@@ -145,6 +146,7 @@ async def init_multimodal_worker(
     shutdown_endpoints[:] = [generate_endpoint]
 
     engine = sgl.Engine(server_args=server_args)
+    server_args = config.use_resolved_server_args(engine.server_args)
 
     if config.serving_mode == DisaggregationMode.DECODE:
         logging.info("Initializing prefill client for multimodal decode worker")
@@ -215,6 +217,7 @@ async def init_multimodal_prefill_worker(
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     engine = sgl.Engine(server_args=server_args)
+    server_args = config.use_resolved_server_args(engine.server_args)
 
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"

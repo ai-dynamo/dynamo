@@ -17,6 +17,7 @@ use crate::protocols::{
     ActiveSequenceEvent, ActiveSequenceEventData, MAX_REPLICA_BATCH_DURATION,
     MAX_REPLICA_BATCH_EVENTS, WorkerWithDpRank,
 };
+use crate::scheduling::queue::SchedulerBookingDescriptor;
 
 #[derive(Default)]
 struct ReplicaBatchEffects {
@@ -181,20 +182,28 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 expected_output_tokens,
                 prefill_load_hint,
             } => {
-                if self
-                    .request_index
-                    .try_insert_request(request_id.clone(), event_worker, lora_name)
-                    .is_err()
-                {
+                let Ok(attempt_id) = self.request_index.try_insert_request(
+                    request_id.clone(),
+                    event_worker,
+                    lora_name,
+                ) else {
                     return;
-                }
+                };
+                let booking = SchedulerBookingDescriptor {
+                    request_id: request_id.clone(),
+                    worker: event_worker,
+                    attempt_id,
+                };
                 if self.replica_worker_policy == ReplicaWorkerPolicy::LazyRegister {
                     self.ensure_worker_registered(event_worker);
                 }
                 let table = self.workers.read();
                 let Some(&idx) = table.index.get(&event_worker) else {
-                    self.request_index
-                        .remove_request_if_worker(&request_id, event_worker);
+                    self.request_index.remove_request_if_booking(
+                        &request_id,
+                        event_worker,
+                        attempt_id,
+                    );
                     tracing::debug!(
                         worker = ?event_worker,
                         "Dropping replica AddRequest for unregistered worker"
@@ -224,18 +233,26 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 drop(table);
                 self.request_index
                     .remove_requests(expired_request_ids.iter());
+                if let Some(observer) = self.replica_request_lease_observer() {
+                    observer.admitted(booking);
+                }
                 effects.record_worker_load(event_worker, load, true);
                 effects.cleanup_prompt_trie = true;
             }
             ActiveSequenceEventData::Free => {
-                let Some(worker) = self.request_index.worker_for(&request_id) else {
+                let Some(current) = self.request_index.booking_for(&request_id) else {
                     return;
                 };
-                if worker != event_worker {
+                if current.worker != event_worker {
                     return;
                 }
+                let booking = SchedulerBookingDescriptor {
+                    request_id: request_id.clone(),
+                    worker: current.worker,
+                    attempt_id: current.attempt_id,
+                };
                 let table = self.workers.read();
-                let Some(&idx) = table.index.get(&worker) else {
+                let Some(&idx) = table.index.get(&current.worker) else {
                     return;
                 };
                 let load = {
@@ -246,25 +263,40 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                     };
                     let load = seq.worker_load_snapshot();
                     self.prompt_registry
-                        .apply_membership_delta_and_load_without_cleanup(worker, delta, load);
+                        .apply_membership_delta_and_load_without_cleanup(
+                            current.worker,
+                            delta,
+                            load,
+                        );
                     load
                 };
                 drop(table);
-                self.request_index
-                    .remove_request_if_worker(&request_id, worker);
-                effects.record_worker_load(worker, load, true);
+                self.request_index.remove_request_if_booking(
+                    &request_id,
+                    current.worker,
+                    current.attempt_id,
+                );
+                if let Some(observer) = self.replica_request_lease_observer() {
+                    observer.completed(&booking);
+                }
+                effects.record_worker_load(current.worker, load, true);
                 effects.wake_scheduler = true;
                 effects.cleanup_prompt_trie = true;
             }
             ActiveSequenceEventData::MarkPrefillCompleted => {
-                let Some(worker) = self.request_index.worker_for(&request_id) else {
+                let Some(current) = self.request_index.booking_for(&request_id) else {
                     return;
                 };
-                if worker != event_worker {
+                if current.worker != event_worker {
                     return;
                 }
+                let booking = SchedulerBookingDescriptor {
+                    request_id: request_id.clone(),
+                    worker: current.worker,
+                    attempt_id: current.attempt_id,
+                };
                 let table = self.workers.read();
-                let Some(&idx) = table.index.get(&worker) else {
+                let Some(&idx) = table.index.get(&current.worker) else {
                     return;
                 };
                 let load = {
@@ -273,11 +305,15 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                         return;
                     }
                     let load = seq.worker_load_snapshot();
-                    self.prompt_registry.replace_worker_load_state(worker, load);
+                    self.prompt_registry
+                        .replace_worker_load_state(current.worker, load);
                     load
                 };
                 drop(table);
-                effects.record_worker_load(worker, load, false);
+                if let Some(observer) = self.replica_request_lease_observer() {
+                    observer.progressed(&booking);
+                }
+                effects.record_worker_load(current.worker, load, false);
                 effects.wake_scheduler = true;
             }
         }

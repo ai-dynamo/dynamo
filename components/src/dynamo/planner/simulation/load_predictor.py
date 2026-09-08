@@ -8,9 +8,14 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from statistics import mean
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from tqdm import tqdm  # type: ignore[import-untyped]
+
+from dynamo.planner.offline.trace_data import (
+    extract_metrics_from_mooncake,
+    extract_metrics_from_trace_paths,
+)
 
 from .presets import throughput_intervals
 
@@ -212,8 +217,6 @@ def predictor_fields(entry: str | dict[str, Any]) -> dict[str, Any]:
 def build_windows(trace_path: str, interval_s: int) -> list[Window]:
     """Aggregate a Mooncake trace using the Planner's production trace utility."""
 
-    from dynamo.planner.offline.trace_data import extract_metrics_from_mooncake
-
     return [
         Window(
             float(metrics["request_count"]),
@@ -221,6 +224,27 @@ def build_windows(trace_path: str, interval_s: int) -> list[Window]:
             float(metrics["avg_osl"]),
         )
         for metrics in extract_metrics_from_mooncake(trace_path, interval_s)
+    ]
+
+
+def build_windows_from_trace_paths(
+    trace_paths: list[str],
+    trace_format: Literal["mooncake", "dynamo"],
+    interval_s: int,
+) -> list[Window]:
+    """Aggregate one resolved public traffic source into predictor windows."""
+
+    return [
+        Window(
+            float(metrics["request_count"]),
+            float(metrics["avg_isl"]),
+            float(metrics["avg_osl"]),
+        )
+        for metrics in extract_metrics_from_trace_paths(
+            trace_paths,
+            trace_format,
+            interval_s,
+        )
     ]
 
 
@@ -330,23 +354,40 @@ def sweep_load_predictor(
     candidates: list[str | dict[str, Any]],
     trace_path: str | None,
     show_progress: bool,
+    trace_paths: list[str] | None = None,
+    trace_format: str | None = None,
 ) -> LoadPredictorResult:
     """Choose the best candidate independently for each scaling interval."""
 
     intervals = throughput_intervals(policies)
     if not intervals:
         return LoadPredictorResult(reason="no_throughput_scaling_candidate")
-    if trace_path is None:
+    if not candidates:
+        raise ValueError("load-predictor candidates must be nonempty")
+    fallback = candidates[0]
+    resolved_paths = list(
+        trace_paths or ([trace_path] if trace_path is not None else [])
+    )
+    temporal_format = trace_format or "mooncake"
+    if not resolved_paths or temporal_format not in {"mooncake", "dynamo"}:
         return LoadPredictorResult(
-            best_by_interval=dict.fromkeys(intervals, _DEFAULT_PRESET),
-            reason="static_workload_constant",
+            best_by_interval=dict.fromkeys(intervals, fallback),
+            reason="static_workload_configured_fallback",
         )
 
     result = LoadPredictorResult(reason="swept")
     labels = [_entry_label(entry, index) for index, entry in enumerate(candidates)]
     fallback_intervals: list[int] = []
     for interval_s in intervals:
-        windows = build_windows(trace_path, interval_s)
+        windows = (
+            build_windows(resolved_paths[0], interval_s)
+            if temporal_format == "mooncake" and len(resolved_paths) == 1
+            else build_windows_from_trace_paths(
+                resolved_paths,
+                cast(Literal["mooncake", "dynamo"], temporal_format),
+                interval_s,
+            )
+        )
         warmup = _common_warmup(candidates, interval_s)
         losses: dict[str, float] = {}
         best_entry: str | dict[str, Any] | None = None
@@ -370,11 +411,9 @@ def sweep_load_predictor(
                 best_entry = entry
         result.losses[interval_s] = losses
         if best_entry is None:
-            best_entry = _DEFAULT_PRESET
+            best_entry = fallback
             fallback_intervals.append(interval_s)
         result.best_by_interval[interval_s] = best_entry
     if fallback_intervals:
-        result.reason = (
-            f"swept; no_winner_fallback_{_DEFAULT_PRESET}@{fallback_intervals}"
-        )
+        result.reason = f"swept; no_winner_configured_fallback@{fallback_intervals}"
     return result
