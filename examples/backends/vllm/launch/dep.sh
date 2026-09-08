@@ -22,6 +22,8 @@ python -m dynamo.frontend --router-mode kv &
 # Routing to DP workers managed by Dynamo
 # Chose Qwen3-30B because its a small MOE that can fit on smaller GPUs (L40S for example)
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
+# --no-enable-flashinfer-autotune: the FlashInfer MoE autotune warmup hits a CUDA illegal
+# memory access on Blackwell (sm100). for non-sm100 production use, can remove this flag.
 VLLM_NIXL_SIDE_CHANNEL_PORT=20096 \
 python3 -m dynamo.vllm \
 --model Qwen/Qwen3-30B-A3B \
@@ -31,6 +33,7 @@ python3 -m dynamo.vllm \
 --data-parallel-start-rank 0 \
 --enable-expert-parallel \
 --enforce-eager \
+--no-enable-flashinfer-autotune \
 --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:20080\",\"enable_kv_cache_events\":true}" &
 
 echo "All workers starting. (press Ctrl+C to stop)..."
