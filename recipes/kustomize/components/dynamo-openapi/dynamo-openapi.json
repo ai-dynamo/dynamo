@@ -393,6 +393,19 @@
                 }
               },
               "type": "object"
+            },
+            "roles": {
+              "items": {
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "type": "array",
+              "x-kubernetes-patch-merge-key": "name",
+              "x-kubernetes-patch-strategy": "merge"
             }
           },
           "type": "object"
@@ -800,6 +813,19 @@
                       }
                     },
                     "type": "object"
+                  },
+                  "roles": {
+                    "items": {
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "type": "array",
+                    "x-kubernetes-patch-merge-key": "name",
+                    "x-kubernetes-patch-strategy": "merge"
                   }
                 },
                 "type": "object"
@@ -1269,6 +1295,19 @@
                 }
               },
               "type": "object"
+            },
+            "roles": {
+              "items": {
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "type": "array",
+              "x-kubernetes-patch-merge-key": "name",
+              "x-kubernetes-patch-strategy": "merge"
             }
           },
           "type": "object"
@@ -1627,6 +1666,19 @@
                       }
                     },
                     "type": "object"
+                  },
+                  "roles": {
+                    "items": {
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "type": "array",
+                    "x-kubernetes-patch-merge-key": "name",
+                    "x-kubernetes-patch-strategy": "merge"
                   }
                 },
                 "type": "object"
