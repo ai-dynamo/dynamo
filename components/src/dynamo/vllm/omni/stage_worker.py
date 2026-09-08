@@ -91,9 +91,6 @@ class OmniStageWorker:
         self._output_modalities = output_modalities or []
         self._default_video_fps = default_video_fps
         self.stage_config = stage_config
-        # When set (final media stage with --media-output-fs-url), the worker
-        # encodes + uploads media itself and yields a small formatted
-        # response instead of shipping raw frames to the router.
         self._media_formatter = media_formatter
 
         func_path = getattr(stage_config, "custom_process_input_func", None)
@@ -268,7 +265,7 @@ class OmniStageWorker:
                 formatted = await self._persist_final_output(
                     last_result, request_id, req, request
                 )
-            except Exception as e:
+            except (OSError, ValueError) as e:
                 logger.error(
                     "Stage %d: media persist failed for %s: %s",
                     self.stage_id,
@@ -278,6 +275,13 @@ class OmniStageWorker:
                 )
                 yield {"error": f"media persist failed: {e}", "finished": True}
                 return
+            except Exception:
+                logger.exception(
+                    "Stage %d: unexpected media formatter error for %s",
+                    self.stage_id,
+                    request_id,
+                )
+                raise
             if formatted is not None:
                 logger.info(
                     "Stage %d: persisted final media output for %s",
@@ -621,11 +625,8 @@ async def init_omni_stage(
     # (SharedMemoryConnector, MooncakeConnector, etc.)
     _, connectors = initialize_orchestrator_connectors(connector_configs_path)  # type: ignore[arg-type]
 
-    # Final-stage media persist: the worker encodes + uploads media itself
-    # (like the aggregated OmniHandler) so raw frames never cross the
-    # stage→router SHM/NIXL edge.  Do not initialize the media filesystem on
-    # intermediate stages: apart from being unused there, remote filesystem
-    # setup can fail before those stages ever serve a request.
+    # Skip unused filesystem setup on intermediate stages: remote storage
+    # initialization can fail before they ever serve a request.
     media_formatter = _build_media_formatter(config, stage_id, len(stage_configs))
 
     worker = OmniStageWorker(
@@ -962,7 +963,7 @@ def _build_media_formatter(
     if stage_id != stage_count - 1:
         return None
 
-    media_fs_url = getattr(config, "media_output_fs_url", None)
+    media_fs_url = config.media_output_fs_url
     if not media_fs_url:
         return None
 
@@ -970,8 +971,8 @@ def _build_media_formatter(
     return OutputFormatter(
         model_name=config.served_model_name or config.model,
         media_fs=media_fs,
-        media_http_url=getattr(config, "media_output_http_url", None),
-        default_fps=getattr(config, "default_video_fps", 16),
+        media_http_url=config.media_output_http_url,
+        default_fps=config.default_video_fps,
     )
 
 

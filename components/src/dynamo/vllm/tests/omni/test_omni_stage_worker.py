@@ -13,6 +13,11 @@ import pytest
 import yaml
 
 try:
+    import numpy as np
+    import PIL.Image
+
+    from dynamo.common.storage import get_fs
+    from dynamo.vllm.omni.output_formatter import OutputFormatter
     from dynamo.vllm.omni.stage_worker import (
         OmniStageWorker,
         _build_media_formatter,
@@ -901,13 +906,10 @@ def test_create_engine_resolves_pipeline_with_the_configured_deploy_config():
     )
 
 
-# ── issue-13805: final-stage worker persists media itself ─────────────────
+# ── #13805: final-stage worker persists media itself ─────────────────
 
 
 def _make_media_formatter(tmp_path):
-    from dynamo.common.storage import get_fs
-    from dynamo.vllm.omni.output_formatter import OutputFormatter
-
     return OutputFormatter(
         model_name="test-model",
         media_fs=get_fs(f"file://{tmp_path}"),
@@ -916,8 +918,6 @@ def _make_media_formatter(tmp_path):
 
 
 def _video_frames(n=4, size=8):
-    import numpy as np
-
     return [np.full((size, size, 3), (i * 40) % 256, dtype=np.uint8) for i in range(n)]
 
 
@@ -960,7 +960,6 @@ async def test_final_video_stage_persists_on_worker(tmp_path):
     assert formatted["status"] == "completed"
     url = formatted["data"][0]["url"]
     assert url.endswith("videos/req-video.mp4")
-    # Bytes were persisted to the media fs, not shipped to the router.
     stored = tmp_path / "videos" / "req-video.mp4"
     assert stored.read_bytes() == b"fake-mp4"
 
@@ -1037,12 +1036,13 @@ async def test_routed_media_stage_without_format_context_falls_back_to_shm():
 
 
 @pytest.mark.asyncio
-async def test_media_persist_error_yields_error_chunk():
+@pytest.mark.parametrize("error_type", [OSError, ValueError, RuntimeError])
+async def test_media_persist_error_yields_error_chunk(error_type):
     """Formatter failures remain visible instead of sending raw media onward."""
     in_connector = MagicMock()
     in_connector.get.return_value = {"engine_inputs": {"latents": [0.1]}}
     media_formatter = MagicMock()
-    media_formatter.format.side_effect = RuntimeError("formatter exploded")
+    media_formatter.format.side_effect = error_type("formatter exploded")
     worker = OmniStageWorker(
         engine=_MockEngine(
             output=SimpleNamespace(final_output_type="image", images=_video_frames())
@@ -1059,6 +1059,11 @@ async def test_media_persist_error_yields_error_chunk():
         "stage_connector_refs": {"0": {"name": "ref0"}},
         "format_context": {"request_type": "video_generation"},
     }
+    if error_type is RuntimeError:
+        with pytest.raises(RuntimeError, match="formatter exploded"):
+            _ = [chunk async for chunk in worker.generate(request, _MockContext())]
+        return
+
     chunks = [chunk async for chunk in worker.generate(request, _MockContext())]
 
     assert chunks == [
@@ -1110,8 +1115,6 @@ async def test_media_persist_none_yields_error_without_raw_transfer():
 @pytest.mark.asyncio
 async def test_final_image_stage_persists_on_worker_direct_request(tmp_path):
     """Direct frontend→stage image request: context resolved from the raw request; PNG uploaded."""
-    import PIL.Image
-
     last_result = SimpleNamespace(
         final_output_type="image",
         images=[PIL.Image.new("RGB", (4, 4), color=(255, 0, 0))],
@@ -1137,7 +1140,7 @@ async def test_final_image_stage_persists_on_worker_direct_request(tmp_path):
     assert url.endswith(".png")
     stored_dir = tmp_path / "images" / "test-req-id"
     stored = next(stored_dir.iterdir())
-    assert stored.read_bytes().startswith(b"\x89PNG")  # real PNG, no encode mocks
+    assert stored.read_bytes().startswith(b"\x89PNG")
 
 
 @pytest.mark.asyncio

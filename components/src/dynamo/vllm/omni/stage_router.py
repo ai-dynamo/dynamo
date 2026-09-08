@@ -137,9 +137,7 @@ class OmniStageRouter:
             else:
                 stage_request = stage_outputs[-1].to_next_stage_request(request_id)
             if stage_idx == final_stage_idx:
-                # The final stage may persist media itself (worker-side
-                # encode + upload): forward the formatting context it needs
-                # so raw frames never cross the stage→router edge.
+                # Formatting context enables persistence on the final worker.
                 stage_request["format_context"] = {
                     **fmt_ctx,
                     "request_type": (
@@ -209,10 +207,7 @@ class OmniStageRouter:
         final_stage_id: int = 0,
     ) -> AsyncGenerator[dict, None]:
         """Read OmniRequestOutput from connector (multi-node) or SHM (single-node) and format."""
-        # Worker-side persist path: the final stage already encoded and
-        # uploaded the media; forward the small formatted response verbatim
-        # without touching connectors or SHM.
-        formatted = getattr(stage_output, "formatted_response", None)
+        formatted = stage_output.formatted_response
         if formatted is not None:
             yield formatted
             return

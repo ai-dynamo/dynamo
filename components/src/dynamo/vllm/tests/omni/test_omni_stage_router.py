@@ -13,6 +13,7 @@ from dynamo.common.utils.output_modalities import RequestType
 
 try:
     from dynamo.vllm.omni import stage_router
+    from dynamo.vllm.omni.types import StageOutput
 except ImportError:
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
@@ -506,7 +507,7 @@ async def test_format_output_uses_connector_deserialized_object_directly():
     connector.get.return_value = (final_obj, 10)
     router.connectors = {stage_router._connector_key(0, "router"): connector}
 
-    stage_output = SimpleNamespace(
+    stage_output = StageOutput(
         stage_connector_refs={"0": {"rdma": "meta"}},
         shm_meta=None,
     )
@@ -560,7 +561,7 @@ async def test_format_output_restores_completion_attrs_from_engine_inputs_wrappe
     connector.get.return_value = (wrapped, 32)
     router.connectors = {stage_router._connector_key(0, "router"): connector}
 
-    stage_output = SimpleNamespace(
+    stage_output = StageOutput(
         stage_connector_refs={"0": {"rdma": "meta"}},
         shm_meta=None,
     )
@@ -580,7 +581,7 @@ async def test_format_output_restores_completion_attrs_from_engine_inputs_wrappe
     assert restored.multimodal_output == {"hidden": True}
 
 
-# ── issue-13805: worker-persisted media passes through the router ─────────
+# ── #13805: worker-persisted media passes through the router ─────────
 
 
 @pytest.mark.asyncio
@@ -674,7 +675,7 @@ async def test_format_output_passthrough_formatted_response():
     connector = MagicMock()
     router.connectors = {stage_router._connector_key(0, "router"): connector}
 
-    stage_output = SimpleNamespace(
+    stage_output = StageOutput(
         stage_connector_refs=None,
         shm_meta=None,
         formatted_response=formatted,
