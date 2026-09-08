@@ -574,6 +574,8 @@ impl ErrorMessage {
     /// Unsupported multimodal content is a client error: no retry can make the
     /// request succeed, and infrastructure above the frontend counts 5xx as a
     /// server-side fault. Answered 400 where `not_implemented_error` answers 501.
+    /// The legacy request metric remains `NotImplemented` to distinguish an
+    /// unsupported feature from malformed input.
     pub fn unsupported_content_error<T: Display>(msg: T) -> ErrorResponse {
         tracing::debug!("Unsupported Content error: {msg}");
         let code = StatusCode::BAD_REQUEST;
@@ -586,7 +588,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
-                metric_error_type: Some(ErrorType::Validation),
+                metric_error_type: Some(ErrorType::NotImplemented),
             }),
         )
     }
@@ -8285,7 +8287,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_content_responses_conversion_errors_are_validation_errors() {
+    fn unsupported_content_responses_conversion_errors_keep_legacy_metric() {
         let response = responses_conversion_error_response(
             ResponsesConversionError::UnsupportedContent("feature not available".to_string())
                 .into(),
@@ -8295,7 +8297,7 @@ mod tests {
         assert_eq!(response.1.error_type, "Bad Request");
         assert_eq!(
             extract_error_type_from_response(&response),
-            ErrorType::Validation
+            ErrorType::NotImplemented
         );
     }
 
