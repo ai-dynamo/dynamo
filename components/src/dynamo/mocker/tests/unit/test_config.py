@@ -519,17 +519,15 @@ def test_compute_kv_bytes_reads_local_config_json_without_transformers(
 
 
 @pytest.mark.parametrize(
-    "dtype", ["fp8", "fp8_ds_mla", "fp8_e4m3", "fp8_e5m2", "fp8_inc"]
+    "dtype", [d for d in mocker_args.KV_CACHE_DTYPE_CHOICES if d.startswith("fp8")]
 )
 def test_fp8_kv_cache_dtypes_are_one_byte_end_to_end(dtype):
-    """Every fp8 choice the CLI accepts must have a byte size.
+    """Every fp8 choice the CLI accepts must map to one byte.
 
     A choice the table does not know falls through to the 2-byte default, so
-    the mocker sizes its cache for the wrong dtype and says nothing.
-    ``fp8_e5m2`` was advertised by ``--kv-cache-dtype`` and absent from the
-    table, while every other fp8 variant, and its own torch spelling
-    ``float8_e5m2``, mapped to 1. The list mirrors the choices in
-    ``dynamo.mocker.args``.
+    the mocker sizes its cache for the wrong dtype and says nothing. The cases
+    are read off the CLI choices, so a new fp8 spelling cannot be advertised
+    without a mapping.
     """
     args = mocker_args.parse_args(["--model-path", "model", "--kv-cache-dtype", dtype])
 
