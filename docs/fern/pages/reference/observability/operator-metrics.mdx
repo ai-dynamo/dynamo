@@ -5,6 +5,10 @@ title: Operator Metrics
 subtitle: Kubernetes-only dynamo_operator_* metrics and the annotations and Helm values that enable metrics collection.
 ---
 
+import { EnumStyles } from "@/components/EnumStyles";
+
+<EnumStyles />
+
 The Dynamo Operator exposes its own Prometheus metrics for controller reconciliation, webhook validation, and resource inventory. These are **Kubernetes-scoped** — they exist only where the operator runs, and are separate from the application metrics emitted by frontends and workers (see [Metrics Catalog](metrics-catalog.mdx)). For enablement and dashboards (including the operator dashboard), see the [Kubernetes observability guide](../../kubernetes/operations/observability.mdx).
 
 All operator metrics use the `dynamo_operator` prefix. Unlike application metrics (which use a PodMonitor), the operator is scraped via a ServiceMonitor created by the Helm chart.

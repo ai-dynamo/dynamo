@@ -5,6 +5,10 @@ title: Profiler Configuration Reference
 subtitle: Field reference for the Dynamo profiler CLI arguments — the SLA profiler entry point and the low-level per-endpoint profiler.
 ---
 
+import { EnumStyles } from "@/components/EnumStyles";
+
+<EnumStyles />
+
 The Dynamo profiler has two entry points, each with its own arguments:
 
 - **`python -m dynamo.profiler`** — the SLA profiler. Sweeps a model across tensor-parallel sizes and interpolates prefill/decode performance to recommend a deployment that meets your SLA. Takes a DynamoGraphDeploymentRequest (DGDR) spec plus a handful of operational flags.
