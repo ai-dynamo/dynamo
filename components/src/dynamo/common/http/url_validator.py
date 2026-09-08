@@ -31,7 +31,13 @@ class UrlValidationError(ValueError):
 # an arbitrarily large payload in a single request and force the worker to hold
 # it (and its base64-decoded form) in memory. Default 16 MiB, overridable via
 # ``DYN_MM_MAX_DATA_URL_MB``.
-_MAX_DATA_URL_BYTES = int(os.getenv("DYN_MM_MAX_DATA_URL_MB", "16")) * 1024 * 1024
+try:
+    _MAX_DATA_URL_MB = int(os.getenv("DYN_MM_MAX_DATA_URL_MB", "16"))
+except ValueError:
+    _MAX_DATA_URL_MB = 16
+if _MAX_DATA_URL_MB <= 0:  # a non-positive cap would reject every data: URL
+    _MAX_DATA_URL_MB = 16
+_MAX_DATA_URL_BYTES = _MAX_DATA_URL_MB * 1024 * 1024
 
 
 # IP ranges that must never be reachable from a user-controlled URL.
