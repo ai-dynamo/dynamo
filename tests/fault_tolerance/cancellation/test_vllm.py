@@ -33,7 +33,7 @@ from tests.utils.device import (
     get_default_vllm_block_size,
 )
 from tests.utils.gpu_args import build_gpu_mem_args
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.payloads import check_health_generate, check_models_api
 from tests.utils.port_utils import allocate_port, deallocate_port
 
@@ -125,7 +125,7 @@ class DynamoWorkerProcess(ManagedProcess):
                 ]
             )
             health_check_urls = [
-                (f"http://localhost:{self.system_port}/health", self.is_ready)
+                (f"http://localhost:{self.system_port}/health", check_health_ready)
             ]
         elif mode == WorkerMode.DECODE:
             command.extend(["--disaggregation-mode", "decode"])
@@ -136,13 +136,13 @@ class DynamoWorkerProcess(ManagedProcess):
                 ]
             )
             health_check_urls = [
-                (f"http://localhost:{self.system_port}/health", self.is_ready),
+                (f"http://localhost:{self.system_port}/health", check_health_ready),
                 (f"http://localhost:{frontend_port}/v1/models", check_models_api),
                 (f"http://localhost:{frontend_port}/health", check_health_generate),
             ]
         else:
             health_check_urls = [
-                (f"http://localhost:{self.system_port}/health", self.is_ready),
+                (f"http://localhost:{self.system_port}/health", check_health_ready),
                 (f"http://localhost:{frontend_port}/v1/models", check_models_api),
                 (f"http://localhost:{frontend_port}/health", check_health_generate),
             ]
@@ -225,27 +225,6 @@ class DynamoWorkerProcess(ManagedProcess):
 
         if cleanup_errors:
             raise cleanup_errors[0]
-
-    def is_ready(self, response) -> bool:
-        """Check the health of the worker process"""
-        try:
-            data = response.json()
-            if data.get("status") == "ready":
-                worker_type = (
-                    "Prefill worker" if self.mode == WorkerMode.PREFILL else "Worker"
-                )
-                logger.info(f"{worker_type} status is ready")
-                return True
-            worker_type = (
-                "Prefill worker" if self.mode == WorkerMode.PREFILL else "Worker"
-            )
-            logger.warning(f"{worker_type} status is not ready: {data.get('status')}")
-        except ValueError:
-            worker_type = (
-                "Prefill worker" if self.mode == WorkerMode.PREFILL else "Worker"
-            )
-            logger.warning(f"{worker_type} health response is not valid JSON")
-        return False
 
 
 @pytest.mark.timeout(
