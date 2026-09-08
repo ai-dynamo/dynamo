@@ -730,6 +730,34 @@ mod tests {
         );
     }
 
+    // Guard: attaching the worker's typed error to a pre-stream failure must not
+    // change which requests migrate. The outer type is still CannotConnect, and
+    // InvalidArgument is in neither the migratable nor the non-migratable set, so
+    // this error must stay migratable exactly like a bare CannotConnect.
+    #[test]
+    fn pre_stream_failure_with_typed_cause_is_still_migratable() {
+        use dynamo_runtime::pipeline::network::StreamPrologueError;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::pre_stream_failure_error;
+
+        let bare = DynamoError::builder()
+            .error_type(ErrorType::CannotConnect)
+            .message("worker generate() failed before response stream")
+            .build();
+        assert!(is_migratable(&bare));
+
+        let with_cause = pre_stream_failure_error(&StreamPrologueError::new(
+            "Generate Error: multimodal input is not supported by this backend",
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                .message("multimodal input is not supported by this backend")
+                .build(),
+        ));
+        assert!(
+            is_migratable(&with_cause),
+            "attaching the worker's error must not change retry classification"
+        );
+    }
+
     // Guard: genuinely non-migratable errors stay non-migratable.
     #[test]
     fn cancelled_and_exhausted_are_not_migratable() {

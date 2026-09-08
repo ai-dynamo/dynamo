@@ -15,6 +15,7 @@ pub mod manager;
 pub mod tcp;
 
 use crate::SystemHealth;
+use crate::error::DynamoError;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
@@ -201,9 +202,60 @@ pub enum ControlMessage {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResponseStreamPrologue {
     error: Option<String>,
+
+    /// The same failure as `error`, but keeping the worker's
+    /// [`crate::error::ErrorType`] instead of only its display text, so the
+    /// frontend can classify a
+    /// pre-stream failure (for example, a backend refusing a request it can
+    /// never serve) rather than guessing from a message.
+    ///
+    /// `Option` plus `#[serde(default)]` is a compatibility requirement, not a
+    /// convenience: worker and frontend are deployed independently, so during a
+    /// rolling upgrade an old worker sends a prologue without this field and a
+    /// new worker sends one an old frontend does not know. A required field
+    /// would break the handshake in both directions; an absent field decodes to
+    /// `None` and the frontend falls back to the untyped behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    typed_error: Option<DynamoError>,
 }
 
-pub type StreamProvider<T> = tokio::sync::oneshot::Receiver<Result<T, String>>;
+/// A pre-stream failure as it reaches the requesting side of the transport.
+///
+/// `message` is the display text the prologue has always carried.
+/// `typed_error` is the worker's own [`DynamoError`] when the worker was new
+/// enough to send one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamPrologueError {
+    pub message: String,
+    pub typed_error: Option<DynamoError>,
+}
+
+impl StreamPrologueError {
+    /// A failure detected by the transport itself, with no worker error behind it.
+    pub fn from_message(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            typed_error: None,
+        }
+    }
+
+    /// A worker failure, keeping the display text the prologue has always
+    /// carried alongside the worker's typed error.
+    pub fn new(message: impl Into<String>, typed_error: DynamoError) -> Self {
+        Self {
+            message: message.into(),
+            typed_error: Some(typed_error),
+        }
+    }
+}
+
+impl std::fmt::Display for StreamPrologueError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+pub type StreamProvider<T> = tokio::sync::oneshot::Receiver<Result<T, StreamPrologueError>>;
 
 /// Owning `Drop` here (rather than on `RegisteredStream`) lets `into_parts()`
 /// move the public fields out by plain destructure.
@@ -307,7 +359,7 @@ mod registered_stream_tests {
         let flag = Arc::new(AtomicBool::new(false));
         let flag_clone = flag.clone();
 
-        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<(), StreamPrologueError>>();
         let stream = RegisteredStream::new(dummy_conn_info(), rx).with_cleanup(move || {
             flag_clone.store(true, Ordering::SeqCst);
         });
@@ -327,7 +379,7 @@ mod registered_stream_tests {
         let flag = Arc::new(AtomicBool::new(false));
         let flag_clone = flag.clone();
 
-        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<(), StreamPrologueError>>();
         let stream = RegisteredStream::new(dummy_conn_info(), rx).with_cleanup(move || {
             flag_clone.store(true, Ordering::SeqCst);
         });
@@ -345,7 +397,7 @@ mod registered_stream_tests {
     /// `RegisteredStream` with no cleanup configured must drop cleanly.
     #[test]
     fn drop_without_cleanup_is_a_noop() {
-        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<(), StreamPrologueError>>();
         let stream: RegisteredStream<()> = RegisteredStream::new(dummy_conn_info(), rx);
         drop(stream); // must not panic; nothing observable to assert beyond that
     }
@@ -393,14 +445,22 @@ impl StreamSender {
             .await?)
     }
 
-    #[allow(clippy::needless_update)]
-    pub async fn send_prologue(&mut self, error: Option<String>) -> Result<(), String> {
+    pub async fn send_prologue(
+        &mut self,
+        error: Option<StreamPrologueError>,
+    ) -> Result<(), String> {
         // leaving the original logic in place for now
-        // error overrides the dissolved prologue, but the only field on `ResponseStreamPrologue` is `error`
-        // so the second argument can never be used, and the value of error passed by the caller would always be used
+        // error overrides the dissolved prologue, so the value passed by the caller is always the
+        // one that goes on the wire
         if let Some(_prologue) = self.prologue.take() {
-            // let prologue = ResponseStreamPrologue { error, ..prologue };
-            let prologue = ResponseStreamPrologue { error };
+            let (error, typed_error) = match error {
+                Some(StreamPrologueError {
+                    message,
+                    typed_error,
+                }) => (Some(message), typed_error),
+                None => (None, None),
+            };
+            let prologue = ResponseStreamPrologue { error, typed_error };
             let header_bytes: Bytes = match serde_json::to_vec(&prologue) {
                 Ok(b) => b.into(),
                 Err(err) => {
@@ -489,10 +549,11 @@ pub struct Egress<Req: PipelineIO, Resp: PipelineIO> {
 mod tests {
     use super::{
         DEFAULT_SEND_BUFFER_COUNT, IngressResponseEncoder, NetworkStreamWrapper,
-        RequestControlMessage, RequestPlanePayloadCodec, RequestType, ResponseType,
-        SerdeIngressPayloadAdapter, StreamOptions,
+        RequestControlMessage, RequestPlanePayloadCodec, RequestType, ResponseStreamPrologue,
+        ResponseType, SerdeIngressPayloadAdapter, StreamOptions,
     };
     use crate::engine::AsyncEngineContextProvider;
+    use crate::error::{BackendError, DynamoError, ErrorType};
     use crate::pipeline::Context;
     use crate::protocols::annotated::Annotated;
     use serde::{Deserialize, Serialize};
@@ -502,6 +563,67 @@ mod tests {
         id: u64,
         text: String,
         tokens: Vec<u32>,
+    }
+
+    /// Worker and frontend are upgraded independently, so a prologue from an
+    /// older worker has no typed error field at all. It must still decode, with
+    /// the typed error absent, and the message must be unchanged.
+    #[test]
+    fn prologue_without_typed_error_field_still_decodes() {
+        let legacy = br#"{"error":"Generate Error: something went wrong"}"#;
+        let prologue: ResponseStreamPrologue =
+            serde_json::from_slice(legacy).expect("a prologue without the typed field must decode");
+
+        assert_eq!(
+            prologue.error.as_deref(),
+            Some("Generate Error: something went wrong")
+        );
+        assert!(
+            prologue.typed_error.is_none(),
+            "an absent typed error must decode to None, not fail"
+        );
+    }
+
+    /// The other direction of the same rolling upgrade: a new worker's prologue
+    /// must not grow a field when there is no typed error to send, so an older
+    /// frontend that rejects unknown fields still accepts it.
+    #[test]
+    fn prologue_without_typed_error_does_not_serialize_the_field() {
+        let prologue = ResponseStreamPrologue {
+            error: Some("Generate Error: something went wrong".to_string()),
+            typed_error: None,
+        };
+        let encoded = serde_json::to_string(&prologue).expect("prologue should serialize");
+
+        assert!(
+            !encoded.contains("typed_error"),
+            "an absent typed error must not appear on the wire, got: {encoded}"
+        );
+    }
+
+    /// A typed error survives a full serialize/deserialize round trip with its
+    /// error type intact -- the message alone is not enough to classify it.
+    #[test]
+    fn prologue_round_trips_the_typed_error() {
+        let prologue = ResponseStreamPrologue {
+            error: Some("Generate Error: unsupported input".to_string()),
+            typed_error: Some(
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                    .message("unsupported input")
+                    .build(),
+            ),
+        };
+
+        let encoded = serde_json::to_vec(&prologue).expect("prologue should serialize");
+        let decoded: ResponseStreamPrologue =
+            serde_json::from_slice(&encoded).expect("prologue should deserialize");
+
+        assert_eq!(decoded, prologue);
+        assert_eq!(
+            decoded.typed_error.map(|e| e.error_type()),
+            Some(ErrorType::Backend(BackendError::InvalidArgument))
+        );
     }
 
     #[test]

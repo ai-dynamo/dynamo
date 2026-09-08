@@ -4,10 +4,12 @@
 use super::*;
 
 use crate::engine::AsyncEngineContext;
+use crate::error::DynamoError;
 use crate::metrics::prometheus_names::work_handler;
 use crate::metrics::work_handler_perf::{
     WORK_HANDLER_NETWORK_TRANSIT_SECONDS, WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS,
 };
+use crate::pipeline::network::StreamPrologueError;
 use crate::pipeline::{ManyIn, RequestStream};
 use futures::StreamExt;
 use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
@@ -678,7 +680,20 @@ where
                     tracing::error!("Failed to generate response stream: {error_string}");
                 }
 
-                let _result = publisher.send_prologue(Some(error_string)).await;
+                // Send the worker's own error type along with the display text, so a
+                // frontend can tell a request the backend can never serve apart from a
+                // transport failure. `PipelineError::GenerateError` holds an
+                // `anyhow::Error`, which is not itself a `std::error::Error`, so the
+                // typed error is recovered from the anyhow payload rather than from
+                // `e.source()`.
+                let source: &(dyn std::error::Error + 'static) = match &e {
+                    PipelineError::GenerateError(inner) => inner.as_ref(),
+                    other => other,
+                };
+                let prologue_error =
+                    StreamPrologueError::new(error_string, DynamoError::from(source));
+
+                let _result = publisher.send_prologue(Some(prologue_error)).await;
                 Err(e)?
             }
         };

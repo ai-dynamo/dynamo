@@ -28,6 +28,7 @@ use crate::pipeline::network::RequestPlanePayloadCodec;
 use crate::pipeline::network::RequestType;
 use crate::pipeline::network::ResponseType;
 use crate::pipeline::network::StreamOptions;
+use crate::pipeline::network::StreamPrologueError;
 use crate::pipeline::network::StreamProvider;
 use crate::pipeline::network::StreamReceiver;
 use crate::pipeline::network::StreamSender;
@@ -46,6 +47,38 @@ use std::task::{Context, Poll};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_stream::{StreamExt, StreamNotifyClose, wrappers::ReceiverStream};
 use tracing::Instrument;
+
+/// Build the error returned when the worker fails before any response bytes.
+///
+/// The outer type stays [`ErrorType::CannotConnect`]: the dominant cause of a
+/// pre-stream failure is a worker-local setup or version issue, and migrating
+/// is safe because no response bytes are visible yet. Changing which failures
+/// migrate is a separate decision from being able to see them, and is not made
+/// here -- see the follow-up note below.
+///
+/// What is new is that when the worker sent a typed error in its prologue, that
+/// error is attached as the cause instead of being flattened into the message.
+/// A consumer walking the chain (`crate::error::match_error_chain`) can then
+/// classify the underlying failure -- for example, a backend refusing a request
+/// it can never serve, which should be reported to the caller as a bad request
+/// rather than as an internal error -- while retry classification, which looks
+/// at `CannotConnect`, is unchanged.
+///
+/// Follow-up: promoting the outer error type based on the recovered cause (so
+/// that an unservable request is not retried at all) is a routing change with
+/// its own migration semantics and is deliberately left out of this function.
+pub fn pre_stream_failure_error(error: &StreamPrologueError) -> DynamoError {
+    let builder = DynamoError::builder()
+        .error_type(ErrorType::CannotConnect)
+        .message(format!(
+            "Worker generate() failed before response stream: {error}"
+        ));
+
+    match &error.typed_error {
+        Some(typed) => builder.cause(typed.clone()).build(),
+        None => builder.build(),
+    }
+}
 
 const FIRST_RESPONSE_GUARD_CONTEXT_KEY: &str = "dynamo.request_plane.first_response_guard";
 // A timeout cannot safely release registered memory while a remote read may
@@ -708,20 +741,7 @@ impl AddressedPushRouter {
         let response_stream = match response_stream_provider.await {
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) => {
-                // generate() failed before any response bytes; migrate via
-                // CannotConnect since the dominant cause is a worker-local
-                // setup/version issue. The wire prologue carries only an
-                // opaque string today, so app-level rejections also retry
-                // -- safe because no side effects are visible yet. Follow-up:
-                // structured prologue error type for finer routing.
-                return Err(anyhow::anyhow!(
-                    DynamoError::builder()
-                        .error_type(ErrorType::CannotConnect)
-                        .message(format!(
-                            "Worker generate() failed before response stream: {e}"
-                        ))
-                        .build()
-                ));
+                return Err(anyhow::anyhow!(pre_stream_failure_error(&e)));
             }
             Err(_recv_err) => {
                 // oneshot dropped: either the discovery watcher cancelled

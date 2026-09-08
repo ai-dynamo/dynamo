@@ -6142,6 +6142,74 @@ mod tests {
         assert!(response.1.message.contains("does not currently support"));
     }
 
+    /// A worker that refuses a request before the response stream opens must
+    /// reach the client as 400, not 500.
+    ///
+    /// The error here is built by the real egress classification function, not
+    /// hand-assembled, so this fails if that function stops attaching the
+    /// worker's error. Previously the refusal was flattened into a message and
+    /// this request returned 500.
+    #[test]
+    fn test_pre_stream_refusal_surfaces_as_400() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+        use dynamo_runtime::pipeline::network::StreamPrologueError;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::pre_stream_failure_error;
+
+        let prologue_error = StreamPrologueError::new(
+            "Generate Error: multimodal input is not supported by this backend",
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                .message("multimodal input is not supported by this backend")
+                .build(),
+        );
+
+        let err: anyhow::Error = pre_stream_failure_error(&prologue_error).into();
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.code, StatusCode::BAD_REQUEST.as_u16());
+        assert!(
+            response
+                .1
+                .message
+                .contains("multimodal input is not supported"),
+            "the client should see the worker's reason, got: {}",
+            response.1.message
+        );
+    }
+
+    /// Negative control for `test_pre_stream_refusal_surfaces_as_400`: a genuine
+    /// pre-stream connect failure must still be 500. Only a request-level
+    /// refusal earns a 4xx.
+    #[test]
+    fn test_pre_stream_connect_failure_still_surfaces_as_500() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+        use dynamo_runtime::pipeline::network::StreamPrologueError;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::pre_stream_failure_error;
+
+        // The worker died rather than refused: typed, but not a request problem.
+        let engine_shutdown = StreamPrologueError::new(
+            "Generate Error: engine shut down",
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+                .message("engine shut down")
+                .build(),
+        );
+        let response = ErrorMessage::from_anyhow(
+            pre_stream_failure_error(&engine_shutdown).into(),
+            BACKUP_ERROR_MESSAGE,
+        );
+        assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+
+        // An older worker sends no typed error at all: also still 500.
+        let untyped = StreamPrologueError::from_message("Generate Error: could not reach worker");
+        let response = ErrorMessage::from_anyhow(
+            pre_stream_failure_error(&untyped).into(),
+            BACKUP_ERROR_MESSAGE,
+        );
+        assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
     #[test]
     fn test_cancelled_error_response_from_anyhow() {
         use dynamo_runtime::error::{DynamoError, ErrorType};

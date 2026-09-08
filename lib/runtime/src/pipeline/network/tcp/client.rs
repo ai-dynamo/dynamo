@@ -206,7 +206,10 @@ impl TcpClient {
 
         // set up the prologue for the stream
         // this might have transport specific metadata in the future
-        let prologue = Some(ResponseStreamPrologue { error: None });
+        let prologue = Some(ResponseStreamPrologue {
+            error: None,
+            typed_error: None,
+        });
 
         // create the stream sender
         let stream_sender = StreamSender {

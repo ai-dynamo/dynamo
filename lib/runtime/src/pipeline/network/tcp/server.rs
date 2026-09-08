@@ -42,7 +42,7 @@ use crate::engine::AsyncEngineContext;
 use crate::pipeline::{
     PipelineError,
     network::{
-        ResponseService, ResponseStreamPrologue,
+        ResponseService, ResponseStreamPrologue, StreamPrologueError,
         codec::{TwoPartMessage, TwoPartMessageType},
         tcp::StreamType,
     },
@@ -90,7 +90,7 @@ pub struct TcpStreamServer {
 #[allow(dead_code)]
 struct RequestedSendConnection {
     context: Arc<dyn AsyncEngineContext>,
-    connection: oneshot::Sender<Result<StreamSender, String>>,
+    connection: oneshot::Sender<Result<StreamSender, StreamPrologueError>>,
     /// Capacity of the per-stream mpsc buffer between the socket task and the
     /// engine producer; carried from the registration [`StreamOptions`].
     send_buffer_count: usize,
@@ -98,7 +98,7 @@ struct RequestedSendConnection {
 
 struct RequestedRecvConnection {
     context: Arc<dyn AsyncEngineContext>,
-    connection: oneshot::Sender<Result<StreamReceiver, String>>,
+    connection: oneshot::Sender<Result<StreamReceiver, StreamPrologueError>>,
     /// Capacity of the per-stream mpsc buffer between the socket task and the
     /// engine consumer; carried from the registration [`StreamOptions`].
     send_buffer_count: usize,
@@ -1071,7 +1071,7 @@ async fn tcp_listener(
                 // requester so the generate call chain fails cleanly, then
                 // return Err so the connection task ends without panicking.
                 let msg = "malformed prologue: expected HeaderOnly ControlMessage";
-                let _ = connection.send(Err(msg.to_string()));
+                let _ = connection.send(Err(StreamPrologueError::from_message(msg)));
                 return Err(error!(msg));
             }
         };
@@ -1083,7 +1083,13 @@ async fn tcp_listener(
         // is both complete and ready for data flow; awaiting here is not a performance hit or problem and it allows
         // us to trace the initial setup time vs the time to prologue
         if let Some(error) = &prologue.error {
-            let _ = connection.send(Err(error.clone()));
+            // Forward the worker's typed error when it sent one, so the requesting
+            // side can classify the failure instead of parsing the message. An older
+            // worker sends no typed error and this stays `None`.
+            let _ = connection.send(Err(StreamPrologueError {
+                message: error.clone(),
+                typed_error: prologue.typed_error.clone(),
+            }));
             return Err(error!("Received error prologue: {}", error));
         }
 
@@ -1299,8 +1305,10 @@ fn process_control_message(message: Bytes) -> Result<ControlAction> {
 mod tests {
     use super::*;
     use crate::engine::AsyncEngineContextProvider;
+    use crate::error::{BackendError, DynamoError, ErrorType, match_error_chain};
     use crate::pipeline::Context;
     use crate::pipeline::network::DEFAULT_SEND_BUFFER_COUNT;
+    use crate::pipeline::network::egress::addressed_router::pre_stream_failure_error;
     use crate::pipeline::network::tcp::client::TcpClient;
     use std::io::Write;
     use tempfile::NamedTempFile;
@@ -1635,7 +1643,7 @@ mod tests {
         server: &TcpStreamServer,
     ) -> (
         String,
-        tokio::sync::oneshot::Receiver<Result<super::StreamReceiver, String>>,
+        tokio::sync::oneshot::Receiver<Result<super::StreamReceiver, StreamPrologueError>>,
     ) {
         let context = Context::new(());
         let options = StreamOptions::builder()
@@ -1673,9 +1681,9 @@ mod tests {
         server: &TcpStreamServer,
     ) -> (
         String,
-        tokio::sync::oneshot::Receiver<Result<super::StreamSender, String>>,
+        tokio::sync::oneshot::Receiver<Result<super::StreamSender, StreamPrologueError>>,
         String,
-        tokio::sync::oneshot::Receiver<Result<super::StreamReceiver, String>>,
+        tokio::sync::oneshot::Receiver<Result<super::StreamReceiver, StreamPrologueError>>,
     ) {
         let context = Context::new(());
         let options = StreamOptions::builder()
@@ -2214,9 +2222,12 @@ mod tests {
             .unwrap();
         framed_writer
             .send(TwoPartMessage::from_header(
-                serde_json::to_vec(&ResponseStreamPrologue { error: None })
-                    .unwrap()
-                    .into(),
+                serde_json::to_vec(&ResponseStreamPrologue {
+                    error: None,
+                    typed_error: None,
+                })
+                .unwrap()
+                .into(),
             ))
             .await
             .unwrap();
@@ -2362,7 +2373,7 @@ mod tests {
         // StreamReceiver doesn't impl Debug, so we can't use `.expect_err`.
         match outcome {
             Err(err) => assert!(
-                err.contains("malformed prologue"),
+                err.message.contains("malformed prologue"),
                 "expected malformed-prologue error, got: {err}"
             ),
             Ok(_) => panic!("invalid prologue should produce an error, but got Ok"),
@@ -2423,6 +2434,142 @@ mod tests {
         assert!(
             result.is_ok(),
             "concurrent response registration and call-home timed out"
+        );
+    }
+
+    /// A worker that refuses a request before producing any response bytes must
+    /// keep its error type all the way to the requesting side.
+    ///
+    /// This drives the real transport: a real registration, a real client
+    /// dial-in, a real `send_prologue`, and the real egress classification
+    /// function. Before the prologue carried a typed error, everything below
+    /// the message string was lost here and the requester could only see an
+    /// opaque `CannotConnect`.
+    #[tokio::test]
+    async fn test_typed_prologue_error_survives_to_requester() {
+        let server = test_server().await;
+        let context = Context::new(());
+        let options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(false)
+            .enable_response_stream(true)
+            .build()
+            .unwrap();
+
+        let pending = server.register(options).await;
+        let (connection_info, stream_provider) = pending.recv_stream.unwrap().into_parts();
+        let client_context =
+            Context::with_id_and_metadata((), context.id().to_string(), Default::default());
+
+        // The worker refuses the request: the backend can never serve it.
+        let worker_error = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message("multimodal input is not supported by this backend")
+            .build();
+
+        let client = tokio::spawn(async move {
+            let mut sender =
+                TcpClient::create_response_stream(client_context.context(), connection_info, None)
+                    .await
+                    .unwrap();
+            sender
+                .send_prologue(Some(StreamPrologueError::new(
+                    "Generate Error: multimodal input is not supported by this backend",
+                    worker_error,
+                )))
+                .await
+                .unwrap();
+        });
+        client.await.unwrap();
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), stream_provider)
+            .await
+            .expect("stream provider should resolve quickly")
+            .expect("stream provider channel should not be dropped");
+
+        // `StreamReceiver` is not `Debug`, so match instead of `expect_err`.
+        let prologue_error = match outcome {
+            Err(err) => err,
+            Ok(_) => panic!("an error prologue must not yield a usable stream"),
+        };
+        assert_eq!(
+            prologue_error.typed_error.as_ref().map(|e| e.error_type()),
+            Some(ErrorType::Backend(BackendError::InvalidArgument)),
+            "the worker's error type must survive the prologue round trip"
+        );
+
+        // Feed it through the real egress classification.
+        let egress_error = pre_stream_failure_error(&prologue_error);
+        assert_eq!(
+            egress_error.error_type(),
+            ErrorType::CannotConnect,
+            "the outer type stays CannotConnect so retry classification is unchanged"
+        );
+        assert!(
+            match_error_chain(
+                &egress_error,
+                &[ErrorType::Backend(BackendError::InvalidArgument)],
+                &[],
+            ),
+            "the refusal must be reachable in the error chain, got: {egress_error:?}"
+        );
+    }
+
+    /// Negative control: a worker that failed for a genuine transport-side
+    /// reason carries no request-level refusal into the chain.
+    #[tokio::test]
+    async fn test_untyped_prologue_error_stays_untyped() {
+        let server = test_server().await;
+        let context = Context::new(());
+        let options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(false)
+            .enable_response_stream(true)
+            .build()
+            .unwrap();
+
+        let pending = server.register(options).await;
+        let (connection_info, stream_provider) = pending.recv_stream.unwrap().into_parts();
+        let client_context =
+            Context::with_id_and_metadata((), context.id().to_string(), Default::default());
+
+        let client = tokio::spawn(async move {
+            let mut sender =
+                TcpClient::create_response_stream(client_context.context(), connection_info, None)
+                    .await
+                    .unwrap();
+            sender
+                .send_prologue(Some(StreamPrologueError::from_message(
+                    "Generate Error: engine shut down",
+                )))
+                .await
+                .unwrap();
+        });
+        client.await.unwrap();
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), stream_provider)
+            .await
+            .expect("stream provider should resolve quickly")
+            .expect("stream provider channel should not be dropped");
+
+        let prologue_error = match outcome {
+            Err(err) => err,
+            Ok(_) => panic!("an error prologue must not yield a usable stream"),
+        };
+        assert!(prologue_error.typed_error.is_none());
+
+        let egress_error = pre_stream_failure_error(&prologue_error);
+        assert_eq!(egress_error.error_type(), ErrorType::CannotConnect);
+        assert!(
+            !match_error_chain(
+                &egress_error,
+                &[
+                    ErrorType::InvalidArgument,
+                    ErrorType::Backend(BackendError::InvalidArgument),
+                ],
+                &[],
+            ),
+            "an untyped prologue must not synthesize a request-level refusal"
         );
     }
 
