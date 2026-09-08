@@ -119,7 +119,7 @@ pub async fn completion_response_stream(
             );
             return Status::resource_exhausted(e.to_string());
         }
-        Status::internal(format!("Failed to generate completions: {}", e))
+        crate::grpc::service::dispatch_error_status(&e, "Failed to generate completions")
     })?;
 
     // capture the context to cancel the stream if the client disconnects

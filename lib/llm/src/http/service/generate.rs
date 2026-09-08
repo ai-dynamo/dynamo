@@ -26,6 +26,7 @@ use serde::Serialize;
 use tracing::Instrument;
 
 use super::disconnect::create_connection_monitor;
+use super::error::SanitizedError;
 use super::metrics::{
     CancellationLabels, ErrorType, HttpQueueGuard, InflightGuard, ResponseMetricCollector,
 };
@@ -997,9 +998,10 @@ async fn generate_dispatch(
             let was_cancelled = request_context.is_killed()
                 || super::metrics::request_was_cancelled(error.as_ref());
             let was_rejected = super::metrics::request_was_rejected(error.as_ref());
+            let was_unavailable = super::metrics::request_was_unavailable(error.as_ref());
             inflight_guard.mark_error(if was_cancelled {
                 ErrorType::Cancelled
-            } else if was_rejected {
+            } else if was_rejected || was_unavailable {
                 ErrorType::Unavailable
             } else {
                 ErrorType::Internal
@@ -1016,6 +1018,14 @@ async fn generate_dispatch(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "service_unavailable",
                     "engine rejected the request".to_string(),
+                );
+            }
+            if was_unavailable {
+                tracing::warn!(%request_id, error = %format!("{error:#}"), "no worker available for generate request");
+                return generate_error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "service_unavailable",
+                    SanitizedError::Unavailable.to_string(),
                 );
             }
             tracing::error!(%request_id, error = %format!("{error:#}"), "engine generate call failed");
@@ -1065,6 +1075,15 @@ async fn generate_dispatch(
             {
                 inflight_guard.mark_error(ErrorType::Cancelled);
                 return generate_cancelled_response();
+            }
+            if super::metrics::request_was_unavailable(error.as_ref()) {
+                inflight_guard.mark_error(ErrorType::Unavailable);
+                tracing::warn!(%request_id, %error, "generate stream failed: no worker available");
+                return generate_error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "service_unavailable",
+                    SanitizedError::Unavailable.to_string(),
+                );
             }
             inflight_guard.mark_error(ErrorType::Internal);
             tracing::error!(%request_id, %error, "failed to fold generate stream");
@@ -1180,6 +1199,8 @@ mod tests {
 
     struct MetricEngine;
 
+    struct WorkerUnavailableEngine;
+
     struct MigrationMetricBackend {
         calls: AtomicU32,
     }
@@ -1205,6 +1226,22 @@ mod tests {
             Err(dynamo_runtime::error::DynamoError::builder()
                 .error_type(dynamo_runtime::error::ErrorType::Cancelled)
                 .message("backend cancelled before opening a stream")
+                .build()
+                .into())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for WorkerUnavailableEngine
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            Err(dynamo_runtime::error::DynamoError::builder()
+                .error_type(dynamo_runtime::error::ErrorType::WorkerUnavailable)
+                .message("Server unavailable: unknown endpoint a/generate")
                 .build()
                 .into())
         }
@@ -2487,6 +2524,38 @@ mod tests {
 
         assert_eq!(response.status().as_u16(), 499);
         assert_cancelled_dispatch_metrics(state.as_ref(), 0, 0);
+    }
+
+    #[tokio::test]
+    async fn worker_unavailable_dispatch_returns_503() {
+        let engine: crate::types::openai::generate::GenerateStreamingEngine =
+            Arc::new(WorkerUnavailableEngine);
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+
+        let response = generate_dispatch_for_test(
+            engine,
+            dispatch_test_context(),
+            "req-worker-unavailable".to_string(),
+            "test-model".to_string(),
+            state.clone(),
+            GenerateResponseOptions::default(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let metric_model = state.manager().metric_model_for("test-model");
+        assert_eq!(
+            state.metrics_clone().get_request_counter(
+                metric_model,
+                &Endpoint::Generate,
+                &RequestType::Unary,
+                &Status::Error,
+                &ErrorType::Unavailable,
+            ),
+            1
+        );
     }
 
     #[tokio::test]

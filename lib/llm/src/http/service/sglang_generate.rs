@@ -387,10 +387,11 @@ async fn dispatch(
             let was_cancelled = request_context.is_killed()
                 || super::metrics::request_was_cancelled(error.as_ref());
             let was_rejected = super::metrics::request_was_rejected(error.as_ref());
+            let was_unavailable = super::metrics::request_was_unavailable(error.as_ref());
             let invalid_argument = find_invalid_argument_in_chain(error.as_ref());
             inflight_guard.mark_error(if was_cancelled {
                 ErrorType::Cancelled
-            } else if was_rejected {
+            } else if was_rejected || was_unavailable {
                 ErrorType::Unavailable
             } else if invalid_argument.is_some() {
                 ErrorType::Validation
@@ -408,6 +409,13 @@ async fn dispatch(
                 return error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "engine rejected the request".to_string(),
+                );
+            }
+            if was_unavailable {
+                tracing::warn!(%request_id, error = %format!("{error:#}"), "no worker available for SGLang generate request");
+                return error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    SanitizedError::Unavailable.to_string(),
                 );
             }
             if let Some(invalid_argument) = invalid_argument {
@@ -487,6 +495,11 @@ mod tests {
             ),
             (
                 DynamoErrorType::Unavailable,
+                ErrorType::Unavailable,
+                "Service temporarily unavailable",
+            ),
+            (
+                DynamoErrorType::WorkerUnavailable,
                 ErrorType::Unavailable,
                 "Service temporarily unavailable",
             ),
