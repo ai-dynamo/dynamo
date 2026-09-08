@@ -42,7 +42,7 @@ class _FakeInner:
 
 def _resolver_with(ips: list[str]) -> BlocklistResolver:
     r = BlocklistResolver(allow_private_ips=False)
-    r._inner = _FakeInner(ips)  # bypass real DNS
+    r._inner = _FakeInner(ips)
     return r
 
 
