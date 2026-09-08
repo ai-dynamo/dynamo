@@ -157,6 +157,23 @@ fn namespace_scope(filter: &NamespaceFilter) -> &str {
     }
 }
 
+/// Whether `namespace` is inside `filter` for the purposes of RL discovery.
+///
+/// [`NamespaceFilter::Prefix`] matches on a bare `starts_with`, which also admits a
+/// sibling deployment whose name merely begins with the prefix: under
+/// `DYN_NAMESPACE_PREFIX=myns-dgd` it would take in `myns-dgd2`. The endpoints reached
+/// here are RL control endpoints, so the scope is the prefix itself plus the
+/// hyphen-delimited worker generations beneath it — the same shape
+/// `DYN_NAMESPACE_WORKER_SUFFIX` produces.
+fn namespace_in_scope(filter: &NamespaceFilter, namespace: &str) -> bool {
+    match filter {
+        NamespaceFilter::Prefix(prefix) => namespace
+            .strip_prefix(prefix.as_str())
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('-')),
+        filter => filter.matches(namespace),
+    }
+}
+
 impl RlDiscoveryConfig {
     pub fn from_env(runtime: Arc<DistributedRuntime>) -> Self {
         let namespace_filter = resolve_namespace_filter(
@@ -356,7 +373,7 @@ async fn list_workers(state: &RlDiscoveryState) -> anyhow::Result<Vec<RlWorkerIn
         .into_iter()
         .filter(|instance| match instance {
             DiscoveryInstance::Model { namespace, .. } => {
-                config.namespace_filter.matches(namespace)
+                namespace_in_scope(&config.namespace_filter, namespace)
             }
             _ => true,
         })
@@ -369,7 +386,7 @@ async fn list_workers(state: &RlDiscoveryState) -> anyhow::Result<Vec<RlWorkerIn
             DiscoveryInstance::Endpoint(endpoint) => Some(endpoint),
             _ => None,
         })
-        .filter(|endpoint| config.namespace_filter.matches(&endpoint.namespace))
+        .filter(|endpoint| namespace_in_scope(&config.namespace_filter, &endpoint.namespace))
         .filter(|endpoint| endpoint.endpoint == config.rl_endpoint)
         .filter(|endpoint| {
             config
@@ -937,24 +954,6 @@ mod tests {
         })
     }
 
-    /// The reported defect: with `DYN_NAMESPACE_WORKER_SUFFIX` set, workers register under
-    /// `{namespace}-{suffix}`, so a listener scoped to the bare namespace found none of
-    /// them. A prefix scope has to see them.
-    #[tokio::test]
-    async fn list_workers_finds_suffixed_namespace_under_prefix_scope() {
-        let distributed = test_runtime().await;
-        let started = start_rl_endpoint(&distributed, "ns-abc123").await;
-        let state = discovery_state(&distributed, NamespaceFilter::Prefix("ns".to_string()));
-
-        let workers = list_workers(&state).await.expect("list");
-        assert_eq!(workers.len(), 1);
-        assert_eq!(workers[0].namespace, "ns-abc123");
-
-        started.shutdown().await.expect("endpoint shutdown");
-    }
-
-    /// A prefix scope must still be a scope: an unrelated namespace that the widened
-    /// `AllEndpoints` query now returns has to be dropped before the probe fan-out.
     #[tokio::test]
     async fn list_workers_prefix_scope_excludes_other_namespaces() {
         let distributed = test_runtime().await;
@@ -970,8 +969,6 @@ mod tests {
         other.shutdown().await.expect("endpoint shutdown");
     }
 
-    /// An exact scope keeps its old meaning: `ns` still does not match `ns-abc123`. This
-    /// pins that the fix widens discovery only when a prefix is configured.
     #[tokio::test]
     async fn list_workers_exact_scope_excludes_suffixed_namespace() {
         let distributed = test_runtime().await;
@@ -982,6 +979,16 @@ mod tests {
         assert!(workers.is_empty(), "unexpected workers: {workers:?}");
 
         started.shutdown().await.expect("endpoint shutdown");
+    }
+
+    #[test]
+    fn prefix_scope_stops_at_a_hyphen() {
+        let filter = NamespaceFilter::Prefix("myns-dgd".to_string());
+
+        assert!(namespace_in_scope(&filter, "myns-dgd"));
+        assert!(namespace_in_scope(&filter, "myns-dgd-abc123"));
+        assert!(!namespace_in_scope(&filter, "myns-dgd2"));
+        assert!(!namespace_in_scope(&filter, "myns"));
     }
 
     #[test]

@@ -148,7 +148,7 @@ The RL listener reads the set of Dynamo namespaces it searches from its own proc
 
 | Variable | Effect when it applies |
 |---|---|
-| `DYN_NAMESPACE_PREFIX` | Match every namespace that starts with this value, so `ns` matches both `ns` and `ns-abc123` |
+| `DYN_NAMESPACE_PREFIX` | Match this namespace and the worker generations under it, so `ns` matches `ns` and `ns-abc123` but not the separate deployment `ns2` |
 | `DYN_NAMESPACE_WORKER_SUFFIX` | Match the single namespace `{DYN_NAMESPACE}-{DYN_NAMESPACE_WORKER_SUFFIX}` |
 | `DYN_NAMESPACE` | Match this exact namespace; it defaults to `dynamo` |
 
