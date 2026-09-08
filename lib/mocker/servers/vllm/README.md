@@ -24,7 +24,7 @@ Point the existing Dynamo sidecar at it:
 
 ```bash
 cargo run -p dynamo-vllm-sidecar --bin dynamo-vllm-sidecar -- \
-  --vllm-endpoint 127.0.0.1:50051
+  --grpc-endpoint 127.0.0.1:50051
 ```
 
 `--extra-engine-args` accepts inline JSON or a JSON file path. The values use
@@ -56,11 +56,11 @@ Then start one sidecar for each endpoint:
 
 ```bash
 cargo run -p dynamo-vllm-sidecar --bin dynamo-vllm-sidecar -- \
-  --vllm-endpoint 127.0.0.1:50051 \
+  --grpc-endpoint 127.0.0.1:50051 \
   --disaggregation-mode prefill
 
 cargo run -p dynamo-vllm-sidecar --bin dynamo-vllm-sidecar -- \
-  --vllm-endpoint 127.0.0.1:50052 \
+  --grpc-endpoint 127.0.0.1:50052 \
   --disaggregation-mode decode
 ```
 

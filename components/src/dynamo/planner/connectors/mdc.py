@@ -145,6 +145,9 @@ def worker_info_from_mdc(
     if context_length is None:
         context_length = card.get("architectural_max_context_length")
 
+    # TODO(rank-aware-kv-capacity): propagate capacity provenance into WorkerInfo. Only an exact
+    # or conservative scalar is safe for Planner's scale-down feasibility check; an aggregate
+    # mean must remain explicitly approximate rather than masquerade as a worker minimum.
     return WorkerInfo(
         k8s_name=k8s_name,
         component_name=component_name,

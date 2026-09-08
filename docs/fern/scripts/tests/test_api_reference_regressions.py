@@ -17,6 +17,7 @@ import kubernetes_api_discovery
 import kubernetes_api_rendering
 import markdown_rendering
 import pytest
+import rust_api_discovery
 import rust_api_rendering
 import yaml
 from griffe import Function, GriffeLoader
@@ -308,24 +309,62 @@ _UNMERGED_DOCS_LINK_RE = re.compile(
 )
 
 
-def _api_reference_pages() -> list[Path]:
-    """Every committed page this reference owns."""
-    pages = sorted((FERN_ROOT / "pages" / "reference" / "api").rglob("*.mdx"))
-    pages.append(K8S_TARGET_MDX)
-    return pages
+@pytest.fixture(scope="session")
+def discovered_python_modules() -> list[api_discovery.Module]:
+    """One griffe pass for every check that inspects freshly rendered pages.
+
+    The Python/Rust pages are publish-time artifacts (not committed), so
+    content regressions must be asserted against a fresh render; reading the
+    tree would silently iterate zero files and pass vacuously."""
+    loader = api_discovery.build_loader()
+    return [
+        api_discovery.discover_module(loader, spec) for spec in api_discovery.MODULES
+    ]
 
 
-def test_api_pages_never_link_to_docs_paths_through_main() -> None:
+def _api_reference_sources(
+    modules: list[api_discovery.Module],
+) -> dict[str, str]:
+    """name -> page text for every page this reference owns.
+
+    Committed pages (the hand-written API landing, the Kubernetes output)
+    read from disk; the publish-time Python/Rust pages come from a fresh
+    render."""
+    sources = {
+        str(page.relative_to(REPO_ROOT)): page.read_text(encoding="utf-8")
+        for page in sorted((FERN_ROOT / "pages" / "reference" / "api").rglob("*.mdx"))
+    }
+    assert sources, "the committed API landing page has gone missing"
+    sources[str(K8S_TARGET_MDX.relative_to(REPO_ROOT))] = K8S_TARGET_MDX.read_text(
+        encoding="utf-8"
+    )
+    sources["<rendered> python/README.mdx"] = api_rendering.render_landing_page(modules)
+    for module in modules:
+        sources[
+            f"<rendered> python/{module.slug}.mdx"
+        ] = api_rendering.render_module_page(module)
+    rust_reference = rust_api_discovery.discover_rust_reference(
+        REPO_ROOT, FERN_ROOT / "components" / "releases.data.ts"
+    )
+    sources["<rendered> rust/README.mdx"] = rust_api_rendering.render_page(
+        rust_reference
+    )
+    return sources
+
+
+def test_api_pages_never_link_to_docs_paths_through_main(
+    discovered_python_modules: list[api_discovery.Module],
+) -> None:
     """These pages, their generator scripts, and the raw Kubernetes Markdown
     all arrive in the same change. A ``blob/main`` deep link to any of them
     resolves to a 404 until that change merges, so the link checker fails on
     exactly the commits that introduce the pages. Reference the repo path as
     inline code instead, or link the sibling page relatively."""
     offenders: dict[str, list[str]] = {}
-    for page in _api_reference_pages():
-        found = _UNMERGED_DOCS_LINK_RE.findall(page.read_text(encoding="utf-8"))
+    for name, text in _api_reference_sources(discovered_python_modules).items():
+        found = _UNMERGED_DOCS_LINK_RE.findall(text)
         if found:
-            offenders[str(page.relative_to(REPO_ROOT))] = found
+            offenders[name] = found
 
     assert not offenders, f"self-referential main links: {offenders}"
 
@@ -548,8 +587,37 @@ def test_pre_merge_runs_all_api_generators_hermetically() -> None:
     assert "docs/fern/scripts/tests/test_gen_rust_api.py" in workflow
     assert "docs/fern/scripts/tests/test_gen_kubernetes_api.py" in workflow
     assert "-c /dev/null" not in workflow
-    for generator in ("python", "rust", "kubernetes"):
-        assert f"gen_{generator}_api.py --check" in workflow
+    # Python/Rust references are publish-time artifacts: pre-merge must run
+    # both generators in WRITE mode (proving a source PR cannot break
+    # generation) and never as a freshness diff against committed pages,
+    # which no longer exist. Kubernetes output stays committed, so its
+    # freshness gate stays.
+    for generator in ("python", "rust"):
+        assert f"gen_{generator}_api.py\n" in workflow
+        assert f"gen_{generator}_api.py --check" not in workflow
+    assert "gen_kubernetes_api.py --check" in workflow
+    # The publish and preview paths must GENERATE the pages before syncing
+    # them to the docs-website branch (dev sync and version snapshots both).
+    for generator in ("python", "rust"):
+        assert f"gen_{generator}_api.py --check" not in publish
+    assert "gen_kubernetes_api.py --check" in publish
+    assert "Generate API references" in publish
+    assert "Generate API references at the tag" in publish
+    # fern check validates nav paths, so the fern-check job must materialize
+    # the generated pages first.
+    assert "Generate API reference pages" in workflow
+    # Step names existing is not enough: generation must PRECEDE each
+    # consumer step, or a reorder ships snapshots (and runs fern check)
+    # against a tree with no pages.
+    assert publish.index("Generate API references") < publish.index(
+        "Sync dev content from main"
+    )
+    assert publish.index("Generate API references at the tag") < publish.index(
+        "Build versioned pages from tagged commit"
+    )
+    assert workflow.index("Generate API reference pages") < workflow.index(
+        "Validate Fern configuration"
+    )
     assert "griffe==2.1.0" in workflow
     assert "griffe==2.1.0" in publish
     assert '"griffe==2.1.0"' in project
@@ -754,15 +822,18 @@ def test_mdx_prose_keeps_unknown_colon_pairs_intact() -> None:
     assert "Timeout:30:" in rendered
 
 
-def test_generated_python_pages_carry_no_sphinx_roles() -> None:
+def test_generated_python_pages_carry_no_sphinx_roles(
+    discovered_python_modules: list[api_discovery.Module],
+) -> None:
     """Guards the published output, not just the helper: every curated page
-    is regenerated from docstrings that mix Google and Sphinx styles."""
-    for page in sorted(
-        (FERN_ROOT / "pages" / "reference" / "api" / "python").glob("*.mdx")
-    ):
-        text = page.read_text(encoding="utf-8")
+    renders from docstrings that mix Google and Sphinx styles. The pages are
+    publish-time artifacts, so the guard runs on a fresh render -- globbing
+    the (empty) tree would pass vacuously."""
+    assert discovered_python_modules
+    for module in discovered_python_modules:
+        text = api_rendering.render_module_page(module)
         for role in (":class:`", ":meth:`", ":func:`", ":attr:`", ":mod:`"):
-            assert role not in text, f"{page.name} still carries {role}"
+            assert role not in text, f"{module.slug}.mdx still carries {role}"
 
 
 def test_kubernetes_attributes_escape_source_metacharacters() -> None:

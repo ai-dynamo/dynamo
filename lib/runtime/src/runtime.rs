@@ -267,6 +267,20 @@ impl Runtime {
         Runtime::new(primary, Some(secondary))
     }
 
+    /// Like [`Runtime::from_handle`], but also attaches the compute pool and `block_in_place`
+    /// permits that `config` implies, the way [`Runtime::from_settings`] does.
+    ///
+    /// For when the Tokio runtime is owned elsewhere — a process-wide `OnceCell`, say — so only a
+    /// handle can be borrowed, but the [`RuntimeConfig`] behind it is known.
+    pub fn from_handle_with_config(
+        handle: tokio::runtime::Handle,
+        config: &RuntimeConfig,
+    ) -> anyhow::Result<Runtime> {
+        let primary = RuntimeType::External(handle.clone());
+        let secondary = RuntimeType::External(handle);
+        Runtime::new_with_config(primary, Some(secondary), config)
+    }
+
     /// Create a [`Runtime`] instance from the settings
     /// See [`config::RuntimeConfig::from_settings`]
     pub fn from_settings() -> anyhow::Result<Runtime> {

@@ -111,12 +111,29 @@ def test_streaming_sampling_params_preserves_request_overrides():
 
     result = streaming_sampling_params(engine_client, [requested])
 
-    assert result is not None
     assert result[0].temperature == 0.7
     assert result[0].max_tokens == 42
     assert result[0].top_p == 0.8
     assert result[0].output_kind == RequestOutputKind.DELTA
     assert requested.output_kind == RequestOutputKind.CUMULATIVE
+
+
+def test_streaming_sampling_params_preserves_explicit_empty_list():
+    engine_client = SimpleNamespace(
+        default_sampling_params_list=[SamplingParams(temperature=0.1)]
+    )
+
+    result = streaming_sampling_params(engine_client, [])
+
+    assert result == []
+
+
+def test_streaming_sampling_params_preserves_empty_engine_defaults():
+    engine_client = SimpleNamespace(default_sampling_params_list=[])
+
+    result = streaming_sampling_params(engine_client)
+
+    assert result == []
 
 
 class TestBuildEngineInputs:
@@ -245,6 +262,60 @@ class TestI2VEngineInputs:
         assert sp.boundary_ratio == 0.875
         assert sp.guidance_scale_2 == 1.0
         assert sp.num_inference_steps == 40
+
+    async def test_media_passthrough_reaches_sampling_params(self):
+        """A top-level SDK extra_body field, nested by the frontend under
+        extra_args["media_passthrough"], rides sampling params extra_args to
+        the engine. Nothing is set on the sampling params by attribute name."""
+        handler = _make_handler()
+        req = NvCreateVideoRequest(
+            prompt="a cat by the sea",
+            model="test-model",
+            size="832x480",
+            extra_args={
+                "media_passthrough": {
+                    "backend_custom_knob": 0.5,
+                    "denoise_strength": 0.8,
+                }
+            },
+        )
+        result = await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+        sp = result.sampling_params_list[0]
+        assert sp.extra_args["backend_custom_knob"] == 0.5
+        assert sp.extra_args["denoise_strength"] == 0.8
+
+    @pytest.mark.parametrize(
+        "bad_knob",
+        [
+            {"frame_interpolation_model_path": "attacker/repository"},
+            {"guardrails": False},
+            {"safety_checker": None},
+            {"vae_checkpoint_url": "http://evil/x.pkl"},
+        ],
+    )
+    async def test_media_passthrough_rejects_load_and_policy_knobs(self, bad_knob):
+        """A path/checkpoint field or a policy control is refused while the
+        request is being built, before any engine call, so it cannot reach a
+        model load or a guardrail switch."""
+        handler = _make_handler()
+        handler.engine_client.generate = MagicMock(
+            side_effect=AssertionError("engine must not run for a rejected request")
+        )
+        req = NvCreateVideoRequest(
+            prompt="a cat",
+            model="test-model",
+            size="832x480",
+            extra_args={"media_passthrough": bad_knob},
+        )
+        with pytest.raises(ValueError):
+            await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+
+    def test_media_passthrough_absent_is_a_no_op(self):
+        req = NvCreateVideoRequest(prompt="a cat", model="test-model")
+        assert req.extra_args is None
+        handler = _make_handler()
+        inputs = handler._engine_inputs_from_video(req)
+        assert inputs.sampling_params_list is not None
 
     def test_i2v_protocol_roundtrip(self):
         """VideoNvExt and NvCreateVideoRequest serialize/deserialize I2V fields correctly."""

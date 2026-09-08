@@ -14,12 +14,35 @@ use super::overlap::{OverlapSignals, SelectedWorkerTierSnapshot};
 use super::prefill_load::effective_prefill_tokens;
 pub use crate::protocols::PotentialLoad;
 use crate::protocols::{
-    LocalBlockHash, RoutingConstraints, SharedCacheHits, WorkerConfigLike, WorkerId,
-    WorkerWithDpRank,
+    LocalBlockHash, RoutingConstraints, SharedCacheHits, WorkerAffinityTarget, WorkerConfigLike,
+    WorkerId, WorkerWithDpRank,
 };
 use crate::router_hint::RouterHintRootCandidates;
 use crate::scheduling::policy_queue::QueueRejection;
 use crate::sequences::WorkerLoadProjection;
+
+/// Router-internal identity for one admitted request attempt.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AttemptId(u64);
+
+impl AttemptId {
+    pub(crate) fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    #[cfg(feature = "bench")]
+    #[doc(hidden)]
+    pub fn for_benchmark(value: u64) -> Self {
+        Self::new(value)
+    }
+}
+
+impl std::fmt::Display for AttemptId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
 
 pub type OverloadedWorkerProvider =
     Arc<dyn Fn() -> Option<HashSet<WorkerId>> + Send + Sync + 'static>;
@@ -115,6 +138,28 @@ pub struct SchedulingResponse {
     pub target_cached_prefix_blocks: u32,
     pub router_hint_candidates: Option<RouterHintRootCandidates>,
     pub potential_decode_blocks: usize,
+}
+
+/// Internal result that pairs a public scheduling response with its attempt identity.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct AdmittedSchedulingResponse {
+    pub response: SchedulingResponse,
+    pub attempt: AdmissionAttempt,
+}
+
+/// Whether an admitted scheduling response owns tracked request state.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionAttempt {
+    Untracked,
+    Tracked(AttemptId),
+}
+
+impl AdmittedSchedulingResponse {
+    pub fn into_response(self) -> SchedulingResponse {
+        self.response
+    }
 }
 
 /// A routing decision that selected less KV overlap than another eligible worker.
@@ -335,6 +380,11 @@ pub struct ScheduleRequest {
     pub isl_tokens: usize,
     pub lora_name: Option<String>,
     pub expected_output_tokens: Option<u32>,
+    /// A session-affinity target resolved by the request host.
+    ///
+    /// The default selector treats an eligible target as exclusive. Custom policies receive the
+    /// target as advisory context and may select another eligible worker.
+    pub affinity_target: Option<WorkerAffinityTarget>,
     pub pinned_worker: Option<WorkerWithDpRank>,
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
     pub routing_constraints: RoutingConstraints,
@@ -363,6 +413,9 @@ pub struct SchedulingRequest {
     pub expected_output_tokens: Option<u32>,
 
     // Routing constraints and request-level config.
+    /// Affinity target with the same default-versus-custom policy semantics as
+    /// [`ScheduleRequest::affinity_target`].
+    pub affinity_target: Option<WorkerAffinityTarget>,
     pub pinned_worker: Option<WorkerWithDpRank>,
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
     pub routing_constraints: RoutingConstraints,
@@ -535,6 +588,7 @@ mod tests {
             isl_tokens,
             lora_name: None,
             expected_output_tokens: None,
+            affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: RoutingConstraints::default(),

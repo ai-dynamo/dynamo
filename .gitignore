@@ -13,9 +13,6 @@ NOTICES.txt
 # Local extraction destinations for `docker buildx build --target {legal,sboms}`.
 legal-extract/
 sboms-extract/
-# EPP Go compliance SBOM exported by the CI EPP-build step (make sbom-export);
-# consumed by the frontend build from the build context, never committed.
-.epp-sbom/
 plans/
 *rendered.Dockerfile
 rendered.*.Dockerfile
@@ -141,7 +138,10 @@ core.*
 !/.claude/skills
 /.agents/*
 !/.agents/skills
-/.codex
+/.codex/*
+!/.codex/config.toml
+!/.codex/agents/
+!/.codex/agents/*.toml
 /CLAUDE.md
 /CLAUDE.md.bak
 
@@ -177,3 +177,7 @@ fern/components/install-selector-data.ts
 
 # Local git worktrees
 .worktrees/
+
+
+# Optimization-run artifacts (EXP_ROOT lives at runs/<EXP_ID>/ in the repo root)
+/runs/
