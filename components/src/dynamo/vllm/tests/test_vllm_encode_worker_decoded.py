@@ -3,12 +3,15 @@
 
 """Unit tests for encode-worker multimodal helpers."""
 
+import importlib.util
 import logging
 from types import SimpleNamespace
 
 import pytest
 import torch
+from PIL import Image
 
+from dynamo.vllm.constants import EmbeddingTransferMode
 from dynamo.vllm.multimodal_handlers import encode_worker_handler
 from dynamo.vllm.multimodal_handlers.encode_worker_handler import (
     EmbeddingItem,
@@ -36,6 +39,77 @@ def _handler(*, frontend_decoding: bool) -> EncodeWorkerHandler:
 
 def _embedding_item(values: torch.Tensor) -> EmbeddingItem:
     return EmbeddingItem(key=None, image_grid_thw=[], embeddings=values)
+
+
+def _image_loader_class_reading_current_env() -> type:
+    """Return an ``ImageLoader`` class that re-reads ``DYN_MM_IMAGE_CACHE_SIZE``.
+
+    ``ImageLoader.CACHE_SIZE_MAXIMUM`` is evaluated once while the class body
+    runs, and that value is then frozen into the ``cache_size`` parameter
+    default. Executing a private copy of the module picks up the environment as
+    it stands now -- which is what a worker launched with the variable exported
+    sees -- without mutating the module object the rest of the session shares.
+    """
+    spec = importlib.util.find_spec("dynamo.common.multimodal.image_loader")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.ImageLoader
+
+
+def _encode_handler_with_cache_env(monkeypatch, cache_size_env) -> EncodeWorkerHandler:
+    """Run the real ``EncodeWorkerHandler.__init__`` with the heavy parts stubbed."""
+    if cache_size_env is None:
+        monkeypatch.delenv("DYN_MM_IMAGE_CACHE_SIZE", raising=False)
+    else:
+        monkeypatch.setenv("DYN_MM_IMAGE_CACHE_SIZE", cache_size_env)
+
+    monkeypatch.setattr(
+        encode_worker_handler, "ImageLoader", _image_loader_class_reading_current_env()
+    )
+    monkeypatch.setattr(
+        encode_worker_handler, "_load_image_processor", lambda engine_args: object()
+    )
+    monkeypatch.setattr(
+        encode_worker_handler, "load_vision_model", lambda *args, **kwargs: object()
+    )
+    monkeypatch.setattr(
+        encode_worker_handler,
+        "get_encoder_components",
+        lambda *args, **kwargs: (object(), object()),
+    )
+
+    engine_args = SimpleNamespace(
+        model="model",
+        trust_remote_code=False,
+        enforce_eager=True,
+    )
+    return EncodeWorkerHandler(engine_args, EmbeddingTransferMode.LOCAL)
+
+
+@pytest.mark.parametrize(
+    "cache_size_env, expected_capacity",
+    [("2", 2), (None, 8)],
+    ids=["env-set", "env-unset-default"],
+)
+async def test_encode_worker_image_cache_capacity_follows_env(
+    monkeypatch, cache_size_env, expected_capacity
+):
+    handler = _encode_handler_with_cache_env(monkeypatch, cache_size_env)
+    try:
+        loader = handler.image_loader
+        keys = [
+            f"https://example.com/{index}.png" for index in range(expected_capacity + 1)
+        ]
+        for key in keys:
+            loader._cache_put(key, Image.new("RGB", (4, 4), color="blue"))
+
+        assert len(loader._image_cache) == expected_capacity
+        assert keys[0] not in loader._image_cache
+        assert keys[-1] in loader._image_cache
+    finally:
+        handler.cleanup()
+        await handler.send_complete_checker_task
 
 
 def test_prepare_embedding_transfers_coalesces_uneven_images():
