@@ -75,6 +75,16 @@ def _config_get(config: Any, *names: str) -> Any:
 # model's config, e.g. ``text_config`` (most VLMs) or ``thinker_config.text_config``
 # (Qwen2.5-Omni). Transformers' ``get_text_config`` picks the sub-config the same
 # way plus per-model overrides; a layout not found here falls back to transformers.
+def _is_positive_int(value: Any) -> bool:
+    """A usable size from a JSON config.
+
+    `isinstance(True, int)` is true in Python, so a config carrying
+    `"head_dim": true` would otherwise be read as an authoritative dimension of
+    1 and silently under-size the cache.
+    """
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
 _TEXT_CONFIG_KEYS = (
     "text_config",
     "llm_config",
@@ -161,7 +171,7 @@ def compute_kv_bytes_per_token(
     num_attention_heads = _config_get(config, "num_attention_heads")
     hidden_size = _config_get(config, "hidden_size")
     sizes = (num_layers, num_attention_heads, hidden_size)
-    if not all(isinstance(v, int) for v in sizes) or num_attention_heads == 0:
+    if not all(_is_positive_int(v) for v in sizes):
         logger.warning(
             "Could not compute kv_bytes_per_token: model config for %s lacks "
             "layer, head, or hidden sizes (%s)",
@@ -177,7 +187,7 @@ def compute_kv_bytes_per_token(
     # size their heads independently of hidden_size / num_attention_heads, so
     # deriving it silently mis-sizes the cache for those.
     head_dim = _config_get(config, "head_dim")
-    if not isinstance(head_dim, int) or head_dim <= 0:
+    if not _is_positive_int(head_dim):
         head_dim = hidden_size // num_attention_heads
     dtype_bytes = get_kv_cache_dtype_bytes(config, kv_cache_dtype)
     kv_bytes = num_layers * 2 * num_kv_heads * head_dim * dtype_bytes

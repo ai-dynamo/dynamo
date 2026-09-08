@@ -540,16 +540,19 @@ def test_compute_kv_bytes_uses_head_dim_when_the_config_declares_one(
     )
     monkeypatch.setitem(sys.modules, "transformers", None)
 
-    # 2 layers * 2 (K+V) * 4 kv heads * 256 head_dim * 2 bytes.
-    # Deriving 3584 // 16 = 224 would give 7168.
+    # Deriving 3584 // 16 = 224 would give 7168 instead.
     assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) == 8192
 
 
-@pytest.mark.parametrize("head_dim", [None, 0, "128"])
-def test_compute_kv_bytes_derives_head_dim_when_not_usable(
+@pytest.mark.parametrize("head_dim", [0, "128", True])
+def test_compute_kv_bytes_derives_head_dim_when_declared_but_unusable(
     monkeypatch, tmp_path, head_dim
 ):
-    """Absent, zero or non-integer head_dim falls back to the derived value."""
+    """A declared but unusable head_dim falls back to the derived value.
+
+    `True` is in here because `isinstance(True, int)` holds, so a JSON `true`
+    would otherwise be taken as an authoritative head dimension of 1.
+    """
     config = {
         "num_hidden_layers": 2,
         "num_key_value_heads": 4,
@@ -557,12 +560,10 @@ def test_compute_kv_bytes_derives_head_dim_when_not_usable(
         "hidden_size": 3584,
         "torch_dtype": "bfloat16",
     }
-    if head_dim is not None:
-        config["head_dim"] = head_dim
+    config["head_dim"] = head_dim
     (tmp_path / "config.json").write_text(json.dumps(config))
     monkeypatch.setitem(sys.modules, "transformers", None)
 
-    # 3584 // 16 = 224 head_dim.
     assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) == 7168
 
 
