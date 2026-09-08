@@ -1132,9 +1132,8 @@ impl Worker {
         // the exact primary discovery instance is callable.
         self.activate_engine_routes().await;
 
-        // Registration succeeded, no signal intervened, and the administrative
-        // routes are open: this is the first instant the worker is serviceable,
-        // so it is the first instant the health route may report ready.
+        // First instant the worker is serviceable: registered, not cancelled,
+        // and engine routes open. Nothing earlier may report ready.
         set_process_health(&endpoint, HealthStatus::Ready);
 
         let rl_endpoint = if let Some(rl_config) = rl_config {
@@ -1193,9 +1192,8 @@ impl Worker {
         // routes. No resume callback can re-register after the final unregister.
         self.begin_engine_route_shutdown().await;
 
-        // Symmetric with the ready write above: give readiness back before the
-        // orchestrator drains and unregisters, so a terminating worker stops
-        // advertising itself as ready while it is still winding down.
+        // Symmetric with the ready write: stop advertising ready before the
+        // orchestrator drains and unregisters.
         set_process_health(&endpoint, HealthStatus::NotReady);
 
         if let Some(rl_endpoint) = rl_endpoint
