@@ -11,6 +11,7 @@ import time
 
 import pytest
 from gpu_memory_service.integrations.common.kv_lease_client import (
+    KVLease,
     SharedMemoryKVLeaseClient,
     read_any_kv_lease_namespace_total_blocks,
     read_kv_lease_namespace_total_blocks,
@@ -35,6 +36,9 @@ _LEASE_ACTIVE_MUTATIONS_OFFSET = int(gms_rust_ring.KV_LEASE_ACTIVE_MUTATIONS_OFF
 _LEASE_RECOVERY_OWNER_PID_OFFSET = int(gms_rust_ring.KV_LEASE_RECOVERY_OWNER_PID_OFFSET)
 _LEASE_RECOVERY_BARRIER = int(gms_rust_ring.KV_LEASE_RECOVERY_BARRIER)
 _LEASE_RECORD_OFFSET = 64
+_LEASE_RECORD_SIZE = 16
+_LEASE_STATE_LEASED = 1
+_LEASE_STATE_SEALED = 2
 _LEASE_STATE_TRANSITION = 4
 
 
@@ -800,3 +804,40 @@ def test_shared_memory_lease_release_ignores_stale_generation(tmp_path):
     finally:
         client.close()
         shadow.close()
+
+
+def test_shared_memory_lease_seal_is_atomic_and_idempotent(tmp_path):
+    path = str(tmp_path / "atomic-seal.shm")
+    client = SharedMemoryKVLeaseClient(
+        path,
+        namespace="atomic-seal",
+        owner_id="primary",
+        total_blocks=3,
+        reserved_blocks=[0],
+    )
+    try:
+        leases = client.acquire(2)
+        stale_second = KVLease(
+            leases[1].block_id,
+            leases[1].generation + 1,
+        )
+        with pytest.raises(RuntimeError, match="committed 0/2"):
+            client.seal([leases[0], stale_second])
+
+        for lease in leases:
+            offset = _LEASE_RECORD_OFFSET + lease.block_id * _LEASE_RECORD_SIZE
+            assert struct.unpack_from("<I", client._mmap, offset)[0] == (
+                _LEASE_STATE_LEASED
+            )
+
+        client.seal(leases)
+        client.seal(leases)
+        for lease in leases:
+            offset = _LEASE_RECORD_OFFSET + lease.block_id * _LEASE_RECORD_SIZE
+            assert struct.unpack_from("<I", client._mmap, offset)[0] == (
+                _LEASE_STATE_SEALED
+            )
+        with pytest.raises(ValueError, match="duplicate block_ids"):
+            client.seal([leases[0], leases[0]])
+    finally:
+        client.close()
