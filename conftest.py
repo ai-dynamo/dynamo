@@ -35,10 +35,14 @@ _UNMANAGED_ROOTS = frozenset({"examples", "skills", ".agents"})
 _REPO_ROOT = Path(__file__).resolve().parent
 
 # Seed sys.modules with the venv copies before pytest collection runs.
+# Best-effort by construction: an engine that is present but not importable --
+# an editable install whose source tree is unreadable raises PermissionError,
+# not ImportError -- must not abort collection of the entire suite, so catch
+# everything the import can raise rather than ImportError alone.
 for _name in ("vllm", "sglang"):
     try:
         importlib.import_module(_name)
-    except ImportError:
+    except Exception:
         pass
 
 # Suppress ImportPathMismatchError when pytest later loads dynamo.vllm

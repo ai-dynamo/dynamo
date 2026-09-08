@@ -29,6 +29,21 @@
 #     4 idle warm-standby GPUs for the joining group (scale 4 -> 8).
 #   * RDMA / InfiniBand for the mooncake weight-transfer backend. Set
 #     --mooncake-ib-device to the node's IB device list before applying.
+#   * A mooncake-transfer-engine build that ships the torch ProcessGroup
+#     extension. --elastic-ep-backend mooncake is not just the weight transport:
+#     SGLang registers "mooncake" (device) and "mooncake-cpu" (CPU) as
+#     torch.distributed backends and builds the elastic-EP process groups from
+#     them, so every collective those groups run -- including the all-gather
+#     that --enable-dp-attention issues to sync MLP batch metadata -- goes
+#     through it. Two ways the image can be wrong:
+#       - The extension is compiled per torch release (pg_<major>_<minor>_<patch>,
+#         e.g. pg_2_11_0). A wheel with no module matching the image's exact
+#         torch version has no usable backend.
+#       - mooncake renamed the module mooncake.ep -> mooncake.pg; SGLang
+#         v0.5.16 imports the old name and v0.5.18 the new one, so the engine
+#         and the wheel have to agree on which one exists.
+#     The Dynamo SGLang worker checks both while parsing arguments and refuses
+#     to start with a diagnostic rather than failing after the model loads.
 #   * DYN_SYSTEM_ENABLED=true so the leader exposes the :9090 system server that
 #     serves /engine/control/*.
 #

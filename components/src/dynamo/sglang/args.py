@@ -40,6 +40,7 @@ from dynamo.sglang._compat import (
     resolved_server_args,
 )
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
+from dynamo.sglang.elastic_ep_preflight import check_elastic_ep_backend
 
 configure_dynamo_logging()
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
@@ -627,6 +628,11 @@ async def parse_args(args: list[str]) -> Config:
         server_args = ServerArgs.from_cli_args(parsed_args)
         if get_sglang_model_config(server_args).is_multimodal:
             ensure_sglang_tensor_image_size()
+
+    check_elastic_ep_backend(
+        getattr(server_args, "elastic_ep_backend", None),
+        getattr(server_args, "enable_dp_attention", False),
+    )
 
     if getattr(server_args, "schedule_low_priority_values_first", False):
         raise ValueError(
