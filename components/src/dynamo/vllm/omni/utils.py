@@ -107,7 +107,8 @@ def image_generation_size_from_request(request: dict) -> tuple[int, int]:
             width = _coerce_dimension(source["width"], "width")
         if source.get("height") is not None:
             height = _coerce_dimension(source["height"], "height")
-    return width, height
+    # Bound the size-derived dims too, not just explicit width/height overrides.
+    return _coerce_dimension(width, "width"), _coerce_dimension(height, "height")
 
 
 def image_generation_sampling_overrides(

@@ -443,7 +443,7 @@ def decode_pcm16(audio_b64: str) -> np.ndarray | None:
     if not audio_b64:
         return None
     try:
-        raw = base64.b64decode(audio_b64)
+        raw = base64.b64decode(audio_b64, validate=True)
     except ValueError:
         logger.warning("realtime omni: dropping malformed base64 audio chunk")
         return None

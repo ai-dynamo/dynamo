@@ -399,7 +399,8 @@ class AudioGenerationHandler:
         elif ref_audio_str.startswith("data:"):
             try:
                 _, encoded = ref_audio_str.split(",", 1)
-                audio_bytes = base64.b64decode(encoded)
+                # validate=True so invalid chars raise instead of being dropped.
+                audio_bytes = base64.b64decode(encoded, validate=True)
             except ValueError as exc:
                 raise ValueError("Invalid data: ref_audio (malformed base64)") from exc
             if len(audio_bytes) > self.config.tts_ref_audio_max_bytes:
