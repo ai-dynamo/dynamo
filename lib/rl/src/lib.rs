@@ -112,11 +112,19 @@ pub struct RlDiscoveryConfig {
 /// 2. `worker_suffix` (`DYN_NAMESPACE_WORKER_SUFFIX`): match exactly `{base}-{suffix}`.
 /// 3. Neither: match `base` exactly.
 ///
-/// `base` is `namespace` (`DYN_NAMESPACE`), or [`DEFAULT_NAMESPACE`] when it is absent.
-/// The suffix rule mirrors `get_worker_namespace` in
+/// `base` is `namespace` (`DYN_NAMESPACE`) whenever that variable is set, and
+/// [`DEFAULT_NAMESPACE`] only when it is unset. An explicitly empty value is kept, so a
+/// deployment that sets `DYN_NAMESPACE=` is searched under the same empty base its
+/// workers register with.
+///
+/// Both rules mirror `get_worker_namespace` in
 /// `components/src/dynamo/common/utils/namespace.py`, which is how workers pick the
-/// namespace they register under: a single ASCII hyphen, no trimming, no case folding.
-/// An empty value counts as absent, matching that helper's truthiness test.
+/// namespace they register under. Its `os.environ.get("DYN_NAMESPACE", "dynamo")` falls
+/// back only for an unset variable, and its `if suffix:` skips an empty suffix; the
+/// composition is a single ASCII hyphen, no trimming, no case folding.
+///
+/// The prefix has no counterpart in that helper. An empty one would match every
+/// namespace, so it counts as absent rather than as a scope over everything.
 ///
 /// The no-prefix, no-suffix case stays [`NamespaceFilter::Exact`] rather than going
 /// through `NamespaceFilter::from_namespace_and_prefix`, because that constructor maps
@@ -136,7 +144,7 @@ pub fn resolve_namespace_filter(
         return NamespaceFilter::Prefix(prefix.to_string());
     }
 
-    let base = present(namespace).unwrap_or(DEFAULT_NAMESPACE);
+    let base = namespace.unwrap_or(DEFAULT_NAMESPACE);
     match present(worker_suffix) {
         Some(suffix) => NamespaceFilter::Exact(format!("{base}-{suffix}")),
         None => NamespaceFilter::Exact(base.to_string()),
@@ -993,7 +1001,6 @@ mod tests {
 
     #[test]
     fn resolve_namespace_filter_precedence() {
-        // (namespace, prefix, suffix, expected)
         let cases = [
             (
                 "prefix wins over a suffix that is also set",
@@ -1022,6 +1029,27 @@ mod tests {
                 None,
                 None,
                 NamespaceFilter::Exact(DEFAULT_NAMESPACE.to_string()),
+            ),
+            (
+                "an explicitly empty namespace is kept, not defaulted",
+                Some(""),
+                None,
+                None,
+                NamespaceFilter::Exact(String::new()),
+            ),
+            (
+                "an explicitly empty namespace still takes the suffix",
+                Some(""),
+                None,
+                Some("abc123"),
+                NamespaceFilter::Exact("-abc123".to_string()),
+            ),
+            (
+                "an empty prefix counts as absent rather than matching everything",
+                Some("ns"),
+                Some(""),
+                None,
+                NamespaceFilter::Exact("ns".to_string()),
             ),
         ];
 
