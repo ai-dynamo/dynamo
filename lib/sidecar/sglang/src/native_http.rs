@@ -132,7 +132,7 @@ pub(crate) fn request(
     } else {
         None
     };
-    let input_logprobs_requested = is_truthy(body.get("return_logprob"));
+    let input_logprobs_requested = parse_return_logprob(body.get("return_logprob"));
     Ok(Some(NativeRequest {
         body: Value::Object(body),
         is_prefill: mode.is_prefill(),
@@ -143,16 +143,21 @@ pub(crate) fn request(
 }
 
 /// SGLang's `/generate` schema types `return_logprob` as a boolean, but the
-/// body is opaque client JSON. Accept the same values Python's `bool()` does so
-/// the two implementations of this endpoint agree on what "requested" means.
-fn is_truthy(value: Option<&Value>) -> bool {
+/// body reaching us is opaque client JSON. Read it the way the server will:
+/// SGLang parses the field with Pydantic, which in lax mode accepts `0`/`1`
+/// and the usual false and true spellings as strings. Plain truthiness would
+/// disagree on `"false"` and `"0"` and claim logprobs were requested when the
+/// engine saw the opposite. Anything SGLang would reject never reaches
+/// generation, so it is "not requested" here.
+fn parse_return_logprob(value: Option<&Value>) -> bool {
     match value {
-        None | Some(Value::Null) => false,
         Some(Value::Bool(flag)) => *flag,
-        Some(Value::Number(number)) => number.as_f64().is_some_and(|number| number != 0.0),
-        Some(Value::String(text)) => !text.is_empty(),
-        Some(Value::Array(items)) => !items.is_empty(),
-        Some(Value::Object(fields)) => !fields.is_empty(),
+        Some(Value::Number(number)) => number.as_f64() == Some(1.0),
+        Some(Value::String(text)) => matches!(
+            text.to_ascii_lowercase().as_str(),
+            "1" | "on" | "t" | "true" | "y" | "yes"
+        ),
+        _ => false,
     }
 }
 
@@ -441,13 +446,21 @@ fn annotate_input_logprobs_unavailable(response: &mut Value) {
     let terminal = meta_info
         .get("finish_reason")
         .is_some_and(|reason| !reason.is_null());
-    if !terminal || is_truthy(meta_info.get("input_token_logprobs")) {
+    if !terminal || has_input_logprobs(meta_info.get("input_token_logprobs")) {
         return;
     }
     meta_info.insert(
         INPUT_LOGPROBS_UNAVAILABLE_KEY.to_string(),
         Value::String(INPUT_LOGPROBS_UNAVAILABLE_DISAGG_DECODE.to_string()),
     );
+}
+
+/// SGLang reports prompt logprobs as an array of per-token entries. Absent,
+/// null, and empty all mean the same thing: this response carries none.
+fn has_input_logprobs(value: Option<&Value>) -> bool {
+    value
+        .and_then(Value::as_array)
+        .is_some_and(|entries| !entries.is_empty())
 }
 
 fn request_error(error: reqwest::Error) -> DynamoError {
@@ -499,8 +512,8 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        NativeHttp, NativeRequest, authentication_error, output, request, response_error,
-        response_has_output,
+        NativeHttp, NativeRequest, authentication_error, output, parse_return_logprob, request,
+        response_error, response_has_output,
     };
     use crate::client::Discovery;
 
@@ -648,6 +661,32 @@ mod tests {
         .unwrap();
         assert!(native.is_decode);
         assert!(!native.input_logprobs_requested);
+    }
+
+    #[test]
+    fn return_logprob_follows_sglang_boolean_parsing() {
+        // The spellings SGLang's request model accepts as false are the ones
+        // plain truthiness gets wrong: every string below is non-empty.
+        for value in [json!("false"), json!("False"), json!("0"), json!("no")] {
+            assert!(
+                !parse_return_logprob(Some(&value)),
+                "{value} should read as not requested"
+            );
+        }
+        for value in [json!("true"), json!("TRUE"), json!("1"), json!("yes")] {
+            assert!(
+                parse_return_logprob(Some(&value)),
+                "{value} should read as requested"
+            );
+        }
+        assert!(parse_return_logprob(Some(&json!(1))));
+        assert!(!parse_return_logprob(Some(&json!(0))));
+        // Values SGLang would reject outright: the request never generates, so
+        // there is nothing to explain on the way back.
+        assert!(!parse_return_logprob(Some(&json!("maybe"))));
+        assert!(!parse_return_logprob(Some(&json!(2))));
+        assert!(!parse_return_logprob(Some(&Value::Null)));
+        assert!(!parse_return_logprob(None));
     }
 
     #[test]

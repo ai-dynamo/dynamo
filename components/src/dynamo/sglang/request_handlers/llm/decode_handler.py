@@ -489,8 +489,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         input_param: Dict[str, Any],
         context: Context,
         priority: int | None,
-    ) -> AsyncIterator[Dict[str, Any]]:
-        """Build and dispatch one native SGLang request."""
+    ) -> tuple[AsyncIterator[Dict[str, Any]], bool]:
+        """Build and dispatch one native SGLang request.
+
+        Returns the response stream alongside SGLang's own reading of
+        ``return_logprob``. The opaque payload is client JSON, so only the
+        validated request says whether the engine will compute logprobs.
+        """
         raise_if_unextracted_multimodal(request)
         input_ids = input_param.get("input_ids")
         if not isinstance(input_ids, list):
@@ -519,7 +524,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             routed_dp_rank=routing.get("dp_rank"),
             lora_path=self._resolve_lora(request),
         )
-        return native_generate_stream(self.engine, native_request)
+        return (
+            native_generate_stream(self.engine, native_request),
+            bool(native_request.return_logprob),
+        )
 
     async def generate(
         self, request: Dict[str, Any], context: Context
@@ -546,7 +554,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         priority = (request.get("routing") or {}).get("priority")
         native_payload = native_generate_payload(request)
         if native_payload is not None:
-            stream = self._native_generate_stream(
+            stream, input_logprobs_requested = self._native_generate_stream(
                 request,
                 native_payload,
                 input_param,
@@ -556,7 +564,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             async for output in self._process_native_generate_stream(
                 stream,
                 context,
-                input_logprobs_requested=bool(native_payload.get("return_logprob")),
+                input_logprobs_requested=input_logprobs_requested,
             ):
                 yield output
             return

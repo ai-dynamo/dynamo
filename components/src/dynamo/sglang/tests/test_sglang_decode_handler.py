@@ -405,6 +405,20 @@ def test_engine_generate_preserves_native_fields_and_overrides_worker_state():
     }
 
 
+def test_engine_generate_reads_return_logprob_as_sglang_does():
+    # The opaque payload is client JSON. "false" is a truthy Python string but
+    # the request model parses it as false, and that reading is the one that
+    # decides whether the engine computes logprobs at all.
+    native = build_native_generate_request(
+        {"return_logprob": "false"},
+        input_ids=[1],
+        fallback_rid="request",
+        priority=None,
+    )
+
+    assert native.return_logprob is False
+
+
 def test_engine_generate_requires_object_sampling_params_for_prefill_override():
     request = {"sampling_params": [1, 2]}
 
@@ -510,7 +524,6 @@ async def test_native_generate_stream_marks_input_logprobs_unavailable_on_decode
 
     responses = [chunk["engine_data"]["sglang_response"] for chunk in chunks]
     assert responses == [streaming_response, terminal_response]
-    # Mutated in place, so the forwarded object is still the engine's own.
     assert responses[1] is terminal_response
     assert "input_logprobs_unavailable_reason" not in responses[0]["meta_info"]
     assert (
