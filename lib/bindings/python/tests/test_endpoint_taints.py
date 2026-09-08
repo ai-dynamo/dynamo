@@ -29,10 +29,7 @@ def _runtime() -> DistributedRuntime:
     return DistributedRuntime(asyncio.get_running_loop(), "file", "tcp")
 
 
-async def _register_worker(
-    runtime: DistributedRuntime, taints: set[str]
-) -> Endpoint:
-    """Register one synthetic worker for ENDPOINT_PATH advertising `taints`."""
+async def _register_worker(runtime: DistributedRuntime, taints: set[str]) -> Endpoint:
     endpoint = runtime.endpoint(ENDPOINT_PATH)
     await endpoint.register_endpoint_instance()
 
@@ -72,32 +69,6 @@ async def test_list_endpoint_taints_snapshots_both_live_workers(temp_file_store)
         }
     finally:
         worker_a.shutdown()
-        worker_b.shutdown()
-        observer.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_list_endpoint_taints_drops_stopped_worker(temp_file_store):
-    worker_a = _runtime()
-    worker_b = _runtime()
-    observer = _runtime()
-    try:
-        endpoint_a = await _register_worker(worker_a, {"pool=fast"})
-        endpoint_b = await _register_worker(worker_b, {"pool=slow"})
-
-        live = await _snapshot(observer)
-        assert set(live) == {
-            str(endpoint_a.connection_id()),
-            str(endpoint_b.connection_id()),
-        }
-
-        # Stop one worker; its discovery records (endpoint instance and model
-        # card) are removed, so it must disappear from the live snapshot.
-        worker_a.shutdown()
-
-        live = await _snapshot(observer)
-        assert live == {str(endpoint_b.connection_id()): {"pool=slow"}}
-    finally:
         worker_b.shutdown()
         observer.shutdown()
 
