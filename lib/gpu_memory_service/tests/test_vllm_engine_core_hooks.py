@@ -31,18 +31,12 @@ def test_block_pool_hbm_directory_survives_engine_replacement(monkeypatch):
 
     import gpu_memory_service.integrations.vllm.install_kv_leases as leases_mod
     from gpu_memory_service.integrations.common.kv_lease_client import KVLease
+    from vllm.v1.core import kv_cache_coordinator
     from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.kv_cache_manager import KVCacheManager
 
-    methods = (
-        "__init__",
-        "get_new_blocks",
-        "free_blocks",
-        "get_num_free_blocks",
-        "cache_full_blocks",
-        "get_cached_block",
-    )
-    originals = {name: getattr(BlockPool, name) for name in methods}
+    original_block_pool_binding = kv_cache_coordinator.BlockPool
+    original_block_pool_methods = dict(BlockPool.__dict__)
     original_allocate_slots = KVCacheManager.allocate_slots
     original_directory = leases_mod.ContentDirectory
     original_factory = leases_mod._factory
@@ -199,8 +193,12 @@ def test_block_pool_hbm_directory_survives_engine_replacement(monkeypatch):
         leases_mod._factory = None
         leases_mod.ContentDirectory = lambda *_args, **_kwargs: directory
         assert leases_mod.install(factory=lambda _total: Client())
+        GMSBlockPool = kv_cache_coordinator.BlockPool
+        assert GMSBlockPool is leases_mod._gms_block_pool_class
+        assert issubclass(GMSBlockPool, BlockPool)
+        assert dict(BlockPool.__dict__) == original_block_pool_methods
 
-        primary = BlockPool(8, True, 4)
+        primary = GMSBlockPool(8, True, 4)
         blocks = primary.get_new_blocks(2)
         primary.cache_full_blocks(
             SimpleNamespace(block_hashes=[b"a" * 32, b"b" * 32]),
@@ -231,7 +229,7 @@ def test_block_pool_hbm_directory_survives_engine_replacement(monkeypatch):
             "engine_id": "0",
         }
 
-        shadow = BlockPool(8, True, 4)
+        shadow = GMSBlockPool(8, True, 4)
         recovered = shadow.get_cached_block(b"a" * 32, [0])
         assert recovered is not None
         assert recovered[0].block_id == blocks[0].block_id
@@ -314,12 +312,33 @@ def test_block_pool_hbm_directory_survives_engine_replacement(monkeypatch):
         assert fallback[0].block_hash is None
         assert shadow.free_block_queue.get_all_free_blocks()[0] is fallback[0]
     finally:
-        for name, original in originals.items():
-            setattr(BlockPool, name, original)
+        kv_cache_coordinator.BlockPool = original_block_pool_binding
         KVCacheManager.allocate_slots = original_allocate_slots
         leases_mod.ContentDirectory = original_directory
         leases_mod._factory = original_factory
         leases_mod._patched = original_patched
+        leases_mod._gms_block_pool_class = None
+
+
+def test_allocate_slots_translates_atomic_lease_race_to_backpressure(monkeypatch):
+    import gpu_memory_service.integrations.vllm.install_kv_leases as leases_mod
+
+    def contend(*_args, **_kwargs):
+        raise leases_mod.GMSKVLeaseUnavailable("lease claimed after free-count check")
+
+    monkeypatch.setattr(leases_mod, "orig_allocate_slots", contend)
+    assert leases_mod.patched_allocate_slots(object(), object()) is None
+
+
+def test_allocate_slots_does_not_hide_unrelated_engine_errors(monkeypatch):
+    import gpu_memory_service.integrations.vllm.install_kv_leases as leases_mod
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("native allocator invariant")
+
+    monkeypatch.setattr(leases_mod, "orig_allocate_slots", fail)
+    with pytest.raises(RuntimeError, match="native allocator invariant"):
+        leases_mod.patched_allocate_slots(object(), object())
 
 
 @pytest.mark.parametrize(
