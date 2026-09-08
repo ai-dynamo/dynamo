@@ -292,6 +292,14 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.trtllm \
 
 ## Verify the Run
 
+Do not decide whether a run worked by matching strings in its logs. The strings
+differ between backends and versions, and the tail of a successful run is not
+reliably a success message: once the last request is answered and the job tears
+down, the engine process exits, and vLLM's client watches that process without
+always distinguishing an ordinary exit from a crash, so it logs `Engine core
+proc ... died unexpectedly` and raises `EngineDeadError`. That is why both
+checks below rest on an HTTP response or on an observable change in behavior.
+
 ### Gate on a Completion, Not on a Status Code
 
 `/v1/models` answers `200` with an empty `data` array while the worker is still loading. A readiness check that only looks at the status code lets the job finish as `COMPLETED` without having served anything, which is harder to notice than a crash. The Triton cache failure above lands in the same window: registration succeeds and the first inference does not. Require both a registered model and a real completion:
@@ -320,10 +328,9 @@ Read the count into a variable before comparing it. Reading `$?` after a pipe gi
 
 A successful completion does not by itself prove that both workers took part;
 the decode worker alone can answer, which makes a misconfigured disaggregated
-job look identical to a working one. Log-based checks are a poor way to tell
-them apart, because the strings differ between backends and versions. In one
-run, counting `NIXL` mentions gave 16 lines that were all initialization
-messages, and the same pattern appeared in an aggregated run.
+job look identical to a working one. Counting log lines does not separate the
+two: in one run, `NIXL` appeared 16 times and every line was an initialization
+message, and the same pattern appeared in an aggregated run.
 
 Withdrawing the prefill worker answers the question directly and does not
 depend on any log string:
@@ -361,3 +368,4 @@ Save the PID when the worker starts and kill that PID. A pattern-based `pkill -f
 | `nats: dead` while etcd reports healthy | Two jobs on the same node are sharing fixed ports. The second process attaches to the first job's control plane instead of failing to bind, so both logs look normal while the measurements are mixed. Run one job per node, or offset every port |
 | `enroot import` fails within seconds on a `404` for a manifest digest | Enroot 3.x sends only the Docker v2 media type in `Accept`, and Dynamo runtime images from `1.0.2` onward are published as OCI image indexes. The manifest list request still succeeds, because the registry ignores the header there, and the `jq` that selects the per-architecture child also succeeds because an OCI index carries the same `.manifests[].platform` shape. The failure lands on the child manifest request, which has no ignore rule. Reproduce it with the child digest, not the index digest: the index answers `200` for any `Accept`. Enroot 4.x sends both media types |
 | Blackwell Ultra worker dies with `PTXAS error: Internal Triton PTX codegen error` | The `ptxas` bundled with Triton in the image is older than the GPU. Calling it directly reports `Value 'sm_103a' is not defined for option 'gpu-name'`. The PTX comes from FlashInfer's JIT autotuner rather than from Triton itself, despite the message. Either point `TRITON_PTXAS_PATH` at a newer `ptxas` present in the same image, or use an image whose FlashInfer does not take that path. Newer images stopped hitting it, but FlashInfer and torch moved together between the two images tested, so the responsible change was not isolated |
+| A job that served every request ends with `EngineDeadError` in the worker log | Teardown, not a crash. The engine process exits when the job stops, and vLLM's client reports an exit it did not initiate as `Engine core proc ... died unexpectedly`. Look for the shutdown line earlier in the same log, and judge the run by whether the requests were answered rather than by the last line |
