@@ -86,7 +86,7 @@ pub const MAX_BEST_OF: u8 = 20;
 pub const BEST_OF_RANGE: (u8, u8) = (MIN_BEST_OF, MAX_BEST_OF);
 
 /// Maximum allowed number of stop sequences.
-pub const MAX_STOP_SEQUENCES: usize = 32;
+pub const MAX_STOP_SEQUENCES: usize = 4;
 /// Maximum allowed number of tools.
 pub const MAX_TOOLS: usize = 1536;
 // Metadata validation constants removed - we are no longer restricting the metadata field char limits
@@ -146,8 +146,15 @@ fn validate_no_unsupported_fields_with_ignore(
         anyhow::bail!("`cache_salt` must be a string");
     }
     if let Some(value) = unsupported_fields.get("stop_token_ids") {
-        serde_json::from_value::<Vec<crate::types::TokenIdType>>(value.clone())
+        let token_ids: Vec<crate::types::TokenIdType> = serde_json::from_value(value.clone())
             .map_err(|_| anyhow::anyhow!("`stop_token_ids` must be an array of token IDs"))?;
+        if token_ids.len() > MAX_STOP_SEQUENCES {
+            anyhow::bail!(
+                "Maximum of {} stop token IDs allowed, got {}",
+                MAX_STOP_SEQUENCES,
+                token_ids.len()
+            );
+        }
     }
     if let Some(value) = unsupported_fields.get("detokenize")
         && !value.is_boolean()
@@ -1020,5 +1027,61 @@ mod tests {
         }))
         .unwrap();
         validate_response_format(&Some(fmt)).unwrap();
+    }
+
+    #[test]
+    fn validate_stop_accepts_up_to_max_sequences() {
+        let four_strings = Some(dynamo_protocols::types::Stop::StringArray(vec![
+            "a".into(),
+            "b".into(),
+            "c".into(),
+            "d".into(),
+        ]));
+        validate_stop(&four_strings).unwrap();
+
+        let four_token_ids = Some(dynamo_protocols::types::Stop::TokenIdArray(vec![
+            1, 2, 3, 4,
+        ]));
+        validate_stop(&four_token_ids).unwrap();
+    }
+
+    #[test]
+    fn validate_stop_rejects_over_max_sequences() {
+        let five_strings = Some(dynamo_protocols::types::Stop::StringArray(vec![
+            "a".into(),
+            "b".into(),
+            "c".into(),
+            "d".into(),
+            "e".into(),
+        ]));
+        let err = validate_stop(&five_strings).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Maximum of 4 stop sequences allowed, got 5"
+        );
+
+        let five_token_ids = Some(dynamo_protocols::types::Stop::TokenIdArray(vec![
+            1, 2, 3, 4, 5,
+        ]));
+        let err = validate_stop(&five_token_ids).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Maximum of 4 stop token IDs allowed, got 5"
+        );
+    }
+
+    #[test]
+    fn validate_no_unsupported_fields_rejects_over_max_stop_token_ids() {
+        let unsupported_fields =
+            HashMap::from([("stop_token_ids".to_string(), json!([1, 2, 3, 4, 5]))]);
+
+        let err = validate_no_unsupported_fields(&unsupported_fields).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Maximum of 4 stop token IDs allowed, got 5"
+        );
+
+        let ok_fields = HashMap::from([("stop_token_ids".to_string(), json!([1, 2, 3, 4]))]);
+        validate_no_unsupported_fields(&ok_fields).unwrap();
     }
 }

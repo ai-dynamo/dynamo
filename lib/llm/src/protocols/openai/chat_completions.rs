@@ -950,6 +950,77 @@ mod tests {
     }
 
     #[test]
+    fn test_stop_sequence_limit_enforced_consistently() {
+        let four_stops = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": ["a", "b", "c", "d"]
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(four_stops).expect("Failed to deserialize request");
+        ValidateRequest::validate(&request).expect("exactly 4 stops must validate");
+        request
+            .extract_stop_conditions()
+            .expect("exactly 4 stops must extract");
+
+        let five_stops = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": ["a", "b", "c", "d", "e"]
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(five_stops).expect("Failed to deserialize request");
+        let err = ValidateRequest::validate(&request).expect_err("5 stops must fail validation");
+        assert_eq!(
+            err.to_string(),
+            "Maximum of 4 stop sequences allowed, got 5"
+        );
+        let err = request
+            .extract_stop_conditions()
+            .expect_err("5 stops must fail extraction");
+        assert_eq!(
+            err.to_string(),
+            "Maximum of 4 stop sequences allowed, got 5"
+        );
+
+        let five_stop_token_ids = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": [1, 2, 3, 4, 5]
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(five_stop_token_ids).expect("Failed to deserialize request");
+        let err =
+            ValidateRequest::validate(&request).expect_err("5 stop token IDs must fail validation");
+        assert_eq!(
+            err.to_string(),
+            "Maximum of 4 stop token IDs allowed, got 5"
+        );
+        let err = request
+            .extract_stop_conditions()
+            .expect_err("5 stop token IDs must fail extraction");
+        assert_eq!(
+            err.to_string(),
+            "Maximum of 4 stop token IDs allowed, got 5"
+        );
+
+        let five_passthrough_stop_token_ids = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop_token_ids": [1, 2, 3, 4, 5]
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(five_passthrough_stop_token_ids)
+                .expect("Failed to deserialize request");
+        let err = ValidateRequest::validate(&request)
+            .expect_err("5 passthrough stop token IDs must fail validation");
+        assert_eq!(
+            err.to_string(),
+            "Maximum of 4 stop token IDs allowed, got 5"
+        );
+    }
+
+    #[test]
     fn test_passthrough_token_constraints_validate() {
         let request_json = json!({
             "model": "test-model",
