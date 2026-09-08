@@ -23,7 +23,7 @@ impl ConcurrentRadixTreeCompressed {
         &self,
         sequence: &[LocalBlockHash],
         early_exit: bool,
-        retain_router_hint_chain: bool,
+        retain_kv_transfer_chain: bool,
     ) -> MatchDetails {
         let next_child = sequence
             .first()
@@ -32,7 +32,7 @@ impl ConcurrentRadixTreeCompressed {
             next_child,
             SliceHashSequence(sequence),
             early_exit,
-            retain_router_hint_chain,
+            retain_kv_transfer_chain,
         )
     }
 
@@ -42,20 +42,20 @@ impl ConcurrentRadixTreeCompressed {
         next_child: Option<SharedNode>,
         sequence: S,
         early_exit: bool,
-        retain_router_hint_chain: bool,
+        retain_kv_transfer_chain: bool,
     ) -> MatchDetails {
         let mut details = MatchDetails::new();
         if sequence.len() == 0 {
             return details;
         }
-        let mut router_hint_root_chain =
-            retain_router_hint_chain.then(|| Vec::with_capacity(sequence.len()));
+        let mut kv_transfer_chain =
+            retain_kv_transfer_chain.then(|| Vec::with_capacity(sequence.len()));
 
         let walk_result = {
             let MatchDetails {
                 overlap_scores: ref mut scores,
                 ref mut last_matched_hashes,
-                router_hint_root_candidates: _,
+                kv_transfer_candidates: _,
             } = details;
             Self::walk_match_path(
                 next_child,
@@ -63,13 +63,13 @@ impl ConcurrentRadixTreeCompressed {
                 early_exit,
                 scores,
                 Some(last_matched_hashes),
-                router_hint_root_chain.as_mut(),
+                kv_transfer_chain.as_mut(),
             )
         };
 
         Self::record_surviving_details(&mut details, &walk_result);
-        if let Some(block_hashes) = router_hint_root_chain {
-            details.retain_router_hint_root_candidates(block_hashes);
+        if let Some(block_hashes) = kv_transfer_chain {
+            details.retain_kv_transfer_candidates(block_hashes);
         }
         details
     }
@@ -83,7 +83,7 @@ impl ConcurrentRadixTreeCompressed {
         mut last_matched_hashes: Option<
             &mut FxHashMap<WorkerWithDpRank, ExternalSequenceBlockHash>,
         >,
-        mut router_hint_root_chain: Option<&mut Vec<ExternalSequenceBlockHash>>,
+        mut kv_transfer_chain: Option<&mut Vec<ExternalSequenceBlockHash>>,
     ) -> MatchWalkResult {
         let mut active: FxHashSet<WorkerWithDpRank> = FxHashSet::default();
         let mut active_count: usize = 0;
@@ -114,7 +114,7 @@ impl ConcurrentRadixTreeCompressed {
                 active_count,
                 scores,
                 last_matched_hashes: last_matched_hashes.as_deref_mut(),
-                router_hint_root_chain: router_hint_root_chain.as_deref_mut(),
+                kv_transfer_chain: kv_transfer_chain.as_deref_mut(),
             });
             let edge_len = outcome.edge_len;
             let edge_match_len = outcome.edge_match_len;

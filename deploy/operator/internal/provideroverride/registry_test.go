@@ -69,12 +69,12 @@ func TestExpectedTarget(t *testing.T) {
 		{name: "single-node component PodClique", provider: consts.WorkloadProviderGrove, version: GroveAPIVersion, scope: ScopeComponent, component: singleNode, want: TargetPodCliqueTemplateSpec},
 		{name: "multinode component scaling group", provider: consts.WorkloadProviderGrove, version: GroveAPIVersion, scope: ScopeComponent, component: multinode, want: TargetPodCliqueScalingGroupConfig},
 		{name: "forced component scaling group", provider: consts.WorkloadProviderGrove, version: GroveAPIVersion, scope: ScopeComponent, component: forcedScalingGroup, want: TargetPodCliqueScalingGroupConfig},
-		{name: "multinode leader PodClique", provider: consts.WorkloadProviderGrove, version: GroveAPIVersion, scope: ScopeMultinodeLeader, component: multinode, want: TargetPodCliqueTemplateSpec},
-		{name: "multinode worker PodClique", provider: consts.WorkloadProviderGrove, version: GroveAPIVersion, scope: ScopeMultinodeWorker, component: multinode, want: TargetPodCliqueTemplateSpec},
+		{name: "multinode leader PodClique", provider: consts.WorkloadProviderGrove, version: GroveAPIVersion, scope: ScopeRoleLeader, component: multinode, want: TargetPodCliqueTemplateSpec},
+		{name: "multinode worker PodClique", provider: consts.WorkloadProviderGrove, version: GroveAPIVersion, scope: ScopeRoleWorker, component: multinode, want: TargetPodCliqueTemplateSpec},
 		{name: "component provider unsupported", provider: consts.WorkloadProviderComponent, version: GroveAPIVersion, scope: ScopeRoot, wantErr: "does not support provider overrides"},
 		{name: "version unsupported", provider: consts.WorkloadProviderGrove, version: "grove.io/v2", scope: ScopeRoot, wantErr: "unsupported Grove apiVersion"},
-		{name: "role requires multinode", provider: consts.WorkloadProviderGrove, version: GroveAPIVersion, scope: ScopeMultinodeLeader, component: singleNode, wantErr: "requires a multinode component"},
-		{name: "GMS roles unsupported", provider: consts.WorkloadProviderGrove, version: GroveAPIVersion, scope: ScopeMultinodeWorker, component: interPodGMS, wantErr: "not supported for inter-pod GMS"},
+		{name: "role requires multinode", provider: consts.WorkloadProviderGrove, version: GroveAPIVersion, scope: ScopeRoleLeader, component: singleNode, wantErr: "requires a multinode component"},
+		{name: "GMS roles unsupported", provider: consts.WorkloadProviderGrove, version: GroveAPIVersion, scope: ScopeRoleWorker, component: interPodGMS, wantErr: "not supported for inter-pod GMS"},
 	}
 
 	for _, tt := range tests {
