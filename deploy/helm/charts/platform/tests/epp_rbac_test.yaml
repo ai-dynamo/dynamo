@@ -1,14 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# The EPP reads its own peer Service by name at startup when DYN_EPP_PEER_SERVICE
-# is set (ensure_peer_service_exists in deploy/inference-gateway/ext-proc). Without
-# a core-API services/get grant on the role bound to epp-serviceaccount, the API
-# server denies that read and the replicated EPP never becomes ready.
-#
-# `contains` matches a rule element exactly, so pinning verbs to ["get"] is also
-# the negative control: widening the grant (create/update/delete/patch, or a
-# wildcard) changes the element and fails these assertions.
+# EPP reads its peer Service at startup when DYN_EPP_PEER_SERVICE is set; without
+# core services/get the replicated EPP never becomes ready.
 suite: EPP RBAC — core services/get for peer discovery
 templates:
   - charts/dynamo-operator/templates/epp.yaml
