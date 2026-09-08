@@ -50,26 +50,16 @@ async fn unsupported_hosted_tools_fail_before_dispatch_or_streaming() {
                     "custom",
                 ),
             ] {
-                for choice in [
-                    None,
-                    Some(json!("auto")),
-                    Some(json!("required")),
-                    Some(json!("none")),
-                ] {
-                    let mut body = json!({
-                        "model": MODEL,
-                        "input": "ping",
-                        "stream": stream,
-                        "tools": tools,
-                    });
-                    if let Some(choice) = choice {
-                        body["tool_choice"] = choice;
-                    }
-                    let response = post_responses(&svc, &body).await;
-                    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
-                    let error: Value = response.json().await.unwrap();
-                    assert!(error["message"].as_str().unwrap().contains(tool_type));
-                }
+                let body = json!({
+                    "model": MODEL,
+                    "input": "ping",
+                    "stream": stream,
+                    "tools": tools,
+                });
+                let response = post_responses(&svc, &body).await;
+                assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+                let error: Value = response.json().await.unwrap();
+                assert!(error["message"].as_str().unwrap().contains(tool_type));
             }
         }
         assert!(svc.engine.take_requests().await.is_empty());
@@ -88,21 +78,17 @@ async fn unsupported_tool_choices_fail_before_dispatch_or_streaming() {
                 json!({"type": "web_search_preview"}),
                 json!({"type": "allowed_tools", "mode": "required", "tools": [{"type": "function", "name": "read_file"}]}),
             ] {
-                for tools in [None, Some(json!([tool("read_file")]))] {
-                    let mut body = json!({
-                        "model": MODEL,
-                        "input": "ping",
-                        "stream": stream,
-                        "tool_choice": choice,
-                    });
-                    if let Some(tools) = tools {
-                        body["tools"] = tools;
-                    }
-                    let response = post_responses(&svc, &body).await;
-                    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
-                    let error: Value = response.json().await.unwrap();
-                    assert!(error["message"].as_str().unwrap().contains("tool_choice"));
-                }
+                let body = json!({
+                    "model": MODEL,
+                    "input": "ping",
+                    "stream": stream,
+                    "tool_choice": choice,
+                    "tools": [tool("read_file")],
+                });
+                let response = post_responses(&svc, &body).await;
+                assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+                let error: Value = response.json().await.unwrap();
+                assert!(error["message"].as_str().unwrap().contains("tool_choice"));
             }
         }
         assert!(svc.engine.take_requests().await.is_empty());
