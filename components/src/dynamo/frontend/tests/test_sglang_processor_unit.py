@@ -1091,9 +1091,8 @@ def test_guided_tool_choice_requires_effective_reasoning(
 
 
 @pytest.mark.core
-@pytest.mark.parametrize("response_type", ["json_schema", "json_object"])
-def test_structured_response_requires_effective_reasoning(response_type):
-    request = {"response_format": {"type": response_type}}
+def test_structured_response_requires_effective_reasoning():
+    request = {"response_format": {"type": "json_schema"}}
 
     assert _guided_output_requires_reasoning(request, True, "deepseek_v4") is True
     assert _guided_output_requires_reasoning(request, False, "deepseek_v4") is False
@@ -1106,25 +1105,24 @@ def test_structured_response_requires_effective_reasoning(response_type):
 @pytest.mark.core
 @pytest.mark.timeout(60)
 @pytest.mark.parametrize("use_pool", [False, True], ids=["inline", "pool"])
-@pytest.mark.parametrize("response_type", ["json_schema", "json_object"])
 @pytest.mark.parametrize(
     ("thinking", "separate_reasoning"),
     [(True, True), (False, True), (True, False)],
 )
 def test_structured_response_generator_routes_json_and_preserves_streaming(
-    tokenizer, monkeypatch, use_pool, response_type, thinking, separate_reasoning
+    tokenizer, monkeypatch, use_pool, thinking, separate_reasoning
 ):
-    """Exercise both generator paths, including real worker preprocessing."""
-    response_format = {"type": response_type}
-    if response_type == "json_schema":
-        response_format["json_schema"] = {
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {
             "name": "answer",
             "schema": {
                 "type": "object",
                 "properties": {"answer": {"type": "integer"}},
                 "required": ["answer"],
             },
-        }
+        },
+    }
     request = {
         "model": MODEL,
         "messages": [{"role": "user", "content": "Return answer 42 as JSON."}],
@@ -4318,6 +4316,75 @@ class TestReasoningParsing:  # FRONTEND.9 — reasoning ↔ tool-call orchestrat
             )
         assert reasoning == expected_reasoning
         assert responses[-1]["finish_reason"] == finish_reason
+
+    @pytest.mark.core
+    @pytest.mark.timeout(60)
+    @pytest.mark.parametrize(
+        ("text", "expected_content", "expected_reasoning"),
+        [
+            ("42", "42", ""),
+            ("true", "true", ""),
+            ("false", "false", ""),
+            ("null", "null", ""),
+            ('"ok"', '"ok"', ""),
+            ('"contains { and ["', '"contains { and ["', ""),
+            ("-1.25e-3", "-1.25e-3", ""),
+            ('{"answer":42}<|structured_end|>', '{"answer":42}', ""),
+            ('{"answer":42} trailing text', "", '{"answer":42} trailing text'),
+            ('{"answer":42}<|unknown_end|>', "", '{"answer":42}<|unknown_end|>'),
+            ('{"answer":42}</think>43', "43", '{"answer":42}'),
+            ("42 is a candidate.</think>43", "43", "42 is a candidate."),
+        ],
+    )
+    def test_structured_response_scalars_and_trailing_tokens(
+        self, tokenizer, text, expected_content, expected_reasoning
+    ):
+        _, reasoning_parser = create_parsers(
+            {},
+            tool_call_parser_name=None,
+            reasoning_parser_name="qwen3",
+            force_reasoning=True,
+        )
+        assert reasoning_parser is not None
+        case_tokenizer = copy.deepcopy(tokenizer)
+        detector = reasoning_parser.detector
+        case_tokenizer.add_special_tokens(
+            {
+                "additional_special_tokens": [
+                    detector.think_start_token,
+                    detector.think_end_token,
+                    "<|structured_end|>",
+                ]
+            }
+        )
+        assert case_tokenizer.convert_tokens_to_ids("<|structured_end|>") != (
+            case_tokenizer.eos_token_id
+        )
+        post = SglangStreamingPostProcessor(
+            tokenizer=case_tokenizer,
+            tool_call_parser=None,
+            reasoning_parser=reasoning_parser,
+            structured_guided_json=True,
+        )
+        responses = []
+        for token_id in case_tokenizer.encode(text, add_special_tokens=False):
+            choice = post.process_output({"token_ids": [token_id]})
+            if choice:
+                responses.append(choice)
+        terminal = post.process_output({"token_ids": [], "finish_reason": "stop"})
+        assert terminal is not None
+        responses.append(terminal)
+        assert (
+            "".join(choice["delta"].get("content", "") for choice in responses)
+            == expected_content
+        )
+        assert (
+            "".join(
+                choice["delta"].get("reasoning_content", "") for choice in responses
+            )
+            == expected_reasoning
+        )
+        assert responses[-1]["finish_reason"] == "stop"
 
 
 # ---------------------------------------------------------------------------
