@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 use crate::backend::ExecutionContext;
 use crate::kv_router::publisher::{KvEventPublisher, KvEventSourceConfig, WorkerMetricsPublisher};
 use crate::protocols::TokenIdType;
+use crate::protocols::common::FinishReason;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use anyhow::{Context, Result, bail};
 use dynamo_kv_router::protocols::{KvCacheEvent, StorageTier};
@@ -798,6 +799,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let (request, ctx) = input.into_parts();
         let request_start = Instant::now();
         let native_sglang = sglang::response_metadata(&request, ctx.id()).map_err(Error::from)?;
+        let native_sglang_terminal = native_sglang.is_some();
 
         let dp_rank = self.resolve_dp_rank(&request);
 
@@ -1161,10 +1163,21 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         }
 
                         if signal.completed {
-                            if !send_response(&stream_tx, output, &async_context).await {
-                                break;
+                            let mut terminal_output = Some(output);
+                            if !native_sglang_terminal {
+                                if !send_response(
+                                    &stream_tx,
+                                    terminal_output
+                                        .take()
+                                        .expect("completed request has a terminal token"),
+                                    &async_context,
+                                )
+                                .await
+                                {
+                                    break;
+                                }
+                                native_timing.record_tokens(1);
                             }
-                            native_timing.record_tokens(1);
 
                             let delay_completed = tokio::select! {
                                 _ = wait_for_no_bootstrap_handoff_delay(
@@ -1224,26 +1237,45 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                 }
                             }
 
-                            let mut final_output = LLMEngineOutput::length();
-                            if let Some(cached) = cached_prefix_tokens {
-                                final_output.completion_usage = Some(usage_with_cached_tokens(
-                                    prompt_tokens_count,
-                                    token_count,
-                                    cached,
-                                ));
-                            }
-                            if !send_response(&stream_tx, final_output, &async_context).await {
-                                break;
+                            if native_sglang_terminal {
+                                // Native SGLang carries terminal metadata on the final token.
+                                let mut output = terminal_output
+                                    .take()
+                                    .expect("native SGLang request has a terminal token");
+                                output.finish_reason = Some(FinishReason::Length);
+                                if let Some(cached) = cached_prefix_tokens {
+                                    output.completion_usage = Some(usage_with_cached_tokens(
+                                        prompt_tokens_count,
+                                        token_count,
+                                        cached,
+                                    ));
+                                }
+                                if !send_response(&stream_tx, output, &async_context).await {
+                                    break;
+                                }
+                                native_timing.record_tokens(1);
+                            } else {
+                                let mut final_output = LLMEngineOutput::length();
+                                if let Some(cached) = cached_prefix_tokens {
+                                    final_output.completion_usage = Some(usage_with_cached_tokens(
+                                        prompt_tokens_count,
+                                        token_count,
+                                        cached,
+                                    ));
+                                }
+                                if !send_response(&stream_tx, final_output, &async_context).await {
+                                    break;
+                                }
                             }
                             native_timing.record_normal_completion();
                             request_completed_normally = true;
                             break;
+                        } else {
+                            if !send_response(&stream_tx, output, &async_context).await {
+                                break;
+                            }
+                            native_timing.record_tokens(1);
                         }
-
-                        if !send_response(&stream_tx, output, &async_context).await {
-                            break;
-                        }
-                        native_timing.record_tokens(1);
                     }
 
                     _ = async_context.stopped() => {
@@ -1444,6 +1476,39 @@ mod tests {
         let mut expected_finish = LLMEngineOutput::length();
         expected_finish.completion_usage = Some(usage_with_cached_tokens(3, 1, 0));
         assert_eq!(stream.next().await.unwrap().data.unwrap(), expected_finish);
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn native_sglang_completion_attaches_length_to_final_token() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(64)
+            .max_num_batched_tokens(Some(64))
+            .speedup_ratio(1000.0)
+            .build()
+            .unwrap();
+        let live = LiveEngine::start(args.clone(), 0).unwrap();
+        let engine = MockerExecutionContext::new(args);
+        assert!(engine.engines.set(vec![live]).is_ok());
+
+        let mut request = decode_request(3, 1);
+        request.extra_args = Some(serde_json::json!({"sglang_tito": {"rid": "native"}}));
+
+        let mut stream = engine.generate(SingleIn::new(request)).await.unwrap();
+        let output = stream.next().await.unwrap().data.unwrap();
+        assert_eq!(output.token_ids.len(), 1);
+        assert_eq!(
+            output.finish_reason,
+            LLMEngineOutput::length().finish_reason
+        );
+        let response = &output.engine_data.as_ref().unwrap()["sglang_response"];
+        assert_eq!(response["output_ids"], serde_json::json!(output.token_ids));
+        assert_eq!(response["meta_info"]["completion_tokens"], 1);
+        assert_eq!(
+            response["meta_info"]["finish_reason"],
+            serde_json::json!({"type": "length"})
+        );
         assert!(stream.next().await.is_none());
     }
 

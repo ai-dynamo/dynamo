@@ -122,6 +122,7 @@ def test_native_generate_replays_incremental_ids_and_keeps_openai_canonical(
 
     terminal = [event for event in events if event["meta_info"]["finish_reason"]]
     assert terminal == [events[-1]]
+    assert events[-1]["output_ids"] == [OUTPUT_IDS[-1]]
     terminal_meta = events[-1]["meta_info"]
     assert terminal_meta["finish_reason"] == {"type": "length"}
     assert terminal_meta["input_token_logprobs"][0] == [None, INPUT_IDS[1], None]
