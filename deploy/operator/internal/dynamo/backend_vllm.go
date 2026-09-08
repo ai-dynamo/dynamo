@@ -87,10 +87,19 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 			container.ReadinessProbe = nil
 			container.StartupProbe = nil
 		}
-	} else if role == RoleMain && b.elasticEPRayLaunch(container) {
+	} else if role == RoleMain && IsSinglePodElasticEPLeader(component, b.ElasticEPRayPoCEnabled) {
 		// A single-pod elastic-EP component still needs a Ray head, so that
 		// follower pods created later have a cluster to join. Only the leader
 		// arm applies here: a lone pod is expanded as RoleMain, never RoleWorker.
+		//
+		// The full leader predicate, not just the gate and the launch flags. Synthesis
+		// and both Service pathways already defer to it, so gating on less here rewrites
+		// the pod template of shapes that get no follower and no Service -- replicas > 1,
+		// or the flags on a non-worker. That matters on the gate-off-to-on transition:
+		// admission runs on create and update, never on a gate flip, so a component
+		// accepted while the gate was off is not re-admitted when it is switched on. The
+		// narrower check would then rewrite its command, rolling a running deployment
+		// into a shape this operator declines to admit.
 		if injectElasticEPRayLaunchFlags(container, role, serviceName, multinodeDeployer, "") {
 			// Bind both addresses only when a Ray head was actually injected.
 			//
@@ -624,6 +633,11 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 // and the operator is allowed to act on it. IsElasticEPRayLaunch answers the first
 // half -- what the engine intends -- and the gate answers the second, which is the
 // administrator's to grant.
+//
+// Only the RoleFollower arm uses this. The leader arm applies the full
+// IsSinglePodElasticEPLeader predicate, which a follower deliberately fails: it rests
+// at zero replicas. A follower exists only because synthesis already applied that
+// predicate to its leader, so it inherits the guarantee rather than re-testing it.
 func (b *VLLMBackend) elasticEPRayLaunch(container *corev1.Container) bool {
 	return b.ElasticEPRayPoCEnabled && IsElasticEPRayLaunch(container)
 }
