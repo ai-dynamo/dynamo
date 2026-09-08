@@ -1098,7 +1098,6 @@ pub struct ActiveLoad {
     ///
     /// This is published by workers only and is the authoritative signal for
     /// backend KV occupancy used by overload detection.
-    #[serde(default)]
     pub kv_used_blocks: Option<u64>,
 }
 
@@ -1156,7 +1155,6 @@ pub struct ActiveSequenceEvent {
     /// Source DRT identity, used to suppress a publisher's own echo. Router events use the router
     /// ID; worker-origin completion marks use the worker ID.
     pub router_id: u64,
-    #[serde(default)]
     pub lora_name: Option<String>,
 }
 
@@ -1183,7 +1181,6 @@ pub enum ActiveSequenceEventData {
         #[serde(default = "default_track_prefill_tokens")]
         track_prefill_tokens: bool,
         expected_output_tokens: Option<u32>,
-        #[serde(default)]
         prefill_load_hint: Option<PrefillLoadHint>,
     },
     // NOTE: Output-block growth is intentionally not a replica-sync event. It can occur
@@ -1246,7 +1243,6 @@ pub struct KvCacheStoreData {
     /// The optional hash of the parent block.
     pub parent_hash: Option<ExternalSequenceBlockHash>,
     /// Absolute position of the first block in this batch for positional replay.
-    #[serde(default)]
     pub start_position: Option<u32>,
     /// A list of stored blocked data.
     pub blocks: Vec<KvCacheStoredBlockData>,
@@ -1367,7 +1363,6 @@ pub struct KvCacheStoredBlockData {
     /// Extra multimodal metadata for this block
     /// Note: Do NOT use skip_serializing_if with bincode - it breaks deserialization
     /// because bincode is positional and expects all fields to be present.
-    #[serde(default)]
     pub mm_extra_info: Option<BlockExtraInfo>,
 }
 

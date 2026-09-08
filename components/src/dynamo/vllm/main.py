@@ -226,6 +226,7 @@ async def worker(argv: list[str] | None = None) -> None:
         discovery_backend=config.discovery_backend,
         request_plane=config.request_plane,
         event_plane=config.event_plane,
+        response_plane=config.response_plane,
     )
 
     if snapshot_controller is not None:
