@@ -23,12 +23,9 @@ REMOVERS = (remove_all_argument_occurrences, remove_valued_arguments)
 
 @pytest.mark.parametrize("remove", REMOVERS)
 def test_key_without_a_value_does_not_consume_the_next_flag(remove) -> None:
-    """A key left without a value must take only itself.
-
-    Both removers used to delete the following token unconditionally, so a
-    mistyped ``--tp`` swallowed the next argument as well and left its value
-    behind as a stray positional.
-    """
+    """Both removers used to delete the following token unconditionally, so a
+    mistyped ``--tp`` swallowed the next argument and left its value behind as
+    a stray positional."""
     args = ["--tp", "--model-path", "/models/m", "--trust-remote-code"]
 
     assert remove(list(args), "--tp") == [

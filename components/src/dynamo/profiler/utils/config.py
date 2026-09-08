@@ -251,8 +251,6 @@ def remove_all_argument_occurrences(args: list[str], arg_name: str) -> list[str]
         arg = args[index]
         if arg == arg_name:
             index += 1
-            # Only consume a value. A following flag belongs to another
-            # argument, so a key left without one takes just itself.
             if index < len(args) and not _is_flag(args[index]):
                 index += 1
             continue
