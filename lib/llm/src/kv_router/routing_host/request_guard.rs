@@ -5,11 +5,8 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     kv_router::{
-        KvRouter,
-        indexer::ApproximateRequestLease,
-        metrics::RouterRequestMetrics,
-        prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION,
-        request_lease::RequestAttemptLease,
+        KvRouter, indexer::ApproximateRequestLease, metrics::RouterRequestMetrics,
+        prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION, request_lease::RequestAttemptLease,
         scheduler::SchedulerBookingDescriptor,
     },
     lora::LoadEstimator,

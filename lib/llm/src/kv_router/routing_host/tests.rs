@@ -1305,7 +1305,7 @@ async fn router_with_recorded_dispatch_and_affinity(
         workers,
         None,
         16,
-        DefaultWorkerSelector::new(Some(config.clone()), "decode"),
+        crate::kv_router::SelectionPolicySource::Registry,
         Some(config),
         None,
         "decode",
@@ -2681,7 +2681,7 @@ async fn builtin_host_with_recorded_dispatch(
     )
     .await
     .unwrap();
-    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin(inner, load_context).unwrap();
+    let host = RoutingHost::new_builtin(inner, load_context).unwrap();
     (host, dispatch, worker_id, runtime)
 }
 

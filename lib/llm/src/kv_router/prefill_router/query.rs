@@ -241,8 +241,9 @@ mod tests {
         time::Duration,
     };
 
+    use crate::local_model::runtime_config::ModelRuntimeConfig;
     use async_trait::async_trait;
-    use dynamo_kv_router::{config::KvRouterConfig, selector::DefaultWorkerSelector};
+    use dynamo_kv_router::config::KvRouterConfig;
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
         component::Instance,
@@ -483,12 +484,7 @@ mod tests {
         (shared, prefill, worker_runtimes, workers)
     }
 
-    async fn tracked_binding(
-        label: &str,
-    ) -> (
-        Arc<PrefillBinding<DefaultWorkerSelector>>,
-        Arc<KvRouter<DefaultWorkerSelector>>,
-    ) {
+    async fn tracked_binding(label: &str) -> (Arc<PrefillBinding>, Arc<KvRouter>) {
         let runtime = Runtime::from_current().unwrap();
         let distributed = DistributedRuntime::new(runtime, DistributedConfig::process_local())
             .await
@@ -524,7 +520,7 @@ mod tests {
                 workers_rx,
                 None,
                 16,
-                DefaultWorkerSelector::new(Some(config.clone()), "prefill"),
+                crate::kv_router::SelectionPolicySource::Registry,
                 Some(config),
                 None,
                 Some(WorkerType::Prefill),
@@ -549,10 +545,7 @@ mod tests {
         (binding, chooser)
     }
 
-    async fn tracked_prefill_router() -> (
-        Arc<PrefillRouter<DefaultWorkerSelector>>,
-        Arc<KvRouter<DefaultWorkerSelector>>,
-    ) {
+    async fn tracked_prefill_router() -> (Arc<PrefillRouter>, Arc<KvRouter>) {
         let (binding, chooser) = tracked_binding("primary").await;
         let router = PrefillRouter::disabled(Arc::new(ModelManager::new()), RouterMode::KV, None);
         router.binding.store(Some(binding));
