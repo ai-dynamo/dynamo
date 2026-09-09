@@ -206,6 +206,8 @@ For **production environments**, Kai Scheduler and Grove should be installed sep
 
 Grove should be upgraded in lockstep with Dynamo while Grove APIs are not stable. Dynamo 1.3.x expects Grove's earlier `ClusterTopology` API and is incompatible with the newer `ClusterTopologyBinding` API; Dynamo 1.4.x expects `ClusterTopologyBinding`.
 
+Grove `v0.1.0-alpha.13` enables its `kai-scheduler` backend by default. When using Grove with KAI Scheduler, disable KAI's independent stale PodGroup eviction by setting `scheduler.args.default-staleness-grace-period` to `"-1"`; Grove owns PodGroup termination timing. The bundled subcharts configure this automatically. The bundled Grove subchart also enables its CRD installer so new and updated Grove CRDs are applied before its operator starts during upgrades.
+
 After installing them separately, enable Dynamo integration:
 
 Kai Scheduler:

@@ -281,6 +281,9 @@ grove:
   tolerations: []
   # -- Affinity for Grove pods
   affinity: {}
+  crdInstaller:
+    # -- Upgrade Grove CRDs before the bundled operator starts.
+    enabled: true
   config:
     server:
       healthProbes:
@@ -298,6 +301,10 @@ kai-scheduler:
     tolerations: []
     # -- Affinity for kai-scheduler pods
     affinity: {}
+  scheduler:
+    args:
+      # -- Disable KAI's stale PodGroup eviction because Grove owns PodGroup termination timing.
+      default-staleness-grace-period: "-1"
 
 # etcd configuration - distributed key-value store
 # Installation is controlled by global.etcd.install above.

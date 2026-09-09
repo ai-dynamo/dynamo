@@ -227,9 +227,11 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.checkpoint.enabled | bool | `false` | Whether to enable checkpoint/restore functionality |
 | grove.tolerations | list | `[]` | Node tolerations for Grove pods |
 | grove.affinity | object | `{}` | Affinity for Grove pods |
+| grove.crdInstaller.enabled | bool | `true` | Upgrade Grove CRDs before the bundled operator starts. |
 | grove.config.server.healthProbes.enable | bool | `true` | Enable Grove's webhook-aware liveness and readiness probes. The readiness endpoint stays false until certificates and the webhook server are ready. |
 | kai-scheduler.global.tolerations | list | `[]` | Node tolerations for kai-scheduler pods |
 | kai-scheduler.global.affinity | object | `{}` | Affinity for kai-scheduler pods |
+| kai-scheduler.scheduler.args.default-staleness-grace-period | string | `"-1"` | Disable KAI's stale PodGroup eviction because Grove owns PodGroup termination timing. |
 | etcd.image.repository | string | `"bitnamilegacy/etcd"` | following bitnami announcement for brownout - https://github.com/bitnami/charts/tree/main/bitnami/etcd#%EF%B8%8F-important-notice-upcoming-changes-to-the-bitnami-catalog, we need to use the legacy repository until we migrate to the new "secure" repository |
 
 ### NATS Configuration
@@ -293,6 +295,8 @@ For **production environments**, Kai Scheduler and Grove should be installed sep
 | 1.5.x           | >= v0.17.0    | >= v0.1.0-alpha.13 |
 
 Grove should be upgraded in lockstep with Dynamo while Grove APIs are not stable. Dynamo 1.3.x expects Grove's earlier `ClusterTopology` API and is incompatible with the newer `ClusterTopologyBinding` API; Dynamo 1.4.x expects `ClusterTopologyBinding`.
+
+Grove `v0.1.0-alpha.13` enables its `kai-scheduler` backend by default. When using Grove with KAI Scheduler, disable KAI's independent stale PodGroup eviction by setting `scheduler.args.default-staleness-grace-period` to `"-1"`; Grove owns PodGroup termination timing. The bundled subcharts configure this automatically. The bundled Grove subchart also enables its CRD installer so new and updated Grove CRDs are applied before its operator starts during upgrades.
 
 After installing them separately, enable Dynamo integration:
 

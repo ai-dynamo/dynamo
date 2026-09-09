@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: Grove and KAI Scheduler integration
+templates:
+  - charts/grove/templates/configmap-operator.yaml
+  - charts/grove/templates/deployment.yaml
+  - charts/kai-scheduler/templates/default-shard.yaml
+tests:
+  - it: enables Grove's KAI scheduler backend
+    template: charts/grove/templates/configmap-operator.yaml
+    set:
+      global.grove.install: true
+      global.kai-scheduler.install: true
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '(?s)scheduler:\n  profiles:\n  - name: default-scheduler\n  - name: kai-scheduler'
+
+  - it: lets Grove own stale PodGroup termination timing
+    template: charts/kai-scheduler/templates/default-shard.yaml
+    set:
+      global.grove.install: true
+      global.kai-scheduler.install: true
+    asserts:
+      - equal:
+          path: spec.args["default-staleness-grace-period"]
+          value: "-1"
+
+  - it: upgrades Grove CRDs before starting its operator
+    template: charts/grove/templates/deployment.yaml
+    set:
+      global.grove.install: true
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: crd-installer
