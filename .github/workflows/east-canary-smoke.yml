@@ -14,26 +14,30 @@ permissions:
   contents: read
 
 jobs:
-  gpu-builder-v1-smoke:
-    name: East GPU builder v1 DinD capacity smoke
-    runs-on: prod-builder-amd-gpu-v1-east-canary
-    timeout-minutes: 30
+  cpu-burst:
+    name: East CPU burst slot ${{ matrix.slot }}
+    runs-on: prod-default-v2-east-canary
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        slot: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     steps:
-      - name: Verify Docker and nested GPU access
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Verify runner and hold burst
         shell: bash
         run: |
           set -euo pipefail
+          echo "slot=${{ matrix.slot }}"
           echo "runner_name=${RUNNER_NAME}"
           echo "runner_os=${RUNNER_OS}"
           echo "runner_arch=${RUNNER_ARCH}"
           echo "hostname=$(hostname)"
-          docker info
-          gpu_output=$(docker run --rm --gpus all busybox:1.37 sh -c '
-            for device in /dev/nvidia[0-9]*; do
-              [ -e "${device}" ] && printf "%s\n" "${device}"
-            done
-          ')
-          printf '%s\n' "${gpu_output}"
-          gpu_count=$(printf '%s\n' "${gpu_output}" | grep -c '^/dev/nvidia[0-9]')
-          echo "gpu_device_count=${gpu_count}"
-          test "${gpu_count}" -eq 1
+          test "${RUNNER_OS}" = Linux
+          test -f Cargo.toml
+          sleep 45
