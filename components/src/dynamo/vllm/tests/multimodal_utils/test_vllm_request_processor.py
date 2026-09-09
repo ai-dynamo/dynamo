@@ -1054,6 +1054,49 @@ async def test_qwen_decode_reconstructs_placeholder_embeddings(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_qwen_decode_merges_placeholder_image_with_reloaded_video(monkeypatch):
+    processor = _processor()
+    image = {"placeholder": object()}
+    video = object()
+    processor.video_loader.load_video_batch.return_value = [video]
+    monkeypatch.setattr(
+        mod,
+        "construct_qwen_decode_mm_data",
+        lambda grid, shape, request_id: {"image": image},
+    )
+    video_items = [{"Url": "https://example.com/video.mp4"}]
+
+    prepared = await _prepare_prompt(
+        processor,
+        {
+            "token_ids": [1, 2],
+            "multi_modal_data": {
+                "image_url": [{"Url": "https://example.com/image.png"}],
+                "video_url": video_items,
+            },
+            "prefill_result": {
+                "disaggregated_params": {
+                    "embedding_params": {
+                        "image_grid_thw": [[1, 2, 2]],
+                        "embeddings_shape": [1, 16],
+                    }
+                }
+            },
+        },
+        "request-mixed-decode",
+        None,
+        DisaggregationMode.DECODE,
+    )
+
+    assert prepared.prompt["multi_modal_data"] == {
+        "image": image,
+        "video": video,
+    }
+    processor.image_loader.load_image_batch.assert_not_awaited()
+    processor.video_loader.load_video_batch.assert_awaited_once_with(video_items, {})
+
+
+@pytest.mark.asyncio
 async def test_non_qwen_decode_uses_expanded_prompt_tokens():
     processor = _processor(model="llava-hf/llava-1.5-7b-hf")
 

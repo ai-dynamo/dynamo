@@ -14,7 +14,7 @@
 //! - **Runtime**: Tokio runtime configuration and system server settings
 //! - **NATS**: NATS client connection and authentication
 //! - **ETCD**: ETCD client connection and authentication
-//! - **TCP Response Stream**: TCP response stream server (CallHome) port and host
+//! - **TCP Request Callback**: bidirectional request callback listener port and host
 //! - **Event Plane**: Event transport selection (NATS)
 //! - **KVBM**: Key-Value Block Manager configuration
 //! - **LLM**: Language model inference configuration
@@ -739,13 +739,21 @@ pub mod request_plane {
     pub const DYN_TCP_SHRINK_MESSAGE_SIZE: &str = "DYN_TCP_SHRINK_MESSAGE_SIZE";
 }
 
-/// TCP response stream server (CallHome listener) environment variables
+/// Response plane transport configuration.
+pub mod response_plane {
+    /// Response transport used by every runtime in this process: "tcp" or "quic".
+    /// Defaults to "tcp".
+    pub const DYN_RESPONSE_PLANE: &str = "DYN_RESPONSE_PLANE";
+}
+
+/// TCP request callback listener environment variables. Names are retained for compatibility.
 pub mod tcp_response_stream {
-    /// Port for the TCP response stream server.
+    /// Port shared by the TCP request callback and QUIC response listeners.
     /// If unset or 0, the OS assigns a free ephemeral port.
     pub const DYN_TCP_RESPONSE_STREAM_PORT: &str = "DYN_TCP_RESPONSE_STREAM_PORT";
 
-    /// IP address or exact interface used to bind and advertise the TCP response stream server.
+    /// IP address or exact interface shared by the TCP request callback and QUIC response
+    /// listeners.
     /// Unspecified addresses are rejected.
     /// If unset, the server auto-detects a routable local IP.
     pub const DYN_TCP_RESPONSE_STREAM_HOST: &str = "DYN_TCP_RESPONSE_STREAM_HOST";
@@ -791,6 +799,15 @@ pub mod tcp_response_stream {
         /// TLS handshake timeout in seconds (default: 3).
         pub const DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS: &str = "DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS";
     }
+}
+
+/// Fixed-lane QUIC response transport.
+pub mod quic_response {
+    /// Bulk-lane batch interval in microseconds. Defaults to 5,000. Registration,
+    /// prologue, first-data, and priority-end frames always flush immediately.
+    pub const DYN_QUIC_RESPONSE_BATCH_INTERVAL_US: &str = "DYN_QUIC_RESPONSE_BATCH_INTERVAL_US";
+    /// Per-response frontend mailbox capacity. Defaults to 16,384 frames.
+    pub const DYN_QUIC_RESPONSE_BUFFER_CAPACITY: &str = "DYN_QUIC_RESPONSE_BUFFER_CAPACITY";
 }
 
 /// Event Plane transport environment variables
@@ -1055,6 +1072,7 @@ mod tests {
             router::DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
             request_plane::DYN_REQUEST_PLANE,
             request_plane::DYN_REQUEST_PLANE_CODEC,
+            response_plane::DYN_RESPONSE_PLANE,
             request_plane::DYN_TCP_MAX_MESSAGE_SIZE,
             request_plane::DYN_TCP_SHRINK_MESSAGE_SIZE,
             // TCP Response Stream
@@ -1069,6 +1087,8 @@ mod tests {
             tcp_response_stream::tls::DYN_TCP_TLS_CLIENT_KEY_PATH,
             tcp_response_stream::tls::DYN_TCP_TLS_CLIENT_CA_CERT_PATH,
             tcp_response_stream::tls::DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS,
+            quic_response::DYN_QUIC_RESPONSE_BATCH_INTERVAL_US,
+            quic_response::DYN_QUIC_RESPONSE_BUFFER_CAPACITY,
             // Event Plane
             event_plane::DYN_EVENT_PLANE,
             event_plane::DYN_EVENT_PLANE_CODEC,

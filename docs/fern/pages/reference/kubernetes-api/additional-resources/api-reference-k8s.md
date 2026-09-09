@@ -135,6 +135,24 @@ _Appears in:_
 | `LeaderWorkerSet` | ComponentKindLeaderWorkerSet represents a LeaderWorkerSet resource.<br /> |
 
 
+#### ComponentRoleSpec
+
+
+
+ComponentRoleSpec configures one named Pod-producing role inside a compound component.
+The enclosing component type defines the allowed role names and cardinality.
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name identifies the role within the enclosing component independently of<br />generated provider resource names. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Required: \{\} <br /> |
+| `providerOverride` _[ProviderOverride](#provideroverride)_ | ProviderOverride configures the provider workload unit generated for this<br />role. It is supported only for components embedded in a DGD. |  | Optional: \{\} <br /> |
+
+
 #### ConfigMapKeySelector
 
 
@@ -318,6 +336,7 @@ _Appears in:_
 | `replicas` _integer_ | Replicas is the desired number of Pods for this component.<br />When scalingAdapter is enabled, this field is managed by the<br />DynamoGraphDeploymentScalingAdapter and should not be modified directly. |  | Minimum: 0 <br /> |
 | `minAvailable` _integer_ | MinAvailable maps to Grove PodClique minAvailable for single-node and<br />Grove PodCliqueScalingGroup minAvailable for multi-node components.<br />This field determines 1) the minimum number of replicas guaranteed to be<br />gang-scheduled, and 2) when violating minAvailable replicas triggers gang<br />termination.<br />For Grove-backed DynamoGraphDeployment components, minAvailable defaults to<br />1 when omitted and is immutable after creation. Positive replica counts must<br />be greater than or equal to minAvailable. Replicas may be scaled to 0 as a<br />special scale-to-zero state; minAvailable remains configured but is not<br />enforced again until replicas is scaled back to a positive value.<br />For non-Grove deployments, setting this field will result in a validation error. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode is the configuration for multinode components. |  |  |
+| `roles` _[ComponentRoleSpec](#componentrolespec) array_ | Roles expose the named Pod-producing parts inside a compound component.<br />When set for a multinode component, this list must contain exactly one<br />leader and one worker role. Their cardinality is derived from multinode.nodeCount.<br />Omission preserves the implicit multinode role layout. |  | Optional: \{\} <br /> |
 | `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled, replicas are managed by the DGDSA and external autoscalers scale the service<br />via the Scale subresource; when disabled, replicas are set directly. Opt in with<br />`scalingAdapter: \{enabled: true\}` -- a bare `scalingAdapter: \{\}` is disabled because<br />`enabled` defaults to false. |  | Optional: \{\} <br /> |
 | `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines legacy Go-EPP configuration for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp".<br />Deprecated: omit this field for the native Rust EPP. Presence of eppConfig<br />keeps the Go EPP Pod contract until migration clears it. |  | Optional: \{\} <br /> |
 | `frontendSidecar` _[FrontendSidecarSpec](#frontendsidecarspec)_ | FrontendSidecar configures an auto-generated frontend sidecar container.<br />When specified, the operator injects a fully configured frontend container<br />with all standard Dynamo environment variables, health probes, and ports.<br />This eliminates the need to manually specify these in extraPodSpec.containers. (GAIE) |  | Optional: \{\} <br /> |
@@ -362,7 +381,8 @@ _Appears in:_
 | `readinessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | ReadinessProbe to signal when the container is ready to receive traffic. |  |  |
 | `replicas` _integer_ | Replicas is the desired number of Pods for this component.<br />When scalingAdapter is enabled, this field is managed by the<br />DynamoGraphDeploymentScalingAdapter and should not be modified directly. |  | Minimum: 0 <br /> |
 | `minAvailable` _integer_ | MinAvailable maps to Grove PodClique minAvailable for single-node and<br />Grove PodCliqueScalingGroup minAvailable for multi-node components.<br />This field determines 1) the minimum number of replicas guaranteed to be<br />gang-scheduled, and 2) when violating minAvailable replicas triggers gang<br />termination.<br />For Grove-backed DynamoGraphDeployment components, minAvailable defaults to<br />1 when omitted and is immutable after creation. Positive replica counts must<br />be greater than or equal to minAvailable. Replicas may be scaled to 0 as a<br />special scale-to-zero state; minAvailable remains configured but is not<br />enforced again until replicas is scaled back to a positive value.<br />For non-Grove deployments, setting this field will result in a validation error. |  | Minimum: 1 <br />Optional: \{\} <br /> |
-| `multinode` _object_ | Multinode is the configuration for multinode components. Standalone DCDs accept only `nodeCount`; `leader` and `worker` are DGD-only provider contexts. |  |  |
+| `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode is the configuration for multinode components. |  |  |
+| `roles` _object array_ | Roles expose the named Pod-producing parts inside a compound component.<br />When set for a multinode component, this list must contain exactly one<br />leader and one worker role. Their cardinality is derived from multinode.nodeCount.<br />Omission preserves the implicit multinode role layout. Standalone DCD roles accept only `name`; `providerOverride` is a DGD-only provider context. |  | Optional: \{\} <br /> |
 | `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled, replicas are managed by the DGDSA and external autoscalers scale the service<br />via the Scale subresource; when disabled, replicas are set directly. Opt in with<br />`scalingAdapter: \{enabled: true\}` -- a bare `scalingAdapter: \{\}` is disabled because<br />`enabled` defaults to false. |  | Optional: \{\} <br /> |
 | `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines legacy Go-EPP configuration for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp".<br />Deprecated: omit this field for the native Rust EPP. Presence of eppConfig<br />keeps the Go EPP Pod contract until migration clears it. |  | Optional: \{\} <br /> |
 | `frontendSidecar` _[FrontendSidecarSpec](#frontendsidecarspec)_ | FrontendSidecar configures an auto-generated frontend sidecar container.<br />When specified, the operator injects a fully configured frontend container<br />with all standard Dynamo environment variables, health probes, and ports.<br />This eliminates the need to manually specify these in extraPodSpec.containers. (GAIE) |  | Optional: \{\} <br /> |
@@ -972,22 +992,6 @@ _Appears in:_
 | `uri` _string_ | URI is the model source URI<br />Supported formats:<br />- S3: s3://bucket/path/to/model<br />- HuggingFace: hf://org/model@revision_sha<br />- Local filesystem: file:///path/to/model |  | Required: \{\} <br /> |
 
 
-#### MultinodeRoleSpec
-
-
-
-MultinodeRoleSpec configures one explicit role of a multinode component.
-
-
-
-_Appears in:_
-- [MultinodeSpec](#multinodespec)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `providerOverride` _[ProviderOverride](#provideroverride)_ | providerOverride configures the Grove PCLQ template generated for this<br />multinode role. It uses apiVersion `grove.io/v1alpha1`, target<br />`PodCliqueTemplateSpec`, and may set only `topologyConstraint`. It is<br />supported only for components embedded in a DGD. |  | Optional: \{\} <br /> |
-
-
 #### MultinodeSpec
 
 
@@ -998,12 +1002,11 @@ _Appears in:_
 
 _Appears in:_
 - [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `nodeCount` _integer_ | Indicates the number of nodes to deploy for multinode components.<br />Total number of GPUs is NumberOfNodes * GPU limit.<br />Must be greater than 1. | 2 | Minimum: 2 <br /> |
-| `leader` _[MultinodeRoleSpec](#multinoderolespec)_ | Leader configures the generated multinode leader unit. |  | Optional: \{\} <br /> |
-| `worker` _[MultinodeRoleSpec](#multinoderolespec)_ | Worker configures the generated multinode worker unit. |  | Optional: \{\} <br /> |
 
 
 #### PVC
@@ -1108,9 +1111,9 @@ All other providers, versions, targets, and fields are rejected.
 
 
 _Appears in:_
+- [ComponentRoleSpec](#componentrolespec)
 - [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
 - [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
-- [MultinodeRoleSpec](#multinoderolespec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -1706,6 +1709,24 @@ _Appears in:_
 | `scheduledReplicas` _integer_ | scheduledReplicas is the number of replicas the backend scheduler has<br />scheduled, expressed strictly in Dynamo component-replica units (not<br />raw backend pod counts). It is a diagnostic aid for distinguishing<br />capacity/scheduling shortfalls from runtime readiness.<br />It is optional and omitted (nil) when the active backend cannot derive<br />it reliably in component-replica units — for example before the backing<br />resource's status has been observed, or for backends that do not report<br />a scheduling count. A nil value therefore means "not reported", never<br />"zero scheduled"; consumers must not treat absence as a scheduling<br />failure. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 
 
+#### ComponentRoleSpec
+
+
+
+ComponentRoleSpec configures one named Pod-producing role inside a compound component.
+The enclosing component type defines the allowed role names and cardinality.
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | name identifies the role within the enclosing component independently of<br />generated provider resource names. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Required: \{\} <br /> |
+| `providerOverride` _[ProviderOverride](#provideroverride)_ | providerOverride configures the provider workload unit generated for this<br />role. It is supported only for components embedded in a DGD. |  | Optional: \{\} <br /> |
+
+
 #### ComponentType
 
 _Underlying type:_ _string_
@@ -1871,6 +1892,7 @@ _Appears in:_
 | `replicas` _integer_ | replicas is the desired number of Pods for this component. When<br />`scalingAdapter` is set on this component, this field is managed by<br />the DynamoGraphDeploymentScalingAdapter and should not be modified<br />directly. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `minAvailable` _integer_ | minAvailable maps to Grove PodCliqueScalingGroup minAvailable for<br />components rendered as a scaling group (multi-node, inter-pod GMS, or<br />`experimental.grove.forceScalingGroup`; see `UsesPCSG`) and to Grove<br />PodClique minAvailable for all other single-node components.<br />This field determines 1) the minimum number of replicas guaranteed to be<br />gang-scheduled, and 2) when violating minAvailable replicas triggers gang<br />termination.<br />For Grove-backed DynamoGraphDeployment components, minAvailable defaults to<br />1 when omitted and is immutable after creation. Positive replica counts must<br />be greater than or equal to minAvailable. Replicas may be scaled to 0 as a<br />special scale-to-zero state; minAvailable remains configured but is not<br />enforced again until replicas is scaled back to a positive value.<br />For non-Grove deployments, setting this field will result in a validation error. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `multinode` _[MultinodeSpec](#multinodespec)_ | multinode configures multinode components. |  | Optional: \{\} <br /> |
+| `roles` _[ComponentRoleSpec](#componentrolespec) array_ | roles expose the named Pod-producing parts inside a compound component.<br />When set for a multinode component, this list must contain exactly one<br />leader and one worker role. Their cardinality is derived from multinode.nodeCount.<br />Omission preserves the implicit multinode role layout. |  | Optional: \{\} <br /> |
 | `sharedMemorySize` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ | sharedMemorySize controls the size of the tmpfs mounted at `/dev/shm`.<br />`nil` selects the operator default (8Gi), a positive quantity sets a<br />custom size, and `"0"` disables the shared-memory volume entirely.<br />Simpler replacement for v1alpha1's `SharedMemorySpec` struct with its<br />`disabled bool` + `size Quantity` pattern. |  | Optional: \{\} <br /> |
 | `modelRef` _[ModelReference](#modelreference)_ | modelRef references a model served by this component. When specified,<br />a headless service is created for endpoint discovery. |  | Optional: \{\} <br /> |
 | `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | scalingAdapter opts this component into the DynamoGraphDeploymentScalingAdapter.<br />Setting it (even as an empty object, `scalingAdapter: \{\}`) creates a DGDSA that owns the<br />`replicas` field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via the<br />Scale subresource; omit the field to opt out. |  | Optional: \{\} <br /> |
@@ -1902,7 +1924,8 @@ _Appears in:_
 | `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | podTemplate defines the component's Pod configuration. New components must<br />include a container named "main" with a non-empty image. Existing components<br />created without a podTemplate may remain unchanged. The operator merges<br />defaults into the main container.<br />For DGD components whose main image tag is not a Dynamo semantic version,<br />set runtimeVersionOverride explicitly.<br />All other containers are user-managed sidecars and must specify their<br />required fields, including image. |  | Optional: \{\} <br /> |
 | `replicas` _integer_ | replicas is the desired number of Pods for this component. When<br />`scalingAdapter` is set on this component, this field is managed by<br />the DynamoGraphDeploymentScalingAdapter and should not be modified<br />directly. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `minAvailable` _integer_ | minAvailable maps to Grove PodCliqueScalingGroup minAvailable for<br />components rendered as a scaling group (multi-node, inter-pod GMS, or<br />`experimental.grove.forceScalingGroup`; see `UsesPCSG`) and to Grove<br />PodClique minAvailable for all other single-node components.<br />This field determines 1) the minimum number of replicas guaranteed to be<br />gang-scheduled, and 2) when violating minAvailable replicas triggers gang<br />termination.<br />For Grove-backed DynamoGraphDeployment components, minAvailable defaults to<br />1 when omitted and is immutable after creation. Positive replica counts must<br />be greater than or equal to minAvailable. Replicas may be scaled to 0 as a<br />special scale-to-zero state; minAvailable remains configured but is not<br />enforced again until replicas is scaled back to a positive value.<br />For non-Grove deployments, setting this field will result in a validation error. |  | Minimum: 1 <br />Optional: \{\} <br /> |
-| `multinode` _object_ | multinode configures multinode components. Standalone DCDs accept only `nodeCount`; `leader` and `worker` are DGD-only provider contexts. |  | Optional: \{\} <br /> |
+| `multinode` _[MultinodeSpec](#multinodespec)_ | multinode configures multinode components. |  | Optional: \{\} <br /> |
+| `roles` _object array_ | roles expose the named Pod-producing parts inside a compound component.<br />When set for a multinode component, this list must contain exactly one<br />leader and one worker role. Their cardinality is derived from multinode.nodeCount.<br />Omission preserves the implicit multinode role layout. Standalone DCD roles accept only `name`; `providerOverride` is a DGD-only provider context. |  | Optional: \{\} <br /> |
 | `sharedMemorySize` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ | sharedMemorySize controls the size of the tmpfs mounted at `/dev/shm`.<br />`nil` selects the operator default (8Gi), a positive quantity sets a<br />custom size, and `"0"` disables the shared-memory volume entirely.<br />Simpler replacement for v1alpha1's `SharedMemorySpec` struct with its<br />`disabled bool` + `size Quantity` pattern. |  | Optional: \{\} <br /> |
 | `modelRef` _[ModelReference](#modelreference)_ | modelRef references a model served by this component. When specified,<br />a headless service is created for endpoint discovery. |  | Optional: \{\} <br /> |
 | `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | scalingAdapter opts this component into the DynamoGraphDeploymentScalingAdapter.<br />Setting it (even as an empty object, `scalingAdapter: \{\}`) creates a DGDSA that owns the<br />`replicas` field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via the<br />Scale subresource; omit the field to opt out. |  | Optional: \{\} <br /> |
@@ -2364,7 +2387,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `forceScalingGroup` _boolean_ | forceScalingGroup opts a single-node component into rendering as a<br />PodCliqueScalingGroup with one single-pod PodClique per replica.<br />Scaling changes the scaling-group replica count. The first<br />`minAvailable` replicas join the deployment's base PodGang together<br />with its other base workloads; each replica beyond `minAvailable`<br />gets its own PodGang, gang-scheduled separately from the rest of the<br />deployment. `false` or omitted means automatic selection (multi-node<br />and inter-pod GMS components use a scaling group, other single-node<br />components a standalone PodClique), not "force PodClique".<br />Immutable after creation. |  | Optional: \{\} <br /> |
+| `forceScalingGroup` _boolean_ | forceScalingGroup opts a single-node component into rendering as a<br />PodCliqueScalingGroup with one single-pod PodClique per replica.<br />Scaling changes the scaling-group replica count. The first<br />`minAvailable` replicas join the deployment's base PodGang together<br />with its other base workloads; each replica beyond `minAvailable`<br />gets its own PodGang, gang-scheduled separately from the rest of the<br />deployment. `false` or omitted means automatic selection (multi-node<br />and inter-pod GMS components use a scaling group, other single-node<br />components a standalone PodClique), not "force PodClique".<br />The pointer preserves field presence on the wire: `nil` and `false` are<br />semantically identical, and consumers must dereference with `false`.<br />Immutable after creation. |  | Optional: \{\} <br /> |
 
 
 #### HardwareSpec
@@ -2503,24 +2526,6 @@ _Appears in:_
 | `revision` _string_ | revision is the model revision/version. |  | Optional: \{\} <br /> |
 
 
-#### MultinodeRoleSpec
-
-
-
-MultinodeRoleSpec configures one explicit role of a multinode component.
-Additional role-specific settings can be added here without introducing a
-polymorphic list keyed by generated provider resource names.
-
-
-
-_Appears in:_
-- [MultinodeSpec](#multinodespec)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `providerOverride` _[ProviderOverride](#provideroverride)_ | providerOverride configures the Grove PCLQ template generated for this<br />multinode role. It uses apiVersion `grove.io/v1alpha1`, target<br />`PodCliqueTemplateSpec`, and may set only `topologyConstraint`. It is<br />supported only for components embedded in a DGD. |  | Optional: \{\} <br /> |
-
-
 #### MultinodeSpec
 
 
@@ -2531,12 +2536,11 @@ MultinodeSpec configures a multinode component.
 
 _Appears in:_
 - [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `nodeCount` _integer_ | nodeCount is the number of nodes to deploy for the multinode component.<br />Total GPUs used is `nodeCount * container GPU request`. | 2 | Minimum: 2 <br />Optional: \{\} <br /> |
-| `leader` _[MultinodeRoleSpec](#multinoderolespec)_ | leader configures the generated multinode leader unit. |  | Optional: \{\} <br /> |
-| `worker` _[MultinodeRoleSpec](#multinoderolespec)_ | worker configures the generated multinode worker unit. |  | Optional: \{\} <br /> |
 
 
 #### OptimizationType
@@ -2704,9 +2708,9 @@ All other providers, versions, targets, and fields are rejected.
 
 
 _Appears in:_
+- [ComponentRoleSpec](#componentrolespec)
 - [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
 - [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
-- [MultinodeRoleSpec](#multinoderolespec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |

@@ -866,17 +866,30 @@ class VllmMultimodalRequestProcessor:
                 ]
                 has_mm_data = False
 
-            # Preserve the fallback: video/audio media is loaded again
-            # on decode because the handoff currently carries image metadata only.
-            if multi_modal_data is None and has_mm_data:
+            # Video/audio media is loaded again on decode because the handoff
+            # currently carries image metadata only. For mixed requests, merge
+            # it with the reconstructed Qwen image placeholder.
+            if has_mm_data:
                 mm_map = request["multi_modal_data"]
-                if mm_map.get(VIDEO_URL_KEY) or mm_map.get(AUDIO_URL_KEY):
-                    multi_modal_data = await self.extract_multimodal_data(
-                        request,
+                local_mm_map = {
+                    key: mm_map[key]
+                    for key in (VIDEO_URL_KEY, AUDIO_URL_KEY)
+                    if mm_map.get(key)
+                }
+                if local_mm_map:
+                    local_request = dict(request)
+                    local_request["multi_modal_data"] = local_mm_map
+                    local_mm_data = await self.extract_multimodal_data(
+                        local_request,
                         request_id,
                         context,
                         mm_processor_kwargs,
                     )
+                    if local_mm_data:
+                        if multi_modal_data is None:
+                            multi_modal_data = local_mm_data
+                        else:
+                            multi_modal_data.update(local_mm_data)
         elif mode == DisaggregationMode.AGGREGATED:
             pre_rendered = await self.try_receive_mm_kwargs(request)
             if pre_rendered is None:
