@@ -19,7 +19,7 @@ import requests
 
 from tests.conftest import EtcdServer, NatsServer
 from tests.utils.gpu_args import build_gpu_mem_args
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.network_canary import ConnectionCanary, running_canary
 from tests.utils.port_utils import allocate_ports
 
@@ -43,13 +43,6 @@ _COMMON_PROCESS_KWARGS: dict[str, Any] = {
     "display_output": False,
     "terminate_all_matching_process_names": False,
 }
-
-
-def _check_ready(response) -> bool:
-    try:
-        return (response.json() or {}).get("status") == "ready"
-    except ValueError:
-        return False
 
 
 def _model_registered(response) -> bool:
@@ -107,7 +100,7 @@ class _VllmWorkerProcess(ManagedProcess):
             command=command,
             env=_strict_media_env(DYN_SYSTEM_PORT=str(system_port)),
             health_check_urls=[
-                (f"http://localhost:{system_port}/health", _check_ready)
+                (f"http://localhost:{system_port}/health", check_health_ready)
             ],
             timeout=900,
             straggler_commands=["-m dynamo.vllm"],
