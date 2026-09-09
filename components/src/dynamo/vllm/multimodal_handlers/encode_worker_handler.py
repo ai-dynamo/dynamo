@@ -38,8 +38,6 @@ from ..multimodal_utils.model import ModelFamily, resolve_model_family
 
 logger = logging.getLogger(__name__)
 
-CACHE_SIZE_MAXIMUM = 8
-
 # [gluo WIP] now it's time to revisit
 # Both embedding transfer suffers from increasing latency as
 # number of concurrent requests increases, NixlPersistentEmbedding transfers
@@ -132,8 +130,9 @@ class EncodeWorkerHandler:
 
         self._enable_frontend_decoding = enable_frontend_decoding
         self._decoded_content_hash_warning_emitted = False
+        # No cache_size: ImageLoader's default reads DYN_MM_IMAGE_CACHE_SIZE,
+        # so passing one here would ignore the operator's setting.
         self.image_loader = ImageLoader(
-            cache_size=CACHE_SIZE_MAXIMUM,
             enable_frontend_decoding=enable_frontend_decoding,
         )
         self.image_processor = _load_image_processor(self.engine_args)

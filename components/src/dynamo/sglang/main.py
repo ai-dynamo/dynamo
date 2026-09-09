@@ -75,6 +75,7 @@ async def worker(argv: list[str] | None = None):
         discovery_backend=dynamo_args.discovery_backend,
         request_plane=dynamo_args.request_plane,
         event_plane=dynamo_args.event_plane,
+        response_plane=dynamo_args.response_plane,
     )
 
     # Keep the flock alive for process lifetime. Linux releases it on exit.
