@@ -204,8 +204,10 @@ field instead of inventing a value. Keep its `affinity` operation whenever
 may deselect both `scheduling` and `placement`.
 Within the selected networking Component, remove the environment entries or
 extended-resource keys that the provider does not require, and keep the bare
-`- name:` entry for every canonical component: a merge patch must list all
-components in base order so Kustomize keeps their positions. Keep each
+`- name:` entries: a merge patch's component list must be an ordered prefix of
+the base component list, through the last component it changes, so Kustomize
+keeps every component in place. Optional components after the canonical three
+need no entry. Keep each
 extended-resource request and limit pair together with the same key and
 quantity. Never select generic `network-interface` together with provider or
 private networking.
@@ -399,11 +401,12 @@ patches:
     path: patches/vllm-kv-transfer-config.yaml
 ```
 
-Each hook lists every canonical component by name, with bare entries for the
-components it leaves alone. Keep those entries: the validator rejects a merge
-patch that omits a canonical component, because Kustomize would otherwise
-reorder `spec.components` or append a new one. Kustomize moves the merged hook
-entry to the front of the worker environment; that reordering is expected.
+Each hook lists the canonical components by name, with a bare entry for
+`Frontend`. Keep those entries: the validator rejects a merge patch whose
+component list is not an ordered prefix of the base, because Kustomize would
+otherwise reorder `spec.components` or append a new component. Kustomize moves
+the merged hook entry to the front of the worker environment; that reordering
+is expected.
 
 TensorRT-LLM transfer selection has no worker environment hook in the catalog.
 Its `cache_transceiver_config` remains part of the paired prefill and decode
@@ -437,10 +440,10 @@ canonical component positions, rejects base-owned cluster fields and duplicate
 environment names, lowers each strategic merge patch into guarded JSON 6902
 operations against the accumulated document, replays the selected Component and
 case patch operations in order, and compares that replay with the Kustomize
-render. Merge patches must list every canonical component in base order, may
-only address containers the base defines, and may not use `$patch` directives
-or null deletions; violations use the `merge-patch` diagnostic. It also
-enforces the
+render. Merge patches must list components as an ordered prefix of the base,
+may only address containers the base defines, and may not use `$patch`
+directives or null deletions; violations use the `merge-patch` diagnostic. It
+also enforces the
 optional ordered networking slot, worker-only networking deltas, the generic
 annotation, environment, extended-resource, and host-volume shapes, and
 decoded request/limit equality. Failures

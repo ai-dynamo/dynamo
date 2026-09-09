@@ -1190,3 +1190,162 @@ def test_validator_rejects_merge_patch_without_schema_component(
     kustomization_path.write_text(yaml.safe_dump(kustomization, sort_keys=False))
 
     _assert_error(core._validate(case), "merge-patch")
+
+
+def _append_optional_component(case: Path) -> None:
+    base_path = case / "base.yaml"
+    documents = core._documents(base_path)
+    dgd = next(
+        document
+        for document in documents
+        if document.get("kind") == "DynamoGraphDeployment"
+    )
+    dgd["spec"]["components"].append(
+        {
+            "name": "Planner",
+            "type": "planner",
+            "replicas": 1,
+            "podTemplate": {
+                "spec": {
+                    "containers": [
+                        {"name": "main", "image": "example.invalid/planner:latest"}
+                    ]
+                }
+            },
+        }
+    )
+    core._write_documents(base_path, documents)
+
+
+def test_validator_accepts_merge_prefix_before_optional_component(
+    tmp_path: Path,
+) -> None:
+    case, _ = _custom_merge_networking_case(
+        tmp_path,
+        _merge_patch(
+            [
+                {"name": "Frontend"},
+                _worker_env_patch("PrefillWorker", _MERGE_NETWORK_ENV),
+                _worker_env_patch("DecodeWorker", _MERGE_NETWORK_ENV),
+            ]
+        ),
+    )
+    _append_optional_component(case)
+
+    result = core._validate(case)
+    rendered = _rendered_dgd(case)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert [component["name"] for component in rendered["spec"]["components"]] == [
+        "Frontend",
+        "PrefillWorker",
+        "DecodeWorker",
+        "Planner",
+    ]
+    planner = _components(rendered)["Planner"]
+    assert "env" not in planner["podTemplate"]["spec"]["containers"][0]
+
+
+def test_validator_rejects_merge_patch_skipping_a_canonical_component(
+    tmp_path: Path,
+) -> None:
+    case, _ = _custom_merge_networking_case(
+        tmp_path,
+        _merge_patch(
+            [
+                {"name": "Frontend"},
+                _worker_env_patch("DecodeWorker", _MERGE_NETWORK_ENV),
+            ]
+        ),
+    )
+    _assert_error(core._validate(case), "merge-patch")
+
+
+def test_validator_accepts_merge_env_value_from_source(tmp_path: Path) -> None:
+    sourced = [
+        {
+            "name": "FI_PROVIDER",
+            "valueFrom": {
+                "configMapKeyRef": {"name": "efa-settings", "key": "provider"}
+            },
+        }
+    ]
+    case, _ = _custom_merge_networking_case(
+        tmp_path,
+        _merge_patch(
+            [
+                {"name": "Frontend"},
+                _worker_env_patch("PrefillWorker", sourced),
+                _worker_env_patch("DecodeWorker", sourced),
+            ]
+        ),
+    )
+
+    result = core._validate(case)
+    rendered = _components(_rendered_dgd(case))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    for name in ("PrefillWorker", "DecodeWorker"):
+        env = rendered[name]["podTemplate"]["spec"]["containers"][0]["env"]
+        assert env[0] == sourced[0]
+
+
+def _read_only_mount_component(name: str) -> dict[str, Any]:
+    return {
+        "name": name,
+        "podTemplate": {
+            "spec": {
+                "containers": [
+                    {
+                        "name": "main",
+                        "volumeMounts": [
+                            {
+                                "name": "ib",
+                                "mountPath": "/dev/infiniband",
+                                "readOnly": True,
+                            }
+                        ],
+                    }
+                ],
+                "volumes": [{"name": "ib", "hostPath": {"path": "/dev/infiniband"}}],
+            }
+        },
+    }
+
+
+def test_validator_accepts_merge_read_only_host_mount(tmp_path: Path) -> None:
+    case, _ = _custom_merge_networking_case(
+        tmp_path,
+        _merge_patch(
+            [
+                {"name": "Frontend"},
+                _read_only_mount_component("PrefillWorker"),
+                _read_only_mount_component("DecodeWorker"),
+            ]
+        ),
+    )
+
+    result = core._validate(case)
+    rendered = _components(_rendered_dgd(case))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    for name in ("PrefillWorker", "DecodeWorker"):
+        main = rendered[name]["podTemplate"]["spec"]["containers"][0]
+        assert main["volumeMounts"][0] == {
+            "name": "ib",
+            "mountPath": "/dev/infiniband",
+            "readOnly": True,
+        }
+
+
+def test_validator_rejects_merge_host_mount_with_unknown_field(
+    tmp_path: Path,
+) -> None:
+    component = _read_only_mount_component("PrefillWorker")
+    mount = component["podTemplate"]["spec"]["containers"][0]["volumeMounts"][0]
+    mount["bogusField"] = "x"
+    case, _ = _custom_merge_networking_case(
+        tmp_path,
+        _merge_patch([{"name": "Frontend"}, component, {"name": "DecodeWorker"}]),
+    )
+    _assert_error(core._validate(case), "networking-delta")

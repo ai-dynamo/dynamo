@@ -1150,10 +1150,10 @@ class _MergeLowering:
             for element in current
         ]
         if tokens == ("spec", "components"):
-            if keys != current_keys:
+            if keys != current_keys[: len(keys)]:
                 raise self._error(
-                    "merge patch must list every canonical component by name in "
-                    "base order; unmatched names would append new components",
+                    "merge patch components must form an ordered prefix of the base "
+                    "component list; unmatched names would append new components",
                     tokens,
                     expected=current_keys,
                     actual=keys,
@@ -1211,7 +1211,9 @@ class _MergeLowering:
             if _json_equal(merged, existing):
                 continue
             self._identity(element)
-            self._emit("test", element + (merge_key,), key)
+            identity = element + (merge_key,)
+            if identity not in self._tested:
+                self._emit("test", identity, key)
             self.lower_mapping(item, existing, element, item_schema)
             working[position] = merged
 
@@ -1792,6 +1794,36 @@ def _physical_network_env_name(
     return None
 
 
+_VOLUME_MOUNT_OPTIONAL_FIELDS: Mapping[str, type] = {
+    "readOnly": bool,
+    "mountPropagation": str,
+    "subPath": str,
+    "subPathExpr": str,
+}
+
+
+def _is_volume_mount_shape(value: Any) -> bool:
+    """Accept a VolumeMount with its optional Kubernetes fields, checked by type."""
+
+    if not isinstance(value, dict) or not {"name", "mountPath"} <= set(value):
+        return False
+    if not set(value) <= {"name", "mountPath", *_VOLUME_MOUNT_OPTIONAL_FIELDS}:
+        return False
+    if not (isinstance(value["name"], str) and value["name"]):
+        return False
+    if not (isinstance(value["mountPath"], str) and value["mountPath"].startswith("/")):
+        return False
+    for field, field_type in _VOLUME_MOUNT_OPTIONAL_FIELDS.items():
+        if field not in value:
+            continue
+        if field_type is bool:
+            if not isinstance(value[field], bool):
+                return False
+        elif not (isinstance(value[field], str) and value[field]):
+            return False
+    return True
+
+
 def _network_operation_kind(
     layer: _PatchLayer,
     op_index: int,
@@ -1843,10 +1875,13 @@ def _network_operation_kind(
         value = operation.get("value")
         if (
             isinstance(value, dict)
-            and set(value) == {"name", "value"}
+            and set(value) in ({"name", "value"}, {"name", "valueFrom"})
             and isinstance(value.get("name"), str)
             and value["name"]
-            and isinstance(value.get("value"), str)
+            and (
+                isinstance(value.get("value"), str)
+                or isinstance(value.get("valueFrom"), dict)
+            )
         ):
             return "env-append"
         return None
@@ -1877,15 +1912,7 @@ def _network_operation_kind(
         return "resource"
 
     if tokens[:-1] == main_prefix + ("volumeMounts",) and _is_list_slot(tokens[-1]):
-        value = operation.get("value")
-        if (
-            isinstance(value, dict)
-            and set(value) == {"name", "mountPath"}
-            and isinstance(value.get("name"), str)
-            and value["name"]
-            and isinstance(value.get("mountPath"), str)
-            and value["mountPath"].startswith("/")
-        ):
+        if _is_volume_mount_shape(operation.get("value")):
             return "host-mount"
         return None
 
