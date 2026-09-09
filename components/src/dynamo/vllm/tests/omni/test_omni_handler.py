@@ -741,6 +741,17 @@ class TestImageGenerationSizeValidation:
         request = {"size": "99999x99999", "width": 512, "height": 512}
         assert image_generation_size_from_request(request) == (512, 512)
 
+    def test_a_discarded_extra_body_width_is_not_validated(self):
+        # Same rule one level down: the top-level field wins over extra_body, so
+        # the extra_body value never reaches the engine and must not fail the
+        # request. Only the value that survives the precedence chain is checked.
+        request = {"extra_body": {"width": "abc"}, "width": 512}
+        assert image_generation_size_from_request(request) == (512, 1024)
+
+    def test_extra_body_width_still_applies_when_not_overridden(self):
+        request = {"extra_body": {"width": 100, "height": 100}}
+        assert image_generation_size_from_request(request) == (100, 100)
+
     def test_accepts_the_maximum(self):
         maximum = f"{MAX_IMAGE_DIMENSION}x{MAX_IMAGE_DIMENSION}"
         assert image_generation_size_from_request({"size": maximum}) == (
