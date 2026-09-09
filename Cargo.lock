@@ -2451,6 +2451,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-custom-policy-builtin"
+version = "1.5.0"
+dependencies = [
+ "dynamo-kv-router",
+ "serde",
+ "tempfile",
+]
+
+[[package]]
 name = "dynamo-custom-policy-example-catalog"
 version = "1.5.0"
 dependencies = [
