@@ -1058,3 +1058,76 @@ func TestDGD_IntermediateSpokeDeletesFrontendSidecarContainerDropsHubReference(t
 		}
 	}
 }
+
+func TestBugDGD_BetaOnlyCompilationCacheSubPathUpdateRoundTrips(t *testing.T) {
+	in := &DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "beta-only-subpath", Namespace: "ns"},
+		Spec: DynamoGraphDeploymentSpec{
+			Services: map[string]*DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: "worker",
+					VolumeMounts: []VolumeMount{
+						{Name: "cache", MountPoint: "/cache", SubPath: "v1", UseAsCompilationCache: true},
+					},
+				},
+			},
+		},
+	}
+	wantHash, err := ComputeDGDWorkersSpecHash(in)
+	if err != nil {
+		t.Fatalf("ComputeDGDWorkersSpecHash(in) error = %v", err)
+	}
+
+	hub := &v1beta1.DynamoGraphDeployment{}
+	if err := in.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo() error = %v", err)
+	}
+	if hub.Spec.Components[0].CompilationCache == nil || hub.Spec.Components[0].CompilationCache.SubPath != "v1" {
+		t.Fatalf("expected SubPath to be preserved in hub, got %#v", hub.Spec.Components[0].CompilationCache)
+	}
+
+	// Update only the SubPath in the hub (beta-only field)
+	hub.Spec.Components[0].CompilationCache.SubPath = "v2"
+
+	out := &DynamoGraphDeployment{}
+	if err := out.ConvertFrom(hub); err != nil {
+		t.Fatalf("ConvertFrom() error = %v", err)
+	}
+	want := []VolumeMount{{Name: "cache", MountPoint: "/cache", SubPath: "v2", UseAsCompilationCache: true}}
+	if diff := cmp.Diff(want, out.Spec.Services["worker"].VolumeMounts); diff != "" {
+		t.Fatalf("SubPath update was not applied correctly (-want +got):\n%s", diff)
+	}
+
+	// Verify round-trip stability
+	outHash, err := ComputeDGDWorkersSpecHash(out)
+	if err != nil {
+		t.Fatalf("ComputeDGDWorkersSpecHash(out) error = %v", err)
+	}
+
+	hubAgain := &v1beta1.DynamoGraphDeployment{}
+	if err := out.ConvertTo(hubAgain); err != nil {
+		t.Fatalf("second ConvertTo() error = %v", err)
+	}
+	if hubAgain.Spec.Components[0].CompilationCache == nil || hubAgain.Spec.Components[0].CompilationCache.SubPath != "v2" {
+		t.Fatalf("expected SubPath v2 to be preserved in second hub, got %#v", hubAgain.Spec.Components[0].CompilationCache)
+	}
+
+	outAgain := &DynamoGraphDeployment{}
+	if err := outAgain.ConvertFrom(hubAgain); err != nil {
+		t.Fatalf("second ConvertFrom() error = %v", err)
+	}
+	if diff := cmp.Diff(want, outAgain.Spec.Services["worker"].VolumeMounts); diff != "" {
+		t.Fatalf("SubPath changed after second round-trip (-want +got):\n%s", diff)
+	}
+
+	gotHash, err := ComputeDGDWorkersSpecHash(outAgain)
+	if err != nil {
+		t.Fatalf("ComputeDGDWorkersSpecHash(outAgain) error = %v", err)
+	}
+	if gotHash != outHash {
+		t.Fatalf("second round-trip hash = %q, want %q", gotHash, outHash)
+	}
+	if gotHash == wantHash {
+		t.Fatalf("round-trip hash should have changed after SubPath update, got %q (same as original)", gotHash)
+	}
+}
