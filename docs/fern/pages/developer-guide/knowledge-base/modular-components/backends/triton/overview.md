@@ -37,9 +37,9 @@ The Triton and KServe features below are not yet supported end-to-end through th
 
 > [!IMPORTANT]
 > **Discovery backend at scale.**
-> The `file` discovery backend suits small repositories and the examples below.
+> The `file` discovery backend suits small repositories and the examples below for simple quickstarts.
 > A worker that registers a large repository (hundreds of models) in a single burst overflows the file watcher's channels and can tear the frontend down before it reports ready.
-> Use the `etcd` discovery backend (`--discovery-backend=etcd`, with etcd and NATS running) for large repositories.
+> Use the `etcd` discovery backend (`--discovery-backend=etcd`, with etcd running) for large repositories on baremetal. On Kubernetes, native k8s discovery will be used by default.
 
 ## Container / driver matrix
 
