@@ -23,7 +23,9 @@ try:
     from dynamo.vllm.omni.main import _register_lora_engine_routes
     from dynamo.vllm.omni.omni_handler import EngineInputs, OmniHandler
     from dynamo.vllm.omni.utils import (
+        MAX_IMAGE_DIMENSION,
         build_original_prompt,
+        image_generation_size_from_request,
         parse_omni_request,
         streaming_sampling_params,
     )
@@ -690,6 +692,79 @@ class TestParseOmniRequest:
             "height": 768,
             "width": 512,
             "guidance_scale": 1.5,
+        }
+
+    @pytest.mark.parametrize("bad", ["abc", [1, 2], {"w": 1}, 1.5, True])
+    def test_nvext_dimensions_reject_non_integers(self, bad):
+        # nvext is applied after image_generation_size_from_request and wins, so
+        # it needs its own bound or it reopens every case that helper rejects.
+        request = {"prompt": "x", "size": "512x512", "nvext": {"width": bad}}
+        with pytest.raises(ValueError, match=r"nvext\.width must be an integer"):
+            asyncio.run(parse_omni_request(request, ["image"]))
+
+    @pytest.mark.parametrize("bad", [0, -1, MAX_IMAGE_DIMENSION + 1])
+    def test_nvext_dimensions_reject_out_of_range(self, bad):
+        request = {"prompt": "x", "size": "512x512", "nvext": {"height": bad}}
+        with pytest.raises(ValueError, match=r"nvext\.height must be between"):
+            asyncio.run(parse_omni_request(request, ["image"]))
+
+
+class TestImageGenerationSizeValidation:
+    """Client-supplied image dimensions are bounded wherever they enter."""
+
+    @pytest.mark.parametrize("bad", ["not-a-number", [1], {"w": 1}, 1.5, True])
+    def test_rejects_non_integer_width(self, bad):
+        with pytest.raises(ValueError, match="width must be an integer"):
+            image_generation_size_from_request({"width": bad})
+
+    @pytest.mark.parametrize("bad", [0, -1, MAX_IMAGE_DIMENSION + 1])
+    def test_rejects_out_of_range_width(self, bad):
+        with pytest.raises(ValueError, match="width must be between"):
+            image_generation_size_from_request({"width": bad})
+
+    @pytest.mark.parametrize("size", ["0x0", "-1x-1", "8192x8192"])
+    def test_rejects_out_of_range_size(self, size):
+        # The message must name ``size``: the client never sent ``width`` and
+        # would have no field to correct.
+        with pytest.raises(ValueError, match=r"width in size='"):
+            image_generation_size_from_request({"size": size})
+
+    def test_unparseable_size_still_falls_back_to_defaults(self):
+        # parse_size's documented contract: only what it does parse is bounded.
+        assert image_generation_size_from_request({"size": "not-a-size"}) == (
+            1024,
+            1024,
+        )
+
+    def test_explicit_width_overrides_an_out_of_range_size(self):
+        # The size value is discarded, so it must not be validated on its way out.
+        request = {"size": "99999x99999", "width": 512, "height": 512}
+        assert image_generation_size_from_request(request) == (512, 512)
+
+    def test_accepts_the_maximum(self):
+        maximum = f"{MAX_IMAGE_DIMENSION}x{MAX_IMAGE_DIMENSION}"
+        assert image_generation_size_from_request({"size": maximum}) == (
+            MAX_IMAGE_DIMENSION,
+            MAX_IMAGE_DIMENSION,
+        )
+
+
+class TestImageEndpointSizeValidation:
+    """/v1/images/generations takes the same bound as the chat path."""
+
+    def test_rejects_out_of_range_size(self):
+        handler = _make_handler()
+        req = NvCreateImageRequest(prompt="x", size="99999x99999")
+        with pytest.raises(ValueError, match=r"width in size='99999x99999'"):
+            handler._engine_inputs_from_image(req)
+
+    def test_accepts_a_supported_size(self):
+        handler = _make_handler()
+        req = NvCreateImageRequest(prompt="x", size="1024x768")
+        inputs = handler._engine_inputs_from_image(req)
+        assert inputs.prompt["mm_processor_kwargs"] == {
+            "target_h": 768,
+            "target_w": 1024,
         }
 
 

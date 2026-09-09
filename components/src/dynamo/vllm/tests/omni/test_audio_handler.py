@@ -3,6 +3,7 @@
 
 """Unit tests for AudioGenerationHandler."""
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -291,3 +292,81 @@ class TestEngineInputsFromAudio:
         )
 
         assert inputs.stream_audio is False
+
+
+class TestResolveRefAudio:
+    """ref_audio is client-supplied, so every failure must be a clean rejection."""
+
+    @staticmethod
+    def _wav_bytes(samples=1600, rate=16000):
+        import io
+
+        import numpy as np
+        import soundfile as sf
+
+        buf = io.BytesIO()
+        # Random content so the base64 payload really contains '+' and '/'.
+        rng = np.random.default_rng(0)
+        sf.write(
+            buf, rng.standard_normal(samples).astype("float32"), rate, format="WAV"
+        )
+        return buf.getvalue()
+
+    @staticmethod
+    def _data_uri(payload: bytes) -> str:
+        import base64
+
+        return "data:audio/wav;base64," + base64.b64encode(payload).decode()
+
+    def test_decodes_a_valid_data_uri(self):
+        handler = _make_audio_handler()
+        wav = self._wav_bytes()
+        data, rate = asyncio.run(handler._resolve_ref_audio(self._data_uri(wav)))
+        assert len(data) == 1600 and rate == 16000
+
+    def test_decodes_a_percent_encoded_payload(self):
+        # A data URI that travelled through a URL has '+' and '/' escaped.
+        # Permissive base64 silently dropped the '%' and produced wrong bytes.
+        import base64
+        import urllib.parse
+
+        handler = _make_audio_handler()
+        wav = self._wav_bytes()
+        encoded = base64.b64encode(wav).decode()
+        assert "+" in encoded or "/" in encoded
+        quoted = urllib.parse.quote(encoded, safe="=")
+        data, rate = asyncio.run(
+            handler._resolve_ref_audio(f"data:audio/wav;base64,{quoted}")
+        )
+        assert len(data) == 1600 and rate == 16000
+
+    @pytest.mark.parametrize(
+        "uri, expected",
+        [
+            ("data:audio/wav", "missing ',' separator"),
+            ("data:audio/wav,RIFFraw", "expected base64 payload"),
+            ("data:audio/wav;base64,!!not-base64!!", "Malformed base64"),
+        ],
+    )
+    def test_rejects_malformed_data_uris(self, uri, expected):
+        handler = _make_audio_handler()
+        with pytest.raises(ValueError, match=expected):
+            asyncio.run(handler._resolve_ref_audio(uri))
+
+    @pytest.mark.parametrize("payload", [b"", b"abcd"])
+    def test_rejects_valid_base64_that_is_not_audio(self, payload):
+        # Reaches soundfile, which raises LibsndfileError (a RuntimeError);
+        # unguarded that surfaces as a 500 rather than a bad-request error.
+        handler = _make_audio_handler()
+        with pytest.raises(ValueError, match="not readable audio"):
+            asyncio.run(handler._resolve_ref_audio(self._data_uri(payload)))
+
+    def test_rejects_an_oversized_data_uri_before_decoding(self):
+        handler = _make_audio_handler(tts_ref_audio_max_bytes=16)
+        with pytest.raises(ValueError, match="too large"):
+            asyncio.run(handler._resolve_ref_audio(self._data_uri(self._wav_bytes())))
+
+    def test_rejects_an_unsupported_scheme(self):
+        handler = _make_audio_handler()
+        with pytest.raises(ValueError, match="must be a URL"):
+            asyncio.run(handler._resolve_ref_audio("ftp://example.com/a.wav"))
