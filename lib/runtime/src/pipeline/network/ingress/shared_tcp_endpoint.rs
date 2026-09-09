@@ -837,6 +837,7 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
 mod tests {
     use super::*;
     use crate::pipeline::error::PipelineError;
+    use crate::tls_utils::test_certs::self_signed_pair;
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
@@ -1272,22 +1273,6 @@ mod tests {
         cancellation_token.cancel();
     }
 
-    fn make_cert_files() -> (tempfile::NamedTempFile, tempfile::NamedTempFile) {
-        use std::io::Write;
-        let key_pair = rcgen::KeyPair::generate().unwrap();
-        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
-            .unwrap()
-            .self_signed(&key_pair)
-            .unwrap();
-        let mut cert_file = tempfile::NamedTempFile::new().unwrap();
-        cert_file.write_all(cert.pem().as_bytes()).unwrap();
-        let mut key_file = tempfile::NamedTempFile::new().unwrap();
-        key_file
-            .write_all(key_pair.serialize_pem().as_bytes())
-            .unwrap();
-        (cert_file, key_file)
-    }
-
     #[tokio::test]
     async fn new_no_tls_env_is_plaintext() {
         let token = CancellationToken::new();
@@ -1301,7 +1286,7 @@ mod tests {
 
     #[tokio::test]
     async fn new_partial_tls_config_errors() {
-        let (cert, key) = make_cert_files();
+        let (cert, key) = self_signed_pair();
         let cert_str = cert.path().to_str().unwrap();
         let key_str = key.path().to_str().unwrap();
         let token = CancellationToken::new();
@@ -1334,7 +1319,7 @@ mod tests {
 
     #[tokio::test]
     async fn new_both_paths_enables_tls() {
-        let (cert, key) = make_cert_files();
+        let (cert, key) = self_signed_pair();
         let token = CancellationToken::new();
         temp_env::with_vars(
             [
@@ -1352,7 +1337,7 @@ mod tests {
 
     #[test]
     fn request_plane_tls_acceptor_enables_mtls() {
-        let (cert, key) = make_cert_files();
+        let (cert, key) = self_signed_pair();
         // cert + key + client CA -> mTLS acceptor built.
         assert!(
             SharedTcpServer::request_plane_tls_acceptor(
@@ -1367,7 +1352,7 @@ mod tests {
 
     #[test]
     fn request_plane_tls_rejects_client_ca_without_server_identity() {
-        let (client_ca, _) = make_cert_files();
+        let (client_ca, _) = self_signed_pair();
         let error = SharedTcpServer::request_plane_tls_acceptor(None, None, Some(client_ca.path()))
             .err()
             .expect("a client CA without a server certificate/key must fail");
@@ -1380,7 +1365,7 @@ mod tests {
 
     #[test]
     fn request_plane_tls_reads_client_ca_path() {
-        let (cert, key) = make_cert_files();
+        let (cert, key) = self_signed_pair();
         let error = SharedTcpServer::request_plane_tls_acceptor(
             Some(cert.path()),
             Some(key.path()),

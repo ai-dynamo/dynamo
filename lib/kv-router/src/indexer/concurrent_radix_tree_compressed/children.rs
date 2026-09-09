@@ -146,31 +146,29 @@ impl NodeChildren {
     }
 
     pub(super) fn insert(&self, key: LocalBlockHash, child: SharedNode) -> Option<SharedNode> {
-        loop {
-            let current = self.state.load_full();
-            if let ChildrenState::Sharded(children) = current.as_ref() {
-                return children.insert(key, child);
-            }
-
-            let mut entries = Self::clone_compact_entries(current.as_ref());
-            let previous = match entries.binary_search_by_key(&key, |entry| entry.hash) {
-                Ok(index) => Some(std::mem::replace(&mut entries[index].node, child.clone())),
-                Err(index) => {
-                    entries.insert(
-                        index,
-                        ChildEntry {
-                            hash: key,
-                            node: child.clone(),
-                        },
-                    );
-                    None
-                }
-            };
-
-            if self.compare_and_swap(&current, Self::state_from_entries(entries)) {
-                return previous;
-            }
+        let current = self.state.load_full();
+        if let ChildrenState::Sharded(children) = current.as_ref() {
+            return children.insert(key, child);
         }
+
+        let mut entries = Self::clone_compact_entries(current.as_ref());
+        let previous = match entries.binary_search_by_key(&key, |entry| entry.hash) {
+            Ok(index) => Some(std::mem::replace(&mut entries[index].node, child.clone())),
+            Err(index) => {
+                entries.insert(
+                    index,
+                    ChildEntry {
+                        hash: key,
+                        node: child,
+                    },
+                );
+                None
+            }
+        };
+
+        self.state
+            .store(Arc::new(Self::state_from_entries(entries)));
+        previous
     }
 
     pub(super) fn insert_if_absent(
@@ -220,70 +218,61 @@ impl NodeChildren {
     }
 
     pub(super) fn remove(&self, key: &LocalBlockHash) -> Option<SharedNode> {
-        loop {
-            let current = self.state.load_full();
-            let remove_index = match current.as_ref() {
-                ChildrenState::Empty => return None,
-                ChildrenState::Singleton(entry) => {
-                    if entry.hash != *key {
-                        return None;
-                    }
-                    0
+        let current = self.state.load_full();
+        let remove_index = match current.as_ref() {
+            ChildrenState::Empty => return None,
+            ChildrenState::Singleton(entry) => {
+                if entry.hash != *key {
+                    return None;
                 }
-                ChildrenState::Small(entries) => {
-                    let Ok(index) = entries.binary_search_by_key(key, |entry| entry.hash) else {
-                        return None;
-                    };
-                    index
-                }
-                ChildrenState::Sharded(children) => {
-                    return children.remove(key).map(|(_, child)| child);
-                }
-            };
-
-            let mut entries = Self::clone_compact_entries(current.as_ref());
-            let removed = entries.remove(remove_index);
-            if self.compare_and_swap(&current, Self::compact_state(entries)) {
-                return Some(removed.node);
+                0
             }
-        }
+            ChildrenState::Small(entries) => {
+                let Ok(index) = entries.binary_search_by_key(key, |entry| entry.hash) else {
+                    return None;
+                };
+                index
+            }
+            ChildrenState::Sharded(children) => {
+                return children.remove(key).map(|(_, child)| child);
+            }
+        };
+
+        let mut entries = Self::clone_compact_entries(current.as_ref());
+        let removed = entries.remove(remove_index);
+        self.state.store(Arc::new(Self::compact_state(entries)));
+        Some(removed.node)
     }
 
     pub(super) fn clear(&self) -> bool {
-        loop {
-            let current = self.state.load_full();
-            match current.as_ref() {
-                ChildrenState::Empty => return false,
-                ChildrenState::Sharded(children) => {
-                    let had_children = !children.is_empty();
-                    children.clear();
-                    return had_children;
-                }
-                ChildrenState::Singleton(_) | ChildrenState::Small(_) => {
-                    if self.compare_and_swap(&current, ChildrenState::Empty) {
-                        return true;
-                    }
-                }
+        let current = self.state.load_full();
+        match current.as_ref() {
+            ChildrenState::Empty => false,
+            ChildrenState::Sharded(children) => {
+                let had_children = !children.is_empty();
+                children.clear();
+                had_children
+            }
+            ChildrenState::Singleton(_) | ChildrenState::Small(_) => {
+                self.state.store(Arc::new(ChildrenState::Empty));
+                true
             }
         }
     }
 
     /// Transfers the current state while the owning node's exclusive shape gate is held.
     pub(super) fn transfer_for_split(&self) -> Self {
-        loop {
-            let current = self.state.load_full();
-            let replacement = match current.as_ref() {
-                ChildrenState::Sharded(_) => {
-                    ChildrenState::Sharded(ShardedChildren::with_hasher(FxBuildHasher))
-                }
-                ChildrenState::Empty | ChildrenState::Singleton(_) | ChildrenState::Small(_) => {
-                    ChildrenState::Empty
-                }
-            };
-            if self.compare_and_swap(&current, replacement) {
-                return Self::from_state(current);
+        let current = self.state.load_full();
+        let replacement = match current.as_ref() {
+            ChildrenState::Sharded(_) => {
+                ChildrenState::Sharded(ShardedChildren::with_hasher(FxBuildHasher))
             }
-        }
+            ChildrenState::Empty | ChildrenState::Singleton(_) | ChildrenState::Small(_) => {
+                ChildrenState::Empty
+            }
+        };
+        self.state.store(Arc::new(replacement));
+        Self::from_state(current)
     }
 
     fn clone_compact_entries(state: &ChildrenState) -> Vec<ChildEntry> {
@@ -309,24 +298,12 @@ impl NodeChildren {
 
     fn compact_state(mut entries: Vec<ChildEntry>) -> ChildrenState {
         debug_assert!(entries.windows(2).all(|pair| pair[0].hash < pair[1].hash));
-        if entries.is_empty() {
-            return ChildrenState::Empty;
+        debug_assert!(entries.len() <= SMALL_CHILD_LIMIT);
+        match entries.len() {
+            0 => ChildrenState::Empty,
+            1 => ChildrenState::Singleton(entries.remove(0)),
+            _ => ChildrenState::Small(entries.into_boxed_slice()),
         }
-        if entries.len() == 1 {
-            if let Some(entry) = entries.pop() {
-                return ChildrenState::Singleton(entry);
-            }
-            return ChildrenState::Empty;
-        }
-        if entries.len() <= SMALL_CHILD_LIMIT {
-            return ChildrenState::Small(entries.into_boxed_slice());
-        }
-
-        let sharded = ShardedChildren::with_hasher(FxBuildHasher);
-        for entry in entries {
-            sharded.insert(entry.hash, entry.node);
-        }
-        ChildrenState::Sharded(sharded)
     }
 
     fn compare_and_swap(&self, current: &Arc<ChildrenState>, next: ChildrenState) -> bool {

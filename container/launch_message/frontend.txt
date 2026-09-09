@@ -50,9 +50,10 @@ Benefits:
 
 Quick Start:
 
-Online Mocker simulation is temporarily unavailable. Use
-aisimulate predict --stack dynamo for offline simulation. Online simulation will return through
-the unified AISimulate CLI in a future release.
+Use aisimulate predict --stack dynamo for offline virtual-clock simulation. The former public
+Replay online CLI is temporarily unavailable. Live Mocker workers remain available from a full
+Dynamo installation or the planner image; this frontend-only image does not include their
+dependencies.
 
 Start frontend server:
 > python -m dynamo.frontend --http-port 8000
