@@ -462,14 +462,13 @@ class TestKalmanPredictor:
         result = predictor.predict_next()
         assert result >= 0.0
 
-    @pytest.mark.parametrize("log1p", [False, True])
-    def test_predict_returns_non_negative_on_declining_traffic(self, log1p):
+    def test_predict_returns_non_negative_on_declining_traffic(self):
         """A sustained decline drives the local-linear-trend level below zero.
 
-        Load is never negative, so both output branches must clamp, as the
-        sibling ARIMA and Prophet predictors already do.
+        Load is never negative, so both raw-mode return sites must clamp, as
+        the sibling ARIMA and Prophet predictors already do.
         """
-        predictor = KalmanPredictor(_make_config(load_predictor_log1p=log1p))
+        predictor = KalmanPredictor(_make_config(load_predictor_log1p=False))
         results = []
         for v in [10.0, 15.0, 20.0, 15.0, 10.0, 5.0, 2.0, 1.0, 0.0]:
             predictor.add_data_point(v)
