@@ -30,7 +30,14 @@ async def _generate_error(_request, _context=None):
 
 
 @pytest.fixture
-async def error_router_endpoint(temp_file_store):
+async def error_router_endpoint(temp_file_store, monkeypatch):
+    # KvRouter tracks workers on a background task, so a generate() issued right
+    # after construction can beat that set being populated and fail with "no
+    # endpoints available to route work" instead of the stream error under test.
+    # The router's startup gate exists for exactly this but defaults to 0
+    # (DYN_ROUTER_MIN_INITIAL_WORKERS); require one worker, as
+    # tests/router/test_kv_router_gil_release.py already does.
+    monkeypatch.setenv("DYN_ROUTER_MIN_INITIAL_WORKERS", "1")
     endpoint_path = f"error-router-{uuid.uuid4().hex}.worker.generate"
     loop = asyncio.get_running_loop()
     worker_runtime = DistributedRuntime(loop, "file", "tcp")
