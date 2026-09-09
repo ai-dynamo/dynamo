@@ -138,6 +138,13 @@ struct WorkItem {
     endpoint_name: String,
 }
 
+/// Handler-map key and request path for one endpoint instance. Several instances in one process
+/// share this server, so the key must carry the instance id; register and unregister must agree on
+/// the format or a teardown removes the wrong handler, or none.
+fn instance_path(endpoint_name: &str, instance_id: u64) -> String {
+    format!("{instance_id:x}/{endpoint_name}")
+}
+
 /// Shared TCP server that handles multiple endpoints on a single port
 pub struct SharedTcpServer {
     handlers: Arc<DashMap<String, Arc<EndpointHandler>>>,
@@ -525,7 +532,7 @@ impl SharedTcpServer {
         Ok(())
     }
 
-    pub async fn unregister_endpoint(&self, endpoint_path: &str, endpoint_name: &str) {
+    pub async fn remove_handler(&self, endpoint_path: &str, endpoint_name: &str) {
         if let Some((_, handler)) = self.handlers.remove(endpoint_path) {
             handler
                 .system_health
@@ -674,7 +681,8 @@ impl SharedTcpServer {
                     // The client only treats this prefix as a rejection; any other reply is
                     // read as a success ACK and it waits for a response stream that never opens.
                     let error_response = TcpResponseMessage::new(Bytes::from(format!(
-                        "Server unavailable: unknown endpoint {endpoint_path}"
+                        "{} unknown endpoint {endpoint_path}",
+                        crate::pipeline::network::ACK_UNAVAILABLE_PREFIX
                     )));
                     if let Ok(encoded) = error_response.encode() {
                         let _ = response_tx.send(encoded);
@@ -745,9 +753,10 @@ impl SharedTcpServer {
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                     WORK_HANDLER_ENQUEUE_REJECTED_TOTAL.inc();
-                    send_response(TcpResponseMessage::new(Bytes::from_static(
-                        b"Server unavailable: worker pool channel closed",
-                    )));
+                    send_response(TcpResponseMessage::new(Bytes::from(format!(
+                        "{} worker pool channel closed",
+                        crate::pipeline::network::ACK_UNAVAILABLE_PREFIX
+                    ))));
                     handler.inflight.fetch_sub(1, Ordering::SeqCst);
                     handler.notify.notify_one();
                     tracing::error!("Worker pool channel closed, shutting down read loop");
@@ -783,11 +792,8 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
         component_name: String,
         system_health: Arc<Mutex<SystemHealth>>,
     ) -> Result<()> {
-        // Include instance_id in the routing key to avoid collisions when multiple workers
-        // share the same TCP server (e.g., --num-workers > 1 in tests)
-        let endpoint_path = format!("{instance_id:x}/{endpoint_name}");
         self.register_endpoint(
-            endpoint_path,
+            instance_path(&endpoint_name, instance_id),
             service_handler,
             instance_id,
             namespace,
@@ -800,8 +806,7 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
 
     async fn unregister_endpoint(&self, endpoint_name: &str, instance_id: u64) -> Result<()> {
         // Other instances in this process may serve the same endpoint name; remove only ours.
-        let endpoint_path = format!("{instance_id:x}/{endpoint_name}");
-        self.unregister_endpoint(&endpoint_path, endpoint_name)
+        self.remove_handler(&instance_path(endpoint_name, instance_id), endpoint_name)
             .await;
         Ok(())
     }
@@ -979,9 +984,7 @@ mod tests {
             let server = server.clone();
             let endpoint_path = endpoint_path.clone();
             async move {
-                server
-                    .unregister_endpoint(&endpoint_path, "test_endpoint")
-                    .await;
+                server.remove_handler(&endpoint_path, "test_endpoint").await;
                 Instant::now()
             }
         });
@@ -1074,25 +1077,24 @@ mod tests {
             "/health".to_string(),
             "/live".to_string(),
         )));
+        let plane: &dyn RequestPlaneServer = server.as_ref();
         let removed = Arc::new(SlowMockHandler::new(Duration::ZERO));
         let survivor = Arc::new(SlowMockHandler::new(Duration::ZERO));
         for (instance_id, handler) in [(0xa_u64, removed), (0xb_u64, survivor.clone())] {
-            RequestPlaneServer::register_endpoint(
-                &*server,
-                "generate".to_string(),
-                handler as Arc<dyn PushWorkHandler>,
-                instance_id,
-                "test_namespace".to_string(),
-                "test_component".to_string(),
-                system_health.clone(),
-            )
-            .await
-            .unwrap();
+            plane
+                .register_endpoint(
+                    "generate".to_string(),
+                    handler as Arc<dyn PushWorkHandler>,
+                    instance_id,
+                    "test_namespace".to_string(),
+                    "test_component".to_string(),
+                    system_health.clone(),
+                )
+                .await
+                .unwrap();
         }
 
-        RequestPlaneServer::unregister_endpoint(&*server, "generate", 0xa)
-            .await
-            .unwrap();
+        plane.unregister_endpoint("generate", 0xa).await.unwrap();
 
         let client = TcpRequestClient::new().unwrap();
 
@@ -1106,12 +1108,17 @@ mod tests {
             .await
             .expect("surviving instance's handler should still receive requests");
 
-        let ack = send_ack(&client, addr, "a/generate").await;
-        assert!(
-            ack.starts_with(b"Server unavailable:"),
-            "removed instance should be rejected on the ACK, got {:?}",
-            String::from_utf8_lossy(&ack)
-        );
+        // Both an instance whose handler was removed and one that never registered must be
+        // rejected on the ACK: the client only recognises this prefix as a rejection, and reads
+        // anything else as the success ACK before waiting for a stream that never opens.
+        for path in ["a/generate", "deadbeef/generate"] {
+            let ack = send_ack(&client, addr, path).await;
+            assert!(
+                ack.starts_with(crate::pipeline::network::ACK_UNAVAILABLE_PREFIX.as_bytes()),
+                "{path} should be rejected on the ACK, got {:?}",
+                String::from_utf8_lossy(&ack)
+            );
+        }
 
         cancellation_token.cancel();
     }
