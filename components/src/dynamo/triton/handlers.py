@@ -61,7 +61,9 @@ class RequestHandler:
                     # an object array of bytes via the Triton Tensor API.
                     response_arr = output_tensor.to_bytes_array()
                 else:
-                    response_arr = np.from_dlpack(output_tensor)
+if output_tensor.memory_type != tritonserver.MemoryType.CPU:
+    output_tensor = output_tensor.to_host()
+response_arr = np.from_dlpack(output_tensor)
                 dtype_str = TRITON_TO_DYNAMO_DTYPE.get(triton_dtype, triton_dtype)
                 response_tensors.append(
                     {
