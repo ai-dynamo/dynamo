@@ -6,12 +6,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pytest
-from dynamo.artifacts.capture import (
+from dynamo.artifacts.format_v1 import decode_generation_artifact
+from dynamo.vllm.generation_artifact import (
     ArtifactCaptureError,
-    GenerationArtifactSession,
+    VllmGenerationArtifactSession,
     _resolve_router_layout,
 )
-from dynamo.artifacts.format_v1 import decode_generation_artifact
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
@@ -64,7 +64,7 @@ def _model_config(**overrides):
     return SimpleNamespace(hf_config=SimpleNamespace(**values))
 
 
-def _session(request: dict, **overrides) -> GenerationArtifactSession:
+def _session(request: dict, **overrides) -> VllmGenerationArtifactSession:
     values = {
         "model_config": _model_config(),
         "enable_rl": True,
@@ -72,7 +72,7 @@ def _session(request: dict, **overrides) -> GenerationArtifactSession:
         "choice_count": 1,
         **overrides,
     }
-    session = GenerationArtifactSession.from_backend_request(request, **values)
+    session = VllmGenerationArtifactSession.from_backend_request(request, **values)
     assert session is not None
     return session
 
@@ -183,7 +183,7 @@ async def test_capture_allows_token_only_artifact_without_rl(monkeypatch) -> Non
 
 def test_capture_rejects_malformed_contract_and_logprob_alignment() -> None:
     assert (
-        GenerationArtifactSession.from_backend_request(
+        VllmGenerationArtifactSession.from_backend_request(
             {},
             model_config=_model_config(),
             enable_rl=True,

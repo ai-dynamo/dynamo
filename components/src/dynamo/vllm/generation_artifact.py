@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Backend-neutral capture state for generation artifact production."""
+"""vLLM producer for the strict ``generation_artifact_v1`` format."""
 
 from __future__ import annotations
 
@@ -12,13 +12,12 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
-
-from .format_v1 import (
+from dynamo.artifacts.format_v1 import (
     GenerationArtifactChoice,
     GenerationArtifactView,
     encode_generation_artifact,
 )
-from .storage import (
+from dynamo.artifacts.storage import (
     ArtifactStorageError,
     ArtifactTarget,
     PresignedHttpPutTarget,
@@ -84,8 +83,8 @@ class _ChoiceCapture:
     routed_experts: Any | None = None
 
 
-class GenerationArtifactSession:
-    """Captures one vLLM choice and synchronously delivers its final artifact."""
+class VllmGenerationArtifactSession:
+    """Captures one vLLM choice and delivers its final version 1 artifact."""
 
     def __init__(
         self,
@@ -109,7 +108,7 @@ class GenerationArtifactSession:
         enable_rl: bool,
         route_capture_enabled: bool,
         choice_count: int,
-    ) -> GenerationArtifactSession | None:
+    ) -> VllmGenerationArtifactSession | None:
         settings = generation_artifact_settings(request)
         if settings is None:
             return None

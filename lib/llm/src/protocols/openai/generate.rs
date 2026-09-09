@@ -21,7 +21,7 @@ use serde_json::{Map, Value};
 
 use super::{convert_backend_top_logprobs, token_to_utf8_bytes};
 use crate::protocols::Annotated;
-use crate::protocols::common::extensions::{GenerationArtifactKind, NvExt};
+use crate::protocols::common::extensions::{GenerationArtifactResponseExpectation, NvExt};
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PromptLogprobs};
 use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 use crate::protocols::openai::validate;
@@ -78,26 +78,15 @@ pub struct GenerateRequest {
 
 impl GenerateRequest {
     pub(crate) fn response_options(&self) -> GenerateResponseOptions {
-        let mut generation_artifact_contents = [false; 3];
         let generation_artifact = self
             .nvext
             .as_ref()
-            .and_then(|nvext| nvext.generation_artifact.as_ref());
-        if let Some(artifact) = generation_artifact {
-            for content in &artifact.contents {
-                let index = match content {
-                    GenerationArtifactKind::MoeRoutes => 0,
-                    GenerationArtifactKind::SelectedLogprobs => 1,
-                    GenerationArtifactKind::TopkLogprobs => 2,
-                };
-                generation_artifact_contents[index] = true;
-            }
-        }
+            .and_then(|nvext| nvext.generation_artifact.as_ref())
+            .map(GenerationArtifactResponseExpectation::from);
         GenerateResponseOptions {
             include_logprobs: self.sampling_params.logprobs().is_some(),
             include_prompt_logprobs: self.sampling_params.prompt_logprobs().is_some(),
-            generation_artifact: generation_artifact.is_some(),
-            generation_artifact_contents,
+            generation_artifact,
         }
     }
 
@@ -417,12 +406,11 @@ pub struct GenerateResponse {
     pub generation_artifact: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct GenerateResponseOptions {
     include_logprobs: bool,
     include_prompt_logprobs: bool,
-    generation_artifact: bool,
-    generation_artifact_contents: [bool; 3],
+    generation_artifact: Option<GenerationArtifactResponseExpectation>,
 }
 
 /// Per-index accumulation state while folding a stream of
@@ -436,7 +424,7 @@ struct GenerateChoiceAcc {
 }
 
 impl GenerateChoiceAcc {
-    fn apply(&mut self, output: &LLMEngineOutput, options: GenerateResponseOptions) -> Result<()> {
+    fn apply(&mut self, output: &LLMEngineOutput, options: &GenerateResponseOptions) -> Result<()> {
         if let Some(finish_reason) = output.finish_reason.as_ref() {
             match finish_reason {
                 crate::protocols::common::FinishReason::Error(message) => {
@@ -480,7 +468,7 @@ impl GenerateChoiceAcc {
         Ok(())
     }
 
-    fn into_response(self, options: GenerateResponseOptions) -> Result<GenerateResponseChoice> {
+    fn into_response(self, options: &GenerateResponseOptions) -> Result<GenerateResponseChoice> {
         let Self {
             index,
             token_ids,
@@ -634,7 +622,7 @@ impl GenerateAggregator {
     fn apply_output(
         &mut self,
         output: LLMEngineOutput,
-        options: GenerateResponseOptions,
+        options: &GenerateResponseOptions,
     ) -> Result<()> {
         if options.include_prompt_logprobs
             && self.prompt_logprobs.is_none()
@@ -684,7 +672,7 @@ impl GenerateAggregator {
         pin_mut!(stream);
         while let Some(delta) = stream.next().await {
             if let Some(output) = delta.into_data().map_err(anyhow::Error::new)? {
-                aggregator.apply_output(output, options)?;
+                aggregator.apply_output(output, &options)?;
             }
         }
 
@@ -699,7 +687,7 @@ impl GenerateAggregator {
 
         let mut choices: Vec<GenerateResponseChoice> = choices
             .into_values()
-            .map(|choice| choice.into_response(options))
+            .map(|choice| choice.into_response(&options))
             .collect::<Result<_>>()?;
         choices.sort_by_key(|choice| choice.index);
 
@@ -712,16 +700,11 @@ impl GenerateAggregator {
             None
         };
 
-        let generation_artifact = if options.generation_artifact {
+        let generation_artifact = if let Some(artifact) = options.generation_artifact.as_ref() {
             Some(generation_artifact.unwrap_or_else(|| {
-                let contents: Vec<&str> = ["moe_routes", "selected_logprobs", "topk_logprobs"]
-                    .into_iter()
-                    .zip(options.generation_artifact_contents)
-                    .filter_map(|(name, requested)| requested.then_some(name))
-                    .collect();
                 serde_json::json!({
-                    "format": "generation_artifact_v1",
-                    "contents": contents,
+                    "format": artifact.format,
+                    "contents": artifact.contents,
                     "state": "failed",
                     "error_code": "artifact_receipt_missing",
                     "error": "generation artifact result was not returned by the backend"
@@ -1341,8 +1324,10 @@ mod tests {
             stream,
             "req-artifact".to_string(),
             GenerateResponseOptions {
-                generation_artifact: true,
-                generation_artifact_contents: [true, false, false],
+                generation_artifact: Some(GenerationArtifactResponseExpectation {
+                    format: "generation_artifact_v1".to_string(),
+                    contents: vec!["moe_routes".to_string()],
+                }),
                 ..Default::default()
             },
         )
@@ -1364,8 +1349,10 @@ mod tests {
             stream,
             "req-artifact".to_string(),
             GenerateResponseOptions {
-                generation_artifact: true,
-                generation_artifact_contents: [false, true, false],
+                generation_artifact: Some(GenerationArtifactResponseExpectation {
+                    format: "generation_artifact_v1".to_string(),
+                    contents: vec!["selected_logprobs".to_string()],
+                }),
                 ..Default::default()
             },
         )
