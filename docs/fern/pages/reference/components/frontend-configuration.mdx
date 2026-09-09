@@ -515,7 +515,7 @@ See the [KServe gRPC Frontend](../../developer-guide/knowledge-base/modular-comp
 
 ### Histogram buckets
 
-The frontend's six latency and size histograms use log-spaced buckets, rounded to two significant figures, always starting with a `0` edge. Each histogram is tuned by three environment variables that share a prefix: `_MIN` and `_MAX` bound the range, and `_COUNT` sets how many edges are generated across it. These have no CLI equivalent, and they are read once while the frontend builds its metrics, so changing one requires a restart.
+The frontend's six latency and size histograms use log-spaced buckets, rounded to two significant figures, always starting with a `0` edge. Each histogram is tuned by three environment variables that share a prefix: `_MIN` and `_MAX` bound the range, and `_COUNT` is the total number of bucket edges **including** that leading `0`, so `COUNT - 1` edges are spread across the range and `MAX` is the top one. The inter-token latency default of `13` therefore means `0` plus twelve log-spaced edges. These have no CLI equivalent, and they are read once while the frontend builds its metrics, so changing one requires a restart.
 
 | Histogram | Variable prefix | Min | Max | Count |
 |---|---|---|---|---|
@@ -535,11 +535,18 @@ export DYN_METRICS_ITL_COUNT=20
 
 `dynamo_frontend_cached_tokens` shares the input sequence buckets, so `DYN_METRICS_INPUT_SEQUENCE_*` changes both histograms.
 
-A configuration is rejected, with a warning, unless `MIN` is greater than zero, `MIN` is less than `MAX`, and `COUNT` is between 1 and 512. Rejected values fall back to the defaults above. A value that cannot be parsed at all also warns and falls back. Because rounding to two significant figures can collapse neighboring edges, a high `COUNT` over a narrow range yields fewer buckets than requested; the frontend warns when that removes more than a tenth of them.
+A histogram's configuration is validated as a set: `MIN` must be above zero, below `MAX`, and `COUNT` must be between 1 and 512. If any part fails, the frontend warns and reverts **all three** values for that histogram together — setting `DYN_METRICS_ITL_MIN=5` against the default `MAX` of `2.0` also discards a perfectly valid `DYN_METRICS_ITL_COUNT=20`.
 
-Bucket edges appear directly in the `le` label, which is the only reliable way to confirm a setting took effect:
+A value that cannot be parsed at all is handled per variable, not as a set: it warns, that one variable falls back to its default, and the others still apply.
+
+Use `COUNT` of at least 2. `COUNT=1` passes validation but produces the leading `0` edge and nothing else, which ignores `MIN` and `MAX` and puts every observation in `+Inf`. Because rounding to two significant figures can collapse neighboring edges, a high `COUNT` over a narrow range also yields fewer buckets than requested; the frontend warns when that removes more than a tenth of them.
+
+Bucket edges appear directly in the `le` label, which is the only reliable way to confirm a setting took effect. These histograms are labeled by `model`, so a series exists only after a request has populated it — on a freshly restarted frontend the command below prints nothing, which means "no data yet", not "the setting was ignored". Send a request first:
 
 ```bash
+curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"<model>","messages":[{"role":"user","content":"hi"}],"max_tokens":8}' > /dev/null
+
 curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_seconds_bucket
 ```
 
