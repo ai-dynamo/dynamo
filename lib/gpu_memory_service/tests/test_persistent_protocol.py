@@ -6,7 +6,7 @@
 import asyncio
 
 import pytest
-from gpu_memory_service.common.locks import RequestedLockType
+from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import (
     ClaimPersistentAllocationRequest,
     ClaimPersistentAllocationResponse,
@@ -90,18 +90,17 @@ def test_persistent_messages_round_trip(message):
     assert type(decoded) is type(message)
 
 
-def test_persistent_lock_request_fails_closed_until_implemented():
+def test_persistent_lock_request_is_granted_without_reserving_layout():
     async def exercise():
         sessions = GMSSessionManager()
-        with pytest.raises(
-            OperationNotAllowed,
-            match="persistent allocation sessions are not implemented",
-        ):
-            await sessions.acquire_lock(
-                RequestedLockType.RW_PERSISTENT,
-                timeout_ms=0,
-                session_id="session-0",
-            )
+        granted = await sessions.acquire_lock(
+            RequestedLockType.RW_PERSISTENT,
+            timeout_ms=0,
+            session_id="session-0",
+        )
+
+        assert granted is GrantedLockType.RW_PERSISTENT
+        assert sessions._reserved_rw_session_id is None
 
     asyncio.run(exercise())
 
