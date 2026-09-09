@@ -14,9 +14,9 @@ permissions:
   contents: read
 
 jobs:
-  two-gpu-v2-smoke:
-    name: East two-GPU v2 capacity smoke
-    runs-on: prod-tester-amd-gpu-2-v2-east-canary
+  four-gpu-v2-smoke:
+    name: East four-GPU v2 capacity smoke
+    runs-on: prod-tester-amd-gpu-4-v2-east-canary
     timeout-minutes: 30
     container:
       image: ${{ vars.ECR_REGISTRY }}/dockerhub/busybox:1.37
@@ -33,6 +33,6 @@ jobs:
           set -- /dev/nvidia[0-9]*
           test -e "$1"
           echo "gpu_device_count=$#"
-          test "$#" -eq 2
+          test "$#" -eq 4
           test -d /scratch
           test -d /models
