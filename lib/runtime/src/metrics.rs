@@ -943,10 +943,16 @@ impl MetricsRegistry {
                     tracing::warn!(metric_name = %name, %error, "skipping typed metric family");
                     continue;
                 }
+                // First writer wins, matching how the merger itself resolves a
+                // conflict: the first family fixes help and type, and later
+                // ones must agree. A later family can be accepted and still
+                // have every sample dropped as a duplicate series, so letting
+                // it overwrite the unit would label the surviving data with a
+                // unit from a source that contributed none of it.
                 if !built.unit.is_empty() {
-                    units.insert(name.clone(), built.unit);
+                    units.entry(name.clone()).or_insert(built.unit);
                 }
-                prom_types.insert(name, built.prom_type);
+                prom_types.entry(name).or_insert(built.prom_type);
             }
         }
 
@@ -2122,6 +2128,51 @@ mod test_metric_families_combined {
     /// applied to whichever family did survive under that name. Here the
     /// rejected entry claims `info`, which would flip the surviving gauge to a
     /// non-monotonic Sum on the OTLP side.
+    /// The merger resolves a conflict first-writer-wins: the first family
+    /// fixes help and type and later ones must agree. The metadata maps must
+    /// resolve the same way. A later family can pass that check and still have
+    /// every sample dropped as a duplicate series, so a last-writer-wins unit
+    /// would label the surviving data with a unit from a source that
+    /// contributed none of it.
+    #[test]
+    fn metadata_from_a_source_that_contributed_no_samples_does_not_win() {
+        let registry = MetricsRegistry::new();
+        registry.add_typed_callback(StdArc::new(|| {
+            Ok(vec![
+                crate::metrics::prom_typed::BuiltFamily {
+                    unit: "bytes".to_string(),
+                    prom_type: "gauge".to_string(),
+                    family: gauge_family("vllm:probe", "Same help", 1.0),
+                },
+                // Same name, help and type, so the merger accepts it -- but the
+                // labels match too, so every sample is dropped as a duplicate.
+                crate::metrics::prom_typed::BuiltFamily {
+                    unit: "seconds".to_string(),
+                    prom_type: "gauge".to_string(),
+                    family: gauge_family("vllm:probe", "Same help", 2.0),
+                },
+            ])
+        }));
+
+        let collected = registry.metric_families_combined().expect("combined");
+
+        let family = collected
+            .families
+            .iter()
+            .find(|f| f.name() == "vllm:probe")
+            .expect("family");
+        assert_eq!(
+            family.get_metric()[0].get_gauge().value(),
+            1.0,
+            "the surviving sample should be the first source's"
+        );
+        assert_eq!(
+            collected.units.get("vllm:probe").map(String::as_str),
+            Some("bytes"),
+            "unit came from a source whose samples were all dropped"
+        );
+    }
+
     #[test]
     fn rejected_family_leaves_no_metadata_behind() {
         let registry = MetricsRegistry::new();
