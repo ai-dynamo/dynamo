@@ -125,7 +125,7 @@ def test_stream_counter_diagnostics():
         (0, "b", 0),
         (103, "a", 0),
         (0, "a", 0),
-        (1, "a", 0),
+        (104, "a", 0),
     ]:
         stats.observe(
             ForwardPassMetrics(worker_id=worker, dp_rank=dp, counter_id=counter)

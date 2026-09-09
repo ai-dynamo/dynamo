@@ -304,9 +304,11 @@ class _RecordingStats:
             if metrics.counter_id > previous + 1:
                 self.counter_gaps += metrics.counter_id - previous - 1
             elif metrics.counter_id <= previous:
-                # Could be a duplicate, reordering or producer restart. Do not
-                # label it as definite loss; rebase to the observed counter.
+                # Could be a duplicate, reordering or producer restart. Keep
+                # the high-water mark: a restart cannot be distinguished here,
+                # and rebasing would turn delayed messages into artificial gaps.
                 self.non_increasing_counters += 1
+                return
         self.last_counter[key] = metrics.counter_id
 
 
