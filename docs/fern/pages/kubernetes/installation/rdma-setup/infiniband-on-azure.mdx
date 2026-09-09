@@ -19,7 +19,7 @@ The Network Operator and NicClusterPolicy steps in this guide are based on the [
 - At least **2 GPU nodes** to enable cross-node RDMA communication
 - **ND-series VMs** with Mellanox ConnectX InfiniBand NICs (e.g., `Standard_ND96asr_v4`, `Standard_ND96isr_H100_v5`)
 - **Ubuntu OS** on the node pool (required for NVIDIA driver compatibility)
-- GPU driver installation **skipped** on the node pool (`--gpu-driver none`) — see [GPU Node Pool Setup](../managed-kubernetes/azure/aks-setup.mdx#step-2-add-a-gpu-node-pool). This guide installs the GPU Operator (Step 5), and AKS-managed drivers cannot coexist with it.
+- GPU driver installation **skipped** on the node pool (`--gpu-driver none`) — see [GPU Node Pool Setup](../managed-kubernetes/azure/aks-setup.mdx#step-2-add-a-gpu-node-pool). This guide has the GPU Operator build and manage the driver (Step 5) so that it is compiled with RDMA support. A node takes its driver from either the host or the Operator's driver daemonset, not both.
 
 **Register the AKS InfiniBand feature** to ensure nodes land on the same physical InfiniBand network:
 
@@ -44,7 +44,7 @@ The RDMA setup involves five components installed in this order:
 <Note>
 Steps 1 and 2 install the OFED/DOCA driver, which the AKS node image does not ship — the Network Operator is what makes the Mellanox NICs usable for RDMA. Step 5 is only needed because this guide manages GPU drivers with the GPU Operator.
 
-Azure documents a second, simpler option: keep the **AKS-managed GPU driver** (create the node pool without `--gpu-driver none`) and load `nvidia_peermem` with Azure's [`nvidia-peermem-reloader`](https://github.com/Azure/aks-rdma-infiniband/tree/main/configs/nvidia-peermem-reloader) DaemonSet, which drops Step 5 entirely. The two driver sources are mutually exclusive and cannot coexist on the same node pool. See [GPU Drivers](https://github.com/Azure/aks-rdma-infiniband/blob/main/website/docs/configurations/02-gpu-drivers.md) in the Azure RDMA repo for the trade-offs. The steps below cover the GPU Operator path.
+Azure documents a second, simpler option: keep the **AKS-managed GPU driver** (create the node pool without `--gpu-driver none`) and load `nvidia_peermem` with Azure's [`nvidia-peermem-reloader`](https://github.com/Azure/aks-rdma-infiniband/tree/main/configs/nvidia-peermem-reloader) DaemonSet, which drops Step 5 entirely. A node takes its driver from one source or the other, so if you still want the Operator's other components on that path, install it with [`driver.enabled=false`](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html) so it does not manage the driver. See [GPU Drivers](https://github.com/Azure/aks-rdma-infiniband/blob/main/website/docs/configurations/02-gpu-drivers.md) in the Azure RDMA repo for the trade-offs. The steps below cover the GPU Operator path.
 </Note>
 
 <Steps toc={true}>
@@ -415,7 +415,7 @@ kubectl rollout restart daemonset/nvidia-driver-daemonset -n gpu-operator
 Running `lsmod` or `modinfo nvidia_peermem` on the host is not a meaningful check on this path — the module belongs to the driver container, so an empty result there is expected and does not indicate a problem.
 
 <Note>
-The [nvidia-peermem-reloader](https://github.com/Azure/aks-rdma-infiniband/tree/main/configs/nvidia-peermem-reloader) DaemonSet from the Azure RDMA repo is the fix for the **AKS-managed GPU driver** case, where the module is present on the host but unloaded. It mounts the host's `/lib/modules` and runs `modprobe nvidia-peermem`. Do not use it alongside the GPU Operator: with `--gpu-driver none` there is no host driver for it to load a module from. When using the GPU Operator, `driver.rdma.enabled=true` handles `nvidia_peermem` instead.
+The [nvidia-peermem-reloader](https://github.com/Azure/aks-rdma-infiniband/tree/main/configs/nvidia-peermem-reloader) DaemonSet from the Azure RDMA repo is the fix for the **AKS-managed GPU driver** case, where the module is present on the host but unloaded. It mounts the host's `/lib/modules` and runs `modprobe nvidia-peermem`. It has nothing to load on a `--gpu-driver none` node pool, since there is no host driver there — on this guide's path, `driver.rdma.enabled=true` handles `nvidia_peermem` inside the driver daemonset instead.
 </Note>
 
 ## See Also
