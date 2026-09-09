@@ -941,7 +941,7 @@ impl ExtProcError {
                 status_code: StatusCode::ServiceUnavailable,
                 message: msg,
             },
-            PickError::TokenizationFailed(msg) => Self {
+            PickError::InvalidRequest(msg) => Self {
                 status_code: StatusCode::BadRequest,
                 message: msg,
             },
