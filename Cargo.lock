@@ -2451,6 +2451,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-custom-policy-builtin"
+version = "1.5.0"
+dependencies = [
+ "dynamo-kv-router",
+ "serde",
+ "tempfile",
+]
+
+[[package]]
 name = "dynamo-custom-policy-example-catalog"
 version = "1.5.0"
 dependencies = [
@@ -2966,6 +2975,7 @@ dependencies = [
  "parking_lot",
  "percent-encoding",
  "prometheus",
+ "quinn",
  "rand 0.9.4",
  "rayon",
  "rcgen",
@@ -2977,6 +2987,7 @@ dependencies = [
  "rustls-pemfile",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "socket2 0.5.10",
  "stdio-override",
  "temp-env",
