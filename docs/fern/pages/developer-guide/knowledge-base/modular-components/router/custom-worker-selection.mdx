@@ -26,6 +26,12 @@ flowchart LR
 
 For multiple compile-checked policies, see the [custom policy examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example). Repository contributors who use a coding agent must also provide the [worker-selection API rules](https://github.com/ai-dynamo/dynamo/blob/main/lib/kv-router/src/scheduling/CLAUDE.md).
 
+## Use a Built-In Policy First
+
+The Dynamo frontend ships built-in worker-selection policies, in [`lib/router-plugins`](https://github.com/ai-dynamo/dynamo/tree/main/lib/router-plugins). Selecting one needs router-policy YAML only — no policy crate, no rebuild, no private image. See [Worker-Selection Policies](configuration-and-tuning.md#worker-selection-policies) for the available types and how to select one.
+
+Write your own policy when no shipped policy expresses the rule you need. The rest of this page covers that case; a custom policy is added alongside the shipped ones, so you keep both.
+
 ## Choose the Policy Stage
 
 | Stage | Input | Output | Use this stage for |
@@ -390,6 +396,10 @@ Both paths use the same policy crate, catalog, and YAML file. Choose the process
 <Tab title="Python Frontend">
 
 Add the catalog to the Python binding manifest. Keep the dependency alias `dynamo-worker-selection-policy-catalog`:
+
+<Note>
+Your catalog is registered alongside the [policies Dynamo ships](#use-a-built-in-policy-first), not instead of them, so both remain selectable. Your catalog cannot reuse a shipped policy's type name; the registry rejects the duplicate at startup rather than overriding it.
+</Note>
 
 ```bash
 # Link the policy catalog into the Python extension.
