@@ -20,6 +20,8 @@ from dynamo.common.utils.video_utils import compute_num_frames, parse_size
 DEFAULT_IMAGE_SIZE = "1024x1024"
 DEFAULT_VIDEO_SIZE = "832x480"
 MAX_IMAGE_DIMENSION = 4096
+# Longest a client-supplied ``size`` may render as inside an error or log line.
+SIZE_LABEL_LIMIT = 32
 
 
 def _coerce_dimension(value: Any, name: str) -> int:
@@ -97,13 +99,22 @@ def image_generation_mm_processor_kwargs(height: int, width: int) -> dict[str, i
     return {"target_h": height, "target_w": width}
 
 
-def _size_dimension_fields(size: str | None) -> tuple[str, str]:
+def _size_dimension_fields(size: Any) -> tuple[str, str]:
     """Error labels naming ``size`` as the source of a width/height.
 
     A dimension derived from ``size`` must not be reported as ``width``: the
     client never sent that field and would have nothing to correct.
+
+    ``size`` is unbounded client input and this label reaches both the error
+    returned to the caller and the log line at the handler, so echo at most
+    ``SIZE_LABEL_LIMIT`` characters of it -- enough to identify a plausible
+    ``WxH`` value, and never a megabyte of it per request.
     """
-    return f"width in size={size!r}", f"height in size={size!r}"
+    if isinstance(size, str) and len(size) > SIZE_LABEL_LIMIT:
+        shown: Any = size[:SIZE_LABEL_LIMIT] + "..."
+    else:
+        shown = size
+    return f"width in size={shown!r}", f"height in size={shown!r}"
 
 
 def image_generation_size_from_str(

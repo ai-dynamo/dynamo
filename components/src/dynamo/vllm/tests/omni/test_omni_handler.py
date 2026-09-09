@@ -748,6 +748,20 @@ class TestImageGenerationSizeValidation:
             MAX_IMAGE_DIMENSION,
         )
 
+    def test_a_long_size_is_truncated_in_the_error(self):
+        # size is unbounded client input and this message reaches both the
+        # caller and the handler's log line, so it must not echo all of it.
+        long_size = "9" * 100 + "x1"
+        with pytest.raises(ValueError) as excinfo:
+            image_generation_size_from_request({"size": long_size})
+        message = str(excinfo.value)
+        assert long_size not in message
+        assert "..." in message and len(message) < 120
+
+    def test_non_string_size_falls_back_to_defaults(self):
+        # parse_size tolerates a non-string size; the error label must too.
+        assert image_generation_size_from_request({"size": 1024}) == (1024, 1024)
+
 
 class TestImageEndpointSizeValidation:
     """/v1/images/generations takes the same bound as the chat path."""
