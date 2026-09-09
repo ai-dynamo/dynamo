@@ -394,10 +394,19 @@ mod tests {
         let client = endpoint.client().await.unwrap();
 
         let original = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
-        original.enable_replica_sync(client.clone()).await.unwrap();
+        let shared = original.clone();
+        let (first, second) = tokio::join!(
+            original.enable_replica_sync(client.clone()),
+            shared.enable_replica_sync(client.clone()),
+        );
+        first.unwrap();
+        second.unwrap();
         wait_for_registration_count(&drt, &query, 1).await;
 
         drop(original);
+        shared.enable_replica_sync(client.clone()).await.unwrap();
+        wait_for_registration_count(&drt, &query, 1).await;
+        drop(shared);
         wait_for_registration_count(&drt, &query, 0).await;
 
         let replacement = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();

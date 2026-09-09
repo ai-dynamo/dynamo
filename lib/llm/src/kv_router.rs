@@ -677,9 +677,8 @@ impl KvRouter {
         shared_cache: Option<Box<dyn SharedKvCache>>,
         lora_filter: Option<Arc<crate::lora::LoraFilter>>,
     ) -> Result<Self> {
-        let source = RouterLoadSource::from_worker_role_or_metric(worker_role, metric_worker_type);
         let parent_token = endpoint.component().drt().child_token();
-        let scheduler_load = SchedulerLoadSender::disabled(source, parent_token.child_token());
+        let scheduler_load = SchedulerLoadSender::disabled(parent_token.child_token());
 
         Self::new_with_worker_role_and_scheduler_load(
             endpoint,
@@ -821,6 +820,7 @@ impl KvRouter {
         let available_worker_provider: WorkerAvailabilityProvider =
             Arc::new(move || client_for_availability.available_instance_ids());
 
+        let replica_leases = Arc::new(sequence::DeferredReplicaRequestLeaseObserver::default());
         let scheduler = embedded::EmbeddedSelection::start(
             embedded::EmbeddedSelectionArgs {
                 kv_router_config: kv_router_config.clone(),
@@ -838,6 +838,7 @@ impl KvRouter {
                 endpoint: endpoint.clone(),
                 router_id: endpoint.drt().discovery().instance_id(),
                 policy_factory,
+                request_leases: replica_leases.clone(),
             },
             workers_with_configs.clone(),
             cancellation_token.child_token(),
@@ -847,6 +848,7 @@ impl KvRouter {
             scheduler.booking_cleanup(),
             cancellation_token.child_token(),
         );
+        replica_leases.install(Arc::new(request_leases.clone()));
         tracing::info!("KV Routing initialized");
         let cancellation_token = cancellation_guard.disarm();
         Ok(Self {
@@ -1229,35 +1231,16 @@ impl KvRouter {
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         pinned_worker: Option<&WorkerWithDpRank>,
     ) -> Option<HashSet<WorkerId>> {
-        let (Some(filter), Some(lora_name)) = (self.lora_filter.as_ref(), lora_name) else {
+        let Some(filter) = self.lora_filter.as_ref() else {
             return allowed_worker_ids;
         };
-        // Base candidate universe: explicit allow-set if present, else all current workers.
-        let base: Vec<WorkerId> = match &allowed_worker_ids {
-            Some(allowed) => allowed.iter().copied().collect(),
-            None => self.workers_with_configs.borrow().keys().copied().collect(),
-        };
-        if base.is_empty() {
-            return allowed_worker_ids;
-        }
-        let mut narrowed: HashSet<WorkerId> = filter
-            .filter_worker_ids_for_lora(Some(lora_name), &base)
-            .into_iter()
-            .collect();
-        // Retain a pinned worker only if it is already within the candidate universe — never
-        // widen the caller's `allowed_worker_ids` (KV-cache / EPP / migration invariants depend
-        // on that set). If the filter excluded an in-universe pinned worker, re-add it so the
-        // pin still wins for cache correctness; if the pin is outside the universe, honor the
-        // caller's constraint and drop it.
-        if let Some(p) = pinned_worker
-            && base.contains(&p.worker_id)
-        {
-            narrowed.insert(p.worker_id);
-        }
-        if narrowed.is_empty() {
-            return allowed_worker_ids;
-        }
-        Some(narrowed)
+        dynamo_kv_router::scheduling::narrow_allowed_worker_ids_by_lora(
+            filter.as_ref(),
+            lora_name,
+            allowed_worker_ids,
+            pinned_worker,
+            || self.workers_with_configs.borrow().keys().copied().collect(),
+        )
     }
 
     /// Give these tokens, find the worker with the best weighted cache hit.
@@ -1946,6 +1929,13 @@ impl KvRouter {
     }
 
     #[doc(hidden)]
+    pub(crate) fn affinity_coordinator(
+        &self,
+        ttl: std::time::Duration,
+    ) -> anyhow::Result<crate::session_affinity::AffinityCoordinator> {
+        self.scheduler.affinity_coordinator(ttl)
+    }
+
     pub(crate) fn booking_cleanup(&self) -> scheduler::SchedulerBookingCleanup {
         self.scheduler.booking_cleanup()
     }

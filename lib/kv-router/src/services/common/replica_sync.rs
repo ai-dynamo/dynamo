@@ -31,6 +31,8 @@ const AFFINITY_EVENT_CHANNEL_CAPACITY: usize = 4_096;
 /// One replicated session binding.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct AffinityBindingEvent {
+    #[serde(flatten)]
+    pub partition: RoutingPartitionId,
     pub session_id: String,
     pub worker_id: u64,
     pub dp_rank: Option<u32>,
@@ -54,12 +56,14 @@ impl AffinityBindingEvent {
 /// Publishes bindings from a [`super::super::selection::affinity::SessionAffinity`]
 /// into the mesh. Best effort: a full channel drops the update.
 struct AffinityMeshSink {
+    partition: RoutingPartitionId,
     tx: mpsc::Sender<AffinityBindingEvent>,
 }
 
 impl AffinityReplicaSink for AffinityMeshSink {
     fn publish(&self, session_id: &str, target: AffinityTarget, version: AffinityVersion) {
         let update = AffinityBindingEvent {
+            partition: self.partition.clone(),
             session_id: session_id.to_string(),
             worker_id: target.worker_id,
             dp_rank: target.dp_rank,
@@ -164,10 +168,16 @@ impl ReplicaSyncConfig {
 
     /// Sink that publishes session bindings into the mesh, when this runtime
     /// carries them.
-    pub(crate) fn affinity_sink(&self) -> Option<Arc<dyn AffinityReplicaSink>> {
-        self.affinity_tx
-            .clone()
-            .map(|tx| Arc::new(AffinityMeshSink { tx }) as Arc<dyn AffinityReplicaSink>)
+    pub(crate) fn affinity_sink(
+        &self,
+        partition: &RoutingPartitionId,
+    ) -> Option<Arc<dyn AffinityReplicaSink>> {
+        self.affinity_tx.clone().map(|tx| {
+            Arc::new(AffinityMeshSink {
+                tx,
+                partition: partition.clone(),
+            }) as Arc<dyn AffinityReplicaSink>
+        })
     }
 
     pub(crate) fn is_self_event(&self, event: &ActiveSequenceEvent) -> bool {

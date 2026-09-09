@@ -116,7 +116,10 @@ impl Selector {
             builder = builder.replica_sync(peer_replication.sync_port, Vec::new());
         }
         if let Some(ttl) = cfg.session_affinity_ttl_secs {
-            builder = builder.session_affinity(std::time::Duration::from_secs_f64(ttl));
+            builder = builder.session_affinity(
+                std::time::Duration::try_from_secs_f64(ttl)
+                    .context("invalid session affinity TTL")?,
+            );
         }
         let service = Arc::new(
             builder
@@ -878,5 +881,18 @@ worker_selection:
             .select_and_reserve(synthetic_req)
             .await
             .expect("synthetic profile must ignore any policy_class value");
+    }
+    #[tokio::test]
+    async fn invalid_affinity_ttl_returns_configuration_error() {
+        for ttl in [-1.0, 0.0, 0.5, f64::NAN, f64::INFINITY] {
+            let mut cfg = test_config();
+            cfg.session_affinity_ttl_secs = Some(ttl);
+            assert!(
+                Selector::new(&cfg, WorkerSelectionPolicyRegistry::default())
+                    .await
+                    .is_err(),
+                "TTL={ttl}"
+            );
+        }
     }
 }

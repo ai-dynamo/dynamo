@@ -254,11 +254,15 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
     wait_for_min_initial_workers(&router_client, min_initial_workers).await?;
     let endpoint_id = router_client.endpoint.id();
 
-    let affinity = create_affinity_coordinator(
-        session_affinity_ttl_secs.map(Duration::from_secs),
-        router_client.clone(),
-    )
-    .await?;
+    let ttl = session_affinity_ttl_secs.map(Duration::from_secs);
+    let affinity = match (ttl, chooser.as_ref()) {
+        (Some(ttl), Some(chooser)) => {
+            let affinity = chooser.affinity_coordinator(ttl)?;
+            affinity.enable_replica_sync(router_client.clone()).await?;
+            Some(affinity)
+        }
+        _ => create_affinity_coordinator(ttl, router_client.clone()).await?,
+    };
 
     let embedding_cache_indexer = if enable_multimodal_cache_indexer
         && matches!(router_mode, RouterMode::DeviceAwareWeighted)

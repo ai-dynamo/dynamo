@@ -32,14 +32,16 @@ pub trait KvEventIngress: Send + Sync {
         Vec::new()
     }
 
-    /// Start feeding every rank of `record` into its partition's index.
+    /// Reconcile event sources, retaining unchanged ranks and their cached state.
+    /// `previous` is the last schedulable record in the same partition.
     /// Called only when the core subscribes to worker KV events.
-    async fn attach(
+    async fn reconcile(
         &self,
         registry: &WorkerRegistry,
+        previous: Option<&WorkerCatalogRecord>,
         record: &WorkerCatalogRecord,
     ) -> Result<(), SelectionError> {
-        let _ = (registry, record);
+        let _ = (registry, previous, record);
         Ok(())
     }
 
@@ -79,33 +81,61 @@ impl KvEventIngress for ZmqDirectIngress {
             .collect()
     }
 
-    async fn attach(
+    async fn reconcile(
         &self,
         registry: &WorkerRegistry,
+        previous: Option<&WorkerCatalogRecord>,
         record: &WorkerCatalogRecord,
     ) -> Result<(), SelectionError> {
         let block_size = record
             .block_size
             .ok_or_else(|| SelectionError::BadRequest("block_size is required".to_string()))?;
-        let mut endpoints: Vec<_> = record.listener_endpoints().into_iter().collect();
-        endpoints.sort_by_key(|(dp_rank, _)| *dp_rank);
-        for (dp_rank, endpoint) in endpoints {
-            crate::services::common::zmq::validate_endpoint(&endpoint).map_err(|error| {
+        let endpoints = record.listener_endpoints();
+        for (rank, endpoint) in &endpoints {
+            crate::services::common::zmq::validate_endpoint(endpoint).map_err(|error| {
                 SelectionError::BadRequest(format!(
-                    "invalid kv_events endpoint for worker {} dp_rank {dp_rank}: {error}",
+                    "invalid kv_events endpoint for worker {} dp_rank {rank}: {error}",
                     record.worker_id
                 ))
             })?;
-            if let Some(replay_endpoint) = record.replay_endpoint.as_deref() {
-                crate::services::common::zmq::validate_endpoint(replay_endpoint).map_err(
-                    |error| {
-                        SelectionError::BadRequest(format!(
-                            "invalid replay endpoint for worker {} dp_rank {dp_rank}: {error}",
-                            record.worker_id
-                        ))
-                    },
-                )?;
+        }
+        if let Some(endpoint) = record.replay_endpoint.as_deref() {
+            crate::services::common::zmq::validate_endpoint(endpoint).map_err(|error| {
+                SelectionError::BadRequest(format!(
+                    "invalid replay endpoint for worker {}: {error}",
+                    record.worker_id
+                ))
+            })?;
+        }
+        let ranks: std::collections::HashSet<_> = record.dp_ranks().collect();
+        let mut retained = std::collections::HashSet::new();
+        if let Some(previous) = previous {
+            let old_endpoints = previous.listener_endpoints();
+            for rank in previous.dp_ranks() {
+                if ranks.contains(&rank)
+                    && old_endpoints.get(&rank) == endpoints.get(&rank)
+                    && previous.replay_endpoint == record.replay_endpoint
+                {
+                    retained.insert(rank);
+                } else {
+                    registry
+                        .deregister_dp_rank(
+                            record.worker_id,
+                            rank,
+                            &previous.model_name,
+                            &previous.routing_group,
+                        )
+                        .await
+                        .map_err(|error| SelectionError::Internal(error.to_string()))?;
+                }
             }
+        }
+        let mut endpoints: Vec<_> = endpoints
+            .into_iter()
+            .filter(|(rank, _)| ranks.contains(rank) && !retained.contains(rank))
+            .collect();
+        endpoints.sort_by_key(|(rank, _)| *rank);
+        for (dp_rank, endpoint) in endpoints {
             registry
                 .register(
                     record.worker_id,

@@ -1926,13 +1926,9 @@ impl ModelManager {
         is_eagle: bool,
     ) -> anyhow::Result<Arc<KvRouter>> {
         let client = endpoint.client().await?;
-        let source = crate::kv_router::RouterLoadSource::from_worker_role_or_metric(
-            worker_role,
-            metric_worker_type,
-        );
         let parent_token = endpoint.component().drt().child_token();
         let scheduler_load =
-            crate::kv_router::SchedulerLoadSender::disabled(source, parent_token.child_token());
+            crate::kv_router::SchedulerLoadSender::disabled(parent_token.child_token());
         self.kv_chooser_for_with_policy_and_client(
             client,
             kv_cache_block_size,

@@ -136,6 +136,9 @@ impl SelectionServiceBuilder {
     }
 
     pub async fn build(self) -> anyhow::Result<SelectionService> {
+        if let Some(ttl) = self.session_affinity_ttl {
+            super::affinity::SessionAffinity::validate_ttl(ttl)?;
+        }
         self.kv_router_config
             .validate_config()
             .map_err(anyhow::Error::msg)?;

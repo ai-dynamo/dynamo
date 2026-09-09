@@ -281,9 +281,9 @@ pub enum ReplicaWorkerPolicy {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct SequenceTrackerOptions {
-    replica_worker_policy: ReplicaWorkerPolicy,
-    expiry_duration: Option<Duration>,
+pub(crate) struct SequenceTrackerOptions {
+    pub(crate) replica_worker_policy: ReplicaWorkerPolicy,
+    pub(crate) expiry_duration: Option<Duration>,
 }
 
 /// Errors that can occur during sequence management operations.
@@ -443,7 +443,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     }
 
     /// Builds a tracker from resolved replica-admission and expiry policies.
-    fn new_with_options(
+    pub(crate) fn new_with_options(
         publisher: P,
         block_size: usize,
         dp_range: HashMap<u64, (u32, u32)>,

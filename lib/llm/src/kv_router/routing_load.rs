@@ -200,10 +200,7 @@ pub struct SchedulerLoadSender {
 }
 
 impl SchedulerLoadSender {
-    pub(crate) fn disabled(
-        _source: RouterLoadSource,
-        cancellation_token: CancellationToken,
-    ) -> Self {
+    pub(crate) fn disabled(cancellation_token: CancellationToken) -> Self {
         Self {
             wake_tx: None,
             shared: Arc::new(SchedulerLoadShared::new(SCHEDULER_LOAD_CHANNEL_CAPACITY)),
@@ -273,18 +270,12 @@ impl SchedulerLoadReceiver {
 }
 
 pub(crate) fn scheduler_load_channel(
-    source: RouterLoadSource,
     cancellation_token: CancellationToken,
 ) -> (SchedulerLoadSender, SchedulerLoadReceiver) {
-    scheduler_load_channel_with_capacity(
-        source,
-        cancellation_token,
-        SCHEDULER_LOAD_CHANNEL_CAPACITY,
-    )
+    scheduler_load_channel_with_capacity(cancellation_token, SCHEDULER_LOAD_CHANNEL_CAPACITY)
 }
 
 fn scheduler_load_channel_with_capacity(
-    _source: RouterLoadSource,
     cancellation_token: CancellationToken,
     capacity: usize,
 ) -> (SchedulerLoadSender, SchedulerLoadReceiver) {
@@ -326,7 +317,7 @@ impl RoutingLoadContext {
         let cancellation_token = parent_token.child_token();
         let (scheduler_load, monitor) = if source.monitors_sequence_load() {
             let (scheduler_load, scheduler_load_rx) =
-                scheduler_load_channel(source, cancellation_token.child_token());
+                scheduler_load_channel(cancellation_token.child_token());
             let monitor = KvWorkerMonitor::new(
                 client.clone(),
                 source,
@@ -339,7 +330,7 @@ impl RoutingLoadContext {
             (scheduler_load, Some(monitor))
         } else {
             (
-                SchedulerLoadSender::disabled(source, cancellation_token.child_token()),
+                SchedulerLoadSender::disabled(cancellation_token.child_token()),
                 None,
             )
         };
@@ -442,8 +433,7 @@ mod tests {
     #[tokio::test]
     async fn saturated_channel_coalesces_batch_and_later_absolute_state_converges() {
         let token = CancellationToken::new();
-        let (sender, mut receiver) =
-            scheduler_load_channel_with_capacity(RouterLoadSource::Decode, token, 1);
+        let (sender, mut receiver) = scheduler_load_channel_with_capacity(token, 1);
 
         sender.publish(snapshot(1, 90));
         sender.publish_batch(vec![snapshot(1, 80), snapshot(2, 70)]);
@@ -469,8 +459,7 @@ mod tests {
     #[tokio::test]
     async fn saturated_channel_preserves_queued_updates_before_coalesced_updates() {
         let token = CancellationToken::new();
-        let (sender, mut receiver) =
-            scheduler_load_channel_with_capacity(RouterLoadSource::Decode, token, 2);
+        let (sender, mut receiver) = scheduler_load_channel_with_capacity(token, 2);
 
         sender.publish(snapshot(2, 20));
         sender.publish(snapshot(1, 10));

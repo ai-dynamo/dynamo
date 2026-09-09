@@ -175,11 +175,7 @@ impl SessionAffinity {
         )
     }
 
-    pub fn new_with_limits(
-        ttl: Duration,
-        max_entries: usize,
-        max_session_id_bytes: usize,
-    ) -> Result<Self, AffinityError> {
+    pub(crate) fn validate_ttl(ttl: Duration) -> Result<(), AffinityError> {
         if !(Duration::from_secs(1)..=Duration::from_secs(MAX_SESSION_AFFINITY_TTL_SECS))
             .contains(&ttl)
         {
@@ -187,6 +183,15 @@ impl SessionAffinity {
                 "session affinity TTL must be between 1 and {MAX_SESSION_AFFINITY_TTL_SECS} seconds"
             )));
         }
+        Ok(())
+    }
+
+    pub fn new_with_limits(
+        ttl: Duration,
+        max_entries: usize,
+        max_session_id_bytes: usize,
+    ) -> Result<Self, AffinityError> {
+        Self::validate_ttl(ttl)?;
         let inner = Arc::new(Inner {
             entries: DashMap::new(),
             ttl,

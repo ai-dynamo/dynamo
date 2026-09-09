@@ -13,8 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::identity::RoutingPartitionId;
 use crate::indexer::{
-    KvRouterError, LowerTierQueryOptions, RoutingDecisionHashes, SharedKvCache, TieredMatchDetails,
-    TieredMatchProvider,
+    LowerTierQueryOptions, RoutingDecisionHashes, SharedKvCache, TieredMatchDetails,
 };
 use crate::kv_hints::{
     KvHint, KvHintAction, KvSourceLocationsPayload, KvTransferCandidateSource, KvTransferCandidates,
@@ -32,7 +31,8 @@ use crate::scheduling::{
     narrow_allowed_worker_ids_by_lora, prefill_load_hint_from_effective_tokens,
 };
 use crate::sequences::{
-    ActiveSequencesMultiWorker, ReplicaWorkerPolicy, SequenceError, SequenceRequest,
+    ActiveSequencesMultiWorker, ReplicaRequestLeaseObserver, ReplicaWorkerPolicy, SequenceError,
+    SequenceRequest, SequenceTrackerOptions, active_request_expiry_duration,
 };
 use crate::services::common::replica_sync::{
     HostReplicaSyncFactory, ReplicaSyncConfig, SchedulerLoadSink, ScopedReplicaEvent,
@@ -44,7 +44,7 @@ use crate::services::indexer::registry::WorkerRegistry;
 use crate::services::overlap::MooncakeOverlapSummary;
 use crate::tracking_hash::{TrackingHashContext, TrackingHashScope};
 
-use super::affinity::{Acquired, AffinityInitialization, AffinityLease, SessionAffinity};
+use super::affinity::{Acquired, AffinityLease, SessionAffinity};
 use super::catalog::WorkerCatalog;
 use super::error::SelectionError;
 use super::ingress::{KvEventIngress, ZmqDirectIngress};
@@ -60,45 +60,12 @@ use crate::WorkerSelectionPolicyFactory;
 use crate::WorkerType;
 use crate::services::common::replica_sync::AffinityBindingEvent;
 
-/// Source of dequeue-time overlap refreshes for a partition scheduler: the
-/// partition's index.
-#[derive(Clone)]
-pub enum RefreshProvider {
-    Local(Arc<Indexer>),
-}
-
-#[async_trait::async_trait]
-impl TieredMatchProvider for RefreshProvider {
-    async fn find_tiered_matches(
-        &self,
-        sequence: &[LocalBlockHash],
-    ) -> Result<TieredMatchDetails, KvRouterError> {
-        match self {
-            Self::Local(indexer) => indexer.find_tiered_matches(sequence.to_vec()).await,
-        }
-    }
-
-    async fn find_tiered_matches_with_options(
-        &self,
-        sequence: &[LocalBlockHash],
-        options: LowerTierQueryOptions,
-    ) -> Result<TieredMatchDetails, KvRouterError> {
-        match self {
-            Self::Local(indexer) => {
-                indexer
-                    .find_tiered_matches_with_options(sequence.to_vec(), options)
-                    .await
-            }
-        }
-    }
-}
-
 /// The scheduler type every partition runs.
 pub type SelectionScheduler = LocalScheduler<
     ScopedSequencePublisher,
     SelectionWorkerConfig,
     WorkerSelectionPolicy,
-    TieredOverlapRefresher<RefreshProvider>,
+    TieredOverlapRefresher<Indexer>,
 >;
 
 /// Handle to one partition's scheduler and indexer for an embedding host that
@@ -122,6 +89,11 @@ impl SelectionPartition {
     pub fn indexer(&self) -> &Indexer {
         &self.0.indexer
     }
+
+    /// Return this partition's affinity table, initialized with its serving TTL.
+    pub fn session_affinity(&self, ttl: Duration) -> Result<SessionAffinity, SelectionError> {
+        self.0.session_affinity(ttl).cloned()
+    }
 }
 
 struct SelectionEntry {
@@ -132,6 +104,8 @@ struct SelectionEntry {
     workers_tx: watch::Sender<HashMap<WorkerId, SelectionWorkerConfig>>,
     scheduler: SelectionScheduler,
     replica_tx: Option<mpsc::Sender<ActiveSequenceEvent>>,
+    affinity: OnceCell<SessionAffinity>,
+    replica_config: Option<ReplicaSyncConfig>,
 }
 
 struct PreparedSelectionInputs {
@@ -141,6 +115,29 @@ struct PreparedSelectionInputs {
     overlap: OverlapSignals,
     shared_cache_hits: Option<SharedCacheHits>,
     kv_transfer_candidates: Option<KvTransferCandidates>,
+}
+
+impl SelectionEntry {
+    fn session_affinity(&self, ttl: Duration) -> Result<&SessionAffinity, SelectionError> {
+        let table = self
+            .affinity
+            .get_or_try_init(|| -> Result<_, SelectionError> {
+                let table = SessionAffinity::new(ttl).map_err(affinity_error)?;
+                if let Some(config) = &self.replica_config
+                    && let Some(sink) = config.affinity_sink(&self.key)
+                {
+                    table.enable_replication(config.process_id(), sink);
+                }
+                Ok(table)
+            })?;
+        if table.ttl() != ttl {
+            return Err(SelectionError::Conflict(format!(
+                "session affinity TTL mismatch for {}",
+                self.key
+            )));
+        }
+        Ok(table)
+    }
 }
 
 struct SelectionOperation {
@@ -259,6 +256,8 @@ pub struct HostTelemetry {
 #[derive(Clone, Default)]
 pub struct HostReplication {
     pub channels: Option<HostReplicaSyncFactory>,
+    /// Owns request expiry when supplied; the partition then expires only through lifecycle events.
+    pub request_leases: Option<Arc<dyn ReplicaRequestLeaseObserver>>,
 }
 
 impl std::fmt::Debug for SelectionHost {
@@ -310,10 +309,17 @@ type SelectionEntries = RwLock<HashMap<RoutingPartitionId, Arc<OnceCell<Arc<Sele
 /// standard hasher. Entries are removed on `free`, on a `RequestNotFound` from
 /// the indexed scheduler, and by a periodic sweep that drops ids whose booking
 /// expired underneath them.
-type ReservationIndex = RwLock<HashMap<String, RoutingPartitionId>>;
+type ReservationIndex = RwLock<HashMap<String, Reservation>>;
+
+struct Reservation {
+    partition: RoutingPartitionId,
+    _affinity_lease: Option<AffinityLease>,
+}
 
 pub struct SelectionCore {
     catalog: WorkerCatalog,
+    /// Serializes catalog commits and the corresponding ingress changes. Never held by selection.
+    catalog_updates: tokio::sync::Mutex<()>,
     entries: Arc<SelectionEntries>,
     reservation_index: Arc<ReservationIndex>,
     /// Sweep task is started lazily from the first `ensure_entry`, which always
@@ -334,19 +340,7 @@ pub struct SelectionCore {
     /// `create_reservation` can replay them without re-sending the prompt.
     selection_cache: SelectionCache,
     tracking_hash: Arc<TrackingHashContext>,
-    /// Session stickiness for request-shaped hosts; `None` when not configured.
-    session_affinity: Option<SessionAffinity>,
-    /// Leases held by booked selections, released with the booking.
-    affinity_leases: parking_lot::Mutex<HashMap<String, AffinityLease>>,
-}
-
-/// What a booked selection holds on its session until the worker is known.
-enum AffinityHold {
-    Initialize(AffinityInitialization),
-    Bound {
-        target: SessionTarget,
-        lease: AffinityLease,
-    },
+    session_affinity_ttl: Option<Duration>,
 }
 
 type SessionTarget = super::affinity::AffinityTarget;
@@ -426,29 +420,10 @@ impl SelectionCore {
         session_affinity_ttl: Option<Duration>,
     ) -> Self {
         let cancel_token = cancel_token.child_token();
-        let session_affinity = match session_affinity_ttl {
-            Some(ttl) => match SessionAffinity::new(ttl) {
-                Ok(table) => {
-                    if let Some(sink) = replica_config.as_ref().and_then(|c| c.affinity_sink()) {
-                        let process_id = replica_config
-                            .as_ref()
-                            .map(|c| c.process_id())
-                            .unwrap_or_default();
-                        table.enable_replication(process_id, sink);
-                    }
-                    Some(table)
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "session affinity disabled");
-                    None
-                }
-            },
-            None => None,
-        };
-        let indexer_registry = Arc::new(WorkerRegistry::new_with_cancel_token(
-            indexer_threads,
-            cancel_token.clone(),
-        ));
+        let indexer_registry = Arc::new(
+            WorkerRegistry::new_with_cancel_token(indexer_threads, cancel_token.clone())
+                .retain_empty_partitions(),
+        );
         let listens_for_kv_events = kv_router_config.use_kv_events && !indexer_policy.is_remote();
         indexer_registry.set_indexer_policy(indexer_policy);
         if signal_indexer_ready {
@@ -456,6 +431,7 @@ impl SelectionCore {
         }
         Self {
             catalog: WorkerCatalog::default(),
+            catalog_updates: tokio::sync::Mutex::new(()),
             entries: Arc::new(RwLock::new(HashMap::new())),
             reservation_index: Arc::new(RwLock::new(HashMap::new())),
             reservation_sweep_started: OnceCell::new(),
@@ -469,8 +445,7 @@ impl SelectionCore {
             replica_config,
             selection_cache: SelectionCache::new(&cache_config),
             tracking_hash,
-            session_affinity,
-            affinity_leases: parking_lot::Mutex::new(HashMap::new()),
+            session_affinity_ttl,
         }
     }
 
@@ -554,8 +529,14 @@ impl SelectionCore {
         req: WorkerRequest,
     ) -> Result<WorkerCatalogRecord, SelectionError> {
         self.ensure_running()?;
-        let (previous, record) = self.catalog.upsert(req);
-        self.reconcile_worker(record.worker_id, previous).await
+        let mut record = WorkerCatalogRecord::new(req);
+        // Partition policy factories may construct independently. Only committing
+        // membership and reconciling ingress needs the catalog mutation lock.
+        self.prepare_worker(&mut record)?;
+        let _update = self.catalog_updates.lock().await;
+        self.ensure_running()?;
+        let previous = self.catalog.get(record.worker_id);
+        self.reconcile_worker(record, previous).await
     }
 
     pub async fn patch_worker(
@@ -563,16 +544,23 @@ impl SelectionCore {
         worker_id: WorkerId,
         patch: WorkerPatchRequest,
     ) -> Result<WorkerCatalogRecord, SelectionError> {
+        let _update = self.catalog_updates.lock().await;
         self.ensure_running()?;
-        let (previous, record) = self.catalog.patch(worker_id, patch)?;
-        self.reconcile_worker(record.worker_id, Some(previous))
-            .await
+        let previous = self
+            .catalog
+            .get(worker_id)
+            .ok_or_else(|| SelectionError::NotFound(format!("worker {worker_id} not found")))?;
+        let mut record = previous.clone();
+        record.apply_patch(patch);
+        self.prepare_worker(&mut record)?;
+        self.reconcile_worker(record, Some(previous)).await
     }
 
     pub async fn delete_worker(
         &self,
         worker_id: WorkerId,
     ) -> Result<WorkerCatalogRecord, SelectionError> {
+        let _update = self.catalog_updates.lock().await;
         let Some(previous) = self.catalog.get(worker_id) else {
             return Err(SelectionError::NotFound(format!(
                 "worker {worker_id} not found"
@@ -609,79 +597,67 @@ impl SelectionCore {
         }
     }
 
-    async fn reconcile_worker(
-        &self,
-        worker_id: WorkerId,
-        previous: Option<WorkerCatalogRecord>,
-    ) -> Result<WorkerCatalogRecord, SelectionError> {
-        let Some(record) = self.catalog.get(worker_id) else {
-            return Err(SelectionError::NotFound(format!(
-                "worker {worker_id} not found"
-            )));
-        };
-
-        if previous
-            .as_ref()
-            .is_some_and(|record| record.lifecycle == WorkerLifecycle::Schedulable)
-        {
-            self.catalog
-                .set_lifecycle(worker_id, WorkerLifecycle::Draining, Vec::new());
-            self.publish_scheduler_config(&previous.as_ref().expect("checked").key())?;
-            self.cleanup_indexer_registration(previous.as_ref().expect("checked"))
-                .await;
-        }
-
+    fn prepare_worker(&self, record: &mut WorkerCatalogRecord) -> Result<(), SelectionError> {
         let queueing_enabled = self
             .kv_router_config
             .queueing_enabled(Some(&record.model_name))
             .map_err(|error| SelectionError::BadRequest(error.to_string()))?;
-        let mut reasons = record.missing_schedulable_metadata(queueing_enabled);
+        record.not_schedulable_reasons = record.missing_schedulable_metadata(queueing_enabled);
         if let Some(ingress) = self.ingress() {
-            reasons.extend(ingress.missing_metadata(&record));
+            record
+                .not_schedulable_reasons
+                .extend(ingress.missing_metadata(record));
         }
-        if !reasons.is_empty() {
-            let updated = self
-                .catalog
-                .set_lifecycle(worker_id, WorkerLifecycle::Incomplete, reasons)
-                .ok_or_else(|| SelectionError::NotFound(format!("worker {worker_id} not found")))?;
-            self.publish_scheduler_config(&updated.key())?;
-            return Ok(updated);
-        }
-
-        if let Err(error) = self.ensure_entry(&record) {
-            return self.mark_incomplete_after_reconcile_error(worker_id, record.key(), error);
-        }
-        if let Some(ingress) = self.ingress()
-            && let Err(error) = ingress.attach(&self.indexer_registry, &record).await
+        if record.not_schedulable_reasons.is_empty()
+            && let Err(error) = self.ensure_entry(record)
         {
-            self.cleanup_indexer_registration(&record).await;
-            return self.mark_incomplete_after_reconcile_error(worker_id, record.key(), error);
+            record
+                .not_schedulable_reasons
+                .push(format!("reconciliation failed: {error}"));
         }
 
-        let updated = self
-            .catalog
-            .set_lifecycle(worker_id, WorkerLifecycle::Schedulable, Vec::new())
-            .ok_or_else(|| SelectionError::NotFound(format!("worker {worker_id} not found")))?;
-        self.publish_scheduler_config(&updated.key())?;
-        Ok(updated)
+        Ok(())
     }
 
-    fn mark_incomplete_after_reconcile_error(
+    async fn reconcile_worker(
         &self,
-        worker_id: WorkerId,
-        key: RoutingPartitionId,
-        error: SelectionError,
+        mut record: WorkerCatalogRecord,
+        previous: Option<WorkerCatalogRecord>,
     ) -> Result<WorkerCatalogRecord, SelectionError> {
-        let updated = self
-            .catalog
-            .set_lifecycle(
-                worker_id,
-                WorkerLifecycle::Incomplete,
-                vec![format!("reconciliation failed: {error}")],
-            )
-            .ok_or_else(|| SelectionError::NotFound(format!("worker {worker_id} not found")))?;
-        self.publish_scheduler_config(&key)?;
-        Ok(updated)
+        let previous = previous.filter(|old| old.lifecycle == WorkerLifecycle::Schedulable);
+        let previous = if let Some(old) = previous.as_ref()
+            && (old.key() != record.key() || !record.not_schedulable_reasons.is_empty())
+        {
+            self.catalog
+                .set_lifecycle(old.worker_id, WorkerLifecycle::Draining, Vec::new());
+            self.publish_scheduler_config(&old.key())?;
+            self.cleanup_indexer_registration(old).await;
+            None
+        } else {
+            previous
+        };
+
+        if record.not_schedulable_reasons.is_empty()
+            && let Some(ingress) = self.ingress()
+            && let Err(error) = ingress
+                .reconcile(&self.indexer_registry, previous.as_ref(), &record)
+                .await
+        {
+            self.cleanup_indexer_registration(&record).await;
+            record
+                .not_schedulable_reasons
+                .push(format!("reconciliation failed: {error}"));
+        }
+        record.lifecycle = if record.not_schedulable_reasons.is_empty() {
+            WorkerLifecycle::Schedulable
+        } else {
+            WorkerLifecycle::Incomplete
+        };
+        // Readers see only committed metadata. A valid capacity/topology update preserves
+        // live bookings on ranks present in both the old and new snapshots.
+        self.catalog.replace(record.clone());
+        self.publish_scheduler_config(&record.key())?;
+        Ok(record)
     }
 
     fn ensure_entry(
@@ -752,7 +728,7 @@ impl SelectionCore {
                     host_replica,
                 );
                 let worker_label = self.worker_type.as_str();
-                let slots = Arc::new(ActiveSequencesMultiWorker::new_with_replica_worker_policy(
+                let slots = Arc::new(ActiveSequencesMultiWorker::new_with_options(
                     scoped_replica_sync
                         .publisher
                         .with_load_sink(self.host.telemetry.scheduler_load.clone()),
@@ -761,15 +737,28 @@ impl SelectionCore {
                     scoped_replica_sync.enabled,
                     scoped_replica_sync.process_id,
                     worker_label,
-                    ReplicaWorkerPolicy::RequireRegistered,
+                    SequenceTrackerOptions {
+                        replica_worker_policy: ReplicaWorkerPolicy::RequireRegistered,
+                        expiry_duration: self
+                            .host
+                            .replication
+                            .request_leases
+                            .is_none()
+                            .then(active_request_expiry_duration),
+                    },
                 ));
+                if let Some(observer) = &self.host.replication.request_leases {
+                    slots.set_replica_request_lease_observer(Arc::clone(observer));
+                }
                 let replica_tx = scoped_replica_sync.channel.map(|(replica_tx, subscriber)| {
                     slots.start_replica_sync(subscriber, self.cancel_token.child_token());
                     replica_tx
                 });
-                slots.start_periodic_force_expiry_across_all_workers(
-                    self.cancel_token.child_token(),
-                );
+                if self.host.replication.request_leases.is_none() {
+                    slots.start_periodic_force_expiry_across_all_workers(
+                        self.cancel_token.child_token(),
+                    );
+                }
 
                 let indexer = match &self.host.cache.index {
                     KvIndexSource::Owned(ingress) => {
@@ -781,7 +770,7 @@ impl SelectionCore {
                 };
                 let overlap_refresh = indexer.supports_overlap_refresh().then(|| {
                     Arc::new(TieredOverlapRefresher::new(
-                        RefreshProvider::Local(Arc::new(indexer.clone())),
+                        indexer.clone(),
                         self.kv_router_config.clone(),
                         block_size,
                     ))
@@ -820,6 +809,8 @@ impl SelectionCore {
                     workers_tx,
                     scheduler,
                     replica_tx,
+                    affinity: OnceCell::new(),
+                    replica_config: self.replica_config.clone(),
                 }))
             })?
             .clone();
@@ -834,6 +825,9 @@ impl SelectionCore {
                 "is_eagle mismatch for {key}: existing={} requested={is_eagle}",
                 entry.is_eagle
             )));
+        }
+        if let Some(ttl) = self.session_affinity_ttl {
+            entry.session_affinity(ttl)?;
         }
         Ok(entry)
     }
@@ -995,26 +989,24 @@ impl SelectionCore {
         // Session stickiness: a bound session steers selection (exclusive for
         // the default selector); a new session is bound to the worker chosen.
         // An explicit affinity target or pin from the caller wins.
-        let session_id = self
-            .session_affinity
-            .as_ref()
+        let table = entry.affinity.get();
+        let session_id = table
             .and(session_context.as_ref())
             .filter(|_| affinity_target.is_none() && pinned_worker.is_none())
             .map(|context| context.session_id().to_string());
         let mut affinity_hold = None;
-        let affinity_target = match (session_id.as_deref(), self.session_affinity.as_ref()) {
+        let affinity_target = match (session_id.as_deref(), table) {
             (Some(session_id), Some(table)) if book => {
-                match table
-                    .acquire(session_id, None)
-                    .await
-                    .map_err(affinity_error)?
-                {
+                match tokio::select! {
+                    _ = self.cancel_token.cancelled() => return Err(SelectionError::Scheduler(KvSchedulerError::SubscriberShutdown)),
+                    result = table.acquire(session_id, None) => result.map_err(affinity_error)?,
+                } {
                     Acquired::Initialize(init) => {
-                        affinity_hold = Some(AffinityHold::Initialize(init));
+                        affinity_hold = Some(Acquired::Initialize(init));
                         None
                     }
                     Acquired::Bound { target, lease } => {
-                        affinity_hold = Some(AffinityHold::Bound { target, lease });
+                        affinity_hold = Some(Acquired::Bound { target, lease });
                         Some(WorkerAffinityTarget::new(target.worker_id, target.dp_rank))
                     }
                 }
@@ -1136,13 +1128,6 @@ impl SelectionCore {
                 }
             } => result?,
         };
-        if let (Some(hold), Some(session_id), Some(selection_id)) = (
-            affinity_hold.take(),
-            session_id.as_deref(),
-            selection_id.as_deref(),
-        ) {
-            self.bind_session(hold, session_id, selection_id, response.best_worker);
-        }
         let endpoint = self
             .catalog
             .schedulable_endpoint(response.best_worker.worker_id, &key)
@@ -1199,7 +1184,13 @@ impl SelectionCore {
         });
 
         if book && let Some(selection_id) = selection_id.as_deref() {
-            self.record_reservation(selection_id, &key);
+            let lease = match (affinity_hold, session_id.as_deref(), table) {
+                (Some(hold), Some(session_id), Some(table)) => {
+                    Self::bind_session(table, hold, session_id, response.best_worker)
+                }
+                _ => None,
+            };
+            self.record_reservation(selection_id, &key, lease);
             if let Some(hashes) = routing_hashes.clone() {
                 self.record_routing_decision(&entry, response.best_worker, hashes)
                     .await;
@@ -1445,7 +1436,7 @@ impl SelectionCore {
                 lora_name,
             })
             .await?;
-        self.record_reservation(&selection_id, &key);
+        self.record_reservation(&selection_id, &key, None);
         if let Some(hashes) = routing_hashes {
             self.record_routing_decision(&entry, worker, hashes).await;
         }
@@ -1460,41 +1451,45 @@ impl SelectionCore {
         })
     }
 
-    fn record_reservation(&self, selection_id: &str, key: &RoutingPartitionId) {
-        self.reservation_index
-            .write()
-            .insert(selection_id.to_string(), key.clone());
+    fn record_reservation(
+        &self,
+        selection_id: &str,
+        key: &RoutingPartitionId,
+        lease: Option<AffinityLease>,
+    ) {
+        self.reservation_index.write().insert(
+            selection_id.to_string(),
+            Reservation {
+                partition: key.clone(),
+                _affinity_lease: lease,
+            },
+        );
     }
 
     fn forget_reservation(&self, selection_id: &str) {
         self.reservation_index.write().remove(selection_id);
-        self.affinity_leases.lock().remove(selection_id);
     }
 
     /// Bind (or confirm) `session_id` to the worker a booking landed on and
     /// keep the lease with the booking. A bound session whose worker was not
     /// selected (it left) is invalidated and rebound.
     fn bind_session(
-        &self,
-        hold: AffinityHold,
+        table: &SessionAffinity,
+        hold: Acquired,
         session_id: &str,
-        selection_id: &str,
         worker: WorkerWithDpRank,
-    ) {
-        let Some(table) = self.session_affinity.as_ref() else {
-            return;
-        };
+    ) -> Option<AffinityLease> {
         let selected = SessionTarget::new(worker.worker_id, Some(worker.dp_rank));
         let lease = match hold {
-            AffinityHold::Initialize(init) => init.commit(selected).ok(),
-            AffinityHold::Bound { target, lease }
+            Acquired::Initialize(init) => init.commit(selected).ok(),
+            Acquired::Bound { target, lease }
                 if target.worker_id == selected.worker_id
                     && target.dp_rank.is_none_or(|rank| rank == worker.dp_rank) =>
             {
                 lease.publish(target);
-                return self.hold_lease(selection_id, lease);
+                return Some(lease);
             }
-            AffinityHold::Bound { mut lease, .. } => {
+            Acquired::Bound { mut lease, .. } => {
                 lease.invalidate();
                 match table.try_acquire(session_id, None) {
                     Ok(super::affinity::AcquireStep::Initialize(init)) => {
@@ -1504,21 +1499,18 @@ impl SelectionCore {
                 }
             }
         };
-        if let Some(lease) = lease {
+        if let Some(lease) = &lease {
             lease.publish(selected);
-            self.hold_lease(selection_id, lease);
         }
-    }
-
-    fn hold_lease(&self, selection_id: &str, lease: AffinityLease) {
-        self.affinity_leases
-            .lock()
-            .insert(selection_id.to_string(), lease);
+        lease
     }
 
     /// Apply a session binding a replica published.
     pub(crate) fn dispatch_affinity_event(&self, event: AffinityBindingEvent) {
-        let Some(table) = self.session_affinity.as_ref() else {
+        let Some(entry) = self.entry(&event.partition) else {
+            return;
+        };
+        let Some(table) = entry.affinity.get() else {
             return;
         };
         if self
@@ -1529,7 +1521,11 @@ impl SelectionCore {
             return;
         }
         table.observe_replica_sequence(event.sequence);
-        if self.catalog.get(event.worker_id).is_none() {
+        if self
+            .catalog
+            .get(event.worker_id)
+            .is_none_or(|record| record.key() != event.partition)
+        {
             return;
         }
         let (target, version, worker_id) = (event.target(), event.version(), event.worker_id);
@@ -1580,7 +1576,7 @@ impl SelectionCore {
             .reservation_index
             .read()
             .get(selection_id)
-            .cloned()
+            .map(|reservation| reservation.partition.clone())
             .and_then(|key| self.entry(&key));
         let mut entries = self.initialized_entries();
         if let Some(indexed) = indexed {
@@ -1828,35 +1824,16 @@ impl SelectionCore {
 /// scheduler (expired by the periodic force-expiry, or freed through a path
 /// that bypassed this core). Returns the number of entries removed.
 fn sweep_reservation_index(entries: &SelectionEntries, index: &ReservationIndex) -> usize {
-    let snapshot: Vec<(String, RoutingPartitionId)> = index
-        .read()
-        .iter()
-        .map(|(id, key)| (id.clone(), key.clone()))
-        .collect();
-    if snapshot.is_empty() {
-        return 0;
-    }
-    let stale: Vec<String> = {
-        let entries = entries.read();
-        snapshot
-            .into_iter()
-            .filter(|(id, key)| {
-                entries
-                    .get(key)
-                    .and_then(|cell| cell.get())
-                    .is_none_or(|entry| !entry.scheduler.has_request(id))
-            })
-            .map(|(id, _)| id)
-            .collect()
-    };
-    if stale.is_empty() {
-        return 0;
-    }
+    let entries = entries.read();
     let mut index = index.write();
-    stale
-        .iter()
-        .filter(|id| index.remove(id.as_str()).is_some())
-        .count()
+    let before = index.len();
+    index.retain(|id, reservation| {
+        entries
+            .get(&reservation.partition)
+            .and_then(|cell| cell.get())
+            .is_some_and(|entry| entry.scheduler.has_request(id))
+    });
+    before - index.len()
 }
 
 fn spawn_reservation_index_sweep(
@@ -3097,7 +3074,13 @@ mod tests {
         let mut request = reserve_request("booked");
         request.routing_group = "group-b".to_string();
         core.select_and_reserve(request).await.expect("reserve");
-        assert_eq!(core.reservation_index.read().get("booked"), Some(&key_b));
+        assert_eq!(
+            core.reservation_index
+                .read()
+                .get("booked")
+                .map(|r| &r.partition),
+            Some(&key_b)
+        );
         assert_eq!(
             core.lifecycle_entries("booked")[0].key,
             key_b,
@@ -3124,7 +3107,13 @@ mod tests {
         })
         .await
         .expect("cached reservation");
-        assert_eq!(core.reservation_index.read().get("cached"), Some(&key_b));
+        assert_eq!(
+            core.reservation_index
+                .read()
+                .get("cached")
+                .map(|r| &r.partition),
+            Some(&key_b)
+        );
 
         // Lifecycle calls still resolve, and free drops the index entry.
         core.prefill_complete("booked")
@@ -3353,6 +3342,7 @@ mod tests {
         core.upsert_worker(worker(2)).await.expect("worker upsert");
 
         core.dispatch_affinity_event(AffinityBindingEvent {
+            partition: RoutingPartitionId::new("model", "default"),
             session_id: "chat-b".to_string(),
             worker_id: 2,
             dp_rank: Some(0),
@@ -3364,8 +3354,348 @@ mod tests {
             .await
             .expect("booking");
         assert_eq!(response.worker_id, 2);
-        assert!(core.affinity_leases.lock().contains_key("r2"));
+        assert!(
+            core.reservation_index
+                .read()
+                .get("r2")
+                .unwrap()
+                ._affinity_lease
+                .is_some()
+        );
         core.free_reservation("r2").await.expect("free");
-        assert!(core.affinity_leases.lock().is_empty());
+        assert!(core.reservation_index.read().is_empty());
+    }
+
+    #[tokio::test]
+    async fn expired_booking_releases_affinity_lease() {
+        let core = core_with_session_affinity();
+        core.upsert_worker(worker(1)).await.unwrap();
+        core.select_and_reserve(session_reservation("abandoned", "session"))
+            .await
+            .unwrap();
+        let key = RoutingPartitionId::new("model", "default");
+        core.entry(&key)
+            .unwrap()
+            .scheduler
+            .free("abandoned")
+            .await
+            .unwrap();
+        assert_eq!(
+            sweep_reservation_index(&core.entries, &core.reservation_index),
+            1
+        );
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(11)).await;
+        assert_eq!(
+            core.entry(&RoutingPartitionId::new("model", "default"))
+                .unwrap()
+                .affinity
+                .get()
+                .unwrap()
+                .query_target("session", None)
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn partition_sessions_keep_independent_bindings() {
+        let core = core_with_session_affinity();
+        core.upsert_worker(worker(1)).await.unwrap();
+        let first = core
+            .select_and_reserve(session_reservation("first", "shared-session"))
+            .await
+            .unwrap();
+        core.upsert_worker(worker(2)).await.unwrap();
+        let mut other = worker(3);
+        other.routing_group = "other".to_string();
+        core.upsert_worker(other).await.unwrap();
+        let mut request = session_reservation("other", "shared-session");
+        request.routing_group = "other".to_string();
+        assert_eq!(core.select_and_reserve(request).await.unwrap().worker_id, 3);
+        assert_eq!(
+            core.entry(&RoutingPartitionId::new("model", "default"))
+                .unwrap()
+                .affinity
+                .get()
+                .unwrap()
+                .query_target("shared-session", None)
+                .unwrap()
+                .unwrap()
+                .worker_id,
+            first.worker_id
+        );
+        let again = core
+            .select_and_reserve(session_reservation("again", "shared-session"))
+            .await
+            .unwrap();
+        assert_eq!(again.worker_id, first.worker_id);
+    }
+
+    #[tokio::test]
+    async fn rejoined_worker_feeds_partition_index() {
+        use crate::protocols::{BlockHashOptions, compute_block_hash_for_seq};
+        for update_only in [false, true] {
+            let core = SelectionCore::try_new_local(
+                test_config(true),
+                1,
+                CancellationToken::new(),
+                SelectionCacheConfig::default(),
+            )
+            .unwrap();
+            let request = worker_with_kv_events(1);
+            core.upsert_worker(request.clone()).await.unwrap();
+            let key = RoutingPartitionId::new("model", "default");
+            let partition = core.partition(&key).unwrap();
+            let tokens: Vec<u32> = (1..=8).collect();
+            let hashes: Vec<u64> =
+                compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default())
+                    .into_iter()
+                    .map(|hash| hash.0)
+                    .collect();
+            let indexer = core
+                .indexer_registry
+                .get_indexer(&key)
+                .unwrap()
+                .indexer
+                .clone();
+            indexer
+                .apply_event_routed(store_event(1, 0, 1, &[], &hashes, StorageTier::Device))
+                .await
+                .unwrap();
+            indexer.dump_events().await.unwrap();
+            if !update_only {
+                core.delete_worker(1).await.unwrap();
+            }
+            let mut request = request;
+            request.total_kv_blocks = Some(2048);
+            core.upsert_worker(request).await.unwrap();
+            let retained = partition.indexer().dump_events().await.unwrap();
+            if update_only {
+                assert!(
+                    !retained.is_empty(),
+                    "metadata update cleared cached blocks"
+                );
+            } else {
+                assert!(retained.is_empty(), "removed worker retained cached blocks");
+                let current = core
+                    .indexer_registry
+                    .get_indexer(&key)
+                    .unwrap()
+                    .indexer
+                    .clone();
+                current
+                    .apply_event_routed(store_event(1, 0, 1, &[], &hashes, StorageTier::Device))
+                    .await
+                    .unwrap();
+                current.dump_events().await.unwrap();
+            }
+            let mut request = select_request();
+            request.prompt = PromptRequest {
+                token_ids: Some(tokens),
+                ..PromptRequest::default()
+            };
+            assert_eq!(
+                core.select(request).await.unwrap().overlap.longest_matched,
+                8,
+                "update_only={update_only}"
+            );
+            assert_eq!(
+                partition.indexer().dump_events().await.unwrap().len(),
+                indexer.dump_events().await.unwrap().len()
+            );
+        }
+    }
+    #[tokio::test]
+    async fn metadata_update_preserves_live_booking() {
+        struct SuspendedDetach(tokio::sync::Notify);
+        #[async_trait::async_trait]
+        impl KvEventIngress for SuspendedDetach {
+            fn open(
+                &self,
+                registry: &WorkerRegistry,
+                key: &RoutingPartitionId,
+                block_size: u32,
+            ) -> Indexer {
+                registry.get_or_create_indexer(key.clone(), block_size)
+            }
+            async fn detach(&self, _registry: &WorkerRegistry, _record: &WorkerCatalogRecord) {
+                self.0.notify_one();
+                std::future::pending().await
+            }
+        }
+        let ingress = Arc::new(SuspendedDetach(tokio::sync::Notify::new()));
+        let core = core_with_host(SelectionHost {
+            cache: HostCache {
+                index: KvIndexSource::Owned(ingress.clone()),
+                shared: None,
+            },
+            ..SelectionHost::default()
+        });
+        core.upsert_worker(worker(1)).await.unwrap();
+        core.select_and_reserve(reserve_request("live"))
+            .await
+            .unwrap();
+        let entry = core
+            .entry(&RoutingPartitionId::new("model", "default"))
+            .unwrap();
+        let mut updated = worker(1);
+        updated.max_num_batched_tokens = Some(2048);
+        tokio::select! {
+            result = core.upsert_worker(updated) => { result.unwrap(); },
+            _ = ingress.0.notified() => {
+                // A capacity update must not temporarily withdraw this worker.
+                assert!(entry.scheduler.has_request("live"));
+                panic!("capacity update detached the worker");
+            }
+        }
+        assert!(entry.scheduler.has_request("live"));
+        core.free_reservation("live").await.unwrap();
+    }
+    #[tokio::test(start_paused = true)]
+    async fn host_lease_manager_owns_expiry() {
+        use crate::scheduling::queue::SchedulerBookingDescriptor;
+        struct HostLeases;
+        impl ReplicaRequestLeaseObserver for HostLeases {
+            fn admitted(&self, _: SchedulerBookingDescriptor) {}
+            fn progressed(&self, _: &SchedulerBookingDescriptor) {}
+            fn completed(&self, _: &SchedulerBookingDescriptor) {}
+        }
+        for host_owned in [false, true] {
+            let core = core_with_host(SelectionHost {
+                replication: HostReplication {
+                    request_leases: host_owned
+                        .then(|| Arc::new(HostLeases) as Arc<dyn ReplicaRequestLeaseObserver>),
+                    ..HostReplication::default()
+                },
+                ..SelectionHost::default()
+            });
+            core.upsert_worker(worker(1)).await.unwrap();
+            core.select_and_reserve(reserve_request("live"))
+                .await
+                .unwrap();
+            tokio::task::yield_now().await;
+            tokio::time::advance(active_request_expiry_duration() * 3).await;
+            tokio::task::yield_now().await;
+            let entry = core
+                .entry(&RoutingPartitionId::new("model", "default"))
+                .unwrap();
+            assert_eq!(entry.scheduler.has_request("live"), host_owned);
+            if host_owned {
+                core.free_reservation("live").await.unwrap();
+                assert!(!entry.scheduler.has_request("live"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn catalog_updates_commit_in_order_without_exposing_candidates() {
+        struct PausedUpdate {
+            entered: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+        }
+        #[async_trait::async_trait]
+        impl KvEventIngress for PausedUpdate {
+            fn open(
+                &self,
+                registry: &WorkerRegistry,
+                key: &RoutingPartitionId,
+                block_size: u32,
+            ) -> Indexer {
+                registry.get_or_create_indexer(key.clone(), block_size)
+            }
+            async fn reconcile(
+                &self,
+                _: &WorkerRegistry,
+                previous: Option<&WorkerCatalogRecord>,
+                _: &WorkerCatalogRecord,
+            ) -> Result<(), SelectionError> {
+                if previous.is_some() {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                }
+                Ok(())
+            }
+        }
+        let ingress = Arc::new(PausedUpdate {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let mut core = core_with_host(SelectionHost {
+            cache: HostCache {
+                index: KvIndexSource::Owned(ingress.clone()),
+                shared: None,
+            },
+            ..SelectionHost::default()
+        });
+        core.listens_for_kv_events = true;
+        core.upsert_worker(worker(1)).await.unwrap();
+        core.select_and_reserve(reserve_request("live"))
+            .await
+            .unwrap();
+        let mut updated = worker(1);
+        updated.max_num_batched_tokens = Some(2048);
+        let update = core.upsert_worker(updated);
+        tokio::pin!(update);
+        tokio::select! {
+            _ = &mut update => panic!("update should pause before committing"),
+            _ = ingress.entered.notified() => {}
+        }
+        let committed = core.catalog.get(1).unwrap();
+        assert_eq!(committed.lifecycle, WorkerLifecycle::Schedulable);
+        assert_eq!(committed.max_num_batched_tokens, Some(1024));
+        let entry = core.entry(&committed.key()).unwrap();
+        assert!(entry.scheduler.has_request("live"));
+        let deletion = core.delete_worker(1);
+        tokio::pin!(deletion);
+        assert!(
+            std::future::Future::poll(
+                deletion.as_mut(),
+                &mut std::task::Context::from_waker(std::task::Waker::noop())
+            )
+            .is_pending()
+        );
+        ingress.release.notify_one();
+        assert_eq!(update.await.unwrap().max_num_batched_tokens, Some(2048));
+        assert!(entry.scheduler.has_request("live"));
+        assert_eq!(
+            deletion.await.unwrap().lifecycle,
+            WorkerLifecycle::Unschedulable
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while entry.scheduler.has_request("live") {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn affinity_configuration_rejects_invalid_or_conflicting_ttl() {
+        use super::super::service::SelectionServiceBuilder;
+        for ttl in [
+            Duration::ZERO,
+            Duration::from_secs(super::super::affinity::MAX_SESSION_AFFINITY_TTL_SECS + 1),
+        ] {
+            let result = SelectionServiceBuilder::new(
+                test_config(false),
+                WorkerType::Aggregated,
+                Default::default(),
+            )
+            .session_affinity(ttl)
+            .build()
+            .await;
+            assert!(result.is_err());
+        }
+        let core = core_with_session_affinity();
+        core.upsert_worker(worker(1)).await.unwrap();
+        let partition = core
+            .partition(&RoutingPartitionId::new("model", "default"))
+            .unwrap();
+        assert!(matches!(
+            partition.session_affinity(Duration::from_secs(20)),
+            Err(SelectionError::Conflict(_))
+        ));
     }
 }

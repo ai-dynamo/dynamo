@@ -311,6 +311,7 @@ pub struct WorkerEntry {
 pub struct WorkerRegistry {
     workers: DashMap<WorkerId, WorkerEntry>,
     indexers: DashMap<RoutingPartitionId, IndexerEntry>,
+    retain_empty_partitions: bool,
     peers: DashMap<String, ()>,
     watermarks: DashMap<(WorkerId, u32), Arc<AtomicU64>>,
     num_threads: usize,
@@ -343,12 +344,19 @@ impl WorkerRegistry {
         Self::new_inner(num_threads, indexer_metrics, CancellationToken::new())
     }
 
+    #[cfg(feature = "metrics")]
     pub(super) fn new_with_indexer_metrics_and_cancel_token(
         num_threads: usize,
         indexer_metrics: Arc<KvIndexerMetrics>,
         root_cancel_token: CancellationToken,
     ) -> Self {
         Self::new_inner(num_threads, indexer_metrics, root_cancel_token)
+    }
+
+    /// Selection partitions retain their index and overlap refresher across scale-to-zero.
+    pub(crate) fn retain_empty_partitions(mut self) -> Self {
+        self.retain_empty_partitions = true;
+        self
     }
 
     fn new_inner(
@@ -360,6 +368,7 @@ impl WorkerRegistry {
         Self {
             workers: DashMap::new(),
             indexers: DashMap::new(),
+            retain_empty_partitions: false,
             peers: DashMap::new(),
             watermarks: DashMap::new(),
             num_threads,
@@ -830,7 +839,9 @@ impl WorkerRegistry {
     }
 
     fn maybe_remove_indexer(&self, key: &RoutingPartitionId) {
-        if self.workers.iter().any(|entry| entry.value().key == *key) {
+        if self.retain_empty_partitions
+            || self.workers.iter().any(|entry| entry.value().key == *key)
+        {
             return;
         }
 

@@ -321,7 +321,7 @@ impl RoutingHost {
         session_affinity_ttl: Option<Duration>,
     ) -> Result<Self, Error> {
         let affinity = session_affinity_ttl
-            .map(AffinityCoordinator::new)
+            .map(|ttl| kv_router.affinity_coordinator(ttl))
             .transpose()?;
 
         Ok(Self::new_with_coordinator(
@@ -340,7 +340,7 @@ impl RoutingHost {
         session_affinity_mode: SessionAffinityMode,
     ) -> Result<Self, Error> {
         let affinity = session_affinity_ttl
-            .map(AffinityCoordinator::new)
+            .map(|ttl| kv_router.affinity_coordinator(ttl))
             .transpose()?;
 
         Ok(Self::new_with_load_context_and_coordinator(

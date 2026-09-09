@@ -18,13 +18,16 @@ use dynamo_kv_router::protocols::{
 pub use dynamo_kv_router::sequence::{ActiveSequences, RequestId};
 
 use anyhow::Result;
+use dynamo_kv_router::scheduling::queue::SchedulerBookingDescriptor;
 use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::{
     EventPublisher, EventSubscriber, EventTransportKind, TypedEventSubscriber,
 };
+use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::future::Future;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -37,6 +40,107 @@ use dynamo_runtime::transports::event_plane::MsgpackCodec;
 // Match the existing standalone replica-sync queue. Lifecycle callers enqueue without awaiting;
 // if the queue is full, the newest event is dropped without blocking the local mutation.
 const REPLICA_EVENT_CHANNEL_CAPACITY: usize = 100_000;
+
+enum DeferredReplicaLeaseEvent {
+    Admitted(SchedulerBookingDescriptor),
+    Progressed(SchedulerBookingDescriptor),
+    Completed(SchedulerBookingDescriptor),
+}
+
+enum DeferredReplicaLeaseState {
+    Buffering(Vec<DeferredReplicaLeaseEvent>),
+    Installing {
+        target: Arc<dyn ReplicaRequestLeaseObserver>,
+        pending: Vec<DeferredReplicaLeaseEvent>,
+    },
+    Installed(Arc<dyn ReplicaRequestLeaseObserver>),
+}
+
+impl Default for DeferredReplicaLeaseState {
+    fn default() -> Self {
+        Self::Buffering(Vec::new())
+    }
+}
+
+/// Buffers the construction-time event window until `KvRouter` installs its
+/// request lease manager. After installation, calls pass through directly.
+#[derive(Default)]
+pub(crate) struct DeferredReplicaRequestLeaseObserver {
+    state: Mutex<DeferredReplicaLeaseState>,
+}
+
+impl DeferredReplicaRequestLeaseObserver {
+    pub(crate) fn install(&self, target: Arc<dyn ReplicaRequestLeaseObserver>) -> bool {
+        let mut pending = {
+            let mut state = self.state.lock();
+            let DeferredReplicaLeaseState::Buffering(pending) = &mut *state else {
+                return false;
+            };
+            let pending = std::mem::take(pending);
+            *state = DeferredReplicaLeaseState::Installing {
+                target: Arc::clone(&target),
+                pending: Vec::new(),
+            };
+            pending
+        };
+
+        loop {
+            for event in pending {
+                Self::notify(&target, event);
+            }
+            let mut state = self.state.lock();
+            let DeferredReplicaLeaseState::Installing {
+                target: installing_target,
+                pending: queued,
+            } = &mut *state
+            else {
+                unreachable!("observer installation state changed unexpectedly");
+            };
+            if queued.is_empty() {
+                *state = DeferredReplicaLeaseState::Installed(Arc::clone(installing_target));
+                return true;
+            }
+            pending = std::mem::take(queued);
+        }
+    }
+
+    fn observe(&self, event: DeferredReplicaLeaseEvent) {
+        let target = {
+            let mut state = self.state.lock();
+            match &mut *state {
+                DeferredReplicaLeaseState::Buffering(pending)
+                | DeferredReplicaLeaseState::Installing { pending, .. } => {
+                    pending.push(event);
+                    return;
+                }
+                DeferredReplicaLeaseState::Installed(target) => Arc::clone(target),
+            }
+        };
+        Self::notify(&target, event);
+    }
+
+    fn notify(target: &Arc<dyn ReplicaRequestLeaseObserver>, event: DeferredReplicaLeaseEvent) {
+        match event {
+            DeferredReplicaLeaseEvent::Admitted(booking) => target.admitted(booking),
+            DeferredReplicaLeaseEvent::Progressed(booking) => target.progressed(&booking),
+            DeferredReplicaLeaseEvent::Completed(booking) => target.completed(&booking),
+        }
+    }
+}
+
+impl ReplicaRequestLeaseObserver for DeferredReplicaRequestLeaseObserver {
+    fn admitted(&self, booking: SchedulerBookingDescriptor) {
+        self.observe(DeferredReplicaLeaseEvent::Admitted(booking));
+    }
+
+    fn progressed(&self, booking: &SchedulerBookingDescriptor) {
+        self.observe(DeferredReplicaLeaseEvent::Progressed(booking.clone()));
+    }
+
+    fn completed(&self, booking: &SchedulerBookingDescriptor) {
+        self.observe(DeferredReplicaLeaseEvent::Completed(booking.clone()));
+    }
+}
 
 /// How active-sequence events are framed on the wire for a transport.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -714,5 +818,52 @@ mod tests {
                 .decode_payload::<ActiveSequenceEvent>(&batch_payload)
                 .is_err()
         );
+    }
+    #[test]
+    fn deferred_replica_observer_flushes_completed_startup_attempts_in_order() {
+        use dynamo_kv_router::sequences::NoopSequencePublisher;
+        use std::collections::HashMap;
+        #[derive(Default)]
+        struct Observer(Mutex<Vec<(&'static str, SchedulerBookingDescriptor)>>);
+        impl ReplicaRequestLeaseObserver for Observer {
+            fn admitted(&self, booking: SchedulerBookingDescriptor) {
+                self.0.lock().push(("add", booking));
+            }
+            fn progressed(&self, booking: &SchedulerBookingDescriptor) {
+                self.0.lock().push(("progress", booking.clone()));
+            }
+            fn completed(&self, booking: &SchedulerBookingDescriptor) {
+                self.0.lock().push(("free", booking.clone()));
+            }
+        }
+        let slots = ActiveSequencesMultiWorker::new_without_expiry(
+            NoopSequencePublisher,
+            4,
+            HashMap::from([(1, (0, 1))]),
+            true,
+            0,
+            "test",
+        );
+        let deferred = Arc::new(DeferredReplicaRequestLeaseObserver::default());
+        assert!(slots.set_replica_request_lease_observer(deferred.clone()));
+        slots.apply_replica_batch(vec![add_event("startup"), free_event("startup")]);
+        let observer = Arc::new(Observer::default());
+        assert!(deferred.install(observer.clone()));
+        {
+            let events = observer.0.lock();
+            assert_eq!(events.len(), 2);
+            let booking = &events[0].1;
+            assert_eq!(booking.request_id, "startup");
+            assert_eq!(
+                *events,
+                vec![("add", booking.clone()), ("free", booking.clone())]
+            );
+        }
+        slots.apply_replica_batch(vec![add_event("after-install")]);
+        assert_eq!(
+            observer.0.lock().last().unwrap().1.request_id,
+            "after-install"
+        );
+        assert!(!deferred.install(observer));
     }
 }

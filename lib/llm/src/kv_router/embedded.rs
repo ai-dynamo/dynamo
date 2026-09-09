@@ -3,14 +3,10 @@
 
 //! Embedded selection backend for the frontend `KvRouter`.
 //!
-//! The router runs its scheduling and active-sequence accounting on one
-//! partition of an in-process `SelectionService` (the same core the standalone
-//! selection service and the EPP use). The router keeps its own KV indexer and
-//! request transport: it computes overlap against that indexer and hands the
-//! partition scheduler a fully formed `ScheduleRequest`. The partition's worker
-//! catalog is fed from the runtime-config watch, so discovery remains the source
-//! of truth for membership while the scheduler and its replica sync are
-//! runtime-free.
+//! The runtime-config watch feeds one selection partition's worker catalog.
+//! Runtime ingress feeds the partition's index, and the frontend prepares overlap
+//! and request constraints before scheduling directly on that partition. The
+//! frontend retains transport, stream leases, and request-expiry ownership.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -64,6 +60,7 @@ pub(crate) struct EmbeddedSelectionArgs {
     /// Builds the partition's worker-selection policy (see
     /// `SelectionPolicySource::resolve`).
     pub policy_factory: WorkerSelectionPolicyFactory,
+    pub request_leases: Arc<dyn dynamo_kv_router::sequences::ReplicaRequestLeaseObserver>,
 }
 
 /// Partition model name when the router has none.
@@ -75,6 +72,7 @@ pub(crate) struct EmbeddedSelection {
     /// the router holds the partition.
     _service: Arc<SelectionService>,
     partition: SelectionPartition,
+    affinity: std::sync::OnceLock<crate::session_affinity::AffinityCoordinator>,
     worker_type: &'static str,
 }
 
@@ -163,6 +161,7 @@ impl EmbeddedSelection {
             },
             replication: HostReplication {
                 channels: replica_sync,
+                request_leases: Some(args.request_leases),
             },
         })
         .build()
@@ -203,8 +202,20 @@ impl EmbeddedSelection {
         Ok(Self {
             _service: service,
             partition,
+            affinity: std::sync::OnceLock::new(),
             worker_type: args.metric_worker_type,
         })
+    }
+
+    pub(crate) fn affinity_coordinator(
+        &self,
+        ttl: std::time::Duration,
+    ) -> Result<crate::session_affinity::AffinityCoordinator> {
+        let table = self.partition.session_affinity(ttl)?;
+        Ok(self
+            .affinity
+            .get_or_init(|| crate::session_affinity::AffinityCoordinator::wrap(table))
+            .clone())
     }
 
     /// Membership is catalog-driven (runtime-config watch); explicit worker

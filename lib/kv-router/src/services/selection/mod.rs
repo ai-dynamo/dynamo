@@ -29,8 +29,7 @@ pub use crate::services::common::replica_sync::{
 };
 pub use core::{
     HostCache, HostEligibility, HostLoad, HostReplication, HostTelemetry, KvIndexSource,
-    RefreshProvider, SelectionCore, SelectionHost, SelectionPartition, SelectionScheduler,
-    SelectionServiceConfig,
+    SelectionCore, SelectionHost, SelectionPartition, SelectionScheduler, SelectionServiceConfig,
 };
 pub use error::SelectionError;
 pub use ingress::{KvEventIngress, ZmqDirectIngress};

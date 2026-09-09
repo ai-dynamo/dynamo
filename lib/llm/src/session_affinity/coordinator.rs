@@ -9,7 +9,7 @@
 
 use std::{
     pin::Pin,
-    sync::{Arc, OnceLock},
+    sync::Arc,
     task::{Context, Poll},
     time::Duration,
 };
@@ -56,7 +56,7 @@ fn from_table(target: TableTarget) -> AffinityTarget {
 
 struct Inner {
     table: SessionAffinity,
-    replica: OnceLock<ReplicaSyncRuntime>,
+    replica: tokio::sync::OnceCell<ReplicaSyncRuntime>,
 }
 
 impl Drop for Inner {
@@ -79,11 +79,11 @@ impl AffinityCoordinator {
         ))
     }
 
-    fn wrap(table: SessionAffinity) -> Self {
+    pub(crate) fn wrap(table: SessionAffinity) -> Self {
         Self {
             inner: Arc::new(Inner {
                 table,
-                replica: OnceLock::new(),
+                replica: tokio::sync::OnceCell::new(),
             }),
         }
     }
@@ -92,21 +92,24 @@ impl AffinityCoordinator {
         &self,
         client: dynamo_runtime::component::Client,
     ) -> Result<(), Error> {
-        let (replica, router_id) =
-            ReplicaSyncRuntime::start(client, self.inner.table.downgrade()).await?;
-        if !self
-            .inner
-            .table
-            .enable_replication(router_id, replica.sink())
-        {
-            return Err(anyhow::anyhow!(
-                "session affinity replica sync already enabled"
-            ));
-        }
         self.inner
             .replica
-            .set(replica)
-            .map_err(|_| anyhow::anyhow!("session affinity replica sync already enabled"))
+            .get_or_try_init(|| async {
+                let (replica, router_id) =
+                    ReplicaSyncRuntime::start(client, self.inner.table.downgrade()).await?;
+                if !self
+                    .inner
+                    .table
+                    .enable_replication(router_id, replica.sink())
+                {
+                    return Err(anyhow::anyhow!(
+                        "session affinity replica sync already enabled"
+                    ));
+                }
+                Ok(replica)
+            })
+            .await?;
+        Ok(())
     }
 
     /// Take a slot without cancelling on the request context.

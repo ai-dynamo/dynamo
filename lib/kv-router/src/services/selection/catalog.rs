@@ -8,10 +8,7 @@ use parking_lot::RwLock;
 use crate::identity::RoutingPartitionId;
 use crate::protocols::{WorkerId, WorkerWithDpRank};
 
-use super::error::SelectionError;
-use super::types::{
-    SelectionWorkerConfig, WorkerCatalogRecord, WorkerLifecycle, WorkerPatchRequest, WorkerRequest,
-};
+use super::types::{SelectionWorkerConfig, WorkerCatalogRecord, WorkerLifecycle};
 
 #[derive(Debug, Default)]
 pub(super) struct WorkerCatalog {
@@ -19,33 +16,8 @@ pub(super) struct WorkerCatalog {
 }
 
 impl WorkerCatalog {
-    pub(super) fn upsert(
-        &self,
-        req: WorkerRequest,
-    ) -> (Option<WorkerCatalogRecord>, WorkerCatalogRecord) {
-        let mut workers = self.workers.write();
-        let previous = workers.get(&req.worker_id).cloned();
-        let record = WorkerCatalogRecord::new(req);
-        workers.insert(record.worker_id, record.clone());
-        (previous, record)
-    }
-
-    pub(super) fn patch(
-        &self,
-        worker_id: WorkerId,
-        patch: WorkerPatchRequest,
-    ) -> Result<(WorkerCatalogRecord, WorkerCatalogRecord), SelectionError> {
-        let mut workers = self.workers.write();
-        let Some(record) = workers.get_mut(&worker_id) else {
-            return Err(SelectionError::NotFound(format!(
-                "worker {worker_id} not found"
-            )));
-        };
-        let previous = record.clone();
-        record.apply_patch(patch);
-        record.lifecycle = WorkerLifecycle::Incomplete;
-        record.not_schedulable_reasons.clear();
-        Ok((previous, record.clone()))
+    pub(super) fn replace(&self, record: WorkerCatalogRecord) {
+        self.workers.write().insert(record.worker_id, record);
     }
 
     pub(super) fn get(&self, worker_id: WorkerId) -> Option<WorkerCatalogRecord> {
