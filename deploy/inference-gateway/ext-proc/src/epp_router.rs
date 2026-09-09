@@ -7,8 +7,8 @@
 //! no Dynamo `DistributedRuntime`, no etcd/NATS, and no embedded KV router.
 //! Instead it composes:
 //!
-//! - a [`VllmRenderClient`] tokenization,
-//! - a [`PodDiscovery`] that discovers Ready raw vLLM pods from Kubernetes,
+//! - a [`RenderClient`] that tokenizes prompts via a render sidecar,
+//! - a [`PodDiscovery`] that discovers Ready worker pods from Kubernetes,
 //! - a [`TopologyAdapter`] that registers those pods into the selector, and
 //! - a [`Selector`] (in-process, runtime-free selection service) that picks a
 //!   worker.
@@ -27,21 +27,52 @@ use anyhow::Result;
 use tokio::sync::Semaphore;
 
 use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
+use dynamo_llm::http::service::metadata::extract_metadata_from_header_pairs;
 use dynamo_llm::protocols::common::extensions::{
     AgentHints, HEADER_REQUEST_PRIORITY, HEADER_REQUEST_STRICT_PRIORITY, resolve_request_priority,
 };
 use serde::Deserialize;
 
-use crate::epp_standalone_config::EppStandaloneConfig;
+use crate::epp_standalone_config::{EppStandaloneConfig, RendererProtocol};
 use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo};
 use crate::pod_discovery::PodDiscovery;
+use crate::render_http::RenderError;
 use crate::selector::{SelectRequest, Selector};
+use crate::sglang_renderer_client::SglangRendererClient;
 use crate::topology_adapter::{RegistrationDefaults, TopologyAdapter};
-use crate::vllm_render_client::{VllmRenderClient, VllmRenderError};
+use crate::vllm_render_client::VllmRenderClient;
+
+/// Resolve the request's scheduling policy class from the Dynamo metadata
+/// headers. Goes through the frontend's metadata extractor (rather than a
+/// hardcoded header name) so custom `DYN_METADATA_HEADER` prefixes, trimming,
+/// and duplicate handling stay aligned with the integrated router.
+pub(crate) fn requested_policy_class(
+    headers: &[(String, String)],
+) -> Result<Option<String>, PickError> {
+    let metadata =
+        extract_metadata_from_header_pairs(headers.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .map_err(|e| PickError::MetadataHeadersInvalid(e.to_string()))?;
+    Ok(metadata.get("policy-class").cloned())
+}
+
+/// Protocol-dispatched render client for the standalone EPP.
+enum RenderClient {
+    Vllm(VllmRenderClient),
+    Sglang(SglangRendererClient),
+}
+
+impl RenderClient {
+    async fn render_chat(&self, body: bytes::Bytes) -> Result<Vec<u32>, RenderError> {
+        match self {
+            Self::Vllm(c) => c.render_chat(body).await,
+            Self::Sglang(c) => c.render_chat(body).await,
+        }
+    }
+}
 
 /// Standalone endpoint picker backed by the standalone selection service.
 pub struct EppRouter {
-    renderer: VllmRenderClient,
+    renderer: RenderClient,
     reflector: Arc<PodDiscovery>,
     selector: Arc<Selector>,
     // Kept alive for the lifetime of the router; the reconcile loop runs on it.
@@ -64,11 +95,20 @@ impl EppRouter {
         policy_registry: WorkerSelectionPolicyRegistry,
     ) -> Result<Self> {
         let selector = Arc::new(Selector::new(&cfg, policy_registry).await?);
-        let renderer = VllmRenderClient::new(
-            &cfg.tokenizer_service_url,
-            Duration::from_millis(cfg.tokenization_timeout_ms),
-            cfg.tokenizer_max_response_bytes,
-        )?;
+        let timeout = Duration::from_millis(cfg.tokenization_timeout_ms);
+        let max_response_bytes = cfg.tokenizer_max_response_bytes;
+        let renderer = match cfg.renderer_protocol {
+            RendererProtocol::VllmRender => RenderClient::Vllm(VllmRenderClient::new(
+                &cfg.tokenizer_service_url,
+                timeout,
+                max_response_bytes,
+            )?),
+            RendererProtocol::SglangRenderer => RenderClient::Sglang(SglangRendererClient::new(
+                &cfg.tokenizer_service_url,
+                timeout,
+                max_response_bytes,
+            )?),
+        };
         let (reflector, reflector_ready) = PodDiscovery::spawn(&cfg).await?;
         let reflector = Arc::new(reflector);
         let defaults = RegistrationDefaults::from_config(&cfg);
@@ -113,6 +153,7 @@ impl EppRouter {
             serde_json::from_slice(&request_body).map_err(|error| TokenizeFailure {
                 priority_jump: None,
                 strict_priority: None,
+                expected_output_tokens: None,
                 error: TokenizeError::InvalidBody(error),
             })?;
         let resolved = resolve_request_priority(
@@ -120,6 +161,11 @@ impl EppRouter {
             priority_header.as_deref(),
             strict_priority_header.as_deref(),
         );
+        let expected_output_tokens = hints
+            .nvext
+            .as_ref()
+            .and_then(|n| n.agent_hints.as_ref())
+            .and_then(|h| h.osl);
         // Moves the `Bytes` into reqwest (zero-copy) rather than copying.
         let token_ids =
             self.renderer
@@ -128,12 +174,14 @@ impl EppRouter {
                 .map_err(|e| TokenizeFailure {
                     priority_jump: resolved.priority_jump,
                     strict_priority: resolved.strict_priority,
+                    expected_output_tokens,
                     error: TokenizeError::Render(e),
                 })?;
         Ok(TokenizedRequest {
             token_ids,
             priority_jump: resolved.priority_jump,
             strict_priority: resolved.strict_priority,
+            expected_output_tokens,
         })
     }
 
@@ -285,11 +333,14 @@ impl EndpointPicker for EppRouter {
             token_ids: tokens,
             priority_jump,
             strict_priority,
+            expected_output_tokens,
         } = tokenized_or_load_only(
             self.tokenize(req.body.clone(), priority_header, strict_priority_header)
                 .await,
             &req.request_id,
         )?;
+
+        let policy_class = requested_policy_class(&req.headers)?;
 
         // EPP-minted booking key (not the reused `x-request-id`): stays
         // EPP-known/releasable and rides back on `PickResult::reservation_id`,
@@ -318,9 +369,12 @@ impl EndpointPicker for EppRouter {
             // Effective header-over-body values; `None` only when unset everywhere.
             priority_jump,
             strict_priority,
+            expected_output_tokens,
+            policy_class,
         };
 
         // On either error return below the guard (still armed) frees the booking.
+
         let resp = match self.selector.select_and_reserve(select_req).await {
             Ok(resp) => resp,
             Err(e) => return Err(PickError::RoutingFailed(e.to_string())),
@@ -430,8 +484,8 @@ impl<R: ReservationReleaser> Drop for ReservationGuard<R> {
 enum TokenizeError {
     /// The request body could not be parsed — a genuine client (400) error.
     InvalidBody(serde_json::Error),
-    /// The vLLM render call failed; the specific variant decides the status.
-    Render(VllmRenderError),
+    /// The renderer call failed; the specific variant decides the status.
+    Render(RenderError),
 }
 
 impl TokenizeError {
@@ -442,9 +496,9 @@ impl TokenizeError {
     fn should_degrade(&self) -> bool {
         match self {
             TokenizeError::InvalidBody(_) => false,
-            TokenizeError::Render(VllmRenderError::Unavailable { .. })
-            | TokenizeError::Render(VllmRenderError::Timeout { .. }) => true,
-            TokenizeError::Render(VllmRenderError::UpstreamStatus { status, .. }) => {
+            TokenizeError::Render(RenderError::Unavailable { .. })
+            | TokenizeError::Render(RenderError::Timeout { .. }) => true,
+            TokenizeError::Render(RenderError::UpstreamStatus { status, .. }) => {
                 // These statuses conventionally describe transient overload or
                 // gateway/service unavailability. Keep the list explicit so auth,
                 // routing, and renderer programming errors remain visible.
@@ -452,8 +506,8 @@ impl TokenizeError {
             }
             // A successful response that violates the renderer contract, or
             // exceeds the configured limit, is a configuration/program error.
-            TokenizeError::Render(VllmRenderError::InvalidResponse { .. })
-            | TokenizeError::Render(VllmRenderError::ResponseTooLarge { .. }) => false,
+            TokenizeError::Render(RenderError::InvalidResponse { .. })
+            | TokenizeError::Render(RenderError::ResponseTooLarge { .. }) => false,
         }
     }
 
@@ -464,30 +518,30 @@ impl TokenizeError {
             // The serde message describes the client's own JSON, not our
             // internals, so it is safe to surface as a 400.
             TokenizeError::InvalidBody(e) => {
-                PickError::TokenizationFailed(format!("invalid request body: {e}"))
+                PickError::InvalidRequest(format!("invalid request body: {e}"))
             }
             TokenizeError::Render(e) => {
-                tracing::warn!(request_id, error = %e, "Tokenization Render failed");
-                match e {
-                    VllmRenderError::Unavailable { .. } => PickError::TokenizerUnavailable,
-                    VllmRenderError::Timeout { .. } => PickError::TokenizerTimeout,
-                    // Only the renderer's payload-validation statuses (400/422)
-                    // mean the client's request was bad → surface as a client 400.
-                    // Auth/misconfig (401/403/404), overload (429/503), any other
-                    // 4xx, and 5xx are not client payload errors. The transient
-                    // subset is handled before this mapper by `should_degrade`.
-                    VllmRenderError::UpstreamStatus { status, .. } => match status.as_u16() {
-                        400 | 422 => PickError::TokenizationFailed(
-                            "request rejected by tokenization service".to_string(),
-                        ),
-                        // Renderer overloaded / temporarily unavailable → retryable.
-                        429 | 503 => PickError::TokenizerUnavailable,
-                        _ => PickError::TokenizerUpstreamError,
-                    },
-                    // A too-large or contract-breaking success is the renderer's
-                    // fault (→ 502).
-                    VllmRenderError::InvalidResponse { .. }
-                    | VllmRenderError::ResponseTooLarge { .. } => PickError::TokenizerUpstreamError,
+                tracing::warn!(request_id, error = %e, "Tokenization render failed");
+                match &e {
+                    RenderError::Unavailable { .. } => PickError::TokenizerUnavailable,
+                    RenderError::Timeout { .. } => PickError::TokenizerTimeout,
+                    RenderError::InvalidResponse { .. } | RenderError::ResponseTooLarge { .. } => {
+                        PickError::TokenizerUpstreamError
+                    }
+                    RenderError::UpstreamStatus { status, .. } => {
+                        match status.as_u16() {
+                            // Only payload-validation statuses (400/422) mean the
+                            // client's request was bad → surface as a client 400.
+                            // Auth/misconfig (401/403/404), overload (429/503), any
+                            // other 4xx, and 5xx are the renderer's or our own fault.
+                            400 | 422 => PickError::InvalidRequest(
+                                "request rejected by tokenization service".to_string(),
+                            ),
+                            // Renderer overloaded / temporarily unavailable → retryable.
+                            429 | 503 => PickError::TokenizerUnavailable,
+                            _ => PickError::TokenizerUpstreamError,
+                        }
+                    }
                 }
             }
         }
@@ -499,12 +553,14 @@ struct TokenizedRequest {
     token_ids: Vec<u32>,
     priority_jump: Option<f64>,
     strict_priority: Option<u32>,
+    expected_output_tokens: Option<u32>,
 }
 
 #[derive(Debug)]
 struct TokenizeFailure {
     priority_jump: Option<f64>,
     strict_priority: Option<u32>,
+    expected_output_tokens: Option<u32>,
     error: TokenizeError,
 }
 
@@ -520,6 +576,7 @@ fn tokenized_or_load_only(
         Err(TokenizeFailure {
             priority_jump,
             strict_priority,
+            expected_output_tokens,
             error,
         }) if error.should_degrade() => {
             tracing::warn!(
@@ -531,6 +588,7 @@ fn tokenized_or_load_only(
                 token_ids: Vec::new(),
                 priority_jump,
                 strict_priority,
+                expected_output_tokens,
             })
         }
         Err(TokenizeFailure { error, .. }) => Err(error.into_pick_error(request_id)),
@@ -542,12 +600,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn requested_policy_class_uses_frontend_metadata_extraction() {
+        // The class rides a Dynamo metadata header; the extractor strips the
+        // prefix, trims, and honors the first of repeated headers.
+        let headers: Vec<(String, String)> = vec![
+            (
+                "x-dynamo-meta-policy-class".to_string(),
+                " latency ".to_string(),
+            ),
+            (
+                "x-dynamo-meta-policy-class".to_string(),
+                "throughput".to_string(),
+            ),
+            ("x-request-id".to_string(), "irrelevant".to_string()),
+        ];
+        assert_eq!(
+            requested_policy_class(&headers).unwrap().as_deref(),
+            Some("latency")
+        );
+
+        // Mixed-case header names match as well.
+        let headers: Vec<(String, String)> = vec![(
+            "X-Dynamo-Meta-Policy-Class".to_string(),
+            "express".to_string(),
+        )];
+        assert_eq!(
+            requested_policy_class(&headers).unwrap().as_deref(),
+            Some("express")
+        );
+
+        // No metadata header → no policy class.
+        let headers: Vec<(String, String)> = vec![("x-request-id".to_string(), "r1".to_string())];
+        assert_eq!(requested_policy_class(&headers).unwrap(), None);
+    }
+
+    #[test]
     fn render_upstream_status_maps_to_correct_pick_error() {
-        use crate::vllm_render_client::VllmRenderError;
         use reqwest::StatusCode;
 
         let map = |status: StatusCode| {
-            TokenizeError::Render(VllmRenderError::UpstreamStatus {
+            TokenizeError::Render(RenderError::UpstreamStatus {
                 status,
                 body: String::new(),
             })
@@ -557,11 +649,11 @@ mod tests {
         // Renderer validated the client's payload and rejected it → client 400.
         assert!(matches!(
             map(StatusCode::BAD_REQUEST),
-            PickError::TokenizationFailed(_)
+            PickError::InvalidRequest(_)
         ));
         assert!(matches!(
             map(StatusCode::UNPROCESSABLE_ENTITY),
-            PickError::TokenizationFailed(_)
+            PickError::InvalidRequest(_)
         ));
 
         // Auth / misconfiguration is NOT an invalid client payload → upstream 502,
@@ -592,8 +684,6 @@ mod tests {
 
     #[tokio::test]
     async fn transient_renderer_failure_degrades_and_keeps_priority() {
-        use crate::vllm_render_client::VllmRenderError;
-
         // Accept the connection and close it without an HTTP response. This
         // gives us the same unavailable variant produced by `VllmRenderClient`
         // without racing another process to reuse a dropped ephemeral port.
@@ -611,12 +701,13 @@ mod tests {
             .await
             .unwrap_err();
         server.await.unwrap();
-        assert!(matches!(&render_error, VllmRenderError::Unavailable { .. }));
+        assert!(matches!(&render_error, RenderError::Unavailable { .. }));
 
         let degraded = tokenized_or_load_only(
             Err(TokenizeFailure {
                 priority_jump: Some(3.5),
                 strict_priority: Some(7),
+                expected_output_tokens: Some(128),
                 error: TokenizeError::Render(render_error),
             }),
             "req-1",
@@ -625,6 +716,7 @@ mod tests {
         assert!(degraded.token_ids.is_empty());
         assert_eq!(degraded.priority_jump, Some(3.5));
         assert_eq!(degraded.strict_priority, Some(7));
+        assert_eq!(degraded.expected_output_tokens, Some(128));
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -644,11 +736,12 @@ mod tests {
             .unwrap_err();
         server.abort();
         let _ = server.await;
-        assert!(matches!(&timeout_error, VllmRenderError::Timeout { .. }));
+        assert!(matches!(&timeout_error, RenderError::Timeout { .. }));
         let degraded = tokenized_or_load_only(
             Err(TokenizeFailure {
                 priority_jump: Some(4.5),
                 strict_priority: Some(8),
+                expected_output_tokens: Some(128),
                 error: TokenizeError::Render(timeout_error),
             }),
             "req-2",
@@ -661,27 +754,28 @@ mod tests {
 
     #[test]
     fn tokenization_failure_policy_keeps_bad_input_visible() {
-        use crate::vllm_render_client::VllmRenderError;
         use reqwest::StatusCode;
 
         let malformed = tokenized_or_load_only(
             Err(TokenizeFailure {
                 priority_jump: None,
                 strict_priority: None,
+                expected_output_tokens: None,
                 error: TokenizeError::InvalidBody(
                     serde_json::from_str::<()>("not json").unwrap_err(),
                 ),
             }),
             "req-1",
         );
-        assert!(matches!(malformed, Err(PickError::TokenizationFailed(_))));
+        assert!(matches!(malformed, Err(PickError::InvalidRequest(_))));
 
         for status in [StatusCode::BAD_REQUEST, StatusCode::UNPROCESSABLE_ENTITY] {
             let result = tokenized_or_load_only(
                 Err(TokenizeFailure {
                     priority_jump: Some(1.0),
                     strict_priority: Some(2),
-                    error: TokenizeError::Render(VllmRenderError::UpstreamStatus {
+                    expected_output_tokens: Some(128),
+                    error: TokenizeError::Render(RenderError::UpstreamStatus {
                         status,
                         body: String::new(),
                     }),
@@ -689,7 +783,7 @@ mod tests {
                 "req-1",
             );
             assert!(
-                matches!(result, Err(PickError::TokenizationFailed(_))),
+                matches!(result, Err(PickError::InvalidRequest(_))),
                 "{status} must remain a client error"
             );
         }
@@ -698,7 +792,8 @@ mod tests {
             Err(TokenizeFailure {
                 priority_jump: Some(1.0),
                 strict_priority: Some(2),
-                error: TokenizeError::Render(VllmRenderError::InvalidResponse {
+                expected_output_tokens: Some(128),
+                error: TokenizeError::Render(RenderError::InvalidResponse {
                     source: serde_json::from_str::<()>("not json").unwrap_err(),
                 }),
             }),
@@ -714,7 +809,8 @@ mod tests {
             Err(TokenizeFailure {
                 priority_jump: Some(1.0),
                 strict_priority: Some(2),
-                error: TokenizeError::Render(VllmRenderError::UpstreamStatus {
+                expected_output_tokens: Some(128),
+                error: TokenizeError::Render(RenderError::UpstreamStatus {
                     status,
                     body: String::new(),
                 }),
@@ -736,7 +832,8 @@ mod tests {
                 Err(TokenizeFailure {
                     priority_jump: Some(1.0),
                     strict_priority: Some(2),
-                    error: TokenizeError::Render(VllmRenderError::UpstreamStatus {
+                    expected_output_tokens: Some(128),
+                    error: TokenizeError::Render(RenderError::UpstreamStatus {
                         status,
                         body: String::new(),
                     }),

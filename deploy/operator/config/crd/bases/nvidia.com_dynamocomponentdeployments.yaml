@@ -11456,6 +11456,32 @@ spec:
                           type: string
                       type: object
                   type: object
+                roles:
+                  description: |-
+                    Roles expose the named Pod-producing parts inside a compound component.
+                    When set for a multinode component, this list must contain exactly one
+                    leader and one worker role. Their cardinality is derived from multinode.nodeCount.
+                    Omission preserves the implicit multinode role layout.
+                  items:
+                    description: |-
+                      ComponentRoleSpec configures one named Pod-producing role inside a compound component.
+                      The enclosing component type defines the allowed role names and cardinality.
+                    properties:
+                      name:
+                        description: |-
+                          Name identifies the role within the enclosing component independently of
+                          generated provider resource names.
+                        maxLength: 63
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                    required:
+                      - name
+                    type: object
+                  type: array
+                  x-kubernetes-list-map-keys:
+                    - name
+                  x-kubernetes-list-type: map
                 runtimeVersionOverride:
                   description: |-
                     RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's
@@ -12242,6 +12268,8 @@ spec:
                             deployment. `false` or omitted means automatic selection (multi-node
                             and inter-pod GMS components use a scaling group, other single-node
                             components a standalone PodClique), not "force PodClique".
+                            The pointer preserves field presence on the wire: `nil` and `false` are
+                            semantically identical, and consumers must dereference with `false`.
                             Immutable after creation.
                           type: boolean
                       type: object
@@ -20473,6 +20501,32 @@ spec:
                   format: int32
                   minimum: 0
                   type: integer
+                roles:
+                  description: |-
+                    roles expose the named Pod-producing parts inside a compound component.
+                    When set for a multinode component, this list must contain exactly one
+                    leader and one worker role. Their cardinality is derived from multinode.nodeCount.
+                    Omission preserves the implicit multinode role layout.
+                  items:
+                    description: |-
+                      ComponentRoleSpec configures one named Pod-producing role inside a compound component.
+                      The enclosing component type defines the allowed role names and cardinality.
+                    properties:
+                      name:
+                        description: |-
+                          name identifies the role within the enclosing component independently of
+                          generated provider resource names.
+                        maxLength: 63
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                    required:
+                      - name
+                    type: object
+                  type: array
+                  x-kubernetes-list-map-keys:
+                    - name
+                  x-kubernetes-list-type: map
                 runtimeVersionOverride:
                   description: |-
                     RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's
