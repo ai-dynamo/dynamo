@@ -1,20 +1,26 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Connect-time SSRF backstop shared by the HTTP backends.
+"""Connect-time SSRF backstop for the aiohttp backend.
 
-``validate_url`` checks a hostname's resolved IPs, but the backend re-resolves
-at connect, so a DNS-rebinding server can return a public IP on the check and an
-internal one at connect. These shims re-apply the blocklist at resolve time,
-mirroring the Rust frontend's ``BlocklistResolver``
-(``lib/llm/src/preprocessor/media/loader.rs``). Both reuse
+``validate_url`` checks a hostname's resolved IPs, but the client re-resolves at
+connect, so a DNS-rebinding server can return a public IP on the check and an
+internal one at connect. aiohttp's ``TCPConnector(resolver=...)`` hook lets us
+resolve + filter once and hand the connector the validated addresses to dial,
+while the hostname is still used for TLS SNI / certificate verification — the
+same mechanism the Rust frontend uses on reqwest's ``dns_resolver``
+(``lib/llm/src/preprocessor/media/loader.rs``). Reuses
 :func:`url_validator.is_blocked_ip`.
+
+Scope: this governs **direct** connections. When an egress proxy is configured,
+the proxy resolves the origin, so SSRF must be enforced at the proxy / network
+layer instead (true of the Rust path as well). httpx has no equivalent resolver
+hook, so it relies on the pre-check + per-hop redirect revalidation in
+``base.py`` (see the note in ``httpx_client``).
 """
 
 from __future__ import annotations
 
-import asyncio
-import ipaddress
 import socket
 from typing import Any
 
@@ -30,7 +36,11 @@ try:  # aiohttp is the default backend; httpx-only envs still import this module
     from aiohttp.resolver import DefaultResolver
 
     class BlocklistResolver(AbstractResolver):
-        """aiohttp resolver that drops blocked IPs before the connector dials."""
+        """aiohttp resolver that drops blocked IPs before the connector dials.
+
+        Returns the full set of non-blocked addresses (not just the first) so
+        aiohttp keeps its normal multi-address / Happy-Eyeballs fallback.
+        """
 
         def __init__(self, *, allow_private_ips: bool) -> None:
             self._inner = DefaultResolver()
@@ -52,27 +62,3 @@ try:  # aiohttp is the default backend; httpx-only envs still import this module
 
 except ImportError:  # pragma: no cover - aiohttp always present in practice
     BlocklistResolver = None  # type: ignore[assignment,misc]
-
-
-async def resolve_allowed_ip(host: str, *, allow_private_ips: bool) -> str:
-    """Resolve ``host`` to one non-blocked IP for a pinned connect (httpx path).
-
-    httpx has no resolver hook, so we resolve + filter here and hand the backend
-    a specific IP to dial. An IP literal is checked without a lookup. Raises
-    :class:`SsrfBlockedAddress` if nothing non-blocked remains.
-    """
-    try:
-        ipaddress.ip_address(host)
-    except ValueError:
-        pass
-    else:
-        if not allow_private_ips and is_blocked_ip(host):
-            raise SsrfBlockedAddress(f"IP literal {host!r} is in a blocked range")
-        return host
-
-    infos = await asyncio.get_running_loop().getaddrinfo(host, None)
-    for info in infos:
-        ip = info[4][0]
-        if allow_private_ips or not is_blocked_ip(ip):
-            return ip
-    raise SsrfBlockedAddress(f"host {host!r} resolves only to blocked IPs")
