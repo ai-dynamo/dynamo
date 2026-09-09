@@ -19,6 +19,10 @@ FRONTEND_DECODING=false
 # share GPUs. Keep the lease above the observed 75-77 second handoff window,
 # while allowing deployments to choose a shorter cleanup interval.
 DYN_VLLM_KV_LEASE_DURATION=${DYN_VLLM_KV_LEASE_DURATION:-100}
+if ! [[ "$DYN_VLLM_KV_LEASE_DURATION" =~ ^([6-9]|[1-9][0-9]+)$ ]]; then
+    echo "DYN_VLLM_KV_LEASE_DURATION must be an integer >= 6" >&2
+    exit 2
+fi
 KV_TRANSFER_CONFIG="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"kv_lease_duration\":${DYN_VLLM_KV_LEASE_DURATION}}}"
 
 # --single-gpu: Packs all 3 workers (encode, prefill, decode) onto a single GPU.
