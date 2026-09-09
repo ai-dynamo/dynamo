@@ -136,6 +136,13 @@ impl SubagentGroupAffinityPicker {
         self.last_sweep = now;
     }
 
+    /// Marks a bound group as still in use without changing its worker.
+    fn touch_group(&mut self, group_id: &str, now: Instant) {
+        if let Some(binding) = self.groups.get_mut(group_id) {
+            binding.last_used = now;
+        }
+    }
+
     fn bind_group(&mut self, group_id: &str, worker: WorkerWithDpRank, now: Instant) {
         if let Some(binding) = self.groups.get_mut(group_id) {
             binding.worker = worker;
@@ -181,18 +188,22 @@ impl WorkerPicker for SubagentGroupAffinityPicker {
         let now = Instant::now();
         self.sweep_expired(now);
 
-        // A bound group outranks this subagent's own session target, which is what scatters
-        // siblings across the pool.
+        // Only the group binding steers a subagent. Falling back to this subagent's own session
+        // target is what scatters siblings, so an unbound group is placed purely by load.
         let preferred = self
             .groups
             .get(group_id)
-            .map(|binding| WorkerAffinityTarget::from(binding.worker))
-            .or_else(|| context.affinity_target());
+            .map(|binding| WorkerAffinityTarget::from(binding.worker));
 
         let row = self.select_row(candidates, loads, preferred)?;
-        // One candidate means the host constrained the choice rather than the policy making it:
-        // a pinned session target, an explicit worker target, or a migration retry. Recording it
-        // would rebind every sibling to a worker this policy never selected.
+
+        // Keep an actively used group alive even on requests that cannot rebind it, otherwise a
+        // busy group expires mid-use and its siblings scatter.
+        self.touch_group(group_id, now);
+
+        // One candidate means the host narrowed the choice rather than the policy making it, most
+        // often a pinned session target. Recording it would move every sibling onto a worker this
+        // policy never selected. This is a heuristic: it cannot see why the set was narrowed.
         if candidates.len() > 1
             && let Some(candidate) = candidates.get(row)
         {
@@ -563,6 +574,38 @@ mod tests {
         set_active_requests(&mut sibling, worker_a, 0);
         set_active_requests(&mut sibling, worker_b, 0);
         assert_eq!(select(&policy, &workers(), &sibling), worker_b);
+    }
+
+    #[test]
+    fn an_unbound_group_ignores_the_subagents_own_affinity_target() {
+        let worker_a = WorkerWithDpRank::from_worker_id(29);
+        let worker_b = WorkerWithDpRank::from_worker_id(41);
+
+        // This subagent's own session is bound to the busy worker 41. Honoring that would place
+        // the whole new group on a loaded worker instead of by load.
+        let mut first = request("child-1", Some("parent-1"), Some(worker_b.into()));
+        set_active_requests(&mut first, worker_a, 0);
+        set_active_requests(&mut first, worker_b, 3);
+
+        assert_eq!(select(&policy(0), &workers(), &first), worker_a);
+    }
+
+    #[test]
+    fn a_used_group_survives_the_idle_sweep() {
+        let worker = WorkerWithDpRank::from_worker_id(29);
+        let ttl = Duration::from_secs(60);
+        let mut picker = SubagentGroupAffinityPicker::new(0, ttl);
+        let start = Instant::now();
+        picker.bind_group("busy", worker, start);
+        picker.bind_group("idle", worker, start);
+
+        // "busy" keeps arriving on requests that cannot rebind it, so it must stay alive.
+        let later = start + Duration::from_secs(90);
+        picker.touch_group("busy", later);
+        picker.sweep_expired(later);
+
+        assert!(picker.groups.contains_key("busy"));
+        assert!(!picker.groups.contains_key("idle"));
     }
 
     #[test]

@@ -21,17 +21,17 @@ The policy implements only `WorkerPicker`. It requests `WorkerInputs::LOAD`; Dyn
 | Request | Decision |
 |---|---|
 | No parent session id | Dynamo's advisory session target if eligible and at or below `max_active_requests`, otherwise the least-loaded worker |
-| Parent session id, group not yet bound | The least-loaded worker, then bind the group to it |
+| Parent session id, group not yet bound | The least-loaded worker, ignoring the subagent's own session target, then bind the group to it |
 | Parent session id, group bound and at or below `max_active_requests` | Retain the group's worker |
 | Parent session id, group bound and above `max_active_requests` | The least-loaded non-group worker if it is *strictly* less loaded, then rebind the group to it; otherwise retain |
 | Group's worker absent from the eligible set | The least-loaded worker, then rebind the group to it |
 | One eligible candidate | Select it without rebinding the group |
 
-A bound group outranks the subagent's own session target, which is the binding that scatters siblings. Every worker the policy freely selects becomes the group's new binding, so a group that moves stays moved.
+A subagent is steered only by its group binding. Its own session target is ignored even when the group is unbound, because that per-subagent binding is exactly what scatters siblings: honoring it on the first request would place the whole new group on whichever worker that one subagent happened to land on. Every worker the policy freely selects becomes the group's new binding, so a group that moves stays moved.
 
 The move requires a *strictly* less loaded alternative. Moving to an equally loaded worker would relocate the group on every sibling once the threshold is crossed, so the group would oscillate across the pool and lose the shared prefix it exists to reuse.
 
-A single-candidate set means the host constrained the choice — a pinned session target, an explicit worker target, or a migration retry — so the policy selects that worker but leaves the group binding alone rather than dragging every sibling onto a worker it never chose.
+A single-candidate set means the host narrowed the choice — most often a pinned session target — so the policy selects that worker but leaves the group binding alone rather than dragging every sibling onto a worker it never chose. This is a heuristic: the picker cannot see *why* the set was narrowed, so a pool that is genuinely down to one eligible worker is treated the same way. Such a request still marks its group as in use, so an actively used group does not expire while it is being served.
 
 Load ties use `WorkerWithDpRank`, so selection does not depend on Dynamo's unspecified candidate-row order. The binding records a worker and its data-parallel rank, so a group shares one rank rather than only one worker.
 
@@ -49,6 +49,12 @@ Dynamo resolves the parent session id at the HTTP boundary, so the policy works 
 | OpenCode | `x-session-id` | `x-parent-session-id` |
 
 A request whose parent id equals its own session id is treated as a main-agent request.
+
+## Attention-DP Backends
+
+The binding records a worker and its data-parallel rank, so grouping is rank-exact as far as Dynamo's router is concerned. A backend that routes again internally can still split a group across ranks.
+
+TensorRT-LLM is the case to watch. When its `attention_dp_config.kv_cache_routing_conversation_affinity` is enabled, the engine's own `ConversationAwareADPRouter` pins a conversation to an attention-DP rank keyed on `agent_context.session_id` — each subagent's own id, not the parent's. With the default `--conversation-affinity-dp-rank-source engine`, the engine load-balances every new conversation independently, so siblings share a worker but scatter across the ranks inside it, which is where the shared prefix would have been reused. Set `--conversation-affinity-dp-rank-source dynamo` so the rank this policy selects is the one the engine records.
 
 ## Configuration
 
