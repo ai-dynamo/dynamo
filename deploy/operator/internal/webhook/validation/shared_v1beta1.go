@@ -691,6 +691,14 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 			"cannot change node topology between single-node and multi-node after creation",
 		))
 	} else {
+		if newComponent.Multinode != nil && oldComponent.Multinode != nil &&
+			newComponent.Multinode.NodeCount != oldComponent.Multinode.NodeCount {
+			allErrs = append(allErrs, field.Invalid(
+				fldPath.Child("multinode", "nodeCount"),
+				newComponent.Multinode.NodeCount,
+				apivalidation.FieldImmutableErrorMsg,
+			))
+		}
 		allErrs = append(allErrs, validateComponentRolesUpdate(
 			newComponent,
 			oldComponent,

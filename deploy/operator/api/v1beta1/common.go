@@ -120,10 +120,10 @@ type ComponentRoleSpec struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Name string `json:"name"`
 
-	// replicas optionally asserts the logical cardinality of this role in one
-	// complete component instance. The enclosing component type defines the
-	// cardinality. For multinode components, omitted values are derived from
-	// multinode.nodeCount; when set, leader must be 1 and worker must be
+	// replicas is the logical cardinality of this role in one complete component
+	// instance. The enclosing component type defines the cardinality. For
+	// multinode components, admission defaults and persists omitted values from
+	// multinode.nodeCount; leader must be 1 and worker must be
 	// multinode.nodeCount minus 1.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
@@ -138,7 +138,8 @@ type ComponentRoleSpec struct {
 // MultinodeSpec configures a multinode component.
 type MultinodeSpec struct {
 	// nodeCount is the number of nodes to deploy for the multinode component.
-	// Total GPUs used is `nodeCount * container GPU request`.
+	// Total GPUs used is `nodeCount * container GPU request`. The value is
+	// immutable after creation.
 	// +optional
 	// +kubebuilder:default=2
 	// +kubebuilder:validation:Minimum=2

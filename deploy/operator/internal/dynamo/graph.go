@@ -1309,7 +1309,7 @@ func expandRolesForComponent(componentName string, componentReplicas *int32, num
 	case isMultinode && isInterPodGMS:
 		return expandMultinodeGMSRoles(componentName, numberOfNodes, component.GetTotalEnginePods())
 	case isMultinode:
-		return expandMultinodeRoles(componentName, numberOfNodes, component.Roles)
+		return expandMultinodeRoles(componentName, numberOfNodes)
 	case isInterPodGMS:
 		return expandSingleNodeGMSRoles(componentName, component.GetTotalEnginePods())
 	case component.IsGroveScalingGroupForced():
@@ -1335,24 +1335,11 @@ func expandSingleNodeScalingGroupRoles(componentName string) []ServiceRole {
 	}
 }
 
-func expandMultinodeRoles(componentName string, numberOfNodes int32, roles []v1beta1.ComponentRoleSpec) []ServiceRole {
-	leaderReplicas := explicitRoleReplicas(roles, v1beta1.ComponentRoleLeader, 1)
-	workerReplicas := explicitRoleReplicas(roles, v1beta1.ComponentRoleWorker, numberOfNodes-1)
+func expandMultinodeRoles(componentName string, numberOfNodes int32) []ServiceRole {
 	return []ServiceRole{
-		{Name: componentName + "-" + commonconsts.GroveRoleSuffixLeader, Role: RoleLeader, Replicas: leaderReplicas},
-		{Name: componentName + "-" + commonconsts.GroveRoleSuffixWorker, Role: RoleWorker, Replicas: workerReplicas},
+		{Name: componentName + "-" + commonconsts.GroveRoleSuffixLeader, Role: RoleLeader, Replicas: 1},
+		{Name: componentName + "-" + commonconsts.GroveRoleSuffixWorker, Role: RoleWorker, Replicas: numberOfNodes - 1},
 	}
-}
-
-// explicitRoleReplicas resolves an authored role cardinality after admission.
-// Omitted role replica counts retain the established implicit multinode behavior.
-func explicitRoleReplicas(roles []v1beta1.ComponentRoleSpec, name string, implicit int32) int32 {
-	for i := range roles {
-		if roles[i].Name == name && roles[i].Replicas != nil {
-			return *roles[i].Replicas
-		}
-	}
-	return implicit
 }
 
 // ExplicitMultinodeRolesMatchImplicit reports whether the authored roles carry

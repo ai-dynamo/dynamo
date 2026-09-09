@@ -812,13 +812,6 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSharedSpe
 				apivalidation.FieldImmutableErrorMsg,
 			))
 		}
-		if newComponent.GetNumberOfNodes() != oldComponent.GetNumberOfNodes() {
-			allErrs = append(allErrs, field.Invalid(
-				fldPath.Child("multinode", "nodeCount"),
-				newComponent.GetNumberOfNodes(),
-				apivalidation.FieldImmutableErrorMsg,
-			))
-		}
 	}
 	return allErrs
 }

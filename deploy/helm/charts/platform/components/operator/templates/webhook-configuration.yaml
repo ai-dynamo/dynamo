@@ -236,7 +236,7 @@ webhooks:
       namespace: {{ .Release.Namespace }}
       path: /mutate-nvidia-com-v1beta1-dynamocomponentdeployment
   failurePolicy: {{ .Values.webhook.failurePolicy }}
-  matchPolicy: Exact
+  matchPolicy: Equivalent
   name: mdynamocomponentdeploymentv1beta1.kb.io
   {{- if .Values.webhook.namespaceSelector }}
   namespaceSelector:

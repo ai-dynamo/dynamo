@@ -5169,13 +5169,13 @@ func TestExpandRolesForService(t *testing.T) {
 			},
 		},
 		{
-			name:          "explicit multinode role replicas resolve by semantic name",
+			name:          "multinode node count remains authoritative over role replicas",
 			serviceName:   "test-service",
 			numberOfNodes: 5,
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				Roles: []v1alpha1.ComponentRoleSpec{
-					{Name: v1alpha1.ComponentRoleWorker, Replicas: ptr.To(int32(4))},
-					{Name: v1alpha1.ComponentRoleLeader, Replicas: ptr.To(int32(1))},
+					{Name: v1alpha1.ComponentRoleWorker, Replicas: ptr.To(int32(99))},
+					{Name: v1alpha1.ComponentRoleLeader, Replicas: ptr.To(int32(2))},
 				},
 			},
 			expected: []ServiceRole{

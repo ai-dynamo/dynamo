@@ -120,36 +120,15 @@ func TestComputeBetaDGDWorkersSpecHash_EquivalentExplicitRolesDoNotRoll(t *testi
 		},
 	}))
 
-	testCases := []struct {
-		name  string
-		roles []v1beta1.ComponentRoleSpec
-	}{
-		{
-			name: "derived role replicas",
-			roles: []v1beta1.ComponentRoleSpec{
-				{Name: v1beta1.ComponentRoleWorker},
-				{Name: v1beta1.ComponentRoleLeader},
-			},
-		},
-		{
-			name: "explicit role replicas",
-			roles: []v1beta1.ComponentRoleSpec{
-				{Name: v1beta1.ComponentRoleWorker, Replicas: ptr.To(int32(3))},
-				{Name: v1beta1.ComponentRoleLeader, Replicas: ptr.To(int32(1))},
-			},
-		},
+	t.Log("Make the same semantic role structure explicit in reverse declaration order")
+	explicit := implicit.DeepCopy()
+	explicit.Spec.Components[0].Roles = []v1beta1.ComponentRoleSpec{
+		{Name: v1beta1.ComponentRoleWorker},
+		{Name: v1beta1.ComponentRoleLeader},
 	}
 
-	for _, testCase := range testCases {
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Log("Make the same semantic role structure explicit in reverse declaration order")
-			explicit := implicit.DeepCopy()
-			explicit.Spec.Components[0].Roles = testCase.roles
-
-			t.Log("Verify the representation-only migration keeps the worker generation stable")
-			assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, implicit), mustComputeBetaDGDWorkersSpecHash(t, explicit))
-		})
-	}
+	t.Log("Verify the representation-only migration keeps the worker generation stable")
+	assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, implicit), mustComputeBetaDGDWorkersSpecHash(t, explicit))
 }
 
 func TestComputeBetaDGDWorkersSpecHash_CanonicalizesExplicitRoleOrder(t *testing.T) {
