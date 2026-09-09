@@ -47,6 +47,18 @@ from dynamo.common.utils.runtime import run_async
 logger = logging.getLogger(__name__)
 
 
+def _attributable_to_cv2(exc: BaseException) -> bool:
+    """Whether this decode failure is OpenCV's.
+
+    vLLM picks among several video backends. A media_io configured for PyAV or
+    DeepStream raises its own ImportError, and reinstalling OpenCV would not
+    repair it, so only errors that name cv2 earn the OpenCV remedy.
+    ``ModuleNotFoundError`` carries the module in ``name``; the SystemError a
+    backendless build raises names the class in its text.
+    """
+    return getattr(exc, "name", None) == "cv2" or "cv2" in str(exc)
+
+
 @functools.lru_cache(maxsize=1)
 def _cv2_lacks_video_backend() -> bool:
     """Whether the installed OpenCV imports but can open no video.
@@ -221,6 +233,8 @@ class VideoLoader:
         try:
             return await asyncio.to_thread(media_io.load_bytes, content)
         except ImportError as exc:
+            if not _attributable_to_cv2(exc):
+                raise
             raise video_decoder_missing(
                 "vllm", "opencv-python-headless", "cv2", codec, cause=str(exc)
             ) from exc
@@ -232,7 +246,7 @@ class VideoLoader:
             # decoder this media_io actually ran, so a configured non-OpenCV
             # backend raising SystemError would otherwise be hidden behind a
             # recommendation to reinstall OpenCV.
-            if "cv2" not in str(exc) or not _cv2_lacks_video_backend():
+            if not _attributable_to_cv2(exc) or not _cv2_lacks_video_backend():
                 raise
             raise video_decoder_missing(
                 "vllm",

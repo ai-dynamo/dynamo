@@ -377,6 +377,27 @@ async def test_backendless_cv2_does_not_pre_empt_a_working_decode(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_other_backend_import_error_is_not_blamed_on_opencv(monkeypatch):
+    """A media_io configured for another backend keeps its own ImportError.
+
+    vLLM selects among several video backends and PyAV is absent from the
+    shipped images too, so its ImportError would otherwise be rewritten into
+    advice to reinstall OpenCV -- which cannot repair a VideoMediaIO still
+    configured for PyAV.
+    """
+    loader = VideoLoader()
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "vp9")
+    monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
+
+    class _PyAvMediaIO:
+        def load_bytes(self, content: bytes):
+            raise ModuleNotFoundError("No module named 'av'", name="av")
+
+    with pytest.raises(ModuleNotFoundError, match="'av'"):
+        await loader._decode_video_bytes(b"vp9-bytes", _PyAvMediaIO())
+
+
+@pytest.mark.asyncio
 async def test_other_backend_system_error_is_not_blamed_on_opencv(monkeypatch):
     """A different decoder's SystemError must survive on a backendless image.
 

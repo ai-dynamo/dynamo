@@ -66,16 +66,24 @@ def _install_hint(backend: str, package: str, module: str) -> str:
     The bundled installer is offered only where it installs this package for
     this backend; elsewhere it exits 0 having fixed nothing.
     """
-    flags = "--no-deps"
-    spec = VALIDATED_SPECS[package]
     if _carrier_present(module):
-        flags += f" --force-reinstall --only-binary {package}"
+        # Replacing a build that is already here, so pin what is installed. The
+        # validated range would be wrong twice: it can be satisfied by what is
+        # present, so pip changes nothing, and its upper bound can sit below
+        # the version the image ships. That version is whatever the backend
+        # resolved, so this is deliberately not called a validated install.
         installed = _installed_version(package)
-        if installed:
-            spec = f"{package}=={installed}"
-        # No distribution metadata: the validated spec is the only bound left,
-        # and force-reinstall still replaces what is there.
-    hint = f"install the validated decoder with `pip install {flags} '{spec}'`"
+        spec = f"{package}=={installed}" if installed else VALIDATED_SPECS[package]
+        hint = (
+            "replace the shipped build with the binary wheel of the same "
+            f"version: `pip install --no-deps --force-reinstall "
+            f"--only-binary {package} '{spec}'`"
+        )
+    else:
+        hint = (
+            "install the validated decoder with "
+            f"`pip install --no-deps '{VALIDATED_SPECS[package]}'`"
+        )
     if installer_covers(backend, package):
         hint += f" (or `{INSTALLER_CMD} {backend}`)"
     return hint
