@@ -28,7 +28,7 @@ import requests
 
 from tests.conftest import EtcdServer, NatsServer
 from tests.utils.gpu_args import build_gpu_mem_args
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import allocate_ports
 from tests.utils.router_logs import (
@@ -65,13 +65,6 @@ _STAIRCASE_IMAGE_FRESH_COLOR = (17, 99, 201)
 _SWAP_ORDER_FRESH_COLORS = [(14, 141, 77), (211, 66, 101), (44, 91, 233)]
 _HTTP_IMAGE_COLORS = [(180, 30, 90), (30, 180, 90), (90, 30, 180)]
 _HTTP_DATA_URI_COLOR = (60, 120, 210)
-
-
-def _check_ready(response) -> bool:
-    try:
-        return (response.json() or {}).get("status") == "ready"
-    except ValueError:
-        return False
 
 
 def _make_process_env(log_level: str = "debug", **extra) -> dict[str, str]:
@@ -136,7 +129,7 @@ class VLLMWorkerProcess(ManagedProcess):
                 DYN_FORWARDPASS_METRIC_PORT=str(fpm_port),
             ),
             health_check_urls=[
-                (f"http://localhost:{system_port}/health", _check_ready)
+                (f"http://localhost:{system_port}/health", check_health_ready)
             ],
             timeout=900,
             straggler_commands=["-m dynamo.vllm"],

@@ -71,7 +71,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         openssh-server \
         libturbojpeg \
         librdmacm1 \
-        rdma-core && \
+        rdma-core \
+        libjemalloc2 && \
     test -f /usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so && \
     test -d "${NIXL_PLUGIN_DIR}" && \
     ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \

@@ -158,6 +158,8 @@ class FrontendRouterProcess(ManagedProcess):
 
     def _check_ready(self, response):
         """Check if KV, random, round-robin, or direct router is ready"""
+        # NOTE: /v1/models has no health-status payload; any HTTP 200 means the
+        # router endpoint is serving and must not use check_health_ready.
         return response.status_code == 200
 
     def __exit__(self, exc_type, exc_val, exc_tb):

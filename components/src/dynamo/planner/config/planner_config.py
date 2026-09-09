@@ -414,6 +414,16 @@ class PlannerConfig(BaseModel):
             "throughput_adjustment_interval",
         ),
     )
+    max_throughput_scaling_replicas: int = Field(
+        default=SLAPlannerDefaults.max_throughput_scaling_replicas,
+        gt=0,
+        description=(
+            "Maximum replica-count change per component produced by one "
+            "throughput-scaling observation. The same limit applies to scale-up "
+            "and scale-down. Hard endpoint, GPU-budget, and power-budget recovery "
+            "may override this limit."
+        ),
+    )
     max_gpu_budget: int = SLAPlannerDefaults.max_gpu_budget
     min_gpu_budget: int = SLAPlannerDefaults.min_gpu_budget
     """Per-DGD GPU floor enforced by the local planner. -1 disables (default).
@@ -463,7 +473,7 @@ class PlannerConfig(BaseModel):
         ge=0,
         le=65535,
         description=(
-            "Port for the localhost-only runtime minimum-endpoint API. "
+            "Port for the localhost-only runtime endpoint and GPU-budget API. "
             "Set to 0 to disable the API."
         ),
     )

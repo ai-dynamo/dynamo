@@ -90,7 +90,7 @@ from dynamo.vllm.kv_connector_protocols import (
     KvConnectorProtocol,
     make_kv_connector_protocol,
 )
-from dynamo.vllm.router_hints import enable_router_hint_support
+from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
 
 from .args import Config
 from .cache_info import get_configured_kv_event_block_size
@@ -145,9 +145,7 @@ def _discard_orphan_result(fut: "asyncio.Future[dict]") -> None:
 
 
 _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY: Final = "kv_transfer_params"
-# Request payload key under extra_args.kv_transfer_params. This intentionally
-# matches the runtime capability string, but it lives in a different namespace.
-_ROUTER_HINT_EXTRA_ARGS_KEY: Final = "router_hint"
+_KV_HINT_EXTRA_ARGS_KEY: Final = "kv_hint"
 _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
     {
         "allow_unpaused",
@@ -863,39 +861,7 @@ def build_sampling_params(
         configured_default = default_sampling_params.get("max_tokens", dynamic_default)
         sampling_params.max_tokens = min(configured_default, dynamic_default)
 
-    # Forward only Dynamo's router-generated hint from
-    # request.extra_args.kv_transfer_params into vLLM SamplingParams. Today,
-    # router_hint is the only kv_transfer_params key the Rust preprocessor adds,
-    # so do not pass through any other request-provided connector inputs. Copy
-    # extra_args before mutation because SamplingParams may reuse the
-    # default_sampling_params dict across requests.
-    if isinstance(extra_args, dict):
-        request_kv_transfer_params = extra_args.get(_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY)
-        if isinstance(request_kv_transfer_params, dict):
-            passthrough_router_hint = request_kv_transfer_params.get(
-                _ROUTER_HINT_EXTRA_ARGS_KEY
-            )
-            if isinstance(passthrough_router_hint, dict):
-                passthrough_extra_args = (
-                    dict(sampling_params.extra_args)
-                    if isinstance(sampling_params.extra_args, dict)
-                    else {}
-                )
-                existing_kv_transfer_params = passthrough_extra_args.get(
-                    _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY
-                )
-                passthrough_kv_transfer_params = (
-                    dict(existing_kv_transfer_params)
-                    if isinstance(existing_kv_transfer_params, dict)
-                    else {}
-                )
-                passthrough_kv_transfer_params[
-                    _ROUTER_HINT_EXTRA_ARGS_KEY
-                ] = passthrough_router_hint
-                passthrough_extra_args[
-                    _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY
-                ] = passthrough_kv_transfer_params
-                sampling_params.extra_args = passthrough_extra_args
+    _apply_kv_hint(sampling_params, request.get("kv_hint"))
 
     # Dynamo's internal token path consumes disjoint token deltas. This mirrors
     # the SGLang integration and lets vLLM's stream_interval gate reduce backend
@@ -906,15 +872,36 @@ def build_sampling_params(
     return sampling_params
 
 
+def _apply_kv_hint(sampling_params: SamplingParams, kv_hint: Any) -> None:
+    """Attach the complete Dynamo KV hint message to vLLM's private input."""
+    if not isinstance(kv_hint, Mapping):
+        return
+
+    extra_args = (
+        dict(sampling_params.extra_args)
+        if isinstance(sampling_params.extra_args, dict)
+        else {}
+    )
+    existing_kv_transfer_params = extra_args.get(_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY)
+    kv_transfer_params = (
+        dict(existing_kv_transfer_params)
+        if isinstance(existing_kv_transfer_params, dict)
+        else {}
+    )
+    kv_transfer_params[_KV_HINT_EXTRA_ARGS_KEY] = dict(kv_hint)
+    extra_args[_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY] = kv_transfer_params
+    sampling_params.extra_args = extra_args
+
+
 def _update_kv_transfer_params(
     sampling_params: SamplingParams,
     kv_transfer_params: Mapping[str, Any],
     *,
-    preserve_router_hint: bool = False,
+    preserve_kv_hint: bool = False,
 ) -> None:
-    """Set vLLM KV transfer params, optionally carrying Dynamo's router hint.
+    """Set vLLM KV transfer params, optionally carrying Dynamo's transfer hint.
 
-    ``build_sampling_params`` may have copied ``router_hint`` from the Dynamo
+    ``build_sampling_params`` may have copied ``kv_hint`` from the Dynamo
     request into ``sampling_params.extra_args["kv_transfer_params"]``. The new
     ``kv_transfer_params`` value comes from vLLM's ``KVTransferConfig``
     (``engine_client.vllm_config.kv_transfer_config``), via the connector
@@ -930,16 +917,16 @@ def _update_kv_transfer_params(
         else {}
     )
     updated_params = dict(kv_transfer_params)
-    updated_params.pop(_ROUTER_HINT_EXTRA_ARGS_KEY, None)
+    updated_params.pop(_KV_HINT_EXTRA_ARGS_KEY, None)
 
     existing_params = extra_args.get(_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY)
-    router_hint = (
-        existing_params.get(_ROUTER_HINT_EXTRA_ARGS_KEY)
-        if preserve_router_hint and isinstance(existing_params, Mapping)
+    kv_hint = (
+        existing_params.get(_KV_HINT_EXTRA_ARGS_KEY)
+        if preserve_kv_hint and isinstance(existing_params, Mapping)
         else None
     )
-    if isinstance(router_hint, Mapping):
-        updated_params[_ROUTER_HINT_EXTRA_ARGS_KEY] = router_hint
+    if isinstance(kv_hint, Mapping):
+        updated_params[_KV_HINT_EXTRA_ARGS_KEY] = kv_hint
 
     extra_args[_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY] = updated_params
     sampling_params.extra_args = extra_args
@@ -1488,6 +1475,22 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "message": f"new_data_parallel_size must be >= 1, got: {new_dp_size}",
             }
         parallel_config = self.engine_client.vllm_config.parallel_config
+        # Capability gate: control/scale_elastic_ep is registered on every vLLM
+        # worker, but elastic EP only works with the Ray DP backend and the
+        # feature enabled. On a worker without it, vLLM's scale_elastic_ep raises
+        # NotImplementedError / a Ray-backend assertion, which the fail-fast grow
+        # handler below would turn into a needless restart of a healthy worker.
+        # Reject unsupported configs here, before the engine is touched.
+        if not getattr(parallel_config, "enable_elastic_ep", False) or (
+            getattr(parallel_config, "data_parallel_backend", "mp") != "ray"
+        ):
+            return {
+                "status": "error",
+                "message": (
+                    "elastic EP scaling is not enabled on this worker; it requires "
+                    "enable_elastic_ep=true and data_parallel_backend=ray"
+                ),
+            }
         tp_size = parallel_config.tensor_parallel_size
         # Elastic EP sizes the EP world as data_parallel_size * tensor_parallel_size
         # (elastic_execute.py), excluding PCP, and vLLM rejects PCP>1 with DP>1 -- so a
@@ -1562,14 +1565,44 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     self.node_ip: str = d["NodeManagerAddress"]
                     self.node_id: str = d["NodeID"]
 
-            original_list_nodes = _ray_util_state.list_nodes
+            async def _scale_engine(size: int) -> None:
+                # add_dp_placement_groups calls ray.util.state.list_nodes();
+                # patch it to the GCS API for the duration of the reconfigure.
+                original_list_nodes = _ray_util_state.list_nodes
+                try:
+                    _ray_util_state.list_nodes = lambda **kw: [
+                        _NodeInfo(n) for n in ray.nodes() if n.get("Alive", False)
+                    ]
+                    await self.engine_client.scale_elastic_ep(size)
+                finally:
+                    _ray_util_state.list_nodes = original_list_nodes
+
             try:
-                _ray_util_state.list_nodes = lambda **kw: [
-                    _NodeInfo(n) for n in ray.nodes() if n.get("Alive", False)
-                ]
-                await self.engine_client.scale_elastic_ep(new_dp_size)
-            finally:
-                _ray_util_state.list_nodes = original_list_nodes
+                await _scale_engine(new_dp_size)
+            except EngineDeadError as dead_err:
+                # Engine died mid-grow. Restart it the same way every other engine
+                # path here does, so it comes back clean and re-registers.
+                logger.error(
+                    "[ElasticEP] Engine died during scale to dp=%s: %s",
+                    new_dp_size,
+                    dead_err,
+                )
+                self._shutdown_on_engine_dead(dead_err)  # NoReturn: restarts worker
+            except Exception as grow_err:
+                # Fail fast: vLLM does no rollback or cleanup on a failed scale (its
+                # _scale_up_elastic_ep has no except and its /scale_elastic_ep
+                # endpoint just returns 500), so a failed grow leaves the engine
+                # partial/wedged with no safe way to recover in process. Restart the
+                # worker so it comes back clean, rather than fake a recovery that
+                # nothing acts on.
+                logger.error(
+                    "[ElasticEP] Scaling to dp=%s failed: %s. vLLM does not roll "
+                    "back a failed scale; restarting the worker to recover a clean "
+                    "state.",
+                    new_dp_size,
+                    grow_err,
+                )
+                self._shutdown_worker()  # NoReturn: runtime.shutdown() + os._exit(1)
 
             logger.info(f"[ElasticEP] Scaling to dp={new_dp_size} complete")
             return {
@@ -2432,7 +2465,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             lora_needs_set.append(WorkerType.Encode)
 
         apply_data_parallel_runtime_config(runtime_config, self.dp_range)
-        enable_router_hint_support(
+        publish_kv_hint_capabilities(
             runtime_config,
             self.config.engine_args,
             lora_worker_type,
@@ -3929,7 +3962,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         _update_kv_transfer_params(
             sampling_params,
             kv_protocol.prefill_request_kv_transfer_params(),
-            preserve_router_hint=True,
+            preserve_kv_hint=True,
         )
         # Override for prefill: only generate 1 token
         sampling_params.max_tokens = 1
