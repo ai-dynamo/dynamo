@@ -44,8 +44,8 @@ async def prepare_snapshot_engine(
         embedding_worker=config.embedding_worker,
     )
     engine = setup_vllm_engine(config, stat_logger_factory)
-    # Decide before the first pause: reaching this at pause time would raise
-    # after sleep() had already released the engine's memory.
+    # Detect checkpoint support before the first pause; otherwise an exception
+    # here would occur after sleep() had already released the engine's memory.
     checkpoint_hooks = all(
         hasattr(engine[0], hook)
         for hook in ("checkpoint_prepare", "checkpoint_restore")
