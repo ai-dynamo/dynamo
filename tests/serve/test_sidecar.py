@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""E2E coverage for lib/sidecar/{vllm,sglang,trtllm}/launch/agg.sh (native-gRPC sidecar + engine).
-
-TRT-LLM's agg.sh pip-installs smg-grpc-proto at runtime if the test image does
-not already carry it (see lib/sidecar/trtllm/launch/agg.sh). The 1.3.0rc25
-runtime image does not bundle it, so lib/sidecar/ci/sidecar-test-image.Dockerfile
-pre-bakes it into the sidecar test image to keep this suite hermetic and
-avoid a live network fetch on every run.
-"""
+"""E2E coverage for lib/sidecar/{vllm,sglang,trtllm}/launch/agg.sh (native-gRPC sidecar + engine)."""
 
 import dataclasses
 import os
@@ -46,7 +39,6 @@ sidecar_configs = {
         marks=[
             pytest.mark.vllm,
             pytest.mark.gpu_1,
-            # First-run wiring smoke: adjust once CI has measured actual duration.
             pytest.mark.timeout(610),
             pytest.mark.pre_merge,
         ],

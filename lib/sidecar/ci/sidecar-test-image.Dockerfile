@@ -18,6 +18,16 @@ ARG BACKEND
 USER root
 COPY --from=sidecar /usr/local/bin/dynamo-${BACKEND}-sidecar /usr/local/bin/dynamo-${BACKEND}-sidecar
 
+# BASE_IMAGE may be the floating main-<backend>-runtime-test tag rather than
+# one freshly built at this PR's SHA (see pr.yaml's sidecar-*-test-image
+# Calculate tags step) — its baked-in /workspace/lib/sidecar reflects the last
+# main merge, not this PR. shared-test.yml runs pytest from that baked-in
+# /workspace, not a fresh checkout, so without this the suite would silently
+# exercise stale launch scripts on exactly the PRs it exists to test. Refresh
+# it from this job's own checkout (the build context) unconditionally, so it's
+# correct whether or not BASE_IMAGE was freshly built this run.
+COPY --chown=dynamo:0 lib/sidecar/ /workspace/lib/sidecar/
+
 # vllm-rs ships inside the vllm wheel, not on PATH — lib/sidecar/vllm/launch/agg.sh
 # expects it on PATH, but lib/sidecar/vllm/deploy/agg.yaml resolves it the same
 # way this does. A no-op for sglang/trtllm; each backend gets its own

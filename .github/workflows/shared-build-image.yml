@@ -612,6 +612,10 @@ jobs:
           ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
           ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
           TEST_EXTRA_TAGS: ${{ inputs.test_extra_tags }}
+          # Routed through env (not inlined via ${{ }}) so a value containing
+          # shell metacharacters can't be interpreted as script rather than data.
+          IMAGE_URI: ${{ steps.calculate-target-tag.outputs.image_uri }}
+          TEST_IMAGE_URI: ${{ steps.calculate-target-tag.outputs.test_image_uri }}
         run: |
           PUSH_ARGS=""
           if [ "${{ inputs.push_image }}" == "true" ]; then
@@ -639,7 +643,7 @@ jobs:
             PYPI_SECRET_ARGS+=(--secret "id=pypi-netrc,src=${NETRC}")
           fi
 
-          TEST_TAG_ARGS=(-t "${{ steps.calculate-target-tag.outputs.test_image_uri }}")
+          TEST_TAG_ARGS=(-t "${TEST_IMAGE_URI}")
           if [ -n "$TEST_EXTRA_TAGS" ]; then
             while IFS= read -r tag; do
               if [ -n "$tag" ]; then
@@ -656,7 +660,7 @@ jobs:
             --platform ${{ inputs.platform }} \
             --target ${TEST_TARGET} \
             -f container/Dockerfile.test \
-            --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.image_uri }} \
+            --build-arg BASE_IMAGE="${IMAGE_URI}" \
             "${TEST_TAG_ARGS[@]}" .
       - name: Show summary
         shell: bash

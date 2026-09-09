@@ -366,27 +366,20 @@ jobs:
 
   # --------------------------------------------------------------------------
   # Sidecar E2E: lib/sidecar/*/launch/agg.sh, run against a CI-only image that
-  # layers the dynamo-*-sidecar binary onto the backend's already-built -test
-  # image (neither the sidecar image nor the backend runtime images bundle
-  # both today — see lib/sidecar/README.md and lib/sidecar/ci/sidecar-test-image.Dockerfile).
-  # Gated on `sidecar` only (lib/sidecar/** changes), not on `core`/vllm/sglang/
-  # trtllm — a lib/sidecar/**-only PR does not trigger vllm-build/sglang-build/
-  # trtllm-build, so the "Calculate tags" step in each *-test-image job below
-  # falls back to the main-{framework}-runtime-test floating tag (kept fresh by
-  # post-merge-ci.yml's test_extra_tags) instead of rebuilding the runtime image
-  # just to layer a sidecar binary on top of it.
-  # gpu_1 fan-out is a deliberate exception to the narrow-scope TODO on the
-  # `sidecar` filter in .github/filters.yaml; revisit if CI cost becomes an issue.
+  # layers the dynamo-*-sidecar binary onto the backend's -test image (see
+  # lib/sidecar/ci/sidecar-test-image.Dockerfile). Gated on `sidecar` only, not
+  # on core/vllm/sglang/trtllm: a lib/sidecar/**-only PR doesn't trigger the
+  # backend builds, so each *-test-image job's "Calculate tags" step falls back
+  # to the main-{framework}-runtime-test floating tag instead. gpu_1 fan-out is
+  # a deliberate exception to the narrow-scope TODO on the `sidecar` filter in
+  # .github/filters.yaml; revisit if CI cost becomes an issue.
   # --------------------------------------------------------------------------
 
   sidecar-vllm-test-image:
     name: dynamo-sidecar (vllm test image)
     needs: [changed-files, vllm-build, sidecar-build]
-    # always(): vllm-build doesn't trigger on `sidecar` (a lib/sidecar/**-only
-    # PR leaves it skipped), and sidecar-build itself can fail independently of
-    # this job's own gate. Without always(), GitHub Actions auto-skips this job
-    # whenever either needed job fails outright (skip is fine either way; see
-    # the tags step below for the fallback each case resolves to).
+    # always(): without it, GitHub Actions auto-skips this job whenever
+    # vllm-build or sidecar-build is skipped/fails (see the fallback tags step).
     if: always() && needs.changed-files.outputs.sidecar == 'true'
     runs-on: prod-builder-v3
     permissions:
@@ -412,22 +405,12 @@ jobs:
         ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
       run: |
         set -euo pipefail
-        # This job runs on any lib/sidecar/** change alone, which does not
-        # trigger vllm-build. When vllm-build didn't run (or failed) this PR,
-        # reuse the latest main-vllm-runtime-test floating tag (kept fresh by
-        # post-merge-ci.yml) instead of rebuilding vllm-runtime just to layer
-        # a sidecar binary on top of it.
         if [ "${{ needs.vllm-build.result }}" = "success" ]; then
           echo "base_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}-${{ needs.vllm-build.outputs.target_tag_plain }}-test" >> "${GITHUB_OUTPUT}"
         else
           echo "base_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:main-vllm-runtime-test" >> "${GITHUB_OUTPUT}"
         fi
-        # sidecar-build shares this job's own if: condition, so it always
-        # attempts to run here — but it can still fail on its own (as opposed
-        # to being skipped). Fall back to the floating main-dynamo-sidecar tag
-        # (published by post-merge-ci.yml) rather than pulling a tag this run
-        # never pushed. Must stay in sync with shared-build-sidecar.yml's
-        # calculate-target-tag step.
+        # Must stay in sync with shared-build-sidecar.yml's calculate-target-tag step.
         if [ "${{ needs.sidecar-build.result }}" = "success" ]; then
           echo "sidecar_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}-dynamo-sidecar" >> "${GITHUB_OUTPUT}"
         else
@@ -470,11 +453,8 @@ jobs:
   sidecar-sglang-test-image:
     name: dynamo-sidecar (sglang test image)
     needs: [changed-files, sglang-build, sidecar-build]
-    # always(): sglang-build doesn't trigger on `sidecar` (a lib/sidecar/**-only
-    # PR leaves it skipped), and sidecar-build itself can fail independently of
-    # this job's own gate. Without always(), GitHub Actions auto-skips this job
-    # whenever either needed job fails outright (skip is fine either way; see
-    # the tags step below for the fallback each case resolves to).
+    # always(): without it, GitHub Actions auto-skips this job whenever
+    # sglang-build or sidecar-build is skipped/fails (see the fallback tags step).
     if: always() && needs.changed-files.outputs.sidecar == 'true'
     runs-on: prod-builder-v3
     permissions:
@@ -500,22 +480,12 @@ jobs:
         ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
       run: |
         set -euo pipefail
-        # This job runs on any lib/sidecar/** change alone, which does not
-        # trigger sglang-build. When sglang-build didn't run (or failed) this
-        # PR, reuse the latest main-sglang-runtime-test floating tag (kept
-        # fresh by post-merge-ci.yml) instead of rebuilding sglang-runtime
-        # just to layer a sidecar binary on top of it.
         if [ "${{ needs.sglang-build.result }}" = "success" ]; then
           echo "base_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}-${{ needs.sglang-build.outputs.target_tag_plain }}-test" >> "${GITHUB_OUTPUT}"
         else
           echo "base_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:main-sglang-runtime-test" >> "${GITHUB_OUTPUT}"
         fi
-        # sidecar-build shares this job's own if: condition, so it always
-        # attempts to run here — but it can still fail on its own (as opposed
-        # to being skipped). Fall back to the floating main-dynamo-sidecar tag
-        # (published by post-merge-ci.yml) rather than pulling a tag this run
-        # never pushed. Must stay in sync with shared-build-sidecar.yml's
-        # calculate-target-tag step.
+        # Must stay in sync with shared-build-sidecar.yml's calculate-target-tag step.
         if [ "${{ needs.sidecar-build.result }}" = "success" ]; then
           echo "sidecar_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}-dynamo-sidecar" >> "${GITHUB_OUTPUT}"
         else
@@ -558,11 +528,8 @@ jobs:
   sidecar-trtllm-test-image:
     name: dynamo-sidecar (trtllm test image)
     needs: [changed-files, trtllm-build, sidecar-build]
-    # always(): trtllm-build doesn't trigger on `sidecar` (a lib/sidecar/**-only
-    # PR leaves it skipped), and sidecar-build itself can fail independently of
-    # this job's own gate. Without always(), GitHub Actions auto-skips this job
-    # whenever either needed job fails outright (skip is fine either way; see
-    # the tags step below for the fallback each case resolves to).
+    # always(): without it, GitHub Actions auto-skips this job whenever
+    # trtllm-build or sidecar-build is skipped/fails (see the fallback tags step).
     if: always() && needs.changed-files.outputs.sidecar == 'true'
     runs-on: prod-builder-v3
     permissions:
@@ -588,22 +555,12 @@ jobs:
         ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
       run: |
         set -euo pipefail
-        # This job runs on any lib/sidecar/** change alone, which does not
-        # trigger trtllm-build. When trtllm-build didn't run (or failed) this
-        # PR, reuse the latest main-trtllm-runtime-test floating tag (kept
-        # fresh by post-merge-ci.yml) instead of rebuilding trtllm-runtime
-        # just to layer a sidecar binary on top of it.
         if [ "${{ needs.trtllm-build.result }}" = "success" ]; then
           echo "base_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}-${{ needs.trtllm-build.outputs.target_tag_plain }}-test" >> "${GITHUB_OUTPUT}"
         else
           echo "base_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:main-trtllm-runtime-test" >> "${GITHUB_OUTPUT}"
         fi
-        # sidecar-build shares this job's own if: condition, so it always
-        # attempts to run here — but it can still fail on its own (as opposed
-        # to being skipped). Fall back to the floating main-dynamo-sidecar tag
-        # (published by post-merge-ci.yml) rather than pulling a tag this run
-        # never pushed. Must stay in sync with shared-build-sidecar.yml's
-        # calculate-target-tag step.
+        # Must stay in sync with shared-build-sidecar.yml's calculate-target-tag step.
         if [ "${{ needs.sidecar-build.result }}" = "success" ]; then
           echo "sidecar_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}-dynamo-sidecar" >> "${GITHUB_OUTPUT}"
         else
