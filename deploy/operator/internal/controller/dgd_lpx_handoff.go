@@ -93,7 +93,8 @@ func (r *dgdLPXHandoff) Finalize(ctx context.Context, source *v1beta1.DynamoGrap
 		return client.IgnoreNotFound(err)
 	}
 	if !exactLPXSourceOwner(child, source) {
-		return fmt.Errorf("refusing to delete a foreign LPXGraphDeployment %q", child.Name)
+		// It is not our dependent; do not delete it and do not wait for it.
+		return nil
 	}
 	if err := r.deleteChild(ctx, child); err != nil {
 		return err

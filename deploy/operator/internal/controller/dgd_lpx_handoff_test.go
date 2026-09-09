@@ -93,11 +93,13 @@ func TestLPXHandoffCreatesOnlyAnOwnedReference(t *testing.T) {
 		require.ErrorContains(t, err, "adoption is not supported", invalidIdentity)
 	}
 
-	t.Log("Refuse adoption and deletion after the source name is reused with a different UID")
+	t.Log("Refuse adoption after the source name is reused with a different UID")
 	source.UID = "replacement-source"
 	_, err = handoff.Reconcile(t.Context(), source)
 	require.ErrorContains(t, err, "adoption is not supported")
-	require.ErrorContains(t, handoff.Finalize(t.Context(), source), "foreign")
+
+	t.Log("Do not block finalization on or delete the child owned by the prior source")
+	require.NoError(t, handoff.Finalize(t.Context(), source))
 	stored := &v1alpha1.LPXGraphDeployment{}
 	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(child), stored))
 	require.True(t, stored.DeletionTimestamp.IsZero())
