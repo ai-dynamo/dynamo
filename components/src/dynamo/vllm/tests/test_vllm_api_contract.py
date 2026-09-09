@@ -95,7 +95,6 @@ def test_new_request_data_has_fields_instrumented_scheduler_sets():
 
 
 def test_scheduler_output_new_connector_fields_remain_optional():
-    """Dynamo constructs SchedulerOutput without optional connector metadata."""
     from vllm.v1.core.sched.output import SchedulerOutput
 
     fields = {field.name: field for field in dataclasses.fields(SchedulerOutput)}
