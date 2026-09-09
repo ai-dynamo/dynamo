@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import numpy as np
 import pytest
@@ -20,8 +20,7 @@ pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 def _enable_managed_test_storage(monkeypatch):
     monkeypatch.setenv("DYN_GENERATION_ARTIFACT_ENABLE_MANAGED_FSSPEC", "true")
     stored = {}
-    session = MagicMock()
-    session.__aexit__ = AsyncMock()
+    session = SimpleNamespace(close=AsyncMock())
 
     async def pipe_file(path, data, mode):
         assert mode == "create"

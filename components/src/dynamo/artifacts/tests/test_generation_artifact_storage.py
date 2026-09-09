@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import hashlib
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -29,18 +31,14 @@ def _allow_test_presigned_hosts(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("protocol", ["s3", "gs"])
-async def test_managed_fsspec_writes_exact_profile_object(
-    monkeypatch, protocol: str
-) -> None:
+async def test_managed_fsspec_writes_exact_profile_object(monkeypatch) -> None:
     monkeypatch.setenv(
         "DYN_GENERATION_ARTIFACT_STORAGE_PROFILES",
-        f'{{"training":{{"url":"{protocol}://artifacts/run","allowed_prefixes":["request-1"],"create_only":true}}}}',
+        '{"training":{"url":"s3://artifacts/run","allowed_prefixes":["request-1"],"create_only":true}}',
     )
     payload = b"artifact-bytes"
     stored = {}
-    session = MagicMock()
-    session.__aexit__ = AsyncMock()
+    session = SimpleNamespace(close=AsyncMock())
 
     async def pipe_file(path, data, mode):
         assert mode == "create"
@@ -49,7 +47,7 @@ async def test_managed_fsspec_writes_exact_profile_object(
         stored[path] = data
 
     filesystem = SimpleNamespace(
-        protocol=protocol,
+        protocol="s3",
         async_impl=True,
         set_session=AsyncMock(return_value=session),
         _pipe_file=pipe_file,
@@ -73,14 +71,103 @@ async def test_managed_fsspec_writes_exact_profile_object(
                 ),
             )
 
-    if protocol == "s3":
-        assert "config_kwargs" in url_to_fs.call_args.kwargs
-    else:
-        assert "config_kwargs" not in url_to_fs.call_args.kwargs
+    assert "config_kwargs" in url_to_fs.call_args.kwargs
     assert stored["artifacts/run/request-1/output.dynexp"] == payload
     assert receipt.actual_bytes == len(payload)
     assert receipt.sha256 == hashlib.sha256(payload).hexdigest()
     assert receipt.object_id == "training:request-1/output.dynexp"
+    assert session.close.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_managed_fsspec_session_setup_is_inside_timeout(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "DYN_GENERATION_ARTIFACT_STORAGE_PROFILES",
+        '{"training":{"url":"s3://artifacts/run","allowed_prefixes":["request-1"],"create_only":true}}',
+    )
+
+    class TimeoutProbe:
+        active = False
+
+        async def __aenter__(self):
+            self.active = True
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            self.active = False
+
+    timeout_probe = TimeoutProbe()
+    session = SimpleNamespace(close=AsyncMock())
+
+    async def set_session():
+        assert timeout_probe.active
+        return session
+
+    filesystem = SimpleNamespace(
+        protocol="s3",
+        async_impl=True,
+        set_session=set_session,
+        _pipe_file=AsyncMock(),
+    )
+    with (
+        patch(
+            "dynamo.artifacts.storage.url_to_fs",
+            return_value=(filesystem, "artifacts/run"),
+        ),
+        patch(
+            "dynamo.artifacts.storage.asyncio.timeout",
+            return_value=timeout_probe,
+        ),
+    ):
+        await put_artifact(
+            b"artifact",
+            ManagedFsspecTarget(
+                profile="training", object_key="request-1/output.dynexp"
+            ),
+        )
+
+    session.close.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_managed_timeout_bounds_blocking_session_cleanup(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "DYN_GENERATION_ARTIFACT_STORAGE_PROFILES",
+        '{"training":{"url":"s3://artifacts/run","allowed_prefixes":["request-1"],"create_only":true}}',
+    )
+    real_timeout = asyncio.timeout
+    never = asyncio.Event()
+    session = SimpleNamespace(close=AsyncMock(side_effect=never.wait))
+    filesystem = SimpleNamespace(
+        protocol="s3",
+        async_impl=True,
+        set_session=AsyncMock(return_value=session),
+        _pipe_file=AsyncMock(side_effect=TimeoutError),
+    )
+
+    started = time.monotonic()
+    with (
+        patch(
+            "dynamo.artifacts.storage.url_to_fs",
+            return_value=(filesystem, "artifacts/run"),
+        ),
+        patch(
+            "dynamo.artifacts.storage.asyncio.timeout",
+            side_effect=[real_timeout(1), real_timeout(0.01)],
+        ),
+        pytest.raises(ArtifactStorageError, match="managed artifact write failed"),
+    ):
+        await asyncio.wait_for(
+            put_artifact(
+                b"artifact",
+                ManagedFsspecTarget(
+                    profile="training", object_key="request-1/output.dynexp"
+                ),
+            ),
+            timeout=0.25,
+        )
+
+    assert time.monotonic() - started < 0.25
+    session.close.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -101,7 +188,10 @@ async def test_managed_fsspec_rejects_unsafe_object_keys(
 @pytest.mark.asyncio
 async def test_presigned_put_preserves_exact_url_and_hides_capability() -> None:
     url = "https://storage.example/object%2Fname?X-Signature=secret&part=1&part=2"
-    fs = MagicMock()
+    fs = SimpleNamespace(
+        _pipe_file=AsyncMock(),
+        aclose=AsyncMock(),
+    )
     payload = b"artifact"
     target = PresignedHttpPutTarget(
         url=url,
@@ -117,7 +207,7 @@ async def test_presigned_put_preserves_exact_url_and_hides_capability() -> None:
     with patch("dynamo.artifacts.storage._ExactHttpPutFileSystem", return_value=fs):
         receipt = await put_artifact(payload, target)
 
-    fs.pipe_file.assert_called_once_with(
+    fs._pipe_file.assert_awaited_once_with(
         url,
         payload,
         headers={"content-type": "application/octet-stream", "if-none-match": "*"},
@@ -125,6 +215,37 @@ async def test_presigned_put_preserves_exact_url_and_hides_capability() -> None:
     )
     assert "secret" not in repr(target)
     assert receipt.object_id == "opaque-1"
+
+
+@pytest.mark.asyncio
+async def test_presigned_put_closes_each_request_filesystem() -> None:
+    target = PresignedHttpPutTarget(
+        url="https://storage.example/object?signature=secret",
+        max_bytes=1024,
+        expires_at=(datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+        required_headers={"if-none-match": "*"},
+        object_id="opaque-1",
+    )
+    filesystems = []
+
+    def filesystem_factory(**kwargs):
+        filesystem = SimpleNamespace(
+            _pipe_file=AsyncMock(),
+            aclose=AsyncMock(),
+        )
+        filesystems.append(filesystem)
+        return filesystem
+
+    with patch(
+        "dynamo.artifacts.storage._ExactHttpPutFileSystem",
+        side_effect=filesystem_factory,
+    ):
+        await put_artifact(b"first", target)
+        await put_artifact(b"second", target)
+
+    assert len(filesystems) == 2
+    for filesystem in filesystems:
+        filesystem.aclose.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -181,20 +302,6 @@ def test_presigned_put_rejects_insecure_url_and_unapproved_headers() -> None:
             required_headers={"authorization": "secret", "if-none-match": "*"},
             object_id="opaque",
         )
-
-
-def test_presigned_put_allows_explicit_local_test_host(monkeypatch) -> None:
-    monkeypatch.setenv("DYN_GENERATION_ARTIFACT_ALLOW_INSECURE_HTTP", "true")
-    monkeypatch.setenv("DYN_GENERATION_ARTIFACT_INSECURE_HTTP_HOSTS", "127.0.0.1")
-    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
-    target = PresignedHttpPutTarget(
-        url="http://127.0.0.1:9000/bucket/key",
-        max_bytes=1024,
-        expires_at=expires_at,
-        required_headers={"if-none-match": "*"},
-        object_id="local-test",
-    )
-    assert target.object_id == "local-test"
 
 
 @pytest.mark.parametrize(
@@ -274,8 +381,10 @@ async def test_provider_errors_are_sanitized(monkeypatch) -> None:
         required_headers={"if-none-match": "*"},
         object_id="opaque",
     )
-    fs = MagicMock()
-    fs.pipe_file.side_effect = RuntimeError(capability_sentinel)
+    fs = SimpleNamespace(
+        _pipe_file=AsyncMock(side_effect=RuntimeError(capability_sentinel)),
+        aclose=AsyncMock(),
+    )
     with (
         patch("dynamo.artifacts.storage._ExactHttpPutFileSystem", return_value=fs),
         pytest.raises(
@@ -450,3 +559,13 @@ async def test_managed_target_is_operator_gated_and_prefix_scoped(monkeypatch) -
     )
     with pytest.raises(ArtifactStorageError, match="prefix"):
         await put_artifact(b"data", target)
+
+    target = ManagedFsspecTarget(
+        profile="training", object_key="authorized/output.dynexp"
+    )
+    with (
+        patch("dynamo.artifacts.storage.url_to_fs") as url_to_fs,
+        pytest.raises(ArtifactStorageError, match="s3-compatible provider"),
+    ):
+        await put_artifact(b"data", target)
+    url_to_fs.assert_not_called()
