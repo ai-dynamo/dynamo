@@ -27,12 +27,16 @@ import (
 	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 )
 
+// TestDynamoComponentDeploymentHandlerRegisterWithManager verifies that the beta
+// endpoint is registered and the legacy alpha endpoint is absent.
 func TestDynamoComponentDeploymentHandlerRegisterWithManager(t *testing.T) {
+	t.Log("Set up the v1beta1 scheme")
 	scheme := runtime.NewScheme()
 	if err := nvidiacomv1beta1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add v1beta1 scheme: %v", err)
 	}
 
+	t.Log("Register the DCD validation webhook")
 	server := ctrlwebhook.NewServer(ctrlwebhook.Options{})
 	mgr := &fakeManager{scheme: scheme, webhookServer: server}
 	handler := NewDynamoComponentDeploymentHandler()
@@ -40,6 +44,7 @@ func TestDynamoComponentDeploymentHandlerRegisterWithManager(t *testing.T) {
 		t.Fatalf("RegisterWithManager() error = %v", err)
 	}
 
+	t.Log("Verify the beta endpoint is registered and the alpha endpoint is absent")
 	for _, tc := range []struct {
 		path        string
 		wantPattern string
