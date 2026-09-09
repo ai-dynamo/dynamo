@@ -12,6 +12,10 @@ from types import SimpleNamespace
 import pytest
 
 try:
+    import vllm.platforms as vllm_platforms
+    from vllm.platforms.interface import UnspecifiedPlatform
+
+    from dynamo.vllm import main as vllm_main
     from dynamo.vllm.omni.args import (
         OmniConfig,
         OmniDiffusionKwargs,
@@ -189,9 +193,6 @@ def _no_accelerator():
     entry when there was none, so the PEP 562 lazy ``__getattr__`` in
     ``vllm.platforms`` is re-armed for later tests on this worker.
     """
-    import vllm.platforms as vllm_platforms
-    from vllm.platforms.interface import UnspecifiedPlatform
-
     previous = vllm_platforms.__dict__.get("current_platform", _PLATFORM_UNSET)
     vllm_platforms.current_platform = UnspecifiedPlatform()
     try:
@@ -229,7 +230,6 @@ def test_stage_router_parses_without_an_accelerator(monkeypatch, tmp_path):
 def test_stage_router_selected_by_environment_parses_without_an_accelerator(
     monkeypatch, tmp_path
 ):
-    # This is how the containerized deployment selects the router.
     monkeypatch.setenv("DYN_OMNI_ROUTER", "true")
     monkeypatch.setattr(sys, "argv", _router_argv(tmp_path))
 
@@ -240,18 +240,18 @@ def test_stage_router_selected_by_environment_parses_without_an_accelerator(
     assert config.model == "test-model"
 
 
-def test_stage_router_ignores_engine_option_passthrough(monkeypatch, tmp_path):
-    # The launch scripts forward their EXTRA_ARGS to every omni process, so
-    # engine-only flags reach the router and must not abort it.
+def test_stage_router_ignores_engine_options_without_logging_values(
+    monkeypatch, tmp_path, caplog
+):
+    secret = "secret-token-value"
     monkeypatch.setattr(
         sys,
         "argv",
         _router_argv(
             tmp_path,
             "--omni-router",
-            "--gpu-memory-utilization",
-            "0.9",
-            "--enable-lora",
+            "--hf-token",
+            secret,
         ),
     )
 
@@ -260,6 +260,8 @@ def test_stage_router_ignores_engine_option_passthrough(monkeypatch, tmp_path):
 
     assert config.omni_router is True
     assert config.model == "test-model"
+    assert "Stage router ignored 2 unrecognized engine argument tokens" in caplog.text
+    assert secret not in caplog.text
 
 
 def test_stage_router_honors_negated_flag_over_environment(monkeypatch, tmp_path):
@@ -282,9 +284,6 @@ def test_stage_worker_still_requires_an_accelerator(monkeypatch, tmp_path):
 
 
 def test_stage_router_ignores_stage_id_after_end_of_options(monkeypatch, tmp_path):
-    # Argparse never reads --stage-id past a bare --, so neither may the role
-    # pre-scan: treating it as a stage worker would build the engine parser
-    # this host cannot resolve a device for.
     monkeypatch.setattr(
         sys, "argv", _router_argv(tmp_path, "--omni-router", "--", "--stage-id", "0")
     )
@@ -298,8 +297,6 @@ def test_stage_router_ignores_stage_id_after_end_of_options(monkeypatch, tmp_pat
 
 
 def test_stage_router_ignores_negated_flag_after_end_of_options(monkeypatch, tmp_path):
-    # Same delimiter rule for the precedence scan: --no-omni-router past -- is a
-    # positional, so the environment still selects the router.
     monkeypatch.setenv("DYN_OMNI_ROUTER", "true")
     monkeypatch.setattr(sys, "argv", _router_argv(tmp_path, "--", "--no-omni-router"))
 
@@ -325,9 +322,6 @@ def test_stage_id_keeps_the_full_parser_alongside_omni_router(monkeypatch, tmp_p
 
 
 def test_stage_router_accepts_underscore_option_names(monkeypatch, tmp_path):
-    # FlexibleArgumentParser accepts either spelling, but the rewrite lives in
-    # parse_args and the router path calls parse_known_args. Unnormalized, this
-    # name is merely warned about and the served name is lost.
     monkeypatch.setattr(
         sys,
         "argv",
@@ -341,14 +335,43 @@ def test_stage_router_accepts_underscore_option_names(monkeypatch, tmp_path):
     assert config.engine_args.served_model_name == ["public-alias"]
 
 
-def test_stage_router_engine_args_satisfy_metrics_setup(monkeypatch, tmp_path):
-    # init_omni_stage_router() hands this config to the shared
-    # setup_metrics_collection(), which reads fields directly off engine_args --
-    # so the router's reduced namespace has to carry them or the router dies
-    # right after the parse this change exists to make work.
-    from dynamo.vllm import main as vllm_main
+def test_stage_router_loads_engine_options_from_config(monkeypatch, tmp_path):
+    config_path = tmp_path / "router.yaml"
+    config_path.write_text(
+        "model: config-model\n"
+        "served-model-name: [public-alias]\n"
+        "trust-remote-code: true\n"
+        "revision: test-revision\n"
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "dynamo.vllm.omni",
+            "--stage-configs-path",
+            str(tmp_path / "stages.yaml"),
+            "--omni-router",
+            "--config",
+            str(config_path),
+        ],
+    )
 
-    monkeypatch.setattr(sys, "argv", _router_argv(tmp_path, "--omni-router"))
+    with _no_accelerator():
+        config = parse_omni_args()
+
+    assert config.model == "config-model"
+    assert config.served_model_name == "public-alias"
+    assert config.engine_args.served_model_name == ["public-alias"]
+    assert config.engine_args.trust_remote_code is True
+    assert config.engine_args.revision == "test-revision"
+
+
+def test_stage_router_honors_disable_log_stats(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        _router_argv(tmp_path, "--omni-router", "--disable-log-stats"),
+    )
 
     with _no_accelerator():
         config = parse_omni_args()
@@ -365,7 +388,8 @@ def test_stage_router_engine_args_satisfy_metrics_setup(monkeypatch, tmp_path):
         config, SimpleNamespace(), logging.getLogger(__name__)
     )
 
-    assert registered, "router metrics registration must still happen"
+    assert config.engine_args.disable_log_stats is True
+    assert not registered
 
 
 # --- vllm_omni API compatibility guards ---

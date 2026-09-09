@@ -459,35 +459,10 @@ class OmniConfig(DynamoRuntimeConfig):
 
 
 def _wants_stage_router(argv: list[str]) -> bool:
-    """Decide whether this process is the stage router, before any parser exists.
+    """Detect router mode before vLLM parser construction infers a device.
 
-    ``OmniEngineArgs.add_cli_args`` instantiates every vLLM config dataclass to
-    compute its argparse defaults, and ``DeviceConfig.__post_init__`` raises
-    ``RuntimeError: Failed to infer device type`` when vLLM recognizes no
-    accelerator. That fires while *building* the parser, so the stage router --
-    which dispatches to stage workers over the Dynamo runtime and never
-    constructs an engine -- has to know its own role before the parser it would
-    otherwise crash on is built. Hence the raw ``argv`` scan.
-
-    Precedence follows the ``--omni-router`` flag registered in
-    :class:`OmniArgGroup`: it is an ``argparse.BooleanOptionalAction`` whose
-    default comes from ``DYN_OMNI_ROUTER``, so the last of ``--omni-router`` /
-    ``--no-omni-router`` on the command line wins and the environment applies
-    only when neither is present. The environment is read through the same
-    ``env_or_default`` call the flag itself uses, so a deployment that selects
-    the router purely through ``DYN_OMNI_ROUTER`` -- with no token on the
-    command line at all -- resolves identically in both places.
-
-    ``--stage-id`` on the command line means an engine-building stage worker,
-    which keeps the full engine parser even when ``--omni-router`` is also
-    present: that combination is rejected by :meth:`OmniConfig.validate`, and
-    the stage worker's argument handling must not change on the way there.
-
-    Both scans stop at the first bare ``--``. Argparse treats that token as the
-    end-of-options delimiter and everything after it as positional, so
-    ``--omni-router -- --stage-id 0`` leaves ``stage_id`` unset. A scan that read
-    all of ``argv`` would still see the token and send the router to the engine
-    parser it cannot build on a host with no accelerator.
+    Match argparse precedence through the first ``--``; an explicit stage ID
+    keeps the full engine path.
     """
     options = argv[: argv.index("--")] if "--" in argv else argv
     if any(
@@ -548,6 +523,11 @@ def _add_stage_router_engine_args(parser: argparse.ArgumentParser) -> None:
         "--trust-remote-code", action=argparse.BooleanOptionalAction, default=False
     )
     parser.add_argument("--revision", type=str, default=None)
+    parser.add_argument(
+        "--disable-log-stats",
+        action="store_true",
+        default=OmniEngineArgs.disable_log_stats,
+    )
 
 
 def parse_omni_args() -> OmniConfig:
@@ -586,18 +566,16 @@ def parse_omni_args() -> OmniConfig:
         config.endpoint = "generate"
 
     if stage_router:
-        # Launch scripts forward EXTRA_ARGS to every omni process, so stage-worker
-        # engine flags reach the router; tolerate them, but keep a typo visible.
+        if "--config" in unknown:
+            unknown = vllm_parser._pull_args_from_config(unknown)
         vllm_args, ignored = vllm_parser.parse_known_args(
             _normalize_engine_option_names(unknown)
         )
         if ignored:
             logger.warning(
-                "Stage router ignoring unrecognized engine options: %s. "
-                "The router never builds an engine; only --model, "
-                "--served-model-name, --trust-remote-code and --revision "
-                "are honored on this path.",
-                " ".join(ignored),
+                "Stage router ignored %d unrecognized engine argument tokens; "
+                "the router does not build an engine.",
+                len(ignored),
             )
     else:
         vllm_args = vllm_parser.parse_args(unknown)
@@ -638,11 +616,7 @@ def parse_omni_args() -> OmniConfig:
             served_model_name=vllm_args.served_model_name,
             trust_remote_code=vllm_args.trust_remote_code,
             revision=vllm_args.revision,
-            # init_omni_stage_router() -> setup_metrics_collection() reads this
-            # straight off engine_args; the engine default keeps the router's
-            # metrics registration identical to the full OmniEngineArgs it used
-            # to build.
-            disable_log_stats=OmniEngineArgs.disable_log_stats,
+            disable_log_stats=vllm_args.disable_log_stats,
         )
     else:
         engine_args = OmniEngineArgs.from_cli_args(vllm_args)
