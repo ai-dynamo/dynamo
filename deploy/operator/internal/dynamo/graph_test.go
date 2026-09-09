@@ -8443,7 +8443,7 @@ func TestApplyCompilationCacheExistingMount(t *testing.T) {
 			}},
 			expectedMounts: []corev1.VolumeMount{
 				{Name: "compilation-cache", MountPath: "/other-path"},
-				{Name: "compilation-cache", MountPath: mountPath},
+				{Name: "compilation-cache", MountPath: mountPath, SubPath: "model"},
 			},
 		},
 	}
@@ -8457,6 +8457,7 @@ func TestApplyCompilationCacheExistingMount(t *testing.T) {
 				CompilationCache: &v1beta1.CompilationCacheConfig{
 					PVCName:   "compilation-cache",
 					MountPath: mountPath,
+					SubPath:   "model",
 				},
 			}
 
