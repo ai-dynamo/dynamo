@@ -19,6 +19,7 @@ from sglang.srt.managers.io_struct import ProfileReq
 
 import dynamo.sglang._compat as sglang_compat
 import dynamo.sglang.args as sglang_args
+import dynamo.sglang.main as sglang_main
 from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
 from dynamo.sglang._compat import (
@@ -1643,3 +1644,25 @@ async def test_worker_teardown_keeps_the_body_failure(caplog):
 
     assert steps == ["handler.cleanup", "run_deferred_handlers"]
     assert "an earlier exception is already propagating" in caplog.text
+
+
+def test_main_treats_cancellation_as_clean_exit(monkeypatch, caplog):
+    async def cancelled_worker():
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(sglang_main, "worker", cancelled_worker)
+
+    with caplog.at_level(logging.INFO):
+        sglang_main.main()
+
+    assert "Worker cancelled; shutdown complete" in caplog.text
+
+
+def test_main_preserves_worker_failure(monkeypatch):
+    async def failing_worker():
+        raise RuntimeError("worker failed")
+
+    monkeypatch.setattr(sglang_main, "worker", failing_worker)
+
+    with pytest.raises(RuntimeError, match="worker failed"):
+        sglang_main.main()

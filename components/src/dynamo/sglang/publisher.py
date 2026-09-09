@@ -600,8 +600,9 @@ async def cancel_metrics_task(metrics_task: asyncio.Task) -> None:
 async def run_to_completion(coro: Coroutine[Any, Any, None]) -> bool:
     """Run ``coro`` to completion even if the calling task is cancelled.
 
-    Returns ``True`` if a cancellation was aimed at the caller while waiting.
-    Never raises ``CancelledError``; the caller decides when to re-raise.
+    Returns ``True`` when cancellation targeted the caller while it waited or
+    the inner task itself finished cancelled. Never raises ``CancelledError``;
+    the caller decides whether and when to re-raise.
     """
     task = asyncio.ensure_future(coro)
     outer_cancelled = False
@@ -638,9 +639,9 @@ async def finish_worker_teardown(
 ) -> None:
     """Run worker teardown to completion, then honour any cancellation.
 
-    The cancellation is absorbed until teardown finishes; re-raising earlier
-    would skip the deferred handlers that reap SGLang's scheduler subprocesses.
-    When the worker body already failed, that exception stays the reported one.
+    When ``body_failed`` is true, caller cancellation and metrics-task failure
+    do not replace the propagating body error. Cleanup and deferred-handler
+    failures still propagate.
     """
 
     async def _teardown() -> None:
