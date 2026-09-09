@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
 from typing import Any, Dict, Generator, Optional, Tuple
 
 import pytest
@@ -128,11 +127,6 @@ class VllmWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_PORT"] = str(self.system_port)
 
         log_dir = f"{request.node.name}_{worker_id}"
-
-        try:
-            shutil.rmtree(log_dir)
-        except FileNotFoundError:
-            pass
 
         super().__init__(
             command=command,

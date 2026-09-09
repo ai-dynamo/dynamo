@@ -11,7 +11,6 @@ import importlib.util
 import json
 import logging
 import os
-import shutil
 import sys
 import time
 
@@ -19,11 +18,8 @@ import pytest
 import requests
 
 from tests.utils.constants import QWEN
-from tests.utils.managed_process import (
-    DynamoFrontendProcess,
-    ManagedProcess,
-    check_health_ready,
-)
+from tests.utils.http_checks import check_health_ready, models_available
+from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 from tests.utils.port_utils import allocate_port, deallocate_port
 
 logger = logging.getLogger(__name__)
@@ -275,16 +271,11 @@ class MockerWorkerProcess(ManagedProcess):
 
         log_dir = f"{request.node.name}_{worker_id}"
 
-        try:
-            shutil.rmtree(log_dir)
-        except FileNotFoundError:
-            pass
-
         super().__init__(
             command=command,
             env=env,
             health_check_urls=[
-                (f"http://localhost:{frontend_port}/v1/models", self._check_models_api),
+                (f"http://localhost:{frontend_port}/v1/models", models_available),
                 (f"http://localhost:{system_port}/health", check_health_ready),
             ],
             timeout=300,
@@ -294,17 +285,6 @@ class MockerWorkerProcess(ManagedProcess):
             straggler_commands=["-m dynamo.mocker"],
             log_dir=log_dir,
         )
-
-    def _check_models_api(self, response):
-        """Check if models API is ready"""
-        try:
-            if response.status_code != 200:
-                return False
-            data = response.json()
-            models = data.get("data", [])
-            return len(models) > 0
-        except Exception:
-            return False
 
 
 @pytest.fixture(scope="function")
@@ -380,16 +360,11 @@ class SampleUnifiedWorkerProcess(ManagedProcess):
 
         log_dir = f"{request.node.name}_{worker_id}"
 
-        try:
-            shutil.rmtree(log_dir)
-        except FileNotFoundError:
-            pass
-
         super().__init__(
             command=command,
             env=env,
             health_check_urls=[
-                (f"http://localhost:{frontend_port}/v1/models", self._check_models_api),
+                (f"http://localhost:{frontend_port}/v1/models", models_available),
                 (f"http://localhost:{system_port}/health", check_health_ready),
             ],
             timeout=120,
@@ -398,15 +373,6 @@ class SampleUnifiedWorkerProcess(ManagedProcess):
             straggler_commands=["-m dynamo.common.backend.sample_main"],
             log_dir=log_dir,
         )
-
-    def _check_models_api(self, response):
-        try:
-            if response.status_code != 200:
-                return False
-            data = response.json()
-            return len(data.get("data", [])) > 0
-        except Exception:
-            return False
 
 
 @pytest.fixture
