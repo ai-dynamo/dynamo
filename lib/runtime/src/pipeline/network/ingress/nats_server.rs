@@ -33,36 +33,13 @@ pub struct NatsMultiplexedServer {
 struct EndpointTask {
     cancel_token: CancellationToken,
     join_handle: tokio::task::JoinHandle<()>,
-    _endpoint_name: String,
 }
 
 /// NATS subject and handler-map key for one endpoint instance. Several instances in one
-/// process can register the same endpoint name, so the key must carry the instance id.
+/// process can register the same endpoint name, so the key must carry the instance id;
+/// register and unregister must agree on it or a teardown removes the wrong task, or none.
 fn instance_subject(endpoint_name: &str, instance_id: u64) -> String {
     format!("{endpoint_name}-{instance_id:x}")
-}
-
-/// Store one instance's endpoint task. Keyed by [`instance_subject`] so a second instance
-/// registering the same endpoint name does not evict the first's cancel token and join handle.
-fn store_handler(
-    handlers: &DashMap<String, EndpointTask>,
-    endpoint_name: &str,
-    instance_id: u64,
-    task: EndpointTask,
-) {
-    handlers.insert(instance_subject(endpoint_name, instance_id), task);
-}
-
-/// Take one instance's endpoint task, leaving other instances of the same endpoint name in place.
-/// Must key the same way as [`store_handler`] or teardown drops the wrong task, or none.
-fn take_handler(
-    handlers: &DashMap<String, EndpointTask>,
-    endpoint_name: &str,
-    instance_id: u64,
-) -> Option<EndpointTask> {
-    handlers
-        .remove(&instance_subject(endpoint_name, instance_id))
-        .map(|(_, task)| task)
 }
 
 impl NatsMultiplexedServer {
@@ -203,14 +180,11 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
         // Store task info for later cleanup
-        store_handler(
-            &self.handlers,
-            &endpoint_name,
-            instance_id,
+        self.handlers.insert(
+            endpoint_with_id,
             EndpointTask {
                 cancel_token: endpoint_cancel,
                 join_handle,
-                _endpoint_name: endpoint_name.clone(),
             },
         );
 
@@ -218,10 +192,11 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
     }
 
     async fn unregister_endpoint(&self, endpoint_name: &str, instance_id: u64) -> Result<()> {
-        if let Some(task) = take_handler(&self.handlers, endpoint_name, instance_id) {
+        let endpoint_with_id = instance_subject(endpoint_name, instance_id);
+        if let Some((_, task)) = self.handlers.remove(&endpoint_with_id) {
             tracing::info!(
                 endpoint_name = %endpoint_name,
-                endpoint_with_id = %instance_subject(endpoint_name, instance_id),
+                endpoint_with_id = %endpoint_with_id,
                 "Unregistering NATS endpoint"
             );
             // Cancel the token to trigger graceful shutdown
@@ -268,43 +243,13 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
 mod tests {
     use super::*;
 
-    fn endpoint_task() -> EndpointTask {
-        EndpointTask {
-            cancel_token: CancellationToken::new(),
-            join_handle: tokio::spawn(async {}),
-            _endpoint_name: "generate".to_string(),
-        }
-    }
-
-    #[tokio::test]
-    async fn two_instances_of_one_endpoint_name_coexist() {
-        let handlers = DashMap::new();
-
-        store_handler(&handlers, "generate", 0xa, endpoint_task());
-        store_handler(&handlers, "generate", 0xb, endpoint_task());
-
-        assert_eq!(
-            handlers.len(),
-            2,
-            "a second instance registering the same endpoint name must not evict the first"
-        );
-    }
-
-    #[tokio::test]
-    async fn take_handler_removes_only_the_callers_instance() {
-        let handlers = DashMap::new();
-        store_handler(&handlers, "generate", 0xa, endpoint_task());
-        store_handler(&handlers, "generate", 0xb, endpoint_task());
-
-        assert!(take_handler(&handlers, "generate", 0xa).is_some());
-
-        assert!(
-            take_handler(&handlers, "generate", 0xa).is_none(),
-            "removing an instance twice must not take another instance's task"
-        );
-        assert!(
-            take_handler(&handlers, "generate", 0xb).is_some(),
-            "the surviving instance's task must still be there to cancel and join"
+    #[test]
+    fn instance_subject_is_the_client_subject_and_unique_per_instance() {
+        assert_eq!(instance_subject("generate", 0xa), "generate-a");
+        assert_ne!(
+            instance_subject("generate", 0xa),
+            instance_subject("generate", 0xb),
+            "two instances of one endpoint name must not share a handler-map key"
         );
     }
 }

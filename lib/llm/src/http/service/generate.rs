@@ -1097,7 +1097,7 @@ async fn generate_dispatch(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::{
         future::Future,
         pin::Pin,
@@ -1203,9 +1203,17 @@ mod tests {
 
     struct MetricEngine;
 
-    struct WorkerUnavailableEngine;
+    /// Fails dispatch the way an addressed worker that no longer serves the instance does.
+    pub(crate) struct WorkerUnavailableEngine;
 
     struct WorkerUnavailableStreamEngine;
+
+    fn worker_unavailable_error() -> dynamo_runtime::error::DynamoError {
+        dynamo_runtime::error::DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::WorkerUnavailable)
+            .message("Server unavailable: unknown endpoint a/generate")
+            .build()
+    }
 
     struct MigrationMetricBackend {
         calls: AtomicU32,
@@ -1245,11 +1253,7 @@ mod tests {
             &self,
             _request: SingleIn<PreprocessedRequest>,
         ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
-            Err(dynamo_runtime::error::DynamoError::builder()
-                .error_type(dynamo_runtime::error::ErrorType::WorkerUnavailable)
-                .message("Server unavailable: unknown endpoint a/generate")
-                .build()
-                .into())
+            Err(worker_unavailable_error().into())
         }
     }
 
@@ -1264,12 +1268,7 @@ mod tests {
             // The dispatch call succeeds and the stream opens; the error arrives mid-stream, the
             // way an exhausted migration surfaces it.
             let context = request.context();
-            let stream = futures::stream::iter([Annotated::from_err(
-                dynamo_runtime::error::DynamoError::builder()
-                    .error_type(dynamo_runtime::error::ErrorType::WorkerUnavailable)
-                    .message("Server unavailable: unknown endpoint a/generate")
-                    .build(),
-            )]);
+            let stream = futures::stream::iter([Annotated::from_err(worker_unavailable_error())]);
             Ok(ResponseStream::new(Box::pin(stream), context))
         }
     }
@@ -2314,7 +2313,7 @@ mod tests {
         }
     }
 
-    fn dispatch_test_context() -> Context<PreprocessedRequest> {
+    pub(crate) fn dispatch_test_context() -> Context<PreprocessedRequest> {
         Context::new(
             PreprocessedRequest::builder()
                 .model("test-model".to_string())
@@ -2497,23 +2496,53 @@ mod tests {
         await_cancelled_dispatch(task, dropped.as_ref(), state.as_ref()).await;
     }
 
-    async fn dispatch_terminal_finish_reason(
-        finish_reason: crate::protocols::common::FinishReason,
+    /// Dispatch one default request through `engine` on a fresh service and return the
+    /// response with the service state, so the caller can assert on the metrics it produced.
+    async fn dispatch_engine(
+        engine: crate::types::openai::generate::GenerateStreamingEngine,
+        request_id: &str,
     ) -> (Response, Arc<service_v2::State>) {
-        let engine: crate::types::openai::generate::GenerateStreamingEngine =
-            Arc::new(TerminalEngine(finish_reason));
         let service = HttpService::builder().build().unwrap();
         let state = service.state_clone();
         let response = generate_dispatch_for_test(
             engine,
             dispatch_test_context(),
-            "req-terminal-dispatch".to_string(),
+            request_id.to_string(),
             "test-model".to_string(),
             state.clone(),
             GenerateResponseOptions::default(),
         )
         .await;
         (response, state)
+    }
+
+    async fn dispatch_terminal_finish_reason(
+        finish_reason: crate::protocols::common::FinishReason,
+    ) -> (Response, Arc<service_v2::State>) {
+        dispatch_engine(
+            Arc::new(TerminalEngine(finish_reason)),
+            "req-terminal-dispatch",
+        )
+        .await
+    }
+
+    async fn assert_worker_unavailable_returns_503(
+        engine: crate::types::openai::generate::GenerateStreamingEngine,
+    ) {
+        let (response, state) = dispatch_engine(engine, "req-worker-unavailable").await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let metric_model = state.manager().metric_model_for("test-model");
+        assert_eq!(
+            state.metrics_clone().get_request_counter(
+                metric_model,
+                &Endpoint::Generate,
+                &RequestType::Unary,
+                &Status::Error,
+                &ErrorType::Unavailable,
+            ),
+            1
+        );
     }
 
     #[tokio::test]
@@ -2555,66 +2584,12 @@ mod tests {
 
     #[tokio::test]
     async fn worker_unavailable_dispatch_returns_503() {
-        let engine: crate::types::openai::generate::GenerateStreamingEngine =
-            Arc::new(WorkerUnavailableEngine);
-        let service = HttpService::builder().build().unwrap();
-        let state = service.state_clone();
-
-        let response = generate_dispatch_for_test(
-            engine,
-            dispatch_test_context(),
-            "req-worker-unavailable".to_string(),
-            "test-model".to_string(),
-            state.clone(),
-            GenerateResponseOptions::default(),
-        )
-        .await;
-
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-
-        let metric_model = state.manager().metric_model_for("test-model");
-        assert_eq!(
-            state.metrics_clone().get_request_counter(
-                metric_model,
-                &Endpoint::Generate,
-                &RequestType::Unary,
-                &Status::Error,
-                &ErrorType::Unavailable,
-            ),
-            1
-        );
+        assert_worker_unavailable_returns_503(Arc::new(WorkerUnavailableEngine)).await;
     }
 
     #[tokio::test]
     async fn worker_unavailable_mid_stream_returns_503() {
-        let engine: crate::types::openai::generate::GenerateStreamingEngine =
-            Arc::new(WorkerUnavailableStreamEngine);
-        let service = HttpService::builder().build().unwrap();
-        let state = service.state_clone();
-
-        let response = generate_dispatch_for_test(
-            engine,
-            dispatch_test_context(),
-            "req-worker-unavailable-stream".to_string(),
-            "test-model".to_string(),
-            state.clone(),
-            GenerateResponseOptions::default(),
-        )
-        .await;
-
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-
-        let metric_model = state.manager().metric_model_for("test-model");
-        assert_eq!(
-            state.metrics_clone().get_request_counter(
-                metric_model,
-                &Endpoint::Generate,
-                &RequestType::Unary,
-                &Status::Error,
-                &ErrorType::Unavailable,
-            ),
-            1
-        );
+        assert_worker_unavailable_returns_503(Arc::new(WorkerUnavailableStreamEngine)).await;
     }
 
     #[tokio::test]

@@ -85,9 +85,7 @@ class _Worker:
 
 async def _wait_for_single_instance(endpoint):
     client = await endpoint.client()
-    instances = await client.wait_for_instances()
-    assert len(instances) == 1
-    return client
+    assert len(await client.wait_for_instances()) == 1
 
 
 async def _generate_and_collect(router, response_buffer_size):

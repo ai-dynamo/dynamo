@@ -899,6 +899,16 @@ mod tests {
         }
     }
 
+    fn ready_system_health() -> Arc<Mutex<SystemHealth>> {
+        Arc::new(Mutex::new(SystemHealth::new(
+            crate::HealthStatus::Ready,
+            vec![],
+            false, // health_check_enabled
+            "/health".to_string(),
+            "/live".to_string(),
+        )))
+    }
+
     #[tokio::test]
     async fn test_graceful_shutdown_waits_for_inflight_tcp_requests() {
         // Initialize tracing for test debugging
@@ -918,13 +928,7 @@ mod tests {
 
         // Register endpoint
         let endpoint_path = "test_endpoint".to_string();
-        let system_health = Arc::new(Mutex::new(SystemHealth::new(
-            crate::HealthStatus::Ready,
-            vec![],
-            false, // health_check_enabled
-            "/health".to_string(),
-            "/live".to_string(),
-        )));
+        let system_health = ready_system_health();
 
         server
             .register_endpoint(
@@ -1071,13 +1075,7 @@ mod tests {
                 .unwrap();
         let addr = server.clone().bind_and_start().await.unwrap();
 
-        let system_health = Arc::new(Mutex::new(SystemHealth::new(
-            crate::HealthStatus::Ready,
-            vec![],
-            false,
-            "/health".to_string(),
-            "/live".to_string(),
-        )));
+        let system_health = ready_system_health();
         let plane: &dyn RequestPlaneServer = server.as_ref();
         let removed = Arc::new(SlowMockHandler::new(Duration::ZERO));
         let survivor = Arc::new(SlowMockHandler::new(Duration::ZERO));
