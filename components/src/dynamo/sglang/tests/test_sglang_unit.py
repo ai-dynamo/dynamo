@@ -1493,12 +1493,14 @@ async def test_lora_registration_model_type_gate(
 async def _real_shaped_metrics_task() -> asyncio.Task:
     """A metrics task shaped like publisher.run()/_idle(): parked on one await,
     with no cleanup work after cancellation."""
+    started = asyncio.Event()
 
     async def metrics_loop():
+        started.set()
         await asyncio.Event().wait()
 
     task = asyncio.create_task(metrics_loop())
-    await asyncio.sleep(0)  # let it reach the await
+    await started.wait()
     return task
 
 
@@ -1510,63 +1512,80 @@ def _fake_teardown_targets(steps):
         steps.append("handler.cleanup")
 
     async def run_deferred_handlers():
-        await asyncio.sleep(0)  # stands in for the await in real deferred handlers
         steps.append("run_deferred_handlers")
 
     return cleanup, run_deferred_handlers
 
 
-@pytest.mark.parametrize("cancel_after_ticks", range(1, 4))
 @pytest.mark.timeout(5)
 @pytest.mark.asyncio
-async def test_worker_teardown_always_completes(cancel_after_ticks):
-    """However the cancellation is timed against teardown, both cleanup steps
-    run. An implementation that raises from inside the teardown leaves `steps`
-    partial and fails this for the early tick counts."""
-    metrics_task = await _real_shaped_metrics_task()
+async def test_worker_teardown_surfaces_cancellation_after_metrics_unwind():
+    started = asyncio.Event()
+    unwinding = asyncio.Event()
+    release_metrics = asyncio.Event()
     steps = []
-    cleanup, run_deferred_handlers = _fake_teardown_targets(steps)
 
+    async def metrics_loop():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            unwinding.set()
+            await release_metrics.wait()
+            raise
+
+    async def deferred():
+        steps.append("run_deferred_handlers")
+
+    metrics_task = asyncio.create_task(metrics_loop())
+    await started.wait()
     outer = asyncio.create_task(
-        finish_worker_teardown(metrics_task, cleanup, run_deferred_handlers)
+        finish_worker_teardown(
+            metrics_task,
+            lambda: steps.append("handler.cleanup"),
+            deferred,
+        )
     )
-    # Let the teardown coroutine start before the sweep. Cancelling a task that
-    # has never been stepped throws CancelledError into an unstarted coroutine,
-    # so its body never runs at all -- that is asyncio behaviour rather than a
-    # teardown defect, and it is not the scenario under test.
-    await asyncio.sleep(0)
-    for _ in range(cancel_after_ticks):
-        await asyncio.sleep(0)
+
+    await unwinding.wait()
     outer.cancel()
-
-    try:
-        await outer
-    except asyncio.CancelledError:
-        pass
-
-    assert steps == ["handler.cleanup", "run_deferred_handlers"]
-    assert metrics_task.done()
-
-
-@pytest.mark.timeout(5)
-@pytest.mark.asyncio
-async def test_worker_teardown_surfaces_the_cancellation():
-    """A cancellation arriving during teardown must reach the caller, not be
-    logged as a success. This is the bug in #12672."""
-    metrics_task = await _real_shaped_metrics_task()
-    steps = []
-    cleanup, run_deferred_handlers = _fake_teardown_targets(steps)
-
-    outer = asyncio.create_task(
-        finish_worker_teardown(metrics_task, cleanup, run_deferred_handlers)
-    )
-    await asyncio.sleep(0)
-    outer.cancel()
+    release_metrics.set()
 
     with pytest.raises(asyncio.CancelledError):
         await outer
 
     assert steps == ["handler.cleanup", "run_deferred_handlers"]
+    assert metrics_task.cancelled()
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_worker_teardown_surfaces_cancellation_after_deferred_cleanup():
+    metrics_task = await _real_shaped_metrics_task()
+    deferred_started = asyncio.Event()
+    release_deferred = asyncio.Event()
+    steps = []
+
+    def cleanup():
+        steps.append("handler.cleanup")
+
+    async def deferred():
+        deferred_started.set()
+        await release_deferred.wait()
+        steps.append("run_deferred_handlers")
+
+    outer = asyncio.create_task(
+        finish_worker_teardown(metrics_task, cleanup, deferred)
+    )
+    await deferred_started.wait()
+    outer.cancel()
+    release_deferred.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await outer
+
+    assert steps == ["handler.cleanup", "run_deferred_handlers"]
+    assert metrics_task.cancelled()
 
 
 @pytest.mark.timeout(5)
@@ -1588,9 +1607,23 @@ async def test_worker_teardown_is_silent_when_nothing_cancels():
 async def test_worker_teardown_keeps_the_body_failure(caplog):
     """When the worker body already failed, that exception is the diagnostic;
     the cancellation is logged instead of replacing it."""
-    metrics_task = await _real_shaped_metrics_task()
+    started = asyncio.Event()
+    unwinding = asyncio.Event()
+    release_metrics = asyncio.Event()
     steps = []
     cleanup, run_deferred_handlers = _fake_teardown_targets(steps)
+
+    async def metrics_loop():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            unwinding.set()
+            await release_metrics.wait()
+            raise
+
+    metrics_task = asyncio.create_task(metrics_loop())
+    await started.wait()
 
     async def failing_worker():
         try:
@@ -1601,8 +1634,9 @@ async def test_worker_teardown_keeps_the_body_failure(caplog):
             )
 
     outer = asyncio.create_task(failing_worker())
-    await asyncio.sleep(0)
+    await unwinding.wait()
     outer.cancel()
+    release_metrics.set()
 
     with pytest.raises(RuntimeError, match="nats is down"):
         await outer
