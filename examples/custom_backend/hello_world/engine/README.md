@@ -69,7 +69,7 @@ overlap. With no cache knowledge, requests would round-robin instead.
 ## Run without Docker
 
 Same shape as `basic/`: install, then two terminals. Needs Linux and
-Python 3.11+ — the `ai-dynamo` wheels are Linux-only, so on macOS use
+Python 3.10+ — the `ai-dynamo` wheels are Linux-only, so on macOS use
 the [Container](#container) path instead.
 
 ```bash
