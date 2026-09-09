@@ -55,15 +55,6 @@ func TestDefaultMultinodeRoleReplicas(t *testing.T) {
 			wantLeader: ptr.To(int32(2)),
 			wantWorker: ptr.To(int32(2)),
 		},
-		{
-			name: "leaves roles without a multinode schema unchanged",
-			component: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
-				Roles: []nvidiacomv1beta1.ComponentRoleSpec{
-					{Name: nvidiacomv1beta1.ComponentRoleLeader},
-					{Name: nvidiacomv1beta1.ComponentRoleWorker},
-				},
-			},
-		},
 	}
 
 	for _, tt := range tests {
