@@ -28,7 +28,7 @@ def _can_import_tritonclient() -> bool:
             importlib.import_module("tritonclient.grpc.model_config_pb2")
             importlib.import_module("tritonclient.utils")
             _tritonclient_importable = True
-        except ImportError:
+        except Exception:
             _tritonclient_importable = False
 
     return _tritonclient_importable
