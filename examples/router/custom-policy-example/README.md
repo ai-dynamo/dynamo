@@ -27,6 +27,7 @@ Preferred routing taints are optional candidate metadata. A filter, scorer, or p
 | Crate | Use it for |
 |---|---|
 | [`soft-pin-repin`](soft-pin-repin/README.md) | Retain a soft session-affinity target until its active-request load exceeds a threshold, then repin |
+| [`subagent-group-affinity`](subagent-group-affinity/README.md) | Co-locate the subagents of one parent session on a worker chosen by load, and track the group in policy-local state |
 | `simple-filter-score-pick` | One filter, one scorer, and one picker show the complete policy flow |
 | `disagg-filter-score-pick` | Prefill and decode workers each need the complete policy flow |
 | `simple-stacked-score-pick` | Multiple scorer costs compose before one picker runs |
@@ -34,6 +35,8 @@ Preferred routing taints are optional candidate metadata. A filter, scorer, or p
 The `simple-filter-score-pick` policy shows the complete pipeline. It filters on minimum device overlap and scores active requests. Its picker normally selects the lowest cost. Tool-result turns select the worker with the most device overlap through `session_context().input_trigger()`.
 
 The [`soft-pin-repin` policy](soft-pin-repin/README.md) documents its load threshold, soft-binding behavior, and two-Mocker `A -> B -> B` walkthrough.
+
+The [`subagent-group-affinity` policy](subagent-group-affinity/README.md) keys a policy-local binding on `session_context().parent_session_id()` so the subagents of one parent share a worker. It documents its group lifecycle and two-Mocker `A -> A -> B` walkthrough.
 
 The `disagg-filter-score-pick` policy applies the overlap filter to both worker types. Its factory matches the routing stage and calls separate prefill and decode policy builders. Each builder shows the complete filter, scorer, and picker composition for that stage.
 
@@ -200,6 +203,7 @@ Run these commands from the Dynamo repository root:
 ```bash
 cargo test \
   -p dynamo-custom-policy-example-soft-pin-repin \
+  -p dynamo-custom-policy-example-subagent-group-affinity \
   -p dynamo-custom-policy-example-simple-filter-score-pick \
   -p dynamo-custom-policy-example-disagg-filter-score-pick \
   -p dynamo-custom-policy-example-simple-stacked-score-pick \
@@ -282,6 +286,8 @@ Create `/tmp/worker-selection.yaml` with the policy instances from [Configure a 
 Use `min_device_overlap_blocks: 0` for this test. A positive threshold can reject every worker on a cold request or a replay path without raw tier data.
 
 For overload-aware soft affinity, follow the [`soft-pin-repin` two-Mocker walkthrough](soft-pin-repin/README.md#run-with-two-mockers).
+
+For subagent co-location, follow the [`subagent-group-affinity` two-Mocker walkthrough](subagent-group-affinity/README.md#run-with-two-mockers).
 
 ### Aggregated Policy
 
