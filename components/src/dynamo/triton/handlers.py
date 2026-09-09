@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+from typing import AsyncGenerator
 
 import numpy as np
 from tritonserver import Model as TritonModel
@@ -31,7 +32,7 @@ class RequestHandler:
             out["name"]: out["datatype"] for out in model.metadata()["outputs"]
         }
 
-    async def generate(self, request: dict) -> dict:
+    async def generate(self, request: dict) -> AsyncGenerator[dict, None]:
         logger.debug(f"Received request: {request}")
 
         # Short-circuit health probes before inference to avoid poisoning stateful models.

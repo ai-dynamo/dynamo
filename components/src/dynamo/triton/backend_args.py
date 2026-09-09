@@ -481,7 +481,7 @@ class DynamoTritonConfig(Config):
         return {key: value for key, value in opts.items() if value is not None}
 
 
-def parse_args(argv: Optional[list[str]] = None) -> Config:
+def parse_args(argv: Optional[list[str]] = None) -> DynamoTritonConfig:
     """Parse command-line arguments for the Dynamo Triton Runtime.
 
     Args:
