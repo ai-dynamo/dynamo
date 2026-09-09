@@ -214,11 +214,6 @@ class GMSSessionManager:
                 except asyncio.TimeoutError:
                     return None
             return GrantedLockType.RO
-
-        if mode == RequestedLockType.RW_PERSISTENT:
-            raise OperationNotAllowed(
-                "persistent allocation sessions are not implemented"
-            )
         if mode != RequestedLockType.RW_OR_RO:
             raise OperationNotAllowed(f"unsupported lock type: {mode}")
 
