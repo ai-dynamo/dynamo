@@ -707,9 +707,13 @@ class ManagedDGDR:
         dgd_name = status.get("dgdName")
         if dgd_name:
             try:
-                dgd = await self.get_dgd(dgd_name)
+                dgd = await self._retry_vcluster_api(
+                    f"reading diagnostic DGD {self.config.namespace}/{dgd_name}",
+                    self.get_dgd,
+                    dgd_name,
+                )
                 logger.error("DGD failure diagnostics:\n%s", json.dumps(dgd, indent=2))
-            except exceptions.ApiException as error:
+            except (exceptions.ApiException, aiohttp.ClientConnectionError) as error:
                 logger.warning(
                     "Could not read DGD %s/%s: %s",
                     self.config.namespace,
@@ -722,9 +726,14 @@ class ManagedDGDR:
         self._require_clients()
         assert self.batch is not None
         try:
-            job = await self.batch.read_namespaced_job(name, self.config.namespace)
+            job = await self._retry_vcluster_api(
+                f"reading diagnostic Job {self.config.namespace}/{name}",
+                self.batch.read_namespaced_job,
+                name,
+                self.config.namespace,
+            )
             logger.error("Profiling Job failure diagnostics:\n%s", job.to_str())
-        except exceptions.ApiException as error:
+        except (exceptions.ApiException, aiohttp.ClientConnectionError) as error:
             logger.warning(
                 "Could not read profiling Job %s/%s: %s",
                 self.config.namespace,
@@ -737,10 +746,13 @@ class ManagedDGDR:
         self._require_clients()
         assert self.core is not None
         try:
-            pods = await self.core.list_namespaced_pod(
-                self.config.namespace, label_selector=label_selector
+            pods = await self._retry_vcluster_api(
+                f"listing diagnostic Pods in {self.config.namespace} matching {label_selector}",
+                self.core.list_namespaced_pod,
+                self.config.namespace,
+                label_selector=label_selector,
             )
-        except exceptions.ApiException as error:
+        except (exceptions.ApiException, aiohttp.ClientConnectionError) as error:
             logger.warning(
                 "Could not list pods in %s matching %s: %s",
                 self.config.namespace,
@@ -757,7 +769,9 @@ class ManagedDGDR:
             ]
             for container in containers:
                 try:
-                    logs = await self.core.read_namespaced_pod_log(
+                    logs = await self._retry_vcluster_api(
+                        f"reading diagnostic logs for {pod.metadata.name}/{container.name}",
+                        self.core.read_namespaced_pod_log,
                         pod.metadata.name,
                         self.config.namespace,
                         container=container.name,
@@ -769,7 +783,10 @@ class ManagedDGDR:
                         container.name,
                         logs,
                     )
-                except exceptions.ApiException as error:
+                except (
+                    exceptions.ApiException,
+                    aiohttp.ClientConnectionError,
+                ) as error:
                     logger.warning(
                         "Could not read logs for %s/%s: %s",
                         pod.metadata.name,
