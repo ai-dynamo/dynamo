@@ -395,12 +395,13 @@ def test_raw_reference_omits_dgd_only_fields_from_standalone_dcd_docs(
         dcd = by_name["DynamoComponentDeploymentSpec"]
         assert "providerOverride" not in {field.name for field in dcd.fields}
         dcd_multinode = next(field for field in dcd.fields if field.name == "multinode")
-        assert dcd_multinode.type == "object"
-        assert "`leader` and `worker` are DGD-only" in dcd_multinode.description
+        assert "MultinodeSpec" in dcd_multinode.type
+        dcd_roles = next(field for field in dcd.fields if field.name == "roles")
+        assert dcd_roles.type == "object array"
+        assert "Standalone DCD roles accept only `name`" in dcd_roles.description
         for type_name in (
             "DynamoComponentDeploymentSharedSpec",
-            "MultinodeSpec",
-            "MultinodeRoleSpec",
+            "ComponentRoleSpec",
             "ProviderOverride",
         ):
             assert "DynamoComponentDeploymentSpec" not in {

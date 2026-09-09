@@ -48,7 +48,6 @@ import (
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
@@ -360,9 +359,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 		ctrlBuilder = newGroveWatchSetup(r.Client).addTo(ctrlBuilder)
 	}
 
-	// Wrap with metrics collection
-	observedReconciler := observability.NewObservedReconciler(r, consts.ResourceTypeDynamoGraphDeployment)
-	return ctrlBuilder.Complete(observedReconciler)
+	return ctrlBuilder.Complete(r)
 }
 
 func (r *DynamoGraphDeploymentReconciler) GetRecorder() events.EventRecorder {

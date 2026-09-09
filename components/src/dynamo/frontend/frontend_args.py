@@ -88,6 +88,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
 
     discovery_backend: str
     request_plane: str
+    response_plane: str = "tcp"
     event_plane: Optional[str] = None
     chat_processor: str
     enable_anthropic_api: bool
@@ -120,6 +121,14 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
         ):
             raise ValueError(
                 "--tls-client-ca-cert-path requires --tls-cert-path and --tls-key-path"
+            )
+        if self.frontend_route_extensions and (
+            self.interactive or self.kserve_grpc_server
+        ):
+            mode_flag = "--interactive" if self.interactive else "--kserve-grpc-server"
+            raise ValueError(
+                "--frontend-route-extension is only supported by the HTTP frontend, "
+                f"so it cannot be combined with {mode_flag}"
             )
         if self.migration_limit < 0 or self.migration_limit > _U32_MAX:
             raise ValueError(
@@ -530,6 +539,14 @@ class FrontendArgGroup(ArgGroup):
                 "'tcp' is fastest [nats|tcp]"
             ),
             choices=["nats", "tcp"],
+        )
+        add_argument(
+            g,
+            flag_name="--response-plane",
+            env_var="DYN_RESPONSE_PLANE",
+            default="tcp",
+            help="Select the response transport. Frontend and workers must match.",
+            choices=["tcp", "quic"],
         )
         add_argument(
             g,
