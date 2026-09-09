@@ -224,14 +224,21 @@ is already held.
 
 ### Relationship To The TCP Request Plane
 
-The TCP request plane keeps its own worker pool, sized by `DYN_TCP_WORKER_POOL_SIZE` and
-`DYN_TCP_WORK_QUEUE_SIZE`. That pool bounds TCP-side task execution only; it is independent of the
-gate and no longer changes with the engine-admission settings. The two use the same numeric defaults
-by coincidence, not by sharing constants.
+The TCP request plane keeps its own work queue and worker pool, sized by
+`DYN_TCP_WORK_QUEUE_SIZE` and `DYN_TCP_WORKER_POOL_SIZE`. These controls are separately configured
+from the gate, but they are serially ordered:
+
+`TCP work queue -> TCP worker pool -> Backend Admission Gate -> backend`
+
+A TCP request keeps its worker-pool permit while waiting at the gate, so the upstream pool caps how
+many TCP requests can reach the gate at once and can prevent the gate's configured overflow queue
+from being fully reachable. NATS reaches the gate without this TCP-specific upstream bound. Engine
+admission settings no longer resize the TCP worker pool; matching numeric defaults remain separate
+constants.
 
 The two controls report separately. The `dynamo_work_handler_*` family reports TCP worker-pool
 occupancy, queue activity and capacity, permit wait, and enqueue rejection. The gate has its own
-independent family:
+separate family:
 
 - `dynamo_backend_admission_engine_request_count` and
   `dynamo_backend_admission_request_queue_count` — current occupancy of the limit and the FIFO queue.
