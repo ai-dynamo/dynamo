@@ -20,6 +20,7 @@ module installs anything.
 
 from __future__ import annotations
 
+import importlib.metadata
 import importlib.util
 
 from dynamo.common.multimodal.nvdec_decoder import HW_ROUTED_CODECS, nvdec_available
@@ -37,21 +38,43 @@ class MissingMediaDecoderError(RuntimeError):
     """
 
 
+def _carrier_present(module: str) -> bool:
+    """Whether the decode carrier imports here, however it was built."""
+    return importlib.util.find_spec(module) is not None
+
+
+def _installed_version(package: str) -> str | None:
+    """The installed distribution version, or None when it has no metadata."""
+    try:
+        return importlib.metadata.version(package)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
 def _install_hint(backend: str, package: str, module: str) -> str:
     """The remedy line: a pip command that works from where the caller is.
 
-    Two things make the naive command wrong. The carrier may already be
-    importable but unusable for this input -- the vLLM images ship an OpenCV
-    built from source with no video backend, at a version that can satisfy the
-    spec below, so a plain install reports "already satisfied" and changes
-    nothing. And the bundled installer does not cover every backend/package
-    pair, so offering it where it installs nothing relevant sends the caller
-    down a command that exits 0 and fixes nothing.
+    Where the carrier is absent, install the validated spec. Where it is
+    already importable but unusable for this input -- the vLLM images ship an
+    OpenCV built from source with no video backend -- the remedy is to swap
+    that build for the binary wheel, so it pins the version already installed.
+    Reusing the validated spec there would be wrong twice over: it can be
+    satisfied by what is present, so pip changes nothing, and its upper bound
+    can be below the version the image ships, so a caller who ran it anyway
+    would be downgraded off what the backend resolved.
+
+    The bundled installer is offered only where it installs this package for
+    this backend; elsewhere it exits 0 having fixed nothing.
     """
-    spec = VALIDATED_SPECS[package]
     flags = "--no-deps"
-    if importlib.util.find_spec(module) is not None:
+    spec = VALIDATED_SPECS[package]
+    if _carrier_present(module):
         flags += f" --force-reinstall --only-binary {package}"
+        installed = _installed_version(package)
+        if installed:
+            spec = f"{package}=={installed}"
+        # No distribution metadata: the validated spec is the only bound left,
+        # and force-reinstall still replaces what is there.
     hint = f"install the validated decoder with `pip install {flags} '{spec}'`"
     if installer_covers(backend, package):
         hint += f" (or `{INSTALLER_CMD} {backend}`)"
@@ -93,6 +116,16 @@ def video_decoder_missing(
             f"this video ({codec_desc}) normally decodes in hardware via NVDEC, "
             "but NVDEC is unavailable in this container. Grant the 'video' "
             "driver capability (NVIDIA_DRIVER_CAPABILITIES) to enable it, or "
+        )
+    elif _carrier_present(module):
+        # Present but useless for video: the vLLM images ship an OpenCV built
+        # from source with no video backend. Saying it is "not installed"
+        # would send the reader looking for a package that is already there.
+        lead = (
+            f"this video ({codec_desc}) has no decoder in this image: shipped "
+            "images decode only H.264/H.265 (in hardware, via NVDEC), and the "
+            f"'{module}' they ship is built without a video backend. "
+            "Re-encode the input to H.264/H.265, or "
         )
     else:
         lead = (

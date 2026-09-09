@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import numpy as np
 import pytest
 
+import dynamo.common.multimodal.codec_errors as codec_errors
 import dynamo.common.multimodal.video_loader as video_loader_module
 from dynamo.common.http import HttpStatusError
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
@@ -298,6 +299,8 @@ async def test_decode_video_bytes_missing_decoder_is_actionable(monkeypatch):
     loader = VideoLoader()
     monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "vp9")
     monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
+    # cv2 genuinely absent, independent of what the test machine has installed.
+    monkeypatch.setattr(codec_errors.importlib.util, "find_spec", lambda name: None)
 
     with pytest.raises(MissingMediaDecoderError) as exc_info:
         await loader._decode_video_bytes(b"vp9-bytes", _ImportErrorMediaIO())
@@ -332,12 +335,19 @@ async def test_decode_video_bytes_backendless_cv2_is_actionable(monkeypatch):
     monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
     monkeypatch.setattr(video_loader_module, "_cv2_lacks_video_backend", lambda: True)
 
+    monkeypatch.setattr(codec_errors.importlib.util, "find_spec", lambda name: object())
+    monkeypatch.setattr(
+        codec_errors.importlib.metadata, "version", lambda p: "5.0.0.93"
+    )
+
     with pytest.raises(MissingMediaDecoderError) as exc_info:
         await loader._decode_video_bytes(b"vp9-bytes", _SystemErrorMediaIO())
 
     msg = str(exc_info.value)
     assert "'vp9'" in msg
-    assert VALIDATED_SPECS["opencv-python-headless"] in msg
+    # The remedy swaps the source build for the wheel of the same version.
+    assert "opencv-python-headless==5.0.0.93" in msg
+    assert "--force-reinstall" in msg
     assert "video backend" in msg
 
 

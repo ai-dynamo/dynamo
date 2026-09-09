@@ -97,12 +97,13 @@ The default pip timeout is 600 seconds (`--timeout-s` overrides it; `0` disables
 - For H.264 and H.265, prefer NVDEC. Granting the container the `video` driver capability decodes those formats on the GPU with no extra package. Install a software decoder when that is not an option, or when the input is audio.
 - Installing a decoder package brings in that wheel's bundled media libraries. The runtime images are scanned for media components at build time; a package installed afterwards is not covered by that scan. Review what your deployment ships — a baked image layer keeps the change visible and reviewable.
 - On TensorRT-LLM, the install puts back `opencv-python-headless`, which those images deliberately do not ship. H.264 and H.265 already decode there through NVDEC, so install it only for a host where NVDEC is unavailable.
-- The vLLM images ship OpenCV already, rebuilt from source with every video backend disabled. It covers still images — which multimodal Mistral models need, because `mistral_common` resizes every image through `cv2` — and decodes no video at all. Video input on vLLM goes through NVDEC. To decode video in software instead, replace it with the PyPI wheel:
+- The vLLM images ship OpenCV already, rebuilt from source with every video backend disabled. It covers still images — which multimodal Mistral models need, because `mistral_common` resizes every image through `cv2` — and decodes no video at all. Video input on vLLM goes through NVDEC. To decode video in software instead, swap that build for the PyPI wheel of the same version:
 
 ```bash
+VERSION=$(pip show opencv-python-headless | awk '/^Version:/{print $2}')
 pip install --no-deps --force-reinstall --only-binary opencv-python-headless \
-  'opencv-python-headless>=4.13.0.92,<5'
+  "opencv-python-headless==${VERSION}"
 ```
 
-`--force-reinstall` and `--only-binary` are both required: the source build already registers as `opencv-python-headless` at a version that can satisfy the spec, so a plain install reports the requirement as already satisfied and leaves the backendless build in place. The wheel restores the bundled FFmpeg and its codecs. The bundled installer does not cover this — it installs only PyAV for vLLM.
+Every part of that command is load-bearing. `--force-reinstall` and `--only-binary` are both needed because the source build already registers as `opencv-python-headless`, so a plain install reports the requirement as satisfied and leaves it in place. Pinning the installed version keeps the swap to source-build-for-wheel — a version range would risk moving you off the release the backend resolved. The wheel restores the bundled FFmpeg and its codecs, which is exactly the codec surface the image is built to exclude, so review it against your distribution policy. The bundled installer does not do this: it installs only PyAV for vLLM.
 - The optional Rust frontend decoder (`--frontend-decoding`) links FFmpeg's compiled-in decoders and always decodes VP8/VP9 regardless of installed Python packages; backend decoding is what an install extends. Re-encoding an input to VP9 (`ffmpeg -i input.mp4 -c:v libvpx-vp9 -an output.webm`) is an alternative that needs no additional packages.

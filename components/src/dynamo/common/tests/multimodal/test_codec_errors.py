@@ -16,6 +16,18 @@ from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
 
 
+@pytest.fixture(autouse=True)
+def _carrier_absent(monkeypatch):
+    """Pin the hint's view of the interpreter to "carrier not installed".
+
+    ``_install_hint`` asks whether the carrier is already importable, so
+    without this the expected message would depend on whether the machine
+    running the tests happens to have cv2 or av installed. Tests covering the
+    present-but-unusable case override it.
+    """
+    monkeypatch.setattr(codec_errors.importlib.util, "find_spec", lambda name: None)
+
+
 def test_video_message_names_codec_and_spec(monkeypatch):
     monkeypatch.setattr(codec_errors, "nvdec_available", lambda: True)
     err = video_decoder_missing("vllm", "opencv-python-headless", "cv2", "vp9")
@@ -40,21 +52,37 @@ def test_audio_message_still_offers_the_installer():
     assert "install_media_decoders vllm" in str(err)
 
 
-def test_present_but_unusable_carrier_forces_a_binary_reinstall(monkeypatch):
+def test_present_but_unusable_carrier_pins_the_installed_version(monkeypatch):
     """A carrier already on the path needs more than a plain install.
 
-    The vLLM images ship an OpenCV built from source with no video backend, at
-    a version that satisfies the spec, so `pip install` alone reports the
-    requirement as satisfied and leaves it in place.
+    The vLLM images ship an OpenCV built from source with no video backend, so
+    the remedy is to swap that build for the wheel of the SAME version. The
+    validated range would be wrong here twice: what is installed can satisfy
+    it, so pip would change nothing, and its upper bound is below the 5.x those
+    images ship, so following it would downgrade off what vLLM resolved.
     """
     monkeypatch.setattr(codec_errors.importlib.util, "find_spec", lambda name: object())
+    monkeypatch.setattr(
+        codec_errors.importlib.metadata, "version", lambda p: "5.0.0.93"
+    )
     msg = str(video_decoder_missing("vllm", "opencv-python-headless", "cv2", "vp9"))
     assert "--force-reinstall" in msg
     assert "--only-binary opencv-python-headless" in msg
+    assert "opencv-python-headless==5.0.0.93" in msg
+    assert VALIDATED_SPECS["opencv-python-headless"] not in msg
 
-    monkeypatch.setattr(codec_errors.importlib.util, "find_spec", lambda name: None)
+
+def test_present_carrier_without_metadata_falls_back_to_the_spec(monkeypatch):
+    """Importable but with no distribution metadata: the spec is all we have."""
+    monkeypatch.setattr(codec_errors.importlib.util, "find_spec", lambda name: object())
+
+    def _missing(_package):
+        raise codec_errors.importlib.metadata.PackageNotFoundError
+
+    monkeypatch.setattr(codec_errors.importlib.metadata, "version", _missing)
     msg = str(video_decoder_missing("vllm", "opencv-python-headless", "cv2", "vp9"))
-    assert "--force-reinstall" not in msg
+    assert VALIDATED_SPECS["opencv-python-headless"] in msg
+    assert "--force-reinstall" in msg
 
 
 def test_hw_codec_without_nvdec_points_at_driver_capability(monkeypatch):
