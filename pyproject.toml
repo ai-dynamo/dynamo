@@ -343,6 +343,7 @@ markers = [
     "mocker: marks tests for the mocker component",
     "router: marks tests for router component",
     "planner: marks tests for planner component",
+    "sidecar: marks tests that launch a Dynamo dynamo-*-sidecar binary against its native-gRPC engine via lib/sidecar/*/launch/*.sh",
     "kvbm: marks tests for KV behavior and model determinism",
     "kvbm_consolidator: marks KVBM consolidator/router integration tests",
     "kvbm_determinism: marks KVBM model determinism tests",

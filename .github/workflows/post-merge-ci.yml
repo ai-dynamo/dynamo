@@ -214,6 +214,10 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-runtime-{0}', github.sha) || '' }}
+      # Lets sidecar-vllm-test-image (pr.yaml) layer onto the latest main -test
+      # image instead of rebuilding vllm-runtime on every lib/sidecar/**-only PR.
+      test_extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-vllm-runtime-test' || '' }}
       archive_sources: false
     secrets: inherit
 
@@ -279,6 +283,10 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-runtime-{0}', github.sha) || '' }}
+      # Lets sidecar-sglang-test-image (pr.yaml) layer onto the latest main -test
+      # image instead of rebuilding sglang-runtime on every lib/sidecar/**-only PR.
+      test_extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-sglang-runtime-test' || '' }}
       archive_sources: false
     secrets: inherit
 
@@ -344,6 +352,10 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-runtime-{0}', github.sha) || '' }}
+      # Lets sidecar-trtllm-test-image (pr.yaml) layer onto the latest main -test
+      # image instead of rebuilding trtllm-runtime on every lib/sidecar/**-only PR.
+      test_extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-trtllm-runtime-test' || '' }}
       archive_sources: false
     secrets: inherit
 

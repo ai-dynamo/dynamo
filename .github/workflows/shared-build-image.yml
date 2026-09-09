@@ -37,6 +37,11 @@ on:
         required: false
         type: string
         default: ''
+      test_extra_tags:
+        description: 'Additional tags for the -test image only (newline-separated plain tag names, no ECR prefix). Unlike extra_tags (runtime image), the -test image otherwise gets no floating tag.'
+        required: false
+        type: string
+        default: ''
       no_cache:
         description: 'Disable Docker build cache'
         required: false
@@ -603,6 +608,10 @@ jobs:
       - name: Build and Push Test Image
         if: ${{ !inputs.compliance_only && inputs.target != 'dev' && inputs.target != 'local-dev' && inputs.target != 'frontend' }}
         shell: bash
+        env:
+          ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          TEST_EXTRA_TAGS: ${{ inputs.test_extra_tags }}
         run: |
           PUSH_ARGS=""
           if [ "${{ inputs.push_image }}" == "true" ]; then
@@ -630,6 +639,15 @@ jobs:
             PYPI_SECRET_ARGS+=(--secret "id=pypi-netrc,src=${NETRC}")
           fi
 
+          TEST_TAG_ARGS=(-t "${{ steps.calculate-target-tag.outputs.test_image_uri }}")
+          if [ -n "$TEST_EXTRA_TAGS" ]; then
+            while IFS= read -r tag; do
+              if [ -n "$tag" ]; then
+                TEST_TAG_ARGS+=(-t "${ECR_REGISTRY}/${ECR_REPOSITORY}:${tag}")
+              fi
+            done <<< "$TEST_EXTRA_TAGS"
+          fi
+
           docker buildx build \
             --progress=plain \
             ${PUSH_ARGS} \
@@ -639,7 +657,7 @@ jobs:
             --target ${TEST_TARGET} \
             -f container/Dockerfile.test \
             --build-arg BASE_IMAGE=${{ steps.calculate-target-tag.outputs.image_uri }} \
-            -t ${{ steps.calculate-target-tag.outputs.test_image_uri }} .
+            "${TEST_TAG_ARGS[@]}" .
       - name: Show summary
         shell: bash
         if: ${{ inputs.push_image == 'true' && inputs.show_summary == 'true' }}
