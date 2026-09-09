@@ -511,6 +511,12 @@ pub mod llm {
         /// `DYN_HISTOGRAM_DYN_METRICS_ITL_MAX`. The doubled form is still read as
         /// a fallback, with a warning, and will be removed in a future release.
         pub const DEPRECATED_HISTOGRAM_PREFIX: &str = "DYN_HISTOGRAM_";
+
+        /// Former name of [`DEPRECATED_HISTOGRAM_PREFIX`], kept so that code outside
+        /// this workspace importing it keeps compiling. Remove together with the
+        /// doubled-name fallback.
+        #[deprecated(note = "use DEPRECATED_HISTOGRAM_PREFIX")]
+        pub const HISTOGRAM_PREFIX: &str = DEPRECATED_HISTOGRAM_PREFIX;
     }
 
     /// Forward-pass-metrics trace configuration.

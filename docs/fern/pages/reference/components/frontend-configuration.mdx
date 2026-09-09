@@ -529,8 +529,8 @@ The frontend's six latency and size histograms use log-spaced buckets, rounded t
 For example, to raise the inter-token latency ceiling from 2 seconds to 80:
 
 ```bash
-DYN_METRICS_ITL_MAX=80
-DYN_METRICS_ITL_COUNT=20
+export DYN_METRICS_ITL_MAX=80
+export DYN_METRICS_ITL_COUNT=20
 ```
 
 `dynamo_frontend_cached_tokens` shares the input sequence buckets, so `DYN_METRICS_INPUT_SEQUENCE_*` changes both histograms.
@@ -544,7 +544,7 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
 ```
 
 <Warning>
-  Prometheus cannot compute `histogram_quantile` across series with different `le` sets, so changing any of these values makes the new data non-comparable with data already scraped, and dashboards show a discontinuity at the restart. Bucket count also drives cardinality: each edge is a separate series per value of the `model` label.
+  Changing any of these values makes new data non-comparable with data already scraped. `histogram_quantile` still returns a number when a query spans two different `le` layouts, but aggregating incompatible bucket layouts yields misleading quantiles rather than an error, so dashboards show a discontinuity at the restart that is easy to misread as a real latency change. Bucket count also drives cardinality: each edge is a separate series per value of the `model` label.
 </Warning>
 
 <Note>

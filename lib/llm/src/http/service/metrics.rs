@@ -2565,17 +2565,43 @@ mod tests {
     // binary, not just this module). A module-local mutex would be insufficient because
     // `std::env::{set_var, remove_var}` race against `getenv` in any other thread.
 
+    /// Every ITL bucket variable, new and deprecated, cleared; `overrides` sets the ones a
+    /// test cares about. Clearing all of them matters: an inherited value a test does not
+    /// set — a `_MIN` above the `_MAX` under test, say — fails validation and reverts the
+    /// whole config, failing the assertion for a reason unrelated to what is being tested.
+    fn itl_env(overrides: &[(&'static str, &'static str)]) -> Vec<(&'static str, Option<String>)> {
+        let mut vars: Vec<(&'static str, Option<String>)> = [
+            "DYN_METRICS_ITL_MIN",
+            "DYN_METRICS_ITL_MAX",
+            "DYN_METRICS_ITL_COUNT",
+            "DYN_HISTOGRAM_DYN_METRICS_ITL_MIN",
+            "DYN_HISTOGRAM_DYN_METRICS_ITL_MAX",
+            "DYN_HISTOGRAM_DYN_METRICS_ITL_COUNT",
+        ]
+        .into_iter()
+        .map(|name| (name, None))
+        .collect();
+        for (name, value) in overrides {
+            let slot = vars
+                .iter_mut()
+                .find(|(n, _)| n == name)
+                .expect("override names a variable outside the cleared set");
+            slot.1 = Some((*value).to_string());
+        }
+        vars
+    }
+
     #[test]
     #[serial_test::serial]
     fn bucket_config_reads_the_documented_env_var_names() {
         // PR #4083 prepended DYN_HISTOGRAM_ to a prefix that already started with
         // DYN_METRICS_, so these names silently stopped working.
         temp_env::with_vars(
-            [
-                ("DYN_METRICS_ITL_MIN", Some("0.002")),
-                ("DYN_METRICS_ITL_MAX", Some("80")),
-                ("DYN_METRICS_ITL_COUNT", Some("20")),
-            ],
+            itl_env(&[
+                ("DYN_METRICS_ITL_MIN", "0.002"),
+                ("DYN_METRICS_ITL_MAX", "80"),
+                ("DYN_METRICS_ITL_COUNT", "20"),
+            ]),
             || {
                 let cfg = parse_bucket_config(env_metrics::DYN_METRICS_ITL, 0.001, 2.0, 13);
                 assert_eq!(cfg, (0.002, 80.0, 20));
@@ -2589,10 +2615,7 @@ mod tests {
         // The doubled form was the only working name between #4083 and this fix, so it
         // stays supported for one release rather than silently reverting to defaults.
         temp_env::with_vars(
-            [
-                ("DYN_METRICS_ITL_MAX", None),
-                ("DYN_HISTOGRAM_DYN_METRICS_ITL_MAX", Some("80")),
-            ],
+            itl_env(&[("DYN_HISTOGRAM_DYN_METRICS_ITL_MAX", "80")]),
             || {
                 let (_, max, _) = parse_bucket_config(env_metrics::DYN_METRICS_ITL, 0.001, 2.0, 13);
                 assert_eq!(max, 80.0);
@@ -2604,10 +2627,10 @@ mod tests {
     #[serial_test::serial]
     fn bucket_config_prefers_the_new_name_over_the_deprecated_one() {
         temp_env::with_vars(
-            [
-                ("DYN_METRICS_ITL_MAX", Some("80")),
-                ("DYN_HISTOGRAM_DYN_METRICS_ITL_MAX", Some("30")),
-            ],
+            itl_env(&[
+                ("DYN_METRICS_ITL_MAX", "80"),
+                ("DYN_HISTOGRAM_DYN_METRICS_ITL_MAX", "30"),
+            ]),
             || {
                 let (_, max, _) = parse_bucket_config(env_metrics::DYN_METRICS_ITL, 0.001, 2.0, 13);
                 assert_eq!(max, 80.0);
@@ -2621,14 +2644,10 @@ mod tests {
         // Unparseable also warns, which is what makes a typo diagnosable; the warning
         // itself is not asserted here, only that the default is preserved.
         temp_env::with_vars(
-            [
-                ("DYN_METRICS_ITL_MIN", Some("not-a-number")),
-                ("DYN_METRICS_ITL_MAX", None),
-                ("DYN_METRICS_ITL_COUNT", Some("12.5")),
-                ("DYN_HISTOGRAM_DYN_METRICS_ITL_MIN", None),
-                ("DYN_HISTOGRAM_DYN_METRICS_ITL_MAX", None),
-                ("DYN_HISTOGRAM_DYN_METRICS_ITL_COUNT", None),
-            ],
+            itl_env(&[
+                ("DYN_METRICS_ITL_MIN", "not-a-number"),
+                ("DYN_METRICS_ITL_COUNT", "12.5"),
+            ]),
             || {
                 let cfg = parse_bucket_config(env_metrics::DYN_METRICS_ITL, 0.001, 2.0, 13);
                 assert_eq!(cfg, (0.001, 2.0, 13));
@@ -2641,14 +2660,7 @@ mod tests {
     fn bucket_config_rejects_a_parseable_but_invalid_combination() {
         // min >= max parses fine but cannot produce buckets, so the whole set reverts.
         temp_env::with_vars(
-            [
-                ("DYN_METRICS_ITL_MIN", Some("5")),
-                ("DYN_METRICS_ITL_MAX", Some("1")),
-                ("DYN_METRICS_ITL_COUNT", None),
-                ("DYN_HISTOGRAM_DYN_METRICS_ITL_MIN", None),
-                ("DYN_HISTOGRAM_DYN_METRICS_ITL_MAX", None),
-                ("DYN_HISTOGRAM_DYN_METRICS_ITL_COUNT", None),
-            ],
+            itl_env(&[("DYN_METRICS_ITL_MIN", "5"), ("DYN_METRICS_ITL_MAX", "1")]),
             || {
                 let cfg = parse_bucket_config(env_metrics::DYN_METRICS_ITL, 0.001, 2.0, 13);
                 assert_eq!(cfg, (0.001, 2.0, 13));
@@ -2677,38 +2689,35 @@ mod tests {
     fn itl_ceiling_env_var_reaches_the_exported_le_labels() {
         // End to end: the documented name must move the `le` labels that
         // dashboards actually read, which is the only reliable confirmation operators have.
-        temp_env::with_vars(
-            [
-                ("DYN_METRICS_ITL_MAX", Some("80")),
-                ("DYN_METRICS_ITL_COUNT", Some("20")),
-                ("DYN_METRICS_PREFIX", None),
-                ("DYN_HISTOGRAM_DYN_METRICS_ITL_MAX", None),
-                ("DYN_HISTOGRAM_DYN_METRICS_ITL_COUNT", None),
-            ],
-            || {
-                let registry = Registry::new();
-                let metrics = Metrics::new();
-                metrics.register(&registry).unwrap();
-                metrics
-                    .inter_token_latency
-                    .with_label_values(&["m"])
-                    .observe(0.5);
+        let mut vars = itl_env(&[
+            ("DYN_METRICS_ITL_MAX", "80"),
+            ("DYN_METRICS_ITL_COUNT", "20"),
+        ]);
+        // The name prefix would otherwise change which metric family to look for.
+        vars.push(("DYN_METRICS_PREFIX", None));
+        temp_env::with_vars(vars, || {
+            let registry = Registry::new();
+            let metrics = Metrics::new();
+            metrics.register(&registry).unwrap();
+            metrics
+                .inter_token_latency
+                .with_label_values(&["m"])
+                .observe(0.5);
 
-                let bounds = bucket_upper_bounds(
-                    &registry,
-                    &format!(
-                        "{}_{}",
-                        name_prefix::FRONTEND,
-                        frontend_service::INTER_TOKEN_LATENCY_SECONDS
-                    ),
-                );
-                assert_eq!(
-                    bounds.last().copied(),
-                    Some(80.0),
-                    "top finite bucket should follow DYN_METRICS_ITL_MAX, got {bounds:?}"
-                );
-            },
-        );
+            let bounds = bucket_upper_bounds(
+                &registry,
+                &format!(
+                    "{}_{}",
+                    name_prefix::FRONTEND,
+                    frontend_service::INTER_TOKEN_LATENCY_SECONDS
+                ),
+            );
+            assert_eq!(
+                bounds.last().copied(),
+                Some(80.0),
+                "top finite bucket should follow DYN_METRICS_ITL_MAX, got {bounds:?}"
+            );
+        });
     }
 
     #[test]
