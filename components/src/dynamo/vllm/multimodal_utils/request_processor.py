@@ -181,17 +181,11 @@ def _build_user_mm_uuids(
         mm_uuids.setdefault(backend_modality, []).extend(values)
 
     if use_audio_in_video:
-        video_uuids = mm_uuids.get("video")
-        audio_uuids = mm_uuids.get("audio")
-        if video_uuids is not None or audio_uuids is not None:
-            video_uuids = (
-                video_uuids if video_uuids is not None else [None] * video_count
-            )
-            audio_uuids = (
-                audio_uuids
-                if audio_uuids is not None
-                else [None] * explicit_audio_count
-            )
+        explicit_audio_count = explicit_audio_count or 0
+        video_count = video_count or 0
+        if "video" in mm_uuids or "audio" in mm_uuids:
+            video_uuids = mm_uuids.get("video", [None] * video_count)
+            audio_uuids = mm_uuids.get("audio", [None] * explicit_audio_count)
             mm_uuids["audio"] = audio_uuids + video_uuids
 
     mm_uuids = {
