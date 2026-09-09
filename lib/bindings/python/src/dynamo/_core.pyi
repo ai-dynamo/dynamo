@@ -3379,6 +3379,7 @@ class backend:
             data_parallel_start_rank: Optional[int] = None,
             bootstrap_host: Optional[str] = None,
             bootstrap_port: Optional[int] = None,
+            enable_eagle: bool = False,
         ) -> None: ...
         @property
         def context_length(self) -> Optional[int]: ...
@@ -3398,6 +3399,8 @@ class backend:
         def bootstrap_host(self) -> Optional[str]: ...
         @property
         def bootstrap_port(self) -> Optional[int]: ...
+        @property
+        def enable_eagle(self) -> bool: ...
 
     class EngineConfig:
         def __init__(

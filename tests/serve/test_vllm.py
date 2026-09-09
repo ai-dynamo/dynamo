@@ -34,6 +34,7 @@ from tests.utils.payload_builder import (
     embedding_payload,
     embedding_payload_default,
     kv_events_metrics_payload,
+    lora_chat_payload,
     metric_payload_default,
     pooling_payload,
     router_cached_tokens_chat_payload,
@@ -43,7 +44,6 @@ from tests.utils.payloads import (
     EmbeddingMultiWorkerDispatchPayload,
     EmbeddingPayload,
     ToolCallingChatPayload,
-    lora_chat_payload,
 )
 
 logger = logging.getLogger(__name__)
