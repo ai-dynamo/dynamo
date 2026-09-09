@@ -22,7 +22,7 @@ try:
 except ImportError:
     grpcclient = None
 
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.managed_process import ManagedProcess, check_health_ready
 
 logger = logging.getLogger(__name__)
 
@@ -50,10 +50,7 @@ class EchoTensorWorkerProcess(ManagedProcess):
             command=command,
             env=env,
             health_check_urls=[
-                (
-                    f"http://localhost:{system_port}/health",
-                    lambda r: r.json().get("status") == "ready",
-                )
+                (f"http://localhost:{system_port}/health", check_health_ready)
             ],
             timeout=300,
             display_output=True,
