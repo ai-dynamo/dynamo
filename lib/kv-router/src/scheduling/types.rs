@@ -574,8 +574,8 @@ mod tests {
             session_context: None,
             overlap: OverlapSignals {
                 tier_overlap_blocks: Default::default(),
-                effective_overlap_blocks: HashMap::default(),
-                effective_cached_tokens: HashMap::default(),
+                effective_overlap_blocks: Default::default(),
+                effective_cached_tokens: Default::default(),
             },
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,

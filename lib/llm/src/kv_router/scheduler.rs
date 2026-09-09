@@ -555,7 +555,7 @@ where
         &self,
         token_seq: Option<Vec<SequenceHash>>,
         isl_tokens: usize,
-        effective_cached_tokens: HashMap<dynamo_kv_router::protocols::WorkerWithDpRank, usize>,
+        effective_cached_tokens: FxHashMap<dynamo_kv_router::protocols::WorkerWithDpRank, usize>,
         track_prefill_tokens: bool,
     ) -> Vec<PotentialLoad> {
         self.inner.get_potential_loads(
@@ -691,7 +691,7 @@ mod tests {
 
         assert_eq!(
             scheduler
-                .get_potential_loads(None, 64, HashMap::new(), true)
+                .get_potential_loads(None, 64, Default::default(), true)
                 .len(),
             1
         );
@@ -704,7 +704,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 if scheduler
-                    .get_potential_loads(None, 64, HashMap::new(), true)
+                    .get_potential_loads(None, 64, Default::default(), true)
                     .iter()
                     .any(|load| load.worker_id == 1)
                 {
