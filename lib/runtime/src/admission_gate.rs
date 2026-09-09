@@ -103,8 +103,12 @@
 //! Registration can complete after the gate has already admitted requests, so
 //! the limit stays adjustable rather than being frozen at construction.
 //!
-//! The TCP request plane keeps its own unrelated `DYN_TCP_WORKER_POOL_SIZE` /
-//! `DYN_TCP_WORK_QUEUE_SIZE` pool sizing.
+//! TCP requests pass through the TCP work queue and worker pool before reaching
+//! this gate, then keep their worker-pool permit while waiting here. The TCP
+//! pool can therefore limit how many requests reach the gate at once. Its
+//! `DYN_TCP_WORKER_POOL_SIZE` / `DYN_TCP_WORK_QUEUE_SIZE` controls remain
+//! separately configured from this gate; NATS has no corresponding TCP-side
+//! bound.
 
 use std::collections::VecDeque;
 use std::future::Future;
