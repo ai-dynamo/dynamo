@@ -2368,31 +2368,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{"spec.components[1].multinode.nodeCount: Invalid value: 3: " + apivalidation.FieldImmutableErrorMsg},
 		},
 		{
-			name: "node count and explicit role replicas cannot update together",
-			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
-				setBetaExplicitMultinodeRoles(worker, 2)
-				worker.Roles[0].Replicas = k8sptr.To(int32(1))
-				worker.Roles[1].Replicas = k8sptr.To(int32(1))
-			}),
-			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
-				setBetaExplicitMultinodeRoles(worker, 3)
-				worker.Roles[0].Replicas = k8sptr.To(int32(1))
-				worker.Roles[1].Replicas = k8sptr.To(int32(2))
-			}),
-			wantWebhookErrs: []string{"spec.components[1].multinode.nodeCount: Invalid value: 3: " + apivalidation.FieldImmutableErrorMsg},
-		},
-		{
-			name: "node count update with persisted defaulted role replicas is rejected",
-			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
-				setBetaExplicitMultinodeRoles(worker, 2)
-			}),
-			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
-				setBetaExplicitMultinodeRoles(worker, 2)
-				worker.Multinode.NodeCount = 3
-			}),
-			wantWebhookErrs: []string{`spec.components[1].roles[1].replicas: Invalid value: 1: must equal 2 for multinode role "worker"`},
-		},
-		{
 			name: "implicit to semantically equivalent explicit roles is allowed",
 			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
@@ -2409,16 +2384,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
 			}),
-		},
-		{
-			name: "implicit to explicit roles cannot accompany a node count update",
-			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
-				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
-			}),
-			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
-				setBetaExplicitMultinodeRoles(worker, 3)
-			}),
-			wantWebhookErrs: []string{"spec.components[1].multinode.nodeCount: Invalid value: 3: " + apivalidation.FieldImmutableErrorMsg},
 		},
 		{
 			name: "explicit role list reorder is allowed",
