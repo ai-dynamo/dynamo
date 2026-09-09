@@ -1241,6 +1241,16 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         result
     }
 
+    pub(crate) fn project_worker_loads_into(
+        &self,
+        token_sequence: Option<&[SequenceHash]>,
+        decay_now: Instant,
+        projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    ) {
+        self.prompt_registry
+            .project_worker_loads_into(token_sequence, decay_now, projections);
+    }
+
     /// Query all workers for their current number of active blocks.
     pub fn active_blocks(&self) -> HashMap<WorkerWithDpRank, usize> {
         self.prompt_registry.active_blocks()
@@ -2683,6 +2693,18 @@ mod tests {
             decay_now,
         );
         let projections = sequences.project_worker_loads(Some(&prompt), decay_now);
+
+        let mut reused = FxHashMap::default();
+        reused.insert(
+            WorkerWithDpRank::new(u64::MAX, 0),
+            WorkerLoadProjection::default(),
+        );
+        sequences.project_worker_loads_into(Some(&prompt), decay_now, &mut reused);
+        assert_eq!(reused, projections);
+        let capacity = reused.capacity();
+        sequences.project_worker_loads_into(None, decay_now, &mut reused);
+        assert_eq!(reused, sequences.project_worker_loads(None, decay_now));
+        assert_eq!(reused.capacity(), capacity);
 
         assert_eq!(actual.0, expected.0);
         assert_eq!(actual.1, expected.1);

@@ -304,10 +304,22 @@ impl PromptRegistry {
         token_sequence: Option<&[SequenceHash]>,
         decay_now: Instant,
     ) -> FxHashMap<WorkerWithDpRank, WorkerLoadProjection> {
+        let mut projections = FxHashMap::default();
+        self.project_worker_loads_into(token_sequence, decay_now, &mut projections);
+        projections
+    }
+
+    pub(super) fn project_worker_loads_into(
+        &self,
+        token_sequence: Option<&[SequenceHash]>,
+        decay_now: Instant,
+        projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    ) {
         let query_len = token_sequence.map_or(0, |query| query.len());
         let matched_depth = self.membership.compute_overlap_depths(token_sequence);
         let loads = self.loads.read();
-        let mut projections = FxHashMap::with_capacity_and_hasher(loads.len(), FxBuildHasher);
+        projections.clear();
+        projections.reserve(loads.len());
 
         for (worker, load) in loads.iter() {
             let overlap_depth = matched_depth.get(&worker).copied().unwrap_or(0);
@@ -321,8 +333,6 @@ impl PromptRegistry {
                 },
             );
         }
-
-        projections
     }
 
     pub(super) fn active_blocks(&self) -> HashMap<WorkerWithDpRank, usize> {

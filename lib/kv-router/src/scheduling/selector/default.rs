@@ -251,6 +251,9 @@ impl DefaultScoringContext {
     }
 }
 
+// Keep candidate construction in the scoring loop so LLVM can remove the
+// temporary WorkerCandidate and retain only the fields the default scorer uses.
+#[inline(always)]
 fn default_row(
     input: &MaterializedSelectionInput<'_>,
     context: DefaultScoringContext,
@@ -268,6 +271,7 @@ fn default_row(
 }
 
 impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
+    #[inline(always)]
     fn worker_logit(
         &self,
         context: &WorkerSelectionContext<'_>,
@@ -673,8 +677,8 @@ mod tests {
             isl_tokens: 16,
             overlap: OverlapSignals {
                 tier_overlap_blocks: Default::default(),
-                effective_overlap_blocks: HashMap::default(),
-                effective_cached_tokens: HashMap::default(),
+                effective_overlap_blocks: Default::default(),
+                effective_cached_tokens: Default::default(),
             },
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,
@@ -1076,8 +1080,8 @@ mod tests {
             isl_tokens: 16,
             overlap: OverlapSignals {
                 tier_overlap_blocks: Default::default(),
-                effective_overlap_blocks: HashMap::default(),
-                effective_cached_tokens: HashMap::default(),
+                effective_overlap_blocks: Default::default(),
+                effective_cached_tokens: Default::default(),
             },
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,
@@ -1135,8 +1139,8 @@ mod tests {
             isl_tokens: 16,
             overlap: OverlapSignals {
                 tier_overlap_blocks: Default::default(),
-                effective_overlap_blocks: HashMap::default(),
-                effective_cached_tokens: HashMap::default(),
+                effective_overlap_blocks: Default::default(),
+                effective_cached_tokens: Default::default(),
             },
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,
@@ -1212,8 +1216,8 @@ mod tests {
                 isl_tokens: 16,
                 overlap: OverlapSignals {
                     tier_overlap_blocks: Default::default(),
-                    effective_overlap_blocks: HashMap::default(),
-                    effective_cached_tokens: HashMap::default(),
+                    effective_overlap_blocks: Default::default(),
+                    effective_cached_tokens: Default::default(),
                 },
                 kv_transfer_candidates: None,
                 retain_kv_transfer_chain: false,
@@ -1287,8 +1291,8 @@ mod tests {
             isl_tokens: 16,
             overlap: OverlapSignals {
                 tier_overlap_blocks: Default::default(),
-                effective_overlap_blocks: HashMap::default(),
-                effective_cached_tokens: HashMap::default(),
+                effective_overlap_blocks: Default::default(),
+                effective_cached_tokens: Default::default(),
             },
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,
@@ -1358,8 +1362,8 @@ mod tests {
             isl_tokens: 16,
             overlap: OverlapSignals {
                 tier_overlap_blocks: Default::default(),
-                effective_overlap_blocks: HashMap::default(),
-                effective_cached_tokens: HashMap::default(),
+                effective_overlap_blocks: Default::default(),
+                effective_cached_tokens: Default::default(),
             },
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,
@@ -1411,11 +1415,11 @@ mod tests {
         let isl = 4usize;
         let worker0 = WorkerWithDpRank::from_worker_id(0);
 
-        let mut effective_overlap_blocks = HashMap::new();
+        let mut effective_overlap_blocks = rustc_hash::FxHashMap::default();
         effective_overlap_blocks.insert(worker0, 2.0);
         // worker1 has 0 overlap (not in map)
 
-        let mut effective_cached_tokens = HashMap::new();
+        let mut effective_cached_tokens = rustc_hash::FxHashMap::default();
         effective_cached_tokens.insert(worker0, 2);
 
         let mut tier_overlap_blocks = crate::scheduling::TierOverlapBlocks::default();
@@ -1492,7 +1496,7 @@ mod tests {
         let worker0 = WorkerWithDpRank::from_worker_id(0);
         let worker1 = WorkerWithDpRank::from_worker_id(1);
 
-        let mut effective_cached_tokens = HashMap::new();
+        let mut effective_cached_tokens = rustc_hash::FxHashMap::default();
         effective_cached_tokens.insert(worker0, 32);
 
         let mut tier_overlap_blocks = crate::scheduling::TierOverlapBlocks::default();
@@ -1523,7 +1527,7 @@ mod tests {
             isl_tokens: isl,
             overlap: OverlapSignals {
                 tier_overlap_blocks,
-                effective_overlap_blocks: HashMap::new(),
+                effective_overlap_blocks: Default::default(),
                 effective_cached_tokens,
             },
             kv_transfer_candidates: None,
@@ -1798,7 +1802,7 @@ mod tests {
         let worker0 = WorkerWithDpRank::from_worker_id(0);
         let worker1 = WorkerWithDpRank::from_worker_id(1);
 
-        let mut effective_overlap_blocks = HashMap::new();
+        let mut effective_overlap_blocks = rustc_hash::FxHashMap::default();
         effective_overlap_blocks.insert(worker0, 4.0);
 
         let config = KvRouterConfig {
@@ -1826,7 +1830,7 @@ mod tests {
             overlap: OverlapSignals {
                 tier_overlap_blocks: Default::default(),
                 effective_overlap_blocks,
-                effective_cached_tokens: HashMap::new(),
+                effective_cached_tokens: Default::default(),
             },
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,
@@ -1898,7 +1902,7 @@ mod tests {
         let isl = 64usize;
         let worker0 = WorkerWithDpRank::from_worker_id(0);
 
-        let mut effective_overlap_blocks = HashMap::new();
+        let mut effective_overlap_blocks = rustc_hash::FxHashMap::default();
         effective_overlap_blocks.insert(worker0, 2.0);
 
         let config = KvRouterConfig::default();
@@ -1916,7 +1920,7 @@ mod tests {
             overlap: OverlapSignals {
                 tier_overlap_blocks: Default::default(),
                 effective_overlap_blocks,
-                effective_cached_tokens: HashMap::new(),
+                effective_cached_tokens: Default::default(),
             },
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,

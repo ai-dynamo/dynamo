@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use crossbeam_queue::SegQueue;
 use parking_lot::Mutex;
+use rustc_hash::FxHashMap;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
@@ -36,7 +37,7 @@ use crate::protocols::{
 use crate::sequences::topology::WorkerDpRange;
 use crate::sequences::{
     ActiveSequencesMultiWorker, LifecycleMutationOutcome, SequenceError, SequencePublisher,
-    SequenceRequest,
+    SequenceRequest, WorkerLoadProjection,
 };
 
 /// Large default for max_num_batched_tokens when not configured (effectively disables queueing for that worker)
@@ -428,6 +429,8 @@ struct SchedulerQueueActor<
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
     available_worker_provider: Option<WorkerAvailabilityProvider>,
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
+    // Storage only: all request-specific values are recomputed before selection.
+    projection_scratch: FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
 }
 
 /// Queue that gates scheduling requests behind a capacity check.
@@ -567,6 +570,7 @@ impl<
             overloaded_worker_provider,
             available_worker_provider,
             non_max_overlap_selection_observer: Arc::clone(&non_max_overlap_selection_observer),
+            projection_scratch: FxHashMap::default(),
         };
         tokio::spawn(actor.run(admission_rx));
         Self {
@@ -1292,15 +1296,18 @@ impl<
     }
 
     fn select_worker_for_request(
-        &self,
+        &mut self,
         request: &mut SchedulingRequest,
         decay_now: Instant,
     ) -> Result<SelectedWorkerForRequest, KvSchedulerError> {
-        request.worker_loads = self
-            .slots
-            .project_worker_loads(request.token_seq.as_deref(), decay_now);
+        std::mem::swap(&mut request.worker_loads, &mut self.projection_scratch);
+        self.slots.project_worker_loads_into(
+            request.token_seq.as_deref(),
+            decay_now,
+            &mut request.worker_loads,
+        );
 
-        {
+        let result = {
             let workers = self.workers_with_configs.borrow();
             let overloaded_worker_ids = self
                 .overloaded_worker_provider
@@ -1365,11 +1372,16 @@ impl<
                         non_max_overlap_selection,
                     }
                 })
-        }
+        };
+        // The selected result owns every load value needed by booking and the
+        // response. Return the map's allocation to the actor on success or error.
+        std::mem::swap(&mut request.worker_loads, &mut self.projection_scratch);
+        self.projection_scratch.clear();
+        result
     }
 
     fn select_without_admission_inner(
-        &self,
+        &mut self,
         mut request: SchedulingRequest,
         decay_now: Instant,
     ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
@@ -3499,11 +3511,15 @@ policy_classes:
                     effective_overlap_blocks: HashMap::from([
                         (WorkerWithDpRank::new(0, 0), 1.0),
                         (WorkerWithDpRank::new(1, 0), 9.0),
-                    ]),
+                    ])
+                    .into_iter()
+                    .collect(),
                     effective_cached_tokens: HashMap::from([
                         (WorkerWithDpRank::new(0, 0), 16),
                         (WorkerWithDpRank::new(1, 0), 144),
-                    ]),
+                    ])
+                    .into_iter()
+                    .collect(),
                 },
             },
         });
@@ -3594,8 +3610,8 @@ policy_classes:
                 }),
                 overlap: OverlapSignals {
                     tier_overlap_blocks: Default::default(),
-                    effective_overlap_blocks: HashMap::from([(worker, 5.0)]),
-                    effective_cached_tokens: HashMap::from([(worker, 80)]),
+                    effective_overlap_blocks: HashMap::from([(worker, 5.0)]).into_iter().collect(),
+                    effective_cached_tokens: HashMap::from([(worker, 80)]).into_iter().collect(),
                 },
             },
         });
@@ -3638,8 +3654,8 @@ policy_classes:
         let refresher = Arc::new(BlockingRefresher::new(RefreshedOverlap::from_overlap(
             OverlapSignals {
                 tier_overlap_blocks: Default::default(),
-                effective_overlap_blocks: HashMap::from([(worker, 7.0)]),
-                effective_cached_tokens: HashMap::from([(worker, 56)]),
+                effective_overlap_blocks: HashMap::from([(worker, 7.0)]).into_iter().collect(),
+                effective_cached_tokens: HashMap::from([(worker, 56)]).into_iter().collect(),
             },
         )));
         let (queue, slots) = make_queue_with_blocking_refresher(

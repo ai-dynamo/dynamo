@@ -170,6 +170,7 @@ impl<'a> MaterializedSelectionInput<'a> {
         )
     }
 
+    #[inline(always)]
     fn row_with_device_overlap(
         &self,
         worker: WorkerWithDpRank,
