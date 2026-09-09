@@ -12,6 +12,7 @@ import (
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -164,11 +165,16 @@ func observeLPXRestart(ctx context.Context, reader client.Reader, source *v1beta
 // Its identity is already reconciled; results and conditions still require current generations.
 // child may be nil or deleting; all other pointer inputs must be non-nil.
 func projectLPXChildStatus(source *v1beta1.DynamoGraphDeployment, child *v1alpha1.LPXGraphDeployment, result *ReconcileResult, status *v1beta1.DynamoGraphDeploymentStatus) {
+	previousLPX := status.LPX
 	status.LPX = nil
 	components := lpx.Components(source)
 	if len(components) == 0 && child == nil {
+		if previousLPX != nil && apiequality.Semantic.DeepEqual(status.Placement, previousLPX.Placement) {
+			status.Placement = nil
+		}
 		return
 	}
+	status.Placement = nil
 	if result.ComponentStatus == nil {
 		result.ComponentStatus = make(map[string]v1beta1.ComponentReplicaStatus)
 	}
@@ -194,6 +200,8 @@ func projectLPXChildStatus(source *v1beta1.DynamoGraphDeployment, child *v1alpha
 		if status.LPX.Placement != nil && status.LPX.Placement.LPXAttempt != nil {
 			status.LPX.Placement.LPXAttempt.ObservedGeneration = source.Generation
 		}
+		// Keep the established DGD-level field as a compatibility projection of LPX-owned placement.
+		status.Placement = status.LPX.Placement
 		// Project only current authored members from the single observed child.
 		for _, component := range components {
 			if observedStatus, found := child.Status.Components[component.ComponentName]; found {

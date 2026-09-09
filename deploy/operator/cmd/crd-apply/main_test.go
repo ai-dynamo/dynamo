@@ -22,6 +22,8 @@ import (
 )
 
 func TestCRDApplyInstallsGeneratedSchemas(t *testing.T) {
+	const objectType = "object"
+
 	t.Log("Start a local API server with its default request and storage limits")
 	env := &envtest.Environment{UseExistingCluster: ptr.To(false)}
 	config, err := env.Start()
@@ -74,7 +76,7 @@ func TestCRDApplyInstallsGeneratedSchemas(t *testing.T) {
 		}
 	}
 
-	t.Log("Verify installed schemas keep public LPX status grouped and private child status flat")
+	t.Log("Verify installed schemas preserve DGD placement, keep LPX status grouped, and keep private child status flat")
 	client, err := apiextensionsclient.NewForConfig(config)
 	if err != nil {
 		t.Fatal(err)
@@ -109,7 +111,7 @@ func TestCRDApplyInstallsGeneratedSchemas(t *testing.T) {
 					templateField = "extraPodSpec"
 				}
 				template := version.Schema.OpenAPIV3Schema.Properties["spec"].Properties[templateField]
-				if template.Type != "object" || template.Description == "" {
+				if template.Type != objectType || template.Description == "" {
 					t.Errorf("%s %s is missing the documented %s schema", name, version.Name, templateField)
 				}
 			}
@@ -118,17 +120,18 @@ func TestCRDApplyInstallsGeneratedSchemas(t *testing.T) {
 		for _, version := range crd.Spec.Versions {
 			status := version.Schema.OpenAPIV3Schema.Properties["status"]
 			if name == "dynamographdeployments.nvidia.com" {
-				for _, field := range []string{"modelDownload", "placement"} {
-					if _, exists := status.Properties[field]; exists {
-						t.Errorf("%s %s retains status.%s", name, version.Name, field)
-					}
+				if _, exists := status.Properties["modelDownload"]; exists {
+					t.Errorf("%s %s retains status.modelDownload", name, version.Name)
+				}
+				if status.Properties["placement"].Type != objectType {
+					t.Errorf("%s %s is missing the established status.placement projection", name, version.Name)
 				}
 				status = status.Properties["lpx"]
 			} else if _, exists := status.Properties["lpx"]; exists {
 				t.Errorf("%s %s unexpectedly groups private child status", name, version.Name)
 			}
 			for _, field := range []string{"modelDownload", "placement"} {
-				if status.Properties[field].Type != "object" {
+				if status.Properties[field].Type != objectType {
 					t.Errorf("%s %s is missing the typed %s projection", name, version.Name, field)
 				}
 			}

@@ -641,6 +641,7 @@ _Appears in:_
 | `services` _object (keys:string, values:[ServiceReplicaStatus](#servicereplicastatus))_ | Services contains per-service replica status information.<br />The map key is the service name from spec.services. |  | Optional: \{\} <br /> |
 | `restart` _[RestartStatus](#restartstatus)_ | Restart contains the status of the restart of the graph deployment. |  | Optional: \{\} <br /> |
 | `checkpoints` _object (keys:string, values:[ServiceCheckpointStatus](#servicecheckpointstatus))_ | Checkpoints contains per-service checkpoint status information.<br />The map key is the service name from spec.services. |  | Optional: \{\} <br /> |
+| `placement` _[PlacementStatus](#placementstatus)_ | Placement groups DGD-level scheduler placement signals (score, reporting<br />state, and any future placement fields). |  | Optional: \{\} <br /> |
 | `lpx` _[DynamoGraphDeploymentLPXStatus](#dynamographdeploymentlpxstatus)_ | LPX contains the status of the graph's LPX workload, when present. |  | Optional: \{\} <br /> |
 | `rollingUpdate` _[RollingUpdateStatus](#rollingupdatestatus)_ | RollingUpdate tracks the progress of operator manged rolling updates.<br />Currently only supported for singl-node, non-Grove deployments (DCD/Deployment). |  | Optional: \{\} <br /> |
 
@@ -982,6 +983,45 @@ _Appears in:_
 | `preferredWeight` _float_ | PreferredWeight is required and used only when enforcement is<br />"preferred". Higher values create a stronger same-domain routing<br />preference, but do not guarantee same-domain selection. The value is not<br />a probability; worker selection still depends on load and other routing<br />inputs. A value of 0 disables the topology preference; 1 is the strongest<br />supported preference. |  | Maximum: 1 <br />Minimum: 0 <br />Optional: \{\} <br /> |
 
 
+#### LPXAttemptRequestStatus
+
+
+
+LPXAttemptRequestStatus identifies one exact request in the aggregate attempt.
+
+
+
+_Appears in:_
+- [LPXAttemptStatus](#lpxattemptstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ |  |  |  |
+| `attemptDigest` _string_ |  |  |  |
+| `uid` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg)_ |  |  |  |
+
+
+#### LPXAttemptStatus
+
+
+
+LPXAttemptStatus mirrors the v1beta1 durable LPX attempt authority record.
+
+
+
+_Appears in:_
+- [PlacementStatus](#placementstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `observedGeneration` _integer_ |  |  |  |
+| `podCliqueSetUID` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg)_ |  |  |  |
+| `deadlineAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ |  |  |  |
+| `exceededAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ |  |  |  |
+| `disarmedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ |  |  |  |
+| `requests` _[LPXAttemptRequestStatus](#lpxattemptrequeststatus) array_ |  |  | MaxItems: 9 <br />MinItems: 1 <br /> |
+
+
 
 
 #### ModelReference
@@ -1053,6 +1093,48 @@ _Appears in:_
 | `storageClass` _string_ | StorageClass to be used for PVC creation. Required when create is true. |  |  |
 | `size` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ | Size of the volume in Gi, used during PVC creation. Required when create is true. |  |  |
 | `volumeAccessMode` _[PersistentVolumeAccessMode](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#persistentvolumeaccessmode-v1-core)_ | VolumeAccessMode is the volume access mode of the PVC. Required when create is true. |  |  |
+
+
+#### PlacementScoreState
+
+_Underlying type:_ _string_
+
+PlacementScoreState describes whether placement score is available and how
+complete the reported score is for a graph deployment. See the v1beta1
+PlacementScoreState for the authoritative semantics of each value.
+
+_Validation:_
+- Enum: [Reported Partial Unsupported Unknown]
+
+_Appears in:_
+- [PlacementStatus](#placementstatus)
+
+| Field | Description |
+| --- | --- |
+| `Reported` |  |
+| `Partial` |  |
+| `Unsupported` |  |
+| `Unknown` |  |
+
+
+#### PlacementStatus
+
+
+
+PlacementStatus groups DGD-level scheduler placement fields under a single
+status object so future placement signals can be added without a schema
+break. See the v1beta1 PlacementStatus for the authoritative field docs.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `score` _float_ | Score is the DGD-level scheduler placement score. Normalized to [0.0, 1.0]<br />where higher is better and 1.0 is the best possible placement. |  | Maximum: 1 <br />Minimum: 0 <br />Optional: \{\} <br /> |
+| `state` _[PlacementScoreState](#placementscorestate)_ | State indicates placement score reporting state. |  | Enum: [Reported Partial Unsupported Unknown] <br />Optional: \{\} <br /> |
+| `lpxAttempt` _[LPXAttemptStatus](#lpxattemptstatus)_ | LPXAttempt is Dynamo's durable aggregate LPX scheduling-attempt authority record. |  | Optional: \{\} <br /> |
 
 
 #### ProfilingConfigSpec
@@ -2204,6 +2286,7 @@ _Appears in:_
 | `components` _object (keys:string, values:[ComponentReplicaStatus](#componentreplicastatus))_ | components contains per-component replica status information, keyed by component name. |  | Optional: \{\} <br /> |
 | `restart` _[RestartStatus](#restartstatus)_ | restart contains the status of a graph-level restart. |  | Optional: \{\} <br /> |
 | `checkpoints` _object (keys:string, values:[ComponentCheckpointStatus](#componentcheckpointstatus))_ | checkpoints contains per-component checkpoint status, keyed by component name. |  | Optional: \{\} <br /> |
+| `placement` _[PlacementStatus](#placementstatus)_ | placement groups DGD-level scheduler placement signals (score, reporting<br />state, and any future placement fields). |  | Optional: \{\} <br /> |
 | `lpx` _[DynamoGraphDeploymentLPXStatus](#dynamographdeploymentlpxstatus)_ | lpx contains the status of the graph's LPX workload, when present. |  | Optional: \{\} <br /> |
 | `rollingUpdate` _[RollingUpdateStatus](#rollingupdatestatus)_ | rollingUpdate tracks the progress of operator-managed rolling updates.<br />Currently only supported for single-node, non-Grove deployments (DCD/Deployment). |  | Optional: \{\} <br /> |
 
@@ -2741,15 +2824,16 @@ PlacementStatus groups DGD-level scheduler placement fields under a single
 status object so future placement signals (e.g. scheduler contract version,
 last-report timestamp, per-unit reports) can be added without a schema break.
 
-The score source is an open question in DEP #10064 (Grove mirror, typed Grove
-scheduler API, or unstructured provider). Until a source is selected and
-implemented, the DGD controller does not write this field; the schema and
-conversion are landed here so downstream consumers can rely on the shape.
+The generic score source is an open question in DEP #10064 (Grove mirror,
+typed Grove scheduler API, or unstructured provider). Until one is selected,
+the DGD controller writes this field only as a compatibility projection of
+current LPX placement.
 
 
 
 _Appears in:_
 - [DynamoGraphDeploymentLPXStatus](#dynamographdeploymentlpxstatus)
+- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |

@@ -133,6 +133,11 @@ type DynamoGraphDeploymentStatus struct {
 	// +optional
 	Checkpoints map[string]ComponentCheckpointStatus `json:"checkpoints,omitempty"`
 
+	// placement groups DGD-level scheduler placement signals (score, reporting
+	// state, and any future placement fields).
+	// +optional
+	Placement *PlacementStatus `json:"placement,omitempty"`
+
 	// lpx contains the status of the graph's LPX workload, when present.
 	// +optional
 	LPX *DynamoGraphDeploymentLPXStatus `json:"lpx,omitempty"`

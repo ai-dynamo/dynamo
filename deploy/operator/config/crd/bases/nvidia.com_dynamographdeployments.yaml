@@ -16067,6 +16067,76 @@ spec:
                   description: ObservedGeneration is the most recent generation observed by the controller.
                   format: int64
                   type: integer
+                placement:
+                  description: |-
+                    Placement groups DGD-level scheduler placement signals (score, reporting
+                    state, and any future placement fields).
+                  properties:
+                    lpxAttempt:
+                      description: LPXAttempt is Dynamo's durable aggregate LPX scheduling-attempt authority record.
+                      properties:
+                        deadlineAt:
+                          format: date-time
+                          type: string
+                        disarmedAt:
+                          format: date-time
+                          type: string
+                        exceededAt:
+                          format: date-time
+                          type: string
+                        observedGeneration:
+                          format: int64
+                          type: integer
+                        podCliqueSetUID:
+                          description: |-
+                            UID is a type that holds unique ID values, including UUIDs.  Because we
+                            don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                            intent and helps make sure that UIDs and names do not get conflated.
+                          type: string
+                        requests:
+                          items:
+                            description: LPXAttemptRequestStatus identifies one exact request in the aggregate attempt.
+                            properties:
+                              attemptDigest:
+                                type: string
+                              name:
+                                type: string
+                              uid:
+                                description: |-
+                                  UID is a type that holds unique ID values, including UUIDs.  Because we
+                                  don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                                  intent and helps make sure that UIDs and names do not get conflated.
+                                type: string
+                            required:
+                              - attemptDigest
+                              - name
+                            type: object
+                          maxItems: 9
+                          minItems: 1
+                          type: array
+                          x-kubernetes-list-map-keys:
+                            - name
+                          x-kubernetes-list-type: map
+                      required:
+                        - observedGeneration
+                        - requests
+                      type: object
+                    score:
+                      description: |-
+                        Score is the DGD-level scheduler placement score. Normalized to [0.0, 1.0]
+                        where higher is better and 1.0 is the best possible placement.
+                      maximum: 1
+                      minimum: 0
+                      type: number
+                    state:
+                      description: State indicates placement score reporting state.
+                      enum:
+                        - Reported
+                        - Partial
+                        - Unsupported
+                        - Unknown
+                      type: string
+                  type: object
                 restart:
                   description: Restart contains the status of the restart of the graph deployment.
                   properties:
@@ -25855,6 +25925,82 @@ spec:
                   description: observedGeneration is the most recent generation observed by the controller.
                   format: int64
                   type: integer
+                placement:
+                  description: |-
+                    placement groups DGD-level scheduler placement signals (score, reporting
+                    state, and any future placement fields).
+                  properties:
+                    lpxAttempt:
+                      description: lpxAttempt is Dynamo's durable aggregate LPX scheduling-attempt authority record.
+                      properties:
+                        deadlineAt:
+                          format: date-time
+                          type: string
+                        disarmedAt:
+                          format: date-time
+                          type: string
+                        exceededAt:
+                          format: date-time
+                          type: string
+                        observedGeneration:
+                          format: int64
+                          type: integer
+                        podCliqueSetUID:
+                          description: |-
+                            UID is a type that holds unique ID values, including UUIDs.  Because we
+                            don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                            intent and helps make sure that UIDs and names do not get conflated.
+                          type: string
+                        requests:
+                          items:
+                            description: LPXAttemptRequestStatus identifies one exact request in the aggregate attempt.
+                            properties:
+                              attemptDigest:
+                                type: string
+                              name:
+                                type: string
+                              uid:
+                                description: |-
+                                  UID is a type that holds unique ID values, including UUIDs.  Because we
+                                  don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                                  intent and helps make sure that UIDs and names do not get conflated.
+                                type: string
+                            required:
+                              - attemptDigest
+                              - name
+                            type: object
+                          maxItems: 9
+                          minItems: 1
+                          type: array
+                          x-kubernetes-list-map-keys:
+                            - name
+                          x-kubernetes-list-type: map
+                      required:
+                        - observedGeneration
+                        - requests
+                      type: object
+                    score:
+                      description: |-
+                        score is the DGD-level scheduler placement score aggregated from
+                        relevant scheduler placement units. Normalized to [0.0, 1.0] where higher
+                        is better and 1.0 represents the best possible placement. Aggregation
+                        uses the minimum across placement units so the value is a worst-placement
+                        signal for the graph. Scores are only comparable across DGDs that share
+                        the same scheduler scoring contract and version.
+                      maximum: 1
+                      minimum: 0
+                      type: number
+                    state:
+                      description: |-
+                        state indicates placement score reporting state. See PlacementScoreState
+                        for the semantics of each value.
+                      enum:
+                        - Reported
+                        - Partial
+                        - Unsupported
+                        - Unknown
+                      type: string
+                  type: object
                 restart:
                   description: restart contains the status of a graph-level restart.
                   properties:

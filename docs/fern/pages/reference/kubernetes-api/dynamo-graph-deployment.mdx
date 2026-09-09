@@ -168,6 +168,10 @@ The operator maintains observed state under `status`.
   Most recent `metadata.generation` observed by the controller.
 </ParamField>
 
+<ParamField path="status.placement" type="PlacementStatus">
+  Public deployment-level placement summary. For LPX workloads, this field mirrors `status.lpx.placement` for compatibility with existing clients.
+</ParamField>
+
 <ParamField path="status.lpx" type="DynamoGraphDeploymentLPXStatus">
   LPX download and placement observations for the current configuration. Omitted when no current LPX result exists, including ordinary-only deployments. LPX component entries and aggregate readiness remain under `status.components`, `status.state`, and `status.conditions`.
 </ParamField>

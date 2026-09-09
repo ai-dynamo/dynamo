@@ -958,6 +958,10 @@ func TestDGD_RoundTrip_Status(t *testing.T) {
 		Status: v1beta1.DynamoGraphDeploymentStatus{
 			ObservedGeneration: 7,
 			State:              v1beta1.DGDStateSuccessful,
+			Placement: &v1beta1.PlacementStatus{
+				Score: ptr.To(0.92),
+				State: v1beta1.PlacementScoreStateReported,
+			},
 			LPX: &v1beta1.DynamoGraphDeploymentLPXStatus{
 				Placement: &v1beta1.PlacementStatus{
 					Score: ptr.To(0.87),

@@ -10,10 +10,10 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 3 Kubernetes API packages with 174 typed CRD and config sections.
+Dynamo publishes 3 Kubernetes API packages with 178 typed CRD and config sections.
 
 <CardGroup cols={3}>
-<Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">68 types</Card>
+<Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">72 types</Card>
 <Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">76 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">30 types</Card>
 </CardGroup>
@@ -1104,6 +1104,12 @@ See [ServiceCheckpointStatus](#servicecheckpointstatus).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
+<ParamField path="placement" type="PlacementStatus">
+Placement groups DGD-level scheduler placement signals (score, reporting state, and any future placement fields).
+See [PlacementStatus](#placementstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
 <ParamField path="lpx" type="DynamoGraphDeploymentLPXStatus">
 LPX contains the status of the graph's LPX workload, when present.
 See [DynamoGraphDeploymentLPXStatus](#dynamographdeploymentlpxstatus).
@@ -1525,6 +1531,56 @@ PreferredWeight is required and used only when enforcement is "preferred". Highe
 </ParamField>
 </Accordion>
 
+<Accordion id="lpxattemptrequeststatus" title="LPXAttemptRequestStatus">
+LPXAttemptRequestStatus identifies one exact request in the aggregate attempt.
+
+
+**Kind:** `type`
+**Appears in:** [LPXAttemptStatus](#lpxattemptstatus)
+
+<ParamField path="name" type="string">
+</ParamField>
+
+<ParamField path="attemptDigest" type="string">
+</ParamField>
+
+<ParamField path="uid" type="UID">
+See [UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg).
+</ParamField>
+</Accordion>
+
+<Accordion id="lpxattemptstatus" title="LPXAttemptStatus">
+LPXAttemptStatus mirrors the v1beta1 durable LPX attempt authority record.
+
+
+**Kind:** `type`
+**Appears in:** [PlacementStatus](#placementstatus)
+
+<ParamField path="observedGeneration" type="integer">
+</ParamField>
+
+<ParamField path="podCliqueSetUID" type="UID">
+See [UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg).
+</ParamField>
+
+<ParamField path="deadlineAt" type="Time">
+See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
+</ParamField>
+
+<ParamField path="exceededAt" type="Time">
+See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
+</ParamField>
+
+<ParamField path="disarmedAt" type="Time">
+See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
+</ParamField>
+
+<ParamField path="requests" type="LPXAttemptRequestStatus array">
+See [LPXAttemptRequestStatus](#lpxattemptrequeststatus).
+**Validation:** MaxItems: 9  MinItems: 1
+</ParamField>
+</Accordion>
+
 <Accordion id="modelreference" title="ModelReference">
 ModelReference identifies a model served by this component
 
@@ -1593,6 +1649,52 @@ See [Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.
 <ParamField path="volumeAccessMode" type="PersistentVolumeAccessMode">
 VolumeAccessMode is the volume access mode of the PVC. Required when create is true.
 See [PersistentVolumeAccessMode](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#persistentvolumeaccessmode-v1-core).
+</ParamField>
+</Accordion>
+
+<Accordion id="placementscorestate" title="PlacementScoreState">
+PlacementScoreState describes whether placement score is available and how
+complete the reported score is for a graph deployment. See the v1beta1
+PlacementScoreState for the authoritative semantics of each value.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [Reported Partial Unsupported Unknown]
+**Appears in:** [PlacementStatus](#placementstatus)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>Reported</Badge>
+- <Badge intent="note" minimal>Partial</Badge>
+- <Badge intent="note" minimal>Unsupported</Badge>
+- <Badge intent="note" minimal>Unknown</Badge>
+</Accordion>
+
+<Accordion id="placementstatus" title="PlacementStatus">
+PlacementStatus groups DGD-level scheduler placement fields under a single
+status object so future placement signals can be added without a schema
+break. See the v1beta1 PlacementStatus for the authoritative field docs.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+
+<ParamField path="score" type="float">
+Score is the DGD-level scheduler placement score. Normalized to [0.0, 1.0] where higher is better and 1.0 is the best possible placement.
+**Validation:** Maximum: 1  Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="state" type="PlacementScoreState">
+State indicates placement score reporting state.
+See [PlacementScoreState](#placementscorestate).
+**Validation:** Enum: [Reported Partial Unsupported Unknown]  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="lpxAttempt" type="LPXAttemptStatus">
+LPXAttempt is Dynamo's durable aggregate LPX scheduling-attempt authority record.
+See [LPXAttemptStatus](#lpxattemptstatus).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -2936,7 +3038,7 @@ See [ModelDownloadStatus](#modeldownloadstatus).
 
 <ParamField path="placement" type="PlacementStatus">
 placement contains LPX scheduling progress and placement signals.
-See [PlacementStatus](#placementstatus).
+See [PlacementStatus](#v1beta1-placementstatus).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -3307,6 +3409,12 @@ See [ComponentCheckpointStatus](#componentcheckpointstatus).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
+<ParamField path="placement" type="PlacementStatus">
+placement groups DGD-level scheduler placement signals (score, reporting state, and any future placement fields).
+See [PlacementStatus](#v1beta1-placementstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
 <ParamField path="lpx" type="DynamoGraphDeploymentLPXStatus">
 lpx contains the status of the graph's LPX workload, when present.
 See [DynamoGraphDeploymentLPXStatus](#dynamographdeploymentlpxstatus).
@@ -3665,12 +3773,12 @@ preferredWeight is required and used only when enforcement is "preferred". Highe
 </ParamField>
 </Accordion>
 
-<Accordion id="lpxattemptrequeststatus" title="LPXAttemptRequestStatus">
+<Accordion id="v1beta1-lpxattemptrequeststatus" title="LPXAttemptRequestStatus">
 LPXAttemptRequestStatus identifies one exact request in the aggregate attempt.
 
 
 **Kind:** `type`
-**Appears in:** [LPXAttemptStatus](#lpxattemptstatus)
+**Appears in:** [LPXAttemptStatus](#v1beta1-lpxattemptstatus)
 
 <ParamField path="name" type="string">
 </ParamField>
@@ -3683,12 +3791,12 @@ See [UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#u
 </ParamField>
 </Accordion>
 
-<Accordion id="lpxattemptstatus" title="LPXAttemptStatus">
+<Accordion id="v1beta1-lpxattemptstatus" title="LPXAttemptStatus">
 LPXAttemptStatus is Dynamo's durable authority record for one aggregate LPX attempt.
 
 
 **Kind:** `type`
-**Appears in:** [PlacementStatus](#placementstatus)
+**Appears in:** [PlacementStatus](#v1beta1-placementstatus)
 
 <ParamField path="observedGeneration" type="integer">
 </ParamField>
@@ -3710,7 +3818,7 @@ See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#
 </ParamField>
 
 <ParamField path="requests" type="LPXAttemptRequestStatus array">
-See [LPXAttemptRequestStatus](#lpxattemptrequeststatus).
+See [LPXAttemptRequestStatus](#v1beta1-lpxattemptrequeststatus).
 **Validation:** MaxItems: 9  MinItems: 1
 </ParamField>
 </Accordion>
@@ -3877,7 +3985,7 @@ See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api
 </ParamField>
 </Accordion>
 
-<Accordion id="placementscorestate" title="PlacementScoreState">
+<Accordion id="v1beta1-placementscorestate" title="PlacementScoreState">
 PlacementScoreState describes whether placement score is available and how
 complete the reported score is for a graph deployment.
 
@@ -3893,7 +4001,7 @@ Every backend must set this field after the first reconciliation:
 **Kind:** `enum`
 **Underlying type:** `string`
 **Validation:** Enum: [Reported Partial Unsupported Unknown]
-**Appears in:** [PlacementStatus](#placementstatus)
+**Appears in:** [PlacementStatus](#v1beta1-placementstatus)
 
 **Allowed values**
 
@@ -3903,19 +4011,19 @@ Every backend must set this field after the first reconciliation:
 - <Badge intent="note" minimal>Unknown</Badge>
 </Accordion>
 
-<Accordion id="placementstatus" title="PlacementStatus">
+<Accordion id="v1beta1-placementstatus" title="PlacementStatus">
 PlacementStatus groups DGD-level scheduler placement fields under a single
 status object so future placement signals (e.g. scheduler contract version,
 last-report timestamp, per-unit reports) can be added without a schema break.
 
-The score source is an open question in DEP #10064 (Grove mirror, typed Grove
-scheduler API, or unstructured provider). Until a source is selected and
-implemented, the DGD controller does not write this field; the schema and
-conversion are landed here so downstream consumers can rely on the shape.
+The generic score source is an open question in DEP #10064 (Grove mirror,
+typed Grove scheduler API, or unstructured provider). Until one is selected,
+the DGD controller writes this field only as a compatibility projection of
+current LPX placement.
 
 
 **Kind:** `type`
-**Appears in:** [DynamoGraphDeploymentLPXStatus](#dynamographdeploymentlpxstatus)
+**Appears in:** [DynamoGraphDeploymentLPXStatus](#dynamographdeploymentlpxstatus), [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)
 
 <ParamField path="score" type="float">
 score is the DGD-level scheduler placement score aggregated from relevant scheduler placement units. Normalized to [0.0, 1.0] where higher is better and 1.0 represents the best possible placement. Aggregation uses the minimum across placement units so the value is a worst-placement signal for the graph. Scores are only comparable across DGDs that share the same scheduler scoring contract and version.
@@ -3924,13 +4032,13 @@ score is the DGD-level scheduler placement score aggregated from relevant schedu
 
 <ParamField path="state" type="PlacementScoreState">
 state indicates placement score reporting state. See PlacementScoreState for the semantics of each value.
-See [PlacementScoreState](#placementscorestate).
+See [PlacementScoreState](#v1beta1-placementscorestate).
 **Validation:** Enum: [Reported Partial Unsupported Unknown]  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="lpxAttempt" type="LPXAttemptStatus">
 lpxAttempt is Dynamo's durable aggregate LPX scheduling-attempt authority record.
-See [LPXAttemptStatus](#lpxattemptstatus).
+See [LPXAttemptStatus](#v1beta1-lpxattemptstatus).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>

@@ -898,6 +898,11 @@ func (in *DynamoGraphDeploymentStatus) DeepCopyInto(out *DynamoGraphDeploymentSt
 			(*out)[key] = val
 		}
 	}
+	if in.Placement != nil {
+		in, out := &in.Placement, &out.Placement
+		*out = new(PlacementStatus)
+		(*in).DeepCopyInto(*out)
+	}
 	if in.LPX != nil {
 		in, out := &in.LPX, &out.LPX
 		*out = new(DynamoGraphDeploymentLPXStatus)

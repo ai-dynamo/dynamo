@@ -654,6 +654,12 @@ func ConvertToSpecTopologyConstraint(src *v1beta1.SpecTopologyConstraint, dst *S
 func ConvertFromDynamoGraphDeploymentStatus(src *DynamoGraphDeploymentStatus, dst *v1beta1.DynamoGraphDeploymentStatus) {
 	dst.ObservedGeneration = src.ObservedGeneration
 	dst.State = v1beta1.DGDState(src.State)
+	if src.Placement != nil {
+		dst.Placement = &v1beta1.PlacementStatus{}
+		ConvertFromPlacementStatus(src.Placement, dst.Placement)
+	} else {
+		dst.Placement = nil
+	}
 	dst.LPX = src.LPX
 	if len(src.Conditions) > 0 {
 		dst.Conditions = make([]metav1.Condition, 0, len(src.Conditions))
@@ -692,6 +698,12 @@ func ConvertFromDynamoGraphDeploymentStatus(src *DynamoGraphDeploymentStatus, ds
 func ConvertToDynamoGraphDeploymentStatus(src *v1beta1.DynamoGraphDeploymentStatus, dst *DynamoGraphDeploymentStatus) {
 	dst.ObservedGeneration = src.ObservedGeneration
 	dst.State = DGDState(src.State)
+	if src.Placement != nil {
+		dst.Placement = &PlacementStatus{}
+		ConvertToPlacementStatus(src.Placement, dst.Placement)
+	} else {
+		dst.Placement = nil
+	}
 	dst.LPX = src.LPX
 	if len(src.Conditions) > 0 {
 		dst.Conditions = make([]metav1.Condition, 0, len(src.Conditions))
@@ -722,6 +734,80 @@ func ConvertToDynamoGraphDeploymentStatus(src *v1beta1.DynamoGraphDeploymentStat
 	if src.RollingUpdate != nil {
 		dst.RollingUpdate = &RollingUpdateStatus{}
 		ConvertToRollingUpdateStatus(src.RollingUpdate, dst.RollingUpdate)
+	}
+}
+
+// ConvertFromPlacementStatus converts placement status from v1alpha1 to v1beta1.
+func ConvertFromPlacementStatus(src *PlacementStatus, dst *v1beta1.PlacementStatus) {
+	*dst = v1beta1.PlacementStatus{State: v1beta1.PlacementScoreState(src.State)}
+	if src.Score != nil {
+		dst.Score = ptr.To(*src.Score)
+	}
+	if src.LPXAttempt != nil {
+		dst.LPXAttempt = &v1beta1.LPXAttemptStatus{}
+		ConvertFromLPXAttemptStatus(src.LPXAttempt, dst.LPXAttempt)
+	}
+}
+
+// ConvertToPlacementStatus converts placement status from v1beta1 to v1alpha1.
+func ConvertToPlacementStatus(src *v1beta1.PlacementStatus, dst *PlacementStatus) {
+	*dst = PlacementStatus{State: PlacementScoreState(src.State)}
+	if src.Score != nil {
+		dst.Score = ptr.To(*src.Score)
+	}
+	if src.LPXAttempt != nil {
+		dst.LPXAttempt = &LPXAttemptStatus{}
+		ConvertToLPXAttemptStatus(src.LPXAttempt, dst.LPXAttempt)
+	}
+}
+
+// ConvertFromLPXAttemptStatus converts LPX attempt status from v1alpha1 to v1beta1.
+func ConvertFromLPXAttemptStatus(src *LPXAttemptStatus, dst *v1beta1.LPXAttemptStatus) {
+	*dst = v1beta1.LPXAttemptStatus{
+		ObservedGeneration: src.ObservedGeneration,
+		PodCliqueSetUID:    src.PodCliqueSetUID,
+		Requests:           make([]v1beta1.LPXAttemptRequestStatus, len(src.Requests)),
+	}
+	// Copy timestamp pointers before converting each request structurally.
+	dst.DeadlineAt = src.DeadlineAt.DeepCopy()
+	dst.ExceededAt = src.ExceededAt.DeepCopy()
+	dst.DisarmedAt = src.DisarmedAt.DeepCopy()
+	for i := range src.Requests {
+		ConvertFromLPXAttemptRequestStatus(&src.Requests[i], &dst.Requests[i])
+	}
+}
+
+// ConvertToLPXAttemptStatus converts LPX attempt status from v1beta1 to v1alpha1.
+func ConvertToLPXAttemptStatus(src *v1beta1.LPXAttemptStatus, dst *LPXAttemptStatus) {
+	*dst = LPXAttemptStatus{
+		ObservedGeneration: src.ObservedGeneration,
+		PodCliqueSetUID:    src.PodCliqueSetUID,
+		Requests:           make([]LPXAttemptRequestStatus, len(src.Requests)),
+	}
+	// Copy timestamp pointers before converting each request structurally.
+	dst.DeadlineAt = src.DeadlineAt.DeepCopy()
+	dst.ExceededAt = src.ExceededAt.DeepCopy()
+	dst.DisarmedAt = src.DisarmedAt.DeepCopy()
+	for i := range src.Requests {
+		ConvertToLPXAttemptRequestStatus(&src.Requests[i], &dst.Requests[i])
+	}
+}
+
+// ConvertFromLPXAttemptRequestStatus converts one request from v1alpha1 to v1beta1.
+func ConvertFromLPXAttemptRequestStatus(src *LPXAttemptRequestStatus, dst *v1beta1.LPXAttemptRequestStatus) {
+	*dst = v1beta1.LPXAttemptRequestStatus{
+		Name:          src.Name,
+		AttemptDigest: src.AttemptDigest,
+		UID:           src.UID,
+	}
+}
+
+// ConvertToLPXAttemptRequestStatus converts one request from v1beta1 to v1alpha1.
+func ConvertToLPXAttemptRequestStatus(src *v1beta1.LPXAttemptRequestStatus, dst *LPXAttemptRequestStatus) {
+	*dst = LPXAttemptRequestStatus{
+		Name:          src.Name,
+		AttemptDigest: src.AttemptDigest,
+		UID:           src.UID,
 	}
 }
 
