@@ -98,6 +98,141 @@ curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"model":"hello-engine","messages":[{"role":"user","content":"hi"}],"max_tokens":250}'
 ```
 
+## Walkthrough: how this engine works
+
+### The contract — four required methods, and the framework calls YOU
+
+An engine is a class that subclasses `LLMEngine`. You never call your
+own methods: `main.py` hands the class to `run()` and from that moment
+the Dynamo worker (Rust) drives everything, invoking your methods by
+name at the right moments. Like Flask calling your route handlers.
+
+```python
+# main.py — our ENTIRE program
+from dynamo.common.backend.run import run
+from .engine import HelloEngine
+
+def main() -> None:
+    run(HelloEngine)          # hand over the class; we get called from here on
+```
+
+What the framework calls, and when:
+
+| Method | Required? | When the framework calls it | Ours does |
+|---|---|---|---|
+| `from_args()` | yes | first — parse CLI, return `(engine, WorkerConfig)` | flags for model name, namespace, discovery |
+| `start()` | yes | once at boot — load your model, return `EngineConfig` | load bundled tokenizer, encode the hardcoded sentence |
+| `generate()` | yes | once **per request** — yield token chunks | stream the sentence one token at a time |
+| `cleanup()` | yes | at shutdown — must be idempotent + null-safe | drop references |
+| `abort()` | no (no-op default) | on client cancel | not overridden |
+| `is_quiescent()` | no (default `None`) | during shutdown — "safe to stop yet?" | not overridden |
+| `kv_event_sources()` | no | once after `start()` — opt into KV routing | see below |
+
+(Draining itself is the Worker's job, not the engine's — the engine
+only answers `is_quiescent()` when asked.)
+
+The rules that matter inside `generate()`: every chunk carries
+`token_ids` and `index`; the final chunk adds `finish_reason` and
+`completion_usage`; poll `context.is_stopped()` between yields and exit
+with a `"cancelled"` terminal if the client went away.
+
+```python
+async def generate(self, request, context):
+    for i, token_id in enumerate(reply):
+        await asyncio.sleep(self.delay)
+        if context.is_stopped():                       # re-check after the await
+            yield {"token_ids": [], "index": 0,
+                   "finish_reason": "cancelled", "completion_usage": usage(i)}
+            return
+        yield {"token_ids": [token_id], "index": 0}
+    # always emit a terminal chunk carrying finish_reason (handles empty reply too)
+    yield {"token_ids": [], "index": 0,
+           "finish_reason": "stop", "completion_usage": usage(len(reply))}
+```
+
+Full contract: [unified-backends guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/advanced-customizations/writing-custom-backends/writing-unified-backends.md)
+and the `LLMEngine` docstrings in
+[`engine.py`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py).
+
+### KV events, in plain English
+
+The goal: tell the router *what this worker has cached*, so the router
+sends matching prompts back to it instead of a cold worker.
+
+**Step 1 — ask for a phone.** At boot, right after `start()`, the
+framework calls `kv_event_sources()`. Returning a `PushSource` means
+"build me a publisher and hand it to this callback":
+
+```python
+async def kv_event_sources(self):
+    return [PushSource(on_ready=self._on_publisher_ready, dp_rank=0)]
+```
+
+**Step 2 — the phone arrives.** The framework builds a
+`KvEventPublisher` (wired underneath to ZMQ or NATS — deployment's
+choice, the engine never knows which) and calls us back with it:
+
+```python
+def _on_publisher_ready(self, publisher):   # `publisher` IS the phone
+    self._publisher = publisher             # keep it; that's all
+```
+
+**Step 3 — call the router whenever we cache something.** From here the
+direction flips: nobody calls us about events again — *we* dial out.
+One line sends one event:
+
+```python
+publisher.publish_stored(
+    token_ids=[...],            # the tokens — the router matches on THESE
+    num_block_tokens=[16, 16],  # block sizes
+    block_hashes=[7, 8],        # our node IDs (any per-worker-unique ints)
+    parent_hash=None,           # what the run's first block chains under
+)
+```
+
+In this engine, `generate()` calls that directly for each prompt's new
+full 16-token blocks (`_publish_prompt_blocks`). Production engines
+usually publish from a dedicated event thread instead so socket I/O
+never touches the token-streaming path — see `sample_engine.py` for
+that queue-and-thread pattern.
+
+> **Which artifact is canonical?** The
+> [unified-backends guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/advanced-customizations/writing-custom-backends/writing-unified-backends.md)
+> defines the contract; `sample_engine.py` (in `dynamo.common.backend`)
+> is the in-tree reference implementation; this example is the
+> deployable end-to-end walkthrough. When they disagree, the guide and
+> the ABC docstrings win.
+
+**Step 4 — the router listens and remembers.** The router subscribed to
+our event channel when the worker registered. Each event lands in its
+radix tree: "worker X holds blocks h1, h2." No polling anywhere —
+publish is push, delivery is push.
+
+**Step 5 — the payoff on the next request.** Scoring a repeat prompt,
+the router finds our blocks in its tree:
+
+```text
+request 1:  [ROUTING] Best: worker_…  0/11 blocks overlap   ← cold
+engine:     published 10 KV block(s) for prompt
+request 2:  [ROUTING] Best: worker_…  10/11 blocks overlap  ← pinned to us
+request 3:  [ROUTING] Best: worker_…  9/12 blocks overlap   ← shared prefix + new tail
+```
+
+The part that surprises most newcomers: **matching keys on the tokens,
+not on our hashes.** The router recomputes each block's match key from
+the `token_ids` in the event, so identical prefixes match no matter
+what IDs the engine picked — `block_hashes` are only node identities
+(for parent links and `publish_removed`), which is why a plain counter
+is enough. We republish the full run on every request; re-stores are
+idempotent in the router's tree. A real engine tracks its cache and
+publishes deltas, plus `publish_removed` when blocks are evicted.
+
+Not implemented here (deliberately): the sibling **KV metrics** channel
+(`ComponentSnapshot` gauges — "how full is my cache"). See
+`component_metrics_dp_ranks()` / `attach_snapshot_publisher()` in
+[`sample_engine.py`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/sample_engine.py)
+for that pattern.
+
 ## Container
 
 ```bash
@@ -233,141 +368,6 @@ The two sidecar files are the minimum paperwork Dynamo's model card
 requires: `tokenizer_config.json` carries the chat template that renders
 `messages` into a prompt; `config.json` provides `model_type` /
 `eos_token_id` / context-length fields.
-
-## Walkthrough: how this engine works
-
-### The contract — four required methods, and the framework calls YOU
-
-An engine is a class that subclasses `LLMEngine`. You never call your
-own methods: `main.py` hands the class to `run()` and from that moment
-the Dynamo worker (Rust) drives everything, invoking your methods by
-name at the right moments. Like Flask calling your route handlers.
-
-```python
-# main.py — our ENTIRE program
-from dynamo.common.backend.run import run
-from .engine import HelloEngine
-
-def main() -> None:
-    run(HelloEngine)          # hand over the class; we get called from here on
-```
-
-What the framework calls, and when:
-
-| Method | Required? | When the framework calls it | Ours does |
-|---|---|---|---|
-| `from_args()` | yes | first — parse CLI, return `(engine, WorkerConfig)` | flags for model name, namespace, discovery |
-| `start()` | yes | once at boot — load your model, return `EngineConfig` | load bundled tokenizer, encode the hardcoded sentence |
-| `generate()` | yes | once **per request** — yield token chunks | stream the sentence one token at a time |
-| `cleanup()` | yes | at shutdown — must be idempotent + null-safe | drop references |
-| `abort()` | no (no-op default) | on client cancel | not overridden |
-| `is_quiescent()` | no (default `None`) | during shutdown — "safe to stop yet?" | not overridden |
-| `kv_event_sources()` | no | once after `start()` — opt into KV routing | see below |
-
-(Draining itself is the Worker's job, not the engine's — the engine
-only answers `is_quiescent()` when asked.)
-
-The rules that matter inside `generate()`: every chunk carries
-`token_ids` and `index`; the final chunk adds `finish_reason` and
-`completion_usage`; poll `context.is_stopped()` between yields and exit
-with a `"cancelled"` terminal if the client went away.
-
-```python
-async def generate(self, request, context):
-    for i, token_id in enumerate(reply):
-        await asyncio.sleep(self.delay)
-        if context.is_stopped():                       # re-check after the await
-            yield {"token_ids": [], "index": 0,
-                   "finish_reason": "cancelled", "completion_usage": usage(i)}
-            return
-        yield {"token_ids": [token_id], "index": 0}
-    # always emit a terminal chunk carrying finish_reason (handles empty reply too)
-    yield {"token_ids": [], "index": 0,
-           "finish_reason": "stop", "completion_usage": usage(len(reply))}
-```
-
-Full contract: [unified-backends guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/advanced-customizations/writing-custom-backends/writing-unified-backends.md)
-and the `LLMEngine` docstrings in
-[`engine.py`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py).
-
-### KV events, in plain English
-
-The goal: tell the router *what this worker has cached*, so the router
-sends matching prompts back to it instead of a cold worker.
-
-**Step 1 — ask for a phone.** At boot, right after `start()`, the
-framework calls `kv_event_sources()`. Returning a `PushSource` means
-"build me a publisher and hand it to this callback":
-
-```python
-async def kv_event_sources(self):
-    return [PushSource(on_ready=self._on_publisher_ready, dp_rank=0)]
-```
-
-**Step 2 — the phone arrives.** The framework builds a
-`KvEventPublisher` (wired underneath to ZMQ or NATS — deployment's
-choice, the engine never knows which) and calls us back with it:
-
-```python
-def _on_publisher_ready(self, publisher):   # `publisher` IS the phone
-    self._publisher = publisher             # keep it; that's all
-```
-
-**Step 3 — call the router whenever we cache something.** From here the
-direction flips: nobody calls us about events again — *we* dial out.
-One line sends one event:
-
-```python
-publisher.publish_stored(
-    token_ids=[...],            # the tokens — the router matches on THESE
-    num_block_tokens=[16, 16],  # block sizes
-    block_hashes=[7, 8],        # our node IDs (any per-worker-unique ints)
-    parent_hash=None,           # what the run's first block chains under
-)
-```
-
-In this engine, `generate()` calls that directly for each prompt's new
-full 16-token blocks (`_publish_prompt_blocks`). Production engines
-usually publish from a dedicated event thread instead so socket I/O
-never touches the token-streaming path — see `sample_engine.py` for
-that queue-and-thread pattern.
-
-> **Which artifact is canonical?** The
-> [unified-backends guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/advanced-customizations/writing-custom-backends/writing-unified-backends.md)
-> defines the contract; `sample_engine.py` (in `dynamo.common.backend`)
-> is the in-tree reference implementation; this example is the
-> deployable end-to-end walkthrough. When they disagree, the guide and
-> the ABC docstrings win.
-
-**Step 4 — the router listens and remembers.** The router subscribed to
-our event channel when the worker registered. Each event lands in its
-radix tree: "worker X holds blocks h1, h2." No polling anywhere —
-publish is push, delivery is push.
-
-**Step 5 — the payoff on the next request.** Scoring a repeat prompt,
-the router finds our blocks in its tree:
-
-```text
-request 1:  [ROUTING] Best: worker_…  0/11 blocks overlap   ← cold
-engine:     published 10 KV block(s) for prompt
-request 2:  [ROUTING] Best: worker_…  10/11 blocks overlap  ← pinned to us
-request 3:  [ROUTING] Best: worker_…  9/12 blocks overlap   ← shared prefix + new tail
-```
-
-The part that surprises most newcomers: **matching keys on the tokens,
-not on our hashes.** The router recomputes each block's match key from
-the `token_ids` in the event, so identical prefixes match no matter
-what IDs the engine picked — `block_hashes` are only node identities
-(for parent links and `publish_removed`), which is why a plain counter
-is enough. We republish the full run on every request; re-stores are
-idempotent in the router's tree. A real engine tracks its cache and
-publishes deltas, plus `publish_removed` when blocks are evicted.
-
-Not implemented here (deliberately): the sibling **KV metrics** channel
-(`ComponentSnapshot` gauges — "how full is my cache"). See
-`component_metrics_dp_ranks()` / `attach_snapshot_publisher()` in
-[`sample_engine.py`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/sample_engine.py)
-for that pattern.
 
 ## Layout
 
