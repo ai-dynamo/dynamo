@@ -50,7 +50,7 @@ jobs:
     # prod-tester-amd-v2 RUNS these images for tests, so it has the memory the
     # builder lacked. Non-GPU tester (syft needs no GPU); registry scan is
     # daemon-independent.
-    runs-on: prod-tester-amd-v2
+    runs-on: prod-tester-amd-v2-east-canary
     # Run inside the shipped image itself (same runner combo as shared-test.yml,
     # proven on this pool): satisfies the runner's job-container requirement and
     # provides python3 for the audit. syft then scans the container's OWN

@@ -94,7 +94,7 @@ jobs:
   # aren't reproducible on plain ubuntu-latest runners.
   rust-gpu:
     needs: image
-    runs-on: prod-tester-amd-gpu-v2
+    runs-on: prod-tester-amd-gpu-v2-east-canary
     container:
       image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ needs.image.outputs.target_tag_plain }}${{ (inputs.cuda_version != '' && !startsWith(inputs.cuda_version, '13.')) && format('-cuda{0}', startsWith(inputs.cuda_version, '12.') && '12' || inputs.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
       env:
@@ -169,7 +169,7 @@ jobs:
 
   mypy:
     needs: image
-    runs-on: prod-tester-amd-v2
+    runs-on: prod-tester-amd-v2-east-canary
     container:
       image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ needs.image.outputs.target_tag_plain }}${{ (inputs.cuda_version != '' && !startsWith(inputs.cuda_version, '13.')) && format('-cuda{0}', startsWith(inputs.cuda_version, '12.') && '12' || inputs.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
       env:
@@ -208,7 +208,7 @@ jobs:
     with:
       test_suite_name: dynamo
       test_type: parallel
-      amd_runner: prod-tester-amd-v2
+      amd_runner: prod-tester-amd-v2-east-canary
       target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}
       cuda_version: '["${{ inputs.cuda_version }}"]'
       platform: '["amd64", "arm64"]'
@@ -229,7 +229,7 @@ jobs:
     with:
       test_suite_name: dynamo
       test_type: sequential
-      amd_runner: prod-tester-amd-v2
+      amd_runner: prod-tester-amd-v2-east-canary
       target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}
       cuda_version: '["${{ inputs.cuda_version }}"]'
       platform: '["amd64", "arm64"]'
@@ -250,7 +250,7 @@ jobs:
     with:
       test_suite_name: dynamo
       test_type: gpu
-      amd_runner: prod-tester-amd-gpu-v2
+      amd_runner: prod-tester-amd-gpu-v2-east-canary
       target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}
       cuda_version: '["${{ inputs.cuda_version }}"]'
       platform: '["amd64"]'

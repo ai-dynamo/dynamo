@@ -51,7 +51,10 @@ jobs:
       - name: Validate deploy test configuration
         id: deploy-test-configuration
         env:
-          RUN_DEPLOY_TESTS: ${{ vars.RUN_DEPLOY_TESTS }}
+          # The east deploy runner cannot initialize until Teleport trusts the
+          # production-east EKS issuer. Keep this temporary validation branch
+          # focused on runner-backed build and test jobs.
+          RUN_DEPLOY_TESTS: "false"
         run: |
           case "$RUN_DEPLOY_TESTS" in
             true)
@@ -227,7 +230,7 @@ jobs:
       needs.changed-files.outputs.snapshot_sglang == 'true' ||
       needs.changed-files.outputs.snapshot_trtllm == 'true'
     name: Operator
-    runs-on: prod-default-v2
+    runs-on: prod-default-v2-east-canary
     # actions: read lets the compliance step download a prior run's baseline
     # operator compliance artifact to diff the OSRB CSV against. Missing -> the
     # diff soft-degrades, build stays green.
@@ -292,7 +295,7 @@ jobs:
     needs: changed-files
     if: needs.changed-files.outputs.power_agent == 'true'
     name: Power Agent
-    runs-on: prod-default-v2
+    runs-on: prod-default-v2-east-canary
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -706,7 +709,7 @@ jobs:
       needs.changed-files.outputs.operator == 'true' &&
       needs.planner-build.result == 'success' &&
       needs.operator.result == 'success'
-    runs-on: prod-builder-amd-v1
+    runs-on: prod-builder-amd-v1-east-canary
     permissions:
       contents: read
     env:
@@ -782,7 +785,7 @@ jobs:
     with:
       test_suite_name: vllm
       test_type: Test
-      amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
+      amd_runner: prod-tester-amd-gpu-v2-east-canary # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
@@ -808,7 +811,7 @@ jobs:
     with:
       test_suite_name: vllm
       test_type: 2-GPU Test
-      amd_runner: prod-tester-amd-gpu-2-v2
+      amd_runner: prod-tester-amd-gpu-2-v2-east-canary
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -825,7 +828,7 @@ jobs:
     with:
       test_suite_name: sglang
       test_type: Test
-      amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
+      amd_runner: prod-tester-amd-gpu-v2-east-canary # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
@@ -851,7 +854,7 @@ jobs:
     with:
       test_suite_name: sglang
       test_type: 2-GPU Test
-      amd_runner: prod-tester-amd-gpu-2-v2
+      amd_runner: prod-tester-amd-gpu-2-v2-east-canary
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -868,7 +871,7 @@ jobs:
     with:
       test_suite_name: trtllm
       test_type: Test
-      amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
+      amd_runner: prod-tester-amd-gpu-v2-east-canary # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
@@ -894,7 +897,7 @@ jobs:
     with:
       test_suite_name: trtllm
       test_type: 2-GPU Test
-      amd_runner: prod-tester-amd-gpu-2-v2
+      amd_runner: prod-tester-amd-gpu-2-v2-east-canary
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64"]' # No ARM GPUs available
@@ -911,7 +914,7 @@ jobs:
     with:
       test_suite_name: planner
       test_type: CPU Test
-      amd_runner: prod-tester-amd-v2
+      amd_runner: prod-tester-amd-v2-east-canary
       target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
       cuda_version: '[""]'
       platform: '["amd64", "arm64"]'
@@ -942,7 +945,7 @@ jobs:
       fail-fast: false
       matrix:
         platform: [amd64, arm64]
-    runs-on: ${{ matrix.platform == 'amd64' && 'prod-tester-amd-v2' || 'prod-tester-arm-v2' }}
+    runs-on: ${{ matrix.platform == 'amd64' && 'prod-tester-amd-v2-east-canary' || 'prod-tester-arm-v2-east-canary' }}
     container:
       image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}-${{ needs.frontend-build.outputs.target_tag_plain }}
       env:
@@ -1155,7 +1158,7 @@ jobs:
       always() && !cancelled() &&
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_vllm == 'true')
-    runs-on: prod-default-v2
+    runs-on: prod-default-v2-east-canary
     outputs:
       image_tag: ${{ format('{0}-ci-{1}-vllm-placeholder', needs.vllm-copy-to-acr.outputs.runtime_version, github.sha) }}
     steps:
@@ -1207,7 +1210,7 @@ jobs:
       always() && !cancelled() &&
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_sglang == 'true')
-    runs-on: prod-default-v2
+    runs-on: prod-default-v2-east-canary
     outputs:
       image_tag: ${{ format('{0}-ci-{1}-sglang-placeholder', needs.sglang-copy-to-acr.outputs.runtime_version, github.sha) }}
     steps:
@@ -1260,7 +1263,7 @@ jobs:
       always() && !cancelled() &&
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_trtllm == 'true')
-    runs-on: prod-default-v2
+    runs-on: prod-default-v2-east-canary
     outputs:
       image_tag: ${{ format('{0}-ci-{1}-trtllm-placeholder', needs.trtllm-copy-to-acr.outputs.runtime_version, github.sha) }}
     steps:
@@ -1302,7 +1305,7 @@ jobs:
        needs.changed-files.outputs.dgdr == 'true') &&
       needs.operator.result == 'success'
     needs: [changed-files, operator]
-    runs-on: prod-deploy-tester-v1
+    runs-on: prod-deploy-tester-v1-east-canary
     permissions:
       contents: read
     outputs:
@@ -1415,7 +1418,7 @@ jobs:
        needs.changed-files.outputs.snapshot_vllm == 'true') &&
       needs.operator.result == 'success'
     needs: [changed-files, operator]
-    runs-on: prod-deploy-tester-v1
+    runs-on: prod-deploy-tester-v1-east-canary
     permissions:
       contents: read
     outputs:
@@ -1453,7 +1456,7 @@ jobs:
        needs.changed-files.outputs.snapshot_sglang == 'true') &&
       needs.operator.result == 'success'
     needs: [changed-files, operator]
-    runs-on: prod-deploy-tester-v1
+    runs-on: prod-deploy-tester-v1-east-canary
     permissions:
       contents: read
     outputs:
@@ -1491,7 +1494,7 @@ jobs:
        needs.changed-files.outputs.snapshot_trtllm == 'true') &&
       needs.operator.result == 'success'
     needs: [changed-files, operator]
-    runs-on: prod-deploy-tester-v1
+    runs-on: prod-deploy-tester-v1-east-canary
     permissions:
       contents: read
     outputs:
@@ -1529,7 +1532,7 @@ jobs:
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_vllm == 'true') &&
       needs.deploy-operator-checkpoint-vllm.result == 'success'
-    runs-on: prod-deploy-tester-v1
+    runs-on: prod-deploy-tester-v1-east-canary
     timeout-minutes: 30
     permissions:
       contents: read
@@ -1581,7 +1584,7 @@ jobs:
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_sglang == 'true') &&
       needs.deploy-operator-checkpoint-sglang.result == 'success'
-    runs-on: prod-deploy-tester-v1
+    runs-on: prod-deploy-tester-v1-east-canary
     timeout-minutes: 30
     permissions:
       contents: read
@@ -1633,7 +1636,7 @@ jobs:
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_trtllm == 'true') &&
       needs.deploy-operator-checkpoint-trtllm.result == 'success'
-    runs-on: prod-deploy-tester-v1
+    runs-on: prod-deploy-tester-v1-east-canary
     timeout-minutes: 30
     permissions:
       contents: read
@@ -1687,7 +1690,7 @@ jobs:
       needs.deploy-snapshot-agent-checkpoint-vllm.result == 'success' &&
       needs.snapshot-placeholder-vllm.result == 'success' &&
       needs.frontend-copy-to-acr.result == 'success'
-    runs-on: prod-deploy-tester-v1
+    runs-on: prod-deploy-tester-v1-east-canary
     timeout-minutes: 30
     permissions:
       contents: read
@@ -1760,7 +1763,7 @@ jobs:
       needs.deploy-snapshot-agent-checkpoint-sglang.result == 'success' &&
       needs.snapshot-placeholder-sglang.result == 'success' &&
       needs.frontend-copy-to-acr.result == 'success'
-    runs-on: prod-deploy-tester-v1
+    runs-on: prod-deploy-tester-v1-east-canary
     timeout-minutes: 30
     permissions:
       contents: read
@@ -1833,7 +1836,7 @@ jobs:
       needs.deploy-snapshot-agent-checkpoint-trtllm.result == 'success' &&
       needs.snapshot-placeholder-trtllm.result == 'success' &&
       needs.frontend-copy-to-acr.result == 'success'
-    runs-on: prod-deploy-tester-v1
+    runs-on: prod-deploy-tester-v1-east-canary
     timeout-minutes: 30
     permissions:
       contents: read
@@ -1900,7 +1903,7 @@ jobs:
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
       always()
     needs: [changed-files, deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-dgdr]
-    runs-on: prod-deploy-tester-v1
+    runs-on: prod-deploy-tester-v1-east-canary
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -1920,7 +1923,7 @@ jobs:
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_vllm == 'true')
     needs: [changed-files, deploy-operator-checkpoint-vllm, deploy-snapshot-agent-checkpoint-vllm, deploy-test-checkpoint-vllm]
-    runs-on: prod-deploy-tester-v1
+    runs-on: prod-deploy-tester-v1-east-canary
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Teardown vCluster
@@ -1937,7 +1940,7 @@ jobs:
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_sglang == 'true')
     needs: [changed-files, deploy-operator-checkpoint-sglang, deploy-snapshot-agent-checkpoint-sglang, deploy-test-checkpoint-sglang]
-    runs-on: prod-deploy-tester-v1
+    runs-on: prod-deploy-tester-v1-east-canary
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Teardown vCluster
@@ -1954,7 +1957,7 @@ jobs:
       (needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_trtllm == 'true')
     needs: [changed-files, deploy-operator-checkpoint-trtllm, deploy-snapshot-agent-checkpoint-trtllm, deploy-test-checkpoint-trtllm]
-    runs-on: prod-deploy-tester-v1
+    runs-on: prod-deploy-tester-v1-east-canary
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Teardown vCluster
@@ -1965,7 +1968,7 @@ jobs:
 
   clean-k8s-builder:
     name: Clean K8s builder if exists
-    runs-on: prod-default-small-v2
+    runs-on: prod-default-small-v2-east-canary
     if: always()
     needs:
       - changed-files
