@@ -19,7 +19,7 @@ use dynamo_kv_router::config::{RouterConfigOverride, try_kv_router_config_from_d
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::prefill_router::PrefillReservation;
-use dynamo_llm::kv_router::{ManagedKvRouter, PrefillRouter};
+use dynamo_llm::kv_router::{FindBestMatchOutcome, ManagedKvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::common::extensions::{
@@ -35,7 +35,7 @@ use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 use uuid::Uuid;
 
-use crate::epp_router::endpoint_in_subset;
+use crate::epp_router::{endpoint_in_subset, requested_policy_class};
 use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo, ResponseUsage};
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
@@ -459,9 +459,10 @@ impl Router {
     ///
     /// Queue priorities are forwarded to the prefill scheduler. `priority_jump`
     /// adjusts the policy score, while `strict_priority` selects the primary
-    /// tier. `routing_constraints` carries the request's required/preferred
-    /// taints (lifted from `nvext.routing_constraints`); a hard `required_taints`
-    /// mismatch excludes a worker from selection.
+    /// tier. `policy_class` names the scheduling policy class the reservation
+    /// queues under. `routing_constraints` carries the request's
+    /// required/preferred taints (lifted from `nvext.routing_constraints`); a
+    /// hard `required_taints` mismatch excludes a worker from selection.
     #[expect(clippy::too_many_arguments)]
     pub async fn route_prefill(
         &self,
@@ -470,6 +471,7 @@ impl Router {
         cache_namespace: Option<String>,
         priority_jump: f64,
         strict_priority: u32,
+        policy_class: Option<String>,
         allowed_worker_ids: Option<HashSet<u64>>,
         routing_constraints: RoutingConstraints,
     ) -> Result<PrefillReservation> {
@@ -486,6 +488,7 @@ impl Router {
                 cache_namespace,
                 priority_jump,
                 strict_priority,
+                policy_class,
                 allowed_worker_ids,
                 routing_constraints,
             )
@@ -497,9 +500,13 @@ impl Router {
     ///
     /// Queue priorities are forwarded to the decode scheduler. `priority_jump`
     /// adjusts the policy score, while `strict_priority` selects the primary
-    /// tier. `routing_constraints` carries the request's required/preferred
+    /// tier. `policy_class` names the scheduling policy class the request queues
+    /// under. `routing_constraints` carries the request's required/preferred
     /// taints (lifted from `nvext.routing_constraints`); a hard `required_taints`
     /// mismatch excludes a worker from selection.
+    ///
+    /// A per-class queue limit rejection surfaces as an error here, the same as
+    /// it does for the integrated frontend.
     #[allow(clippy::too_many_arguments)]
     pub async fn route_decode(
         &self,
@@ -508,6 +515,7 @@ impl Router {
         cache_namespace: Option<String>,
         priority_jump: f64,
         strict_priority: u32,
+        policy_class: Option<String>,
         allowed_worker_ids: Option<HashSet<u64>>,
         routing_constraints: RoutingConstraints,
     ) -> Result<(WorkerWithDpRank, u32)> {
@@ -517,23 +525,39 @@ impl Router {
 
         let config_override = decode_router_config_override(is_disaggregated);
 
-        self.decode_router
-            .find_best_match(
+        let outcome = self
+            .decode_router
+            .find_best_match_details_with_policy_class(
                 None,
                 tokens,
                 None,
                 config_override.as_ref(),
                 false,
+                false,
                 None,
                 cache_namespace,
                 priority_jump,
                 strict_priority,
+                policy_class,
+                None,
+                None,
                 None,
                 allowed_worker_ids,
                 routing_constraints,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Decode query failed: {:?}", e))
+            .map_err(|e| anyhow::anyhow!("Decode query failed: {:?}", e))?;
+
+        match outcome {
+            FindBestMatchOutcome::Routed {
+                worker,
+                overlap_blocks,
+                ..
+            } => Ok((worker, overlap_blocks)),
+            FindBestMatchOutcome::QueueRejected { rejection } => {
+                Err(anyhow::anyhow!("Decode query failed: {rejection}"))
+            }
+        }
     }
 
     /// Register a request with the decode router for bookkeeping.
@@ -884,12 +908,9 @@ fn pod_endpoint_address(pod: &k8s_openapi::api::core::v1::Pod) -> Option<String>
 /// An externally supplied [`Endpoint`] rendered the way [`WorkerEndpointIndex`]
 /// stores addresses, so the two can be compared.
 ///
-/// [`Endpoint::address_port`] builds its string with `format!("{ip}:{port}")`,
-/// which leaves an IPv6 literal unbracketed (`fd00::2:8000`), while the index
-/// stores `SocketAddr`-rendered addresses (`[fd00::2]:8000`). Comparing the two
-/// forms directly matches on IPv4 and silently never matches on IPv6, so both
-/// sides go through `SocketAddr` here. Returns `None` for an address or port
-/// that does not parse, which is not a routable endpoint either way.
+/// [`Endpoint::address_port`] and the index both bracket IPv6 addresses. This
+/// helper additionally validates the address and port before comparing an
+/// externally supplied endpoint with the index.
 fn indexed_endpoint_address(endpoint: &Endpoint) -> Option<String> {
     let ip: IpAddr = endpoint.address.parse().ok()?;
     let port: u16 = endpoint.port.parse().ok()?;
@@ -1413,7 +1434,7 @@ impl EndpointPicker for Router {
         }
 
         let body_str = std::str::from_utf8(&req.body)
-            .map_err(|e| PickError::TokenizationFailed(format!("Invalid UTF-8: {e}")))?;
+            .map_err(|e| PickError::InvalidRequest(format!("Invalid UTF-8: {e}")))?;
 
         let (
             tokens,
@@ -1425,9 +1446,10 @@ impl EndpointPicker for Router {
         ) = self
             .tokenize(body_str)
             .await
-            .map_err(|e| PickError::TokenizationFailed(e.to_string()))?;
+            .map_err(|e| PickError::InvalidRequest(e.to_string()))?;
         let cache_namespace =
             cache_namespace_with_header_override(&req.headers, body_cache_namespace);
+        let policy_class = requested_policy_class(&req.headers)?;
         let reservation_id = Uuid::new_v4().to_string();
 
         // Try prefill routing first (disaggregated mode).
@@ -1441,6 +1463,7 @@ impl EndpointPicker for Router {
                 cache_namespace.clone(),
                 priority_jump,
                 strict_priority,
+                policy_class.clone(),
                 allowed_worker_ids.clone(),
                 routing_constraints.clone(),
             )
@@ -1464,6 +1487,7 @@ impl EndpointPicker for Router {
                 cache_namespace.clone(),
                 priority_jump,
                 strict_priority,
+                policy_class,
                 allowed_worker_ids,
                 routing_constraints,
             )
@@ -1585,6 +1609,9 @@ impl EndpointPicker for Router {
             endpoint,
             fallbacks: vec![],
             headers,
+            // TODO(epp-prefill-endpoint): #13407 will resolve the selected prefill
+            // worker to a callable endpoint for authoritative sidecar injection.
+            selected_prefill_endpoint: None,
             token_ids,
             reservation_id: Some(reservation_id),
         })
@@ -2488,12 +2515,10 @@ mod tests {
         );
     }
 
-    /// `Endpoint::address_port` does not bracket IPv6, while the index stores
-    /// `SocketAddr`-rendered addresses. Comparing the raw forms matches on
-    /// IPv4 and silently never matches on IPv6, so the normalization has to
-    /// agree with what the index stores.
+    /// External endpoints and indexed pod endpoints must use the same
+    /// bracketed IPv6 representation.
     #[test]
-    fn indexed_endpoint_address_brackets_ipv6_to_match_the_index() {
+    fn indexed_endpoint_address_matches_endpoint_and_index_for_ipv6() {
         let endpoint = Endpoint {
             pod_name: "worker-0".to_string(),
             address: "fd00::2".to_string(),
@@ -2505,10 +2530,10 @@ mod tests {
             indexed_endpoint_address(&endpoint).as_deref(),
             Some("[fd00::2]:8000")
         );
-        assert_ne!(
+        assert_eq!(
             endpoint.address_port(),
             "[fd00::2]:8000",
-            "guards the reason this helper exists: the raw form is unbracketed"
+            "the public endpoint formatter must bracket IPv6"
         );
 
         let mut index = WorkerEndpointIndex::default();
