@@ -287,6 +287,35 @@ mod tests {
     use crate::endpoint_type::EndpointType;
 
     #[test]
+    fn dedicated_rerank_does_not_change_legacy_embedding_cards() {
+        bitflags! {
+            #[derive(Debug, Deserialize, PartialEq)]
+            struct LegacyModelType: u16 {
+                const Embedding = 1 << 2;
+            }
+        }
+        #[derive(Debug, Deserialize)]
+        struct LegacyCard {
+            model_type: LegacyModelType,
+        }
+
+        let mut card = crate::model_card::ModelDeploymentCard::with_name_only("embedding");
+        card.model_type = ModelType::Embedding;
+        let wire = serde_json::to_value(&card).unwrap();
+        let legacy: LegacyCard = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(legacy.model_type, LegacyModelType::Embedding);
+
+        // Publishing a separate rerank card must leave the embedding card intact.
+        card.model_type = ModelType::Rerank;
+        let rerank_wire = serde_json::to_value(&card).unwrap();
+        assert!(serde_json::from_value::<LegacyCard>(rerank_wire).is_err());
+        assert!(serde_json::from_value::<LegacyCard>(wire).is_ok());
+
+        card.model_type = ModelType::Embedding | ModelType::Rerank;
+        assert!(serde_json::from_value::<LegacyCard>(serde_json::to_value(card).unwrap()).is_err());
+    }
+
+    #[test]
     fn realtime_bit_position() {
         assert_eq!(ModelType::Realtime.bits(), 1 << 8);
     }

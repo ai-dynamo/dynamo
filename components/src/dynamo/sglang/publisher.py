@@ -479,7 +479,7 @@ async def setup_sgl_metrics(
     and starts a ``DynamoSglangPublisher`` that pulls scheduler metrics
     over ZMQ and (optionally) forwards KV events / FPM stats.
 
-    For **embedding workers** (``config.dynamo_args.embedding_worker``),
+    For **embedding and rerank workers**,
     the chat-shaped pipeline is **skipped entirely**: pooling engines
     have no KV cache, no prefill/decode phase, and no scheduler metrics
     worth collecting, so every metric in that pipeline would emit zeros
@@ -500,9 +500,11 @@ async def setup_sgl_metrics(
     """
     metrics_labels = [("model", engine.server_args.served_model_name)]
 
-    if getattr(config.dynamo_args, "embedding_worker", False):
+    if getattr(config.dynamo_args, "embedding_worker", False) or getattr(
+        config.dynamo_args, "rerank_worker", False
+    ):
         logging.info(
-            "Embedding worker: skipping chat-shaped Prometheus + KV-event "
+            "Pooling worker: skipping chat-shaped Prometheus + KV-event "
             "wiring (no KV cache, no prefill/decode, no scheduler metrics). "
             "Embedding-shaped metrics are registered separately."
         )

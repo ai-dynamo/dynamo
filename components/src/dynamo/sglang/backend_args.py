@@ -111,6 +111,14 @@ class DynamoSGLangArgGroup(ArgGroup):
 
         add_negatable_bool_argument(
             g,
+            flag_name="--rerank-worker",
+            env_var="DYN_SGL_RERANK_WORKER",
+            default=False,
+            help="Run a dedicated text cross-encoder rerank worker. Requires a rerank-capable frontend; also sets SGLang's --is-embedding.",
+        )
+
+        add_negatable_bool_argument(
+            g,
             flag_name="--image-diffusion-worker",
             env_var="DYN_SGL_IMAGE_DIFFUSION_WORKER",
             default=False,
@@ -186,6 +194,7 @@ class DynamoSGLangConfig(ConfigBase):
     dedicated_mm_encoder: bool = False
     embedding_transfer_mode: EmbeddingTransferMode
     embedding_worker: bool
+    rerank_worker: bool = False
     image_diffusion_worker: bool
 
     disagg_config: Optional[str] = None
@@ -203,6 +212,17 @@ class DynamoSGLangConfig(ConfigBase):
 
     def validate(self) -> None:
         _reject_removed_multimodal_env_vars()
+        if self.rerank_worker and (
+            self.embedding_worker
+            or self.image_diffusion_worker
+            or self.video_generation_worker
+            or self.enable_multimodal
+            or self.dedicated_mm_encoder
+            or self.frontend_decoding
+        ):
+            raise ValueError(
+                "--rerank-worker cannot be combined with other worker modes"
+            )
 
         if not isinstance(self.embedding_transfer_mode, EmbeddingTransferMode):
             self.embedding_transfer_mode = EmbeddingTransferMode(

@@ -145,14 +145,14 @@ async def _register_model_with_runtime_config(
     """
     runtime_config = await get_runtime_config(engine, server_args, dynamo_args)
 
-    if dynamo_args.use_sglang_tokenizer:
+    if dynamo_args.use_sglang_tokenizer and not (
+        output_type.supports_embedding() or output_type.supports_rerank()
+    ):
         logging.warning(
             "Using the sglang tokenizer/detokenizer instead. The dynamo tokenizer/detokenizer will not be used and only v1/chat/completions will be available"
         )
         input_type = ModelInput.Text
-        # Only override output_type for chat models, not for embeddings
-        if not output_type.supports_embedding():
-            output_type = ModelType.Chat
+        output_type = ModelType.Chat
 
     if runtime_config is not None and _supports_engine_generate(
         input_type, output_type, worker_type

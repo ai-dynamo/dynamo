@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import heapq
 from collections.abc import AsyncGenerator
 from typing import Any
@@ -9,7 +10,10 @@ import sglang as sgl
 from sglang.srt.managers.io_struct import EmbeddingReqInput
 
 from dynamo._core import Context
+from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import RerankRequest
+from dynamo.sglang.publisher import DynamoSglangPublisher
+from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
 
 def _looks_like_decoder_reranker(tokenizer_manager: Any) -> bool:
@@ -29,12 +33,31 @@ def _looks_like_decoder_reranker(tokenizer_manager: Any) -> bool:
     )
 
 
-class RerankWorkerHandler:
+class RerankWorkerHandler(BaseWorkerHandler):
     """Runs stable text-only cross-encoder reranking through SGLang pooling."""
 
-    def __init__(self, engine: sgl.Engine, *, enable_trace: bool) -> None:
-        self.engine = engine
-        self.enable_trace = enable_trace
+    def __init__(
+        self,
+        engine: sgl.Engine,
+        config: Config,
+        publisher: DynamoSglangPublisher | None = None,
+        shutdown_event: asyncio.Event | None = None,
+    ) -> None:
+        self.validate_engine(engine)
+        super().__init__(engine, config, publisher, None, shutdown_event)
+
+    @staticmethod
+    def validate_engine(engine: sgl.Engine) -> None:
+        if _looks_like_decoder_reranker(engine.tokenizer_manager):
+            raise ValueError(
+                "Dynamo's SGLang /v1/rerank integration currently supports "
+                "cross-encoder rerankers only; decoder-only Qwen3 and Qwen3-VL "
+                "rerankers are not supported"
+            )
+
+    def cleanup(self) -> None:
+        super().cleanup()
+        self.engine.shutdown()
 
     @staticmethod
     def _validate(request: RerankRequest) -> None:
@@ -71,13 +94,6 @@ class RerankWorkerHandler:
         self._validate(rerank_request)
 
         tokenizer_manager = self.engine.tokenizer_manager
-        if _looks_like_decoder_reranker(tokenizer_manager):
-            raise ValueError(
-                "Dynamo's SGLang /v1/rerank integration currently supports "
-                "cross-encoder rerankers only; decoder-only Qwen3 and Qwen3-VL "
-                "rerankers are not supported"
-            )
-
         pairs = [
             [rerank_request.query, document] for document in rerank_request.documents
         ]
