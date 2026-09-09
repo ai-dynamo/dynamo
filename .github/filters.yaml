@@ -286,6 +286,7 @@ snapshot_vllm:
   - 'deploy/operator/internal/dynamo/backend_vllm.go'
 
 snapshot_sglang:
+  - 'components/src/dynamo/sglang/args.py'
   - 'components/src/dynamo/sglang/snapshot.py'
   - 'deploy/operator/internal/dynamo/backend_sglang.go'
 
