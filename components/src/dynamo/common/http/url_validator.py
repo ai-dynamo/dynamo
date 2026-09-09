@@ -109,7 +109,7 @@ async def validate_url(url: str, policy: UrlValidationPolicy) -> str:
     For URLs with a hostname, we resolve it here (off the event loop via
     ``loop.getaddrinfo``) and check the resulting IPs against the blocked
     ranges. This catches obvious DNS rebinding but not an attacker who
-    changes their answer between this lookup and httpx's actual connect.
+    changes their answer between this lookup and the client's actual connect.
 
     Raises ``UrlValidationError`` on any policy violation.
     """

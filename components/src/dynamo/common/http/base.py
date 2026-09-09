@@ -3,8 +3,8 @@
 
 """Abstract base class + unified exception classes for the HTTP facade.
 
-Each concrete subclass (:class:`AiohttpClient`, :class:`HttpxClient`)
-owns a backend-specific session/client singleton on the instance.
+The concrete subclass (:class:`AiohttpClient`)
+owns a backend-specific session singleton on the instance.
 Backend-neutral logic (the SSRF redirect loop) lives here so it isn't
 duplicated across subclasses.
 """
@@ -70,7 +70,7 @@ class HttpClient(abc.ABC):
         """Fetch ``url`` and return the response body.
 
         Single-shot: no retries. Raises one of the unified exception
-        classes above; callers never see native httpx/aiohttp classes.
+        classes above; callers never see native aiohttp classes.
 
         ``policy=None``: use the backend's built-in redirect handling.
 

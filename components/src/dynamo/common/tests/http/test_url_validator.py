@@ -359,8 +359,8 @@ def test_policy_from_env_allow_internal(monkeypatch) -> None:
 
 
 # Fetch-with-revalidation tests now live in test_http_backends.py where
-# they exercise the backend-neutral facade path against both httpx and
-# aiohttp. See ``test_fetch_with_policy_*``.
+# they exercise the backend-neutral facade path against the aiohttp
+# client. See ``test_fetch_with_policy_*``.
 
 
 # ---------------------------------------------------------------------------

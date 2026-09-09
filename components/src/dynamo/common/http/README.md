@@ -1,27 +1,28 @@
 # `dynamo.common.http`
 
-HTTP fetch client. Backend-neutral facade
-(`fetch_bytes` / `close_http_client`) over an `HttpClient` ABC with
-two concrete subclasses: `AiohttpClient` (default) and `HttpxClient`.
-Backend selection: `DYN_HTTP_BACKEND={aiohttp,httpx}`.
+HTTP fetch client: a facade (`fetch_bytes` / `close_http_client`) over
+an `HttpClient` ABC with a single concrete subclass, `AiohttpClient`
+(over `aiohttp.ClientSession`). `DYN_HTTP_BACKEND` is retained for
+back-compat but only `aiohttp` is supported; any other value warns and
+uses aiohttp.
 
-## Why aiohttp is the default
+## Why aiohttp (and why httpx was removed)
 
-Under high concurrency (e.g. one request fanning out to 100 image
-URLs) the httpx backend hits `httpx.PoolTimeout`. aiohttp scales
-markedly better on the same workload — see the
+There used to be a second `HttpxClient` backend. Under high concurrency
+(e.g. one request fanning out to 100 image URLs) it hit
+`httpx.PoolTimeout`: the maintenance routine in
+[`httpcore._async.connection_pool`](https://github.com/encode/httpcore/blob/master/httpcore/_async/connection_pool.py#L303-L309)
+runs *"whenever a new request is added or removed from the pool"* and is
+`O(queue_size × pool_size)` per call, so cost grows quadratically with
+backlog. aiohttp's connector queues natively in `O(1)`. The httpx
+backend needed a process-wide semaphore (`DYN_HTTP_CONCURRENCY`) in
+front of its pool just to keep `PoolTimeout` from leaking — redundant
+under aiohttp. aiohttp also exposes a `TCPConnector(resolver=...)` DNS
+hook (used for the connect-time SSRF backstop) that httpx lacks. Given
+aiohttp was strictly better on both counts, the httpx backend was
+removed. See the
 [NeMo Gym aiohttp vs httpx note](https://docs.nvidia.com/nemo/gym/latest/infrastructure/engineering-notes/aiohttp-vs-httpx.html)
 and [openai-python#1596](https://github.com/openai/openai-python/issues/1596).
-
-Root cause is in httpx's pool. The maintenance routine in
-[`httpcore._async.connection_pool`](https://github.com/encode/httpcore/blob/master/httpcore/_async/connection_pool.py#L303-L309)
-runs *"whenever a new request is added or removed from the pool"* and
-is `O(queue_size × pool_size)` per call, so cost grows quadratically
-with backlog. aiohttp's connector queues natively in `O(1)`, which is
-why our httpx backend needed a process-wide semaphore
-(`DYN_HTTP_CONCURRENCY`) in front of the pool to keep
-`PoolTimeout` from leaking up the stack. That semaphore is redundant
-under aiohttp.
 
 ### Benchmark
 
