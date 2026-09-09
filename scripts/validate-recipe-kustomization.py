@@ -16,21 +16,25 @@
 """Validate a v1beta1 recipe Kustomization by replaying its JSON patches.
 
 This validator intentionally supports the small, fail-closed Kustomize surface
-used by the recipe scaffold: one multi-document base, ordered
-Components, and JSON 6902 ``patches``.  It uses only the Python standard
-library and PyYAML, and verifies its replay against Kustomize v5.8.1.
+used by the recipe scaffold: one multi-document base, ordered Components, and
+``patches`` written either as JSON 6902 operations or as strategic merge
+patches. Merge patches are lowered into guarded JSON 6902 operations by name
+against the accumulated document, so one replay contract covers both styles.
+It uses only the Python standard library and PyYAML, and verifies its replay
+against Kustomize v5.8.1.
 """
 
 from __future__ import annotations
 
 import argparse
 import copy
+import json
 import math
 import os
 import re
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dataclass_replace
 from pathlib import Path
 from typing import (
     Any,
@@ -65,9 +69,13 @@ ROOT_KUSTOMIZATION_KEYS = frozenset(
     {"apiVersion", "kind", "resources", "components", "patches", "sortOptions"}
 )
 COMPONENT_KUSTOMIZATION_KEYS = frozenset(
-    {"apiVersion", "kind", "components", "patches"}
+    {"apiVersion", "kind", "components", "patches", "openapi"}
 )
+SCHEMA_COMPONENT_NAME = "dynamo-openapi"
+SCHEMA_COMPONENT_REFERENCE = "components/" + SCHEMA_COMPONENT_NAME
+MERGE_PATCH_TOP_LEVEL_KEYS = frozenset({"apiVersion", "kind", "metadata", "spec"})
 CANONICAL_COMPONENT_ORDER = (
+    SCHEMA_COMPONENT_NAME,
     "cache-binding",
     "registry-credentials",
     "probes",
@@ -153,6 +161,7 @@ class _PatchLayer:
     operations: Tuple[Mapping[str, Any], ...]
     is_component: bool
     root_component: Optional[_RootComponent]
+    merge: Optional[Mapping[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -429,6 +438,16 @@ def _load_patch(
             ) from error
         source = owner
         label = provisional_label
+    if isinstance(raw_operations, dict):
+        return _PatchLayer(
+            label=label,
+            source=source,
+            target=target,
+            operations=(),
+            is_component=is_component,
+            root_component=root_component,
+            merge=_parse_merge_patch(raw_operations, target, label=label),
+        )
     return _PatchLayer(
         label=label,
         source=source,
@@ -439,12 +458,105 @@ def _load_patch(
     )
 
 
+def _reject_merge_directives(
+    value: Any, *, label: str, tokens: Tuple[str, ...]
+) -> None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if not isinstance(key, str):
+                raise ValidationError(
+                    "merge-patch",
+                    "merge patch keys must be strings",
+                    layer=label,
+                    path=_encode_pointer(tokens),
+                )
+            if key.startswith("$"):
+                raise ValidationError(
+                    "merge-patch",
+                    "strategic merge directives such as %s are not supported" % key,
+                    layer=label,
+                    path=_encode_pointer(tokens + (key,)),
+                )
+            if child is None:
+                raise ValidationError(
+                    "merge-patch",
+                    "null values are not supported; omit the field instead",
+                    layer=label,
+                    path=_encode_pointer(tokens + (key,)),
+                )
+            _reject_merge_directives(child, label=label, tokens=tokens + (key,))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            if child is None:
+                raise ValidationError(
+                    "merge-patch",
+                    "null list items are not supported",
+                    layer=label,
+                    path=_encode_pointer(tokens + (str(index),)),
+                )
+            _reject_merge_directives(child, label=label, tokens=tokens + (str(index),))
+
+
+def _parse_merge_patch(
+    raw: Mapping[str, Any], target: _Target, *, label: str
+) -> Mapping[str, Any]:
+    """Accept one strategic merge patch document for the exact DGD target."""
+
+    extra = sorted(set(raw).difference(MERGE_PATCH_TOP_LEVEL_KEYS))
+    if extra:
+        raise ValidationError(
+            "merge-patch",
+            "unsupported merge patch fields: %s" % ", ".join(extra),
+            layer=label,
+        )
+    expected_api_version = "%s/%s" % (target.group, target.version)
+    if raw.get("apiVersion") != expected_api_version or raw.get("kind") != target.kind:
+        raise ValidationError(
+            "merge-patch",
+            "merge patch apiVersion and kind must match the patch target",
+            layer=label,
+            expected={"apiVersion": expected_api_version, "kind": target.kind},
+            actual={"apiVersion": raw.get("apiVersion"), "kind": raw.get("kind")},
+        )
+    metadata = raw.get("metadata")
+    if (
+        not isinstance(metadata, dict)
+        or set(metadata) != {"name"}
+        or not isinstance(metadata.get("name"), str)
+        or not metadata["name"]
+    ):
+        raise ValidationError(
+            "merge-patch",
+            "merge patch metadata must contain only a placeholder name; "
+            "the target selector chooses the DGD",
+            layer=label,
+        )
+    spec = raw.get("spec")
+    if not isinstance(spec, dict) or not spec:
+        raise ValidationError(
+            "merge-patch",
+            "merge patch requires a non-empty spec mapping",
+            layer=label,
+        )
+    if not _is_json_value(spec):
+        raise ValidationError(
+            "merge-patch",
+            "merge patch spec must contain JSON-compatible values",
+            layer=label,
+        )
+    _reject_merge_directives(spec, label=label, tokens=("spec",))
+    return raw
+
+
 def _classify_root_component(reference: str) -> Optional[Tuple[str, str]]:
+    if reference == SCHEMA_COMPONENT_REFERENCE:
+        return "openapi", ""
     segments = reference.split("/")
     if (
         len(segments) == 3
         and segments[0] == "components"
         and segments[1] in CANONICAL_COMPONENT_ORDER
+        and segments[1] != SCHEMA_COMPONENT_NAME
         and segments[2] in ("agg", "disagg")
     ):
         concern = (
@@ -472,6 +584,8 @@ def _classify_root_component(reference: str) -> Optional[Tuple[str, str]]:
 def _canonical_root_concern(concern: str) -> str:
     if concern in _NETWORK_ROOT_CONCERNS:
         return "network-interface"
+    if concern == "openapi":
+        return SCHEMA_COMPONENT_NAME
     return concern
 
 
@@ -497,6 +611,15 @@ def _component_layers(
             % component_kustomization,
         )
     _reject_unsupported_fields(document, component_kustomization, component=True)
+    if root_component.concern == "openapi":
+        _validate_schema_component(document, component_kustomization)
+        return []
+    if "openapi" in document:
+        raise ValidationError(
+            "unsupported-manifest",
+            "%s declares openapi; only %s supplies the strategic merge schema"
+            % (component_kustomization, SCHEMA_COMPONENT_REFERENCE),
+        )
     layers: List[_PatchLayer] = []
     nested = document.get("components", [])
     if not isinstance(nested, list) or not all(
@@ -744,6 +867,449 @@ def _collect_layers(
     return tuple(layers), root_components
 
 
+def _validate_schema_component(
+    document: Mapping[str, Any], kustomization_path: Path
+) -> Path:
+    openapi = document.get("openapi")
+    if (
+        not isinstance(openapi, dict)
+        or set(openapi) != {"path"}
+        or not isinstance(openapi.get("path"), str)
+        or not openapi["path"]
+    ):
+        raise ValidationError(
+            "merge-patch",
+            "%s must declare openapi.path and no other openapi field"
+            % kustomization_path,
+        )
+    for key in ("patches", "components"):
+        if key in document:
+            raise ValidationError(
+                "merge-patch",
+                "%s must not declare %s; it only supplies the merge schema"
+                % (kustomization_path, key),
+            )
+    schema_path = (kustomization_path.parent / openapi["path"]).resolve()
+    if not schema_path.is_file():
+        raise ValidationError(
+            "merge-patch",
+            "OpenAPI schema file does not exist",
+            actual=str(schema_path),
+        )
+    return schema_path
+
+
+def _load_schema(
+    root_components: Sequence[_RootComponent],
+) -> Optional[Dict[str, Any]]:
+    schema_component = next(
+        (root for root in root_components if root.concern == "openapi"), None
+    )
+    if schema_component is None:
+        return None
+    kustomization_path = _find_kustomization(schema_component.resolved)
+    document = _load_one_mapping(kustomization_path, "Component")
+    schema_path = _validate_schema_component(document, kustomization_path)
+    try:
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise ValidationError(
+            "merge-patch", "cannot read OpenAPI schema %s: %s" % (schema_path, error)
+        ) from error
+    if not isinstance(schema, dict) or not isinstance(schema.get("definitions"), dict):
+        raise ValidationError(
+            "merge-patch",
+            "OpenAPI schema must contain a definitions mapping",
+            actual=str(schema_path),
+        )
+    return schema
+
+
+def _schema_property(node: Any, key: str) -> Any:
+    if not isinstance(node, dict):
+        return None
+    properties = node.get("properties")
+    if isinstance(properties, dict) and key in properties:
+        return properties[key]
+    additional = node.get("additionalProperties")
+    return additional if isinstance(additional, dict) else None
+
+
+def _schema_items(node: Any) -> Any:
+    items = node.get("items") if isinstance(node, dict) else None
+    return items if isinstance(items, dict) else None
+
+
+def _schema_merge_key(node: Any) -> Optional[str]:
+    if isinstance(node, dict) and node.get("x-kubernetes-patch-strategy") == "merge":
+        key = node.get("x-kubernetes-patch-merge-key")
+        if isinstance(key, str) and key:
+            return key
+    return None
+
+
+def _merge_value(patch: Any, current: Any, schema: Any) -> Any:
+    """Compute Kustomize's strategic merge of patch into current.
+
+    Keyed lists place the patch elements first in patch order, merged with
+    their matches, followed by the untouched current elements. Unkeyed lists
+    and scalars are replaced. Mappings merge key by key.
+    """
+
+    if isinstance(patch, dict) and isinstance(current, dict):
+        merged = copy.deepcopy(current)
+        for key, value in patch.items():
+            if key in current:
+                merged[key] = _merge_value(
+                    value, current[key], _schema_property(schema, key)
+                )
+            else:
+                merged[key] = copy.deepcopy(value)
+        return merged
+    if isinstance(patch, list) and isinstance(current, list):
+        merge_key = _schema_merge_key(schema)
+        if merge_key is None:
+            return copy.deepcopy(patch)
+        item_schema = _schema_items(schema)
+        result: List[Any] = []
+        consumed: Set[int] = set()
+        for item in patch:
+            key = item.get(merge_key) if isinstance(item, dict) else None
+            match = next(
+                (
+                    index
+                    for index, element in enumerate(current)
+                    if index not in consumed
+                    and isinstance(element, dict)
+                    and element.get(merge_key) == key
+                ),
+                None,
+            )
+            if match is None:
+                result.append(copy.deepcopy(item))
+            else:
+                consumed.add(match)
+                result.append(_merge_value(item, current[match], item_schema))
+        result.extend(
+            copy.deepcopy(element)
+            for index, element in enumerate(current)
+            if index not in consumed
+        )
+        return result
+    return copy.deepcopy(patch)
+
+
+class _MergeLowering:
+    """Lower one strategic merge patch into guarded JSON 6902 operations.
+
+    The lowered operations replay to exactly the document Kustomize renders,
+    and they carry the same component and container identity tests that the
+    hand-written JSON 6902 Components use, so every downstream contract check
+    applies unchanged.
+    """
+
+    def __init__(self, layer: _PatchLayer, document: Mapping[str, Any]) -> None:
+        self.layer = layer
+        self.document = document
+        self.operations: List[Dict[str, Any]] = []
+        self._tested: Set[Tuple[str, ...]] = set()
+
+    def _error(
+        self, message: str, tokens: Tuple[str, ...], **details: Any
+    ) -> ValidationError:
+        return ValidationError(
+            "merge-patch",
+            message,
+            layer=self.layer.label,
+            path=_encode_pointer(tokens),
+            **details,
+        )
+
+    def _emit(
+        self, op_name: str, tokens: Tuple[str, ...], value: Any = _MISSING
+    ) -> None:
+        operation: Dict[str, Any] = {"op": op_name, "path": _encode_pointer(tokens)}
+        if value is not _MISSING:
+            operation["value"] = copy.deepcopy(value)
+        self.operations.append(operation)
+        if op_name == "test":
+            self._tested.add(tuple(tokens))
+        else:
+            self._tested = {
+                tested
+                for tested in self._tested
+                if not _test_is_invalidated(tested, tokens, op_name)
+            }
+
+    def _test_current(self, tokens: Tuple[str, ...]) -> None:
+        if tuple(tokens) in self._tested:
+            return
+        parent, token = _try_resolve_parent(self.document, tokens)
+        value: Any = _MISSING
+        if isinstance(parent, dict) and token in parent:
+            value = parent[token]
+        elif isinstance(parent, list) and _is_list_slot(token) and token != "-":
+            if int(token) < len(parent):
+                value = parent[int(token)]
+        if value is _MISSING:
+            raise self._error(
+                "merge patch requires an identity value the accumulated document lacks",
+                tokens,
+            )
+        self._emit("test", tokens, value)
+
+    def _identity(self, tokens: Tuple[str, ...]) -> None:
+        """Emit the component and container identity tests guarding tokens."""
+
+        if (
+            len(tokens) < 3
+            or tokens[:2] != ("spec", "components")
+            or not re.fullmatch(r"0|[1-9][0-9]*", tokens[2])
+        ):
+            return
+        component = tokens[:3]
+        for identity in ("name", "type"):
+            self._test_current(component + (identity,))
+        if (
+            len(tokens) >= 7
+            and tokens[3:5] == ("podTemplate", "spec")
+            and tokens[5] in CONTAINER_COLLECTIONS
+            and re.fullmatch(r"0|[1-9][0-9]*", tokens[6])
+        ):
+            self._test_current(tokens[:7] + ("name",))
+
+    def lower_mapping(
+        self,
+        patch: Mapping[str, Any],
+        current: Mapping[str, Any],
+        tokens: Tuple[str, ...],
+        schema: Any,
+    ) -> None:
+        for key, value in patch.items():
+            child = tokens + (key,)
+            child_schema = _schema_property(schema, key)
+            if key not in current:
+                self._identity(child)
+                self._emit("add", child, value)
+                continue
+            existing = current[key]
+            if isinstance(value, dict):
+                if not isinstance(existing, dict):
+                    raise self._error(
+                        "merge patch mapping cannot merge into a non-mapping field",
+                        child,
+                    )
+                self.lower_mapping(value, existing, child, child_schema)
+            elif isinstance(value, list):
+                if not isinstance(existing, list):
+                    raise self._error(
+                        "merge patch list cannot merge into a non-list field", child
+                    )
+                merge_key = _schema_merge_key(child_schema)
+                if merge_key is None:
+                    if not _json_equal(existing, value):
+                        self._identity(child)
+                        self._emit("test", child, existing)
+                        self._emit("replace", child, value)
+                else:
+                    self.lower_list(
+                        value, existing, child, merge_key, _schema_items(child_schema)
+                    )
+            elif not _json_equal(existing, value):
+                self._identity(child)
+                self._emit("test", child, existing)
+                self._emit("replace", child, value)
+
+    def lower_list(
+        self,
+        patch_items: Sequence[Any],
+        current: Sequence[Any],
+        tokens: Tuple[str, ...],
+        merge_key: str,
+        item_schema: Any,
+    ) -> None:
+        keys: List[str] = []
+        for position, item in enumerate(patch_items):
+            if (
+                not isinstance(item, dict)
+                or not isinstance(item.get(merge_key), str)
+                or not item[merge_key]
+            ):
+                raise self._error(
+                    "merge patch list items require a non-empty string %s" % merge_key,
+                    tokens + (str(position),),
+                )
+            if item[merge_key] in keys:
+                raise self._error(
+                    "merge patch repeats %s %s" % (merge_key, item[merge_key]),
+                    tokens + (str(position),),
+                )
+            keys.append(item[merge_key])
+        current_keys = [
+            element.get(merge_key) if isinstance(element, dict) else None
+            for element in current
+        ]
+        if tokens == ("spec", "components"):
+            if keys != current_keys:
+                raise self._error(
+                    "merge patch must list every canonical component by name in "
+                    "base order; unmatched names would append new components",
+                    tokens,
+                    expected=current_keys,
+                    actual=keys,
+                )
+        elif (
+            len(tokens) == 6
+            and tokens[:2] == ("spec", "components")
+            and tokens[3:5] == ("podTemplate", "spec")
+            and tokens[5] in CONTAINER_COLLECTIONS
+        ):
+            if any(key not in current_keys for key in keys):
+                raise self._error(
+                    "merge patch may only address containers the base defines",
+                    tokens,
+                    expected=current_keys,
+                    actual=keys,
+                )
+            if [key for key in current_keys if key in keys] != keys:
+                raise self._error(
+                    "merge patch must list containers in base order",
+                    tokens,
+                    expected=current_keys,
+                    actual=keys,
+                )
+        working = list(current)
+        for position, item in enumerate(patch_items):
+            key = item[merge_key]
+            match = next(
+                (
+                    index
+                    for index in range(position, len(working))
+                    if isinstance(working[index], dict)
+                    and working[index].get(merge_key) == key
+                ),
+                None,
+            )
+            element = tokens + (str(position),)
+            if match is None:
+                self._identity(element)
+                self._emit("add", element, item)
+                working.insert(position, item)
+                continue
+            existing = working[match]
+            merged = _merge_value(item, existing, item_schema)
+            if match != position:
+                moved = tokens + (str(match),)
+                self._identity(moved)
+                self._emit("test", moved, existing)
+                self._emit("remove", moved)
+                del working[match]
+                self._identity(element)
+                self._emit("add", element, merged)
+                working.insert(position, merged)
+                continue
+            if _json_equal(merged, existing):
+                continue
+            self._identity(element)
+            self._emit("test", element + (merge_key,), key)
+            self.lower_mapping(item, existing, element, item_schema)
+            working[position] = merged
+
+
+def _lower_merge_patch(
+    layer: _PatchLayer, document: Mapping[str, Any], schema: Mapping[str, Any]
+) -> Tuple[Mapping[str, Any], ...]:
+    assert layer.merge is not None
+    definition_key = "%s.%s.%s" % (
+        layer.target.group,
+        layer.target.version,
+        layer.target.kind,
+    )
+    definition = schema["definitions"].get(definition_key)
+    if not isinstance(definition, dict):
+        raise ValidationError(
+            "merge-patch",
+            "OpenAPI schema lacks a definition for %s" % definition_key,
+            layer=layer.label,
+        )
+    spec = document.get("spec")
+    if not isinstance(spec, dict):
+        raise ValidationError(
+            "merge-patch",
+            "target document lacks a spec mapping",
+            layer=layer.label,
+        )
+    lowering = _MergeLowering(layer, document)
+    lowering.lower_mapping(
+        layer.merge["spec"], spec, ("spec",), _schema_property(definition, "spec")
+    )
+    if not lowering.operations:
+        raise ValidationError(
+            "merge-patch",
+            "merge patch changes nothing in the accumulated document",
+            layer=layer.label,
+        )
+    return tuple(lowering.operations)
+
+
+def _target_document(documents: Sequence[Any], layer: _PatchLayer) -> Any:
+    matches = [
+        index
+        for index, document in enumerate(documents)
+        if _matches_target(document, layer.target)
+    ]
+    if len(matches) != 1:
+        raise ValidationError(
+            "patch-target-count",
+            "patch target must match exactly one accumulated resource; found %d"
+            % len(matches),
+            layer=layer.label,
+        )
+    return documents[matches[0]]
+
+
+def _lower_merge_layers(
+    base_documents: Sequence[Any],
+    layers: Sequence[_PatchLayer],
+    schema: Optional[Mapping[str, Any]],
+) -> Tuple[_PatchLayer, ...]:
+    """Replace merge layers with lowered operations against the evolving document.
+
+    Lowering follows the replay order so that a later merge patch resolves
+    names against the document that earlier Components already changed. If an
+    earlier layer fails to apply, lowering stops and the ordinary replay
+    reports that failure.
+    """
+
+    if not any(layer.merge is not None for layer in layers):
+        return tuple(layers)
+    if schema is None:
+        raise ValidationError(
+            "merge-patch",
+            "strategic merge patches require %s as the first root Component"
+            % SCHEMA_COMPONENT_REFERENCE,
+        )
+    working = copy.deepcopy(list(base_documents))
+    lowered: List[_PatchLayer] = []
+    halted = False
+    for layer in layers:
+        if layer.merge is not None and not halted:
+            target = _target_document(working, layer)
+            layer = dataclass_replace(
+                layer, operations=_lower_merge_patch(layer, target, schema)
+            )
+        lowered.append(layer)
+        if halted:
+            continue
+        try:
+            target = _target_document(working, layer)
+            for op_index, operation in enumerate(layer.operations, start=1):
+                _apply_operation(target, layer, op_index, operation)
+        except ValidationError:
+            halted = True
+    return tuple(lowered)
+
+
 def _api_parts(api_version: Any) -> Tuple[str, str]:
     if not isinstance(api_version, str):
         return "", ""
@@ -885,6 +1451,10 @@ def _pointer_tokens(
         _decode_pointer_token(token, layer=layer, op_index=op_index, path=path)
         for token in path[1:].split("/")
     )
+
+
+def _is_list_slot(token: str) -> bool:
+    return token == "-" or bool(re.fullmatch(r"0|[1-9][0-9]*", token))
 
 
 def _list_index(
@@ -1207,7 +1777,7 @@ def _physical_network_env_name(
     portable bases may never define.
     """
     name: Any = None
-    if len(tokens) >= 2 and tokens[-2:] == ("env", "-"):
+    if len(tokens) >= 2 and tokens[-2] == "env" and _is_list_slot(tokens[-1]):
         value = operation.get("value")
         name = value.get("name") if isinstance(value, dict) else None
     elif (
@@ -1240,6 +1810,27 @@ def _network_operation_kind(
     pod_prefix = ("spec", "components", component_index, "podTemplate")
     main_prefix = pod_prefix + ("spec", "containers", "0")
 
+    if tokens in (pod_prefix + ("metadata",), pod_prefix + ("metadata", "annotations")):
+        value = operation.get("value")
+        if tokens[-1] == "metadata":
+            annotations = (
+                value.get("annotations")
+                if isinstance(value, dict) and set(value) == {"annotations"}
+                else None
+            )
+        else:
+            annotations = value
+        if (
+            isinstance(annotations, dict)
+            and annotations
+            and all(
+                isinstance(key, str) and key and isinstance(item, str)
+                for key, item in annotations.items()
+            )
+        ):
+            return "annotation"
+        return None
+
     if len(tokens) == 7 and tokens[:6] == pod_prefix + (
         "metadata",
         "annotations",
@@ -1248,7 +1839,7 @@ def _network_operation_kind(
             return "annotation"
         return None
 
-    if tokens == main_prefix + ("env", "-"):
+    if tokens[:-1] == main_prefix + ("env",) and _is_list_slot(tokens[-1]):
         value = operation.get("value")
         if (
             isinstance(value, dict)
@@ -1285,7 +1876,7 @@ def _network_operation_kind(
             return "resource-invalid"
         return "resource"
 
-    if tokens == main_prefix + ("volumeMounts", "-"):
+    if tokens[:-1] == main_prefix + ("volumeMounts",) and _is_list_slot(tokens[-1]):
         value = operation.get("value")
         if (
             isinstance(value, dict)
@@ -1298,7 +1889,7 @@ def _network_operation_kind(
             return "host-mount"
         return None
 
-    if tokens == pod_prefix + ("spec", "volumes", "-"):
+    if tokens[:-1] == pod_prefix + ("spec", "volumes") and _is_list_slot(tokens[-1]):
         value = operation.get("value")
         host_path = value.get("hostPath") if isinstance(value, dict) else None
         if (
@@ -1363,7 +1954,8 @@ def _validate_networking_contract(
             component_value = component_operation.get("value")
             if (
                 len(component_tokens) >= 3
-                and component_tokens[-2:] == ("env", "-")
+                and component_tokens[-2] == "env"
+                and _is_list_slot(component_tokens[-1])
                 and isinstance(component_value, dict)
                 and isinstance(component_value.get("name"), str)
             ):
@@ -1538,7 +2130,7 @@ def _selected_env_append_names(layers: Sequence[_PatchLayer]) -> Set[str]:
             tokens = _pointer_tokens(
                 operation["path"], layer=layer.label, op_index=index
             )
-            if len(tokens) >= 2 and tokens[-2:] == ("env", "-"):
+            if len(tokens) >= 2 and tokens[-2] == "env" and _is_list_slot(tokens[-1]):
                 value = operation["value"]
                 if (
                     not isinstance(value, dict)
@@ -1596,6 +2188,45 @@ def _validate_base_ownership(
                     path=operation["path"],
                     actual=parent[token],
                 )
+
+
+def _reject_duplicate_env(
+    parent: Sequence[Any],
+    value: Any,
+    *,
+    layer: _PatchLayer,
+    op_index: int,
+    path: str,
+) -> None:
+    if (
+        not isinstance(value, dict)
+        or not isinstance(value.get("name"), str)
+        or not value["name"]
+    ):
+        raise ValidationError(
+            "unsupported-manifest",
+            "env add requires a value with a non-empty string name",
+            layer=layer.label,
+            op_index=op_index,
+            path=path,
+        )
+    duplicate_index = next(
+        (
+            index
+            for index, entry in enumerate(parent)
+            if isinstance(entry, dict) and entry.get("name") == value["name"]
+        ),
+        None,
+    )
+    if duplicate_index is not None:
+        raise ValidationError(
+            "replay-duplicate-env",
+            "environment name %s already exists at index %d"
+            % (value["name"], duplicate_index),
+            layer=layer.label,
+            op_index=op_index,
+            path=path,
+        )
 
 
 def _apply_operation(
@@ -1677,6 +2308,10 @@ def _apply_operation(
                 allow_end=True,
                 context=(layer.label, op_index, path),
             )
+            if len(tokens) >= 2 and tokens[-2] == "env":
+                _reject_duplicate_env(
+                    parent, value, layer=layer, op_index=op_index, path=path
+                )
             parent.insert(index, value)
             return
         raise ValidationError(
@@ -1983,10 +2618,12 @@ def validate_case(
     dgd_index = _require_one_beta_dgd(base_documents, "base")
     _validate_canonical_components(base_documents[dgd_index])
     layers, root_components = _collect_layers(base, kustomization)
+    schema = _load_schema(root_components)
+    layers = _lower_merge_layers(base_documents, layers, schema)
     for layer in layers:
         _validate_guards(layer)
-    _validate_networking_contract(layers, root_components)
     _validate_base_ownership(base_documents, dgd_index, layers)
+    _validate_networking_contract(layers, root_components)
 
     _require_kustomize_version(executable)
     build = _run_kustomize(kustomization, executable)
@@ -2052,7 +2689,10 @@ def validate_case(
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Validate a beta recipe Kustomization by sequential JSON Patch replay."
+        description=(
+            "Validate a beta recipe Kustomization by sequential patch replay; "
+            "strategic merge patches are lowered to guarded JSON 6902 operations."
+        )
     )
     parser.add_argument("base_yaml", type=Path, metavar="BASE_YAML")
     parser.add_argument("kustomization_yaml", type=Path, metavar="KUSTOMIZATION_YAML")

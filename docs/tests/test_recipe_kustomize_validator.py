@@ -135,10 +135,9 @@ def _filled_case(
         path.write_text(text)
 
     if with_case_override:
-        worker_env = _dgd(case / "base.yaml")["spec"]["components"][1]["podTemplate"][
-            "spec"
-        ]["containers"][0]["env"]
-        env_index = len(worker_env)
+        # The generic networking Component is a strategic merge patch, so Kustomize
+        # places its NCCL_SOCKET_IFNAME entry first in the worker environment.
+        env_index = 0
         patch = [
             {"op": "test", "path": "/spec/components/1/name", "value": "Worker"},
             {"op": "test", "path": "/spec/components/1/type", "value": "worker"},
@@ -348,6 +347,8 @@ def test_scaffold_inventory_is_complete() -> None:
         "patches/vllm-kv-transfer-config.yaml",
         "patches/vllm-compute-domain-kv-transfer-config.yaml",
         "patches/sglang-nixl-backend.yaml",
+        "components/dynamo-openapi/kustomization.yaml",
+        "components/dynamo-openapi/dynamo-openapi.json",
     }
     for concern in (
         "cache-binding",
@@ -825,19 +826,52 @@ def test_validator_rejects_disaggregated_identity_breaks(
     _assert_error(_validate(case), expected_code)
 
 
-def test_validator_rejects_wrong_framework_hook_old_value(tmp_path: Path) -> None:
+def test_validator_rejects_hook_patch_missing_canonical_component(
+    tmp_path: Path,
+) -> None:
     case = _filled_disagg_case(tmp_path, *DISAGG_CASES[0])
     patch_path = case / "patches" / "vllm-kv-transfer-config.yaml"
-    operations = yaml.safe_load(patch_path.read_text())
-    hook_test = next(
-        operation
-        for operation in operations
-        if operation["op"] == "test" and operation["path"].endswith("/env/0/value")
-    )
-    hook_test["value"] = "wrong-old-hook-value"
-    patch_path.write_text(yaml.safe_dump(operations, sort_keys=False))
+    document = yaml.safe_load(patch_path.read_text())
+    document["spec"]["components"] = [
+        component
+        for component in document["spec"]["components"]
+        if component["name"] != "Frontend"
+    ]
+    patch_path.write_text(yaml.safe_dump(document, sort_keys=False))
 
-    _assert_error(_validate(case), "kustomize-build")
+    _assert_error(_validate(case), "merge-patch")
+
+
+def test_validator_lowers_hook_patch_to_named_env_override(tmp_path: Path) -> None:
+    case = _filled_disagg_case(tmp_path, *DISAGG_CASES[0])
+
+    result = _validate(case)
+    rendered = subprocess.run(
+        [
+            _kustomize_bin(),
+            "build",
+            str(case),
+            "--load-restrictor",
+            "LoadRestrictionsNone",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    dgd = next(
+        document
+        for document in yaml.safe_load_all(rendered)
+        if isinstance(document, dict)
+        and document.get("kind") == "DynamoGraphDeployment"
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    for component in dgd["spec"]["components"][1:]:
+        env = component["podTemplate"]["spec"]["containers"][0]["env"]
+        hooks = [entry for entry in env if entry["name"] == "KV_TRANSFER_CONFIG"]
+        assert hooks == [
+            {"name": "KV_TRANSFER_CONFIG", "value": "cluster-kv-transfer-config"}
+        ]
 
 
 def test_validator_rejects_duplicate_env_added_by_later_layer(tmp_path: Path) -> None:
@@ -1157,7 +1191,9 @@ def test_readme_covers_binding_and_safety_contract() -> None:
         "KV_TRANSFER_CONFIG",
         "SGLANG_DISAGGREGATION_NIXL_BACKEND",
         "LoadRestrictionsNone",
-        "~1",
+        "components/dynamo-openapi",
+        "strategic merge",
+        "merge-patch",
         "scripts/validate-recipe-kustomization.py",
         "--kustomize-bin /explicit/path/to/kustomize",
         "deployment operation",

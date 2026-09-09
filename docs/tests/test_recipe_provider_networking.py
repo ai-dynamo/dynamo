@@ -52,12 +52,12 @@ PROVIDER_VALUES = {
         "your-decode-network-resource-quantity": "3",
     },
     "ib": {
-        "your-prefill-rdma.example.com~1resource": "example.com~1prefill-rdma",
+        "your-prefill-rdma.example.com/resource": "example.com/prefill-rdma",
         "your-prefill-rdma-resource-quantity": "2",
         "your-prefill-nccl-socket-interface": "eth0",
         "your-prefill-gloo-socket-interface": "eth0",
         "your-prefill-ucx-device-list": "mlx5_0:1,mlx5_1:1",
-        "your-decode-rdma.example.com~1resource": "example.com~1decode-rdma",
+        "your-decode-rdma.example.com/resource": "example.com/decode-rdma",
         "your-decode-rdma-resource-quantity": "3",
         "your-decode-nccl-socket-interface": "ens1f0",
         "your-decode-gloo-socket-interface": "ens1f0",
@@ -138,25 +138,28 @@ def _remove_optional_provider_blocks(case: Path, provider: str) -> None:
         / "disagg"
         / "patch-dgd.yaml"
     )
-    operations = yaml.safe_load(patch_path.read_text())
-
-    def retained(operation: dict[str, Any]) -> bool:
-        value = operation.get("value")
-        env_name = value.get("name") if isinstance(value, dict) else None
+    document = yaml.safe_load(patch_path.read_text())
+    for component in document["spec"]["components"]:
+        pod_template = component.get("podTemplate")
+        if pod_template is None:
+            continue
+        pod_spec = pod_template["spec"]
+        main = pod_spec["containers"][0]
         if provider == "gke-roce":
-            return env_name != "NCCL_CROSS_NIC" and ".IP" not in operation["path"]
-        return env_name not in {
-            "NCCL_SOCKET_IFNAME",
-            "GLOO_SOCKET_IFNAME",
-            "UCX_NET_DEVICES",
-        } and not operation["path"].endswith(("/volumeMounts/-", "/volumes/-"))
-
-    patch_path.write_text(
-        yaml.safe_dump(
-            [operation for operation in operations if retained(operation)],
-            sort_keys=False,
-        )
-    )
+            main["env"] = [
+                entry for entry in main["env"] if entry["name"] != "NCCL_CROSS_NIC"
+            ]
+            for scope in ("requests", "limits"):
+                main["resources"][scope] = {
+                    key: value
+                    for key, value in main["resources"][scope].items()
+                    if not key.endswith(".IP")
+                }
+        else:
+            main.pop("env", None)
+            main.pop("volumeMounts", None)
+            pod_spec.pop("volumes", None)
+    patch_path.write_text(yaml.safe_dump(document, sort_keys=False))
 
 
 def _rendered_dgd(case: Path) -> dict[str, Any]:
@@ -186,6 +189,17 @@ def _components(dgd: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {component["name"]: component for component in dgd["spec"]["components"]}
 
 
+def _added_entries(
+    before: list[dict[str, Any]], after: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Return the keyed list entries that a merge patch added, in render order."""
+
+    names = {entry.get("name") for entry in before}
+    added = [entry for entry in after if entry.get("name") not in names]
+    assert [entry for entry in after if entry.get("name") in names] == before
+    return added
+
+
 def _added_mapping(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
     assert all(after.get(key) == value for key, value in before.items())
     return {key: value for key, value in after.items() if key not in before}
@@ -206,13 +220,15 @@ def _network_projection(
     before_volumes = before_spec.get("volumes", [])
     return {
         "annotations": after_pod.get("metadata", {}).get("annotations", {}),
-        "environment": after_main["env"][len(before_main["env"]) :],
+        "environment": _added_entries(before_main["env"], after_main["env"]),
         "requests": _added_mapping(
             before_resources["requests"], after_resources["requests"]
         ),
         "limits": _added_mapping(before_resources["limits"], after_resources["limits"]),
-        "volumeMounts": after_main.get("volumeMounts", [])[len(before_mounts) :],
-        "volumes": after_spec.get("volumes", [])[len(before_volumes) :],
+        "volumeMounts": _added_entries(
+            before_mounts, after_main.get("volumeMounts", [])
+        ),
+        "volumes": _added_entries(before_volumes, after_spec.get("volumes", [])),
     }
 
 
@@ -957,3 +973,220 @@ def test_validator_rejects_base_owned_provider_annotation(tmp_path: Path) -> Non
     core._write_documents(base_path, documents)
 
     _assert_error(core._validate(case), "base-field-ownership")
+
+
+def _merge_patch(components: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "apiVersion": "nvidia.com/v1beta1",
+        "kind": "DynamoGraphDeployment",
+        "metadata": {"name": "canonical-recipe"},
+        "spec": {"components": components},
+    }
+
+
+def _worker_env_patch(name: str, env: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "name": name,
+        "podTemplate": {"spec": {"containers": [{"name": "main", "env": env}]}},
+    }
+
+
+def _custom_merge_networking_case(
+    tmp_path: Path, document: dict[str, Any]
+) -> tuple[Path, Path]:
+    case = core._filled_disagg_case(
+        tmp_path,
+        "trtllm/disagg/deploy-v1beta1.template.yaml",
+        None,
+    )
+    reference = "components/provider-networking/test/disagg"
+    component = case / reference
+    component.mkdir(parents=True, exist_ok=True)
+    (component / "kustomization.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "apiVersion": "kustomize.config.k8s.io/v1alpha1",
+                "kind": "Component",
+                "patches": [
+                    {
+                        "target": {
+                            "group": "nvidia.com",
+                            "version": "v1beta1",
+                            "kind": "DynamoGraphDeployment",
+                        },
+                        "path": "patch-dgd.yaml",
+                    }
+                ],
+            },
+            sort_keys=False,
+        )
+    )
+    (component / "patch-dgd.yaml").write_text(yaml.safe_dump(document, sort_keys=False))
+    _select_networking_component(case, reference)
+    return case, component
+
+
+_MERGE_NETWORK_ENV = [{"name": "FI_PROVIDER", "value": "efa"}]
+
+
+def test_validator_accepts_merge_patch_networking_component(tmp_path: Path) -> None:
+    case, _ = _custom_merge_networking_case(
+        tmp_path,
+        _merge_patch(
+            [
+                {"name": "Frontend"},
+                _worker_env_patch("PrefillWorker", _MERGE_NETWORK_ENV),
+                _worker_env_patch("DecodeWorker", _MERGE_NETWORK_ENV),
+            ]
+        ),
+    )
+
+    result = core._validate(case)
+    rendered = _components(_rendered_dgd(case))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    for name in ("PrefillWorker", "DecodeWorker"):
+        env = rendered[name]["podTemplate"]["spec"]["containers"][0]["env"]
+        assert env[0] == {"name": "FI_PROVIDER", "value": "efa"}
+    rendered_components = _rendered_dgd(case)["spec"]["components"]
+    assert [component["name"] for component in rendered_components] == [
+        "Frontend",
+        "PrefillWorker",
+        "DecodeWorker",
+    ]
+
+
+def test_validator_accepts_merge_annotations_without_base_anchor(
+    tmp_path: Path,
+) -> None:
+    annotations = {"k8s.v1.cni.cncf.io/networks": "rdma-net-0"}
+    case, _ = _custom_merge_networking_case(
+        tmp_path,
+        _merge_patch(
+            [
+                {"name": "Frontend"},
+                {
+                    "name": "PrefillWorker",
+                    "podTemplate": {"metadata": {"annotations": annotations}},
+                },
+                {"name": "DecodeWorker"},
+            ]
+        ),
+    )
+    base_path = case / "base.yaml"
+    documents = core._documents(base_path)
+    dgd = next(
+        document
+        for document in documents
+        if document.get("kind") == "DynamoGraphDeployment"
+    )
+    for component in dgd["spec"]["components"]:
+        component["podTemplate"].pop("metadata", None)
+    core._write_documents(base_path, documents)
+
+    result = core._validate(case)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    rendered = _components(_rendered_dgd(case))
+    assert rendered["PrefillWorker"]["podTemplate"]["metadata"] == {
+        "annotations": annotations
+    }
+    assert "metadata" not in rendered["DecodeWorker"]["podTemplate"]
+
+
+def test_validator_rejects_merge_patch_omitting_a_canonical_component(
+    tmp_path: Path,
+) -> None:
+    case, _ = _custom_merge_networking_case(
+        tmp_path,
+        _merge_patch([_worker_env_patch("PrefillWorker", _MERGE_NETWORK_ENV)]),
+    )
+    _assert_error(core._validate(case), "merge-patch")
+
+
+def test_validator_rejects_merge_patch_naming_unknown_component(
+    tmp_path: Path,
+) -> None:
+    case, _ = _custom_merge_networking_case(
+        tmp_path,
+        _merge_patch(
+            [
+                {"name": "Frontend"},
+                {"name": "PrefillWorker"},
+                {"name": "DecodeWorker"},
+                _worker_env_patch("BogusWorker", _MERGE_NETWORK_ENV),
+            ]
+        ),
+    )
+    _assert_error(core._validate(case), "merge-patch")
+
+
+def test_validator_rejects_merge_patch_directives(tmp_path: Path) -> None:
+    case, _ = _custom_merge_networking_case(
+        tmp_path,
+        _merge_patch(
+            [
+                {"name": "Frontend"},
+                _worker_env_patch(
+                    "PrefillWorker", [{"name": "HF_HUB_OFFLINE", "$patch": "delete"}]
+                ),
+                {"name": "DecodeWorker"},
+            ]
+        ),
+    )
+    _assert_error(core._validate(case), "merge-patch")
+
+
+def test_validator_rejects_merge_networking_override_of_base_env(
+    tmp_path: Path,
+) -> None:
+    case, _ = _custom_merge_networking_case(
+        tmp_path,
+        _merge_patch(
+            [
+                {"name": "Frontend"},
+                _worker_env_patch(
+                    "PrefillWorker", [{"name": "HF_HUB_OFFLINE", "value": "0"}]
+                ),
+                {"name": "DecodeWorker"},
+            ]
+        ),
+    )
+    # The base owns HF_HUB_OFFLINE, so ownership is reported as the root cause
+    # before the networking contract sees the lowered override.
+    _assert_error(core._validate(case), "base-env-ownership")
+
+
+def test_validator_rejects_merge_networking_frontend_mutation(tmp_path: Path) -> None:
+    case, _ = _custom_merge_networking_case(
+        tmp_path,
+        _merge_patch(
+            [
+                _worker_env_patch("Frontend", _MERGE_NETWORK_ENV),
+                {"name": "PrefillWorker"},
+                {"name": "DecodeWorker"},
+            ]
+        ),
+    )
+    _assert_error(core._validate(case), "networking-delta")
+
+
+def test_validator_rejects_merge_patch_without_schema_component(
+    tmp_path: Path,
+) -> None:
+    case, _ = _custom_merge_networking_case(
+        tmp_path,
+        _merge_patch(
+            [
+                {"name": "Frontend"},
+                _worker_env_patch("PrefillWorker", _MERGE_NETWORK_ENV),
+                {"name": "DecodeWorker"},
+            ]
+        ),
+    )
+    kustomization_path = case / "kustomization.yaml"
+    kustomization = yaml.safe_load(kustomization_path.read_text())
+    kustomization["components"].remove("components/dynamo-openapi")
+    kustomization_path.write_text(yaml.safe_dump(kustomization, sort_keys=False))
+
+    _assert_error(core._validate(case), "merge-patch")

@@ -42,9 +42,16 @@ The three version strings in this directory describe different objects:
 Changing the Component configuration API to `v1beta1` does not make a patch
 target beta. The patch target's `group`, `version`, and `kind` select the DGD.
 
-The starter uses guarded JSON 6902 patches. It does not use strategic merge and
-does not select `recipes/kustomize/components/dynamo-openapi`. The OpenAPI
-Component remains part of the separate legacy strategic-merge matrix workflow.
+The starter mixes two patch styles on purpose. Concern Components that own
+positional structure (`cache-binding`, `registry-credentials`, `probes`,
+`scheduling`, `placement`) use guarded JSON 6902 patches. The networking
+Components and the case-local hook patches use strategic merge patches that
+address components, containers, environment entries, and volumes by name. Merge
+patches depend on the `components/dynamo-openapi` schema Component, a generated
+copy of the Dynamo CRD merge keys that the root Kustomization selects first.
+The validator lowers every merge patch into guarded JSON 6902 operations
+against the accumulated document, so both styles replay through one contract;
+merge-patch shape failures use the `merge-patch` diagnostic.
 
 ## Install the pinned renderer
 
@@ -156,13 +163,14 @@ Each Component owns one concern:
 
 | Component | Purpose |
 | --- | --- |
+| `dynamo-openapi` | Generated strategic merge schema for the Dynamo CRDs. Always selected first; it patches nothing and lets Kustomize merge keyed lists by name instead of replacing them. Regenerate with `python3 scripts/generate_kustomize_openapi.py`. |
 | `cache-binding` | Replaces each canonical worker's `shared-model-cache` PVC claim reference with the pre-existing physical claim. It leaves the logical volume and mount name unchanged. |
 | `registry-credentials` | Adds `imagePullSecrets` to the canonical Pod templates. It remains independent of cache binding because a cacheless recipe may still use private images. |
 | `probes` | Optionally replaces the operator's worker startup allowance with one cluster-wide policy. It is not selected by default. |
 | `scheduling` | Adds node selection, tolerations, affinity, scheduler, runtime class, and priority to the canonical components. |
-| `network-interface` | The checked-in generic scaffold illustrates cluster-owned `NCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME` environment variables and the site RDMA extended-resource request. Use a qualified provider Component instead when one owns the required mechanism. |
-| `provider-networking/gke-roce` | Copy-and-fill source for guarded GKE multi-network annotations, socket settings, and four explicit network-resource slots on disaggregated workers. |
-| `provider-networking/ib` | Copy-and-fill source for one guarded IB resource pair plus optional socket, fixed-device, and `/dev/infiniband` blocks on disaggregated workers. |
+| `network-interface` | A strategic merge patch addressed by component name. The checked-in generic scaffold illustrates cluster-owned `NCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME` environment variables and the site RDMA extended-resource request. Use a qualified provider Component instead when one owns the required mechanism. |
+| `provider-networking/gke-roce` | Copy-and-fill strategic merge source for GKE multi-network annotations, socket settings, and four explicit network-resource slots on disaggregated workers. |
+| `provider-networking/ib` | Copy-and-fill strategic merge source for one IB resource pair plus optional socket, fixed-device, and `/dev/infiniband` entries on disaggregated workers. |
 | `placement` | Optionally extends the worker affinity with a topology or clique constraint. It depends on `scheduling` having already created `affinity`. |
 
 Physical networking environment variables remain forbidden in portable bases:
@@ -178,11 +186,9 @@ mount and volume pairs, no duplicate environment names, and no physical
 networking name outside the networking slot. Do not remove the forbidden-name
 validation.
 
-The RDMA placeholder appears inside a JSON Pointer. Convert the discovered
-Kubernetes resource key to RFC 6901 form in both the request and limit paths:
-escape `~` as `~0` and `/` as `~1`. For example,
-`rdma.example.com/device` becomes `rdma.example.com~1device`. Keep the decoded
-key and quantity identical in `requests` and `limits`.
+The RDMA placeholder is an ordinary resource-map key in the networking merge
+patch, for example `rdma.example.com/device`; no JSON Pointer escaping is
+needed. Keep the key and quantity identical in `requests` and `limits`.
 
 The root example selects the standard concerns to make the binding surface
 visible; the optional `probes` override remains unselected.
@@ -196,13 +202,16 @@ Within `scheduling`, remove a complete `add` operation for an unused policy
 field instead of inventing a value. Keep its `affinity` operation whenever
 `placement` is selected. A cluster that relies entirely on default scheduling
 may deselect both `scheduling` and `placement`.
-Within the selected networking Component, remove the complete
-environment-variable or extended-resource `add` operations that the provider
-does not require. Keep each extended-resource request and limit pair together
-with the same decoded key and quantity. Never select generic
-`network-interface` together with provider or private networking.
+Within the selected networking Component, remove the environment entries or
+extended-resource keys that the provider does not require, and keep the bare
+`- name:` entry for every canonical component: a merge patch must list all
+components in base order so Kustomize keeps their positions. Keep each
+extended-resource request and limit pair together with the same key and
+quantity. Never select generic `network-interface` together with provider or
+private networking.
 
-List Components in this exact order:
+List Components in this exact order, after the `components/dynamo-openapi`
+schema Component that always comes first:
 
 1. `cache-binding`
 2. `registry-credentials`
@@ -243,6 +252,7 @@ sortOptions:
 resources:
   - your-base-recipe.yaml
 components:
+  - components/dynamo-openapi
   - components/cache-binding/agg
   - components/registry-credentials/agg
   - components/scheduling/agg
@@ -260,6 +270,7 @@ each `/agg` suffix with `/disagg`. Keep the same Component order:
 
 ```yaml
 components:
+  - components/dynamo-openapi
   - components/cache-binding/disagg
   - components/registry-credentials/disagg
   - components/scheduling/disagg
@@ -291,27 +302,29 @@ For GKE RoCE, fill the independent PrefillWorker and DecodeWorker values for:
 - the default interface and the four explicit RDMA interface/network slots;
 - `NCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME`;
 - each `networking.gke.io.networks/<network>` request/limit quantity; and
-- the `NCCL_CROSS_NIC` and matching `.IP` request/limit operations only when
+- the `NCCL_CROSS_NIC` entry and matching `.IP` request/limit keys only when
   qualification requires them.
 
-Delete an unused GKE attachment as a complete request/limit pair. Delete each
-unused `.IP` request/limit pair completely, and delete the complete
-`NCCL_CROSS_NIC` environment operation when it is not qualified. Do not infer
+Delete an unused GKE attachment as a complete request/limit key pair. Delete
+each unused `.IP` request/limit pair completely, and delete the
+`NCCL_CROSS_NIC` environment entry when it is not qualified. Do not infer
 an attachment count or reuse PrefillWorker values for DecodeWorker.
 
-For generic IB, fill one RFC 6901-encoded extended-resource key and one matching
-request/limit quantity for each worker. The `NCCL_SOCKET_IFNAME`,
-`GLOO_SOCKET_IFNAME`, and fixed `UCX_NET_DEVICES` operations are individually
-optional; delete each complete environment operation that current evidence does
-not support. Dynamic device discovery means omitting `UCX_NET_DEVICES`, not
-inventing a placeholder value. Keep or delete the `/dev/infiniband`
-`volumeMounts/-` and `volumes/-` operations as one name-matched block. This
+For generic IB, fill one extended-resource key and one matching request/limit
+quantity for each worker. The `NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`, and
+fixed `UCX_NET_DEVICES` entries are individually optional; delete each
+environment entry that current evidence does not support. Dynamic device
+discovery means omitting `UCX_NET_DEVICES`, not inventing a placeholder value.
+Keep or delete the `/dev/infiniband` `volumeMounts` and `volumes` entries as one
+name-matched block. This
 networking source must not add `/dev/shm`, scheduling, privilege, telemetry, or
 serving-command policy.
 
-For either provider, retain the identity `test` operations and add annotations
-only through their individual RFC 6901-encoded keys. Do not replace the whole
-worker annotation map. A filled provider profile must leave Frontend unchanged.
+For either provider, keep the bare `- name: Frontend` entry and the canonical
+component order, and add annotations only as individual keys under the worker
+`podTemplate.metadata.annotations` map; Kustomize merges them with any
+recipe-owned annotations. A filled provider profile must leave Frontend
+unchanged.
 
 ### Cacheless and optional components
 
@@ -351,9 +364,11 @@ cluster-owned override; do not select both.
 ## Override networking hooks
 
 The files under `patches/` are examples for case-local overrides. They are not
-reusable Components. Select only the file whose tested old value matches the
-portable base, replace its one obvious placeholder value, and list it under the
-root Kustomization's `patches:` field after `components:`.
+reusable Components. Each is a strategic merge patch that sets one framework
+hook by environment-variable name on both canonical worker roles. Select the
+file for the portable base's framework, replace its one obvious placeholder
+value, and list it under the root Kustomization's `patches:` field after
+`components:`.
 
 The replacement remains a YAML string. Replace only the text inside the
 existing single quotes; for example:
@@ -365,13 +380,13 @@ value: &kv-transfer-config '{"key":"value"}'
 Keeping the outer quotes prevents YAML from converting the JSON text into a
 mapping before it reaches the environment variable.
 
-All three files replace the hook on both canonical worker roles:
+All three files set the hook on both canonical worker roles:
 
 | File | Select when |
 | --- | --- |
-| `patches/vllm-kv-transfer-config.yaml` | The vLLM disaggregated base's first worker environment entry is `KV_TRANSFER_CONFIG` with the common beta default `{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cuda"}`. |
+| `patches/vllm-kv-transfer-config.yaml` | The vLLM disaggregated base, whose workers define `KV_TRANSFER_CONFIG` with the common beta default `{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cuda"}`. |
 | `patches/vllm-compute-domain-kv-transfer-config.yaml` | The vLLM ComputeDomain base uses the minimal default `{"kv_connector":"NixlConnector","kv_role":"kv_both"}`. |
-| `patches/sglang-nixl-backend.yaml` | The SGLang disaggregated base's first worker environment entry is `SGLANG_DISAGGREGATION_NIXL_BACKEND=UCX`. |
+| `patches/sglang-nixl-backend.yaml` | The SGLang disaggregated base, whose workers define `SGLANG_DISAGGREGATION_NIXL_BACKEND=UCX`. |
 
 For example:
 
@@ -384,8 +399,11 @@ patches:
     path: patches/vllm-kv-transfer-config.yaml
 ```
 
-The tests on component identity, container name, hook name, and old value are
-intentional. Do not weaken them to make one snippet match a different base.
+Each hook lists every canonical component by name, with bare entries for the
+components it leaves alone. Keep those entries: the validator rejects a merge
+patch that omits a canonical component, because Kustomize would otherwise
+reorder `spec.components` or append a new one. Kustomize moves the merged hook
+entry to the front of the worker environment; that reordering is expected.
 
 TensorRT-LLM transfer selection has no worker environment hook in the catalog.
 Its `cache_transceiver_config` remains part of the paired prefill and decode
@@ -416,8 +434,13 @@ python3 scripts/validate-recipe-kustomization.py \
 
 The validator checks that the build targets exactly one beta DGD, verifies the
 canonical component positions, rejects base-owned cluster fields and duplicate
-environment names, replays the selected Component and case patch operations in
-order, and compares that replay with the Kustomize render. It also enforces the
+environment names, lowers each strategic merge patch into guarded JSON 6902
+operations against the accumulated document, replays the selected Component and
+case patch operations in order, and compares that replay with the Kustomize
+render. Merge patches must list every canonical component in base order, may
+only address containers the base defines, and may not use `$patch` directives
+or null deletions; violations use the `merge-patch` diagnostic. It also
+enforces the
 optional ordered networking slot, worker-only networking deltas, the generic
 annotation, environment, extended-resource, and host-volume shapes, and
 decoded request/limit equality. Failures

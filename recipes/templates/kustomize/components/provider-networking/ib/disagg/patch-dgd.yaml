@@ -13,85 +13,61 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-- op: test
-  path: /spec/components/1/name
-  value: PrefillWorker
-- op: test
-  path: /spec/components/1/type
-  value: prefill
-- op: test
-  path: /spec/components/1/podTemplate/spec/containers/0/name
-  value: main
-- op: add
-  path: "/spec/components/1/podTemplate/spec/containers/0/resources/requests/your-prefill-rdma.example.com~1resource"
-  value: "your-prefill-rdma-resource-quantity"
-- op: add
-  path: "/spec/components/1/podTemplate/spec/containers/0/resources/limits/your-prefill-rdma.example.com~1resource"
-  value: "your-prefill-rdma-resource-quantity"
-- op: add
-  path: /spec/components/1/podTemplate/spec/containers/0/env/-
-  value:
-    name: NCCL_SOCKET_IFNAME
-    value: "your-prefill-nccl-socket-interface"
-- op: add
-  path: /spec/components/1/podTemplate/spec/containers/0/env/-
-  value:
-    name: GLOO_SOCKET_IFNAME
-    value: "your-prefill-gloo-socket-interface"
-- op: add
-  path: /spec/components/1/podTemplate/spec/containers/0/env/-
-  value:
-    name: UCX_NET_DEVICES
-    value: "your-prefill-ucx-device-list"
-- op: add
-  path: /spec/components/1/podTemplate/spec/containers/0/volumeMounts/-
-  value:
-    name: ib
-    mountPath: /dev/infiniband
-- op: add
-  path: /spec/components/1/podTemplate/spec/volumes/-
-  value:
-    name: ib
-    hostPath:
-      path: /dev/infiniband
-- op: test
-  path: /spec/components/2/name
-  value: DecodeWorker
-- op: test
-  path: /spec/components/2/type
-  value: decode
-- op: test
-  path: /spec/components/2/podTemplate/spec/containers/0/name
-  value: main
-- op: add
-  path: "/spec/components/2/podTemplate/spec/containers/0/resources/requests/your-decode-rdma.example.com~1resource"
-  value: "your-decode-rdma-resource-quantity"
-- op: add
-  path: "/spec/components/2/podTemplate/spec/containers/0/resources/limits/your-decode-rdma.example.com~1resource"
-  value: "your-decode-rdma-resource-quantity"
-- op: add
-  path: /spec/components/2/podTemplate/spec/containers/0/env/-
-  value:
-    name: NCCL_SOCKET_IFNAME
-    value: "your-decode-nccl-socket-interface"
-- op: add
-  path: /spec/components/2/podTemplate/spec/containers/0/env/-
-  value:
-    name: GLOO_SOCKET_IFNAME
-    value: "your-decode-gloo-socket-interface"
-- op: add
-  path: /spec/components/2/podTemplate/spec/containers/0/env/-
-  value:
-    name: UCX_NET_DEVICES
-    value: "your-decode-ucx-device-list"
-- op: add
-  path: /spec/components/2/podTemplate/spec/containers/0/volumeMounts/-
-  value:
-    name: ib
-    mountPath: /dev/infiniband
-- op: add
-  path: /spec/components/2/podTemplate/spec/volumes/-
-  value:
-    name: ib
-    hostPath:
-      path: /dev/infiniband
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  # The root patch target selects the DGD by group, version, and kind. Kustomize
+  # ignores this name; it exists only because a strategic merge patch needs one.
+  name: canonical-recipe
+spec:
+  components:
+    - name: Frontend
+    - name: PrefillWorker
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              env:
+                - name: NCCL_SOCKET_IFNAME
+                  value: "your-prefill-nccl-socket-interface"
+                - name: GLOO_SOCKET_IFNAME
+                  value: "your-prefill-gloo-socket-interface"
+                - name: UCX_NET_DEVICES
+                  value: "your-prefill-ucx-device-list"
+              resources:
+                requests:
+                  your-prefill-rdma.example.com/resource: "your-prefill-rdma-resource-quantity"
+                limits:
+                  your-prefill-rdma.example.com/resource: "your-prefill-rdma-resource-quantity"
+              volumeMounts:
+                - name: ib
+                  mountPath: /dev/infiniband
+          volumes:
+            - name: ib
+              hostPath:
+                path: /dev/infiniband
+    - name: DecodeWorker
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              env:
+                - name: NCCL_SOCKET_IFNAME
+                  value: "your-decode-nccl-socket-interface"
+                - name: GLOO_SOCKET_IFNAME
+                  value: "your-decode-gloo-socket-interface"
+                - name: UCX_NET_DEVICES
+                  value: "your-decode-ucx-device-list"
+              resources:
+                requests:
+                  your-decode-rdma.example.com/resource: "your-decode-rdma-resource-quantity"
+                limits:
+                  your-decode-rdma.example.com/resource: "your-decode-rdma-resource-quantity"
+              volumeMounts:
+                - name: ib
+                  mountPath: /dev/infiniband
+          volumes:
+            - name: ib
+              hostPath:
+                path: /dev/infiniband
