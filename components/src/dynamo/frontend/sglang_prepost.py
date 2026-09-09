@@ -1024,6 +1024,7 @@ class SglangStreamingPostProcessor:
         eos_token_ids: list[int] | None = None,
         prompt_token_ids: list[int] | None = None,
         stop_strings: set[str] | None = None,
+        stop_token_ids: set[int] | None = None,
     ) -> None:
         self.tokenizer = tokenizer
         self.tool_call_parser = tool_call_parser
@@ -1045,7 +1046,11 @@ class SglangStreamingPostProcessor:
         self._pending_guided_reasoning_parts: list[str] | None = (
             [] if self._is_json_array_parser and reasoning_parser is not None else None
         )
+        # The frontend owns text shaping. Keep every stop token in the raw
+        # engine stream, but exclude a matched stop suffix when decoding
+        # user-visible text.
         self._eos_token_ids = set(eos_token_ids or [])
+        self._request_stop_token_ids = set(stop_token_ids or [])
         self._stop_strings = stop_strings or set()
         self._pending_stop_text = ""
         self._locally_finished = False
@@ -1074,11 +1079,35 @@ class SglangStreamingPostProcessor:
         # Full text accumulator for robust finish-time re-parse.
         self._tool_text_parts: list[str] = []
 
-    def _strip_trailing_eos_token_ids(self, token_ids: list[int]) -> list[int]:
-        if not self._eos_token_ids:
+    def _strip_matched_stop_token_ids(
+        self, token_ids: list[int], stop_reason: Any
+    ) -> list[int]:
+        """Remove only the engine-reported token-stop suffix from display IDs."""
+        if not token_ids:
             return token_ids
-        while token_ids and token_ids[-1] in self._eos_token_ids:
-            token_ids.pop()
+
+        known_stop_ids = self._eos_token_ids | self._request_stop_token_ids
+        if isinstance(stop_reason, int) and not isinstance(stop_reason, bool):
+            matched_ids = [stop_reason] if stop_reason in known_stop_ids else []
+        elif (
+            isinstance(stop_reason, list)
+            and stop_reason
+            and all(
+                isinstance(token_id, int)
+                and not isinstance(token_id, bool)
+                and token_id in known_stop_ids
+                for token_id in stop_reason
+            )
+        ):
+            matched_ids = stop_reason
+        elif stop_reason is None and token_ids[-1] in self._eos_token_ids:
+            # Model EOS is intentionally omitted from the public stop_reason.
+            matched_ids = [token_ids[-1]]
+        else:
+            matched_ids = []
+
+        if matched_ids and token_ids[-len(matched_ids) :] == matched_ids:
+            del token_ids[-len(matched_ids) :]
         return token_ids
 
     def _tool_call_id(self, name: str, index: int) -> str:
@@ -1402,9 +1431,12 @@ class SglangStreamingPostProcessor:
         stop_reason = engine_response.get("stop_reason")
         log_probs = engine_response.get("log_probs")
         top_logprobs = engine_response.get("top_logprobs")
-        if finish_reason is not None:
+        stop_terminated = engine_response.get(
+            "stop_terminated", finish_reason == "stop"
+        )
+        if stop_terminated:
             raw_token_count = len(token_ids)
-            token_ids = self._strip_trailing_eos_token_ids(list(token_ids))
+            token_ids = self._strip_matched_stop_token_ids(list(token_ids), stop_reason)
             retained_token_count = len(token_ids)
             if log_probs is not None and len(log_probs) == raw_token_count:
                 log_probs = log_probs[:retained_token_count]
