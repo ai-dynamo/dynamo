@@ -165,5 +165,8 @@ runs:
         fi
 
         KUBECONFIG_B64=$(base64 < "${KUBECONFIG_PATH}" | tr -d '\n')
+        # Masked before export: the value carries a vCluster client certificate,
+        # and every consumer interpolates it into a shell script.
+        echo "::add-mask::${KUBECONFIG_B64}"
         echo "kubeconfig_base64=${KUBECONFIG_B64}" >> $GITHUB_OUTPUT
         echo "::endgroup::"

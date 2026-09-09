@@ -1,43 +1,25 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Minimal SGLang disaggregated deployment for the EFA verification deploy test
-# (tests/deploy/test_deploy_efa_sglang.py). Companion to disagg-efa.yaml, which
-# does the same for vLLM; the two differ only where the frameworks do.
+# Minimal SGLang disaggregated deployment for tests/deploy/test_deploy_efa_sglang.py.
+# Companion to disagg-efa.yaml, which does the same for vLLM. What the EFA lanes
+# assert, and how to run them, is in tests/deploy/README.md.
 #
-# Deliberately NOT under examples/backends/*/deploy/, so the auto-discovered
-# deploy-test matrix (tests/deploy/conftest.py) never picks it up. It only runs
-# on an EFA-capable cluster, via the framework_with_efa marker.
-#
-# Kept small: Qwen3-0.6B and TP=1 per worker, which still exercises the whole
-# EFA path -- a disaggregated completion cannot succeed without a prefill->decode
-# KV transfer, and with the NIXL/LIBFABRIC settings below that transfer rides
-# NIXL -> LIBFABRIC -> EFA.
-#
-# How SGLang selects the backend, versus vLLM:
-#
-#   * --disaggregation-transfer-backend nixl picks NIXL over SGLang's default
-#     Mooncake transfer engine.
-#   * SGLANG_DISAGGREGATION_NIXL_BACKEND=LIBFABRIC is what pins NIXL to the
-#     LIBFABRIC plugin. SGLang has no equivalent of vLLM's --kv-transfer-config
-#     kv_connector_extra_config.backends list; without this variable SGLang asks
-#     NIXL for UCX, which on EFA hardware silently falls back to TCP.
+# Kept out of examples/backends/*/deploy/ so the auto-discovered deploy-test
+# matrix (tests/deploy/conftest.py) never picks it up.
 #
 # Two things are intentionally absent, for the same reasons as in disagg-efa.yaml:
 #
-#   * No tolerations or nodeSelector. On the CI clusters the Kyverno policy
-#     deploy-test-pod-policy injects them for any pod requesting a GPU in the
-#     dynamo-deploy-test namespace, and what it injects differs per cluster
-#     (an H100 ci-pool label on aws-dev-02, a GB200 gpu.product label on
-#     aws-dev-01). Hardcoding either one here would break the other.
+#   * No tolerations or nodeSelector. The Kyverno policy deploy-test-pod-policy
+#     injects them for GPU pods in the dynamo-deploy-test namespace, and what it
+#     injects differs per cluster (an H100 ci-pool label on aws-dev-02, a GB200
+#     gpu.product label on aws-dev-01), so hardcoding either breaks the other.
 #
 #   * No LD_LIBRARY_PATH or PATH override. The -efa image sets up its own NIXL
-#     and libfabric paths (container/templates/aws.Dockerfile), and those paths
-#     are arch-dependent. Overriding them here would mask exactly the packaging
-#     regression tests/container/test_efa_image.py exists to catch.
+#     and libfabric paths, which are arch-dependent; overriding them here would
+#     mask the packaging regression tests/container/test_efa_image.py catches.
 #
-# The image: fields are placeholders; the test overrides every one of them via
-# DeploymentSpec.set_image(--image) with the -efa image under test.
+# Every image: below is a placeholder, overridden by the test via --image.
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:

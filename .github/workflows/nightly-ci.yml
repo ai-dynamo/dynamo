@@ -797,6 +797,32 @@ jobs:
           vcluster_name: ${{ needs.efa-deploy-operator.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.efa-deploy-operator.outputs.namespace }}
 
+      # The vLLM stack normally tears itself down in the test's own fixture, but
+      # that does not survive a job timeout or a lost runner, and
+      # dynamo-deploy-test's fallback cleanup cannot help: its GRAPH_NAME reads
+      # steps.deploy.outputs.graph_name, which the pytest step never sets, so it
+      # always reports "already cleaned up". Without this, a stranded vLLM stack
+      # would still hold GPUs while SGLang runs -- the one thing running the two
+      # lanes sequentially is meant to prevent.
+      - name: Delete any stranded vLLM EFA deployment
+        shell: bash
+        env:
+          KUBECONFIG_B64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          PREFLIGHT_KUBECONFIG: ${{ github.workspace }}/.kubeconfig-preflight
+        run: |
+          set -euo pipefail
+          printf '%s' "${KUBECONFIG_B64}" | base64 -d > "${PREFLIGHT_KUBECONFIG}"
+          chmod 600 "${PREFLIGHT_KUBECONFIG}"
+          export KUBECONFIG="${PREFLIGHT_KUBECONFIG}"
+          kubectl delete dynamographdeployment vllm-disagg-efa \
+            -n default --ignore-not-found --timeout=180s
+          # Deletion returns once the DGD object is gone; the pods it owned can
+          # outlive it, and those are what hold the GPUs and EFA devices.
+          kubectl wait --for=delete pod \
+            -l nvidia.com/dynamo-graph-deployment-name=vllm-disagg-efa \
+            -n default --timeout=180s || true
+          rm -f "${PREFLIGHT_KUBECONFIG}"
+
       - name: Run EFA deploy test
         uses: ./.github/actions/dynamo-deploy-test
         with:

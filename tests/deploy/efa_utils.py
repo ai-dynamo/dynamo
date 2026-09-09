@@ -492,8 +492,11 @@ async def run_efa_deployment_check(
     deployment_spec.set_image(image)
 
     logger.info(
-        f"Starting {profile.name} EFA deploy test (image: {image}, "
-        f"model: {EFA_MODEL_NAME}, namespace: {namespace})"
+        "Starting %s EFA deploy test (image: %s, model: %s, namespace: %s)",
+        profile.name,
+        image,
+        EFA_MODEL_NAME,
+        namespace,
     )
 
     async with ManagedDeployment(
