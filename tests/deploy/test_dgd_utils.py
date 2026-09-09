@@ -3,6 +3,7 @@
 
 """Unit tests for schema-aware DynamoGraphDeployment helpers."""
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -340,3 +341,279 @@ def test_a_companion_without_a_namespace_is_left_alone(tmp_path) -> None:
     configmap = deployment.deployment_spec.companions[0]
 
     assert "namespace" not in deployment._retarget(configmap)["metadata"]
+
+
+# ---------------------------------------------------------------------------
+# Per-run isolation of companion resources
+# ---------------------------------------------------------------------------
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_uniquify_renames_every_companion_not_just_the_deployment(tmp_path) -> None:
+    """Suffixing only the DGD leaves the companions colliding.
+
+    `_create_companions` applies them by name and `_delete_companions` deletes
+    them by name, from `_delete_deployment` -- which `__aenter__` calls *before*
+    creating. Two runs sharing a companion name therefore overwrite each other's
+    content on the way up and delete each other's prerequisites on the way down.
+    """
+    spec = DeploymentSpec(str(_multi_document_manifest(tmp_path)))
+
+    renames = spec.uniquify("-tx-abc123")
+
+    assert spec.name == "recipe-under-test-tx-abc123"
+    assert [d["metadata"]["name"] for d in spec.companions] == [
+        "engine-config-tx-abc123",
+        "test-compute-domain-tx-abc123",
+    ]
+    assert renames["engine-config"] == "engine-config-tx-abc123"
+
+
+def test_uniquify_rewrites_the_references_that_point_at_companions(
+    tmp_path,
+) -> None:
+    """A renamed ConfigMap whose reference still names the old one is worse than
+    no rename at all: the worker sits in CreateContainerConfigError instead."""
+    spec = DeploymentSpec(str(_multi_document_manifest(tmp_path)))
+
+    spec.uniquify("-tx-abc123")
+
+    volumes = spec.spec()["spec"]["components"][0]["podTemplate"]["spec"]["volumes"]
+    assert volumes[0]["configMap"]["name"] == "engine-config-tx-abc123"
+
+
+def test_uniquify_leaves_pod_local_volume_names_alone(tmp_path) -> None:
+    """`volumes[].name` names the volume, not the ConfigMap.
+
+    It only has to match `volumeMounts[].name` inside the same pod, so a blanket
+    string substitution would rename it for no reason -- and would have to rename
+    both sides in step to avoid breaking the mount. Recipes routinely name the
+    volume after the ConfigMap, which is what makes this worth pinning.
+    """
+    spec = DeploymentSpec(str(_multi_document_manifest(tmp_path)))
+
+    spec.uniquify("-tx-abc123")
+
+    pod = spec.spec()["spec"]["components"][0]["podTemplate"]["spec"]
+    assert pod["volumes"][0]["name"] == "cfg"
+    assert pod["containers"][0]["volumeMounts"][0]["name"] == "cfg"
+
+
+def test_uniquify_renames_the_compute_domain_channel_template(tmp_path) -> None:
+    """A pod never names the ComputeDomain; it names the channel template.
+
+    All 28 ComputeDomains in `recipes/` are wired this way, so renaming only
+    `metadata.name` would leave every run creating the same cluster-scoped
+    ResourceClaimTemplate -- the collision the rename exists to prevent.
+    """
+    documents = [
+        {
+            "apiVersion": "resource.nvidia.com/v1beta1",
+            "kind": "ComputeDomain",
+            "metadata": {"name": "cd"},
+            "spec": {
+                "numNodes": 0,
+                "channel": {"resourceClaimTemplate": {"name": "cd-channel"}},
+            },
+        },
+        {
+            "apiVersion": "nvidia.com/v1beta1",
+            "kind": "DynamoGraphDeployment",
+            "metadata": {"name": "dgd"},
+            "spec": {
+                "components": [
+                    {
+                        "name": "Worker",
+                        "podTemplate": {
+                            "spec": {
+                                "containers": [{"name": "main"}],
+                                "resourceClaims": [
+                                    {
+                                        "name": "compute-domain-channel",
+                                        "resourceClaimTemplateName": "cd-channel",
+                                    }
+                                ],
+                            }
+                        },
+                    }
+                ]
+            },
+        },
+    ]
+    path = tmp_path / "deploy.yaml"
+    path.write_text(yaml.safe_dump_all(documents))
+    spec = DeploymentSpec(str(path))
+
+    spec.uniquify("-tx-abc123")
+
+    channel = spec.companions[0]["spec"]["channel"]["resourceClaimTemplate"]
+    assert channel["name"] == "cd-channel-tx-abc123"
+    claims = spec.spec()["spec"]["components"][0]["podTemplate"]["spec"][
+        "resourceClaims"
+    ]
+    assert claims[0]["resourceClaimTemplateName"] == "cd-channel-tx-abc123"
+    # The claim's pod-local name is not a cluster resource and stays put.
+    assert claims[0]["name"] == "compute-domain-channel"
+
+
+def _recipe_manifests():
+    recipes = REPO_ROOT / "recipes"
+    if not recipes.is_dir():
+        pytest.skip("recipes/ not present in this checkout")
+    for path in sorted(recipes.rglob("*.yaml")):
+        try:
+            documents = [
+                d for d in yaml.safe_load_all(path.read_text()) if isinstance(d, dict)
+            ]
+        except yaml.YAMLError:
+            continue
+        if len([d for d in documents if d.get("kind") == "DynamoGraphDeployment"]) == 1:
+            yield path
+
+
+def _owned_names(spec):
+    """Every cluster-scoped name the manifest's companions bring into existence.
+
+    Includes the ResourceClaimTemplate a ComputeDomain's controller creates for
+    its channel, which is named by the manifest and so collides like any other.
+    """
+    names = set()
+    for document in spec.companions:
+        names.add((document.get("metadata") or {}).get("name"))
+        if document.get("kind") == "ComputeDomain":
+            names.add(
+                (
+                    ((document.get("spec") or {}).get("channel") or {}).get(
+                        "resourceClaimTemplate"
+                    )
+                    or {}
+                ).get("name")
+            )
+    names.discard(None)
+    return names
+
+
+def _iter_reference_values(node, path="") -> list:
+    """Every companion reference in a DGD, as (path, value)."""
+    found = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in ("configMap", "configMapRef", "configMapKeyRef") and isinstance(
+                value, dict
+            ):
+                if isinstance(value.get("name"), str):
+                    found.append((f"{path}.{key}.name", value["name"]))
+            elif key == "resourceClaimTemplateName" and isinstance(value, str):
+                found.append((f"{path}.{key}", value))
+            else:
+                found.extend(_iter_reference_values(value, f"{path}.{key}"))
+    elif isinstance(node, list):
+        for index, item in enumerate(node):
+            found.extend(_iter_reference_values(item, f"{path}[{index}]"))
+    return found
+
+
+def _iter_pod_specs(node) -> list:
+    """Every mapping that carries both `volumes` and `containers`."""
+    found = []
+    if isinstance(node, dict):
+        if "volumes" in node and isinstance(node.get("volumes"), list):
+            found.append(node)
+        for value in node.values():
+            found.extend(_iter_pod_specs(value))
+    elif isinstance(node, list):
+        for item in node:
+            found.extend(_iter_pod_specs(item))
+    return found
+
+
+def test_uniquify_suffixes_every_owned_name_across_the_recipe_corpus() -> None:
+    """Replay the rename over every real recipe, not a synthetic stand-in.
+
+    A hand-written manifest only proves the shapes its author thought of. The
+    corpus is what this is pointed at: 91 ConfigMaps, 28 ComputeDomains and 2
+    ResourceClaimTemplates across ~101 manifests. Every cluster-scoped name any
+    of them creates has to carry the per-run suffix, or two runs collide on it.
+    """
+    checked = 0
+    for path in _recipe_manifests():
+        spec = DeploymentSpec(str(path))
+        if not spec.companions:
+            continue
+        checked += 1
+        before = _owned_names(spec)
+
+        renames = spec.uniquify("-tx-abc123")
+
+        for name in before:
+            assert name in renames, f"{path}: {name!r} was not renamed"
+            assert renames[name] == f"{name}-tx-abc123"
+        assert _owned_names(spec) == {f"{n}-tx-abc123" for n in before}
+
+    assert checked >= 90, f"expected ~101 manifests with companions, got {checked}"
+
+
+def test_uniquify_keeps_every_companion_reference_resolving_across_the_corpus() -> None:
+    """A rename that leaves a reference behind is worse than no rename.
+
+    The worker sits in CreateContainerConfigError minutes later instead of
+    failing at apply time. Two properties, over the whole corpus: a reference
+    that named a bundled companion now names its renamed form, and a reference
+    to anything else is untouched. The second matters -- some recipes reference
+    resources they do not bundle (`kimi-k2.5/trtllm/agg-eagle-kv-router`
+    references a `your-compute-domain-channel` placeholder the operator
+    supplies), and rewriting those would invent a dangling name.
+    """
+    for path in _recipe_manifests():
+        spec = DeploymentSpec(str(path))
+        if not spec.companions:
+            continue
+        owned = _owned_names(spec)
+        before = dict(_iter_reference_values(spec.spec()))
+
+        spec.uniquify("-tx-abc123")
+
+        after = dict(_iter_reference_values(spec.spec()))
+        assert after.keys() == before.keys(), f"{path}: reference sites changed shape"
+        for site, old_value in before.items():
+            expected = f"{old_value}-tx-abc123" if old_value in owned else old_value
+            assert after[site] == expected, (
+                f"{path}: {site} was {old_value!r}, expected {expected!r}, "
+                f"got {after[site]!r}"
+            )
+
+
+def test_uniquify_leaves_every_volume_mount_resolvable_across_the_corpus() -> None:
+    """`volumes[].name` is pod-local and must keep matching `volumeMounts[].name`.
+
+    Recipes routinely name the volume after the ConfigMap it mounts, so a
+    blanket string substitution would rewrite one side of that pairing. Checked
+    over the corpus because the two sides live in different subtrees and a
+    partial rename would still parse.
+    """
+    for path in _recipe_manifests():
+        spec = DeploymentSpec(str(path))
+        if not spec.companions:
+            continue
+
+        spec.uniquify("-tx-abc123")
+
+        for pod in _iter_pod_specs(spec.spec()):
+            declared = {
+                v.get("name") for v in pod.get("volumes") or [] if isinstance(v, dict)
+            }
+            containers = list(pod.get("containers") or [])
+            main = pod.get("mainContainer")
+            if isinstance(main, dict):
+                containers.append(main)
+            for container in containers:
+                if not isinstance(container, dict):
+                    continue
+                for mount in container.get("volumeMounts") or []:
+                    if not isinstance(mount, dict):
+                        continue
+                    assert mount.get("name") in declared, (
+                        f"{path}: volumeMount {mount.get('name')!r} no longer "
+                        f"matches any volume in {sorted(declared)}"
+                    )

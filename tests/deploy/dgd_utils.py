@@ -483,6 +483,40 @@ class ServiceSpec:
         self.gpus = value
 
 
+# The DGD reaches a companion resource only through these keys. Measured over
+# every manifest in ``recipes/`` that declares a DynamoGraphDeployment: 91
+# ConfigMaps, each referenced by ``configMap.name`` or ``configMapKeyRef.name``;
+# 2 ResourceClaimTemplates and the channel template of all 28 ComputeDomains,
+# each referenced by ``resourceClaimTemplateName``. Nothing else names one.
+_CONFIGMAP_REF_KEYS = ("configMap", "configMapRef", "configMapKeyRef")
+_TEMPLATE_REF_KEY = "resourceClaimTemplateName"
+
+
+def _rewrite_companion_refs(node: Any, renames: dict) -> None:
+    """Point every companion reference in a DGD at its renamed resource.
+
+    Key-scoped rather than a blanket string substitution, on purpose: recipes
+    routinely name the pod-local volume after the ConfigMap it mounts, and
+    ``volumes[].name`` has to keep matching ``volumeMounts[].name`` within the
+    pod. It does not name the ConfigMap and must not be renamed with it.
+    """
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in _CONFIGMAP_REF_KEYS and isinstance(value, dict):
+                referenced = value.get("name")
+                if isinstance(referenced, str) and referenced in renames:
+                    value["name"] = renames[referenced]
+            elif (
+                key == _TEMPLATE_REF_KEY and isinstance(value, str) and value in renames
+            ):
+                node[key] = renames[value]
+            else:
+                _rewrite_companion_refs(value, renames)
+    elif isinstance(node, list):
+        for item in node:
+            _rewrite_companion_refs(item, renames)
+
+
 class DeploymentSpec:
     def __init__(
         self, base: str, endpoint="/v1/chat/completions", port=8000, system_port=9090
@@ -540,6 +574,59 @@ class DeploymentSpec:
         companions the DGD references too, or the reference dangles.
         """
         return self._companions
+
+    def uniquify(self, suffix: str) -> dict[str, str]:
+        """Give the DGD *and every companion* a per-run name.
+
+        Suffixing only the DGD leaves every companion sharing one namespaced
+        name with every other run, which breaks two ways:
+
+        * ``_create_companions`` applies them, so a second recipe declaring the
+          same name silently overwrites the first one's content. Measured over
+          ``recipes/``: 14 companion names are reused across files, including
+          ``ConfigMap/prefill-config`` and ``ConfigMap/decode-config`` in seven
+          manifests each.
+        * ``_delete_companions`` runs from ``_delete_deployment``, which
+          ``__aenter__`` calls *before* creating -- so a starting run deletes a
+          running one's prerequisites and its workers fall into
+          ``CreateContainerConfigError``.
+
+        Returns the ``old -> new`` map, for logging and for tests.
+        """
+        renames: dict[str, str] = {}
+        # Only companion names drive the reference rewrite. The DGD's own name
+        # is renamed too, but a reference matching it names something this
+        # manifest does not create, and rewriting that would invent a dangling
+        # name rather than repair one.
+        companion_renames: dict[str, str] = {}
+
+        def rename(holder: dict, key: str = "name", *, owned: bool = True) -> None:
+            old = holder.get(key)
+            if isinstance(old, str) and old:
+                renames[old] = holder[key] = f"{old}{suffix}"
+                if owned:
+                    companion_renames[old] = renames[old]
+
+        rename(self._deployment_spec.setdefault("metadata", {}), owned=False)
+
+        for doc in self._companions:
+            metadata = doc.get("metadata")
+            if isinstance(metadata, dict):
+                rename(metadata)
+            if doc.get("kind") == "ComputeDomain":
+                # A pod never names the ComputeDomain. It names the
+                # ResourceClaimTemplate the ComputeDomain controller creates for
+                # its channel -- cluster state under a name of the manifest's
+                # choosing, so it collides just as hard. All 28 ComputeDomains
+                # in recipes/ are wired exactly this way.
+                channel = ((doc.get("spec") or {}).get("channel") or {}).get(
+                    "resourceClaimTemplate"
+                )
+                if isinstance(channel, dict):
+                    rename(channel)
+
+        _rewrite_companion_refs(self._deployment_spec, companion_renames)
+        return renames
 
     def _detect_schema(self) -> str:
         """Detect whether the loaded manifest is v1alpha1 (services dict) or
