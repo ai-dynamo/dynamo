@@ -279,17 +279,13 @@ impl
                     }
 
                     // if we have a data field without an event, then we might need to update the data
-                    if output
-                        .data
-                        .as_ref()
-                        .is_some_and(|data| data.text.is_some())
+                    if let Some(data) = &output.data
+                        && data.text.is_some()
                         && !state.validate_engine_decode
                     {
                         // Text already decoded; track finish for this choice
-                        let (choice_idx, has_finish) = {
-                            let data = output.data.as_ref().unwrap();
-                            (data.index.unwrap_or(0), data.finish_reason.is_some())
-                        };
+                        let choice_idx = data.index.unwrap_or(0);
+                        let has_finish = data.finish_reason.is_some();
                         if has_finish {
                             state.finished_choices.insert(choice_idx);
                             // Defensive: this choice's decoder should not normally hold any
@@ -1459,7 +1455,8 @@ mod tests {
             cx: &mut std::task::Context<'_>,
         ) -> std::task::Poll<Option<Self::Item>> {
             if self.ended {
-                self.overpolled.store(true, std::sync::atomic::Ordering::SeqCst);
+                self.overpolled
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
             }
             let poll = self.inner.as_mut().poll_next(cx);
             if matches!(poll, std::task::Poll::Ready(None)) {
@@ -1637,7 +1634,10 @@ mod tests {
             "choice 0 must finish exactly once (its decode error), not again via EOF flush: {choice0_finishes:?}"
         );
         assert!(
-            matches!(choice0_finishes[0].finish_reason, Some(FinishReason::Error(_))),
+            matches!(
+                choice0_finishes[0].finish_reason,
+                Some(FinishReason::Error(_))
+            ),
             "choice 0's only finish must be its decode error, got: {:?}",
             choice0_finishes[0].finish_reason
         );

@@ -336,5 +336,9 @@ fn hidden_stop_sequence_survives_long_self_similar_prefix_run() {
         result.stop_trigger,
         Some(StopTrigger::HiddenStopSequenceDetected(ref s)) if s == "aaaab"
     ));
-    assert_eq!(result.tokens.len(), 6, "one token report per input token id");
+    assert_eq!(
+        result.tokens.len(),
+        6,
+        "one token report per input token id"
+    );
 }
