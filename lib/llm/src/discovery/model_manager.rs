@@ -3941,7 +3941,6 @@ mod tests {
         );
     }
 
-    /// Stand-in engine for registration-only tests; never invoked.
     struct UncalledEngine;
 
     #[async_trait::async_trait]
