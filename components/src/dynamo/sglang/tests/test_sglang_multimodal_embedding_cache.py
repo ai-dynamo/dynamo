@@ -31,6 +31,7 @@ from dynamo.common.multimodal import TransferRequest
 from dynamo.sglang.request_handlers.multimodal.encode_worker_handler import (
     Modality,
     MultimodalEncodeWorkerHandler,
+    _install_load_video_passthrough,
 )
 
 pytestmark = [
@@ -995,10 +996,6 @@ def test_load_video_passthrough_patches_the_encoder_binding() -> None:
             reason="SGLang required to verify the patch target",
         )
     from sglang.srt.utils.video_decoder import VideoDecoderWrapper
-
-    from dynamo.sglang.request_handlers.multimodal.encode_worker_handler import (
-        _install_load_video_passthrough,
-    )
 
     _install_load_video_passthrough()
     patched = encoder_preprocessor.load_video

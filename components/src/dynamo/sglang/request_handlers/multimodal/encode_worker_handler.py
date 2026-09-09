@@ -148,14 +148,9 @@ def _install_load_video_passthrough() -> None:
     Patch the name **as bound in each importing module**: they do
     ``from sglang.srt.utils import load_video``, so rebinding
     ``sglang.srt.utils.load_video`` alone leaves those call sites untouched.
-    The encoder preprocessor is the one this handler actually goes through --
-    its ``_flatten_and_load_videos`` calls its own binding -- and omitting it is
-    why an earlier revision still raised ``ValueError: Unsupported video input
-    type`` end to end while every unit test passed.
-
-    The compatibility shim supplies the encoder module for N and N-1. Patch it
-    plus the shared processor and utils bindings. Idempotent; a no-op when
-    SGLang is unavailable.
+    The encoder preprocessor calls its own ``load_video`` binding, so patch that
+    module as well as the shared processor and utils bindings. Idempotent; a
+    no-op when SGLang is unavailable.
     """
     if not SGLANG_VIDEO_DECODER_AVAILABLE:
         return
@@ -868,7 +863,6 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
     async def _encode_media(
         self, media_inputs: list[Any], modality: Any
     ) -> tuple[Any, torch.Tensor, dict[str, Any]]:
-        """Encode media through Dynamo's SGLang compatibility boundary."""
         return await mm_encode(self.encoder, media_inputs, modality)
 
     def _extract_media_inputs(

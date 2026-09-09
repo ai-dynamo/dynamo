@@ -22,8 +22,10 @@ from dynamo.sglang.protocol import (
     StopConditions,
 )
 from dynamo.sglang.request_handlers.multimodal.encode_worker_handler import (
+    _NVDEC_SHIM_FPS,
     Modality,
     MultimodalEncodeWorkerHandler,
+    _install_nvdec_video_metadata_shim,
 )
 from dynamo.sglang.request_handlers.multimodal.worker_handler import (
     EmbeddingsProcessor,
@@ -577,11 +579,6 @@ async def test_nvdec_video_metadata_shim_stamps_valid_metadata():
         encoder_preprocessor = pytest.importorskip(
             "sglang.srt.disaggregation.encode_server"
         )
-    from dynamo.sglang.request_handlers.multimodal.encode_worker_handler import (
-        _NVDEC_SHIM_FPS,
-        _install_nvdec_video_metadata_shim,
-    )
-
     saved = encoder_preprocessor.preprocess_video
     try:
         _install_nvdec_video_metadata_shim()
