@@ -2060,6 +2060,7 @@ func applyCompilationCache(container *corev1.Container, component *v1beta1.Dynam
 		}
 		if mount.Name == compilationCache.PVCName && mount.MountPath == mountPath {
 			mount.SubPath = compilationCache.SubPath
+			mount.SubPathExpr = ""
 		}
 		if mount.MountPath != mountPath {
 			normalizedMounts = append(normalizedMounts, mount)
