@@ -272,14 +272,12 @@ fn validate_tokenizer_service_url(value: &str) -> Result<(), ValidationError> {
         return Ok(());
     }
 
-    parse_render_base_url(value)
-        .map(|_| ())
-        .map_err(|_| {
-            let mut error = ValidationError::new("tokenizer_service_url_invalid");
-            error.message =
-                Some("DYN_EPP_TOKENIZER_SERVICE_URL must be an absolute HTTP(S) URL".into());
-            error
-        })
+    parse_render_base_url(value).map(|_| ()).map_err(|_| {
+        let mut error = ValidationError::new("tokenizer_service_url_invalid");
+        error.message =
+            Some("DYN_EPP_TOKENIZER_SERVICE_URL must be an absolute HTTP(S) URL".into());
+        error
+    })
 }
 
 /// Trim a raw value and treat empty as absent.

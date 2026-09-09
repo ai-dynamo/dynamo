@@ -183,9 +183,7 @@ mod tests {
     async fn classifies_upstream_error_status() {
         let router = Router::new().route(
             CHAT_RENDER_PATH,
-            post(|| async {
-                (StatusCode::SERVICE_UNAVAILABLE, "renderer not ready")
-            }),
+            post(|| async { (StatusCode::SERVICE_UNAVAILABLE, "renderer not ready") }),
         );
         let (base_url, server) = spawn_server(router).await;
         let client =
@@ -238,7 +236,8 @@ mod tests {
         );
         let (base_url, server) = spawn_server(router).await;
         let timeout = Duration::from_millis(10);
-        let client = SglangRendererClient::new(&base_url, timeout, TEST_MAX_RESPONSE_BYTES).unwrap();
+        let client =
+            SglangRendererClient::new(&base_url, timeout, TEST_MAX_RESPONSE_BYTES).unwrap();
 
         let error = client
             .render_chat(Bytes::from_static(b"{}"))
@@ -254,18 +253,22 @@ mod tests {
 
     #[test]
     fn rejects_invalid_client_config() {
-        assert!(SglangRendererClient::new(
-            "unix:///tmp/sglang.sock",
-            Duration::from_secs(1),
-            TEST_MAX_RESPONSE_BYTES
-        )
-        .is_err());
-        assert!(SglangRendererClient::new(
-            "http://127.0.0.1:30000",
-            Duration::ZERO,
-            TEST_MAX_RESPONSE_BYTES
-        )
-        .is_err());
+        assert!(
+            SglangRendererClient::new(
+                "unix:///tmp/sglang.sock",
+                Duration::from_secs(1),
+                TEST_MAX_RESPONSE_BYTES
+            )
+            .is_err()
+        );
+        assert!(
+            SglangRendererClient::new(
+                "http://127.0.0.1:30000",
+                Duration::ZERO,
+                TEST_MAX_RESPONSE_BYTES
+            )
+            .is_err()
+        );
         assert!(
             SglangRendererClient::new("http://127.0.0.1:30000", Duration::from_secs(1), 0).is_err()
         );

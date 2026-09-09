@@ -394,18 +394,22 @@ mod tests {
 
     #[test]
     fn rejects_invalid_client_config() {
-        assert!(VllmRenderClient::new(
-            "unix:///tmp/vllm.sock",
-            Duration::from_secs(1),
-            TEST_MAX_RESPONSE_BYTES
-        )
-        .is_err());
-        assert!(VllmRenderClient::new(
-            "http://127.0.0.1:8000",
-            Duration::ZERO,
-            TEST_MAX_RESPONSE_BYTES
-        )
-        .is_err());
+        assert!(
+            VllmRenderClient::new(
+                "unix:///tmp/vllm.sock",
+                Duration::from_secs(1),
+                TEST_MAX_RESPONSE_BYTES
+            )
+            .is_err()
+        );
+        assert!(
+            VllmRenderClient::new(
+                "http://127.0.0.1:8000",
+                Duration::ZERO,
+                TEST_MAX_RESPONSE_BYTES
+            )
+            .is_err()
+        );
         assert!(VllmRenderClient::new("http://127.0.0.1:8000", TEST_TIMEOUT, 0).is_err());
     }
 }

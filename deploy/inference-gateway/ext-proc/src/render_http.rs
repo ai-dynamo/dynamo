@@ -42,9 +42,7 @@ pub enum RenderError {
         source: serde_json::Error,
     },
     /// The renderer returned a successful response larger than the configured limit.
-    #[error(
-        "renderer response is too large: {received} bytes exceeds the {limit}-byte limit"
-    )]
+    #[error("renderer response is too large: {received} bytes exceeds the {limit}-byte limit")]
     ResponseTooLarge { limit: usize, received: u64 },
 }
 
@@ -77,13 +75,13 @@ pub(crate) fn check_content_length(
     response: &reqwest::Response,
     max_bytes: usize,
 ) -> Result<(), RenderError> {
-    if let Some(received) = response.content_length() {
-        if received > max_bytes as u64 {
-            return Err(RenderError::ResponseTooLarge {
-                limit: max_bytes,
-                received,
-            });
-        }
+    if let Some(received) = response.content_length()
+        && received > max_bytes as u64
+    {
+        return Err(RenderError::ResponseTooLarge {
+            limit: max_bytes,
+            received,
+        });
     }
     Ok(())
 }

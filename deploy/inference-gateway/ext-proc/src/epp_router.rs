@@ -37,8 +37,8 @@ use crate::epp_standalone_config::{EppStandaloneConfig, RendererProtocol};
 use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo};
 use crate::pod_discovery::PodDiscovery;
 use crate::render_http::RenderError;
-use crate::sglang_renderer_client::SglangRendererClient;
 use crate::selector::{SelectRequest, Selector};
+use crate::sglang_renderer_client::SglangRendererClient;
 use crate::topology_adapter::{RegistrationDefaults, TopologyAdapter};
 use crate::vllm_render_client::VllmRenderClient;
 
@@ -101,13 +101,11 @@ impl EppRouter {
                 timeout,
                 max_response_bytes,
             )?),
-            RendererProtocol::SglangRenderer => {
-                RenderClient::Sglang(SglangRendererClient::new(
-                    &cfg.tokenizer_service_url,
-                    timeout,
-                    max_response_bytes,
-                )?)
-            }
+            RendererProtocol::SglangRenderer => RenderClient::Sglang(SglangRendererClient::new(
+                &cfg.tokenizer_service_url,
+                timeout,
+                max_response_bytes,
+            )?),
         };
         let (reflector, reflector_ready) = PodDiscovery::spawn(&cfg).await?;
         let reflector = Arc::new(reflector);
@@ -173,7 +171,6 @@ impl EppRouter {
             expected_output_tokens,
         ))
     }
-
 
     /// Ready workers inside an Envoy `candidate_subset`, resolved in a single index
     /// pass (no full-ready set materialized). The reflector's endpoints are
