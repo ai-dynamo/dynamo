@@ -24,7 +24,10 @@ def local_dp_rank_bounds(server_args: Any) -> tuple[int, int]:
     nnodes = getattr(server_args, "nnodes", 1) or 1
     node_rank = getattr(server_args, "node_rank", 0) or 0
 
-    if enable_dp_attention and dp_size > 1:
+    if not enable_dp_attention:
+        return 0, dp_size
+
+    if dp_size > 1:
         local_dp_size = dp_size // nnodes if nnodes > 0 else dp_size
         start_dp_rank = node_rank * local_dp_size
         return start_dp_rank, start_dp_rank + local_dp_size
@@ -40,21 +43,15 @@ def publishes_kv_events(server_args: Any) -> bool:
     to one logical worker. That only yields a unique key per node while DP
     attention gives each node a distinct rank slice.
 
-    Without DP attention, ``local_dp_rank_bounds`` returns ``[0, 1)`` on every
-    node. Every node of a multinode gang would therefore advertise the same
-    ``(leader_worker_id, 0)`` source. The frontend marks that key ambiguous and
-    never activates the direct-ZMQ ingress.
-
-    Only the leader owns the single logical rank in TP-only mode. SGLang emits
-    radix-cache events from the rank-0 scheduler, so non-leader sockets have
-    nothing distinct to contribute.
+    Pure DP is single-node in SGLang, so its leader publishes every replica's
+    distinct rank. Only the leader owns the single logical rank in multinode
+    TP-only mode.
     """
     dp_size = getattr(server_args, "dp_size", 1) or 1
     enable_dp_attention = getattr(server_args, "enable_dp_attention", False)
     nnodes = getattr(server_args, "nnodes", 1) or 1
     node_rank = getattr(server_args, "node_rank", 0) or 0
 
-    # Mirrors the branch in local_dp_rank_bounds: per-node distinct slices.
     if enable_dp_attention and dp_size > 1:
         return True
 
@@ -72,7 +69,8 @@ def per_rank_max_running_requests(server_args: Any) -> int | None:
         return None
 
     dp_size = getattr(server_args, "dp_size", 1) or 1
-    if dp_size <= 1:
+    enable_dp_attention = getattr(server_args, "enable_dp_attention", False)
+    if dp_size <= 1 or not enable_dp_attention:
         return max_running_requests
 
     return max_running_requests // dp_size

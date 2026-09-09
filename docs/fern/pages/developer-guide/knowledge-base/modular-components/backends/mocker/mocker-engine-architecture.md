@@ -13,8 +13,8 @@ component-level design.
 
 For offline usage, see
 [Run a DynoSim Simulation](../../../../../cli/operations/simulation-with-dynosim/dynosim-replay.mdx).
-The [Mocker CLI Reference](../../../../../reference/components/mocker-cli-reference.mdx) tracks the
-temporarily unavailable online surface.
+For live workers, see the
+[Mocker CLI Reference](../../../../../reference/components/mocker-cli-reference.mdx).
 
 ## Generalized Engine
 
@@ -23,10 +23,9 @@ attention data-parallel (DP) barrier. A logical engine contains either one rank 
 sibling ranks. Grouped execution starts a pass only when every sibling rank is ready and completes
 at the latest rank completion time.
 
-Offline prediction and the retained internal worker runtime construct this same generalized engine.
-The AISimulate Replayer advances it with a virtual clock and deterministic event queue. The internal
-worker runtime advances it with Tokio and wall-clock timers, but it is not a public CLI while online
-simulation is unavailable.
+Offline prediction and live Mocker workers construct this same generalized engine. The AISimulate
+Replayer advances it with a virtual clock and deterministic event queue. Live workers advance it
+with Tokio and wall-clock timers and register with the Dynamo runtime.
 
 ## Scheduler
 
@@ -92,8 +91,8 @@ The unified AISimulate configuration exposes three timing modes under
 - **`polynomial`** uses hardcoded polynomial formulas. Prefill time scales quadratically with token
   count, while decode time depends on the total active KV cache size.
 
-The removed public Mocker CLI flags, including `--aic-perf-model`, are not inputs to
-`aisimulate predict` or `aisimulate recommend`.
+The live Mocker CLI flags, including `--aic-perf-model`, are separate from the inputs to
+`aisimulate predict` and `aisimulate recommend`.
 
 ## Bootstrap Rendezvous (Disaggregated Serving)
 
@@ -151,7 +150,7 @@ The following features are not yet supported by the mocker:
 
 | Document | Description |
 |----------|-------------|
-| [Simulate a Kubernetes Deployment](../../../../../kubernetes/operations/simulation-with-dynosim/mocker-live-simulation.mdx) | Check online Kubernetes simulation availability |
-| [Simulate a Local Deployment](../../../../../cli/operations/simulation-with-dynosim/mocker-live-simulation.mdx) | Check online local simulation availability |
-| [Mocker CLI Reference](../../../../../reference/components/mocker-cli-reference.mdx) | Check the removed public CLI status |
+| [Simulate a Kubernetes Deployment](../../../../../kubernetes/operations/simulation-with-dynosim/mocker-live-simulation.mdx) | Deploy live Mocker workers on Kubernetes |
+| [Simulate a Local Deployment](../../../../../cli/operations/simulation-with-dynosim/mocker-live-simulation.mdx) | Run live Mocker workers from the command line |
+| [Mocker CLI Reference](../../../../../reference/components/mocker-cli-reference.mdx) | Configure and launch live Mocker workers |
 | [Run a DynoSim Simulation](../../../../../cli/operations/simulation-with-dynosim/dynosim-replay.mdx) | Predict one workload against a simulated configuration with `aisimulate predict --stack dynamo` |

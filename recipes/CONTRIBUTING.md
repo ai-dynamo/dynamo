@@ -230,6 +230,28 @@ matrix:
         EFAS_PER_GPU: 4
 ```
 
+A matrix value may also set `sortOptions`. Kustomize reads sort options from the
+kustomization it builds, so a base cannot set them. Only the generated overlay
+can. Set the key on the variant that needs an order, not on the matrix, so the
+other variants keep the default `order: fifo`. Use it when apply order matters,
+for example to emit a `ResourceClaimTemplate` before the resource that claims it:
+
+```yaml
+matrix:
+  variant:
+    - name: aws-roce
+      sortOptions:
+        order: legacy
+        legacySortOptions:
+          orderFirst: [ResourceClaimTemplate, ComputeDomain]
+          orderLast: []
+```
+
+> [!NOTE]
+> An explicit `orderFirst` replaces Kustomize's default legacy list. Kinds that
+> you do not name then sort by `ResId`, so `Namespace` loses its usual first
+> slot. Name every kind whose order matters.
+
 A template selection names a source directory relative to the matrix and an
 output `path` relative to the generated overlay. The output path must be under
 `components/`; `path: components/efa` produces a normal local Component at
