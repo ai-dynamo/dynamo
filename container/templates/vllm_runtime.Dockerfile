@@ -124,6 +124,29 @@ RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')
         find "$CUBINS_DIR" -type d -exec chmod g+rwx {} + ; \
     fi
 
+{% if device == "cuda" %}
+# Solar Open2 250B is not supported by the upstream vLLM 0.26.0 runtime. Apply the
+# two Python-only forward-port patches directly to the installed package: the first
+# adds the architecture and its config, the second the reasoning parser, tool-call
+# parser and chat-template logits processor. No kernels are built and the base
+# image is unchanged, so this needs no custom vLLM build.
+COPY --chmod=644 container/patches/vllm/solar_open2/*.patch /tmp/solar-open2-patches/
+COPY --chmod=755 container/deps/vllm/validate_solar_open2_port.py /tmp/validate_solar_open2_port.py
+RUN set -eux; \
+    cd "${SITE_PACKAGES}"; \
+    for patch_file in /tmp/solar-open2-patches/*.patch; do \
+        patch --batch --forward -p1 < "${patch_file}"; \
+    done; \
+    python3 -m compileall -q \
+        vllm/model_executor/models/solar_open2.py \
+        vllm/transformers_utils/configs/solar_open2.py \
+        vllm/reasoning/solar_open2_reasoning_parser.py \
+        vllm/tool_parsers/solar_open2_tool_parser.py \
+        vllm/v1/sample/logits_processor/solar_open2.py; \
+    python3 /tmp/validate_solar_open2_port.py; \
+    rm -rf /tmp/solar-open2-patches /tmp/validate_solar_open2_port.py
+{% endif %}
+
 {% if device != "cuda" %}
 # Copy UCX and NIXL from wheel_builder for CPU/XPU devices
 # (CUDA devices use NIXL from upstream vLLM wheels)
