@@ -23,6 +23,11 @@ const THETA: u32 = 14;
 const OH: u32 = 15;
 const OTHER: u32 = 16;
 
+// Single-character tokens used to build a long, self-similar (periodic) run for the
+// prefix-matching regression test below.
+const A: u32 = 20;
+const B: u32 = 21;
+
 struct TestTokenizer;
 
 impl tokenizer_traits::Encoder for TestTokenizer {
@@ -51,6 +56,8 @@ impl tokenizer_traits::Decoder for TestTokenizer {
                 THETA => Some(" theta"),
                 OH => Some("o"),
                 OTHER => Some("there"),
+                A => Some("a"),
+                B => Some("b"),
                 _ => Some("?"),
             })
             .collect();
@@ -76,7 +83,7 @@ fn make_decoder(
         stop: stop_sequences.map(|v| v.into_iter().map(String::from).collect()),
         ..Default::default()
     };
-    Decoder::new(decode_stream, stop_conditions, include_stop_str, None)
+    Decoder::new(decode_stream, stop_conditions, include_stop_str, None, None)
 }
 
 #[test]
@@ -163,7 +170,7 @@ fn user_stop_token_reports_distinct_trigger() {
         stop_token_ids_hidden: Some(vec![EOS]),
         ..Default::default()
     };
-    let mut decoder = Decoder::new(decode_stream, stop_conditions, false, None);
+    let mut decoder = Decoder::new(decode_stream, stop_conditions, false, None, None);
     let result = decoder.process_token_ids(&[HI, STOP]).unwrap();
 
     assert_eq!(result.text.as_deref(), Some("hi"));
@@ -263,7 +270,7 @@ fn visible_stop_token_flushes_and_orders_prior_jailed_prefix() {
         stop: Some(vec!["hiya".to_string()]),
         ..Default::default()
     };
-    let mut decoder = Decoder::new(decode_stream, stop_conditions, false, None);
+    let mut decoder = Decoder::new(decode_stream, stop_conditions, false, None, None);
     let result = decoder.process_token_ids(&[HI, STOP]).unwrap();
 
     assert_eq!(result.text.as_deref(), Some("hiSTOP"));
@@ -275,4 +282,59 @@ fn visible_stop_token_flushes_and_orders_prior_jailed_prefix() {
         result.tokens,
         vec![Some("hi".to_string()), Some("STOP".to_string())]
     );
+}
+
+/// Pins down exactly *when* a withheld candidate prefix is released, using
+/// `Decoder::step`'s `released_text` directly rather than the aggregate `text` from
+/// `process_token_ids`: the first token's text must stay withheld on its own step (not
+/// released early, in case it still completes into the stop sequence) and only come out
+/// once the following step proves it cannot.
+#[test]
+fn released_text_is_withheld_exactly_until_prefix_is_ruled_out() {
+    let mut decoder = make_decoder(None, None, None, Some(vec!["ozzy"]), false);
+
+    let first = decoder.step(OH).unwrap();
+    assert_eq!(first.token.as_deref(), Some("o"));
+    assert_eq!(
+        first.released_text, None,
+        "\"o\" is still a viable prefix of \"ozzy\" and must not be released yet"
+    );
+    assert!(first.stop_trigger.is_none());
+
+    let second = decoder.step(OTHER).unwrap();
+    assert_eq!(second.token.as_deref(), Some("there"));
+    assert_eq!(
+        second.released_text.as_deref(),
+        Some("othere"),
+        "once \"o\" can no longer complete, it must be released together with this step's own text"
+    );
+    assert!(second.stop_trigger.is_none());
+}
+
+/// Regression test for a long, self-similar (periodic) run of withheld candidate bytes --
+/// the case that made the previous byte-by-byte prefix scan quadratic. Correctness, not
+/// timing, is what a unit test can pin down: every prefix length up to the stop
+/// sequence's own length must still be tracked precisely, or either a real stop is missed
+/// or content is dropped/leaked.
+#[test]
+fn hidden_stop_sequence_survives_long_self_similar_prefix_run() {
+    let mut decoder = make_decoder(None, None, None, Some(vec!["aaaab"]), false);
+    // "aaaaa" (five 'a's) grows the withheld tail beyond the stop sequence's own prefix
+    // length one byte at a time, forcing the matcher to keep re-deriving the longest
+    // still-viable prefix length as the window slides, before the final 'b' completes it.
+    let result = decoder
+        .process_token_ids(&[A, A, A, A, A, B])
+        .expect("decode succeeds");
+
+    assert_eq!(
+        result.text.as_deref(),
+        Some("a"),
+        "only the one 'a' that fell out of the sliding window may be released; \
+         the rest belongs to the matched stop sequence and must stay hidden"
+    );
+    assert!(matches!(
+        result.stop_trigger,
+        Some(StopTrigger::HiddenStopSequenceDetected(ref s)) if s == "aaaab"
+    ));
+    assert_eq!(result.tokens.len(), 6, "one token report per input token id");
 }

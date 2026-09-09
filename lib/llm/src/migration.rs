@@ -39,10 +39,13 @@ use dynamo_runtime::protocols::annotated::Annotated;
 /// Accessors the migration RetryManager needs from a response chunk.
 /// `token_ids` lets it replay already-delivered tokens; `worker_trace_link`
 /// lets it stamp the failed worker's span onto the next attempt's
-/// `migration_link`.
+/// `migration_link`; `jailed_text` lets it carry forward whatever the Backend's
+/// decoder is still withholding as a possible hidden-stop-sequence prefix, so a
+/// retried attempt's fresh decoder can be reseeded instead of silently losing it.
 pub(crate) trait HasTokenIds {
     fn token_ids(&self) -> &[TokenIdType];
     fn worker_trace_link(&self) -> Option<&crate::protocols::common::preprocessor::TraceLink>;
+    fn jailed_text(&self) -> Option<&str>;
 }
 
 impl HasTokenIds for BackendOutput {
@@ -52,6 +55,9 @@ impl HasTokenIds for BackendOutput {
     fn worker_trace_link(&self) -> Option<&crate::protocols::common::preprocessor::TraceLink> {
         self.worker_trace_link.as_ref()
     }
+    fn jailed_text(&self) -> Option<&str> {
+        self.jailed_text.as_deref()
+    }
 }
 
 impl HasTokenIds for LLMEngineOutput {
@@ -60,6 +66,9 @@ impl HasTokenIds for LLMEngineOutput {
     }
     fn worker_trace_link(&self) -> Option<&crate::protocols::common::preprocessor::TraceLink> {
         self.worker_trace_link.as_ref()
+    }
+    fn jailed_text(&self) -> Option<&str> {
+        self.jailed_text.as_deref()
     }
 }
 
@@ -317,8 +326,9 @@ where
         // embedding prompts until a retry can represent an embedding-based continuation.
 
         // TODO: Define a replay-capability contract for attempt-local decoder and sampler state.
-        // Stop-string matching, generated-token penalties, and thinking-token budgets are not
-        // currently checkpointed across workers.
+        // A withheld hidden-stop-sequence prefix is now checkpointed across workers (see
+        // `jail_seed` / `track_response`), but generated-token penalties and thinking-token
+        // budgets are not.
 
         // Disable migration for structured-output (guided-decoding) requests.
         // Inference backends initialize the guided-decoding FSM (finite state machine) fresh
@@ -647,6 +657,12 @@ where
         if let Some(link) = llm_engine_output.worker_trace_link() {
             self.last_worker_link = Some(link.clone());
         }
+        // Snapshot whatever the Backend's decoder is currently withholding as a possible
+        // hidden-stop-sequence prefix, so a future retry's fresh decoder can be reseeded
+        // from it (`jail_seed`) instead of the withheld text simply vanishing. Overwritten
+        // on every chunk -- `None` once the decoder resolves it one way or the other -- so
+        // this always reflects the last known-good chunk's state, never a stale one.
+        self.request.jail_seed = llm_engine_output.jailed_text().map(str::to_string);
         let output_len = u32::try_from(token_ids.len()).unwrap_or(u32::MAX);
         if self.exceed_max_seq_len(output_len) {
             return;
@@ -879,6 +895,7 @@ mod tests {
             completion_usage: None,
             engine_data: None,
             routing_data: None,
+            jailed_text: None,
         })
     }
 
@@ -2327,6 +2344,109 @@ mod tests {
             retry_manager.request.token_ids,
             vec![1, 2, 3, 200, 201, 202]
         );
+    }
+
+    /// Regression test for the migration-discards-withheld-text bug: a chunk delivered
+    /// before a migratable error carries `jailed_text` (whatever the `Backend` decoder was
+    /// withholding as a possible hidden-stop-sequence prefix), and the retried attempt's
+    /// request must be reseeded from it via `jail_seed` rather than starting the new
+    /// decoder unseeded and silently losing that withheld text.
+    #[tokio::test]
+    async fn test_retry_manager_carries_jail_seed_across_migration() {
+        dynamo_runtime::logging::init();
+        let context_id = uuid::Uuid::new_v4().to_string();
+
+        struct JailSeedMockEngine {
+            calls: Arc<AtomicU32>,
+            context_id: String,
+        }
+
+        #[async_trait]
+        impl
+            AsyncEngine<
+                SingleIn<PreprocessedRequest>,
+                ManyOut<Annotated<BackendOutput>>,
+                anyhow::Error,
+            > for JailSeedMockEngine
+        {
+            async fn generate(
+                &self,
+                request: SingleIn<PreprocessedRequest>,
+            ) -> Result<ManyOut<Annotated<BackendOutput>>> {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                let (preprocessed_request, context) = request.transfer(());
+
+                if call == 0 {
+                    // First attempt: deliver one good chunk that leaves "STOP" withheld as
+                    // a partial hidden-stop-sequence match, then disconnect mid-stream.
+                    assert_eq!(
+                        preprocessed_request.jail_seed, None,
+                        "a first attempt must not start pre-seeded"
+                    );
+                    let responses = stream::iter(vec![
+                        Annotated::from_data(BackendOutput {
+                            jailed_text: Some("STOP".to_string()),
+                            ..create_mock_output(10).data.unwrap()
+                        }),
+                        Annotated::from_err(
+                            DynamoError::builder()
+                                .error_type(ErrorType::Disconnected)
+                                .message("worker disconnected mid-stream")
+                                .build(),
+                        ),
+                    ]);
+                    let ctx = Arc::new(Controller::new(self.context_id.clone()));
+                    Ok(ResponseStream::new(Box::pin(responses), ctx))
+                } else {
+                    // Retry attempt: the withheld text from the abandoned attempt's last
+                    // known-good chunk must have been carried onto this request.
+                    assert_eq!(
+                        preprocessed_request.jail_seed.as_deref(),
+                        Some("STOP"),
+                        "retry request must be reseeded with the withheld jail text"
+                    );
+                    let responses = stream::iter(vec![Annotated::from_data(BackendOutput {
+                        jailed_text: None,
+                        ..create_mock_output(11).data.unwrap()
+                    })]);
+                    let ctx = Arc::new(Controller::new(self.context_id.clone()));
+                    Ok(ResponseStream::new(Box::pin(responses), ctx))
+                }
+            }
+        }
+
+        let request = create_mock_request(5);
+        let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> =
+            Arc::new(JailSeedMockEngine {
+                calls: Arc::new(AtomicU32::new(0)),
+                context_id: context_id.clone(),
+            });
+
+        let ctx = Arc::new(Controller::new(context_id.clone()));
+        let metrics = Arc::new(Metrics::new());
+        let mut retry_manager = RetryManager::build(
+            ctx,
+            BTreeMap::new(),
+            request,
+            next_generate,
+            1,
+            None,
+            Arc::new(TEST_MODEL.to_string()),
+            metrics,
+            None,
+        )
+        .await
+        .expect("Failed to build RetryManager");
+
+        let mut responses = Vec::new();
+        while let Some(r) = retry_manager.next().await {
+            responses.push(r);
+        }
+
+        // One good chunk from the first attempt, one from the retry -- the in-stream
+        // error itself is consumed internally to drive the migration, not surfaced.
+        assert_eq!(responses.len(), 2);
+        assert!(responses.iter().all(|r| r.error.is_none()));
     }
 
     #[tokio::test]

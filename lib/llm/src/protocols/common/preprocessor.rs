@@ -361,6 +361,17 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub migration_link: Option<TraceLink>,
 
+    /// Text withheld by the previous attempt's decoder as a possible (but
+    /// unresolved) prefix of a hidden stop sequence, carried into a migration
+    /// retry so the new attempt's decoder does not silently drop it and can
+    /// still complete the match if the continuation supplies the rest of the
+    /// sequence. Frontend-only: set by the migration `RetryManager` from the
+    /// last successfully processed response before a retry, consumed once by
+    /// `Backend` when seeding the retry's decoder.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) jail_seed: Option<String>,
+
     /// Bootstrap info for disaggregated serving
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]

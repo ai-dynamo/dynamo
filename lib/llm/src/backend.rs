@@ -112,6 +112,9 @@ struct DecoderParams {
     include_stop_str_in_output: bool,
     tracker: Option<Arc<RequestTracker>>,
     n: u32,
+    // Withheld hidden-stop-sequence prefix carried over from a migrated attempt's last
+    // known-good chunk (see `PreprocessedRequest::jail_seed`). `None` on a first attempt.
+    jail_seed: Option<String>,
 }
 
 impl DecoderParams {
@@ -131,6 +134,7 @@ impl DecoderParams {
                 .unwrap_or(false),
             tracker: request.tracker.clone(),
             n: request.sampling_options.n.unwrap_or(1) as u32,
+            jail_seed: request.jail_seed.clone(),
         }
     }
 }
@@ -175,6 +179,10 @@ impl Backend {
                 params.stop_conditions.clone(),
                 params.include_stop_str_in_output,
                 params.tracker.clone(),
+                // Every choice starts from the same carried-over withheld prefix. This
+                // only matters for `n == 1` migration retries in practice; a fresh
+                // decoder normally starts unseeded (`None`).
+                params.jail_seed.clone(),
             );
             decoders.insert(idx, decoder);
         }
@@ -271,14 +279,30 @@ impl
                     }
 
                     // if we have a data field without an event, then we might need to update the data
-                    if let Some(data) = &output.data
-                        && data.text.is_some()
+                    if output
+                        .data
+                        .as_ref()
+                        .is_some_and(|data| data.text.is_some())
                         && !state.validate_engine_decode
                     {
                         // Text already decoded; track finish for this choice
-                        if data.finish_reason.is_some() {
-                            let choice_idx = data.index.unwrap_or(0);
+                        let (choice_idx, has_finish) = {
+                            let data = output.data.as_ref().unwrap();
+                            (data.index.unwrap_or(0), data.finish_reason.is_some())
+                        };
+                        if has_finish {
                             state.finished_choices.insert(choice_idx);
+                            // Defensive: this choice's decoder should not normally hold any
+                            // jailed backlog on this path (the engine pre-decoded its own
+                            // text), but flush it into this terminal chunk rather than
+                            // silently dropping it if it ever does, mirroring the
+                            // decoder-driven path below.
+                            if let Some(decoder) = state.decoders.get_mut(&choice_idx)
+                                && let Some(flushed) = decoder.flush_jailed()
+                                && let Some(data) = &mut output.data
+                            {
+                                data.text.get_or_insert_with(String::new).push_str(&flushed);
+                            }
                         }
                         return Some((output, state));
                     }
@@ -421,6 +445,12 @@ impl
                     }
                     data.text = text;
                     data.tokens = Some(tokens);
+                    // Snapshot of whatever this choice's decoder is still withholding as a
+                    // possible hidden-stop-sequence prefix after this step -- `None` once
+                    // resolved (matched, ruled out, or flushed). Carried so a migration
+                    // retry's fresh decoder can be reseeded from the last known-good chunk
+                    // instead of silently losing it (see `PreprocessedRequest::jail_seed`).
+                    data.jailed_text = decoder.peek_jailed();
 
                     output.data = Some(data);
 
@@ -435,6 +465,14 @@ impl
                     // dropped, and drain the flushed choices one synthetic chunk at a time.
                     state.stream_ended = true;
                     for (idx, decoder) in state.decoders.iter_mut() {
+                        // A choice that already finished -- successfully or with an error --
+                        // was already given its chance to flush (see the decoder-driven and
+                        // decoded-text-passthrough paths above). Synthesizing another chunk
+                        // for it here would, at best, be redundant and, at worst, turn a
+                        // choice that ended in an error into a spurious extra `Stop`.
+                        if state.finished_choices.contains(idx) {
+                            continue;
+                        }
                         if let Some(flushed) = decoder.flush_jailed() {
                             state.pending_flush.push((*idx, flushed));
                         }
@@ -474,6 +512,7 @@ impl
                     worker_trace_link: data.worker_trace_link,
                     engine_data: data.engine_data,
                     routing_data: data.routing_data,
+                    jailed_text: data.jailed_text,
                 })
             })
         });
@@ -629,6 +668,9 @@ impl Decoder {
         stop_condition: StopConditions,
         include_stop_str_in_output: bool,
         tracker: Option<Arc<RequestTracker>>,
+        // Withheld hidden-stop-sequence prefix to resume from, e.g. after a migration
+        // retry (see `PreprocessedRequest::jail_seed`). `None` starts unseeded, as before.
+        jail_seed: Option<String>,
     ) -> Self {
         let user_stop_ids: HashSet<TokenIdType> = stop_condition
             .stop_token_ids
@@ -667,6 +709,13 @@ impl Decoder {
             .max()
             .unwrap_or(0);
 
+        // The entire seed is, by construction, text a prior attempt withheld as a partial
+        // hidden-stop-sequence match that had not yet resolved -- treat all of it as still
+        // jailed so this attempt can either complete the match or release it exactly as the
+        // original attempt would have, rather than leaking it or re-checking it as new text.
+        let jail = jail_seed.unwrap_or_default();
+        let jailed_bytes = jail.len();
+
         Self {
             decode_stream,
             tracker,
@@ -677,9 +726,9 @@ impl Decoder {
             visible_stop_sequences,
             min_tokens: stop_condition.min_tokens.unwrap_or(0),
             generated_tokens: 0,
-            jail: String::new(),
+            jail,
             jail_max_bytes,
-            jailed_bytes: 0,
+            jailed_bytes,
         }
     }
 
@@ -830,6 +879,16 @@ impl Decoder {
         flushed
     }
 
+    /// Non-consuming look at whatever is currently withheld as a possible hidden-stop-
+    /// sequence prefix, without releasing it. Unlike [`Self::flush_jailed`], this does not
+    /// end the withholding -- it exists so a caller (e.g. the streaming pipeline) can
+    /// snapshot the in-flight jail state onto each chunk, so it can be recovered and used to
+    /// reseed a fresh `Decoder` (via `jail_seed` in [`Self::new`]) if this attempt is
+    /// abandoned partway through, e.g. by a migration retry.
+    pub(crate) fn peek_jailed(&self) -> Option<String> {
+        self.jailed_string()
+    }
+
     /// Returns the length, in bytes, of the longest suffix of `jail` that is also a strict
     /// prefix of some hidden stop sequence -- text that might still grow into a complete
     /// hidden stop sequence and so must not be released to the caller yet. Only considers
@@ -841,18 +900,59 @@ impl Decoder {
         for seq in hidden_stop_sequences {
             let seq_bytes = seq.as_bytes();
             // A full-length match would already have been caught as a complete stop;
-            // only strictly shorter prefixes are candidates here.
+            // only strictly shorter prefixes are candidates here. Also skip sequences that
+            // cannot possibly beat the current best -- matches the pruning the previous
+            // implementation did via its `best + 1..=max_k` range.
             let max_k = seq_bytes.len().saturating_sub(1).min(jail_bytes.len());
-            for k in (best + 1..=max_k).rev() {
-                if jail.is_char_boundary(jail_bytes.len() - k)
-                    && jail_bytes[jail_bytes.len() - k..] == seq_bytes[..k]
-                {
+            if max_k <= best {
+                continue;
+            }
+            let pattern = &seq_bytes[..max_k];
+            let tail_len = pattern.len().min(jail_bytes.len());
+            let tail = &jail_bytes[jail_bytes.len() - tail_len..];
+
+            // Longest suffix of `tail` that is also a prefix of `pattern`, found in
+            // O(pattern.len() + tail.len()) via the standard KMP-border trick, rather than
+            // the previous byte-by-byte scan over every candidate length (quadratic on
+            // long, self-similar sequences, e.g. a periodic stop string): build the prefix
+            // (failure) function of `pattern + sep + tail` (`sep` = 0xFF, which cannot occur
+            // in valid UTF-8, so no border can bridge across it) and read the border length
+            // back from its last entry. Borders of `pattern + sep + tail` strictly decrease
+            // along the classic `pi[k - 1]` chain, which is walked here only as far as
+            // needed to find one that also lands on a `jail` char boundary.
+            let mut combined = Vec::with_capacity(pattern.len() + 1 + tail.len());
+            combined.extend_from_slice(pattern);
+            combined.push(0xFF);
+            combined.extend_from_slice(tail);
+            let pi = Self::kmp_prefix_function(&combined);
+
+            let mut k = *pi.last().unwrap_or(&0);
+            while k > best {
+                if jail.is_char_boundary(jail_bytes.len() - k) {
                     best = k;
                     break;
                 }
+                k = pi[k - 1];
             }
         }
         best
+    }
+
+    /// Standard KMP prefix (failure) function: `pi[i]` is the length of the longest proper
+    /// prefix of `s[..=i]` that is also a suffix of it.
+    fn kmp_prefix_function(s: &[u8]) -> Vec<usize> {
+        let mut pi = vec![0usize; s.len()];
+        let mut k = 0usize;
+        for i in 1..s.len() {
+            while k > 0 && s[i] != s[k] {
+                k = pi[k - 1];
+            }
+            if s[i] == s[k] {
+                k += 1;
+            }
+            pi[i] = k;
+        }
+        pi
     }
 
     pub fn process_token_ids(&mut self, token_ids: &[TokenIdType]) -> Result<SeqResult> {
@@ -1241,7 +1341,7 @@ mod tests {
         let decode_stream = crate::tokenizers::DecodeStream::new(tokenizer, &[], false);
         let stop_conditions = StopConditions::default();
 
-        let mut decoder = Decoder::new(decode_stream, stop_conditions, false, None);
+        let mut decoder = Decoder::new(decode_stream, stop_conditions, false, None, None);
 
         let result = decoder.process_token_ids(&[42]);
         assert!(
@@ -1264,7 +1364,7 @@ mod tests {
         let decode_stream = crate::tokenizers::DecodeStream::new(tokenizer, &[], false);
         let stop_conditions = StopConditions::default();
 
-        let mut decoder = Decoder::new(decode_stream, stop_conditions, false, None);
+        let mut decoder = Decoder::new(decode_stream, stop_conditions, false, None, None);
 
         let result = decoder.process_token_ids(&[42]);
         let err = result.err().expect("should be Err");
@@ -1284,5 +1384,272 @@ mod tests {
             }
             other => panic!("Expected FinishReason::Error, got: {:?}", other),
         }
+    }
+
+    /// A tokenizer whose per-token fragments are chosen so `1` then `2` leaves a partial
+    /// hidden-stop-sequence match ("STOP", a strict prefix of the configured stop
+    /// sequence "STOPPED") jailed, and `99` fails to decode -- used to exercise
+    /// EOF-time flushing and error/EOF interaction at the `Backend` (not just `Decoder`)
+    /// level, across multiple choices.
+    struct JailingTokenizer;
+
+    impl traits::Encoder for JailingTokenizer {
+        fn encode(&self, _input: &str) -> anyhow::Result<crate::tokenizers::Encoding> {
+            Ok(crate::tokenizers::Encoding::Sp(vec![]))
+        }
+        fn encode_batch(
+            &self,
+            _inputs: &[&str],
+        ) -> anyhow::Result<Vec<crate::tokenizers::Encoding>> {
+            Ok(vec![])
+        }
+    }
+
+    impl traits::Decoder for JailingTokenizer {
+        fn decode(
+            &self,
+            token_ids: &[TokenIdType],
+            _skip_special_tokens: bool,
+        ) -> anyhow::Result<traits::DecodeResult> {
+            let token = match token_ids {
+                [] => "",
+                [1] => "abc",
+                [2] => "STOP",
+                [99] => anyhow::bail!("simulated decode failure"),
+                _ => anyhow::bail!("unexpected token IDs: {token_ids:?}"),
+            };
+            Ok(traits::DecodeResult::Complete(token.to_string()))
+        }
+    }
+
+    impl traits::Tokenizer for JailingTokenizer {}
+
+    fn jailing_request(n: u8) -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(vec![])
+            .stop_conditions(StopConditions {
+                stop: Some(vec!["STOPPED".to_string()]),
+                ..Default::default()
+            })
+            .sampling_options(SamplingOptions {
+                n: Some(n),
+                ..Default::default()
+            })
+            .output_options(OutputOptions::default())
+            .build()
+            .expect("valid preprocessed request")
+    }
+
+    /// Wraps an inner stream and flips a shared flag if it is ever polled again after
+    /// already returning `None` once -- used to verify the backend's `stream_ended` guard
+    /// actually prevents re-polling `stream`, which most `Stream` impls do not guarantee
+    /// is safe.
+    struct EndGuardStream {
+        inner: std::pin::Pin<Box<dyn futures::Stream<Item = Annotated<LLMEngineOutput>> + Send>>,
+        ended: bool,
+        overpolled: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl futures::Stream for EndGuardStream {
+        type Item = Annotated<LLMEngineOutput>;
+
+        fn poll_next(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            if self.ended {
+                self.overpolled.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            let poll = self.inner.as_mut().poll_next(cx);
+            if matches!(poll, std::task::Poll::Ready(None)) {
+                self.ended = true;
+            }
+            poll
+        }
+    }
+
+    struct BareEofMultiChoiceEngine {
+        overpolled: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for BareEofMultiChoiceEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            // Both choices withhold "STOP" as a never-completed partial match against
+            // "STOPPED", then the stream ends with no `finish_reason` ever sent for
+            // either -- a "bare EOF", as from an engine that simply drops the connection.
+            let chunks = vec![
+                Annotated::from_data(LLMEngineOutput {
+                    token_ids: vec![1],
+                    index: Some(0),
+                    ..Default::default()
+                }),
+                Annotated::from_data(LLMEngineOutput {
+                    token_ids: vec![2],
+                    index: Some(0),
+                    ..Default::default()
+                }),
+                Annotated::from_data(LLMEngineOutput {
+                    token_ids: vec![1],
+                    index: Some(1),
+                    ..Default::default()
+                }),
+                Annotated::from_data(LLMEngineOutput {
+                    token_ids: vec![2],
+                    index: Some(1),
+                    ..Default::default()
+                }),
+            ];
+            let guarded = EndGuardStream {
+                inner: Box::pin(futures::stream::iter(chunks)),
+                ended: false,
+                overpolled: self.overpolled.clone(),
+            };
+            Ok(ResponseStream::new(Box::pin(guarded), request.context()))
+        }
+    }
+
+    #[tokio::test]
+    async fn backend_flushes_multiple_jailed_choices_on_bare_eof_without_repolling() {
+        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(JailingTokenizer);
+        let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
+        let request = jailing_request(2);
+        let overpolled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            Arc::new(BareEofMultiChoiceEngine {
+                overpolled: overpolled.clone(),
+            });
+
+        let stream = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+            .await
+            .expect("backend generation succeeds");
+        let outputs: Vec<_> = stream.collect().await;
+
+        // 2 normal chunks per choice (releasing "abc", withholding "STOP") + one
+        // synthetic EOF-flush chunk per choice releasing the withheld "STOP".
+        assert_eq!(outputs.len(), 6, "unexpected output count: {outputs:?}");
+
+        let mut flushed_by_index = std::collections::HashMap::new();
+        for output in &outputs {
+            let data = output.data.as_ref().expect("every chunk carries data");
+            if data.finish_reason.is_some() {
+                flushed_by_index.insert(data.index, data.text.clone());
+            }
+        }
+        assert_eq!(
+            flushed_by_index.get(&Some(0)).cloned().flatten().as_deref(),
+            Some("STOP"),
+            "choice 0's withheld text must be flushed on bare EOF"
+        );
+        assert_eq!(
+            flushed_by_index.get(&Some(1)).cloned().flatten().as_deref(),
+            Some("STOP"),
+            "choice 1's withheld text must be flushed on bare EOF"
+        );
+
+        assert!(
+            !overpolled.load(std::sync::atomic::Ordering::SeqCst),
+            "backend must not poll the underlying stream again after it yields None"
+        );
+    }
+
+    struct ErrorThenBareEofEngine;
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for ErrorThenBareEofEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            // Choice 0 withholds "STOP" (same as choice 1) and *then* hits a decode
+            // error -- so it still has jailed text outstanding at the moment it
+            // terminates via the error path rather than a real stop. Choice 1 withholds
+            // "STOP" too but never gets a `finish_reason` -- the stream just ends (bare
+            // EOF). Without excluding already-finished choices from the EOF flush, choice
+            // 0's leftover jailed text would be flushed into a second, spurious `Stop`
+            // chunk after its error.
+            let chunks = vec![
+                Annotated::from_data(LLMEngineOutput {
+                    token_ids: vec![1],
+                    index: Some(0),
+                    ..Default::default()
+                }),
+                Annotated::from_data(LLMEngineOutput {
+                    token_ids: vec![2],
+                    index: Some(0),
+                    ..Default::default()
+                }),
+                Annotated::from_data(LLMEngineOutput {
+                    token_ids: vec![99],
+                    index: Some(0),
+                    ..Default::default()
+                }),
+                Annotated::from_data(LLMEngineOutput {
+                    token_ids: vec![1],
+                    index: Some(1),
+                    ..Default::default()
+                }),
+                Annotated::from_data(LLMEngineOutput {
+                    token_ids: vec![2],
+                    index: Some(1),
+                    ..Default::default()
+                }),
+            ];
+            Ok(ResponseStream::new(
+                Box::pin(futures::stream::iter(chunks)),
+                request.context(),
+            ))
+        }
+    }
+
+    /// A choice that already ended in a decode error must not be given a second,
+    /// synthetic `Stop` chunk by the bare-EOF flush loop -- that would turn a genuine
+    /// error into what looks like a normal completion downstream.
+    #[tokio::test]
+    async fn backend_does_not_synthesize_stop_after_choice_decode_error() {
+        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(JailingTokenizer);
+        let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
+        let request = jailing_request(2);
+        let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            Arc::new(ErrorThenBareEofEngine);
+
+        let stream = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+            .await
+            .expect("backend generation succeeds");
+        let outputs: Vec<_> = stream.collect().await;
+
+        let choice0_finishes: Vec<_> = outputs
+            .iter()
+            .filter_map(|o| o.data.as_ref())
+            .filter(|d| d.index == Some(0) && d.finish_reason.is_some())
+            .collect();
+        assert_eq!(
+            choice0_finishes.len(),
+            1,
+            "choice 0 must finish exactly once (its decode error), not again via EOF flush: {choice0_finishes:?}"
+        );
+        assert!(
+            matches!(choice0_finishes[0].finish_reason, Some(FinishReason::Error(_))),
+            "choice 0's only finish must be its decode error, got: {:?}",
+            choice0_finishes[0].finish_reason
+        );
+
+        let choice1_flush = outputs
+            .iter()
+            .filter_map(|o| o.data.as_ref())
+            .find(|d| d.index == Some(1) && d.finish_reason.is_some());
+        assert_eq!(
+            choice1_flush.and_then(|d| d.text.as_deref()),
+            Some("STOP"),
+            "choice 1's withheld text must still be flushed on the same bare EOF"
+        );
     }
 }
