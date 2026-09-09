@@ -1575,9 +1575,7 @@ async def test_worker_teardown_surfaces_cancellation_after_deferred_cleanup():
         await release_deferred.wait()
         steps.append("run_deferred_handlers")
 
-    outer = asyncio.create_task(
-        finish_worker_teardown(metrics_task, cleanup, deferred)
-    )
+    outer = asyncio.create_task(finish_worker_teardown(metrics_task, cleanup, deferred))
     await deferred_started.wait()
     outer.cancel()
     release_deferred.set()
