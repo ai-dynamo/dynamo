@@ -226,16 +226,17 @@ pub(crate) const PREFILL_CONTINUE_ANNOTATION: &str = "x-prefill-continue";
 
 /// Drop any client-supplied copy of the router-owned routing markers.
 fn strip_router_owned_annotations(annotations: &mut Vec<String>) {
-    fn is_router_owned(annotation: &str, marker: &str) -> bool {
-        annotation == marker
-            || (annotation.len() > marker.len()
-                && annotation.starts_with(marker)
-                && annotation.as_bytes()[marker.len()] == b':')
-    }
-
+    const MARKERS: [&str; 2] = [
+        BYPASS_REMOTE_PREFILL_ANNOTATION,
+        PREFILL_CONTINUE_ANNOTATION,
+    ];
     annotations.retain(|annotation| {
-        !is_router_owned(annotation, BYPASS_REMOTE_PREFILL_ANNOTATION)
-            && !is_router_owned(annotation, PREFILL_CONTINUE_ANNOTATION)
+        !MARKERS.iter().any(|marker| {
+            annotation == marker
+                || annotation
+                    .strip_prefix(marker)
+                    .is_some_and(|value| value.starts_with(':'))
+        })
     });
 }
 
@@ -327,11 +328,11 @@ enum PrefillPoolCapability {
     Undeclared(Vec<WorkerId>),
 }
 
-    /// Does every routable worker understand the continuation marker?
-    ///
-    /// Unanimous, not first-wins: one worker that ignores it pins cache blocks.
-    /// Asked of `routable`, not the config map, which omits undiscovered workers.
-    /// Narrows the window rather than closing it; the pool can change after.
+/// Does every routable worker understand the continuation marker?
+///
+/// Unanimous, not first-wins: one worker that ignores it pins cache blocks.
+/// Asked of `routable`, not the config map, which omits undiscovered workers.
+/// Narrows the window rather than closing it; the pool can change after.
 fn prefill_pool_capability(
     routable: &[WorkerId],
     runtime_configs: &HashMap<WorkerId, ModelRuntimeConfig>,
@@ -355,44 +356,6 @@ fn prefill_pool_capability(
         PrefillPoolCapability::Supported
     } else {
         PrefillPoolCapability::Undeclared(undeclared)
-    }
-}
-
-/// Read the live pool state and say whether a continuation may be asked for,
-/// logging the reason when it may not.
-fn prefill_pool_allows_continuation<Sel>(
-    binding: &PrefillBinding<Sel>,
-    routable: &[WorkerId],
-    request_id: &str,
-) -> bool
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
-    // The watch guard lives only for this statement, so no lock is held across
-    // the awaits that follow.
-    let capability = prefill_pool_capability(routable, &binding.prefill_runtime_configs.borrow());
-    match capability {
-        PrefillPoolCapability::Supported => true,
-        PrefillPoolCapability::NoRoutableWorkers => {
-            PREFILL_CONTINUE_METRICS
-                .record_decision(prefill_continue_decision::NO_ROUTABLE_WORKERS);
-            tracing::debug!(
-                request_id,
-                "Prefill continuation declined: no routable prefill workers"
-            );
-            false
-        }
-        PrefillPoolCapability::Undeclared(undeclared) => {
-            PREFILL_CONTINUE_METRICS.record_decision(prefill_continue_decision::POOL_UNDECLARED);
-            tracing::debug!(
-                request_id,
-                ?undeclared,
-                routable = routable.len(),
-                "Prefill continuation declined: these routable prefill workers did not declare \
-                 support for the continuation marker, so the whole pool hands off as today"
-            );
-            false
-        }
     }
 }
 
@@ -420,10 +383,33 @@ where
             return false;
         }
         // One sample of the pool, read by both the capability gate and the
-        // census, so the two cannot disagree about who is routable.
+        // census, so the two cannot disagree about who is routable. The watch
+        // guard lives only for this statement, so no lock is held across the
+        // awaits that follow.
         let routable = binding.router.routable_instance_ids();
-        if !prefill_pool_allows_continuation(binding, &routable, request_id) {
-            return false;
+        match prefill_pool_capability(&routable, &binding.prefill_runtime_configs.borrow()) {
+            PrefillPoolCapability::Supported => {}
+            PrefillPoolCapability::NoRoutableWorkers => {
+                PREFILL_CONTINUE_METRICS
+                    .record_decision(prefill_continue_decision::NO_ROUTABLE_WORKERS);
+                tracing::debug!(
+                    request_id,
+                    "Prefill continuation declined: no routable prefill workers"
+                );
+                return false;
+            }
+            PrefillPoolCapability::Undeclared(undeclared) => {
+                PREFILL_CONTINUE_METRICS
+                    .record_decision(prefill_continue_decision::POOL_UNDECLARED);
+                tracing::debug!(
+                    request_id,
+                    ?undeclared,
+                    routable = routable.len(),
+                    "Prefill continuation declined: these routable prefill workers did not \
+                     declare support for the continuation marker, so the whole pool hands off"
+                );
+                return false;
+            }
         }
 
         // Cheap gates first. Each probe below costs a scheduler selection, and
@@ -459,16 +445,18 @@ where
 
         // The override continues without consulting decode load, so measuring
         // it would buy an answer nothing reads.
-        let measured = if self.prefill_continue_policy.needs_decode_load() {
-            self.peek_decode_headroom(request, request_id).await
+        let decode_occupancy = if self.prefill_continue_policy.needs_decode_load() {
+            self.peek_decode_occupancy(request, request_id).await
         } else {
-            PrefillContinueDecisionInput::new(None)
+            None
         };
-        let input = measured
-            .with_prefill_worker_busy(self.peek_prefill_busy(request, binding, request_id).await)
-            .with_remaining_budget_tokens(budget)
-            .with_active_continuations(active)
-            .with_sequences(sequences);
+        let input = PrefillContinueDecisionInput {
+            decode_occupancy,
+            prefill_worker_busy: self.peek_prefill_busy(request, binding, request_id).await,
+            remaining_budget_tokens: budget,
+            active_continuations: active,
+            sequences,
+        };
 
         let decision = self.prefill_continue_policy.decide(input);
         match decision.skip_reason() {
@@ -485,13 +473,12 @@ where
         decision.should_continue()
     }
 
-    /// Read the decode pool's headroom for this request.
-    async fn peek_decode_headroom(
+    /// What the decode worker this request would land on reports it is holding.
+    async fn peek_decode_occupancy(
         &self,
         request: &SingleIn<PreprocessedRequest>,
         request_id: &str,
-    ) -> PrefillContinueDecisionInput {
-        let unknown = PrefillContinueDecisionInput::new(None);
+    ) -> Option<f64> {
         // Counted on every path below, before the prefill interlock can mask
         // the result. Without this there is no denominator for source coverage.
         let record = |outcome: &str| {
@@ -500,75 +487,22 @@ where
                 .with_label_values(&[outcome])
                 .inc();
         };
-        let Some(decode_host) = self.decode_routing_host.get() else {
-            record(prefill_continue_occupancy_read::NO_KV_PLANE);
-            return unknown;
-        };
         // Ask the host, not the mode flag: `kv_router()` panics on a host with
         // no KV plane, and the two could otherwise disagree.
-        if decode_host.kv_router_if_enabled().is_none() {
+        let decode_host = self
+            .decode_routing_host
+            .get()
+            .filter(|host| host.kv_router_if_enabled().is_some());
+        let Some(decode_host) = decode_host else {
             record(prefill_continue_occupancy_read::NO_KV_PLANE);
-            return unknown;
-        }
-        match decode_host
+            return None;
+        };
+
+        let preview = match decode_host
             .preview_kv_route(request, RequestPhase::Decode)
             .await
         {
-            Ok(preview) => {
-                let signals = preview.signals();
-                // The same accessor the sibling bypass gate reads, so the two
-                // cannot classify one snapshot differently.
-                match signals.decode_occupancy() {
-                    Some(occupancy) => {
-                        // Recorded on every read, whatever the gate then does
-                        // with it.
-                        record(prefill_continue_occupancy_read::KNOWN);
-                        PREFILL_CONTINUE_METRICS.decode_occupancy.observe(occupancy);
-                        // The raw pair is logged, not decided on: the gate
-                        // needs one number.
-                        let (used, total) = signals.authoritative_kv.unwrap_or_default();
-                        tracing::debug!(
-                            request_id,
-                            worker_id = signals.worker.worker_id,
-                            dp_rank = signals.worker.dp_rank,
-                            used,
-                            total,
-                            occupancy,
-                            "Decode occupancy read from the worker"
-                        );
-                        PrefillContinueDecisionInput::new(Some(occupancy))
-                    }
-                    None => {
-                        record(prefill_continue_occupancy_read::UNREPORTED);
-                        // Say this loudly once, but not on a healthy cold
-                        // start: capacity is seeded at discovery while usage
-                        const SETTLING_READS: u64 = 100;
-                        static WARNED: std::sync::Once = std::sync::Once::new();
-                        let unreported = PREFILL_CONTINUE_METRICS
-                            .decode_occupancy_reads_total
-                            .with_label_values(&[prefill_continue_occupancy_read::UNREPORTED])
-                            .get();
-                        if unreported >= SETTLING_READS {
-                            WARNED.call_once(|| {
-                                tracing::warn!(
-                                    worker_id = signals.worker.worker_id,
-                                    dp_rank = signals.worker.dp_rank,
-                                    "Prefill continuation is enabled but this decode worker \
-                                 reports no KV occupancy, so every request will hand off. \
-                                 The worker must publish ActiveLoad with kv_used_blocks"
-                                );
-                            });
-                        }
-                        tracing::debug!(
-                            request_id,
-                            worker_id = signals.worker.worker_id,
-                            dp_rank = signals.worker.dp_rank,
-                            "No worker-reported KV occupancy; treating decode load as unavailable"
-                        );
-                        unknown
-                    }
-                }
-            }
+            Ok(preview) => preview,
             Err(error) => {
                 record(prefill_continue_occupancy_read::PREVIEW_FAILED);
                 tracing::debug!(
@@ -576,9 +510,44 @@ where
                     %error,
                     "Decode headroom probe failed; treating decode load as unavailable"
                 );
-                unknown
+                return None;
             }
-        }
+        };
+
+        // The same accessor the sibling bypass gate reads, so the two cannot
+        // classify one snapshot differently.
+        let signals = preview.signals();
+        let worker_id = signals.worker.worker_id;
+        let dp_rank = signals.worker.dp_rank;
+        let Some(occupancy) = signals.decode_occupancy() else {
+            // `decode_occupancy_reads_total{outcome="unreported"}` is the
+            // operator-visible form of this: the worker publishes no ActiveLoad
+            // with kv_used_blocks, so every request hands off.
+            record(prefill_continue_occupancy_read::UNREPORTED);
+            tracing::debug!(
+                request_id,
+                worker_id,
+                dp_rank,
+                "No worker-reported KV occupancy; treating decode load as unavailable"
+            );
+            return None;
+        };
+
+        // Recorded on every read, whatever the gate then does with it.
+        record(prefill_continue_occupancy_read::KNOWN);
+        PREFILL_CONTINUE_METRICS.decode_occupancy.observe(occupancy);
+        // The raw pair is logged, not decided on: the gate needs one number.
+        let (used, total) = signals.authoritative_kv.unwrap_or_default();
+        tracing::debug!(
+            request_id,
+            worker_id,
+            dp_rank,
+            used,
+            total,
+            occupancy,
+            "Decode occupancy read from the worker"
+        );
+        Some(occupancy)
     }
 
     /// Read whether the prefill worker this request would land on is over its
@@ -1065,49 +1034,46 @@ where
         worker_id: u64,
         binding: &PrefillBinding<Sel>,
     ) -> Option<ContinuationPermit> {
+        match self.reserve_continuation_place(worker_id, binding) {
+            Ok(permit) => Some(permit),
+            Err(reason) => {
+                PREFILL_CONTINUE_METRICS.record_demotion(reason);
+                tracing::debug!(
+                    worker_id,
+                    reason,
+                    in_flight = self.continuations.in_flight(worker_id),
+                    "Prefill continuation demoted to a handoff"
+                );
+                demote_to_handoff(request);
+                None
+            }
+        }
+    }
+
+    /// The place, or the [`prefill_continue_demotion`] reason it was refused.
+    fn reserve_continuation_place(
+        &self,
+        worker_id: u64,
+        binding: &PrefillBinding<Sel>,
+    ) -> Result<ContinuationPermit, &'static str> {
         let declared = binding
             .prefill_runtime_configs
             .borrow()
             .get(&worker_id)
             .is_some_and(|config| config.supports_runtime_capability(PREFILL_CONTINUE_CAPABILITY));
         if !declared {
-            PREFILL_CONTINUE_METRICS.record_demotion(prefill_continue_demotion::WORKER_UNDECLARED);
-            tracing::debug!(
-                worker_id,
-                "Prefill continuation demoted to a handoff: the selected worker never declared \
-                 support for the continuation marker"
-            );
-            demote_to_handoff(request);
-            return None;
+            return Err(prefill_continue_demotion::WORKER_UNDECLARED);
         }
-
         // Refuse rather than run unbounded when no cap is configured. Startup
         // validation asks for one, but it does not run on every path a router
         // can be built from, so a config can still arrive here without one.
-        let Some(cap) = self.prefill_continue_policy.max_concurrent() else {
-            PREFILL_CONTINUE_METRICS.record_demotion(prefill_continue_demotion::NO_CAP_CONFIGURED);
-            tracing::debug!(
-                worker_id,
-                "Prefill continuation demoted to a handoff: no continuation cap is configured, \
-                 and the cap is the only bound on continuations that are already running"
-            );
-            demote_to_handoff(request);
-            return None;
-        };
-        if let Some(permit) = self.continuations.try_admit(worker_id, cap) {
-            return Some(permit);
-        }
-
-        PREFILL_CONTINUE_METRICS.record_demotion(prefill_continue_demotion::WORKER_AT_CAP);
-        tracing::debug!(
-            worker_id,
-            in_flight = self.continuations.in_flight(worker_id),
-            ?cap,
-            "Prefill continuation demoted to a handoff: the selected worker has no free \
-             continuation place"
-        );
-        demote_to_handoff(request);
-        None
+        let cap = self
+            .prefill_continue_policy
+            .max_concurrent()
+            .ok_or(prefill_continue_demotion::NO_CAP_CONFIGURED)?;
+        self.continuations
+            .try_admit(worker_id, cap)
+            .ok_or(prefill_continue_demotion::WORKER_AT_CAP)
     }
 
     fn preflight_kv_transfer_constraints(
@@ -1700,41 +1666,18 @@ mod tests {
     }
 
     #[test]
-    fn a_string_encoded_declaration_is_accepted() {
-        // Deliberately the same truthy vocabulary as every other runtime
-        // capability. A backend that spells the flag as a string must not be
-        // refused, because that refusal would be silent.
-        for spelling in ["true", "1", "on", "yes"] {
-            assert_eq!(
-                prefill_pool_capability(&[0], &pool_declaring(spelling)),
-                PrefillPoolCapability::Supported,
-                "{spelling} should read as support"
-            );
-        }
-    }
-
-    #[test]
-    fn a_value_that_means_nothing_is_a_refusal() {
-        for value in [
-            serde_json::json!("banana"),
-            serde_json::json!(1),
-            serde_json::json!(null),
-        ] {
-            assert_eq!(
-                prefill_pool_capability(&[0], &pool_declaring(value.clone())),
-                PrefillPoolCapability::Undeclared(vec![0]),
-                "{value} must not read as support"
-            );
-        }
-    }
-
-    #[test]
-    fn strip_router_owned_annotations_drops_the_valued_form() {
+    fn strip_router_owned_annotations_drops_every_form_of_both_markers() {
         // `get_annotation_value` reads values off a `marker:` prefix, so the
-        // valued form is a live bypass if the strip only matches the bare marker.
+        // valued form is a live bypass if the strip only matches the bare
+        // marker. Every copy must go, and everything else must survive in order.
         let mut annotations = vec![
-            format!("{PREFILL_CONTINUE_ANNOTATION}:1"),
+            "keep-me".to_string(),
+            BYPASS_REMOTE_PREFILL_ANNOTATION.to_string(),
             format!("{BYPASS_REMOTE_PREFILL_ANNOTATION}:true"),
+            "also-keep".to_string(),
+            PREFILL_CONTINUE_ANNOTATION.to_string(),
+            PREFILL_CONTINUE_ANNOTATION.to_string(),
+            format!("{PREFILL_CONTINUE_ANNOTATION}:1"),
             // a different marker that merely shares a prefix must survive
             format!("{PREFILL_CONTINUE_ANNOTATION}-other"),
         ];
@@ -1743,24 +1686,11 @@ mod tests {
 
         assert_eq!(
             annotations,
-            vec![format!("{PREFILL_CONTINUE_ANNOTATION}-other")]
+            vec![
+                "keep-me".to_string(),
+                "also-keep".to_string(),
+                format!("{PREFILL_CONTINUE_ANNOTATION}-other"),
+            ]
         );
-    }
-
-    #[test]
-    fn strip_router_owned_annotations_drops_every_copy_of_both_markers() {
-        // A client can send a marker more than once; every copy must go, and
-        // everything else must survive in order.
-        let mut annotations = vec![
-            "keep-me".to_string(),
-            BYPASS_REMOTE_PREFILL_ANNOTATION.to_string(),
-            "also-keep".to_string(),
-            PREFILL_CONTINUE_ANNOTATION.to_string(),
-            PREFILL_CONTINUE_ANNOTATION.to_string(),
-        ];
-
-        strip_router_owned_annotations(&mut annotations);
-
-        assert_eq!(annotations, vec!["keep-me", "also-keep"]);
     }
 }

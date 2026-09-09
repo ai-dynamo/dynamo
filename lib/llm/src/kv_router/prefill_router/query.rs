@@ -722,43 +722,68 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn round_robin_has_no_interlock_signal_so_nothing_continues() {
-        // The interlock reads a KV route preview, so on the built-in plane it
-        // cannot be read at all. An unread safety check is not a passed one:
+    /// Drive one 256-token request through a continuation-configured router and
+    /// report what reached the worker, per dispatch: `max_tokens` and
+    /// annotations.
+    async fn dispatched_continuation(
+        namespace: &str,
+        mode: RouterMode,
+        config: &dynamo_kv_router::config::KvRouterConfig,
+        pool_support: PoolSupport,
+    ) -> (Vec<Option<u32>>, Vec<Vec<String>>) {
         let runtime = Runtime::from_current().unwrap();
         let discovery_root = tempfile::tempdir().unwrap();
         let dispatch = Arc::new(RecordingDispatch::completed());
         let (_shared, prefill_router, worker_runtimes, _workers) = shared_router(
             &runtime,
             discovery_root.path(),
-            "prefill-continuation-no-interlock",
-            RouterMode::RoundRobin,
+            namespace,
+            mode,
             dispatch.clone(),
-            Some(&continue_config(Some(2))),
-            PoolSupport::Unanimous,
+            Some(config),
+            pool_support,
         )
         .await;
 
         let (_, next) = counting_decode_host();
         let mut request = request();
         request.stop_conditions.max_tokens = Some(256);
-
         let _ = Operator::generate(prefill_router.as_ref(), Context::new(request), next).await;
 
-        assert_eq!(
-            *dispatch.dispatched_max_tokens.lock().unwrap(),
-            vec![Some(1)],
-            "with no readable interlock the request must take today's handoff"
+        let dispatched = (
+            dispatch.dispatched_max_tokens.lock().unwrap().clone(),
+            dispatch.dispatched_annotations.lock().unwrap().clone(),
         );
+        drop(worker_runtimes);
+        runtime.shutdown();
+        dispatched
+    }
+
+    /// The request took today's handoff: clamped to one token, marker stripped.
+    fn assert_handed_off(dispatched: (Vec<Option<u32>>, Vec<Vec<String>>), why: &str) {
+        let (max_tokens, annotations) = dispatched;
+        assert_eq!(max_tokens, vec![Some(1)], "{why}");
         assert_eq!(
-            *dispatch.dispatched_annotations.lock().unwrap(),
+            annotations,
             vec![Vec::<String>::new()],
             "and the marker must never reach the worker"
         );
+    }
 
-        drop(worker_runtimes);
-        runtime.shutdown();
+    #[tokio::test]
+    async fn round_robin_has_no_interlock_signal_so_nothing_continues() {
+        // The interlock reads a KV route preview, so on the built-in plane it
+        // cannot be read at all. An unread safety check is not a passed one:
+        assert_handed_off(
+            dispatched_continuation(
+                "prefill-continuation-no-interlock",
+                RouterMode::RoundRobin,
+                &continue_config(Some(2)),
+                PoolSupport::Unanimous,
+            )
+            .await,
+            "with no readable interlock the request must take today's handoff",
+        );
     }
 
     #[tokio::test]
@@ -811,38 +836,20 @@ mod tests {
     async fn without_a_readable_decode_pool_nothing_continues() {
         // The other continuation tests set `force`, which waives the
         // decode-load test and nothing else. Drop it and the decision has to
-        let runtime = Runtime::from_current().unwrap();
-        let discovery_root = tempfile::tempdir().unwrap();
-        let dispatch = Arc::new(RecordingDispatch::completed());
-        let (_shared, prefill_router, worker_runtimes, _workers) = shared_router(
-            &runtime,
-            discovery_root.path(),
-            "prefill-continuation-no-decode-signal",
-            RouterMode::KV,
-            dispatch.clone(),
-            Some(&dynamo_kv_router::config::KvRouterConfig {
-                prefill_continue_force: false,
-                prefill_continue_decode_busy_threshold: Some(0.9),
-                ..continue_config(Some(2))
-            }),
-            PoolSupport::Unanimous,
-        )
-        .await;
-
-        let (_, next) = counting_decode_host();
-        let mut request = request();
-        request.stop_conditions.max_tokens = Some(256);
-
-        let _ = Operator::generate(prefill_router.as_ref(), Context::new(request), next).await;
-
-        assert_eq!(
-            *dispatch.dispatched_max_tokens.lock().unwrap(),
-            vec![Some(1)],
-            "an unreadable decode pool must not read as a full one"
+        assert_handed_off(
+            dispatched_continuation(
+                "prefill-continuation-no-decode-signal",
+                RouterMode::KV,
+                &dynamo_kv_router::config::KvRouterConfig {
+                    prefill_continue_force: false,
+                    prefill_continue_decode_busy_threshold: Some(0.9),
+                    ..continue_config(Some(2))
+                },
+                PoolSupport::Unanimous,
+            )
+            .await,
+            "an unreadable decode pool must not read as a full one",
         );
-
-        drop(worker_runtimes);
-        runtime.shutdown();
     }
 
     #[tokio::test]
@@ -991,76 +998,33 @@ mod tests {
 
     #[tokio::test]
     async fn a_mixed_pool_refuses_to_continue() {
-        let runtime = Runtime::from_current().unwrap();
-        let discovery_root = tempfile::tempdir().unwrap();
-        let dispatch = Arc::new(RecordingDispatch::completed());
-        let (_shared, prefill_router, worker_runtimes, _workers) = shared_router(
-            &runtime,
-            discovery_root.path(),
-            "prefill-continuation-kv-mixed",
-            RouterMode::KV,
-            dispatch.clone(),
-            Some(&continue_config(Some(2))),
-            PoolSupport::AllButOne,
-        )
-        .await;
-
-        let (_, next) = counting_decode_host();
-
-        let mut request = request();
-        request.stop_conditions.max_tokens = Some(256);
-
-        let _ = Operator::generate(prefill_router.as_ref(), Context::new(request), next).await;
-
-        assert_eq!(
-            *dispatch.dispatched_max_tokens.lock().unwrap(),
-            vec![Some(1)],
-            "a pool that did not unanimously declare support must hand off"
+        assert_handed_off(
+            dispatched_continuation(
+                "prefill-continuation-kv-mixed",
+                RouterMode::KV,
+                &continue_config(Some(2)),
+                PoolSupport::AllButOne,
+            )
+            .await,
+            "a pool that did not unanimously declare support must hand off",
         );
-
-        drop(worker_runtimes);
-        runtime.shutdown();
     }
 
     #[tokio::test]
     async fn without_a_configured_cap_nothing_continues() {
         // Startup validation asks for a cap, but it does not run on every path
         // a router can be built from, so a config can reach dispatch with none.
-        let runtime = Runtime::from_current().unwrap();
-        let discovery_root = tempfile::tempdir().unwrap();
-        let dispatch = Arc::new(RecordingDispatch::completed());
-        let (_shared, prefill_router, worker_runtimes, _workers) = shared_router(
-            &runtime,
-            discovery_root.path(),
-            "prefill-continuation-uncapped",
-            RouterMode::KV,
-            dispatch.clone(),
-            // The cap is deliberately absent.
-            Some(&continue_config(None)),
-            PoolSupport::Unanimous,
-        )
-        .await;
-
-        let (_, next) = counting_decode_host();
-
-        let mut request = request();
-        request.stop_conditions.max_tokens = Some(256);
-
-        let _ = Operator::generate(prefill_router.as_ref(), Context::new(request), next).await;
-
-        assert_eq!(
-            *dispatch.dispatched_max_tokens.lock().unwrap(),
-            vec![Some(1)],
-            "an uncapped router must hand off, not continue without a bound"
+        assert_handed_off(
+            dispatched_continuation(
+                "prefill-continuation-uncapped",
+                RouterMode::KV,
+                // The cap is deliberately absent.
+                &continue_config(None),
+                PoolSupport::Unanimous,
+            )
+            .await,
+            "an uncapped router must hand off, not continue without a bound",
         );
-        assert_eq!(
-            *dispatch.dispatched_annotations.lock().unwrap(),
-            vec![Vec::<String>::new()],
-            "and the marker must not reach the worker"
-        );
-
-        drop(worker_runtimes);
-        runtime.shutdown();
     }
 
     #[tokio::test]

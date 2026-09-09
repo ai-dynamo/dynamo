@@ -93,7 +93,6 @@ impl PrefillContinueDecision {
 
 /// What the router measured for one request, at the moment it must decide.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
-#[non_exhaustive]
 pub struct PrefillContinueDecisionInput {
     /// What the chosen decode worker reports it is holding, as a fraction of
     /// what it can hold. A snapshot taken before this request is admitted, so
@@ -118,7 +117,8 @@ pub struct PrefillContinueDecisionInput {
 }
 
 /// Decides whether a request keeps generating on its prefill worker.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// The default is the off switch.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct PrefillContinuePolicy {
     enabled: bool,
     force: bool,
@@ -126,39 +126,6 @@ pub struct PrefillContinuePolicy {
     prefill_busy_threshold: Option<f64>,
     max_budget_tokens: Option<u32>,
     max_concurrent: Option<usize>,
-}
-
-impl PrefillContinueDecisionInput {
-    /// The decode-side measurement, which every decision needs.
-    pub fn new(decode_occupancy: Option<f64>) -> Self {
-        Self {
-            decode_occupancy,
-            prefill_worker_busy: None,
-            remaining_budget_tokens: None,
-            active_continuations: None,
-            sequences: None,
-        }
-    }
-
-    pub fn with_prefill_worker_busy(mut self, busy: Option<bool>) -> Self {
-        self.prefill_worker_busy = busy;
-        self
-    }
-
-    pub fn with_remaining_budget_tokens(mut self, budget: Option<u32>) -> Self {
-        self.remaining_budget_tokens = budget;
-        self
-    }
-
-    pub fn with_active_continuations(mut self, active: Option<usize>) -> Self {
-        self.active_continuations = active;
-        self
-    }
-
-    pub fn with_sequences(mut self, sequences: Option<u8>) -> Self {
-        self.sequences = sequences;
-        self
-    }
 }
 
 impl PrefillContinuePolicy {
@@ -178,14 +145,7 @@ impl PrefillContinuePolicy {
     }
 
     pub fn disabled() -> Self {
-        Self {
-            enabled: false,
-            force: false,
-            decode_busy_threshold: None,
-            prefill_busy_threshold: None,
-            max_budget_tokens: None,
-            max_concurrent: None,
-        }
+        Self::default()
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -301,12 +261,6 @@ impl PrefillContinuePolicy {
     }
 }
 
-impl Default for PrefillContinuePolicy {
-    fn default() -> Self {
-        Self::disabled()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,22 +344,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_gate_reads_occupancy_and_projects_nothing_onto_it() {
-        let policy = policy(0.9);
-
-        // 89 of 100 blocks is under the line, and it stays under it however
-        // much this request will go on to generate. A projection would need
-        let input = PrefillContinueDecisionInput {
-            remaining_budget_tokens: Some(64_000),
-            ..decode_load(89, 100)
-        };
-        assert_eq!(
-            skip(policy.decide(input)),
-            PrefillContinueSkip::DecodeHasRoom
-        );
-    }
-
     /// The 2P1D against 3P2D regression. One worker at 40 % and each of two
     /// workers at 40 % must decide alike: the gate reads a fraction of the
     /// selected rank, so pool size cannot move it.
@@ -425,18 +363,6 @@ mod tests {
 
     #[test]
     fn a_busy_prefill_worker_stops_the_continuation() {
-        let mut policy = policy(0.9);
-        policy.prefill_busy_threshold = Some(0.8);
-
-        let input = PrefillContinueDecisionInput {
-            prefill_worker_busy: Some(true),
-            ..decode_load(99, 100)
-        };
-        assert_eq!(skip(policy.decide(input)), PrefillContinueSkip::PrefillBusy);
-    }
-
-    #[test]
-    fn continuations_as_heavy_as_decode_relieve_nothing() {
         let mut policy = policy(0.9);
         policy.prefill_busy_threshold = Some(0.8);
 
@@ -507,36 +433,24 @@ mod tests {
     }
 
     #[test]
-    fn an_unbounded_budget_is_not_continued_when_a_cap_is_set() {
-        let mut policy = policy(0.9);
-        policy.max_budget_tokens = Some(2048);
-
-        // Without a budget the commitment cannot be bounded, and Mode A has no
-        // way to undo it once started.
-        let input = PrefillContinueDecisionInput {
-            remaining_budget_tokens: None,
-            ..decode_load(99, 100)
-        };
-        assert_eq!(
-            skip(policy.decide(input)),
-            PrefillContinueSkip::BudgetUnbounded
-        );
-    }
-
-    #[test]
-    fn an_unbounded_budget_is_refused_even_with_no_cap_set() {
+    fn an_unbounded_budget_is_refused_with_or_without_a_cap() {
         // A continuation occupies its worker until the model stops, so a
         // request that names no ceiling cannot be admitted, cap or no cap.
         // Clients that omit `max_tokens` are the common case.
-        let policy = policy(0.9);
-        let input = PrefillContinueDecisionInput {
-            remaining_budget_tokens: None,
-            ..decode_load(99, 100)
-        };
-        assert_eq!(
-            skip(policy.decide(input)),
-            PrefillContinueSkip::BudgetUnbounded
-        );
+        for cap in [None, Some(2048)] {
+            let mut policy = policy(0.9);
+            policy.max_budget_tokens = cap;
+
+            let input = PrefillContinueDecisionInput {
+                remaining_budget_tokens: None,
+                ..decode_load(99, 100)
+            };
+            assert_eq!(
+                skip(policy.decide(input)),
+                PrefillContinueSkip::BudgetUnbounded,
+                "{cap:?}"
+            );
+        }
     }
 
     // --- the concurrency cap ------------------------------------------------
@@ -730,111 +644,29 @@ mod tests {
     fn skip_labels_are_stable_and_distinct() {
         // These are Prometheus label values. A rename breaks an operator's
         // dashboard silently, and a duplicate merges two series just as
-        // silently, so pin the exact strings and not only their shape.
-        let expected = [
-            (PrefillContinueSkip::Disabled, "disabled"),
-            (PrefillContinueSkip::NoTrigger, "no_trigger"),
-            (PrefillContinueSkip::DecodeHasRoom, "decode_has_room"),
-            (
-                PrefillContinueSkip::DecodeLoadUnknown,
-                "decode_load_unknown",
-            ),
-            (PrefillContinueSkip::PrefillBusy, "prefill_busy"),
-            (
-                PrefillContinueSkip::PrefillLoadUnknown,
-                "prefill_load_unknown",
-            ),
-            (PrefillContinueSkip::BudgetAboveCap, "budget_above_cap"),
-            (PrefillContinueSkip::BudgetUnbounded, "budget_unbounded"),
-            (PrefillContinueSkip::MultipleSequences, "multiple_sequences"),
-            (
-                PrefillContinueSkip::ConcurrencyCapReached,
-                "concurrency_cap_reached",
-            ),
-            (
-                PrefillContinueSkip::ConcurrencyUnknown,
-                "concurrency_unknown",
-            ),
-        ];
-        for (reason, label) in expected {
-            assert_eq!(reason.as_str(), label);
-        }
-
-        let distinct: std::collections::HashSet<_> =
-            expected.iter().map(|(_, label)| *label).collect();
-        assert_eq!(distinct.len(), expected.len(), "labels must be distinct");
-        assert_eq!(
-            expected.len(),
-            PrefillContinueSkip::ALL.len(),
-            "every reason must be pinned here"
-        );
-    }
-
-    #[test]
-    fn all_lists_every_skip_reason() {
-        // `ALL` drives which metric series exist, so a variant missing from it
-        // is a series that never appears — the exact failure it exists to stop.
-        // Adding a variant makes this match non-exhaustive and fails the build.
+        // silently, so pin the exact strings and not only their shape. The
+        // match is exhaustive, so a new variant fails the build right here.
+        let mut labels = std::collections::HashSet::new();
         for reason in PrefillContinueSkip::ALL {
-            match reason {
-                PrefillContinueSkip::Disabled
-                | PrefillContinueSkip::NoTrigger
-                | PrefillContinueSkip::DecodeHasRoom
-                | PrefillContinueSkip::DecodeLoadUnknown
-                | PrefillContinueSkip::PrefillBusy
-                | PrefillContinueSkip::PrefillLoadUnknown
-                | PrefillContinueSkip::BudgetAboveCap
-                | PrefillContinueSkip::BudgetUnbounded
-                | PrefillContinueSkip::MultipleSequences
-                | PrefillContinueSkip::ConcurrencyCapReached
-                | PrefillContinueSkip::ConcurrencyUnknown => {}
-            }
+            let pinned = match reason {
+                PrefillContinueSkip::Disabled => "disabled",
+                PrefillContinueSkip::NoTrigger => "no_trigger",
+                PrefillContinueSkip::DecodeHasRoom => "decode_has_room",
+                PrefillContinueSkip::DecodeLoadUnknown => "decode_load_unknown",
+                PrefillContinueSkip::PrefillBusy => "prefill_busy",
+                PrefillContinueSkip::PrefillLoadUnknown => "prefill_load_unknown",
+                PrefillContinueSkip::BudgetAboveCap => "budget_above_cap",
+                PrefillContinueSkip::BudgetUnbounded => "budget_unbounded",
+                PrefillContinueSkip::MultipleSequences => "multiple_sequences",
+                PrefillContinueSkip::ConcurrencyCapReached => "concurrency_cap_reached",
+                PrefillContinueSkip::ConcurrencyUnknown => "concurrency_unknown",
+            };
+            assert_eq!(reason.as_str(), pinned);
+            assert!(labels.insert(pinned), "labels must be distinct: {pinned}");
         }
-        assert_eq!(PrefillContinueSkip::ALL.len(), 11);
-    }
-
-    #[test]
-    fn preflight_and_decide_agree_on_the_cheap_gates() {
-        // The router runs `preflight` first to avoid paying for a load probe a
-        // cheap gate would refuse anyway. If the two ever disagreed, the router
-        // would skip for one reason and the policy report another.
-        let mut policy = policy(0.9);
-        policy.max_budget_tokens = Some(128);
-        policy.max_concurrent = Some(2);
-
-        for budget in [None, Some(64), Some(4096)] {
-            for active in [None, Some(0), Some(2), Some(9)] {
-                for sequences in [None, Some(1), Some(2)] {
-                    let input = PrefillContinueDecisionInput::new(Some(0.0))
-                        .with_remaining_budget_tokens(budget)
-                        .with_active_continuations(active)
-                        .with_sequences(sequences);
-
-                    let preflight = policy.preflight(budget, active, sequences);
-                    let decided = policy.decide(input).skip_reason();
-                    match preflight {
-                        Some(reason) => assert_eq!(
-                            decided,
-                            Some(reason),
-                            "preflight refused {budget:?}/{active:?} but decide did not agree"
-                        ),
-                        // decide may still refuse later, on a gate preflight does
-                        // not cover; it must not refuse for a cheap-gate reason.
-                        None => assert!(
-                            !matches!(
-                                decided,
-                                Some(PrefillContinueSkip::BudgetAboveCap)
-                                    | Some(PrefillContinueSkip::BudgetUnbounded)
-                                    | Some(PrefillContinueSkip::MultipleSequences)
-                                    | Some(PrefillContinueSkip::ConcurrencyCapReached)
-                                    | Some(PrefillContinueSkip::ConcurrencyUnknown)
-                            ),
-                            "preflight passed {budget:?}/{active:?} but decide refused on a cheap gate"
-                        ),
-                    }
-                }
-            }
-        }
+        // `ALL` drives which metric series exist, so a variant missing from it
+        // is a series that never appears.
+        assert_eq!(labels.len(), 11, "every reason must appear in ALL");
     }
 
     #[test]

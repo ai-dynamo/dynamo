@@ -762,6 +762,8 @@ pub mod prefill_continue_decision {
     pub const POOL_UNDECLARED: &str = "pool_undeclared";
     /// Nothing was routable, so there was no pool to ask.
     pub const NO_ROUTABLE_WORKERS: &str = "no_routable_workers";
+
+    pub const ALL: &[&str] = &[CONTINUE, POOL_UNDECLARED, NO_ROUTABLE_WORKERS];
 }
 
 /// `reason` label values for continuations withdrawn at dispatch.
@@ -772,6 +774,8 @@ pub mod prefill_continue_demotion {
     pub const NO_CAP_CONFIGURED: &str = "no_cap_configured";
     /// The chosen worker was already at its cap.
     pub const WORKER_AT_CAP: &str = "worker_at_cap";
+
+    pub const ALL: &[&str] = &[WORKER_UNDECLARED, NO_CAP_CONFIGURED, WORKER_AT_CAP];
 }
 
 impl PrefillContinueMetrics {
@@ -786,27 +790,16 @@ impl PrefillContinueMetrics {
     }
 }
 
-/// Every reason a continuation can be withdrawn once the worker is known.
-const PREFILL_CONTINUE_DEMOTION_REASONS: &[&str] = &[
-    prefill_continue_demotion::WORKER_UNDECLARED,
-    prefill_continue_demotion::NO_CAP_CONFIGURED,
-    prefill_continue_demotion::WORKER_AT_CAP,
-];
-
 /// Create every series up front, so "it never fired" reads as a zero rather
 /// than as an empty query.
 fn materialize_prefill_continue_series(m: &PrefillContinueMetrics) {
-    for label in [
-        prefill_continue_decision::CONTINUE,
-        prefill_continue_decision::POOL_UNDECLARED,
-        prefill_continue_decision::NO_ROUTABLE_WORKERS,
-    ] {
+    for label in prefill_continue_decision::ALL {
         m.decisions_total.with_label_values(&[label]);
     }
     for reason in PrefillContinueSkip::ALL {
         m.decisions_total.with_label_values(&[reason.as_str()]);
     }
-    for reason in PREFILL_CONTINUE_DEMOTION_REASONS {
+    for reason in prefill_continue_demotion::ALL {
         m.demotions_total.with_label_values(&[reason]);
     }
     for outcome in prefill_continue_occupancy_read::ALL {
@@ -1886,26 +1879,18 @@ mod prefill_continue_metric_tests {
             })
             .collect();
 
-        for reason in PrefillContinueSkip::ALL {
+        let decisions = PrefillContinueSkip::ALL
+            .iter()
+            .map(|reason| reason.as_str())
+            .chain(prefill_continue_decision::ALL.iter().copied());
+        for decision in decisions {
             let series = format!(
-                "{}_prefill_continue_decisions_total{{decision={}}}",
-                name_prefix::FRONTEND,
-                reason.as_str()
+                "{}_prefill_continue_decisions_total{{decision={decision}}}",
+                name_prefix::FRONTEND
             );
             assert!(names.contains(&series), "missing {series} in {names:?}");
         }
-        for label in [
-            prefill_continue_decision::CONTINUE,
-            prefill_continue_decision::POOL_UNDECLARED,
-            prefill_continue_decision::NO_ROUTABLE_WORKERS,
-        ] {
-            let series = format!(
-                "{}_prefill_continue_decisions_total{{decision={label}}}",
-                name_prefix::FRONTEND
-            );
-            assert!(names.contains(&series), "missing {series}");
-        }
-        for reason in PREFILL_CONTINUE_DEMOTION_REASONS {
+        for reason in prefill_continue_demotion::ALL {
             let series = format!(
                 "{}_prefill_continue_demotions_total{{reason={reason}}}",
                 name_prefix::FRONTEND

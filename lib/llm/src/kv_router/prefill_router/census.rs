@@ -21,15 +21,10 @@ use crate::protocols::common::llm_backend::LLMEngineOutput;
 
 type LlmResponse = Annotated<LLMEngineOutput>;
 
-/// How many continuations one prefill worker is carrying.
-#[derive(Clone, Copy, Default)]
-struct WorkerContinuations {
-    count: usize,
-}
-
 /// Continuations in flight, per prefill worker.
 pub(super) struct ContinuationCensus {
-    in_flight: Mutex<HashMap<WorkerId, WorkerContinuations>>,
+    /// Worker id to the number of continuations it is carrying.
+    in_flight: Mutex<HashMap<WorkerId, usize>>,
     /// The published gauge, held rather than reached for.
     active: IntGauge,
 }
@@ -53,16 +48,11 @@ impl ContinuationCensus {
         let mut in_flight = self.in_flight.lock();
         // Read rather than `entry`, which would insert a zero row that the
         // refusal below then leaves behind.
-        let running = in_flight.get(&worker_id).copied().unwrap_or_default();
-        if running.count >= cap {
+        let running = in_flight.get(&worker_id).copied().unwrap_or(0);
+        if running >= cap {
             return None;
         }
-        in_flight.insert(
-            worker_id,
-            WorkerContinuations {
-                count: running.count + 1,
-            },
-        );
+        in_flight.insert(worker_id, running + 1);
         // Paired with the permit this returns, not with the map, so it is
         // symmetric with the decrement in `release`.
         self.active.inc();
@@ -73,10 +63,7 @@ impl ContinuationCensus {
     }
 
     pub(super) fn in_flight(&self, worker_id: WorkerId) -> usize {
-        self.in_flight
-            .lock()
-            .get(&worker_id)
-            .map_or(0, |running| running.count)
+        self.in_flight.lock().get(&worker_id).copied().unwrap_or(0)
     }
 
     /// The emptiest routable worker's count, or `None` when there is nothing to
@@ -85,7 +72,7 @@ impl ContinuationCensus {
         let in_flight = self.in_flight.lock();
         routable
             .iter()
-            .map(|worker_id| in_flight.get(worker_id).map_or(0, |running| running.count))
+            .map(|worker_id| in_flight.get(worker_id).copied().unwrap_or(0))
             .min()
     }
 
@@ -98,10 +85,10 @@ impl ContinuationCensus {
             debug_assert!(false, "a continuation permit outlived its census row");
             return;
         };
-        running.count -= 1;
+        *running -= 1;
         // Drop the key at zero, so a fleet that churns workers does not grow
         // this map forever.
-        if running.count == 0 {
+        if *running == 0 {
             in_flight.remove(&worker_id);
         }
     }

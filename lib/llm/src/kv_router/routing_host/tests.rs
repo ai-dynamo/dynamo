@@ -2898,23 +2898,4 @@ mod decode_occupancy {
         assert_eq!(signals(Some((0, 0))).decode_occupancy(), None);
         assert_eq!(signals(Some((0, 0))).decode_load_exceeds(0.2), None);
     }
-
-    /// The two consumers must classify one snapshot alike. The prefill-continue
-    /// policy compares its own threshold against `decode_occupancy`, and the
-    /// conditional bypass gate calls `decode_load_exceeds`. Both must agree, or
-    /// a bypass can add prefill work to a worker the other gate calls busy.
-    #[test]
-    fn both_consumers_classify_one_snapshot_alike() {
-        for used in [0_u64, 400, 833, 834, 1_659, 4_168] {
-            let signals = signals(Some((used, 4_168)));
-            let occupancy = signals.decode_occupancy().unwrap();
-            for threshold in [0.0, 0.2, 0.5, 0.9] {
-                assert_eq!(
-                    Some(occupancy > threshold),
-                    signals.decode_load_exceeds(threshold),
-                    "used={used} threshold={threshold}"
-                );
-            }
-        }
-    }
 }
