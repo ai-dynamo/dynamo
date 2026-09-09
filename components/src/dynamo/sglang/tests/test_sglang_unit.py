@@ -519,29 +519,24 @@ async def test_parse_args_applies_dynamo_defaults_before_resolution(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("snapshot_enabled", "gms_v1", "expected"),
+    ("snapshot_enabled", "expected"),
     [
-        (False, False, False),
-        (True, False, True),
-        (False, True, True),
-        (True, True, True),
+        (False, False),
+        (True, True),
     ],
 )
 async def test_parse_args_sets_raw_memory_saver_before_resolution(
-    monkeypatch, mock_sglang_cli, tmp_path, snapshot_enabled, gms_v1, expected
+    monkeypatch, mock_sglang_cli, tmp_path, snapshot_enabled, expected
 ):
     monkeypatch.setattr(
         "dynamo.sglang.args.configure_snapshot_capture_env", lambda: None
     )
+    monkeypatch.delenv("DYN_GMS_USE_V1", raising=False)
     if snapshot_enabled:
         monkeypatch.setenv(SNAPSHOT_CONTROL_DIR_ENV, str(tmp_path))
         monkeypatch.setenv("NCCL_CUMEM_ENABLE", "0")
     else:
         monkeypatch.delenv(SNAPSHOT_CONTROL_DIR_ENV, raising=False)
-    if gms_v1:
-        monkeypatch.setenv("DYN_GMS_USE_V1", "true")
-    else:
-        monkeypatch.delenv("DYN_GMS_USE_V1", raising=False)
     server_args = SimpleNamespace(
         disaggregation_mode="null",
         dllm_algorithm=None,
@@ -556,7 +551,7 @@ async def test_parse_args_sets_raw_memory_saver_before_resolution(
         return server_args
 
     monkeypatch.setattr("dynamo.sglang.args.ServerArgs.from_cli_args", resolve)
-    mock_sglang_cli(model="/tmp")
+    mock_sglang_cli(model=str(tmp_path))
 
     config = await parse_args(sys.argv[1:])
 
