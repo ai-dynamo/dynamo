@@ -70,6 +70,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		notWantErr         string
 		wantPodAnnotations map[string]string
 		wantProvider       string
+		wantRoleReplicas   map[string]int32
 	}{
 		// Baseline create-path rules.
 		{
@@ -1061,7 +1062,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name: "explicit multinode roles may derive omitted replicas",
+			name: "explicit multinode roles default omitted replicas",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
 				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4}
@@ -1070,6 +1071,10 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					{Name: nvidiacomv1beta1.ComponentRoleWorker},
 				}
 			}),
+			wantRoleReplicas: map[string]int32{
+				nvidiacomv1beta1.ComponentRoleLeader: 1,
+				nvidiacomv1beta1.ComponentRoleWorker: 3,
+			},
 		},
 		{
 			name: "explicit multinode role replicas must match node count",
@@ -2846,7 +2851,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				}
 			}
 			actual := runAdmissionTest(t, test)
-			if tt.wantPodAnnotations != nil || tt.wantProvider != "" {
+			if tt.wantPodAnnotations != nil || tt.wantProvider != "" || tt.wantRoleReplicas != nil {
 				t.Log("Convert the admitted DGD for result assertions")
 				var actualDGD nvidiacomv1beta1.DynamoGraphDeployment
 				if err := runtime.DefaultUnstructuredConverter.FromUnstructured(actual.Object, &actualDGD); err != nil {
@@ -2856,6 +2861,23 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					t.Log("Verify creation-time routing intent determined the admitted workload provider")
 					if got := actualDGD.Annotations[consts.KubeAnnotationWorkloadProvider]; got != tt.wantProvider {
 						t.Fatalf("workload provider = %q, want %q", got, tt.wantProvider)
+					}
+				}
+				if tt.wantRoleReplicas != nil {
+					t.Log("Verify admission persisted the defaulted multinode role replicas")
+					component := actualDGD.GetComponentByName(dgdAdmissionWorkerName)
+					if component == nil {
+						t.Fatalf("admitted DGD has no component %q", dgdAdmissionWorkerName)
+					}
+					for i := range component.Roles {
+						role := &component.Roles[i]
+						want, exists := tt.wantRoleReplicas[role.Name]
+						if !exists {
+							continue
+						}
+						if got := k8sptr.Deref(role.Replicas, 0); got != want {
+							t.Fatalf("role %q replicas = %d, want %d", role.Name, got, want)
+						}
 					}
 				}
 				if tt.wantPodAnnotations == nil {

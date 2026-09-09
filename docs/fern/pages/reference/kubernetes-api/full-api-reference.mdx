@@ -150,7 +150,7 @@ Name identifies the role within the enclosing component independently of generat
 </ParamField>
 
 <ParamField path="replicas" type="integer">
-Replicas optionally declares the number of Pods of this role in one complete component instance. When omitted, the enclosing component type must define the derived count and its relationship to other component fields.
+Replicas declares the number of Pods of this role in one complete component instance. For multinode components, admission defaults leader to 1 and worker to Multinode.NodeCount minus 1. Explicit values must match those counts.
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2414,7 +2414,7 @@ name identifies the role within the enclosing component independently of generat
 </ParamField>
 
 <ParamField path="replicas" type="integer">
-replicas optionally declares the number of Pods of this role in one complete component instance. When omitted, the enclosing component type must define the derived count and its relationship to other component fields.
+replicas declares the number of Pods of this role in one complete component instance. For multinode components, admission defaults leader to 1 and worker to multinode.nodeCount minus 1. Explicit values must match those counts.
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2648,7 +2648,7 @@ See [MultinodeSpec](#v1beta1-multinodespec).
 </ParamField>
 
 <ParamField path="roles" type="ComponentRoleSpec array">
-roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role whose resolved replica counts add up to multinode.nodeCount. Omission preserves the implicit multinode role layout.
+roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Admission defaults their replica counts from multinode.nodeCount. Omission preserves the implicit multinode role layout.
 See [ComponentRoleSpec](#v1beta1-componentrolespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -2757,7 +2757,7 @@ See [MultinodeSpec](#v1beta1-multinodespec).
 </ParamField>
 
 <ParamField path="roles" type="object array">
-roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role whose resolved replica counts add up to multinode.nodeCount. Omission preserves the implicit multinode role layout. Standalone DCD roles accept only `name` and `replicas`; `providerOverride` is a DGD-only provider context.
+roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Admission defaults their replica counts from multinode.nodeCount. Omission preserves the implicit multinode role layout. Standalone DCD roles accept only `name` and `replicas`; `providerOverride` is a DGD-only provider context.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
