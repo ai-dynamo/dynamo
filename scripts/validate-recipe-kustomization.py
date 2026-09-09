@@ -1934,6 +1934,60 @@ def _network_operation_kind(
     return None
 
 
+_NETWORK_SHAPE_KINDS = frozenset(
+    {
+        "annotation",
+        "env-append",
+        "resource",
+        "resource-invalid",
+        "host-mount",
+        "host-volume",
+    }
+)
+_KEYED_LIST_FIELDS = frozenset({"env", "volumeMounts", "volumes"})
+
+
+def _is_canonical_worker_path(tokens: Tuple[str, ...]) -> bool:
+    return (
+        len(tokens) >= 3
+        and tokens[:2] == ("spec", "components")
+        and tokens[2] in ("1", "2")
+    )
+
+
+def _root_adds_network_shape(
+    layer: _PatchLayer,
+    operation: Mapping[str, Any],
+    tokens: Tuple[str, ...],
+    kind: Optional[str],
+    moved_entries: Set[Tuple[str, str]],
+) -> bool:
+    """Recognize a root patch that adds networking-shaped fields to a worker.
+
+    Root patches may replace or move values the canonical workers already
+    carry, such as the framework hooks, but adding annotations, environment
+    entries, extended resources, mounts, or volumes to a canonical worker is
+    the networking Component's job. Moves are recognized by provenance: the
+    lowering tests and removes the existing entry before re-adding it.
+    """
+
+    if (
+        layer.root_component is not None
+        or operation["op"] != "add"
+        or kind not in _NETWORK_SHAPE_KINDS
+        or not _is_canonical_worker_path(tokens)
+    ):
+        return False
+    value = operation.get("value")
+    if (
+        kind in ("env-append", "host-mount", "host-volume")
+        and isinstance(value, dict)
+        and (tokens[2], value.get("name")) in moved_entries
+    ):
+        return False
+    return True
+
+
 def _networking_error(
     layer: _PatchLayer,
     op_index: int,
@@ -1996,24 +2050,46 @@ def _validate_networking_contract(
             and layer.root_component.concern in _NETWORK_ROOT_CONCERNS
         )
         source_has_networking_path = _source_has_networking_path(layer)
+        tested_entries: Dict[Tuple[str, ...], Tuple[str, str]] = {}
+        moved_entries: Set[Tuple[str, str]] = set()
         for op_index, operation in enumerate(layer.operations, start=1):
-            if operation["op"] == "test":
-                continue
             tokens = _pointer_tokens(
                 operation["path"], layer=layer.label, op_index=op_index
             )
+            if operation["op"] == "test":
+                tested = operation.get("value")
+                if (
+                    len(tokens) >= 4
+                    and tokens[:2] == ("spec", "components")
+                    and tokens[-2] in _KEYED_LIST_FIELDS
+                    and _is_list_slot(tokens[-1])
+                    and isinstance(tested, dict)
+                    and isinstance(tested.get("name"), str)
+                ):
+                    tested_entries[tokens] = (tokens[2], tested["name"])
+                continue
+            if operation["op"] == "remove" and tokens in tested_entries:
+                moved_entries.add(tested_entries[tokens])
             kind = _network_operation_kind(layer, op_index, operation)
             physical_name = _physical_network_env_name(
                 layer, op_index, operation, tokens
             )
             # A networking delta is recognized by its owner, its source path, a
-            # base-forbidden physical name, or an extended-resource shape; never
-            # by a provider-specific allowlist.
+            # base-forbidden physical name, an extended-resource shape, or a root
+            # patch adding networking-shaped fields to a canonical worker; never
+            # by a provider-specific allowlist. Optional components after the
+            # canonical workers keep the documented case-local patch path.
+            resource_signal = kind in {"resource", "resource-invalid"} and (
+                layer.root_component is not None or _is_canonical_worker_path(tokens)
+            )
             is_network_delta = (
                 owner_is_network
                 or source_has_networking_path
                 or physical_name is not None
-                or kind in {"resource", "resource-invalid"}
+                or resource_signal
+                or _root_adds_network_shape(
+                    layer, operation, tokens, kind, moved_entries
+                )
             )
             if not is_network_delta:
                 continue
@@ -2066,7 +2142,8 @@ def _validate_networking_contract(
                         layer,
                         op_index,
                         operation,
-                        "root patch cannot serve as the networking slot",
+                        "root patch cannot serve as the networking slot; select a "
+                        "networking Component to add worker networking fields",
                     )
                 root_append_name = (
                     operation.get("value", {}).get("name")

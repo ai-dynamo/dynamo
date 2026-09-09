@@ -1349,3 +1349,127 @@ def test_validator_rejects_merge_host_mount_with_unknown_field(
         _merge_patch([{"name": "Frontend"}, component, {"name": "DecodeWorker"}]),
     )
     _assert_error(core._validate(case), "networking-delta")
+
+
+def _root_merge_patch_case(
+    tmp_path: Path,
+    document: dict[str, Any],
+    *,
+    keep_networking: bool,
+    optional_component: bool = False,
+) -> Path:
+    case = core._filled_disagg_case(
+        tmp_path,
+        "trtllm/disagg/deploy-v1beta1.template.yaml",
+        None,
+    )
+    if optional_component:
+        _append_optional_component(case)
+    if not keep_networking:
+        _remove_networking_component(case)
+    (case / "patches" / "case-local.yaml").write_text(
+        yaml.safe_dump(document, sort_keys=False)
+    )
+    kustomization_path = case / "kustomization.yaml"
+    kustomization = yaml.safe_load(kustomization_path.read_text())
+    kustomization["patches"] = [
+        {
+            "target": {
+                "group": "nvidia.com",
+                "version": "v1beta1",
+                "kind": "DynamoGraphDeployment",
+            },
+            "path": "patches/case-local.yaml",
+        }
+    ]
+    kustomization_path.write_text(yaml.safe_dump(kustomization, sort_keys=False))
+    return case
+
+
+@pytest.mark.parametrize("keep_networking", (False, True))
+def test_validator_rejects_root_patch_adding_provider_networking_env(
+    tmp_path: Path,
+    keep_networking: bool,
+) -> None:
+    case = _root_merge_patch_case(
+        tmp_path,
+        _merge_patch(
+            [
+                {"name": "Frontend"},
+                _worker_env_patch("PrefillWorker", _MERGE_NETWORK_ENV),
+                {"name": "DecodeWorker"},
+            ]
+        ),
+        keep_networking=keep_networking,
+    )
+    _assert_error(core._validate(case), "networking-delta")
+
+
+def test_validator_rejects_root_patch_adding_provider_annotation(
+    tmp_path: Path,
+) -> None:
+    case = _root_merge_patch_case(
+        tmp_path,
+        _merge_patch(
+            [
+                {"name": "Frontend"},
+                {
+                    "name": "PrefillWorker",
+                    "podTemplate": {
+                        "metadata": {
+                            "annotations": {"k8s.v1.cni.cncf.io/networks": "rdma-net-0"}
+                        }
+                    },
+                },
+                {"name": "DecodeWorker"},
+            ]
+        ),
+        keep_networking=False,
+    )
+    _assert_error(core._validate(case), "networking-delta")
+
+
+def test_validator_accepts_root_patch_networking_for_optional_component(
+    tmp_path: Path,
+) -> None:
+    case = _root_merge_patch_case(
+        tmp_path,
+        _merge_patch(
+            [
+                {"name": "Frontend"},
+                {"name": "PrefillWorker"},
+                {"name": "DecodeWorker"},
+                _worker_env_patch("Planner", _MERGE_NETWORK_ENV),
+            ]
+        ),
+        keep_networking=False,
+        optional_component=True,
+    )
+
+    result = core._validate(case)
+    rendered = _components(_rendered_dgd(case))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    planner_main = rendered["Planner"]["podTemplate"]["spec"]["containers"][0]
+    assert planner_main["env"] == _MERGE_NETWORK_ENV
+    for name in ("PrefillWorker", "DecodeWorker"):
+        env = rendered[name]["podTemplate"]["spec"]["containers"][0]["env"]
+        assert all(entry["name"] != "FI_PROVIDER" for entry in env)
+
+
+def test_validator_accepts_root_hook_move_after_networking_prepend(
+    tmp_path: Path,
+) -> None:
+    case = core._filled_disagg_case(tmp_path, *core.DISAGG_CASES[0])
+
+    result = core._validate(case)
+    rendered = _components(_rendered_dgd(case))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    for name in ("PrefillWorker", "DecodeWorker"):
+        env = rendered[name]["podTemplate"]["spec"]["containers"][0]["env"]
+        assert env[0] == {
+            "name": "KV_TRANSFER_CONFIG",
+            "value": "cluster-kv-transfer-config",
+        }
+        assert env[1]["name"] == "NCCL_SOCKET_IFNAME"
