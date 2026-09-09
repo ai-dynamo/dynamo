@@ -101,7 +101,10 @@ class LoadScalingMixin:
             )
             desired = max(desired, bound)
 
-        desired = self._apply_single_budget(desired, component)
+        desired, budget_reason = self._apply_single_scaling_budget(
+            desired,
+            component,
+        )
 
         if desired < num_workers:
             if desired > original_desired:
@@ -112,6 +115,8 @@ class LoadScalingMixin:
             self._diag_load_reason = "scale_up"
         else:
             self._diag_load_reason = "no_change"
+        if budget_reason is not None:
+            self._diag_load_reason = budget_reason
 
         return (
             ScalingDecision(num_prefill=desired)
@@ -201,8 +206,13 @@ class LoadScalingMixin:
 
         final_p = max(final_p, resolve_min_endpoint(self._config, "prefill"))
         final_d = max(final_d, resolve_min_endpoint(self._config, "decode"))
-        final_p, final_d, budget_reason = self._apply_disagg_load_budget(
-            final_p, final_d
+        throughput_lifted_proposal = self._config.enable_throughput_scaling and (
+            post_floor_p > original_p or post_floor_d > original_d
+        )
+        if throughput_lifted_proposal:
+            final_p, final_d = self._fit_disagg_throughput_ceiling(final_p, final_d)
+        final_p, final_d, budget_reason = self._apply_disagg_scaling_budget(
+            final_p, final_d, source="load"
         )
 
         # Per-component reasons
@@ -294,7 +304,10 @@ class LoadScalingMixin:
             desired = max(desired, resolve_min_endpoint(self._config, "decode"))
             if self._config.enable_throughput_scaling:
                 desired = max(desired, self._throughput_lower_bound_d)
-            desired = self._apply_single_budget(desired, "decode")
+            desired, budget_reason = self._apply_single_scaling_budget(
+                desired,
+                "decode",
+            )
 
             if desired < num_workers:
                 if desired > original_desired:
@@ -305,6 +318,8 @@ class LoadScalingMixin:
                 self._diag_load_reason = "scale_up"
             else:
                 self._diag_load_reason = "no_change"
+            if budget_reason is not None:
+                self._diag_load_reason = budget_reason
 
             logger.info(f"Agg easy-mode scaling: {num_workers} -> {desired}")
             return ScalingDecision(num_decode=desired)
@@ -362,7 +377,10 @@ class LoadScalingMixin:
         desired = max(desired, resolve_min_endpoint(self._config, "decode"))
         if self._config.enable_throughput_scaling:
             desired = max(desired, self._throughput_lower_bound_d)
-        desired = self._apply_single_budget(desired, "decode")
+        desired, budget_reason = self._apply_single_scaling_budget(
+            desired,
+            "decode",
+        )
 
         # Preserve "load wanted to scale down but floor lifted it" as a
         # distinct diagnostic reason even when the net result is no change.
@@ -370,7 +388,9 @@ class LoadScalingMixin:
 
         if desired == num_workers:
             logger.info("Agg scaling: no scaling needed")
-            if any_refused and not floor_capped:
+            if budget_reason is not None:
+                self._diag_load_reason = budget_reason
+            elif any_refused and not floor_capped:
                 # A sub-decision actively vetoed scale-down on consolidation
                 # safety grounds; surface that distinct from "no_change".
                 self._diag_load_reason = "scale_down_refused_consolidation"
@@ -386,6 +406,8 @@ class LoadScalingMixin:
             )
         else:  # desired > num_workers (equality returned above)
             self._diag_load_reason = "scale_up"
+        if budget_reason is not None:
+            self._diag_load_reason = budget_reason
 
         logger.info(f"Agg load-based scaling: {num_workers} -> {desired}")
         return ScalingDecision(num_decode=desired)
