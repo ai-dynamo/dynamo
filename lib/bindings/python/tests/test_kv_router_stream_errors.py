@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import contextlib
 import uuid
 from dataclasses import dataclass
 
@@ -31,7 +32,7 @@ async def _generate_error(_request, _context=None):
 
 @dataclass
 class _Worker:
-    """One endpoint served on its own runtime, torn down the way a fixture does."""
+    """One endpoint served on its own runtime."""
 
     endpoint_path: str
     runtime: DistributedRuntime
@@ -39,23 +40,34 @@ class _Worker:
     stopped: bool = False
 
     @classmethod
-    async def start(cls, endpoint_path):
+    @contextlib.asynccontextmanager
+    async def serve(cls, endpoint_path):
         runtime = DistributedRuntime(asyncio.get_running_loop(), "file", "tcp")
-        endpoint = runtime.endpoint(endpoint_path)
-        await register_model(
-            ModelInput.Tensor,
-            ModelType.TensorBased,
-            endpoint,
-            "test-router-worker",
-            worker_type=WorkerType.Aggregated,
-            tensor_model_config={
-                "name": "test-router-worker",
-                "inputs": [],
-                "outputs": [],
-            },
-        )
-        server_task = asyncio.ensure_future(endpoint.serve_endpoint(_generate_error))
-        return cls(endpoint_path, runtime, server_task)
+        try:
+            endpoint = runtime.endpoint(endpoint_path)
+            await register_model(
+                ModelInput.Tensor,
+                ModelType.TensorBased,
+                endpoint,
+                "test-router-worker",
+                worker_type=WorkerType.Aggregated,
+                tensor_model_config={
+                    "name": "test-router-worker",
+                    "inputs": [],
+                    "outputs": [],
+                },
+            )
+            server_task = asyncio.ensure_future(
+                endpoint.serve_endpoint(_generate_error)
+            )
+        except BaseException:
+            runtime.shutdown()
+            raise
+        worker = cls(endpoint_path, runtime, server_task)
+        try:
+            yield worker
+        finally:
+            await worker.stop()
 
     async def stop(self):
         """Shut the runtime down and return once the endpoint's cleanup has finished.
@@ -96,31 +108,24 @@ async def router_runtime(temp_file_store):
 
 @pytest.fixture
 async def error_router_endpoint(router_runtime):
-    # try/finally, not teardown after the yield: a failure in setup would otherwise leave the
-    # worker runtime and its detached cleanup task alive in the next test, which is the
-    # cross-test contamination this module's regression test exists to catch.
-    worker = await _Worker.start(f"error-router-{uuid.uuid4().hex}.worker.generate")
-    try:
+    async with _Worker.serve(
+        f"error-router-{uuid.uuid4().hex}.worker.generate"
+    ) as worker:
         endpoint = router_runtime.endpoint(worker.endpoint_path)
         await _wait_for_single_instance(endpoint)
         yield endpoint
-    finally:
-        await worker.stop()
 
 
 @pytest.fixture
 async def worker_pair(router_runtime):
     suffix = uuid.uuid4().hex
-    workers = []
-    try:
-        for name in ("a", "b"):
-            workers.append(
-                await _Worker.start(f"worker-{name}-{suffix}.worker.generate")
+    async with contextlib.AsyncExitStack() as stack:
+        yield [
+            await stack.enter_async_context(
+                _Worker.serve(f"worker-{name}-{suffix}.worker.generate")
             )
-        yield workers
-    finally:
-        for worker in workers:
-            await worker.stop()
+            for name in ("a", "b")
+        ]
 
 
 @pytest.mark.asyncio
