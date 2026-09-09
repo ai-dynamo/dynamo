@@ -22,6 +22,7 @@ from tests.fault_tolerance.cancellation.utils import (
     poll_for_pattern,
     read_streaming_responses,
     send_cancellable_request,
+    send_completion_request,
     verify_frontend_cancellation_metrics,
     verify_runtime_cancellation_metrics,
 )
@@ -346,7 +347,6 @@ def test_request_cancellation_trtllm_decode_cancel(
                 )
 
 
-@pytest.mark.skip(reason="TRT-LLM prefill cancellation is disabled due to reliability")
 @pytest.mark.timeout(195)  # 3x average
 def test_request_cancellation_trtllm_prefill_cancel(
     request, runtime_services_dynamic_ports, predownload_models
@@ -357,6 +357,12 @@ def test_request_cancellation_trtllm_prefill_cancel(
     This test verifies that when a request is cancelled by the client during the prefill phase,
     the system properly handles the cancellation and cleans up resources on the prefill worker.
     Since the request is cancelled before prefill completes, the decode worker never receives it.
+
+    TRT-LLM declares ``prefill_cancel_until="pre_commit"``: a context request is
+    only cancellable until it returns its handoff parameters. Past that point
+    the KV is committed for the generation server and aborting would orphan it
+    until kv_transfer_timeout_ms (60s by default) reclaims it, which is why this
+    test also checks the deployment still serves promptly afterwards.
 
     Timing (Last Run: 2025-12-09): ~115s total (2 workers at 45% GPU each)
     - Engine initialization: ~92s (frontend: 2s, prefill worker: 45s, decode worker: 45s sequential)
@@ -453,6 +459,22 @@ def test_request_cancellation_trtllm_prefill_cancel(
                     worker_system_port=prefill_worker.system_port,
                     expected_count=1,
                     component="prefill",
+                )
+
+                # A stranded KV transfer does not fail loudly -- it holds the
+                # context server until the transceiver timeout expires, so it
+                # shows up as latency on whatever runs next rather than as an
+                # error. Check that directly.
+                followup = send_completion_request(
+                    prompt="hello",
+                    max_tokens=4,
+                    frontend_port=frontend.frontend_port,
+                )
+                followup.wait()
+                response = followup.get_response()
+                assert response.status_code == 200, (
+                    f"Request after prefill cancellation failed with HTTP "
+                    f"{response.status_code}"
                 )
 
 

@@ -20,8 +20,8 @@ from tests.fault_tolerance.cancellation.utils import (
     DynamoFrontendProcess,
     poll_for_pattern,
     read_streaming_responses,
-    read_worker_generate_summary,
     send_cancellable_request,
+    send_completion_request,
     verify_frontend_cancellation_metrics,
     verify_runtime_cancellation_metrics,
 )
@@ -453,8 +453,9 @@ def test_request_cancellation_vllm_decode_cancel(
                 )
                 verify_runtime_cancellation_metrics(
                     worker_system_port=prefill_worker.system_port,
-                    expected_count=0,
+                    expected_count=1,
                     component="prefill",
+                    max_wait_ms=15000,
                 )
 
 
@@ -467,13 +468,17 @@ def test_request_cancellation_vllm_prefill_cancel(
     """
     End-to-end test for request cancellation during prefill phase.
 
-    This test verifies that when a client disconnects during the prefill
-    phase in a disaggregated setup, the prefill worker still runs the
-    request to completion so KV blocks are released via the normal path
-    (rather than leaking on a torn-down NIXL transfer), and decode routing
-    still proceeds so the KV-transfer-complete guard can free the blocks.
+    A client that disconnects before the first token must stop the prefill
+    worker, rather than leaving it to finish work nobody is waiting for.
 
-    Reference: PR ai-dynamo/dynamo#7489
+    This inverts the contract this test previously asserted (PR #7489), which
+    let the prefill run to completion to avoid leaking KV on a torn-down NIXL
+    transfer. That trade-off no longer applies to vLLM: it aborts promptly and
+    releases KV that was already committed for a decode worker which never
+    collects it, so the worker declares ``prefill_cancel_until="anytime"`` and
+    the router propagates cancellation to the prefill request. The leak the old
+    contract guarded against is still checked below, via the post-cancel
+    requests.
 
     Timing (Last Run: 2026-08-28): ~108s [nats] / ~123s [tcp] (requires 2 GPUs)
     - Engine initialization: ~23s (decode + prefill workers)
@@ -519,10 +524,12 @@ def test_request_cancellation_vllm_prefill_cancel(
                 cancellable_req.cancel()
                 logger.info(f"Cancelled request ID: {request_id} during prefill")
 
-                # Prefill must complete despite client disconnect.
+                # The prefill worker must be told to stop, not run to
+                # completion. This is the log line the abort monitor emits
+                # before calling engine.abort().
                 poll_for_pattern(
                     process=prefill_worker,
-                    pattern=f"Prefill completed for request {request_id}",
+                    pattern=f"Aborting Prefill Request ID: {request_id}",
                     log_offset=prefill_log_offset,
                     match_type="contains",
                     max_wait_ms=15000,
@@ -548,23 +555,23 @@ def test_request_cancellation_vllm_prefill_cancel(
                     max_wait_ms=5000,
                     poll_interval_ms=100,
                 )
-                summary = read_worker_generate_summary(
-                    worker_system_port=prefill_worker.system_port,
-                    component="prefill",
-                )
-                logger.info(f"Prefill generate summary: {summary}")
-                assert summary["duration_count"] == 1.0, (
-                    f"Prefill histogram count={summary['duration_count']} — "
-                    "request was aborted mid-flight."
-                )
-                assert summary["duration_sum"] >= 0.1, (
-                    f"Prefill generate took only {summary['duration_sum']}s — "
-                    "suspiciously short."
-                )
-                assert summary["response_bytes"] > 0, (
-                    "Prefill sent 0 response bytes — handler exited before "
-                    "yielding KV-transfer params."
-                )
+                # The worker must still be able to serve after the abort. This
+                # is what the old "let prefill finish" contract was protecting:
+                # if aborting stranded the KV it had committed for a decode
+                # worker, these would slow down or fail.
+                for attempt in range(3):
+                    followup = send_completion_request(
+                        prompt="hello",
+                        max_tokens=4,
+                        frontend_port=frontend.frontend_port,
+                    )
+                    followup.wait()
+                    response = followup.get_response()
+                    assert response.status_code == 200, (
+                        f"Request {attempt} after prefill cancellation failed "
+                        f"with HTTP {response.status_code}; aborting prefill "
+                        "appears to have damaged the deployment."
+                    )
 
                 # Verify cancellation metrics. The decode-side counter
                 # increments in tcp/client.rs:347 only after the reader loop
