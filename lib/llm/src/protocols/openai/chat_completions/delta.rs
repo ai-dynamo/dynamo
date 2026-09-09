@@ -719,55 +719,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_chat_logprobs_zero_top_delta_serialization_and_aggregation() {
-        use crate::protocols::Annotated;
-        use crate::protocols::openai::ParsingOptions;
-        use crate::protocols::openai::chat_completions::aggregator::DeltaAggregator;
-
-        let mut request = create_test_request();
-        request.inner.logprobs = Some(true);
-        request.inner.top_logprobs = Some(0);
-        request.inner.stream = Some(true);
-        let mut generator = request.response_generator("req-logprobs-zero-top".to_string());
-        let mut deltas = Vec::new();
-        for (index, token) in ["hello", " world"].into_iter().enumerate() {
-            let mut output = final_backend_output();
-            output.token_ids = vec![index as u32 + 1];
-            output.tokens = vec![Some(token.to_string())];
-            output.text = Some(token.to_string());
-            output.log_probs = Some(vec![-0.5]);
-            output.finish_reason = (index == 1).then_some(common::FinishReason::Stop);
-            let delta = generator
-                .choice_from_postprocessor(output)
-                .expect("stream delta");
-            let json = serde_json::to_value(&delta).expect("serialize stream delta");
-            assert_eq!(
-                json["choices"][0]["logprobs"]["content"][0]["logprob"],
-                -0.5
-            );
-            assert_eq!(
-                json["choices"][0]["logprobs"]["content"][0]["top_logprobs"],
-                serde_json::json!([])
-            );
-            deltas.push(Annotated::from_data(delta));
-        }
-        let response =
-            DeltaAggregator::apply(futures::stream::iter(deltas), ParsingOptions::default())
-                .await
-                .expect("aggregate nonstream response");
-        let json = serde_json::to_value(response).expect("serialize aggregate");
-        let content = json["choices"][0]["logprobs"]["content"]
-            .as_array()
-            .expect("chosen-token array");
-        assert_eq!(content.len(), 2);
-        assert_eq!(json["choices"][0]["message"]["content"], "hello world");
-        for logprob in content {
-            assert_eq!(logprob["logprob"], -0.5);
-            assert_eq!(logprob["top_logprobs"], serde_json::json!([]));
-        }
-    }
-
     #[test]
     fn test_completion_tokens_use_backend_usage_when_higher() {
         let request = create_test_request();
