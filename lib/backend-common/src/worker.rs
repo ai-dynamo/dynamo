@@ -2053,6 +2053,7 @@ async fn build_local_model(
         max_num_batched_tokens: llm.max_num_batched_tokens,
         data_parallel_size: llm.data_parallel_size.unwrap_or(1),
         data_parallel_start_rank: llm.data_parallel_start_rank.unwrap_or(0),
+        enable_eagle: llm.enable_eagle,
         tool_call_parser: config.tool_call_parser.clone(),
         reasoning_parser: config.reasoning_parser.clone(),
         exclude_tools_when_tool_choice_none: config.exclude_tools_when_tool_choice_none,
@@ -2407,6 +2408,7 @@ mod tests {
                 total_kv_blocks: Some(100),
                 max_num_seqs: Some(16),
                 max_num_batched_tokens: Some(8192),
+                enable_eagle: true,
                 ..Default::default()
             }),
             ..EngineConfig::default()
@@ -2421,6 +2423,7 @@ mod tests {
         assert_eq!(runtime_config.total_kv_blocks, Some(100));
         assert_eq!(runtime_config.max_num_seqs, Some(16));
         assert_eq!(runtime_config.max_num_batched_tokens, Some(8192));
+        assert!(runtime_config.enable_eagle);
         assert_eq!(runtime_config.tool_call_parser.as_deref(), Some("kimi_k2"));
         assert_eq!(runtime_config.reasoning_parser.as_deref(), Some("kimi_k25"));
         assert_eq!(

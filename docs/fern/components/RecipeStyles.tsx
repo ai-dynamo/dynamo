@@ -2193,6 +2193,15 @@ body:has(input[name="recipe-sku"][value="h200"]:checked):has(input[name="recipe-
     font-weight: 600;
 }
 
+/* Highlight the selected GPU when a table intentionally shows every result. */
+body:has(input[name="recipe-sku"][value="b200"]:checked) .dynamo-variant-table tr[data-gpu="b200"],
+body:has(input[name="recipe-sku"][value="gb200"]:checked) .dynamo-variant-table tr[data-gpu="gb200"],
+body:has(input[name="recipe-sku"][value="h200"]:checked) .dynamo-variant-table tr[data-gpu="h200"] {
+    background: color-mix(in srgb, var(--nv-color-green) 18%, transparent);
+    box-shadow: inset 3px 0 0 var(--nv-color-green);
+    font-weight: 600;
+}
+
 /* Engine axis: hide blocks that do not match the checked inference engine */
 body:has(input[name="recipe-engine"][value="vllm"]:checked) [data-engine]:not([data-engine~="vllm"]),
 body:has(input[name="recipe-engine"][value="sglang"]:checked) [data-engine]:not([data-engine~="sglang"]),
