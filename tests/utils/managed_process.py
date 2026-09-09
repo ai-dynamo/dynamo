@@ -9,6 +9,7 @@ import signal
 import socket
 import subprocess
 import time
+from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
@@ -19,6 +20,16 @@ import requests
 from tests.utils.constants import DefaultPort, DynamoPortRange
 from tests.utils.port_utils import allocate_port, deallocate_port
 from tests.utils.test_output import resolve_test_output_path
+
+# Bounded because a surviving grandchild can hold the child's stdout pipe open
+# indefinitely, which would otherwise let a wedged pipeline hang the test run.
+LOG_DRAIN_TIMEOUT_SECONDS = 5.0
+
+# Line budget for the log tail embedded in a raised RuntimeError. Matches the
+# budget `tests/serve/common.py` already uses when it reports a request failure.
+ERROR_LOG_TAIL_LINES = 80
+
+NO_LOGS_CAPTURED = "<no server logs captured>"
 
 
 def check_health_ready(response: requests.Response) -> bool:
@@ -631,37 +642,105 @@ class ManagedProcess:
         except (OSError, IOError) as e:
             self._logger.warning("Warning: Failed to remove directory %s: %s", path, e)
 
+    def _drain_output_pipeline(self, timeout: float = LOG_DRAIN_TIMEOUT_SECONDS):
+        """Wait, bounded, for the output pipeline to flush into the log file.
+
+        The child's output does not reach ``self._log_path`` directly. It flows
+        through ``sed`` and (when ``display_output`` is set) ``tee``, so at the
+        moment the child is observed dead its final lines -- typically the
+        traceback that explains the death -- may still be sitting in a kernel
+        pipe buffer or in ``tee``'s stdio buffer rather than in the file. Both
+        stages exit once the child's stdout pipe reaches EOF, so waiting for
+        them is what makes the log file complete.
+
+        A process that outlives the child can hold that pipe open, so the wait
+        is bounded and a timeout only degrades the tail, never fails the call.
+        Either stage may be ``None``: ``display_output=False`` leaves
+        ``_tee_proc`` unset, and neither exists before ``_start_process`` runs.
+        """
+        deadline = time.monotonic() + timeout
+        for stage in (self._sed_proc, self._tee_proc):
+            if stage is None:
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                stage.wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                self._logger.warning(
+                    "Output pipeline did not drain within %.1fs; "
+                    "the captured log may be truncated.",
+                    timeout,
+                )
+                break
+            except OSError as e:
+                self._logger.warning("Error draining output pipeline: %s", e)
+                break
+
+    def _read_log_tail(self, lines: int) -> List[str]:
+        """Return at most the last `lines` lines of the log file.
+
+        Streams the file through a bounded deque rather than reading it whole,
+        because a server can emit a very large log before it dies and this runs
+        on the failure path. Returns an empty list if the log is unavailable.
+        """
+        if not self._log_path or not os.path.exists(self._log_path):
+            return []
+        try:
+            with open(self._log_path, "r", encoding="utf-8", errors="ignore") as f:
+                return list(deque(f, maxlen=lines))
+        except Exception as e:
+            self._logger.warning("Could not read log file %s: %s", self._log_path, e)
+            return []
+
     def _log_tail_on_error(self, lines=20):
         """Print the last few lines of the log file when process dies."""
-        if self._log_path and os.path.exists(self._log_path):
-            try:
-                with open(self._log_path, "r") as f:
-                    log_lines = f.readlines()
-                    if log_lines:
-                        self._logger.error(
-                            "=== Last %d lines from %s ===",
-                            min(lines, len(log_lines)),
-                            self._log_path,
-                        )
-                        for line in log_lines[-lines:]:
-                            self._logger.error(line.rstrip())
-                        self._logger.error("=== End of log tail ===")
-            except Exception as e:
-                self._logger.warning("Could not read log file: %s", e)
+        self._drain_output_pipeline()
+        log_lines = self._read_log_tail(lines)
+        if log_lines:
+            self._logger.error(
+                "=== Last %d lines from %s ===", len(log_lines), self._log_path
+            )
+            for line in log_lines:
+                self._logger.error(line.rstrip())
+            self._logger.error("=== End of log tail ===")
 
-    def _check_process_alive(self, context=""):
-        """Check if the main process is still alive. Raises RuntimeError if dead."""
+    def _check_process_alive(self, context="", *, log_tail_lines=ERROR_LOG_TAIL_LINES):
+        """Check if the main process is still alive. Raises RuntimeError if dead.
+
+        The raised message carries the log path and a bounded tail of the
+        process output, so a CI report keeps the reason the process died rather
+        than only its exit code.
+
+        The first line is deliberately byte-for-byte what it has always been:
+        CI greps and the retryable-marker matching in
+        `tests/utils/pytest_parallel_gpu.py` read it. `log_tail_lines` is
+        keyword-only with a default, so existing callers are unaffected, and it
+        must be positive — zero would silently produce an empty tail and a
+        negative value is not a bound.
+        """
+        if log_tail_lines <= 0:
+            raise ValueError(f"log_tail_lines must be positive, got {log_tail_lines}")
+
         if self.proc and self.proc.poll() is not None:
             returncode = self.proc.returncode
+            context_suffix = f" {context}" if context else ""
             self._logger.error(
                 "Main server process died with exit code %d%s",
                 returncode,
-                f" {context}" if context else "",
+                context_suffix,
             )
             # Try to get last few lines from log for debugging
             self._log_tail_on_error()
+            log_tail = "".join(self._read_log_tail(log_tail_lines)).rstrip()
+            if not log_tail:
+                log_tail = NO_LOGS_CAPTURED
             raise RuntimeError(
-                f"Main server process exited with code {returncode}{f' {context}' if context else ''}"
+                f"Main server process exited with code {returncode}{context_suffix}\n"
+                f"Log file: {self.log_path}\n"
+                f"Last {log_tail_lines} lines of process output:\n"
+                f"{log_tail}"
             )
 
     def _check_ports(self, timeout):
