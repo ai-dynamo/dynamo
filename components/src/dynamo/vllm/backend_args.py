@@ -6,6 +6,7 @@
 import argparse
 import logging
 import os
+import re
 import warnings
 from typing import List, Optional, Union
 
@@ -65,6 +66,12 @@ def _is_intra_pod_failover_engine() -> bool:
     if engine_id is None or "FAILOVER_LOCK_PATH" not in os.environ:
         return False
     return os.environ.get("CONTAINER_NAME") == f"engine-{engine_id}"
+
+
+def parse_connector_metric_prefixes(value: str) -> list[str]:
+    """Parse comma- or whitespace-separated connector metric prefixes."""
+    prefixes = [prefix for prefix in re.split(r"[\s,]+", value.strip()) if prefix]
+    return list(dict.fromkeys(prefixes))
 
 
 def _warn_deprecated(message: str) -> None:
@@ -315,6 +322,18 @@ class DynamoVllmArgGroup(ArgGroup):
             ),
         )
 
+        add_argument(
+            g,
+            flag_name="--connector-metric-prefixes",
+            env_var="DYN_VLLM_CONNECTOR_METRIC_PREFIXES",
+            default=None,
+            arg_type=parse_connector_metric_prefixes,
+            help=(
+                "Comma- or whitespace-separated metric name prefixes to append "
+                "to the vLLM worker metrics allowlist for external KV connectors."
+            ),
+        )
+
         # Benchmark / self-profiling
         add_argument(
             g,
@@ -560,6 +579,9 @@ class DynamoVllmConfig(ConfigBase):
 
     # ModelExpress P2P
     model_express_url: Optional[str] = None
+
+    # Additional Prometheus prefixes exposed for external KV connectors.
+    connector_metric_prefixes: Optional[List[str]] = None
 
     # GMS shadow mode
     gms_shadow_mode: bool = False
