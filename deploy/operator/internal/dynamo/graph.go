@@ -1342,6 +1342,32 @@ func expandMultinodeRoles(componentName string, numberOfNodes int32) []ServiceRo
 	}
 }
 
+// ExplicitMultinodeRolesMatchImplicit reports whether the authored roles carry
+// exactly the established multinode structure without role-specific behavior.
+// component must not be nil.
+func ExplicitMultinodeRolesMatchImplicit(component *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+	if component.Multinode == nil || len(component.Roles) != 2 {
+		return false
+	}
+
+	// Require each role exactly once with no role-specific provider behavior.
+	seen := map[string]bool{}
+	for i := range component.Roles {
+		role := &component.Roles[i]
+		if seen[role.Name] || role.ProviderOverride != nil {
+			return false
+		}
+		seen[role.Name] = true
+
+		switch role.Name {
+		case v1beta1.ComponentRoleLeader, v1beta1.ComponentRoleWorker:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func expandSingleNodeGMSRoles(componentName string, totalEnginePods int32) []ServiceRole {
 	return []ServiceRole{
 		{Name: fmt.Sprintf("%s-%s-0", componentName, commonconsts.GroveRoleSuffixGMS), Role: RoleGMS, Replicas: 1, Rank: 0},

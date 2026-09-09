@@ -24,6 +24,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
@@ -92,6 +93,38 @@ func TestDCD_RoundTrip_Minimal(t *testing.T) {
 	}
 	got := dcdRoundTripFromV1beta1(t, src)
 	if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
+		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestDCD_RoundTrip_ExplicitMultinodeRoles(t *testing.T) {
+	t.Log("Build a hub DCD with a complete explicit multinode role schema")
+	src := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "multinode", Namespace: "ns"},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			BackendFramework: "vllm",
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "multinode",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				Multinode:     &v1beta1.MultinodeSpec{NodeCount: 4},
+				Roles: []v1beta1.ComponentRoleSpec{
+					{Name: v1beta1.ComponentRoleLeader},
+					{
+						Name: v1beta1.ComponentRoleWorker,
+						ProviderOverride: &v1beta1.ProviderOverride{
+							APIVersion: "grove.io/v1alpha1",
+							Target:     "PodCliqueTemplateSpec",
+							Value:      apiextensionsv1.JSON{Raw: []byte(`{"topologyConstraint":{"pack":{"required":"rack"}}}`)},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	t.Log("Round-trip the shared role structure through v1alpha1")
+	got := dcdRoundTripFromV1beta1(t, src)
+	if diff := cmp.Diff(src, got); diff != "" {
 		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -634,14 +667,14 @@ func TestDCD_RoundTrip_ExperimentalGrove(t *testing.T) {
 		{
 			name: "grove.forceScalingGroup only",
 			experimental: &v1beta1.ExperimentalSpec{
-				Grove: &v1beta1.GroveSpec{ForceScalingGroup: true},
+				Grove: &v1beta1.GroveSpec{ForceScalingGroup: ptr.To(true)},
 			},
 		},
 		{
 			name: "grove.forceScalingGroup alongside alpha-representable GMS",
 			experimental: &v1beta1.ExperimentalSpec{
 				GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeIntraPod},
-				Grove:            &v1beta1.GroveSpec{ForceScalingGroup: true},
+				Grove:            &v1beta1.GroveSpec{ForceScalingGroup: ptr.To(true)},
 			},
 		},
 	}
