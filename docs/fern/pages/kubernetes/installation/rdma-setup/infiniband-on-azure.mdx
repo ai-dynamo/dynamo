@@ -102,9 +102,13 @@ This targets nodes with Mellanox NICs (`feature.node.kubernetes.io/pci-15b3.pres
 Wait for the MOFED driver DaemonSet to finish installing on all nodes (this may take several minutes):
 
 ```bash
-kubectl get pods -n network-operator -l app=mofed-ubuntu22.04-ds -w
+kubectl get pods -n network-operator -l nvidia.com/ofed-driver -w
 # Wait until all pods show Running
 ```
+
+<Note>
+Select these pods by the `nvidia.com/ofed-driver` label rather than by name. The Network Operator names the DaemonSet `mofed-<os><version>-<kernel-hash>-ds`, so the name changes with the node OS version and kernel — and the pods' `app` label omits the `-ds` suffix that the DaemonSet name carries.
+</Note>
 
 </Step>
 <Step title="Deploy the IB Node Configuration DaemonSet" id="step-3-deploy-the-ib-node-configuration-daemonset">
@@ -197,7 +201,7 @@ kubectl get pods -n kube-system -l app=ib-node-config -w
 <Step title="Deploy the RDMA Shared Device Plugin" id="step-4-deploy-the-rdma-shared-device-plugin">
 The RDMA Shared Device Plugin exposes InfiniBand NICs as a Kubernetes extended resource so pods can request RDMA access.
 
-Create the ConfigMap with the device plugin configuration:
+Create `rdma-configmap.yaml` with the device plugin configuration:
 
 ```yaml
 apiVersion: v1
@@ -221,7 +225,7 @@ data:
     }
 ```
 
-Create the DaemonSet:
+Create `rdma-shared-dp-ds.yaml`:
 
 ```yaml
 apiVersion: apps/v1
@@ -317,7 +321,7 @@ kubectl get pods -n gpu-operator -w
 **1. Check that MOFED driver pods are running on all InfiniBand nodes:**
 
 ```bash
-kubectl get pods -n network-operator -l app=mofed-ubuntu22.04-ds
+kubectl get pods -n network-operator -l nvidia.com/ofed-driver
 ```
 
 **2. Check that IB node config pods completed initialization:**
