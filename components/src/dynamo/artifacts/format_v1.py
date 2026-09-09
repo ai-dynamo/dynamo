@@ -26,7 +26,7 @@ _MAX_MANIFEST_BYTES = 1 << 20
 _MAX_PAYLOAD_BYTES = 64 << 20
 _MAX_OBJECT_BYTES = _PRELUDE.size + _MAX_MANIFEST_BYTES + _MAX_PAYLOAD_BYTES + 65536
 
-_NUMPY_TO_WIRE = {
+_NUMPY_TO_WIRE: dict[np.dtype[Any], str] = {
     np.dtype("uint8"): "u8",
     np.dtype("<u2"): "u16",
     np.dtype("<i4"): "i32",
@@ -106,6 +106,11 @@ def _integer_array(value: Any, field: str) -> np.ndarray:
     if array.size and int(array.min()) < 0:
         raise GenerationArtifactFormatError(f"{field} must not contain negative values")
     maximum = int(array.max()) if array.size else 0
+    if maximum > np.iinfo(np.int64).max:
+        raise GenerationArtifactFormatError(
+            f"{field} values must not exceed the signed 64-bit range"
+        )
+    dtype: np.dtype[Any]
     if maximum <= np.iinfo(np.uint8).max:
         dtype = np.dtype("uint8")
     elif maximum <= np.iinfo(np.uint16).max:

@@ -157,6 +157,38 @@ def test_encoder_rejects_route_alignment_and_expert_range() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "sequence_token_ids,routed_experts",
+    [
+        (np.array([2**63], dtype=np.uint64), None),
+        (
+            np.array([1], dtype=np.int64),
+            np.array([[[2**63]]], dtype=np.uint64),
+        ),
+    ],
+)
+def test_encoder_rejects_unsigned_values_outside_wire_range(
+    sequence_token_ids: np.ndarray, routed_experts: np.ndarray | None
+) -> None:
+    with pytest.raises(GenerationArtifactFormatError, match="signed 64-bit"):
+        encode_generation_artifact(
+            GenerationArtifactView(
+                choices=(
+                    GenerationArtifactChoice(
+                        choice_index=0,
+                        prompt_token_count=0,
+                        sequence_token_ids=sequence_token_ids,
+                        routed_experts=routed_experts,
+                        router_ids=(0,) if routed_experts is not None else (),
+                        expert_counts=(2**63 + 1,)
+                        if routed_experts is not None
+                        else (),
+                    ),
+                )
+            )
+        )
+
+
 def test_encoder_rejects_selected_logprob_misalignment() -> None:
     choice = _artifact_view().choices[0]
     with pytest.raises(GenerationArtifactFormatError, match="selected logprob"):

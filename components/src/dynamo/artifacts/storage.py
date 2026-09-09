@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from types import MappingProxyType
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlsplit
 
 import aiohttp
@@ -324,26 +324,42 @@ def target_from_settings(settings: Mapping[str, Any]) -> ArtifactTarget:
         }
         if unexpected:
             raise ArtifactStorageError("presigned target has unsupported fields")
+        url = target.get("url")
+        expires_at = target.get("expires_at")
+        max_bytes = target.get("max_bytes")
+        object_id = target.get("object_id")
+        required_headers = target.get("required_headers") or {}
+        if (
+            not isinstance(url, str)
+            or not isinstance(max_bytes, int)
+            or not isinstance(object_id, str)
+        ):
+            raise ArtifactStorageError("presigned artifact target is invalid")
         return PresignedHttpPutTarget(
-            url=target.get("url"),
-            expires_at=target.get("expires_at"),
-            max_bytes=target.get("max_bytes"),
-            required_headers=target.get("required_headers") or {},
-            object_id=target.get("object_id"),
+            url=url,
+            expires_at=expires_at,
+            max_bytes=max_bytes,
+            required_headers=cast(Mapping[str, str], required_headers),
+            object_id=object_id,
         )
     if kind == "managed_fsspec":
         if set(target) != {"kind", "profile", "object_key"}:
             raise ArtifactStorageError("managed target has unsupported fields")
-        return ManagedFsspecTarget(
-            profile=target.get("profile"), object_key=target.get("object_key")
-        )
+        profile = target.get("profile")
+        object_key = target.get("object_key")
+        if not isinstance(profile, str) or not isinstance(object_key, str):
+            raise ArtifactStorageError("managed artifact target is invalid")
+        return ManagedFsspecTarget(profile=profile, object_key=object_key)
     raise ArtifactStorageError("generation artifact target kind is unsupported")
 
 
 async def _put_presigned(data: bytes, target: PresignedHttpPutTarget) -> None:
     if len(data) > target.max_bytes:
         raise ArtifactStorageError("artifact exceeds presigned target max_bytes")
-    expires = datetime.fromisoformat(target.expires_at.replace("Z", "+00:00"))
+    expires_at = target.expires_at
+    if not isinstance(expires_at, str):
+        raise ArtifactStorageError("expires_at must be an RFC 3339 timestamp")
+    expires = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
     if expires <= datetime.now(timezone.utc):
         raise ArtifactStorageError("presigned target has expired")
     headers = dict(target.required_headers)
@@ -407,23 +423,21 @@ async def _put_managed(data: bytes, target: ManagedFsspecTarget) -> None:
         raise ArtifactStorageError("managed artifact timeout is invalid")
     try:
         storage_options = dict(profile["storage_options"])
-        config_kwargs = dict(storage_options.get("config_kwargs") or {})
-        config_kwargs.setdefault("connect_timeout", min(timeout, 10))
-        config_kwargs.setdefault("read_timeout", timeout)
-        config_kwargs.setdefault("retries", {"max_attempts": 2, "mode": "standard"})
-        storage_options["config_kwargs"] = config_kwargs
+        if urlsplit(profile["url"]).scheme in {"s3", "s3a"}:
+            config_kwargs = dict(storage_options.get("config_kwargs") or {})
+            config_kwargs.setdefault("connect_timeout", min(timeout, 10))
+            config_kwargs.setdefault("read_timeout", timeout)
+            config_kwargs.setdefault("retries", {"max_attempts": 2, "mode": "standard"})
+            storage_options["config_kwargs"] = config_kwargs
         filesystem, root = url_to_fs(
             profile["url"],
             asynchronous=True,
             skip_instance_cache=True,
             **storage_options,
         )
-        protocols = filesystem.protocol
-        if isinstance(protocols, str):
-            protocols = (protocols,)
-        if not filesystem.async_impl or not set(protocols).intersection({"s3", "s3a"}):
+        if not filesystem.async_impl:
             raise ArtifactStorageError(
-                "managed artifact profile must use the verified async S3 backend"
+                "managed artifact profile must use an async fsspec backend"
             )
         path = "/".join(part for part in (root.rstrip("/"), target.object_key) if part)
         session = await filesystem.set_session()
