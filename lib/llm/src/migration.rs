@@ -397,6 +397,12 @@ where
                                     .and_then(RouteTraceContext::selected_worker_id),
                                 attempt: self.failed_attempt(route_trace.as_deref()),
                             });
+                            // The stream host parked the lifecycle on this
+                            // failure. The client receives this worker error
+                            // (below), so the classifier's abort cause must be
+                            // the same error, not the synthetic exhaustion
+                            // error `new_stream` would otherwise abort with.
+                            self.abort_request_lifecycle(err);
                         } else {
                             self.queue_migration(err.error_type(), self.active_route_trace.clone());
                         }

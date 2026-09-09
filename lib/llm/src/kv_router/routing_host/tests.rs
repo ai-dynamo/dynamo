@@ -1420,7 +1420,21 @@ async fn kv_cancellation_after_admission_still_stops_the_aggregated_dispatch() {
 #[derive(Debug, PartialEq, Eq)]
 enum ClassifierObservation {
     Completed(usize),
-    Aborted { has_cause: bool },
+    /// The typed cause the plugin received, if the abort carried one.
+    Aborted {
+        cause: Option<ErrorType>,
+    },
+}
+
+fn abort_cause_type(error: &(dyn std::error::Error + 'static)) -> Option<ErrorType> {
+    let mut cause = Some(error);
+    while let Some(current) = cause {
+        if let Some(typed) = current.downcast_ref::<DynamoError>() {
+            return Some(typed.error_type());
+        }
+        cause = current.source();
+    }
+    None
 }
 
 struct RecordingClassifier {
@@ -1442,7 +1456,7 @@ impl RequestClassifier for RecordingClassifier {
                 ..
             } => Some(ClassifierObservation::Completed(context_tokens)),
             ClassifyEvent::Aborted { error, .. } => Some(ClassifierObservation::Aborted {
-                has_cause: error.is_some(),
+                cause: error.as_deref().and_then(|error| abort_cause_type(error)),
             }),
             _ => None,
         };
@@ -3033,7 +3047,111 @@ async fn pinned_request_stream_failure_aborts_parked_lifecycle_with_cause() {
         tokio::time::timeout(Duration::from_secs(1), observations_rx.recv())
             .await
             .expect("classifier abort event timed out"),
-        Some(ClassifierObservation::Aborted { has_cause: true })
+        Some(ClassifierObservation::Aborted {
+            cause: Some(ErrorType::WorkerOverloaded),
+        })
+    );
+    assert!(observations_rx.try_recv().is_err());
+    harness.runtime.shutdown();
+}
+
+/// Every attempt fails in-stream with a migratable worker error.
+#[derive(Default)]
+struct AlwaysOverloadedDispatch {
+    attempts: Mutex<Vec<u64>>,
+}
+
+#[async_trait]
+impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
+    for AlwaysOverloadedDispatch
+{
+    async fn generate(
+        &self,
+        request: SingleIn<AddressedRequest<PreprocessedRequest>>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        let (addressed, context) = request.transfer(());
+        let (_, _, instance) = addressed.into_parts();
+        self.attempts
+            .lock()
+            .unwrap()
+            .push(instance.expect("selected worker instance").id());
+        let output = Annotated {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(
+                DynamoError::builder()
+                    .error_type(ErrorType::WorkerOverloaded)
+                    .message("selected worker is overloaded")
+                    .build(),
+            ),
+        };
+        Ok(ResponseStream::new(
+            Box::pin(stream::once(async move { output })),
+            context.context(),
+        ))
+    }
+
+    async fn generate_bidirectional(
+        &self,
+        _instance: Instance,
+        _address: String,
+        _input: ManyIn<PreprocessedRequest>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        unreachable!("the routing host dispatches unary requests")
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn exhausted_migration_aborts_parked_lifecycle_with_worker_failure() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (observations_tx, mut observations_rx) = mpsc::unbounded_channel();
+    let dispatch = Arc::new(AlwaysOverloadedDispatch::default());
+    let harness = two_worker_migration_harness(
+        "exhausted-migration-classifier-lifecycle",
+        dispatch.clone(),
+        Some(RecordingClassifier {
+            calls: Arc::clone(&calls),
+            observations: observations_tx,
+        }),
+    )
+    .await;
+    let migration = Migration::new(1, None, "test".to_string(), Arc::new(Metrics::new()));
+
+    let responses: Vec<_> = migration
+        .generate(Context::new(request()), harness.engine.clone())
+        .await
+        .unwrap()
+        .collect()
+        .await;
+
+    // Both attempts fail in-stream and the retry budget is spent. The client
+    // receives the final attempt's worker error, so the classifier's single
+    // terminal event must carry that same failure, not the synthetic
+    // "migration limit exhausted" that retry accounting produces.
+    assert_eq!(
+        dispatch.attempts.lock().unwrap().len(),
+        2,
+        "one migration retry must run before the budget is exhausted"
+    );
+    let error = responses
+        .last()
+        .and_then(|response| response.error.as_ref())
+        .expect("the final worker error reaches the client");
+    assert!(match_error_chain(
+        error,
+        &[ErrorType::WorkerOverloaded],
+        &[]
+    ));
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), observations_rx.recv())
+            .await
+            .expect("classifier abort event timed out"),
+        Some(ClassifierObservation::Aborted {
+            cause: Some(ErrorType::WorkerOverloaded),
+        })
     );
     assert!(observations_rx.try_recv().is_err());
     harness.runtime.shutdown();
