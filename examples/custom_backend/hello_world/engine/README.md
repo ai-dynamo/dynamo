@@ -236,7 +236,7 @@ requires: `tokenizer_config.json` carries the chat template that renders
 
 ## Walkthrough: how this engine works
 
-### The contract — five methods, and the framework calls YOU
+### The contract — four required methods, and the framework calls YOU
 
 An engine is a class that subclasses `LLMEngine`. You never call your
 own methods: `main.py` hands the class to `run()` and from that moment
@@ -260,8 +260,12 @@ What the framework calls, and when:
 | `start()` | yes | once at boot — load your model, return `EngineConfig` | load bundled tokenizer, encode the hardcoded sentence |
 | `generate()` | yes | once **per request** — yield token chunks | stream the sentence one token at a time |
 | `cleanup()` | yes | at shutdown — must be idempotent + null-safe | drop references |
-| `abort()` / `drain()` | no (no-op defaults) | on client cancel / before shutdown | not overridden |
+| `abort()` | no (no-op default) | on client cancel | not overridden |
+| `is_quiescent()` | no (default `None`) | during shutdown — "safe to stop yet?" | not overridden |
 | `kv_event_sources()` | no | once after `start()` — opt into KV routing | see below |
+
+(Draining itself is the Worker's job, not the engine's — the engine
+only answers `is_quiescent()` when asked.)
 
 The rules that matter inside `generate()`: every chunk carries
 `token_ids` and `index`; the final chunk adds `finish_reason` and
