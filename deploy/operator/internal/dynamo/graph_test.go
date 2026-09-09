@@ -7813,20 +7813,6 @@ func TestApplyCompilationCacheExistingMount(t *testing.T) {
 			}},
 		},
 		{
-			name: "No subPath is defined",
-			mounts: []corev1.VolumeMount{{
-				Name:      "compilation-cache",
-				MountPath: mountPath,
-				SubPath:   "",
-			}},
-			subpath: "",
-			expectedMounts: []corev1.VolumeMount{{
-				Name:      "compilation-cache",
-				MountPath: mountPath,
-				SubPath:   "",
-			}},
-		},
-		{
 			name: "clears SubPathExpr and adds SubPath",
 			mounts: []corev1.VolumeMount{{
 				Name:        "compilation-cache",

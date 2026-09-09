@@ -2013,11 +2013,9 @@ func findPreservedVolumeMount(mounts []corev1.VolumeMount, mount corev1.VolumeMo
 func copyHubOnlyVolumeMountFields(dst *corev1.VolumeMount, preserved corev1.VolumeMount) {
 	name := dst.Name
 	mountPath := dst.MountPath
-	subPath := dst.SubPath
 	*dst = *preserved.DeepCopy()
 	dst.Name = name
 	dst.MountPath = mountPath
-	dst.SubPath = subPath
 }
 
 func hasContainerNamed(containers []corev1.Container, name string) bool {
