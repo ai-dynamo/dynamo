@@ -1,9 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Pure-Rust per-image token-count and image-placeholder token-id resolution
-//! via the `llm-multimodal` crate. Compiled only when the `mm-routing`
-//! cargo feature is enabled.
+//! Common image-token accounting and placeholder resolution for MM-aware routing.
+//!
+//! Standard model families delegate to the `llm-multimodal` registry. Models
+//! whose routing contract cannot be expressed by that per-image interface use
+//! a focused adapter in this module tree.
 
 use std::path::Path;
 use std::sync::LazyLock;
@@ -15,6 +17,8 @@ use llm_tokenizer::traits::Tokenizer;
 use llm_tokenizer::{Decoder, Encoder, Encoding, HuggingFaceTokenizer, SpecialTokens};
 
 use crate::protocols::TokenIdType;
+
+use super::nemotron;
 
 /// No-op `Tokenizer` impl used when a model directory has no `tokenizer.json`
 /// (e.g. Kimi-K2.5 ships `tiktoken.model` instead of an HF fast tokenizer).
@@ -71,15 +75,21 @@ static REGISTRY: LazyLock<VisionProcessorRegistry> =
     LazyLock::new(VisionProcessorRegistry::with_defaults);
 static MODEL_REGISTRY: LazyLock<ModelRegistry> = LazyLock::new(ModelRegistry::new);
 
-/// Maps `(width, height) → num_image_tokens` for a single model using the
-/// model's HF `preprocessor_config.json`.
-pub struct LightseekMmCounter {
-    processor: &'static dyn VisionPreProcessor,
+/// Maps image dimensions to model-visible token counts using the model's HF
+/// configuration. Most processors count each image independently; Nemotron's
+/// dynamic path also consumes request-wide context.
+pub struct ImageRoutingProcessor {
+    processor: ImageTokenCounter,
     config: PreProcessorConfig,
     model_id: String,
 }
 
-impl LightseekMmCounter {
+enum ImageTokenCounter {
+    Registry(&'static dyn VisionPreProcessor),
+    Nemotron(nemotron::NemotronImageTokenCounter),
+}
+
+impl ImageRoutingProcessor {
     /// Returns `Err` when `preprocessor_config.json` is missing or unparseable
     /// or no registered processor matches `model_id` / `model_type`. Callers
     /// should treat the error as "MM-aware routing disabled for this model"
@@ -106,13 +116,26 @@ impl LightseekMmCounter {
             )
         })?;
 
-        let processor = REGISTRY.find(model_id, model_type).ok_or_else(|| {
-            anyhow!(
-                "mm-routing: no image processor registered for model_id={:?} model_type={:?}",
-                model_id,
-                model_type
-            )
-        })?;
+        let processor = if nemotron::supports_model_type(model_type) {
+            let model_config = read_json(model_dir, "config.json").ok_or_else(|| {
+                anyhow!(
+                    "mm-routing: failed to read Nemotron Nano Omni config.json at {}",
+                    model_dir.display()
+                )
+            })?;
+            ImageTokenCounter::Nemotron(nemotron::NemotronImageTokenCounter::try_from_configs(
+                &config,
+                &model_config,
+            )?)
+        } else {
+            ImageTokenCounter::Registry(REGISTRY.find(model_id, model_type).ok_or_else(|| {
+                anyhow!(
+                    "mm-routing: no image processor registered for model_id={:?} model_type={:?}",
+                    model_id,
+                    model_type
+                )
+            })?)
+        };
 
         Ok(Self {
             processor,
@@ -122,8 +145,44 @@ impl LightseekMmCounter {
     }
 
     pub fn count_tokens(&self, width: u32, height: u32) -> usize {
-        self.processor
-            .calculate_num_tokens(width, height, &self.config)
+        match &self.processor {
+            ImageTokenCounter::Registry(processor) => {
+                processor.calculate_num_tokens(width, height, &self.config)
+            }
+            ImageTokenCounter::Nemotron(counter) => counter.count_tokens(width, height),
+        }
+    }
+
+    /// Return backend-exact image counts for one request. Nemotron shares the
+    /// remaining context budget across the entire image batch; registry-backed
+    /// processors count each image independently.
+    pub fn count_tokens_for_images(
+        &self,
+        dimensions: &[(u32, u32)],
+        max_model_len: usize,
+        text_prompt_len: usize,
+    ) -> Result<Vec<usize>> {
+        match &self.processor {
+            ImageTokenCounter::Registry(processor) => Ok(dimensions
+                .iter()
+                .map(|&(width, height)| processor.calculate_num_tokens(width, height, &self.config))
+                .collect()),
+            ImageTokenCounter::Nemotron(counter) => {
+                counter.count_tokens_for_images(dimensions, max_model_len, text_prompt_len)
+            }
+        }
+    }
+
+    /// Whether exact counting needs the rendered prompt with image placeholders
+    /// removed, as opposed to only the independent image dimensions.
+    pub fn uses_request_context_budget(&self) -> bool {
+        matches!(&self.processor, ImageTokenCounter::Nemotron(_))
+    }
+
+    /// Whether this processor mirrors a vLLM-specific prompt expansion
+    /// contract rather than the backend-neutral registry contract.
+    pub(crate) fn requires_vllm_runtime(&self) -> bool {
+        matches!(&self.processor, ImageTokenCounter::Nemotron(_))
     }
 
     pub fn model_id(&self) -> &str {
@@ -163,9 +222,11 @@ pub enum ImagePromptKind {
     /// Kimi-K3's renderer emits one structural `<|media_pad|>` per image, but
     /// the backend replaces it with a dimension-bearing media block.
     KimiK3,
+    /// vLLM wraps each expanded image-token run in `<img>` and `</img>`.
+    Nemotron,
 }
 
-impl LightseekMmCounter {
+impl ImageRoutingProcessor {
     /// Return the exact-routing prompt shape for the processor selected by
     /// `VisionProcessorRegistry::find`.
     ///
@@ -173,11 +234,16 @@ impl LightseekMmCounter {
     /// repeating its model-id / model-type aliases. New processor families
     /// fail closed until their worker prompt shape has been verified here.
     pub fn routing_prompt_kind(&self) -> Option<ImagePromptKind> {
-        match self.processor.model_name() {
-            "kimi-k3" => Some(ImagePromptKind::KimiK3),
-            "inkling" | "kimi-k2.5" | "llama4-vision" | "llava" | "llava-next" | "phi3-vision"
-            | "qwen2-vl" | "qwen3-omni" | "qwen3-vl" => Some(ImagePromptKind::RepeatedPad),
-            _ => None,
+        match &self.processor {
+            ImageTokenCounter::Nemotron(_) => Some(ImagePromptKind::Nemotron),
+            ImageTokenCounter::Registry(processor) => match processor.model_name() {
+                "kimi-k3" => Some(ImagePromptKind::KimiK3),
+                "inkling" | "kimi-k2.5" | "llama4-vision" | "llava" | "llava-next"
+                | "phi3-vision" | "qwen2-vl" | "qwen3-omni" | "qwen3-vl" => {
+                    Some(ImagePromptKind::RepeatedPad)
+                }
+                _ => None,
+            },
         }
     }
 }
@@ -191,6 +257,29 @@ fn resolve_model_token_with_config(
     model_dir: &Path,
     config: &serde_json::Value,
 ) -> Option<ResolvedModelToken> {
+    if nemotron::is_nemotron_config(config) {
+        let token_id = match nemotron::image_context_token_id(config) {
+            Ok(token_id) => token_id,
+            Err(error) => {
+                tracing::warn!(
+                    target: "mm_routing",
+                    model_id = %model_id,
+                    %error,
+                    "mm-routing: invalid Nemotron image prompt contract"
+                );
+                return None;
+            }
+        };
+        tracing::debug!(
+            target: "mm_routing",
+            model_id = %model_id,
+            image_token_id = token_id,
+            spec = "nemotron-nano-omni",
+            "resolved image-placeholder token id"
+        );
+        return Some(ResolvedModelToken { token_id });
+    }
+
     // Try the HuggingFace fast tokenizer first; fall back to a no-op
     // tokenizer when `tokenizer.json` is missing (Kimi-K2.5 ships only
     // `tiktoken.model`, for example). Specs that read the placeholder
@@ -298,7 +387,7 @@ impl RoutingTokens {
 pub fn resolve_routing_tokens(
     model_id: &str,
     model_dir: &Path,
-    counter: Option<&LightseekMmCounter>,
+    counter: Option<&ImageRoutingProcessor>,
 ) -> RoutingTokens {
     let config = read_json(model_dir, "config.json");
     let tokenizer_config = read_json(model_dir, "tokenizer_config.json");
@@ -316,7 +405,7 @@ pub fn resolve_routing_tokens(
     // above remains only a placeholder-token fallback; its alias set cannot
     // silently disable a layout selected by the vision processor.
     let image_prompt_kind =
-        chat_placeholder_token_id.and(counter.and_then(LightseekMmCounter::routing_prompt_kind));
+        chat_placeholder_token_id.and(counter.and_then(ImageRoutingProcessor::routing_prompt_kind));
     let bos_token_string = tokenizer_config
         .as_ref()
         .and_then(extract_bos_token_from_tokenizer_config);
@@ -339,7 +428,7 @@ pub fn resolve_exact_routing_image_token_id(
 ) -> Option<TokenIdType> {
     let config = read_json(model_dir, "config.json")?;
     let model_type = config.get("model_type").and_then(serde_json::Value::as_str);
-    let counter = LightseekMmCounter::try_new(model_id, model_type, model_dir).ok()?;
+    let counter = ImageRoutingProcessor::try_new(model_id, model_type, model_dir).ok()?;
     resolve_routing_tokens(model_id, model_dir, Some(&counter)).exact_routing_image_token_id(true)
 }
 
@@ -453,7 +542,7 @@ mod tests {
         )
         .unwrap();
 
-        let counter = LightseekMmCounter::try_new(
+        let counter = ImageRoutingProcessor::try_new(
             "Qwen/Qwen3-VL-2B-Instruct",
             Some("qwen3_vl"),
             model_dir.path(),
@@ -463,6 +552,98 @@ mod tests {
         // 640x480 is already aligned to patch_size * merge_size (32).
         // (640 / 16) * (480 / 16) / merge_size² = 300.
         assert_eq!(counter.count_tokens(640, 480), 300);
+    }
+
+    fn write_nemotron_omni_configs(model_dir: &Path) {
+        std::fs::write(
+            model_dir.join("config.json"),
+            serde_json::json!({
+                "architectures": [nemotron::MODEL_TYPE],
+                "model_type": nemotron::MODEL_TYPE,
+                "force_image_size": 512,
+                "patch_size": 16,
+                "downsample_ratio": 0.5,
+                "img_context_token": nemotron::IMAGE_CONTEXT,
+                "img_context_token_id": 18,
+                "img_start_token": nemotron::IMAGE_START,
+                "img_end_token": nemotron::IMAGE_END,
+                "vision_config": {
+                    "args": {
+                        "min_num_patches": 1024,
+                        "max_num_patches": 13312
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            model_dir.join("preprocessor_config.json"),
+            serde_json::json!({
+                "image_processor_type": "NemotronH_Nano_Omni_Reasoning_V3ImageProcessor",
+                "image_size": 512,
+                "patch_size": 16,
+                "downsample_ratio": 0.5
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn routing_tokens_resolve_nemotron_prompt_contract() {
+        let model_dir = tempfile::tempdir().unwrap();
+        write_nemotron_omni_configs(model_dir.path());
+        let model_id = "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-FP8";
+        let counter =
+            ImageRoutingProcessor::try_new(model_id, Some(nemotron::MODEL_TYPE), model_dir.path())
+                .unwrap();
+        let resolved = resolve_routing_tokens(model_id, model_dir.path(), Some(&counter));
+
+        assert!(counter.uses_request_context_budget());
+        assert_eq!(
+            counter.routing_prompt_kind(),
+            Some(ImagePromptKind::Nemotron)
+        );
+        assert_eq!(resolved.image_token_id, Some(18));
+        assert_eq!(resolved.chat_placeholder_token_id, Some(18));
+        assert_eq!(resolved.image_prompt_kind, Some(ImagePromptKind::Nemotron));
+        assert_eq!(
+            resolve_exact_routing_image_token_id(model_id, model_dir.path()),
+            Some(18)
+        );
+        assert_eq!(
+            counter
+                .count_tokens_for_images(&[(1920, 1080); 3], 4096, 10)
+                .unwrap(),
+            vec![1344, 1344, 1344]
+        );
+    }
+
+    #[test]
+    fn routing_tokens_reject_nemotron_prompt_contract_drift() {
+        let model_dir = tempfile::tempdir().unwrap();
+        write_nemotron_omni_configs(model_dir.path());
+        let config_path = model_dir.path().join("config.json");
+        let mut config: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        config["img_start_token"] = serde_json::json!("<different>");
+        std::fs::write(&config_path, config.to_string()).unwrap();
+
+        let counter = ImageRoutingProcessor::try_new(
+            "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-FP8",
+            Some(nemotron::MODEL_TYPE),
+            model_dir.path(),
+        )
+        .unwrap();
+        let resolved = resolve_routing_tokens(
+            "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-FP8",
+            model_dir.path(),
+            Some(&counter),
+        );
+
+        assert_eq!(resolved.image_token_id, None);
+        assert_eq!(resolved.image_prompt_kind, None);
     }
 
     fn write_model_config(model_dir: &Path, model_type: &str) {
@@ -482,7 +663,7 @@ mod tests {
         let model_dir = tempfile::tempdir().unwrap();
         write_model_config(model_dir.path(), "kimi_k3");
         std::fs::write(model_dir.path().join("preprocessor_config.json"), "{}").unwrap();
-        let counter = LightseekMmCounter::try_new(
+        let counter = ImageRoutingProcessor::try_new(
             "/models/internal-checkpoint",
             Some("kimi_k3"),
             model_dir.path(),
@@ -506,9 +687,12 @@ mod tests {
         let model_dir = tempfile::tempdir().unwrap();
         write_model_config(model_dir.path(), "kimi_k25");
         std::fs::write(model_dir.path().join("preprocessor_config.json"), "{}").unwrap();
-        let counter =
-            LightseekMmCounter::try_new("moonshotai/Kimi-K2.6", Some("kimi_k25"), model_dir.path())
-                .unwrap();
+        let counter = ImageRoutingProcessor::try_new(
+            "moonshotai/Kimi-K2.6",
+            Some("kimi_k25"),
+            model_dir.path(),
+        )
+        .unwrap();
 
         assert_eq!(
             counter.routing_prompt_kind(),
@@ -537,7 +721,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(model_dir.path().join("preprocessor_config.json"), "{}").unwrap();
-        let counter = LightseekMmCounter::try_new(
+        let counter = ImageRoutingProcessor::try_new(
             "microsoft/Phi-3-vision-128k-instruct",
             Some("phi3_v"),
             model_dir.path(),
@@ -576,7 +760,7 @@ mod tests {
         std::fs::write(model_dir.path().join("preprocessor_config.json"), "{}").unwrap();
         let model_id = "Qwen/Qwen3-Omni-30B-A3B-Instruct";
         let counter =
-            LightseekMmCounter::try_new(model_id, Some("qwen3_omni_moe"), model_dir.path())
+            ImageRoutingProcessor::try_new(model_id, Some("qwen3_omni_moe"), model_dir.path())
                 .unwrap();
 
         assert_eq!(
@@ -600,7 +784,7 @@ mod tests {
         let model_dir = tempfile::tempdir().unwrap();
         std::fs::write(model_dir.path().join("preprocessor_config.json"), "{}").unwrap();
 
-        let counter = LightseekMmCounter::try_new(
+        let counter = ImageRoutingProcessor::try_new(
             "/models/internal-checkpoint",
             Some("inkling_mm_model"),
             model_dir.path(),
@@ -628,7 +812,7 @@ mod tests {
             .unwrap();
             std::fs::write(model_dir.path().join("preprocessor_config.json"), "{}").unwrap();
 
-            let counter = LightseekMmCounter::try_new(
+            let counter = ImageRoutingProcessor::try_new(
                 "/models/vision-model",
                 Some(model_type),
                 model_dir.path(),
