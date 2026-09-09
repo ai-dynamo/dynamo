@@ -32,7 +32,11 @@ import torch
 from openai import BadRequestError, OpenAI
 
 from tests.utils.device import detect_target_device
-from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
+from tests.utils.managed_process import (
+    DynamoFrontendProcess,
+    ManagedProcess,
+    check_health_ready,
+)
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import ServicePorts
 
@@ -117,7 +121,7 @@ class VllmPromptEmbedsWorkerProcess(ManagedProcess):
             env=env,
             health_check_urls=[
                 (f"http://localhost:{self.frontend_port}/v1/models", check_models_api),
-                (f"http://localhost:{self.system_port}/health", self.is_ready),
+                (f"http://localhost:{self.system_port}/health", check_health_ready),
             ],
             timeout=500,
             display_output=True,
@@ -126,20 +130,6 @@ class VllmPromptEmbedsWorkerProcess(ManagedProcess):
             straggler_commands=["-m dynamo.vllm"],
             log_dir=log_dir,
         )
-
-    def is_ready(self, response) -> bool:
-        try:
-            status = (response.json() or {}).get("status")
-        except ValueError:
-            logger.warning("%s health response is not valid JSON", self.worker_id)
-            return False
-
-        is_ready = status == "ready"
-        if is_ready:
-            logger.info("%s status is ready", self.worker_id)
-        else:
-            logger.warning("%s status is not ready: %s", self.worker_id, status)
-        return is_ready
 
 
 @pytest.fixture(scope="function")

@@ -945,6 +945,10 @@ impl ExtProcError {
                 status_code: StatusCode::BadRequest,
                 message: msg,
             },
+            PickError::MetadataHeadersInvalid(msg) => Self {
+                status_code: StatusCode::BadRequest,
+                message: msg,
+            },
             // Upstream tokenizer failures are not client errors: preserve their
             // semantics so clients retry appropriately. `e.to_string()` is the
             // client-safe variant message; the detailed cause is logged upstream.
@@ -1587,5 +1591,15 @@ mod tests {
     fn overloaded_pick_error_maps_to_503() {
         let err = ExtProcError::from_pick_error(PickError::Overloaded);
         assert_eq!(err.status_code, StatusCode::ServiceUnavailable);
+    }
+
+    /// Metadata headers over the frontend's limits map to a client 400, not a
+    /// retryable 503: the frontend rejects these requests too.
+    #[test]
+    fn metadata_headers_invalid_maps_to_400() {
+        let err = ExtProcError::from_pick_error(PickError::MetadataHeadersInvalid(
+            "metadata headers exceed the limit of 64 entries".to_string(),
+        ));
+        assert_eq!(err.status_code, StatusCode::BadRequest);
     }
 }
