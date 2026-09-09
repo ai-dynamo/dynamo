@@ -49,11 +49,17 @@ HARDCODED_REPLY = (
 )
 
 
-def _block_hash(token_block: list[int]) -> int:
-    """Hash a block's tokens so identical prompt blocks always get the
-    same ID — that's what lets the router match repeat prompts."""
+def _block_hash(parent_hash: Optional[int], token_block: list[int]) -> int:
+    """Hash a block's tokens *chained on its parent's hash*, so a block's
+    ID uniquely identifies the whole prefix up to and including it — the
+    same scheme real engines use. Two prompts that share a prefix produce
+    the same chain of IDs for the shared part, which is exactly what lets
+    the router's radix tree score partial overlap."""
     digest = hashlib.blake2b(
-        b",".join(str(t).encode() for t in token_block), digest_size=8
+        str(parent_hash).encode()
+        + b"|"
+        + b",".join(str(t).encode() for t in token_block),
+        digest_size=8,
     ).digest()
     return int.from_bytes(digest, "big") >> 1  # keep it a positive i64
 
@@ -222,22 +228,42 @@ class HelloEngine(LLMEngine):
         self._publisher = publisher
 
     def _publish_prompt_blocks(self, prompt_tokens: list[int]) -> None:
-        """One publish_stored() call per new full 16-token block."""
+        """Publish the prompt's not-yet-published tail of full 16-token
+        blocks, parented under the already-published prefix.
+
+        Because block hashes are chained (see `_block_hash`), the set of
+        published hashes can only ever cover a contiguous *prefix* of any
+        prompt's chain — so we walk until the first unpublished block and
+        publish everything from there in one call, with `parent_hash`
+        anchoring it under the shared prefix in the router's radix tree.
+        """
         if self._publisher is None:  # KV routing disabled by operator
             return
-        token_ids: list[int] = []
-        hashes: list[int] = []
+        parent: Optional[int] = None
+        chain: list[int] = []  # chained hash per full block
         for b in range(len(prompt_tokens) // BLOCK_SIZE):
             block = prompt_tokens[b * BLOCK_SIZE : (b + 1) * BLOCK_SIZE]
-            h = _block_hash(block)
-            if h not in self._published_blocks:
-                self._published_blocks.add(h)
-                token_ids.extend(block)
-                hashes.append(h)
-        if hashes:
-            self._publisher.publish_stored(
-                token_ids=token_ids,
-                num_block_tokens=[BLOCK_SIZE] * len(hashes),
-                block_hashes=hashes,
-            )
-            logger.info("published %d KV block(s) for prompt", len(hashes))
+            parent = _block_hash(parent, block)
+            chain.append(parent)
+
+        # Longest already-published prefix of the chain.
+        first_new = 0
+        while first_new < len(chain) and chain[first_new] in self._published_blocks:
+            first_new += 1
+        if first_new == len(chain):
+            return  # whole prompt already known to the router
+
+        new_hashes = chain[first_new:]
+        self._published_blocks.update(new_hashes)
+        self._publisher.publish_stored(
+            token_ids=prompt_tokens[first_new * BLOCK_SIZE : len(chain) * BLOCK_SIZE],
+            num_block_tokens=[BLOCK_SIZE] * len(new_hashes),
+            block_hashes=new_hashes,
+            # Anchor under the last already-published block (None = root).
+            parent_hash=chain[first_new - 1] if first_new > 0 else None,
+        )
+        logger.info(
+            "published %d KV block(s) for prompt (%d shared-prefix block(s) skipped)",
+            len(new_hashes),
+            first_new,
+        )

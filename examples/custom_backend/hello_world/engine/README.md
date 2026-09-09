@@ -28,13 +28,19 @@ What it demonstrates:
   engine is ~200 lines.
 - **KV-aware routing with synthetic events** — the engine publishes a
   `BlockStored` KV event for each full 16-token block of every prompt,
-  with **deterministic content-derived block identities**. Send the same
-  prompt twice and the router's radix tree scores real overlap:
+  with **chained block identities**: each block's hash folds in its
+  parent's, so a hash uniquely names the whole prefix up to that block —
+  the same scheme real engines use. New blocks are published under their
+  `parent_hash`, so the router's radix tree links them below the shared
+  prefix. Send a prompt that shares a prefix (or an exact repeat) and
+  the router scores real overlap:
 
   ```text
-  request 1:  [ROUTING] Best: worker_…  0/4 blocks overlap
-  engine:     published 3 KV block(s) for prompt
-  request 2:  [ROUTING] Best: worker_…  3/4 blocks overlap
+  request 1:  [ROUTING] Best: worker_…  0/11 blocks overlap   ← cold
+  engine:     published 10 KV block(s) for prompt (0 shared-prefix block(s) skipped)
+  request 2:  [ROUTING] Best: worker_…  10/11 blocks overlap  ← exact repeat pins
+  request 3:  [ROUTING] Best: worker_…  9/12 blocks overlap   ← shared prefix + new tail
+  engine:     published 2 KV block(s) for prompt (9 shared-prefix block(s) skipped)
   ```
 
 ## How it works
@@ -54,11 +60,14 @@ flowchart LR
     W1 -. "KV events<br/>(block hashes)" .-> F
 ```
 
-The engine publishes a KV event for each prompt's blocks; the router's
-radix tree learns which worker "holds" which prefix, so a repeat prompt
-routes back to the same worker (`0/13 → 12/13 blocks overlap`) while
-the other worker stays idle. With no cache knowledge, requests would
-round-robin instead.
+The engine hashes each 16-token block chained on its parent and
+publishes only the not-yet-published tail of that chain, anchored with
+`parent_hash` under the shared prefix. The router's radix tree learns
+which worker "holds" which prefix, so a repeat prompt routes back to
+the same worker (`0/11 → 10/11 blocks overlap`) — and a prompt sharing
+only the beginning (same system prompt, new question) still scores
+partial overlap. With no cache knowledge, requests would round-robin
+instead.
 
 ## Container
 
