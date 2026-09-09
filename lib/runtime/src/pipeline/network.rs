@@ -12,9 +12,11 @@ pub mod codec;
 pub mod egress;
 pub mod ingress;
 pub mod manager;
+pub mod quic_response;
 pub mod tcp;
 
 use crate::SystemHealth;
+use crate::traits::DistributedRuntimeProvider;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
@@ -40,18 +42,62 @@ use prometheus::{CounterVec, Histogram, IntCounter, IntCounterVec, IntGauge};
 /// Shared default maximum TCP message size across request-plane components.
 pub(crate) const DEFAULT_TCP_MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
 
-static TCP_MAX_MESSAGE_SIZE: OnceLock<usize> = OnceLock::new();
 static REQUEST_PLANE_PAYLOAD_CODEC: OnceLock<RequestPlanePayloadCodec> = OnceLock::new();
+static RESPONSE_PLANE_MODE: OnceLock<ResponsePlaneMode> = OnceLock::new();
 
-/// Read the configured TCP max message size once and share it across client,
-/// server, and zero-copy decoder code paths.
-pub(crate) fn get_tcp_max_message_size() -> usize {
-    *TCP_MAX_MESSAGE_SIZE.get_or_init(|| {
-        std::env::var("DYN_TCP_MAX_MESSAGE_SIZE")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(DEFAULT_TCP_MAX_MESSAGE_SIZE)
-    })
+/// Process-wide response transport. Frontends and workers must use the same mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ResponsePlaneMode {
+    #[default]
+    Tcp,
+    Quic,
+}
+
+impl ResponsePlaneMode {
+    pub fn configured() -> Result<Self> {
+        if let Some(mode) = RESPONSE_PLANE_MODE.get() {
+            return Ok(*mode);
+        }
+        let value =
+            std::env::var(crate::config::environment_names::response_plane::DYN_RESPONSE_PLANE)
+                .ok();
+        let mode = Self::from_config_value(value.as_deref())?;
+        Ok(*RESPONSE_PLANE_MODE.get_or_init(|| mode))
+    }
+
+    fn from_config_value(value: Option<&str>) -> Result<Self> {
+        match value {
+            None | Some("tcp") => Ok(Self::Tcp),
+            Some("quic") => Ok(Self::Quic),
+            Some(other) => anyhow::bail!(
+                "invalid {} value '{other}'; expected 'tcp' or 'quic'",
+                crate::config::environment_names::response_plane::DYN_RESPONSE_PLANE
+            ),
+        }
+    }
+
+    pub fn from_transport_name(transport: &str) -> Result<Self> {
+        match transport {
+            "tcp_server" => Ok(Self::Tcp),
+            quic_response::TRANSPORT_NAME => Ok(Self::Quic),
+            other => anyhow::bail!("unsupported response transport '{other}'"),
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Tcp => "tcp",
+            Self::Quic => "quic",
+        }
+    }
+}
+
+crate::env_config! {
+    /// Read the configured TCP max message size once and share it across client,
+    /// server, and zero-copy decoder code paths.
+    pub(crate) fn get_tcp_max_message_size() -> usize =
+        crate::config::environment_names::request_plane::DYN_TCP_MAX_MESSAGE_SIZE,
+        default = DEFAULT_TCP_MAX_MESSAGE_SIZE;
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -129,6 +175,12 @@ impl RequestPlanePayloadCodec {
         }
     }
 }
+
+/// Starting capacity for a buffer that one response frame is encoded into.
+///
+/// Matches `serde_json::to_vec`'s own default so msgpack — which otherwise
+/// starts at zero — stops regrowing its buffer on every streamed frame.
+pub const RESPONSE_ENCODE_CAPACITY_HINT: usize = 128;
 
 pub trait Codable: PipelineIO + Serialize + for<'de> Deserialize<'de> {}
 impl<T: PipelineIO + Serialize + for<'de> Deserialize<'de>> Codable for T {}
@@ -221,6 +273,7 @@ impl Drop for Cleanup {
 pub struct RegisteredStream<T> {
     pub connection_info: ConnectionInfo,
     pub stream_provider: StreamProvider<T>,
+    registration_id: Option<uuid::Uuid>,
     cleanup: Cleanup,
 }
 
@@ -237,8 +290,18 @@ impl<T> RegisteredStream<T> {
         Self {
             connection_info,
             stream_provider,
+            registration_id: None,
             cleanup: Cleanup(None),
         }
+    }
+
+    pub(crate) fn with_registration_id(mut self, registration_id: uuid::Uuid) -> Self {
+        self.registration_id = Some(registration_id);
+        self
+    }
+
+    pub(crate) fn registration_id(&self) -> Option<uuid::Uuid> {
+        self.registration_id
     }
 
     pub(crate) fn with_cleanup<F>(mut self, cleanup: F) -> Self
@@ -255,6 +318,7 @@ impl<T> RegisteredStream<T> {
         let Self {
             connection_info,
             stream_provider,
+            registration_id: _,
             mut cleanup,
         } = self;
         cleanup.0.take();
@@ -486,11 +550,13 @@ pub struct Egress<Req: PipelineIO, Resp: PipelineIO> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_SEND_BUFFER_COUNT, NetworkStreamWrapper, RequestControlMessage,
-        RequestPlanePayloadCodec, RequestType, ResponseType, StreamOptions,
+        DEFAULT_SEND_BUFFER_COUNT, IngressResponseEncoder, NetworkStreamWrapper,
+        RequestControlMessage, RequestPlanePayloadCodec, RequestType, ResponsePlaneMode,
+        ResponseType, SerdeIngressPayloadAdapter, StreamOptions,
     };
     use crate::engine::AsyncEngineContextProvider;
     use crate::pipeline::Context;
+    use crate::protocols::annotated::Annotated;
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -498,6 +564,24 @@ mod tests {
         id: u64,
         text: String,
         tokens: Vec<u32>,
+    }
+
+    #[test]
+    fn response_plane_mode_parses_supported_values() {
+        assert_eq!(
+            ResponsePlaneMode::from_config_value(None).unwrap(),
+            ResponsePlaneMode::Tcp
+        );
+        assert_eq!(
+            ResponsePlaneMode::from_config_value(Some("tcp")).unwrap(),
+            ResponsePlaneMode::Tcp
+        );
+        assert_eq!(
+            ResponsePlaneMode::from_config_value(Some("quic")).unwrap(),
+            ResponsePlaneMode::Quic
+        );
+        assert!(ResponsePlaneMode::from_config_value(Some("")).is_err());
+        assert!(ResponsePlaneMode::from_config_value(Some("invalid")).is_err());
     }
 
     #[test]
@@ -659,6 +743,53 @@ mod tests {
             assert_eq!(decoded, wrapper);
         }
     }
+
+    /// `encode_into` must stay byte-compatible with `encode` for both codecs.
+    #[tokio::test]
+    async fn serde_ingress_encoder_matches_encode_byte_for_byte() {
+        let data = Annotated::from_data(serde_json::json!({
+            "token_ids": [128, 9001],
+            "index": 3,
+        }));
+        let error = Annotated::<serde_json::Value>::from_error("engine failed");
+
+        for codec in [
+            RequestPlanePayloadCodec::Json,
+            RequestPlanePayloadCodec::Msgpack,
+        ] {
+            for (case, response, complete_final, expect_error) in [
+                ("data frame", Some(data.clone()), false, false),
+                ("error frame", Some(error.clone()), false, true),
+                ("complete final", None, true, false),
+            ] {
+                let expected = codec
+                    .encode(&NetworkStreamWrapper {
+                        data: response.clone(),
+                        complete_final,
+                    })
+                    .expect("reference encode");
+
+                let frame = SerdeIngressPayloadAdapter
+                    .encode_response(codec, response, complete_final)
+                    .await
+                    .expect("adapter encode");
+
+                assert_eq!(
+                    frame.bytes.as_ref(),
+                    expected.as_slice(),
+                    "codec={} case={case}",
+                    codec.name()
+                );
+                assert_eq!(
+                    frame.is_error,
+                    expect_error,
+                    "codec={} case={case}",
+                    codec.name()
+                );
+                assert!(!frame.stop_stream, "codec={} case={case}", codec.name());
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -768,13 +899,17 @@ where
             data: response,
             complete_final,
         };
-        let encoded = payload_codec.encode(&wrapper).map_err(|err| {
-            PipelineError::SerializationError(format!(
-                "Failed serializing {} request-plane response: {}",
-                payload_codec.name(),
-                err
-            ))
-        });
+        let mut bytes = Vec::with_capacity(RESPONSE_ENCODE_CAPACITY_HINT);
+        let encoded = payload_codec
+            .encode_into(&wrapper, &mut bytes)
+            .map(|()| bytes)
+            .map_err(|err| {
+                PipelineError::SerializationError(format!(
+                    "Failed serializing {} request-plane response: {}",
+                    payload_codec.name(),
+                    err
+                ))
+            });
         std::future::ready(encoded.map(|bytes| EncodedResponseFrame {
             bytes: bytes.into(),
             is_error,
@@ -788,6 +923,7 @@ pub struct Ingress<Req: PipelineIO, Resp: PipelineIO, Adapter = SerdeIngressPayl
     metrics: OnceLock<Arc<WorkHandlerMetrics>>,
     /// Endpoint-specific notifier for health check timer resets
     endpoint_health_check_notifier: OnceLock<Arc<tokio::sync::Notify>>,
+    quic_response_client_pool: OnceLock<Arc<quic_response::QuicResponseClientPool>>,
     payload_adapter: Arc<Adapter>,
 }
 
@@ -824,6 +960,7 @@ where
             segment: OnceLock::new(),
             metrics: OnceLock::new(),
             endpoint_health_check_notifier: OnceLock::new(),
+            quic_response_client_pool: OnceLock::new(),
             payload_adapter: Arc::new(payload_adapter),
         })
     }
@@ -832,6 +969,25 @@ where
         self.segment
             .set(segment)
             .map_err(|_| anyhow::anyhow!("Segment already set"))
+    }
+
+    pub(crate) fn set_quic_response_client_pool(
+        &self,
+        pool: Arc<quic_response::QuicResponseClientPool>,
+    ) -> Result<()> {
+        self.quic_response_client_pool
+            .set(pool)
+            .map_err(|_| anyhow::anyhow!("QUIC response client pool already set"))
+    }
+
+    pub(crate) fn quic_response_client_pool(
+        &self,
+    ) -> Result<Arc<quic_response::QuicResponseClientPool>, PipelineError> {
+        if let Some(pool) = self.quic_response_client_pool.get() {
+            return Ok(pool.clone());
+        }
+        let pool = quic_response::process_client_pool_from_env()?;
+        Ok(self.quic_response_client_pool.get_or_init(|| pool).clone())
     }
 
     pub fn add_metrics(

@@ -4,6 +4,7 @@
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
+    ops::Range,
     str::FromStr,
 };
 
@@ -11,11 +12,11 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use validator::{Validate, ValidationError};
 
 use dynamo_kv_router::{
-    protocols::{KvTransferEnforcement, RouterHintWorkerMetadata},
-    router_hint::{
-        ROUTER_HINT_RUNTIME_CAPABILITY_KEY, ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
-        ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY,
+    kv_hints::{
+        KV_HINT_TRANSFER_CAPABILITY_KEY, KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+        KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
     },
+    protocols::{KvHintTransferWorkerMetadata, KvTransferEnforcement},
 };
 use dynamo_runtime::{config::is_truthy, protocols::EndpointId};
 
@@ -31,6 +32,9 @@ pub const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
 
 /// Runtime-data key for an engine-published token-overflow contract.
 pub const TOKEN_BUDGET_RUNTIME_KEY: &str = "token_budget";
+
+/// Resource-safety bound for rank ranges advertised by one worker.
+pub(crate) const MAX_DATA_PARALLEL_RANKS_PER_WORKER: u32 = 4096;
 
 /// Runtime-data key indicating that a backend expects tool structural tags to
 /// exclude reasoning and manages grammar activation around reasoning itself.
@@ -199,8 +203,13 @@ pub struct ModelRuntimeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_length: Option<u32>,
 
-    /// Physical KV-cache capacity for each router-visible data-parallel rank.
-    /// This is per rank, never the aggregate capacity of the worker process.
+    /// Compatibility KV-cache capacity applied to each router-visible data-parallel rank.
+    /// Some adapters derive this scalar from aggregate or representative-rank data.
+    ///
+    /// TODO(rank-aware-kv-capacity): Add an additive per-rank advertisement whose resolver
+    /// preserves exact/conservative/estimated provenance. Exact heterogeneous producers must
+    /// dual-write their minimum here for old readers; aggregate division stays an adapter-only
+    /// estimate and must not silently become a hard-admission denominator.
     pub total_kv_blocks: Option<u64>,
 
     pub max_num_seqs: Option<u64>,
@@ -415,15 +424,11 @@ impl ModelRuntimeConfig {
         self.runtime_flag_enabled(capability)
     }
 
-    fn router_hints_enabled(&self) -> bool {
-        self.supports_runtime_capability(ROUTER_HINT_RUNTIME_CAPABILITY_KEY)
-    }
-
-    fn router_hint_endpoint_for_dp_rank(&self, dp_rank: u32) -> Option<&str> {
+    fn kv_hint_transfer_endpoint_for_dp_rank(&self, dp_rank: u32) -> Option<&str> {
         let dp_rank = dp_rank.to_string();
         let endpoint = self
             .runtime_data
-            .get(ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY)?
+            .get(KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY)?
             .as_object()?
             .get(&dp_rank)?
             .as_str()?;
@@ -448,25 +453,25 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
         self.total_kv_blocks
     }
 
-    fn router_hint_metadata_for_dp_rank(
+    fn kv_hint_transfer_metadata_for_dp_rank(
         &self,
         dp_rank: u32,
-    ) -> Option<RouterHintWorkerMetadata<'_>> {
-        if !self.router_hints_enabled() {
+    ) -> Option<KvHintTransferWorkerMetadata<'_>> {
+        if !self.supports_runtime_capability(KV_HINT_TRANSFER_CAPABILITY_KEY) {
             return None;
         }
 
         let worker_type = self
             .runtime_data
-            .get(ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY)?
+            .get(KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY)?
             .as_str()?;
         if worker_type.is_empty() {
             return None;
         }
 
-        Some(RouterHintWorkerMetadata {
+        Some(KvHintTransferWorkerMetadata {
             worker_type,
-            source_control_endpoint: self.router_hint_endpoint_for_dp_rank(dp_rank),
+            source_control_endpoint: self.kv_hint_transfer_endpoint_for_dp_rank(dp_rank),
         })
     }
 
@@ -555,6 +560,16 @@ fn validate_kv_transfer_domain(domain: &str) -> Result<(), ValidationError> {
 }
 
 fn validate_model_runtime_config(config: &ModelRuntimeConfig) -> Result<(), ValidationError> {
+    if config.data_parallel_size == 0 {
+        return Err(validation_error(
+            "invalid_data_parallel_size",
+            "data_parallel_size must be at least 1",
+        ));
+    }
+    config
+        .data_parallel_rank_range()
+        .map_err(|error| validation_error("invalid_data_parallel_rank_range", error))?;
+
     if let Some(parser) = config
         .tool_call_parser
         .as_deref()
@@ -626,6 +641,23 @@ impl ModelRuntimeConfig {
 
     pub fn validate_config(&self) -> Result<(), String> {
         self.validate().map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn data_parallel_rank_range(&self) -> Result<Range<u32>, String> {
+        if self.data_parallel_size == 0 {
+            return Err("data_parallel_size must be at least 1".to_string());
+        }
+        if self.data_parallel_size > MAX_DATA_PARALLEL_RANKS_PER_WORKER {
+            return Err(format!(
+                "data_parallel_size {} exceeds the supported maximum {}",
+                self.data_parallel_size, MAX_DATA_PARALLEL_RANKS_PER_WORKER
+            ));
+        }
+        let end = self
+            .data_parallel_start_rank
+            .checked_add(self.data_parallel_size)
+            .ok_or_else(|| "data-parallel rank range overflows u32".to_string())?;
+        Ok(self.data_parallel_start_rank..end)
     }
 
     pub fn set_engine_specific<T: Serialize>(&mut self, key: &str, value: T) -> anyhow::Result<()> {
@@ -1047,56 +1079,56 @@ mod tests {
     }
 
     #[test]
-    fn router_hint_support_requires_explicit_true() {
+    fn kv_hint_transfer_support_requires_explicit_true() {
         use dynamo_kv_router::WorkerConfigLike;
 
         let mut config = ModelRuntimeConfig::default();
-        assert!(config.router_hint_metadata_for_dp_rank(0).is_none());
+        assert!(config.kv_hint_transfer_metadata_for_dp_rank(0).is_none());
 
         config
-            .set_engine_specific(ROUTER_HINT_RUNTIME_CAPABILITY_KEY, true)
+            .set_engine_specific(KV_HINT_TRANSFER_CAPABILITY_KEY, true)
             .unwrap();
-        assert!(config.router_hint_metadata_for_dp_rank(0).is_none());
+        assert!(config.kv_hint_transfer_metadata_for_dp_rank(0).is_none());
 
         config
-            .set_engine_specific(ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY, "prefill")
+            .set_engine_specific(KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY, "prefill")
             .unwrap();
-        let info = config.router_hint_metadata_for_dp_rank(0).unwrap();
+        let info = config.kv_hint_transfer_metadata_for_dp_rank(0).unwrap();
         assert_eq!(info.worker_type, "prefill");
         assert!(info.source_control_endpoint.is_none());
 
         config
             .set_engine_specific(
-                ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
+                KV_HINT_TRANSFER_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY,
                 serde_json::json!({"0": "tcp://127.0.0.1:23280"}),
             )
             .unwrap();
-        let info = config.router_hint_metadata_for_dp_rank(0).unwrap();
+        let info = config.kv_hint_transfer_metadata_for_dp_rank(0).unwrap();
         assert_eq!(info.worker_type, "prefill");
         assert_eq!(info.source_control_endpoint, Some("tcp://127.0.0.1:23280"));
         assert_eq!(
             config
-                .router_hint_metadata_for_dp_rank(1)
+                .kv_hint_transfer_metadata_for_dp_rank(1)
                 .unwrap()
                 .source_control_endpoint,
             None
         );
 
         config
-            .set_engine_specific(ROUTER_HINT_RUNTIME_CAPABILITY_KEY, "true")
+            .set_engine_specific(KV_HINT_TRANSFER_CAPABILITY_KEY, "true")
             .unwrap();
         assert_eq!(
             config
-                .router_hint_metadata_for_dp_rank(0)
+                .kv_hint_transfer_metadata_for_dp_rank(0)
                 .unwrap()
                 .worker_type,
             "prefill"
         );
 
         config
-            .set_engine_specific(ROUTER_HINT_RUNTIME_CAPABILITY_KEY, "false")
+            .set_engine_specific(KV_HINT_TRANSFER_CAPABILITY_KEY, "false")
             .unwrap();
-        assert!(config.router_hint_metadata_for_dp_rank(0).is_none());
+        assert!(config.kv_hint_transfer_metadata_for_dp_rank(0).is_none());
     }
 
     #[test]
@@ -1212,6 +1244,36 @@ mod tests {
             },
         ] {
             config.validate_config().unwrap();
+        }
+    }
+
+    #[test]
+    fn test_validate_config_rejects_invalid_data_parallel_ranges() {
+        for (config, expected_error) in [
+            (
+                ModelRuntimeConfig {
+                    data_parallel_size: 0,
+                    ..Default::default()
+                },
+                "data_parallel_size must be at least 1",
+            ),
+            (
+                ModelRuntimeConfig {
+                    data_parallel_size: MAX_DATA_PARALLEL_RANKS_PER_WORKER + 1,
+                    ..Default::default()
+                },
+                "exceeds the supported maximum",
+            ),
+            (
+                ModelRuntimeConfig {
+                    data_parallel_start_rank: u32::MAX,
+                    ..Default::default()
+                },
+                "data-parallel rank range overflows u32",
+            ),
+        ] {
+            let error = config.validate_config().unwrap_err();
+            assert!(error.contains(expected_error), "{error}");
         }
     }
 

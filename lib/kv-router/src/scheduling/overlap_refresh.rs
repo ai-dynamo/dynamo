@@ -28,8 +28,8 @@ use async_trait::async_trait;
 
 use crate::config::KvRouterConfig;
 use crate::indexer::{LowerTierQueryOptions, TieredMatchProvider};
+use crate::kv_hints::KvTransferCandidates;
 use crate::protocols::LocalBlockHash;
-use crate::router_hint::RouterHintRootCandidates;
 
 use super::overlap::{OverlapAnalysis, OverlapSignals};
 
@@ -40,14 +40,14 @@ use super::overlap::{OverlapAnalysis, OverlapSignals};
 #[derive(Debug, Clone, Default)]
 pub struct RefreshedOverlap {
     pub overlap: OverlapSignals,
-    pub router_hint_candidates: Option<RouterHintRootCandidates>,
+    pub kv_transfer_candidates: Option<KvTransferCandidates>,
 }
 
 impl RefreshedOverlap {
     pub fn from_overlap(overlap: OverlapSignals) -> Self {
         Self {
             overlap,
-            router_hint_candidates: None,
+            kv_transfer_candidates: None,
         }
     }
 }
@@ -62,7 +62,7 @@ pub trait OverlapScoresRefresh: Send + Sync {
     async fn refresh(
         &self,
         block_hashes: &[LocalBlockHash],
-        retain_router_hint_chain: bool,
+        retain_kv_transfer_chain: bool,
     ) -> Option<RefreshedOverlap>;
 }
 
@@ -87,7 +87,7 @@ impl<P: TieredMatchProvider> OverlapScoresRefresh for TieredOverlapRefresher<P> 
     async fn refresh(
         &self,
         block_hashes: &[LocalBlockHash],
-        retain_router_hint_chain: bool,
+        retain_kv_transfer_chain: bool,
     ) -> Option<RefreshedOverlap> {
         if block_hashes.is_empty() {
             return None;
@@ -97,7 +97,7 @@ impl<P: TieredMatchProvider> OverlapScoresRefresh for TieredOverlapRefresher<P> 
             .find_tiered_matches_with_options(
                 block_hashes,
                 LowerTierQueryOptions {
-                    retain_router_hint_chain,
+                    retain_kv_transfer_chain,
                 },
             )
             .await
@@ -109,12 +109,12 @@ impl<P: TieredMatchProvider> OverlapScoresRefresh for TieredOverlapRefresher<P> 
             }
         };
         let overlap = OverlapAnalysis::new(&self.config, self.block_size, &tiered).signals();
-        let router_hint_candidates = retain_router_hint_chain
-            .then(|| tiered.router_hint_root_candidates().cloned())
+        let kv_transfer_candidates = retain_kv_transfer_chain
+            .then(|| tiered.kv_transfer_candidates().cloned())
             .flatten();
         Some(RefreshedOverlap {
             overlap,
-            router_hint_candidates,
+            kv_transfer_candidates,
         })
     }
 }
@@ -187,7 +187,7 @@ pub async fn refresh_overlap<RF: OverlapScoresRefresh + ?Sized>(
     refresher: Option<&RF>,
     refresh_after: Option<Duration>,
     block_hashes: Option<&[LocalBlockHash]>,
-    retain_router_hint_chain: bool,
+    retain_kv_transfer_chain: bool,
     enqueue_at: tokio::time::Instant,
     now: tokio::time::Instant,
 ) -> Option<RefreshedOverlap> {
@@ -201,7 +201,7 @@ pub async fn refresh_overlap<RF: OverlapScoresRefresh + ?Sized>(
         return None;
     }
     refresher?
-        .refresh(block_hashes?, retain_router_hint_chain)
+        .refresh(block_hashes?, retain_kv_transfer_chain)
         .await
 }
 
@@ -214,7 +214,7 @@ impl OverlapScoresRefresh for NoopOverlapScoresRefresh {
     async fn refresh(
         &self,
         _block_hashes: &[LocalBlockHash],
-        _retain_router_hint_chain: bool,
+        _retain_kv_transfer_chain: bool,
     ) -> Option<RefreshedOverlap> {
         None
     }
@@ -272,7 +272,7 @@ mod tests {
         async fn refresh(
             &self,
             _block_hashes: &[LocalBlockHash],
-            _retain_router_hint_chain: bool,
+            _retain_kv_transfer_chain: bool,
         ) -> Option<RefreshedOverlap> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             Some(RefreshedOverlap::from_overlap(OverlapSignals {

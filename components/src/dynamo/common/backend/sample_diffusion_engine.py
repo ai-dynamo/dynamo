@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import os
 import time
 from collections.abc import AsyncGenerator
 from typing import Any
@@ -54,6 +55,11 @@ class SampleDiffusionEngine(DiffusionEngine):
         parser.add_argument("--endpoint-types", default="images")
         parser.add_argument("--discovery-backend", default="etcd")
         parser.add_argument("--request-plane", default="tcp")
+        parser.add_argument(
+            "--response-plane",
+            choices=["tcp", "quic"],
+            default=os.environ.get("DYN_RESPONSE_PLANE", "tcp"),
+        )
         parser.add_argument("--event-plane", default=None)
         args = parser.parse_args(argv)
 
@@ -70,6 +76,7 @@ class SampleDiffusionEngine(DiffusionEngine):
             endpoint_types=args.endpoint_types,
             discovery_backend=args.discovery_backend,
             request_plane=args.request_plane,
+            response_plane=args.response_plane,
             event_plane=args.event_plane,
             # Diffusion has no KV cache to route on.
             enable_kv_routing=False,

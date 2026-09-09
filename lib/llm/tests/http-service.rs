@@ -2315,3 +2315,119 @@ async fn test_classify_and_pooling_validation_errors_are_metered() {
     cancel_token.cancel();
     task.await.unwrap().unwrap();
 }
+
+// =============================================================================
+// Images route error surfacing: worker exception -> annotated error event ->
+// stream fold -> from_anyhow classification -> HTTP status/body.
+// Regression coverage for the images fold: reverting the from_anyhow routing
+// (back to a hardcoded generic 500) fails the 400 test below.
+// =============================================================================
+
+use dynamo_llm::protocols::openai::images::{NvCreateImageRequest, NvImagesResponse};
+use dynamo_llm::types::openai::images::OpenAIImagesStreamingEngine;
+
+/// Images engine whose stream carries a single error annotation, emulating a
+/// worker that raised during generation (Annotated::from_err on the wire).
+struct ErrorImagesEngine {
+    error: DynamoError,
+}
+
+#[async_trait]
+impl AsyncEngine<SingleIn<NvCreateImageRequest>, ManyOut<Annotated<NvImagesResponse>>, Error>
+    for ErrorImagesEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateImageRequest>,
+    ) -> Result<ManyOut<Annotated<NvImagesResponse>>, Error> {
+        let (_request, context) = request.transfer(());
+        let ctx = context.context();
+        let error = self.error.clone();
+        let stream = stream! {
+            yield Annotated::<NvImagesResponse> {
+                data: None,
+                id: None,
+                event: Some("error".to_string()),
+                comment: None,
+                error: Some(error),
+            };
+        };
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
+async fn start_images_service(
+    engine: OpenAIImagesStreamingEngine,
+) -> (
+    u16,
+    CancellationToken,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+) {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder().port(port).build().unwrap();
+    service
+        .enable_model_endpoint(EndpointType::Images, true)
+        .unwrap();
+    let card = ModelDeploymentCard::with_name_only("image-model");
+    service
+        .state_clone()
+        .manager()
+        .add_images_model("image-model", card.mdcsum(), engine)
+        .unwrap();
+
+    let token = CancellationToken::new();
+    let task = service.spawn_with_listener(token.clone(), listener).await;
+    wait_for_service_ready(port).await;
+    (port, token, task)
+}
+
+async fn post_images_generation(port: u16) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(format!("http://localhost:{}/v1/images/generations", port))
+        .json(&serde_json::json!({
+            "model": "image-model",
+            "prompt": "a red apple",
+        }))
+        .send()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn test_images_worker_invalid_argument_maps_to_400_with_message() {
+    let error = DynamoError::builder()
+        .error_type(DynamoErrorType::InvalidArgument)
+        .message("n must be in [1, 10], got 11")
+        .build();
+    let engine: OpenAIImagesStreamingEngine = Arc::new(ErrorImagesEngine { error });
+    let (port, token, task) = start_images_service(engine).await;
+
+    let response = post_images_generation(port).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response.text().await.unwrap();
+    assert!(
+        body.contains("n must be in [1, 10], got 11"),
+        "validation message must reach the client, got: {body}"
+    );
+
+    token.cancel();
+    let _ = task.await;
+}
+
+#[tokio::test]
+async fn test_images_worker_internal_error_maps_to_sanitized_500() {
+    let error = DynamoError::msg("secret internal detail: db password");
+    let engine: OpenAIImagesStreamingEngine = Arc::new(ErrorImagesEngine { error });
+    let (port, token, task) = start_images_service(engine).await;
+
+    let response = post_images_generation(port).await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = response.text().await.unwrap();
+    assert!(
+        !body.contains("secret internal detail"),
+        "internal details must not leak to the client, got: {body}"
+    );
+
+    token.cancel();
+    let _ = task.await;
+}
