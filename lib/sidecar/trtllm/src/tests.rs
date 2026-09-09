@@ -1432,13 +1432,33 @@ async fn e2e_real_openengine_server() {
     );
 }
 
-/// A `finished` on a prefill worker means the context phase ended without
-/// transmitting a handoff. The frontend's prefill router treats any non-Length
-/// terminal as already-complete and returns it to the caller, so swallowing
-/// this would answer the user with an empty 200.
+/// The OpenEngine servicer suppresses `finished` on a context request only
+/// when it already sent a `PrefillReady`; otherwise -- a stop condition during
+/// the one-token context phase, or a cancellation before transmission -- it
+/// deliberately emits the real terminal, because there is no decode leg to
+/// answer the caller. Context tokens are held back on the normal path so the
+/// decode leg's replay cannot duplicate them, which makes this terminal the
+/// only place they can surface.
 #[test]
-fn prefill_terminal_without_a_handoff_is_rejected() {
+fn a_prefill_terminal_without_a_handoff_carries_its_tokens() {
     let mut state = ResponseState::new(&request(), DisaggregationMode::Prefill);
+    let token = pb::GenerateResponse {
+        request_id: "req".to_string(),
+        event: Some(pb::generate_response::Event::Token(pb::TokenOutput {
+            output_index: Some(0),
+            tokens: vec![pb::TokenInfo {
+                token_id: 99,
+                ..Default::default()
+            }],
+            ..Default::default()
+        })),
+        usage: None,
+    };
+    assert!(
+        state.convert(token).expect("token converts").is_none(),
+        "a context token is held back, not streamed"
+    );
+
     let response = pb::GenerateResponse {
         request_id: "req".to_string(),
         event: Some(pb::generate_response::Event::Finished(
@@ -1451,12 +1471,15 @@ fn prefill_terminal_without_a_handoff_is_rejected() {
         )),
         usage: None,
     };
-    let error = state
+    let terminal = state
         .convert(response)
-        .expect_err("a prefill terminal without a handoff must fail loudly");
-    assert!(
-        error.to_string().contains("without a kv_session handoff"),
-        "unexpected error: {error}"
+        .expect("a handoff-less prefill terminal is serviceable")
+        .expect("it yields a terminal");
+    assert_eq!(terminal.finish_reason, Some(FinishReason::Stop));
+    assert_eq!(
+        terminal.token_ids,
+        [99],
+        "the caller gets what the context phase produced"
     );
 }
 

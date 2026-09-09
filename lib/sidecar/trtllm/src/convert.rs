@@ -402,9 +402,14 @@ pub(crate) struct ResponseState {
     prompt_tokens: u32,
     completion_tokens: u32,
     output_logprobs: Option<u32>,
-    /// Prefill workers terminate on `PrefillReady` instead of `finished`, and
-    /// stream no tokens to the client.
+    /// Prefill workers normally terminate on `PrefillReady` instead of
+    /// `finished`, and stream no tokens to the client.
     is_prefill: bool,
+    /// Held back rather than streamed: on the normal path the decode worker
+    /// replays the context phase's tokens, so forwarding them here would
+    /// duplicate them. They are only surfaced by a context request that ends
+    /// without a handoff, which has no decode leg to replay them.
+    held_prefill_tokens: Vec<u32>,
     /// Cache hits are measured during the context phase, so on a decode worker
     /// they arrive with the handoff rather than from the local engine.
     cached_tokens: Option<u32>,
@@ -417,6 +422,7 @@ impl ResponseState {
             completion_tokens: 0,
             output_logprobs: request.output_options.logprobs,
             is_prefill: mode.is_prefill(),
+            held_prefill_tokens: Vec::new(),
             cached_tokens: request
                 .prefill_result
                 .as_ref()
@@ -439,19 +445,20 @@ impl ResponseState {
     ) -> Result<Option<LLMEngineOutput>, DynamoError> {
         let pb::GenerateResponse { event, usage, .. } = response;
         match event {
-            // A prefill worker returns no tokens to the client: the context
-            // phase's first token travels inside the handoff and the decode
-            // worker replays it.
-            Some(pb::generate_response::Event::Token(_)) if self.is_prefill => Ok(None),
+            Some(pb::generate_response::Event::Token(token)) if self.is_prefill => {
+                self.hold_prefill_token(token)
+            }
             Some(pb::generate_response::Event::Token(token)) => self.convert_token(token),
-            // The handoff is the terminal event for a context request. A
-            // `finished` instead means the context phase ended without
-            // transmitting one -- the frontend's prefill router would treat that
-            // as an already-complete request and return an empty response to the
-            // caller, so fail loudly rather than silently answer nothing.
-            Some(pb::generate_response::Event::Finished(_)) if self.is_prefill => Err(
-                client::protocol_error("prefill terminated without a kv_session handoff"),
-            ),
+            // A context request that ends without a handoff never transmitted
+            // its KV -- it hit a stop condition during the one-token context
+            // phase, or was cancelled first. There is no decode leg to run, so
+            // the terminal and whatever it produced are the whole answer, and
+            // the frontend's prefill router returns them to the caller.
+            Some(pb::generate_response::Event::Finished(finished)) if self.is_prefill => {
+                let mut terminal = self.convert_finished(finished, usage)?;
+                terminal.token_ids = std::mem::take(&mut self.held_prefill_tokens);
+                Ok(Some(terminal))
+            }
             Some(pb::generate_response::Event::Finished(finished)) => {
                 self.convert_finished(finished, usage).map(Some)
             }
@@ -506,6 +513,23 @@ impl ResponseState {
             disaggregated_params: Some(disagg::session_to_json(session)?),
             ..Default::default()
         })
+    }
+
+    /// Counts a context-phase token and keeps its ID, without streaming it.
+    fn hold_prefill_token(
+        &mut self,
+        token: pb::TokenOutput,
+    ) -> Result<Option<LLMEngineOutput>, DynamoError> {
+        let index = token.output_index.unwrap_or(0);
+        if index != 0 {
+            return Err(client::protocol_error(format!(
+                "received unsupported output index {index}"
+            )));
+        }
+        self.held_prefill_tokens
+            .extend(token.tokens.iter().map(|info| info.token_id));
+        self.completion_tokens = self.held_prefill_tokens.len() as u32;
+        Ok(None)
     }
 
     fn convert_token(
