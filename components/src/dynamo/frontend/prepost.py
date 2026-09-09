@@ -35,10 +35,7 @@ from vllm.utils.async_utils import make_async
 from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.llm.exceptions import InvalidArgument
 
-from .structural_tag_policy import (
-    effective_tool_strict,
-    should_attempt_structural_tag,
-)
+from .structural_tag_policy import effective_tool_strict, should_attempt_structural_tag
 from .thinking import apply_default_thinking_mode_to_template_kwargs
 from .utils import legacy_guided_decoding
 
