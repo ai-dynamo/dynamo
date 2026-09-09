@@ -1492,7 +1492,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `name` _string_ | Name references a PVC name defined in the top-level PVCs map |  | Required: \{\} <br /> |
 | `mountPoint` _string_ | MountPoint specifies where to mount the volume.<br />If useAsCompilationCache is true and mountPoint is not specified,<br />a backend-specific default will be used. |  |  |
-| `subPath` _string_ | SubPath specifics the subPath for the volume mount.<br />Only used when UseAsCompilationCache is true |  |  |
+| `subPath` _string_ | Only used when UseAsCompilationCache is true |  |  |
 | `useAsCompilationCache` _boolean_ | UseAsCompilationCache indicates this volume should be used as a compilation cache.<br />When true, backend-specific environment variables will be set and default mount points may be used. | false |  |
 
 

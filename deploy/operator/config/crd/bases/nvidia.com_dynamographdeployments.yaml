@@ -11957,9 +11957,7 @@ spec:
                               description: Name references a PVC name defined in the top-level PVCs map
                               type: string
                             subPath:
-                              description: |-
-                                SubPath specifics the subPath for the volume mount.
-                                Only used when UseAsCompilationCache is true
+                              description: Only used when UseAsCompilationCache is true
                               type: string
                             useAsCompilationCache:
                               default: false
