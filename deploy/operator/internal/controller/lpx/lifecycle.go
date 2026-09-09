@@ -318,7 +318,7 @@ func (r *graphReconciler) reconcileLPXKnownIntentFence(
 		if selected {
 			reason = "The DGD incarnation, generation, model, or selected input changed"
 		}
-		retiring, retireErr := r.retireLPXRequest(ctx, deployment, request, reason)
+		retiring, retireErr := r.retireLPXRequest(ctx, deployment, "", request, reason)
 		return retiring, nil, retireErr
 	}
 	return nil, requests, nil
@@ -337,7 +337,7 @@ func (r *graphReconciler) prepareLPXMaterializing(
 		return nil, &lpxRejected{reason: err.Error()}, nil
 	}
 	projections := workload.ModelProjections()
-	plan, err := workload.PlanNodeLocalMaterialization(deployment.Annotations[dynamo.LPXPCSNameAnnotation])
+	plan, err := workload.PlanNodeLocalMaterialization(dynamo.PCSNameForLPX(source))
 	if err != nil {
 		return nil, &lpxRejected{reason: err.Error()}, nil
 	}
@@ -384,7 +384,7 @@ func (r *graphReconciler) retireInvalidLPXWorkload(
 		return nil, err
 	}
 	if len(requests) > 0 {
-		return r.retireLPXRequest(ctx, deployment, &requests[0], reason)
+		return r.retireLPXRequest(ctx, deployment, "", &requests[0], reason)
 	}
 
 	// Source edits can rename both resources; discover only this exact child's old objects.
@@ -523,7 +523,7 @@ func (r *graphReconciler) reconcileLPXAttemptFence(
 		return nil, nil, err
 	}
 	if stale != nil {
-		retiring, retireErr := r.retireLPXRequest(ctx, deployment, stale, "The immutable build snapshot or complete attempt identity changed")
+		retiring, retireErr := r.retireLPXRequest(ctx, deployment, desired.plan.PodCliqueSetName, stale, "The immutable build snapshot or complete attempt identity changed")
 		return nil, retiring, retireErr
 	}
 	// A deterministic-name collision must never be adopted or deleted.
@@ -613,18 +613,20 @@ func (r *graphReconciler) listOwnedLPXRequestsIfAvailable(
 func (r *graphReconciler) retireFirstOwnedLPXRequest(
 	ctx context.Context,
 	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
+	pcsName string,
 	reason string,
 ) (*lpxRetiring, error) {
 	requests, err := r.listOwnedLPXRequests(ctx, deployment)
 	if err != nil || len(requests) == 0 {
 		return nil, err
 	}
-	return r.retireLPXRequest(ctx, deployment, &requests[0], reason)
+	return r.retireLPXRequest(ctx, deployment, pcsName, &requests[0], reason)
 }
 
 func (r *graphReconciler) retireLPXRequest(
 	ctx context.Context,
 	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
+	pcsName string,
 	request *lpxv1alpha1.LPUPipelineRequest,
 	reason string,
 ) (*lpxRetiring, error) {
@@ -678,7 +680,7 @@ func (r *graphReconciler) retireLPXRequest(
 	}
 
 	// Hold the shared Grove attempt at zero only after every publication is retiring.
-	if err := r.scaleDownLPXPodCliqueSet(ctx, deployment, ""); err != nil {
+	if err := r.scaleDownLPXPodCliqueSet(ctx, deployment, pcsName, ""); err != nil {
 		return nil, fmt.Errorf("scale down the LPX PodCliqueSet after retiring all attempt requests: %w", err)
 	}
 	return &lpxRetiring{
@@ -694,30 +696,36 @@ func (r *graphReconciler) retireLPXRequest(
 func (r *graphReconciler) scaleDownLPXPodCliqueSet(
 	ctx context.Context,
 	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
+	pcsName string,
 	pcsUID types.UID,
 ) error {
-	key := types.NamespacedName{
-		Namespace: deployment.Namespace,
-		Name:      deployment.Annotations[dynamo.LPXPCSNameAnnotation],
-	}
-	pcs := &grovev1alpha1.PodCliqueSet{}
-	if err := r.apiReader.Get(ctx, key, pcs); err != nil {
-		if apierrors.IsNotFound(err) {
+	scale := func(pcs *grovev1alpha1.PodCliqueSet) error {
+		if pcsUID != "" && pcs.UID != pcsUID {
 			return nil
 		}
-		return err
+		if !metav1.IsControlledBy(pcs, deployment) {
+			return fmt.Errorf("refusing to scale down PodCliqueSet %q without the exact LPXGraphDeployment controller owner", pcs.Name)
+		}
+		if !pcs.DeletionTimestamp.IsZero() || pcs.Spec.Replicas == 0 {
+			return nil
+		}
+		pcs.Spec.Replicas = 0
+		return r.Update(ctx, pcs)
 	}
-	if pcsUID != "" && pcs.UID != pcsUID {
-		return nil
+	if pcsName != "" {
+		pcs := &grovev1alpha1.PodCliqueSet{}
+		if err := r.apiReader.Get(ctx, types.NamespacedName{Namespace: deployment.Namespace, Name: pcsName}, pcs); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		return scale(pcs)
 	}
-	if !metav1.IsControlledBy(pcs, deployment) {
-		return fmt.Errorf("refusing to scale down PodCliqueSet %q without the exact LPXGraphDeployment controller owner", pcs.Name)
-	}
-	if !pcs.DeletionTimestamp.IsZero() || pcs.Spec.Replicas == 0 {
-		return nil
-	}
-	pcs.Spec.Replicas = 0
-	return r.Update(ctx, pcs)
+	return visitLifecycleObjectPages(ctx, r.apiReader, &grovev1alpha1.PodCliqueSetList{}, func(object k8sruntime.Object) error {
+		pcs := object.(*grovev1alpha1.PodCliqueSet)
+		if !metav1.IsControlledBy(pcs, deployment) {
+			return nil
+		}
+		return scale(pcs)
+	}, client.InNamespace(deployment.Namespace))
 }
 
 func (r *graphReconciler) reconcileSelectedLPX(
@@ -778,6 +786,7 @@ func (r *graphReconciler) reconcileSelectedLPXFromCurrentRequests(
 			return r.retireLPXRequest(
 				ctx,
 				deployment,
+				desired.plan.PodCliqueSetName,
 				live,
 				fmt.Sprintf("LPX request exceeds the scheduler size budget: %v", sizeErr),
 			)
@@ -786,6 +795,7 @@ func (r *graphReconciler) reconcileSelectedLPXFromCurrentRequests(
 			return r.retireLPXRequest(
 				ctx,
 				deployment,
+				desired.plan.PodCliqueSetName,
 				live,
 				"Waiting for the current LPX request finalizer to finish cleanup",
 			)
@@ -838,7 +848,7 @@ func (r *graphReconciler) reconcileSelectedLPXFromCurrentRequests(
 			continue
 		}
 		if attemptProjection != nil {
-			if err := r.revalidateLPXAttemptPublication(ctx, deployment); err != nil {
+			if err := r.revalidateLPXAttemptPublication(ctx, deployment, desired.plan.PodCliqueSetName); err != nil {
 				return nil, err
 			}
 		}
@@ -903,7 +913,7 @@ func (r *graphReconciler) reconcileSelectedLPXGroveIdentityPrefix(
 				firstName = name
 			}
 		}
-		retiring, err := r.retireLPXRequest(ctx, deployment, currents[firstName], reason)
+		retiring, err := r.retireLPXRequest(ctx, deployment, desired.plan.PodCliqueSetName, currents[firstName], reason)
 		return nil, nil, retiring, err
 	}
 
@@ -947,11 +957,11 @@ func (r *graphReconciler) reconcileSelectedLPXGroveIdentityPrefix(
 			if pending != nil && pending.incomplete != "" {
 				reason = fmt.Sprintf("%s: %s", reason, pending.incomplete)
 			}
-			retiring, err := r.retireLPXRequest(ctx, deployment, live, reason)
+			retiring, err := r.retireLPXRequest(ctx, deployment, desired.plan.PodCliqueSetName, live, reason)
 			return nil, nil, retiring, err
 		}
 		if err := validateCurrentLPXRequest(deployment, request, identity, live); err != nil {
-			retiring, retireErr := r.retireLPXRequest(ctx, deployment, live, err.Error())
+			retiring, retireErr := r.retireLPXRequest(ctx, deployment, desired.plan.PodCliqueSetName, live, err.Error())
 			return nil, nil, retiring, retireErr
 		}
 	}
@@ -984,11 +994,12 @@ func classifyPublishedLPX(current *lpxv1alpha1.LPUPipelineRequest) lpxClassifica
 func (r *graphReconciler) fenceLPXPublicationBeforeGroveSpecWrite(
 	ctx context.Context,
 	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
+	pcsName string,
 ) error {
 	if err := r.validateLPXPublicationSource(ctx, deployment); err != nil {
 		return err
 	}
-	retiring, err := r.retireFirstOwnedLPXRequest(ctx, deployment, "LPX publication was retired before synchronizing a Grove PodCliqueSet spec change")
+	retiring, err := r.retireFirstOwnedLPXRequest(ctx, deployment, pcsName, "LPX publication was retired before synchronizing a Grove PodCliqueSet spec change")
 	if err == nil && retiring != nil {
 		err = retiring
 	}
@@ -1014,7 +1025,7 @@ func (r *graphReconciler) recreateStaleLPXPodCliqueSet(
 	desired *lpxMaterializing,
 ) error {
 	// Retire all exactly-owned requests before changing shared Grove state.
-	retiring, err := r.retireFirstOwnedLPXRequest(ctx, deployment, "LPX publication was retired before recreating its Grove PodCliqueSet")
+	retiring, err := r.retireFirstOwnedLPXRequest(ctx, deployment, desiredPCS.Name, "LPX publication was retired before recreating its Grove PodCliqueSet")
 	if err != nil {
 		return err
 	}
@@ -1022,10 +1033,7 @@ func (r *graphReconciler) recreateStaleLPXPodCliqueSet(
 		return retiring
 	}
 
-	key := types.NamespacedName{
-		Namespace: deployment.Namespace,
-		Name:      deployment.Annotations[dynamo.LPXPCSNameAnnotation],
-	}
+	key := types.NamespacedName{Namespace: deployment.Namespace, Name: desiredPCS.Name}
 	live := &grovev1alpha1.PodCliqueSet{}
 	if err := r.apiReader.Get(ctx, key, live); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -1048,7 +1056,7 @@ func (r *graphReconciler) recreateStaleLPXPodCliqueSet(
 		return fmt.Errorf("%w is deleted", errLPXGrovePodCliqueSetRecreating)
 	}
 	if live.Spec.Replicas != 0 {
-		if err := r.scaleDownLPXPodCliqueSet(ctx, deployment, ""); err != nil {
+		if err := r.scaleDownLPXPodCliqueSet(ctx, deployment, live.Name, ""); err != nil {
 			return err
 		}
 		return fmt.Errorf("%w is scaled to zero", errLPXGrovePodCliqueSetRecreating)
@@ -1291,7 +1299,7 @@ func (r *graphReconciler) observeLPXPodCliqueSet(
 	noCurrentRequests bool,
 ) (*grovev1alpha1.PodCliqueSet, string, error) {
 	pcs := &grovev1alpha1.PodCliqueSet{}
-	key := types.NamespacedName{Namespace: deployment.Namespace, Name: deployment.Annotations[dynamo.LPXPCSNameAnnotation]}
+	key := types.NamespacedName{Namespace: deployment.Namespace, Name: desired.plan.PodCliqueSetName}
 	if err := r.apiReader.Get(ctx, key, pcs); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, "Waiting for the selected Grove PodCliqueSet", nil
@@ -1591,7 +1599,7 @@ func (r *graphReconciler) finalizeLPXRequests(
 	}
 
 	// Start or continue retirement from the authoritative first request.
-	if _, err := r.retireLPXRequest(ctx, deployment, &requests[0], "LPXGraphDeployment is being deleted"); err != nil {
+	if _, err := r.retireLPXRequest(ctx, deployment, "", &requests[0], "LPXGraphDeployment is being deleted"); err != nil {
 		return err
 	}
 	return fmt.Errorf("waiting for LPX request %q to finish fail-closed retirement", requests[0].Name)

@@ -103,7 +103,7 @@ func (r *graphReconciler) reconcileSelectedLPXSafetyPreflight(
 			return nil, nil, fmt.Errorf("failed to list LPX requests after workload resolution: %w", listErr)
 		}
 		if len(requests) > 0 {
-			retiring, retireErr := r.retireLPXRequest(ctx, deployment, &requests[0], rejected.reason)
+			retiring, retireErr := r.retireLPXRequest(ctx, deployment, dynamo.PCSNameForLPX(source), &requests[0], rejected.reason)
 			if retireErr != nil {
 				return nil, nil, fmt.Errorf("failed to retire LPX attempt after workload resolution: %w", retireErr)
 			}

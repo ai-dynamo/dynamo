@@ -125,10 +125,10 @@ func TestLPXAttemptPartialPublicationLossFencesEverySibling(t *testing.T) {
 	require.Len(t, requests, 2, "preparation plus one persisted transition per successful create")
 
 	dgd.Status.Placement.LPXAttempt.DeadlineAt = ptr.To(metav1.NewTime(time.Now().Add(-time.Second)))
-	require.ErrorContains(t, reconciler.revalidateLPXAttemptPublication(ctx, dgd), "deadline")
+	require.ErrorContains(t, reconciler.revalidateLPXAttemptPublication(ctx, dgd, desired.plan.PodCliqueSetName), "deadline")
 	dgd.Status.Placement.LPXAttempt.DeadlineAt = ptr.To(metav1.NewTime(time.Now().Add(time.Minute)))
 	require.NoError(t, reconciler.Delete(ctx, &requests[0]))
-	require.Error(t, reconciler.revalidateLPXAttemptPublication(ctx, dgd))
+	require.Error(t, reconciler.revalidateLPXAttemptPublication(ctx, dgd, desired.plan.PodCliqueSetName))
 	classification, _, _, err := reconciler.reconcileLPXAttemptDeadline(ctx, dgd, source)
 	require.NoError(t, err)
 	require.Equal(t, lpxAttemptAuthorityLostReason, lpxResult(classification).Reason)
@@ -149,7 +149,7 @@ func TestLPXAttemptDeadlineRaceUsesOnlyDurableDisposition(t *testing.T) {
 	source.Spec.Scheduling = deadlineTestScheduling()
 	request := deadlineTestRequest(dgd, "attempt", time.Now().UTC().Truncate(time.Second), lpxv1alpha1.RequestPhaseBound)
 	request.Finalizers = []string{lpxAttemptRecordingFinalizer, "scheduling.lpu.nvidia.com/lpx-cleanup"}
-	pcs := deadlineTestPCS(dgd, "pcs-uid")
+	pcs := deadlineTestPCS(dgd, source, "pcs-uid")
 	attempt := deadlineTestAttempt(dgd, request, time.Now().Add(time.Minute))
 	attempt.DeadlineAt, attempt.PodCliqueSetUID = nil, ""
 	dgd.Status.Placement = &nvidiacomv1beta1.PlacementStatus{LPXAttempt: attempt}
@@ -214,7 +214,7 @@ func TestLPXAttemptDeadlineRaceUsesOnlyDurableDisposition(t *testing.T) {
 	replacement.UID = "replacement-uid"
 	replacement.ResourceVersion = "2"
 	replacement.Annotations[lpxPCSUIDAnnotation] = "replacement-pcs-uid"
-	pcs = deadlineTestPCS(dgd, "replacement-pcs-uid")
+	pcs = deadlineTestPCS(dgd, source, "replacement-pcs-uid")
 	reconciler = newLPXTestReconciler(t, nil, dgd, source, replacement, pcs)
 
 	classification, _, _, err = reconciler.reconcileLPXAttemptDeadline(t.Context(), dgd, source)
@@ -281,10 +281,10 @@ func deadlineTestRequest(dgd *nvidiacomv1alpha1.LPXGraphDeployment, name string,
 	return request
 }
 
-func deadlineTestPCS(dgd *nvidiacomv1alpha1.LPXGraphDeployment, uid types.UID) *grovev1alpha1.PodCliqueSet {
+func deadlineTestPCS(dgd *nvidiacomv1alpha1.LPXGraphDeployment, source *nvidiacomv1beta1.DynamoGraphDeployment, uid types.UID) *grovev1alpha1.PodCliqueSet {
 	return &grovev1alpha1.PodCliqueSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: dgd.Annotations[dynamo.LPXPCSNameAnnotation], Namespace: dgd.Namespace, UID: uid, ResourceVersion: "1",
+			Name: dynamo.PCSNameForLPX(source), Namespace: dgd.Namespace, UID: uid, ResourceVersion: "1",
 			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dgd, nvidiacomv1alpha1.LPXGraphDeploymentGVK)},
 		},
 		Spec: grovev1alpha1.PodCliqueSetSpec{Replicas: 1},

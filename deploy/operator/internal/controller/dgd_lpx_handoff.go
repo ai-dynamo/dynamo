@@ -49,8 +49,7 @@ func (r *dgdLPXHandoff) Reconcile(ctx context.Context, source *v1beta1.DynamoGra
 		return nil, err
 	}
 	if exists && child.Spec.InputRevision == revision &&
-		child.Annotations[dynamo.LPXRestartAnnotation] == restart &&
-		child.Annotations[dynamo.LPXPCSNameAnnotation] == dynamo.PCSNameForLPX(source) {
+		child.Annotations[dynamo.LPXRestartAnnotation] == restart {
 		return child, nil
 	}
 	if !exists {
@@ -62,7 +61,6 @@ func (r *dgdLPXHandoff) Reconcile(ctx context.Context, source *v1beta1.DynamoGra
 		}
 	}
 	child.Spec.InputRevision = revision
-	metav1.SetMetaDataAnnotation(&child.ObjectMeta, dynamo.LPXPCSNameAnnotation, dynamo.PCSNameForLPX(source))
 	metav1.SetMetaDataAnnotation(&child.ObjectMeta, dynamo.LPXRestartAnnotation, restart)
 	metav1.SetMetaDataAnnotation(&child.ObjectMeta, lpx.DGDGenerationAnnotation, strconv.FormatInt(source.Generation, 10))
 	if exists {

@@ -416,7 +416,7 @@ func TestLPXPublicationWitnessReadsOnlyNamedChildrenAndNoPods(t *testing.T) {
 		requests[index].Finalizers = []string{"scheduling.lpu.nvidia.com/test-cleanup"}
 		require.NoError(t, reconciler.Update(ctx, &requests[index]))
 	}
-	_, err = reconciler.retireLPXRequest(ctx, dgd, &requests[0], "test group retirement")
+	_, err = reconciler.retireLPXRequest(ctx, dgd, desired.plan.PodCliqueSetName, &requests[0], "test group retirement")
 	require.NoError(t, err)
 	requests, err = reconciler.listOwnedLPXRequests(ctx, dgd)
 	require.NoError(t, err)
@@ -427,7 +427,7 @@ func TestLPXPublicationWitnessReadsOnlyNamedChildrenAndNoPods(t *testing.T) {
 	pcs := &grovev1alpha1.PodCliqueSet{}
 	require.NoError(t, reconciler.Get(ctx, types.NamespacedName{
 		Namespace: dgd.Namespace,
-		Name:      dgd.Annotations[dynamo.LPXPCSNameAnnotation],
+		Name:      desired.plan.PodCliqueSetName,
 	}, pcs))
 	require.Zero(t, pcs.Spec.Replicas)
 
@@ -517,7 +517,7 @@ func TestLPXPublishedWorkloadFailureRetirement(t *testing.T) {
 			require.IsType(t, &lpxOpen{}, classification)
 			requestBefore := getLPXRequest(t, ctx, reconciler.Client, dgd.Namespace, desired.requests[0].requestName)
 			key := client.ObjectKeyFromObject(dgd)
-			pcsKey := client.ObjectKey{Namespace: dgd.Namespace, Name: dgd.Annotations[dynamo.LPXPCSNameAnnotation]}
+			pcsKey := client.ObjectKey{Namespace: dgd.Namespace, Name: desired.plan.PodCliqueSetName}
 			pcsBefore := &grovev1alpha1.PodCliqueSet{}
 			require.NoError(t, reconciler.Get(ctx, pcsKey, pcsBefore))
 
@@ -857,7 +857,7 @@ func TestLPXPreflightDoesNotRepublishBeforeDeferredGroveRecreation(t *testing.T)
 	_, err = reconciler.reconcileSelectedLPX(ctx, dgd, desired)
 	require.NoError(t, err)
 
-	pcsKey := types.NamespacedName{Namespace: dgd.Namespace, Name: dgd.Annotations[dynamo.LPXPCSNameAnnotation]}
+	pcsKey := types.NamespacedName{Namespace: dgd.Namespace, Name: desired.plan.PodCliqueSetName}
 	drifted := &grovev1alpha1.PodCliqueSet{}
 	require.NoError(t, reconciler.Get(ctx, pcsKey, drifted))
 	require.NotEmpty(t, drifted.Spec.Template.Cliques)
@@ -970,7 +970,7 @@ func TestGroveSpecSyncRecreatesStaleLPXAttemptBeforeSuccessor(t *testing.T) {
 	pcs := &grovev1alpha1.PodCliqueSet{}
 	pcsKey := types.NamespacedName{
 		Namespace: successorDGD.Namespace,
-		Name:      successorDGD.Annotations[dynamo.LPXPCSNameAnnotation],
+		Name:      successorDesired.plan.PodCliqueSetName,
 	}
 	require.NoError(t, reconciler.Get(ctx, pcsKey, pcs))
 	oldCliqueCount := len(pcs.Spec.Template.Cliques)
@@ -1152,7 +1152,7 @@ func TestLPXRestartPreservesBoundProofAndFinalization(t *testing.T) {
 	require.False(t, request.DeletionTimestamp.IsZero())
 	require.Equal(t, []string{lpxAttemptRecordingFinalizer, "scheduling.lpu.nvidia.com/lpx-cleanup"}, request.Finalizers)
 	pcs := &grovev1alpha1.PodCliqueSet{}
-	require.NoError(t, reconciler.Get(ctx, client.ObjectKey{Namespace: dgd.Namespace, Name: dgd.Annotations[dynamo.LPXPCSNameAnnotation]}, pcs))
+	require.NoError(t, reconciler.Get(ctx, client.ObjectKey{Namespace: dgd.Namespace, Name: desired.plan.PodCliqueSetName}, pcs))
 	require.Zero(t, pcs.Spec.Replicas, "child finalization must stop the workload before scheduler cleanup finishes")
 
 	t.Log("Keep the child finalizer until the scheduler releases the exact request")
@@ -1547,7 +1547,7 @@ func TestLPXDisabledPreservesPublishedWorkloadUntilDeletion(t *testing.T) {
 			request := getLPXRequest(t, ctx, r.Client, child.Namespace, selected.requests[0].requestName)
 			require.False(t, request.DeletionTimestamp.IsZero())
 			pcs := &grovev1alpha1.PodCliqueSet{}
-			require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: child.Namespace, Name: child.Annotations[dynamo.LPXPCSNameAnnotation]}, pcs))
+			require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: child.Namespace, Name: dynamo.PCSNameForLPX(source)}, pcs))
 			require.Zero(t, pcs.Spec.Replicas)
 			_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
 			require.ErrorContains(t, err, "waiting for LPX request")
@@ -2113,7 +2113,7 @@ func newLPXTestDeployment(t *testing.T, source *nvidiacomv1beta1.DynamoGraphDepl
 	return &nvidiacomv1alpha1.LPXGraphDeployment{
 		TypeMeta: metav1.TypeMeta{APIVersion: nvidiacomv1alpha1.GroupVersion.String(), Kind: "LPXGraphDeployment"},
 		ObjectMeta: metav1.ObjectMeta{Name: source.Name, Namespace: source.Namespace, UID: types.UID("lpx-" + string(source.UID)), Generation: 1,
-			Annotations:     map[string]string{dynamo.LPXPCSNameAnnotation: dynamo.PCSNameForLPX(source), lpx.DGDGenerationAnnotation: strconv.FormatInt(source.Generation, 10)},
+			Annotations:     map[string]string{lpx.DGDGenerationAnnotation: strconv.FormatInt(source.Generation, 10)},
 			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(source, nvidiacomv1beta1.DynamoGraphDeploymentGVK)},
 			Finalizers:      []string{lpxGraphDeploymentFinalizer},
 		},
@@ -2285,7 +2285,6 @@ func newLPXTestReconciler(
 	revision, err := dynamo.LPXInputRevision(source, "")
 	require.NoError(t, err)
 	dgd.Spec.InputRevision = revision
-	dgd.Annotations[dynamo.LPXPCSNameAnnotation] = dynamo.PCSNameForLPX(source)
 	if dgd.ResourceVersion == "" {
 		dgd.ResourceVersion = "1"
 	}

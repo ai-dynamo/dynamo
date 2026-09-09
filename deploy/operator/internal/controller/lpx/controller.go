@@ -224,7 +224,7 @@ func (r *graphReconciler) reconcileWorkload(ctx context.Context, deployment *v1a
 	state := reconcileOutcome{State: v1beta1.DGDStatePending, Reason: "LPXPending", Message: "Waiting for the current LPX engine"}
 
 	pcs := &grovev1alpha1.PodCliqueSet{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: deployment.Namespace, Name: deployment.Annotations[dynamo.LPXPCSNameAnnotation]}, pcs); err != nil {
+	if err := r.Get(ctx, client.ObjectKey{Namespace: deployment.Namespace, Name: selected.plan.PodCliqueSetName}, pcs); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return state, ctrl.Result{}, err
 		}
@@ -351,7 +351,7 @@ func (r *graphReconciler) validateLPXDeploymentAuthority(ctx context.Context, de
 	if current.UID != deployment.UID || current.Generation != deployment.Generation || !apiequality.Semantic.DeepEqual(current.Spec, deployment.Spec) || !apiequality.Semantic.DeepEqual(current.OwnerReferences, deployment.OwnerReferences) || !current.DeletionTimestamp.IsZero() {
 		return fmt.Errorf("LPXGraphDeployment authority changed before LPX resource mutation")
 	}
-	for _, key := range []string{dynamo.LPXPCSNameAnnotation, dynamo.LPXRestartAnnotation, lpx.DGDGenerationAnnotation} {
+	for _, key := range []string{dynamo.LPXRestartAnnotation, lpx.DGDGenerationAnnotation} {
 		if current.Annotations[key] != deployment.Annotations[key] {
 			return fmt.Errorf("LPXGraphDeployment publication metadata changed before LPX resource mutation")
 		}

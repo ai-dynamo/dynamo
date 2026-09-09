@@ -104,6 +104,7 @@ func (r *graphReconciler) reconcileLPXAttemptDeadline(
 	if attempt == nil {
 		return nil, time.Time{}, nil, nil
 	}
+	pcsName := dynamo.PCSNameForLPX(source)
 	deadlineAt := time.Time{}
 	if attempt.DeadlineAt != nil {
 		deadlineAt = attempt.DeadlineAt.Time
@@ -121,7 +122,7 @@ func (r *graphReconciler) reconcileLPXAttemptDeadline(
 	}
 	if attempt.ExceededAt != nil {
 		state, err := r.continueTerminalLPXAttempt(
-			ctx, deployment, attempt, observed, lpxSchedulingDeadlineExceededReason,
+			ctx, deployment, pcsName, attempt, observed, lpxSchedulingDeadlineExceededReason,
 			"LPX scheduling deadline exceeded; no retry is authorized",
 		)
 		return state, time.Time{}, nil, err
@@ -142,7 +143,7 @@ func (r *graphReconciler) reconcileLPXAttemptDeadline(
 	}
 	if missing {
 		state, err := r.continueTerminalLPXAttempt(
-			ctx, deployment, attempt, observed, lpxAttemptAuthorityLostReason,
+			ctx, deployment, pcsName, attempt, observed, lpxAttemptAuthorityLostReason,
 			"An exact LPX request disappeared; retiring the aggregate without replacement",
 		)
 		return state, time.Time{}, nil, err
@@ -211,7 +212,7 @@ func (r *graphReconciler) reconcileLPXAttemptPreparation(
 
 // revalidateLPXAttemptPublication fences live authority after preparation has
 // established the current nonnil attempt and an unpublished desired request.
-func (r *graphReconciler) revalidateLPXAttemptPublication(ctx context.Context, deployment *nvidiacomv1alpha1.LPXGraphDeployment) error {
+func (r *graphReconciler) revalidateLPXAttemptPublication(ctx context.Context, deployment *nvidiacomv1alpha1.LPXGraphDeployment, pcsName string) error {
 	attempt := currentLPXAttemptStatus(deployment)
 	if attempt.ExceededAt != nil || attempt.DisarmedAt != nil {
 		return fmt.Errorf("LPX publication is forbidden after a durable attempt decision")
@@ -224,7 +225,7 @@ func (r *graphReconciler) revalidateLPXAttemptPublication(ctx context.Context, d
 		return fmt.Errorf("recorded LPX request authority changed before sibling publication")
 	}
 	pcs := &grovev1alpha1.PodCliqueSet{}
-	if err := r.apiReader.Get(ctx, types.NamespacedName{Namespace: deployment.Namespace, Name: deployment.Annotations[dynamo.LPXPCSNameAnnotation]}, pcs); err != nil {
+	if err := r.apiReader.Get(ctx, types.NamespacedName{Namespace: deployment.Namespace, Name: pcsName}, pcs); err != nil {
 		return err
 	}
 	if pcs.UID != attempt.PodCliqueSetUID || !pcs.DeletionTimestamp.IsZero() {
@@ -382,6 +383,7 @@ func exactLPXAttemptState(
 func (r *graphReconciler) continueTerminalLPXAttempt(
 	ctx context.Context,
 	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
+	pcsName string,
 	attempt *nvidiacomv1beta1.LPXAttemptStatus,
 	observed map[string]*lpxv1alpha1.LPUPipelineRequest,
 	reason string,
@@ -409,14 +411,14 @@ func (r *graphReconciler) continueTerminalLPXAttempt(
 		}
 	}
 	if pending {
-		if err := r.scaleDownLPXPodCliqueSet(ctx, deployment, attempt.PodCliqueSetUID); err != nil {
+		if err := r.scaleDownLPXPodCliqueSet(ctx, deployment, pcsName, attempt.PodCliqueSetUID); err != nil {
 			return nil, err
 		}
 		return newLPXDeadlineTransition(
 			attempt, nvidiacomv1beta1.DGDStateFailed, reason, message, lpxRetirementRequeueAfter,
 		), nil
 	}
-	pending, err := r.retireLPXAttemptPodCliqueSet(ctx, deployment, attempt.PodCliqueSetUID)
+	pending, err := r.retireLPXAttemptPodCliqueSet(ctx, deployment, pcsName, attempt.PodCliqueSetUID)
 	if err != nil {
 		return nil, err
 	}
@@ -432,10 +434,11 @@ func (r *graphReconciler) continueTerminalLPXAttempt(
 func (r *graphReconciler) retireLPXAttemptPodCliqueSet(
 	ctx context.Context,
 	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
+	pcsName string,
 	uid types.UID,
 ) (bool, error) {
 	pcs := &grovev1alpha1.PodCliqueSet{}
-	key := types.NamespacedName{Namespace: deployment.Namespace, Name: deployment.Annotations[dynamo.LPXPCSNameAnnotation]}
+	key := types.NamespacedName{Namespace: deployment.Namespace, Name: pcsName}
 	if err := r.apiReader.Get(ctx, key, pcs); err != nil {
 		return false, client.IgnoreNotFound(err)
 	}

@@ -89,7 +89,6 @@ const (
 	LPXDeploymentUIDAnnotation        = "lpx.nvidia.com/deployment-uid"
 	LPXDeploymentGenerationAnnotation = "lpx.nvidia.com/deployment-generation"
 	LPXInputRevisionAnnotation        = "lpx.nvidia.com/input-revision"
-	LPXPCSNameAnnotation              = "lpx.nvidia.com/podcliqueset-name"
 	LPXRestartAnnotation              = "lpx.nvidia.com/restart-id"
 	LPXServingLabel                   = "lpx.nvidia.com/serving"
 	lpxGPUExecutionRole               = "gpu"
@@ -133,8 +132,7 @@ func ValidateLPXSource(deployment *v1alpha1.LPXGraphDeployment, source *v1beta1.
 	if err != nil {
 		return err
 	}
-	if deployment.Spec.InputRevision != revision || deployment.Annotations[LPXRestartAnnotation] != restart ||
-		deployment.Annotations[LPXPCSNameAnnotation] != PCSNameForLPX(source) {
+	if deployment.Spec.InputRevision != revision || deployment.Annotations[LPXRestartAnnotation] != restart {
 		return fmt.Errorf("LPXGraphDeployment is waiting for the current source input revision")
 	}
 	return nil

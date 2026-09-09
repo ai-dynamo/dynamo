@@ -167,7 +167,7 @@ func TestLPXTerminalFailureRetiresUnpublishedWorkload(t *testing.T) {
 			_, err := r.Reconcile(t.Context(), request)
 			require.NoError(t, err)
 			pcs := &grovev1alpha1.PodCliqueSet{}
-			pcsKey := client.ObjectKey{Namespace: child.Namespace, Name: child.Annotations[dynamo.LPXPCSNameAnnotation]}
+			pcsKey := client.ObjectKey{Namespace: child.Namespace, Name: dynamo.PCSNameForLPX(source)}
 			require.NoError(t, r.Get(t.Context(), pcsKey, pcs))
 			pcs.UID = "staged-pcs"
 			require.NoError(t, r.Update(t.Context(), pcs))
@@ -198,7 +198,6 @@ func TestLPXTerminalFailureRetiresUnpublishedWorkload(t *testing.T) {
 				source.Spec.ProviderOverride = &v1beta1.ProviderOverride{Target: "PodCliqueSet"}
 			case "name budget":
 				component.ComponentName = "serving-engines"
-				child.Annotations[dynamo.LPXPCSNameAnnotation] = dynamo.PCSNameForLPX(source)
 			case "selected workload":
 				component.Replicas = ptr.To(int32(2))
 			case "render":
@@ -271,7 +270,7 @@ func TestLPXTerminalCleanupPreservesForeignObjectsAndNewerAuthority(t *testing.T
 			}}
 			foreignPCS, foreignEndpoint := pcs.DeepCopy(), endpoint.DeepCopy()
 			foreignPCS.UID, foreignEndpoint.UID = "foreign-pcs", "foreign-endpoint"
-			foreignPCS.Name = child.Annotations[dynamo.LPXPCSNameAnnotation]
+			foreignPCS.Name = dynamo.PCSNameForLPX(source)
 			foreignEndpoint.Name = dynamo.GetDCDResourceName(source, "lpx", "")
 			foreignPCS.OwnerReferences, foreignEndpoint.OwnerReferences = ordinary.OwnerReferences, ordinary.OwnerReferences
 			if scenario == "pending finalizer" {

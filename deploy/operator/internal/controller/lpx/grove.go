@@ -43,7 +43,7 @@ func (r *graphReconciler) reconcileGrovePodCliqueSetForLPX(
 ) (*grovev1alpha1.PodCliqueSet, bool, error) {
 	// A missing observation permits only creation after the publication fence.
 	if existingPodCliqueSet == nil {
-		if err := r.fenceLPXPublicationBeforeGroveSpecWrite(ctx, deployment); err != nil {
+		if err := r.fenceLPXPublicationBeforeGroveSpecWrite(ctx, deployment, desired.Name); err != nil {
 			return nil, false, err
 		}
 		modified, synced, err := commoncontroller.SyncObservedResource(ctx, r, deployment, existingPodCliqueSet, desired)

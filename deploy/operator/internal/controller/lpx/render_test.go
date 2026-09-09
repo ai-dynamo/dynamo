@@ -45,7 +45,7 @@ func newLPXRenderDeployment(t *testing.T, source *v1beta1.DynamoGraphDeployment)
 	require.NoError(t, err)
 	return &v1alpha1.LPXGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: source.Name, Namespace: source.Namespace, UID: "lpx-render-uid", Generation: 1,
-			Annotations:     map[string]string{dynamo.LPXPCSNameAnnotation: dynamo.PCSNameForLPX(source), lpx.DGDGenerationAnnotation: strconv.FormatInt(source.Generation, 10)},
+			Annotations:     map[string]string{lpx.DGDGenerationAnnotation: strconv.FormatInt(source.Generation, 10)},
 			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(source, v1beta1.DynamoGraphDeploymentGVK)},
 		},
 		Spec: v1alpha1.LPXGraphDeploymentSpec{InputRevision: revision},

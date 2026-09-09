@@ -74,7 +74,7 @@ func TestLPXHandoffCreatesOnlyAnOwnedReference(t *testing.T) {
 	require.True(t, exactLPXSourceOwner(child, source))
 	require.NotEmpty(t, child.Spec.InputRevision)
 	require.NoError(t, dynamo.ValidateLPXSource(child, source))
-	require.NotEqual(t, dynamo.PCSNameForDGD(source.Name, source.Spec.Components), child.Annotations[dynamo.LPXPCSNameAnnotation])
+	require.NotContains(t, child.Annotations, "lpx.nvidia.com/podcliqueset-name")
 	pending := ReconcileResult{State: v1beta1.DGDStatePending}
 	projectLPXChildStatus(source, child, &pending, &v1beta1.DynamoGraphDeploymentStatus{})
 	require.Equal(t, v1beta1.ComponentKindPodCliqueScalingGroup, pending.ComponentStatus["lpx"].ComponentKind)
