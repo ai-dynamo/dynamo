@@ -28,6 +28,7 @@ from dynamo.sglang._compat import (
     filter_supported_async_generate_kwargs,
     require_reasoning_kwargs,
 )
+from dynamo.sglang._disagg import validate_disagg_parallel_sampling
 from dynamo.sglang.args import Config
 from dynamo.sglang.engine_generate import (
     build_native_generate_request,
@@ -536,6 +537,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         Raises:
             RuntimeError: If no bootstrap info received from prefill worker.
         """
+        if self.serving_mode == DisaggregationMode.DECODE:
+            validate_disagg_parallel_sampling(request)
         logging.debug(f"New Request ID: {context.id()}")
         routing = request.get("routing") or {}
         if self._first_token_source is not None:

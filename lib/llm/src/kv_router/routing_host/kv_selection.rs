@@ -6,10 +6,10 @@ use std::collections::HashSet;
 use dynamo_kv_router::{
     RouterConfigOverride,
     indexer::RoutingDecisionHashes,
+    kv_hints::KvHint,
     protocols::{
         BlockExtraInfo, RoutingConstraints, WorkerAffinityTarget, WorkerId, WorkerWithDpRank,
     },
-    router_hint::RouterHint,
     scheduling::{AdmissionAttempt, AdvisoryWorkerLoad, QueueRejection, RoutingEligibility},
     selector::WorkerSelector,
 };
@@ -38,7 +38,7 @@ pub(super) struct WorkerSelection {
     pub(super) potential_decode_blocks: u64,
     pub(super) selected_worker_load: Option<AdvisoryWorkerLoad>,
     pub(super) routing_hashes: Option<RoutingDecisionHashes>,
-    pub(super) router_hint: Option<RouterHint>,
+    pub(super) kv_hint: Option<KvHint>,
 }
 
 pub(super) enum SelectionOutcome {
@@ -137,7 +137,7 @@ where
                     cached_tokens,
                     potential_decode_blocks,
                     routing_hashes,
-                    router_hint,
+                    kv_hint,
                 } => Ok(SelectionOutcome::Routed(WorkerSelection {
                     worker,
                     attempt: admitted.attempt,
@@ -147,7 +147,7 @@ where
                     potential_decode_blocks,
                     selected_worker_load: None,
                     routing_hashes,
-                    router_hint,
+                    kv_hint,
                 })),
                 FindBestMatchOutcome::QueueRejected { rejection } => {
                     Ok(SelectionOutcome::QueueRejected(rejection))
@@ -171,7 +171,7 @@ where
                     potential_decode_blocks,
                     selected_worker_load: Some(selected_worker_load),
                     routing_hashes,
-                    router_hint: None,
+                    kv_hint: None,
                 })),
                 crate::kv_router::FindBestMatchAdvisoryOutcome::QueueRejected { rejection } => {
                     Ok(SelectionOutcome::QueueRejected(rejection))
