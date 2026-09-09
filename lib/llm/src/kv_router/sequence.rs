@@ -32,7 +32,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::kv_router::ACTIVE_SEQUENCES_SUBJECT;
 #[cfg(test)]
-#[cfg(test)]
 use dynamo_runtime::transports::event_plane::MsgpackCodec;
 
 // Match the existing standalone replica-sync queue. Lifecycle callers enqueue without awaiting;
