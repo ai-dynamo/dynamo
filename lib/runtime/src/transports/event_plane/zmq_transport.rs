@@ -110,13 +110,6 @@ fn map_socket_creation_error(error: tmq::TmqError) -> anyhow::Error {
     }
 }
 
-fn map_io_socket_creation_error(error: std::io::Error) -> anyhow::Error {
-    match socket_limit_guidance(error.raw_os_error(), PROCESS_FD_LIMIT_GUIDANCE) {
-        Some(guidance) => error_with_guidance(error, guidance),
-        None => error.into(),
-    }
-}
-
 fn bind_tmq_socket<T>(builder: SocketBuilder<T>, endpoint: &str) -> Result<T>
 where
     T: tmq::FromZmqSocket<T>,
@@ -178,26 +171,24 @@ pub struct ZmqPubTransport {
 impl ZmqPubTransport {
     /// Create a new ZMQ publisher by binding to an endpoint.
     ///
-    /// If port is 0, finds an available port using TcpListener first,
-    /// then binds ZMQ to that port.
+    /// If the TCP port is 0, ZMQ allocates and reserves an ephemeral port
+    /// on the publisher socket itself.
     ///
     /// Returns the transport and the actual bound endpoint.
     pub async fn bind(endpoint: &str, topic: &str) -> Result<(Self, String)> {
-        let actual_endpoint = if endpoint.ends_with(":0") {
-            let listener = tokio::net::TcpListener::bind("0.0.0.0:0")
-                .await
-                .map_err(map_io_socket_creation_error)?;
-            let actual_addr = listener.local_addr()?;
-            let port = actual_addr.port();
-            drop(listener);
-
-            format!("tcp://0.0.0.0:{port}")
+        let bind_endpoint = if endpoint.starts_with("tcp://") && endpoint.ends_with(":0") {
+            format!("{}*", &endpoint[..endpoint.len() - 1])
         } else {
             endpoint.to_string()
         };
 
         let ctx = shared_zmq_context()?;
-        let socket = bind_tmq_socket(configure_publish_builder(publish(&ctx)), &actual_endpoint)?;
+        let socket = bind_tmq_socket(configure_publish_builder(publish(&ctx)), &bind_endpoint)?;
+        let actual_endpoint = socket
+            .get_socket()
+            .get_last_endpoint()
+            .context("Failed to read bound ZMQ publisher endpoint")?
+            .map_err(|_| anyhow!("Bound ZMQ publisher endpoint is not valid UTF-8"))?;
 
         tracing::info!(
             endpoint = %actual_endpoint,
@@ -781,16 +772,6 @@ mod tests {
     }
 
     #[test]
-    fn io_emfile_preserves_error_and_adds_fd_guidance() {
-        let error = std::io::Error::from_raw_os_error(libc::EMFILE);
-        let original = error.to_string();
-        let message = map_io_socket_creation_error(error).to_string();
-
-        assert!(message.starts_with(&original));
-        assert!(message.contains(PROCESS_FD_LIMIT_GUIDANCE));
-    }
-
-    #[test]
     fn non_emfile_error_is_unchanged() {
         let error = tmq::TmqError::Io(std::io::Error::from_raw_os_error(libc::EINVAL));
         let original = error.to_string();
@@ -877,13 +858,37 @@ mod tests {
         assert!(returned.iter().all(|byte| *byte == 0x5a));
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_zmq_concurrent_ephemeral_binds() {
+        let barrier = Arc::new(tokio::sync::Barrier::new(32));
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..32 {
+            let barrier = barrier.clone();
+            tasks.spawn(async move {
+                barrier.wait().await;
+                ZmqPubTransport::bind("tcp://127.0.0.1:0", "concurrent-bind").await
+            });
+        }
+
+        let mut publishers = Vec::new();
+        let mut ports = std::collections::HashSet::new();
+        while let Some(result) = tasks.join_next().await {
+            let (publisher, endpoint) = result.unwrap().unwrap();
+            let address: std::net::SocketAddr =
+                endpoint.strip_prefix("tcp://").unwrap().parse().unwrap();
+            assert_eq!(address.ip(), std::net::Ipv4Addr::LOCALHOST);
+            assert_ne!(address.port(), 0);
+            assert!(ports.insert(address.port()), "Duplicate live port");
+            publishers.push(publisher);
+        }
+        assert_eq!(publishers.len(), 32);
+    }
+
     #[tokio::test]
     async fn test_zmq_pubsub_basic() {
-        let port = 25555;
-        let endpoint = format!("tcp://127.0.0.1:{port}");
         let topic = "test-topic";
 
-        let (publisher, _actual_endpoint) = ZmqPubTransport::bind(&endpoint, topic)
+        let (publisher, endpoint) = ZmqPubTransport::bind("tcp://127.0.0.1:0", topic)
             .await
             .expect("Failed to create publisher");
 
