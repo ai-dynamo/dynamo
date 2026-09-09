@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import asyncio
 import os
+from types import SimpleNamespace
 
 import gpu_memory_service.common.vmm as _vmm_module
 import pytest
 from _fake_vmm import FakeVMM
+from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 from gpu_memory_service.common.locks import GrantedLockType
 from gpu_memory_service.common.protocol.messages import (
     ClaimPersistentAllocationRequest,
@@ -70,6 +72,63 @@ def fake_cuda(monkeypatch):
 # ---------------------------------------------------------------------
 # Unit tests: PersistentAllocationManager direct
 # ---------------------------------------------------------------------
+
+
+class _FakePersistentClient:
+    def __init__(self, *, aligned_size: int, reattached: bool):
+        self.aligned_size = aligned_size
+        self.reattached = reattached
+
+    def claim_persistent(self, **_kwargs):
+        return SimpleNamespace(
+            allocation_id="alloc-1",
+            aligned_size=self.aligned_size,
+            reattached=self.reattached,
+        )
+
+
+def _memory_manager_with_client(client) -> GMSClientMemoryManager:
+    manager = GMSClientMemoryManager.__new__(GMSClientMemoryManager)
+    manager.granularity = 4096
+    manager._client = client
+    return manager
+
+
+def test_client_allows_shared_reattach_to_larger_existing_allocation():
+    manager = _memory_manager_with_client(
+        _FakePersistentClient(aligned_size=8192, reattached=True)
+    )
+
+    allocation_id, aligned_size, reattached = manager.claim_persistent(
+        "eng-A", "kv_pool", 4096, shared=True
+    )
+
+    assert allocation_id == "alloc-1"
+    assert aligned_size == 8192
+    assert reattached is True
+
+
+def test_client_rejects_undersized_or_fresh_persistent_mismatch():
+    undersized = _memory_manager_with_client(
+        _FakePersistentClient(aligned_size=4096, reattached=True)
+    )
+    with pytest.raises(RuntimeError, match="alignment mismatch"):
+        undersized.claim_persistent("eng-A", "kv_pool", 8192, shared=True)
+
+    fresh_mismatch = _memory_manager_with_client(
+        _FakePersistentClient(aligned_size=8192, reattached=False)
+    )
+    with pytest.raises(RuntimeError, match="alignment mismatch"):
+        fresh_mismatch.claim_persistent("eng-A", "kv_pool", 4096, shared=True)
+
+
+def test_client_rejects_larger_exclusive_persistent_reattach():
+    manager = _memory_manager_with_client(
+        _FakePersistentClient(aligned_size=8192, reattached=True)
+    )
+
+    with pytest.raises(RuntimeError, match="alignment mismatch"):
+        manager.claim_persistent("eng-A", "kv_pool", 4096)
 
 
 def test_claim_creates_fresh_allocation(fake_cuda):
