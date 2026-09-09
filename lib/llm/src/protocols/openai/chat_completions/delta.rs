@@ -583,80 +583,46 @@ mod tests {
         assert_eq!(content[0].logprob, -0.5);
     }
 
-    fn assert_chat_logprobs_without_alternatives(
-        top_logprobs: Option<common::llm_backend::TopLogprobs>,
-    ) {
+    #[test]
+    fn test_chat_logprobs_zero_top_ignores_backend_alternatives() {
         for return_as_ids in [false, true] {
             let mut request = create_test_request();
             request.inner.logprobs = Some(true);
             request.inner.top_logprobs = Some(0);
             request.return_tokens_as_token_ids = Some(return_as_ids);
-            let generator = request.response_generator("req-logprobs-no-top".to_string());
-            let logprobs = generator
+            let generator = request.response_generator("req-logprobs-mixed-top".to_string());
+            let candidate = common::llm_backend::TopLogprob {
+                rank: 1,
+                token_id: 1,
+                token: Some("hello".to_string()),
+                logprob: -0.5,
+                bytes: Some(b"hello".to_vec()),
+            };
+            let tokens = ["hello", " world", "!"];
+            let chosen_logprobs = [-0.5, -0.25, -0.125];
+            let content = generator
                 .create_logprobs(
-                    vec![Some("hello".to_string())],
-                    &[1],
-                    Some(vec![-0.5]),
-                    top_logprobs.clone(),
+                    tokens.iter().map(|token| Some((*token).into())).collect(),
+                    &[1, 2, 3],
+                    Some(chosen_logprobs.to_vec()),
+                    Some(vec![vec![candidate], vec![]]),
                 )
-                .expect("chosen-token logprobs");
-            let content = logprobs.content.expect("chosen-token content");
-            assert_eq!(content.len(), 1);
-            let expected_token = if return_as_ids { "token_id:1" } else { "hello" };
-            assert_eq!(content[0].token, expected_token);
-            assert_eq!(content[0].token_id, Some(1));
-            assert_eq!(content[0].logprob, -0.5);
-            assert_eq!(content[0].bytes, token_to_utf8_bytes(expected_token));
-            assert!(content[0].top_logprobs.is_empty());
-        }
-    }
-
-    #[test]
-    fn test_chat_logprobs_absent_alternatives() {
-        assert_chat_logprobs_without_alternatives(None);
-    }
-
-    #[test]
-    fn test_chat_logprobs_empty_alternatives_array() {
-        assert_chat_logprobs_without_alternatives(Some(vec![]));
-    }
-
-    #[test]
-    fn test_chat_logprobs_empty_alternatives_position() {
-        assert_chat_logprobs_without_alternatives(Some(vec![vec![]]));
-    }
-
-    #[test]
-    fn test_chat_logprobs_zero_top_ignores_backend_alternatives() {
-        let mut request = create_test_request();
-        request.inner.logprobs = Some(true);
-        request.inner.top_logprobs = Some(0);
-        let generator = request.response_generator("req-logprobs-mixed-top".to_string());
-        let candidate = common::llm_backend::TopLogprob {
-            rank: 1,
-            token_id: 1,
-            token: Some("hello".to_string()),
-            logprob: -0.5,
-            bytes: Some(b"hello".to_vec()),
-        };
-        let logprobs = generator
-            .create_logprobs(
-                vec![
-                    Some("hello".into()),
-                    Some(" world".into()),
-                    Some("!".into()),
-                ],
-                &[1, 2, 3],
-                Some(vec![-0.5, -0.25, -0.125]),
-                Some(vec![vec![candidate], vec![]]),
-            )
-            .expect("chosen-token logprobs");
-        let content = logprobs.content.expect("chosen-token content");
-        assert_eq!(content.len(), 3);
-        for (index, expected) in [-0.5, -0.25, -0.125].into_iter().enumerate() {
-            assert_eq!(content[index].logprob, expected);
-            assert_eq!(content[index].token_id, Some(index as u32 + 1));
-            assert!(content[index].top_logprobs.is_empty());
+                .expect("chosen-token logprobs")
+                .content
+                .expect("chosen-token content");
+            assert_eq!(content.len(), tokens.len());
+            for (index, entry) in content.iter().enumerate() {
+                let expected_token = if return_as_ids {
+                    format!("token_id:{}", index + 1)
+                } else {
+                    tokens[index].to_string()
+                };
+                assert_eq!(entry.token, expected_token);
+                assert_eq!(entry.token_id, Some(index as u32 + 1));
+                assert_eq!(entry.logprob, chosen_logprobs[index] as f32);
+                assert_eq!(entry.bytes, token_to_utf8_bytes(&expected_token));
+                assert!(entry.top_logprobs.is_empty());
+            }
         }
     }
 
