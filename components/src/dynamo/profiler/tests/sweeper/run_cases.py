@@ -30,26 +30,12 @@ from dynamo.profiler.sweeper.stack_provider import create_stack
 
 
 def load_sweep_config(config_path):
-    """Load one native AI Simulate SmartSearchConfig. Kept as a small,
-    locally-mockable function (matching test_case_runner.py's existing
-    monkeypatch.setattr(run_cases, "load_sweep_config", ...) usage) rather
-    than imported from dynamo.profiler.sweeper.runner, which no longer
-    exists -- that module's CLI-owned wrapper was removed as part of the
-    DEP #14282 reshape; this harness calls aisimulate.sweeper directly,
-    the same way `aisimulate recommend` itself will.
-    """
     from aisimulate.sweeper import SmartSearchConfig
 
     return SmartSearchConfig.from_yaml(str(config_path))
 
 
 def run_sweep(config):
-    """Execute one validated AI Simulate config using the dynamo stack.
-    Kept as a small, locally-mockable function for the same reason as
-    load_sweep_config above. Returns an object exposing `.candidates`,
-    matching what this file's existing tests already construct via
-    SimpleNamespace(candidates=[...]).
-    """
     from types import SimpleNamespace
 
     from aisimulate.sweeper import Sweeper

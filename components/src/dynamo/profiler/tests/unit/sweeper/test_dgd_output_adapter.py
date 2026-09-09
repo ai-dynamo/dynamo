@@ -1,16 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for Dynamo's `dgd` output adapter (DEP #14282).
-
-Validates against the confirmed real AISimulate output-adapter ABI
-(aisimulate/src/aisimulate/output_adapter.py): name/api_version attributes,
-write(config, *, result, output_dir) returning relative, existing paths.
-`_FakeSweepResult` mirrors the real shipped test suite's own
-`_RecommendationResult([candidate])` shape -- see dgd_output_adapter.py's
-module docstring for why `.candidates`/`.workload` are inferred, not yet
-confirmed against the real `SweepResult` class.
-"""
+"""Unit tests for Dynamo's `dgd` output adapter (DEP #14282)."""
 
 from __future__ import annotations
 
