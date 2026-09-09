@@ -28,6 +28,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -988,6 +989,17 @@ func TestDGD_RoundTrip_FullSharedSpec(t *testing.T) {
 					ComponentType:         v1beta1.ComponentTypeWorker,
 					GlobalDynamoNamespace: true,
 					Multinode:             &v1beta1.MultinodeSpec{NodeCount: 4},
+					Roles: []v1beta1.ComponentRoleSpec{
+						{Name: v1beta1.ComponentRoleLeader},
+						{
+							Name: v1beta1.ComponentRoleWorker,
+							ProviderOverride: &v1beta1.ProviderOverride{
+								APIVersion: "grove.io/v1alpha1",
+								Target:     "PodCliqueTemplateSpec",
+								Value:      apiextensionsv1.JSON{Raw: []byte(`{"topologyConstraint":{"pack":{"required":"rack"}}}`)},
+							},
+						},
+					},
 					ModelRef: &v1beta1.ModelReference{
 						Name:     "llama-3-70b-instruct",
 						Revision: "v1",
