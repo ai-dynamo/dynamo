@@ -26,13 +26,8 @@ class DgdOutputConfigError(ValueError):
 
 
 def _dgd_names(dgd_config: Mapping[str, Any], candidate_count: int) -> list[str]:
-    """Mirror __main__.py's own naming rule exactly: one fixed name for a
-    scalar goal (candidate_count == 1), or "{name_prefix}-{index:03d}" per
-    candidate for a Pareto front. Confirmed against the real CLI's
-    _render_dgds/_dgd_name logic, and against the real review-thread example
-    (`--set dgd.name=qwen`) and the real shipped test
-    (`"dgd": {"name": "original", ...}` overridden to `"qwen"` via `--set`).
-    """
+    """Returns dgd_config["name"] for a single candidate, or
+    "{name_prefix}-{index:03d}" per candidate for a Pareto front."""
     name = dgd_config.get("name")
     name_prefix = dgd_config.get("name_prefix")
 
