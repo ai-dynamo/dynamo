@@ -1232,6 +1232,39 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
 
         return bootstrap_host, bootstrap_port
 
+    @staticmethod
+    def _arm_cancellation(
+        request_id_future: asyncio.Future,
+        context: Context,
+        sglang_request_id: str,
+    ) -> bool:
+        """Arm the monitor for *sglang_request_id*, or report the client left.
+
+        SGLang drops an abort for a request it has not registered yet
+        (``TokenizerManager.abort_request`` returns early when the rid is
+        absent from ``rid_to_state``), and registration only happens on the
+        first iteration of the engine's generator, not when it is created.
+        A monitor armed before then can therefore fire into the void and leave
+        the request running with nobody waiting for it.
+
+        The monitor blocks on ``request_id_future``, so resolving it here is
+        what permits an abort. Returning False means the client is already
+        gone and the caller must abandon the stream without starting it: an
+        engine that never saw the request has nothing to abort.
+
+        Callers must not await between a True result and the first iteration
+        of the engine stream, so that registration cannot be overtaken.
+        """
+        # is_stopped() is "not live", so it already covers a killed context.
+        if context.is_stopped():
+            logging.info(
+                f"Client gone before submission, not starting SGLang Request ID "
+                f"{sglang_request_id} for Context: {context.id()}"
+            )
+            return False
+        request_id_future.set_result(sglang_request_id)
+        return True
+
     async def _handle_cancellation(
         self, request_id_future: asyncio.Future, context: Context
     ):
