@@ -33,17 +33,6 @@ RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/
             --requirement /tmp/requirements.test.txt; \
     fi
 
-# Some serve tests add an optional media decoder immediately before launching
-# the backend. GitHub's ARC runner executes this image as an arbitrary uid, so
-# make only the test image's venv package directory writable by that uid. The
-# shipped runtime image remains read-only.
-RUN if [ -n "${VIRTUAL_ENV:-}" ] && command -v chmod >/dev/null; then \
-        SITE_PACKAGES="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" && \
-        chmod o+w "${SITE_PACKAGES}"; \
-    else \
-        echo "skipped writable test site-packages (no venv or chmod)"; \
-    fi
-
 # Copy pytest configuration (markers, filterwarnings, asyncio_mode, etc.)
 COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
 COPY --chmod=664 --chown=dynamo:0 tests/__init__.py /workspace/tests/__init__.py
