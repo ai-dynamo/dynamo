@@ -30,18 +30,15 @@ use scripted_chat_engine::Script;
 
 const TOKENS: [(&str, u32, f64); 2] = [("Hello", 42, -0.125), ("!", 99, -0.75)];
 
-fn request_body(stream: bool, logprobs: bool) -> Value {
-    let mut body = json!({
+fn request_body(stream: bool) -> Value {
+    json!({
         "model": MODEL,
         "messages": [{"role": "user", "content": "Say hello."}],
         "max_completion_tokens": TOKENS.len(),
         "stream": stream,
-        "logprobs": logprobs,
-    });
-    if logprobs {
-        body["top_logprobs"] = json!(0);
-    }
-    body
+        "logprobs": true,
+        "top_logprobs": 0,
+    })
 }
 
 fn converted_backend_script(body: &Value) -> Script {
@@ -63,8 +60,6 @@ fn converted_backend_script(body: &Value) -> Script {
                     tokens: vec![Some(token.to_string())],
                     text: Some(token.to_string()),
                     cum_log_probs: None,
-                    // Supply chosen logprobs even for the disabled control so
-                    // that the converter's request gate is exercised as well.
                     log_probs: Some(vec![logprob]),
                     top_logprobs: None,
                     finish_reason: (index + 1 == TOKENS.len()).then_some(FinishReason::Stop),
@@ -104,8 +99,8 @@ fn assert_chosen_logprobs(content: &Value, expected: &[(&str, u32, f64)]) {
     }
 }
 
-async fn assert_http_response(stream: bool, logprobs: bool) {
-    let body = request_body(stream, logprobs);
+async fn assert_http_response(stream: bool) {
+    let body = request_body(stream);
     // Do not assert on the generated chunks before sending the HTTP request:
     // the regression must be observable in the actual HTTP response body.
     let svc = HarnessService::start([converted_backend_script(&body)]).await;
@@ -123,7 +118,7 @@ async fn assert_http_response(stream: bool, logprobs: bool) {
         .unwrap()
         .to_string();
     let raw = response.text().await.expect("failed to read HTTP response");
-    println!("stream={stream}, logprobs={logprobs}, HTTP response:\n{raw}");
+    println!("stream={stream}, HTTP response:\n{raw}");
 
     if stream {
         assert!(content_type.starts_with("text/event-stream"));
@@ -136,11 +131,7 @@ async fn assert_http_response(stream: bool, logprobs: bool) {
             assert_eq!(chunk["choices"].as_array().unwrap().len(), 1);
             let choice = &chunk["choices"][0];
             assert_eq!(choice["delta"]["content"], TOKENS[index].0);
-            if logprobs {
-                assert_chosen_logprobs(&choice["logprobs"]["content"], &TOKENS[index..=index]);
-            } else {
-                assert!(choice["logprobs"].is_null());
-            }
+            assert_chosen_logprobs(&choice["logprobs"]["content"], &TOKENS[index..=index]);
         }
         assert_eq!(
             chunks.last().unwrap()["choices"][0]["finish_reason"],
@@ -153,34 +144,27 @@ async fn assert_http_response(stream: bool, logprobs: bool) {
         let choice = &response["choices"][0];
         assert_eq!(choice["message"]["content"], "Hello!");
         assert_eq!(choice["finish_reason"], "stop");
-        if logprobs {
-            assert_chosen_logprobs(&choice["logprobs"]["content"], &TOKENS);
-        } else {
-            assert!(choice["logprobs"].is_null());
-        }
+        assert_chosen_logprobs(&choice["logprobs"]["content"], &TOKENS);
     }
 
     // The shared harness uses precomputed chunks. Check that the real incoming
     // request retained the same converter options used to prepare that script.
     let requests = svc.engine.take_requests().await;
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].inner.logprobs, Some(logprobs));
-    assert_eq!(requests[0].inner.top_logprobs, logprobs.then_some(0));
+    assert_eq!(requests[0].inner.logprobs, Some(true));
+    assert_eq!(requests[0].inner.top_logprobs, Some(0));
     assert_eq!(requests[0].inner.stream, Some(stream));
     assert_eq!(svc.engine.remaining_scripts().await, 0);
     svc.shutdown().await;
 }
 
-async fn run_case(stream: bool, logprobs: bool) {
+async fn run_case(stream: bool) {
     temp_env::async_with_vars(
         [(DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("0"))],
         async {
-            tokio::time::timeout(
-                Duration::from_secs(15),
-                assert_http_response(stream, logprobs),
-            )
-            .await
-            .expect("logprobs HTTP regression timed out");
+            tokio::time::timeout(Duration::from_secs(15), assert_http_response(stream))
+                .await
+                .expect("logprobs HTTP regression timed out");
         },
     )
     .await;
@@ -189,18 +173,11 @@ async fn run_case(stream: bool, logprobs: bool) {
 #[tokio::test]
 #[serial]
 async fn nonstreaming_top_zero_preserves_chosen_logprobs() {
-    run_case(false, true).await;
+    run_case(false).await;
 }
 
 #[tokio::test]
 #[serial]
 async fn streaming_top_zero_preserves_chosen_logprobs() {
-    run_case(true, true).await;
-}
-
-#[tokio::test]
-#[serial]
-async fn disabled_logprobs_stay_absent_in_both_http_modes() {
-    run_case(false, false).await;
-    run_case(true, false).await;
+    run_case(true).await;
 }

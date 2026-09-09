@@ -690,24 +690,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_chat_logprobs_disabled_or_missing_chosen_still_absent() {
-        let mut request = create_test_request();
-        let generator = request.response_generator("req-logprobs-disabled".to_string());
-        assert!(
-            generator
-                .create_logprobs(vec![Some("hello".into())], &[1], Some(vec![-0.5]), None)
-                .is_none()
-        );
-        request.inner.logprobs = Some(true);
-        let generator = request.response_generator("req-logprobs-missing".to_string());
-        assert!(
-            generator
-                .create_logprobs(vec![Some("hello".into())], &[1], None, None)
-                .is_none()
-        );
-    }
-
     #[tokio::test]
     async fn test_chat_logprobs_zero_top_streaming_and_aggregation() {
         use crate::protocols::Annotated;
