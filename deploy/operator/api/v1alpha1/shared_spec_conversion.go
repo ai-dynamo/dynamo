@@ -879,6 +879,9 @@ func ConvertFromComponentRoleSpec(src *ComponentRoleSpec, dst *v1beta1.Component
 		replicas := *src.Replicas
 		dst.Replicas = &replicas
 	}
+	if src.PodTemplate != nil {
+		dst.PodTemplate = src.PodTemplate.DeepCopy()
+	}
 
 	// Preserve the role-level provider schema and sparse value verbatim.
 	if src.ProviderOverride != nil {
@@ -894,6 +897,9 @@ func ConvertToComponentRoleSpec(src *v1beta1.ComponentRoleSpec, dst *ComponentRo
 	if src.Replicas != nil {
 		replicas := *src.Replicas
 		dst.Replicas = &replicas
+	}
+	if src.PodTemplate != nil {
+		dst.PodTemplate = src.PodTemplate.DeepCopy()
 	}
 
 	// Preserve the role-level provider schema and sparse value verbatim.
