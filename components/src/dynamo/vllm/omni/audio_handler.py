@@ -7,7 +7,6 @@ Extracted from omni_handler.py to keep modality-specific logic separate.
 OmniHandler holds an instance as ``self.audio`` (composition).
 """
 
-import base64
 import logging
 from typing import Any, Dict
 
@@ -21,6 +20,8 @@ try:
 except ImportError:
     Qwen3TTSPromptEmbedsBuilder = None  # type: ignore[assignment, misc]
 
+from dynamo.common.http.url_validator import UrlValidationError
+from dynamo.common.multimodal.media_source import decode_data_uri
 from dynamo.common.protocols import sanitize_media_passthrough
 from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
 from dynamo.common.utils.output_modalities import RequestType
@@ -397,12 +398,18 @@ class AudioGenerationHandler:
                             f"max {self.config.tts_ref_audio_max_bytes})"
                         )
         elif ref_audio_str.startswith("data:"):
+            # A data URI carries its payload inline, so the URI length already
+            # bounds the decoded size -- check before decoding, or an oversized
+            # payload is fully materialized just to be rejected.
+            if len(ref_audio_str) * 3 // 4 > self.config.tts_ref_audio_max_bytes:
+                raise ValueError(
+                    f"ref_audio data URI too large "
+                    f"(max {self.config.tts_ref_audio_max_bytes} bytes)"
+                )
             try:
-                _, encoded = ref_audio_str.split(",", 1)
-                # validate=True so invalid chars raise instead of being dropped.
-                audio_bytes = base64.b64decode(encoded, validate=True)
-            except ValueError as exc:
-                raise ValueError("Invalid data: ref_audio (malformed base64)") from exc
+                audio_bytes = decode_data_uri(ref_audio_str)
+            except UrlValidationError as exc:
+                raise ValueError(f"Invalid data: ref_audio ({exc})") from exc
             if len(audio_bytes) > self.config.tts_ref_audio_max_bytes:
                 raise ValueError(
                     f"ref_audio data URI too large "
@@ -414,7 +421,15 @@ class AudioGenerationHandler:
                 "ref_audio must be a URL (http/https) or base64 data URI (data:...)"
             )
 
-        wav_data, sr = sf.read(io.BytesIO(audio_bytes), dtype="float32")
+        try:
+            wav_data, sr = sf.read(io.BytesIO(audio_bytes), dtype="float32")
+        except sf.LibsndfileError as exc:
+            # LibsndfileError is a RuntimeError, so without this a payload that
+            # is valid base64 but not audio still reaches the client as a 500.
+            raise ValueError(
+                f"ref_audio is not readable audio ({len(audio_bytes)} bytes): "
+                "unrecognised format"
+            ) from exc
         return wav_data, int(sr)
 
     def _estimate_tts_prompt_len(self, tts_params: Dict[str, Any]) -> int:
