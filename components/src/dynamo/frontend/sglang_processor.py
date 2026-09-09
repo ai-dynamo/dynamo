@@ -147,6 +147,17 @@ def _request_stop_strings(request: dict[str, Any]) -> set[str]:
     return set()
 
 
+def _request_stop_token_ids(request: dict[str, Any]) -> list[int]:
+    """Merge ``stop_token_ids`` with the legacy integer-valued ``stop`` form."""
+    values: list[Any] = list(request.get("stop_token_ids") or [])
+    stop = request.get("stop")
+    if isinstance(stop, list) and all(
+        isinstance(item, int) and not isinstance(item, bool) for item in stop
+    ):
+        values.extend(stop)
+    return _normalize_eos_token_ids(values)
+
+
 def _tokenizer_eos_token_ids(tokenizer: Any) -> list[int]:
     eos_token_ids = _normalize_eos_token_ids(getattr(tokenizer, "eos_token_ids", None))
     if eos_token_ids:
@@ -392,13 +403,12 @@ def _build_dynamo_preproc(
     max_tokens = request.get("max_completion_tokens") or request.get("max_tokens")
 
     stop = request.get("stop")
-    stop_token_ids = request.get("stop_token_ids", [])
+    stop_token_ids = _request_stop_token_ids(request)
     if isinstance(stop, str):
         stop = [stop]
     elif isinstance(stop, list) and all(
         isinstance(item, int) and not isinstance(item, bool) for item in stop
     ):
-        stop_token_ids = [*stop_token_ids, *stop]
         stop = []
     elif stop is None:
         stop = []
@@ -635,6 +645,7 @@ class SglangProcessor:
             eos_token_ids=self.eos_token_ids,
             prompt_token_ids=pre.prompt_token_ids,
             stop_strings=_request_stop_strings(request),
+            stop_token_ids=set(_request_stop_token_ids(request)),
         )
 
         async for item in self._generate_and_stream(
@@ -662,6 +673,8 @@ class SglangProcessor:
                 preproc_result: SglangPreprocessWorkerResult = (
                     await asyncio.wrap_future(future)
                 )
+        except InvalidArgument:
+            raise
         except PreprocessError as exc:
             raise InvalidArgument(str(exc)) from exc
         except Exception as exc:
@@ -695,6 +708,7 @@ class SglangProcessor:
             eos_token_ids=self.eos_token_ids,
             prompt_token_ids=preproc_result.prompt_token_ids,
             stop_strings=_request_stop_strings(request),
+            stop_token_ids=set(_request_stop_token_ids(request)),
         )
 
         async for item in self._generate_and_stream(
@@ -750,6 +764,7 @@ class SglangProcessor:
                 *,
                 finish_reason: str | None,
                 stop_reason: Any | None,
+                stop_terminated: bool,
                 engine_data: Any | None,
             ) -> dict[str, Any]:
                 nonlocal pending_token_ids
@@ -765,6 +780,7 @@ class SglangProcessor:
                     "token_ids": pending_token_ids,
                     "finish_reason": finish_reason,
                     "stop_reason": stop_reason,
+                    "stop_terminated": stop_terminated,
                 }
                 if pending_log_probs is not None:
                     mapped_response["log_probs"] = pending_log_probs
@@ -887,6 +903,7 @@ class SglangProcessor:
                         envelope = flush_pending(
                             finish_reason=None,
                             stop_reason=None,
+                            stop_terminated=False,
                             engine_data=None,
                         )
                         yield envelope
@@ -895,8 +912,10 @@ class SglangProcessor:
 
                 chunk_tokens = len(new_ids)
                 cumulative_output_tokens += chunk_tokens
-                finish_reason = _map_finish_reason(engine_response.get("finish_reason"))
+                raw_finish_reason = engine_response.get("finish_reason")
+                finish_reason = _map_finish_reason(raw_finish_reason)
                 stop_reason = engine_response.get("stop_reason")
+                stop_terminated = raw_finish_reason in {"eos", "stop"}
 
                 if usage := engine_response.get("completion_usage"):
                     pending_usage = usage
@@ -921,6 +940,7 @@ class SglangProcessor:
                     envelope = flush_pending(
                         finish_reason=finish_reason,
                         stop_reason=stop_reason,
+                        stop_terminated=stop_terminated,
                         engine_data=engine_data,
                     )
                     yield envelope

@@ -27,6 +27,7 @@ dynamo-runtime = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
 bytes = { workspace = true }
+dashmap = { workspace = true }
 futures = { workspace = true }
 hyper-util = { workspace = true, features = ["tokio", "http2", "server-auto"] }
 k8s-openapi = { workspace = true }

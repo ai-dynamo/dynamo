@@ -68,6 +68,7 @@ class DistributedRuntime:
         enable_nats: Optional[bool] = None,
         *,
         event_plane: Optional[str] = None,
+        response_plane: Optional[str] = None,
     ) -> "DistributedRuntime":
         """
         Create a new DistributedRuntime.
@@ -78,6 +79,7 @@ class DistributedRuntime:
             request_plane: Request plane transport ("tcp" or "nats")
             enable_nats: Deprecated; NATS enablement is inferred from runtime config
             event_plane: Event plane transport ("nats" or "zmq")
+            response_plane: Response plane transport ("tcp" or "quic")
         """
         ...
 
@@ -2492,6 +2494,7 @@ def run_mocker_trace_replay(
         "mooncake_delta",
         "agentic_mooncake",
         "agentic-mooncake",
+        "weka",
         "applied_compute_agentic",
         "dynamo",
     ] = "mooncake",
@@ -2506,6 +2509,7 @@ def run_mocker_trace_replay(
     capture_per_request: bool = False,
     capture_planner_details: bool = True,
     scaling_policy: Optional[Any] = None,
+    agentic_lanes: Optional[int] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 
@@ -3375,6 +3379,7 @@ class backend:
             data_parallel_start_rank: Optional[int] = None,
             bootstrap_host: Optional[str] = None,
             bootstrap_port: Optional[int] = None,
+            enable_eagle: bool = False,
         ) -> None: ...
         @property
         def context_length(self) -> Optional[int]: ...
@@ -3394,6 +3399,8 @@ class backend:
         def bootstrap_host(self) -> Optional[str]: ...
         @property
         def bootstrap_port(self) -> Optional[int]: ...
+        @property
+        def enable_eagle(self) -> bool: ...
 
     class EngineConfig:
         def __init__(
