@@ -97,6 +97,31 @@ def image_generation_mm_processor_kwargs(height: int, width: int) -> dict[str, i
     return {"target_h": height, "target_w": width}
 
 
+def _size_dimension_fields(size: str | None) -> tuple[str, str]:
+    """Error labels naming ``size`` as the source of a width/height.
+
+    A dimension derived from ``size`` must not be reported as ``width``: the
+    client never sent that field and would have nothing to correct.
+    """
+    return f"width in size={size!r}", f"height in size={size!r}"
+
+
+def image_generation_size_from_str(
+    size: str | None, *, default_w: int = 1024, default_h: int = 1024
+) -> tuple[int, int]:
+    """Resolve bounded image dimensions from a ``WxH`` size string.
+
+    ``parse_size`` falls back to the defaults for an unparseable string but does
+    not bound what it does parse, so every entry point that accepts a
+    client-supplied size needs this rather than ``parse_size`` alone.
+    """
+    width, height = parse_size(size, default_w=default_w, default_h=default_h)
+    width_field, height_field = _size_dimension_fields(size)
+    return _coerce_dimension(width, width_field), _coerce_dimension(
+        height, height_field
+    )
+
+
 def image_generation_size_from_request(request: dict) -> tuple[int, int]:
     """Resolve image output dimensions from OpenAI-style image or chat requests."""
     extra_body = request.get("extra_body")
@@ -105,14 +130,18 @@ def image_generation_size_from_request(request: dict) -> tuple[int, int]:
 
     size = request.get("size") or extra_body.get("size") or DEFAULT_IMAGE_SIZE
     width, height = parse_size(size, default_w=1024, default_h=1024)
+    width_field, height_field = _size_dimension_fields(size)
 
     for source in (extra_body, request):
         if source.get("width") is not None:
-            width = _coerce_dimension(source["width"], "width")
+            width, width_field = source["width"], "width"
         if source.get("height") is not None:
-            height = _coerce_dimension(source["height"], "height")
-    # Bound the size-derived dims too, not just explicit width/height overrides.
-    return _coerce_dimension(width, "width"), _coerce_dimension(height, "height")
+            height, height_field = source["height"], "height"
+    # One coercion covers both the size-derived dims and any explicit override,
+    # and reports whichever field the surviving value actually came from.
+    return _coerce_dimension(width, width_field), _coerce_dimension(
+        height, height_field
+    )
 
 
 def image_generation_sampling_overrides(
@@ -216,10 +245,13 @@ async def parse_omni_request(
             width, height = parse_size(request.get("size", default_size), **size_kwargs)
         else:
             width, height = image_generation_size_from_request(request)
+            # nvext wins over both size and extra_body, so it needs the same
+            # bound -- a bare int() here reintroduces every failure the helper
+            # above rejects.
             if nvext.get("width") is not None:
-                width = int(nvext["width"])
+                width = _coerce_dimension(nvext["width"], "nvext.width")
             if nvext.get("height") is not None:
-                height = int(nvext["height"])
+                height = _coerce_dimension(nvext["height"], "nvext.height")
         sp: dict = {**nvext, "height": height, "width": width}
         if is_video:
             sp["num_frames"] = compute_num_frames(

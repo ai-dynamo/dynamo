@@ -58,6 +58,7 @@ from dynamo.vllm.omni.utils import (
     image_generation_negative_prompt_from_request,
     image_generation_sampling_overrides,
     image_generation_size_from_request,
+    image_generation_size_from_str,
     streaming_sampling_params,
 )
 
@@ -687,7 +688,9 @@ class OmniHandler(BaseOmniHandler):
 
     def _engine_inputs_from_image(self, req: NvCreateImageRequest) -> EngineInputs:
         """Build engine inputs from an NvCreateImageRequest."""
-        width, height = parse_size(req.size, default_w=1024, default_h=1024)
+        # req.size is a free-form client string, so it needs the same bound the
+        # chat path applies -- parse_size alone returns whatever it parses.
+        width, height = image_generation_size_from_str(req.size)
         nvext = req.nvext or ImageNvExt()
 
         prompt = build_image_generation_prompt(
