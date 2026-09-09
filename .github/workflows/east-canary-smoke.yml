@@ -14,25 +14,25 @@ permissions:
   contents: read
 
 jobs:
-  four-gpu-v2-smoke:
-    name: East four-GPU v2 capacity smoke
-    runs-on: prod-tester-amd-gpu-4-v2-east-canary
+  one-gpu-v1-smoke:
+    name: East one-GPU v1 DinD capacity smoke
+    runs-on: prod-tester-amd-gpu-v1-east-canary
     timeout-minutes: 30
-    container:
-      image: ${{ vars.ECR_REGISTRY }}/dockerhub/busybox:1.37
     steps:
-      - name: Verify GPU Kubernetes container hook
-        shell: sh
+      - name: Verify Docker and nested GPU access
+        shell: bash
         run: |
-          set -eu
+          set -euo pipefail
           echo "runner_name=${RUNNER_NAME}"
           echo "runner_os=${RUNNER_OS}"
           echo "runner_arch=${RUNNER_ARCH}"
           echo "hostname=$(hostname)"
-          ls -l /dev/nvidia*
-          set -- /dev/nvidia[0-9]*
-          test -e "$1"
-          echo "gpu_device_count=$#"
-          test "$#" -eq 4
-          test -d /scratch
-          test -d /models
+          docker info
+          gpu_output=$(docker run --rm --gpus all \
+            --entrypoint nvidia-smi \
+            210086341041.dkr.ecr.us-west-2.amazonaws.com/dynamo-ci/aws/dynamo/actions-runner/dind:gpu \
+            -L)
+          printf '%s\n' "${gpu_output}"
+          gpu_count=$(printf '%s\n' "${gpu_output}" | grep -c '^GPU ')
+          echo "gpu_device_count=${gpu_count}"
+          test "${gpu_count}" -eq 1
