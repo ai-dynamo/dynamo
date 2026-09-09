@@ -23,11 +23,16 @@ forward-pass timing model.
 ## Prerequisites
 
 - A DGD in progress from [Deploy with DGD](../model-deployment/deploy-with-dgd.md), with the Frontend and worker defined and only parallelism left to set.
-- AIConfigurator installed: `pip3 install aiconfigurator`.
+- Python 3.11 through 3.13 with AISimulate installed. The AISimulate distribution provides the
+  retained `aiconfigurator` sizing command:
+
+  ```bash
+  python3 -m pip install "aisimulate==0.1.0.dev2"
+  ```
 - Your checkpoint's HuggingFace ID, GPU system (for example `h200_sxm`), backend (`vllm`, `sglang`, or `trtllm`), the total GPUs you can allocate, and your SLA: Time To First Token (TTFT), Time Per Output Token (TPOT), and typical input/output sequence lengths (ISL/OSL).
 
 <Info>
-AIConfigurator only models supported checkpoint + system + backend combinations. Confirm yours before sizing with `aiconfigurator cli support --model-path <model> --system <sku> --backend <backend>`. See the [support matrix](https://ai-dynamo.github.io/aiconfigurator/support-matrix/).
+AIConfigurator only models supported checkpoint + system + backend combinations. Confirm yours before sizing with `aiconfigurator cli support --model-path <model> --system <sku> --backend <backend>`. See the [AIConfigurator compatibility support matrix](https://ai-dynamo.github.io/aiconfigurator/support-matrix/).
 </Info>
 
 <Steps toc={true}>

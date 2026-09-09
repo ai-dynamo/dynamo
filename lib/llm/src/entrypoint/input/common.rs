@@ -4,6 +4,7 @@
 use std::pin::Pin;
 use std::time::Duration;
 
+use anyhow::Context as _;
 use dynamo_renderer::PromptFormatter;
 
 use crate::{
@@ -23,7 +24,7 @@ use crate::{
     preprocessor::{OpenAIPreprocessor, prompt::prompt_formatter_from_mdc},
     protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
-    session_affinity::{AffinityCoordinator, create_affinity_coordinator},
+    session_affinity::{AffinityCoordinator, SessionAffinityMode, create_affinity_coordinator},
     types::{
         Annotated,
         openai::chat_completions::{
@@ -158,6 +159,7 @@ fn validate_router_mode_for_lora(
     }
 }
 
+#[expect(clippy::too_many_arguments)]
 fn preprocessed_backend_engine<Sel>(
     router: LlmPushRouter,
     router_mode: RouterMode,
@@ -165,8 +167,9 @@ fn preprocessed_backend_engine<Sel>(
     model_manager: &Arc<crate::discovery::ModelManager>,
     endpoint_id: &dynamo_runtime::protocols::EndpointId,
     affinity: Option<AffinityCoordinator>,
+    session_affinity_mode: SessionAffinityMode,
     load_context: Arc<RoutingLoadContext>,
-) -> anyhow::Result<ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>>
+) -> anyhow::Result<Arc<RoutingHost<Sel>>>
 where
     Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
 {
@@ -179,7 +182,7 @@ where
         affinity.is_some(),
     )?;
 
-    let engine: ServiceEngine<_, _> = match router_mode {
+    let routing_host = match router_mode {
         RouterMode::KV => {
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
@@ -189,6 +192,7 @@ where
                 chooser,
                 load_context,
                 affinity,
+                session_affinity_mode,
             ))
         }
         _ => {
@@ -199,12 +203,13 @@ where
                 router,
                 load_context,
                 affinity,
+                session_affinity_mode,
                 lora,
             )?)
         }
     };
 
-    Ok(engine)
+    Ok(routing_host)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -229,6 +234,7 @@ pub async fn build_preprocessed_routing(
         encoder_chooser,
         enable_multimodal_cache_indexer,
         session_affinity_ttl_secs,
+        SessionAffinityMode::Hard,
     )
     .await
 }
@@ -244,6 +250,7 @@ pub(crate) async fn build_preprocessed_routing_with_selector<Sel>(
     encoder_chooser: Option<Arc<EncoderRouter>>,
     enable_multimodal_cache_indexer: bool,
     session_affinity_ttl_secs: Option<u64>,
+    session_affinity_mode: SessionAffinityMode,
 ) -> anyhow::Result<PreprocessedRouting<Sel>>
 where
     Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
@@ -299,22 +306,26 @@ where
             model_manager.clone(),
             router_mode,
             session_affinity_ttl_secs,
+            session_affinity_mode,
         )
     });
     let encoder_router = encoder_chooser.unwrap_or_else(EncoderRouter::disabled);
-    if router_mode.is_kv_routing() && prefill_router.conditional_disagg_enabled() {
-        prefill_router.set_decode_session_affinity(affinity.clone());
-    }
-
-    let backend_engine = preprocessed_backend_engine(
+    let routing_host = preprocessed_backend_engine(
         router,
         router_mode,
         chooser,
         &model_manager,
         &endpoint_id,
         affinity,
+        session_affinity_mode,
         load_context,
     )?;
+    if router_mode.is_kv_routing() && prefill_router.conditional_disagg_enabled() {
+        prefill_router
+            .set_decode_routing_host(routing_host.clone())
+            .context("install conditional-disagg decode RoutingHost")?;
+    }
+    let backend_engine: ServiceEngine<_, _> = routing_host;
     Ok(PreprocessedRouting {
         backend_engine,
         prefill_router,

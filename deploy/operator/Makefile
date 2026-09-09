@@ -237,7 +237,7 @@ HELM_MANAGER_RBAC_ROLE := ../helm/charts/platform/components/operator/files/mana
 .PHONY: manifests
 manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	# Use a large maxDescLen to ensure all field comments are included as OpenAPI descriptions
-	# allowDangerousTypes=true is needed for the EndpointPickerConfig from gateway-api-inference-extension which contains float fields
+	# allowDangerousTypes=true is needed for float fields in the API (e.g. kvTransferPolicy.preferredWeight)
 	$(CONTROLLER_GEN) rbac:roleName=manager-role crd:maxDescLen=100000,allowDangerousTypes=true,generateEmbeddedObjectMeta=true webhook paths="./..." output:crd:artifacts:config=config/crd/bases
 	echo "Removing name from mainContainer required fields"
 	for file in config/crd/bases/*.yaml; do \
@@ -250,7 +250,7 @@ manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and C
 	echo "Removing name from standalone v1beta1 DynamoComponentDeployment required fields"
 	$(YQ) eval '(.spec.versions[] | select(.name == "v1beta1") | .schema.openAPIV3Schema.properties.spec.required) |= (. - ["name"])' -i --indent 2 config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml
 	echo "Removing DGD-only provider overrides from standalone DynamoComponentDeployment schemas"
-	$(YQ) eval '(.spec.versions[].schema.openAPIV3Schema.properties.spec.properties) |= (del(.providerOverride) | del(.multinode.properties.leader) | del(.multinode.properties.worker))' -i --indent 2 config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml
+	$(YQ) eval '(.spec.versions[].schema.openAPIV3Schema.properties.spec.properties) |= del(.providerOverride) | (.spec.versions[].schema.openAPIV3Schema.properties.spec.properties.roles.items.properties) |= del(.providerOverride)' -i --indent 2 config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml
 	# PodTemplateSpec is an external Kubernetes type, so its item-level markers cannot be declared on the API field.
 	# Item-scoped rules avoid unbounded list comprehensions without imposing maxItems on the public API.
 	# The annotation value bound matches Kubernetes' total annotation size limit.

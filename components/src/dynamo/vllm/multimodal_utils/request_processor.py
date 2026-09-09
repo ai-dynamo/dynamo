@@ -118,6 +118,30 @@ def _build_forwarded_mm_uuids(
     return None
 
 
+def _video_media_io_kwargs(request: dict) -> dict:
+    """Request-level video decode options, shape-checked the way vLLM does.
+
+    vLLM types this field as `dict[str, dict[str, Any]] | None` on its own
+    OpenAI schemas, so pydantic rejects a malformed value before any handler
+    runs. Dynamo's frontend forwards the field verbatim by design, so the
+    same check has to land here -- otherwise a non-object reaches
+    `VideoMediaIO(**kwargs)` and surfaces as a server error instead of a
+    request error.
+    """
+    media_io_kwargs = request.get("media_io_kwargs")
+    if media_io_kwargs is None:
+        return {}
+    if not isinstance(media_io_kwargs, dict):
+        raise ValueError("media_io_kwargs must be an object")
+
+    video_kwargs = media_io_kwargs.get("video")
+    if video_kwargs is None:
+        return {}
+    if not isinstance(video_kwargs, dict):
+        raise ValueError("media_io_kwargs['video'] must be an object")
+    return video_kwargs
+
+
 def _build_user_mm_uuids(
     raw_uuids: Any,
     use_unified_vision_chunk: bool,
@@ -553,7 +577,10 @@ class VllmMultimodalRequestProcessor:
 
             video_items = mm_map.get(VIDEO_URL_KEY, [])
             if video_items:
-                videos = await self.video_loader.load_video_batch(video_items)
+                video_io_kwargs = _video_media_io_kwargs(request)
+                videos = await self.video_loader.load_video_batch(
+                    video_items, video_io_kwargs
+                )
                 if videos:
                     vllm_mm_data["video"] = videos[0] if len(videos) == 1 else videos
 
@@ -821,17 +848,30 @@ class VllmMultimodalRequestProcessor:
                 ]
                 has_mm_data = False
 
-            # Preserve the fallback: video/audio media is loaded again
-            # on decode because the handoff currently carries image metadata only.
-            if multi_modal_data is None and has_mm_data:
+            # Video/audio media is loaded again on decode because the handoff
+            # currently carries image metadata only. For mixed requests, merge
+            # it with the reconstructed Qwen image placeholder.
+            if has_mm_data:
                 mm_map = request["multi_modal_data"]
-                if mm_map.get(VIDEO_URL_KEY) or mm_map.get(AUDIO_URL_KEY):
-                    multi_modal_data = await self.extract_multimodal_data(
-                        request,
+                local_mm_map = {
+                    key: mm_map[key]
+                    for key in (VIDEO_URL_KEY, AUDIO_URL_KEY)
+                    if mm_map.get(key)
+                }
+                if local_mm_map:
+                    local_request = dict(request)
+                    local_request["multi_modal_data"] = local_mm_map
+                    local_mm_data = await self.extract_multimodal_data(
+                        local_request,
                         request_id,
                         context,
                         mm_processor_kwargs,
                     )
+                    if local_mm_data:
+                        if multi_modal_data is None:
+                            multi_modal_data = local_mm_data
+                        else:
+                            multi_modal_data.update(local_mm_data)
         elif mode == DisaggregationMode.AGGREGATED:
             pre_rendered = await self.try_receive_mm_kwargs(request)
             if pre_rendered is None:

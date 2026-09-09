@@ -23,10 +23,12 @@ from dynamo.common.utils.engine_response import (
     trailing_stop_prefix_len,
 )
 from dynamo.llm import HttpError
+from dynamo.llm.exceptions import EngineShutdown
 from dynamo.sglang._compat import (
     filter_supported_async_generate_kwargs,
     require_reasoning_kwargs,
 )
+from dynamo.sglang._disagg import validate_disagg_parallel_sampling
 from dynamo.sglang.args import Config
 from dynamo.sglang.engine_generate import (
     build_native_generate_request,
@@ -535,6 +537,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         Raises:
             RuntimeError: If no bootstrap info received from prefill worker.
         """
+        if self.serving_mode == DisaggregationMode.DECODE:
+            validate_disagg_parallel_sampling(request)
         logging.debug(f"New Request ID: {context.id()}")
         routing = request.get("routing") or {}
         if self._first_token_source is not None:
@@ -794,6 +798,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 out: dict[str, Any] = {"index": output_idx}
                 finish_reason = meta_info["finish_reason"]
                 if finish_reason:
+                    shutdown_abort = finish_reason.get("type") == "abort"
+                    if (
+                        shutdown_abort
+                        and self.shutdown_event
+                        and self.shutdown_event.is_set()
+                    ):
+                        raise EngineShutdown(
+                            "Engine was shut down during token generation"
+                        )
                     out["finish_reason"] = normalize_finish_reason(
                         finish_reason["type"]
                     )
@@ -914,6 +927,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             await metadata_uploader.upload_choice(output_idx, meta_info)
                         finally:
                             meta_info.clear()
+                        if (
+                            shutdown_abort
+                            and self.shutdown_event
+                            and self.shutdown_event.is_set()
+                        ):
+                            raise EngineShutdown(
+                                "Engine was shut down during token generation"
+                            )
                 elif metadata_uploader is not None:
                     meta_info.clear()
                 if engine_data:
@@ -969,11 +990,20 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 text = res.get("text", "")
 
                 finish_reason = meta_info["finish_reason"]
-                finish_reason_type = (
-                    normalize_finish_reason(finish_reason["type"])
-                    if finish_reason
-                    else None
-                )
+                if finish_reason:
+                    # Keep shutdown aborts retryable by the frontend.
+                    shutdown_abort = finish_reason.get("type") == "abort"
+                    if (
+                        shutdown_abort
+                        and self.shutdown_event
+                        and self.shutdown_event.is_set()
+                    ):
+                        raise EngineShutdown(
+                            "Engine was shut down during token generation"
+                        )
+                    finish_reason_type = normalize_finish_reason(finish_reason["type"])
+                else:
+                    finish_reason_type = None
                 next_count = len(text)
                 count = text_counts_per_choice.get(index, 0)
                 visible_text_len = next_count
@@ -1022,6 +1052,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         await metadata_uploader.upload_choice(index, meta_info)
                     finally:
                         meta_info.clear()
+                    if (
+                        shutdown_abort
+                        and self.shutdown_event
+                        and self.shutdown_event.is_set()
+                    ):
+                        raise EngineShutdown(
+                            "Engine was shut down during token generation"
+                        )
                 elif metadata_uploader is not None:
                     meta_info.clear()
                 if response_nvext:

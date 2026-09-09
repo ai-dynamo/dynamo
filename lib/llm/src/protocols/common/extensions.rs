@@ -61,13 +61,6 @@ where
     Ok(url.to_string())
 }
 
-/// Internal KV cache hints derived from agent lifecycle metadata.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct KvHints {
-    pub evict_session: bool,
-}
-
 /// Causal trigger that produced an incoming agent request.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -129,10 +122,6 @@ pub struct AgentContext {
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction: Option<AgentCompaction>,
-
-    #[builder(default, setter(strip_option))]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub kv_hints: Option<KvHints>,
 
     /// Causal trigger that produced the request, derived from inbound request content.
     #[builder(default, setter(strip_option))]
@@ -375,15 +364,11 @@ pub fn has_non_cache_salt_routing_headers(headers: &HeaderMap) -> bool {
 
 impl From<AgentContextHeaderValues> for AgentContext {
     fn from(values: AgentContextHeaderValues) -> Self {
-        let kv_hints = (values.session_final == Some(true)).then_some(KvHints {
-            evict_session: true,
-        });
         Self {
             session_id: values.session_id,
             parent_session_id: values.parent_session_id,
             session_final: values.session_final,
             compaction: values.compaction,
-            kv_hints,
             input_trigger: None,
         }
     }
@@ -670,6 +655,9 @@ pub struct NvExtResponse {
     pub completion_token_ids: Option<Vec<TokenIdType>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_token_ids: Option<Vec<TokenIdType>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_logprobs: Option<PromptLogprobs>,
 }
 
@@ -720,6 +708,7 @@ pub struct NvExtResponseFieldSelection {
     pub engine_data: bool,
     pub stop_reason: bool,
     pub completion_token_ids: bool,
+    pub prompt_token_ids: bool,
     pub prompt_logprobs: bool,
 }
 
@@ -739,6 +728,7 @@ impl NvExtResponseFieldSelection {
                     "engine_data" => selection.engine_data = true,
                     "stop_reason" => selection.stop_reason = true,
                     "completion_token_ids" => selection.completion_token_ids = true,
+                    "prompt_token_ids" => selection.prompt_token_ids = true,
                     "prompt_logprobs" => selection.prompt_logprobs = true,
                     _ => {}
                 }
@@ -806,6 +796,14 @@ impl NvExtResponseFieldSelection {
             None
         };
 
+        // Prompt IDs can be large, so emit them only once on the terminal
+        // chunk. The tracker stores them only for an explicit opt-in request.
+        let prompt_token_ids = if self.prompt_token_ids && finish_reason_present {
+            tracker.and_then(|t| t.prompt_token_ids().map(<[u32]>::to_vec))
+        } else {
+            None
+        };
+
         let prompt_logprobs = if self.prompt_logprobs && finish_reason_present {
             prompt_logprobs_from_backend
         } else {
@@ -819,6 +817,7 @@ impl NvExtResponseFieldSelection {
             && engine_data.is_none()
             && stop_reason.is_none()
             && completion_token_ids.is_none()
+            && prompt_token_ids.is_none()
             && prompt_logprobs.is_none()
         {
             return None;
@@ -832,6 +831,7 @@ impl NvExtResponseFieldSelection {
             engine_data,
             stop_reason,
             completion_token_ids,
+            prompt_token_ids,
             prompt_logprobs,
         })
     }
@@ -1285,7 +1285,6 @@ mod tests {
                 expected_parent_session_id
             );
             assert_eq!(agent_context.session_final, None);
-            assert_eq!(agent_context.kv_hints, None);
         }
     }
 
@@ -1531,15 +1530,11 @@ mod tests {
             Some("generic-parent")
         );
         assert_eq!(agent_context.session_final, Some(true));
-        assert_eq!(
-            agent_context.kv_hints,
-            Some(KvHints {
-                evict_session: true
-            })
-        );
-
         headers.insert(HEADER_DYNAMO_SESSION_FINAL, "false".parse().unwrap());
-        assert_eq!(agent_context_from_headers(&headers).unwrap().kv_hints, None);
+        assert_eq!(
+            agent_context_from_headers(&headers).unwrap().session_final,
+            Some(false)
+        );
     }
 
     #[test]
@@ -1605,7 +1600,11 @@ mod tests {
     #[test]
     fn response_field_selection_respects_extra_fields() {
         let nvext = NvExt::builder()
-            .extra_fields(vec!["worker_id".to_string(), "routed_experts".to_string()])
+            .extra_fields(vec![
+                "worker_id".to_string(),
+                "routed_experts".to_string(),
+                "prompt_token_ids".to_string(),
+            ])
             .build()
             .unwrap();
 
@@ -1614,6 +1613,7 @@ mod tests {
             NvExtResponseFieldSelection {
                 worker_id: true,
                 routed_experts: true,
+                prompt_token_ids: true,
                 ..Default::default()
             }
         );
@@ -1669,6 +1669,14 @@ mod tests {
         use crate::protocols::common::timing::RequestTracker;
         let tracker = std::sync::Arc::new(RequestTracker::new());
         tracker.set_external_query_token_ids(vec![11u32, 22, 33]);
+        tracker
+    }
+
+    fn tracker_with_prompt_token_ids()
+    -> std::sync::Arc<crate::protocols::common::timing::RequestTracker> {
+        use crate::protocols::common::timing::RequestTracker;
+        let tracker = std::sync::Arc::new(RequestTracker::new());
+        tracker.set_prompt_token_ids(vec![101u32, 102, 103]);
         tracker
     }
 
@@ -1801,6 +1809,26 @@ mod tests {
 
         assert_eq!(out.completion_token_ids, Some(vec![101u32, 102, 103]));
         assert!(out.prompt_logprobs.is_none());
+    }
+
+    #[test]
+    fn build_response_nvext_prompt_token_ids_final_chunk_only() {
+        let selection = NvExtResponseFieldSelection {
+            prompt_token_ids: true,
+            ..Default::default()
+        };
+        let tracker = tracker_with_prompt_token_ids();
+
+        assert!(
+            selection
+                .build_response_nvext(Some(&tracker), false, None, None, None, None)
+                .is_none()
+        );
+
+        let out = selection
+            .build_response_nvext(Some(&tracker), true, None, None, None, None)
+            .expect("prompt_token_ids should emit on the final chunk");
+        assert_eq!(out.prompt_token_ids, Some(vec![101u32, 102, 103]));
     }
 
     #[test]
