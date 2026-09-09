@@ -970,7 +970,8 @@ mod selection_service_lifecycle_tests {
     #[test]
     fn idempotent_shutdown() {
         let service =
-            Python::with_gil(|py| SelectionService::new(py, 1, None, None, None, None)).unwrap();
+            Python::with_gil(|py| SelectionService::new(py, 1, None, None, None, None, None))
+                .unwrap();
         Python::with_gil(|py| {
             service.shutdown(py);
             service.shutdown(py);
