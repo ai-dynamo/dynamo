@@ -149,16 +149,19 @@ mod tests {
     use crate::services::selection::SelectionCacheConfig;
 
     fn core() -> Arc<SelectionCore> {
-        Arc::new(SelectionCore::new_local(
-            KvRouterConfig {
-                use_kv_events: false,
-                router_queue_threshold: None,
-                ..Default::default()
-            },
-            1,
-            CancellationToken::new(),
-            SelectionCacheConfig::default(),
-        ))
+        Arc::new(
+            SelectionCore::try_new_local(
+                KvRouterConfig {
+                    use_kv_events: false,
+                    router_queue_threshold: None,
+                    ..Default::default()
+                },
+                1,
+                CancellationToken::new(),
+                SelectionCacheConfig::default(),
+            )
+            .expect("valid test config"),
+        )
     }
 
     fn schedulable(worker_id: WorkerId) -> WorkerRequest {

@@ -247,8 +247,8 @@ impl Drop for Selector {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
     use std::collections::HashMap;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use dynamo_kv_router::services::selection::{
@@ -718,8 +718,8 @@ worker_selection:
             .expect("selector should build");
         let duplicate = incomplete_registration(1);
 
-        let error = selector
-            .reconcile(&[duplicate.clone(), duplicate])
+        let error = CatalogReconciler::new(Arc::clone(selector.core()))
+            .apply(vec![duplicate.clone(), duplicate])
             .await
             .expect_err("duplicate IDs must be rejected");
         assert!(error.to_string().contains("duplicate worker_id 1"));
@@ -779,10 +779,7 @@ worker_selection:
         )
         .await
         .expect("selector should build");
-        selector
-            .reconcile(&[schedulable_registration(1)])
-            .await
-            .expect("worker should register");
+        register(&selector, vec![schedulable_registration(1)]).await;
 
         let mut req = select_request("res-eot");
         req.expected_output_tokens = Some(128);
@@ -819,10 +816,7 @@ worker_selection:
         .expect("selector should build");
         let mut reg = schedulable_registration(1);
         reg.model_name = "threshold-free-model".to_string();
-        selector
-            .reconcile(&[reg])
-            .await
-            .expect("worker should register");
+        register(&selector, vec![reg]).await;
 
         // A policy-family name resolves to that family's bucketed class.
         let mut family_req = select_request("res-family");
@@ -869,10 +863,7 @@ worker_selection:
         let selector = Selector::new(&test_config(), WorkerSelectionPolicyRegistry::default())
             .await
             .expect("selector should build");
-        selector
-            .reconcile(&[schedulable_registration(1)])
-            .await
-            .expect("worker should register");
+        register(&selector, vec![schedulable_registration(1)]).await;
         let mut synthetic_req = select_request("res-synthetic");
         synthetic_req.policy_class = Some("anything".to_string());
         selector
