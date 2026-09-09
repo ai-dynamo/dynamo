@@ -123,6 +123,12 @@ def add_synthesis_args(parser):
         help="Minimum input sequence length to include in output (default: None, no filtering)",
     )
     parser.add_argument(
+        "--max-rejections",
+        type=int,
+        default=10000,
+        help="Maximum consecutive ISL rejections before failing (default: 10000)",
+    )
+    parser.add_argument(
         "--min-osl",
         type=int,
         default=None,
@@ -308,6 +314,7 @@ def prepare_trace_dataset(args, output_dir, logger):
         num_requests,
         max_isl=args.max_isl,
         min_isl=args.min_isl,
+        max_rejections=args.max_rejections,
         min_osl=args.min_osl,
         max_osl=args.max_osl,
     )

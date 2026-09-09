@@ -102,15 +102,15 @@ If we set the `prefix-len-multiplier` to 2, then the core prefix branches will b
 
 Note that the "prompt branches" are not stretched by `prefix-len-multiplier`. They can be separately modified by applying `prompt-len-multiplier`.
 
-Now, if we set `prefix-root-multiplier` to 2, each row has a 50 percent chance of using either independent radix tree. Both trees have the same structure and distinct hash IDs. The IDs below are illustrative: the implementation maps each ID to `id * num_copies + copy_index`, keeping namespaces stable across repeated calls to `synthesize_requests`.
+Now, if we set `prefix-root-multiplier` to 2, each row has a 50 percent chance of using either independent radix tree. Both trees have the same structure and distinct hash IDs. The implementation maps each ID to `id * num_copies + copy_index`, keeping namespaces stable across repeated calls to `synthesize_requests`. With two copies, the first tree uses even IDs and the second uses odd IDs.
 
 For example, if rows 2 and 4 use the second tree, then we would get:
 
 ```
-[0, 1, 2, 3, 4, 5, (6)]
-[10, 11, 12, 13]
-[0, 1, 2, 3, 4, 5]
-[10, 11, (14), (15)]
+[0, 2, 4, 6, 8, 10, (12)]
+[1, 3, 5, 7]
+[0, 2, 4, 6, 8, 10]
+[1, 3, (15), (17)]
 ```
 
 Synthetic hash IDs are normalized even when all multipliers are one. Do not mix
@@ -147,7 +147,7 @@ I find this to be the most "robust" end-to-end test. It is important to sample a
 Run the CPU-only regression suite from the repository root, using its Python environment:
 
 ```bash
-.venv/bin/python -m pytest benchmarks/prefix_data_generator/tests -q
+PYTHONPATH=benchmarks .venv/bin/python -m pytest -c pyproject.toml benchmarks/prefix_data_generator/tests -q
 ```
 
 The suite requires the benchmark Python dependencies and pytest. It does not download
