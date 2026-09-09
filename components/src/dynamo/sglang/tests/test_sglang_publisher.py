@@ -841,6 +841,7 @@ async def test_run_to_completion_finishes_the_body_when_the_caller_is_cancelled(
 
     async def caller():
         result["cancelled"] = await run_to_completion(body())
+        steps.append("caller.observed")
 
     outer = asyncio.create_task(caller())
     await started.wait()
@@ -850,7 +851,7 @@ async def test_run_to_completion_finishes_the_body_when_the_caller_is_cancelled(
     await outer
 
     assert result["cancelled"] is True
-    assert steps == ["first", "second"]
+    assert steps == ["first", "second", "caller.observed"]
 
 
 @pytest.mark.timeout(5)
