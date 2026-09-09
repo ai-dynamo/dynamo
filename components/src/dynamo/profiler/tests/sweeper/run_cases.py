@@ -26,7 +26,22 @@ import yaml
 
 from dynamo.profiler.sweeper.output.atomic import replace_text
 from dynamo.profiler.sweeper.renderers import DGDGenerationOptions, render_dgd
-from dynamo.profiler.sweeper.runner import load_sweep_config, run_sweep
+from dynamo.profiler.sweeper.stack_provider import create_stack
+
+
+def load_sweep_config(config_path):
+    from aisimulate.sweeper import SmartSearchConfig
+
+    return SmartSearchConfig.from_yaml(str(config_path))
+
+
+def run_sweep(config):
+    from types import SimpleNamespace
+
+    from aisimulate.sweeper import Sweeper
+
+    candidates = list(Sweeper(runner_factory=create_stack()).run(config))
+    return SimpleNamespace(candidates=candidates)
 
 _ROOT = Path(__file__).parent
 _REPOSITORY_ROOT = _ROOT.parents[5]
@@ -726,6 +741,8 @@ def _run_sweeper_renderers(
         reason = f": {exception.describe()}" if exception is not None else ""
         print(f"[{case.hardware.name}/{case.name}] sweeper skipped{reason}", flush=True)
         return []
+
+    from aisimulate.sweeper import SmartSearchConfig, Sweeper
 
     config = load_sweep_config(case.composed_sweeper_path)
     if config.goal.is_pareto:
