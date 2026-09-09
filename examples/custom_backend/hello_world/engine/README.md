@@ -378,3 +378,15 @@ src/hello_engine/tokenizer/   bundled byte-level mock tokenizer (~6 KB)
 Dockerfile                    engine layered on the Dynamo base image
 deploy/dgd.yaml               DynamoGraphDeployment (frontend + workers)
 ```
+
+## What to change when you copy this
+
+| Where | Change |
+|---|---|
+| `pyproject.toml` | package `name` and the `[tool.hatch.build.targets.wheel]` packages path |
+| `Dockerfile` | base image tag — pin to the Dynamo release you build against |
+| `from_args()` | the `--component`, `--endpoint`, and `--served-model-name` defaults |
+| `model_name=` | point at your real model/tokenizer repo — leave it and the frontend tokenizes with the mock vocab |
+| `LlmRegistration` | real values for your engine — **`kv_cache_block_size` must match your engine's actual block size, or the router silently drops your KV events on the first mismatched block** |
+| `generate()` | replace the hardcoded stream with your inference; keep the chunk contract (`token_ids`/`index`, terminal `finish_reason` + `completion_usage`, `is_stopped()` checks) |
+| `deploy/dgd.yaml` | both `image:` references and `metadata.name` |
