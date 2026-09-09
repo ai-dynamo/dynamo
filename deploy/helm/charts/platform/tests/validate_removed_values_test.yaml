@@ -59,8 +59,6 @@ tests:
     asserts:
       - notFailedTemplate: {}
 
-  # --- Grove ownership of KAI PodGroups ---
-
   - it: should reject bundled KAI with Grove without the stale PodGroup override
     set:
       global.kai-scheduler.install: true

@@ -115,8 +115,6 @@ Volcano:
 ` }}
 {{- end }}
 
-{{/* ---- Grove ownership of KAI PodGroups ---- */}}
-
 {{- $groveEnabled := or
   (and .Values.global .Values.global.grove .Values.global.grove.enabled)
   (and .Values.global .Values.global.grove .Values.global.grove.install)
