@@ -112,7 +112,13 @@ impl DeltaGenerator {
                 } else {
                     t.clone()
                 };
-                let converted = convert_backend_top_logprobs(top_lps, t, *tid, lp, return_as_ids);
+                // With no alternatives (e.g. top_logprobs=0), do not let the
+                // converter synthesize a top entry for the chosen token.
+                let converted = if top_lps.is_empty() {
+                    Vec::new()
+                } else {
+                    convert_backend_top_logprobs(top_lps, t, *tid, lp, return_as_ids)
+                };
                 dynamo_protocols::types::ChatCompletionTokenLogprob {
                     token: token_str.clone(),
                     logprob: lp,
@@ -571,6 +577,187 @@ mod tests {
         assert_eq!(content.len(), 1);
         assert_eq!(content[0].token_id, Some(1));
         assert_eq!(content[0].logprob, -0.5);
+    }
+
+    fn assert_chat_logprobs_without_alternatives(
+        top_logprobs: Option<common::llm_backend::TopLogprobs>,
+    ) {
+        for requested_top in [Some(0), None] {
+            for return_as_ids in [false, true] {
+                let mut request = create_test_request();
+                request.inner.logprobs = Some(true);
+                request.inner.top_logprobs = requested_top;
+                request.return_tokens_as_token_ids = Some(return_as_ids);
+                let generator = request.response_generator("req-logprobs-no-top".to_string());
+                let logprobs = generator
+                    .create_logprobs(
+                        vec![Some("hello".to_string())],
+                        &[1],
+                        Some(vec![-0.5]),
+                        top_logprobs.clone(),
+                    )
+                    .expect("chosen-token logprobs");
+                let content = logprobs.content.expect("chosen-token content");
+                assert_eq!(content.len(), 1);
+                let expected_token = if return_as_ids { "token_id:1" } else { "hello" };
+                assert_eq!(content[0].token, expected_token);
+                assert_eq!(content[0].token_id, Some(1));
+                assert_eq!(content[0].logprob, -0.5);
+                assert_eq!(content[0].bytes, token_to_utf8_bytes(expected_token));
+                assert!(content[0].top_logprobs.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn test_chat_logprobs_absent_alternatives() {
+        assert_chat_logprobs_without_alternatives(None);
+    }
+
+    #[test]
+    fn test_chat_logprobs_empty_alternatives_array() {
+        assert_chat_logprobs_without_alternatives(Some(vec![]));
+    }
+
+    #[test]
+    fn test_chat_logprobs_empty_alternatives_position() {
+        assert_chat_logprobs_without_alternatives(Some(vec![vec![]]));
+    }
+
+    #[test]
+    fn test_chat_logprobs_short_alternatives_preserve_all_chosen_tokens() {
+        let mut request = create_test_request();
+        request.inner.logprobs = Some(true);
+        let generator = request.response_generator("req-logprobs-mixed-top".to_string());
+        let candidate = common::llm_backend::TopLogprob {
+            rank: 1,
+            token_id: 1,
+            token: Some("hello".to_string()),
+            logprob: -0.5,
+            bytes: Some(b"hello".to_vec()),
+        };
+        let logprobs = generator
+            .create_logprobs(
+                vec![
+                    Some("hello".into()),
+                    Some(" world".into()),
+                    Some("!".into()),
+                ],
+                &[1, 2, 3],
+                Some(vec![-0.5, -0.25, -0.125]),
+                Some(vec![vec![candidate], vec![]]),
+            )
+            .expect("chosen-token logprobs");
+        let content = logprobs.content.expect("chosen-token content");
+        assert_eq!(content.len(), 3);
+        assert_eq!(content[0].top_logprobs.len(), 1);
+        assert_eq!(content[0].top_logprobs[0].token, "hello");
+        for (index, expected) in [-0.5, -0.25, -0.125].into_iter().enumerate() {
+            assert_eq!(content[index].logprob, expected);
+            assert_eq!(content[index].token_id, Some(index as u32 + 1));
+        }
+        assert!(content[1].top_logprobs.is_empty());
+        assert!(content[2].top_logprobs.is_empty());
+    }
+
+    #[test]
+    fn test_chat_logprobs_nonempty_alternatives_unchanged() {
+        let mut request = create_test_request();
+        request.inner.logprobs = Some(true);
+        request.inner.top_logprobs = Some(1);
+        let generator = request.response_generator("req-logprobs-top-control".to_string());
+        let candidates = vec![common::llm_backend::TopLogprob {
+            rank: 1,
+            token_id: 2,
+            token: Some("hi".to_string()),
+            logprob: -0.25,
+            bytes: Some(b"hi".to_vec()),
+        }];
+        let expected = convert_backend_top_logprobs(&candidates, "hello", 1, -0.5, false);
+        let logprobs = generator
+            .create_logprobs(
+                vec![Some("hello".into())],
+                &[1],
+                Some(vec![-0.5]),
+                Some(vec![candidates]),
+            )
+            .expect("chosen-token logprobs");
+        let content = logprobs.content.expect("chosen-token content");
+        assert_eq!(content.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&content[0].top_logprobs).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_chat_logprobs_disabled_or_missing_chosen_still_absent() {
+        let mut request = create_test_request();
+        let generator = request.response_generator("req-logprobs-disabled".to_string());
+        assert!(
+            generator
+                .create_logprobs(vec![Some("hello".into())], &[1], Some(vec![-0.5]), None)
+                .is_none()
+        );
+        request.inner.logprobs = Some(true);
+        let generator = request.response_generator("req-logprobs-missing".to_string());
+        assert!(
+            generator
+                .create_logprobs(vec![Some("hello".into())], &[1], None, None)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_chat_logprobs_zero_top_streaming_and_aggregation() {
+        use crate::protocols::Annotated;
+        use crate::protocols::openai::ParsingOptions;
+        use crate::protocols::openai::chat_completions::aggregator::DeltaAggregator;
+
+        for streaming in [true, false] {
+            let mut request = create_test_request();
+            request.inner.logprobs = Some(true);
+            request.inner.top_logprobs = Some(0);
+            request.inner.stream = Some(streaming);
+            request.enable_usage_for_nonstreaming(streaming);
+            let mut generator = request.response_generator("req-logprobs-zero-top".to_string());
+            let mut deltas = Vec::new();
+            for (index, token) in ["hello", " world"].into_iter().enumerate() {
+                let mut output = final_backend_output();
+                output.token_ids = vec![index as u32 + 1];
+                output.tokens = vec![Some(token.to_string())];
+                output.text = Some(token.to_string());
+                output.log_probs = Some(vec![-0.5]);
+                output.finish_reason = (index == 1).then_some(common::FinishReason::Stop);
+                let delta = generator
+                    .choice_from_postprocessor(output)
+                    .expect("stream delta");
+                let json = serde_json::to_value(&delta).expect("serialize stream delta");
+                assert_eq!(
+                    json["choices"][0]["logprobs"]["content"][0]["logprob"],
+                    -0.5
+                );
+                assert_eq!(
+                    json["choices"][0]["logprobs"]["content"][0]["top_logprobs"],
+                    serde_json::json!([])
+                );
+                deltas.push(Annotated::from_data(delta));
+            }
+            let response =
+                DeltaAggregator::apply(futures::stream::iter(deltas), ParsingOptions::default())
+                    .await
+                    .expect("aggregate nonstream response");
+            let json = serde_json::to_value(response).expect("serialize aggregate");
+            let content = json["choices"][0]["logprobs"]["content"]
+                .as_array()
+                .expect("chosen-token array");
+            assert_eq!(content.len(), 2);
+            assert_eq!(json["choices"][0]["message"]["content"], "hello world");
+            for logprob in content {
+                assert_eq!(logprob["logprob"], -0.5);
+                assert_eq!(logprob["top_logprobs"], serde_json::json!([]));
+            }
+        }
     }
 
     #[test]
