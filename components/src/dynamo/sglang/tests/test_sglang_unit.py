@@ -558,6 +558,36 @@ async def test_parse_args_sets_raw_memory_saver_before_resolution(
     assert config.server_args.enable_memory_saver is expected
 
 
+@pytest.mark.asyncio
+async def test_parse_args_disables_raw_fpm_for_snapshot_with_metric_port(
+    monkeypatch, mock_sglang_cli, tmp_path
+):
+    monkeypatch.setattr(
+        "dynamo.sglang.args.configure_snapshot_capture_env", lambda: None
+    )
+    monkeypatch.delenv("DYN_GMS_USE_V1", raising=False)
+    monkeypatch.setenv(SNAPSHOT_CONTROL_DIR_ENV, str(tmp_path))
+    monkeypatch.setenv("DYN_FORWARDPASS_METRIC_PORT", "23456")
+    server_args = SimpleNamespace(
+        disaggregation_mode="null",
+        dllm_algorithm=None,
+        enable_forward_pass_metrics=False,
+        kv_events_config=None,
+        get_model_config=lambda: SimpleNamespace(is_multimodal=False),
+    )
+
+    def resolve(parsed_args):
+        assert parsed_args.enable_forward_pass_metrics is False
+        return server_args
+
+    monkeypatch.setattr("dynamo.sglang.args.ServerArgs.from_cli_args", resolve)
+    mock_sglang_cli(model=str(tmp_path))
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.server_args.enable_forward_pass_metrics is False
+
+
 def test_compat_filters_async_generate_kwargs_for_older_engines():
     class OldEngine:
         async def async_generate(self, input_ids=None, sampling_params=None):
