@@ -934,13 +934,19 @@ impl MetricsRegistry {
         for registry in &registries {
             for built in registry.execute_typed_callbacks() {
                 let name = built.family.name().to_string();
+                // Publish the side metadata only once the family is accepted.
+                // The maps are keyed by name, so metadata from a family the
+                // merger rejects would otherwise be applied to the family that
+                // did survive under that name -- a rejected `info` could make a
+                // surviving gauge encode as a non-monotonic Sum.
+                if let Err(error) = merger.add_family(built.family) {
+                    tracing::warn!(metric_name = %name, %error, "skipping typed metric family");
+                    continue;
+                }
                 if !built.unit.is_empty() {
                     units.insert(name.clone(), built.unit);
                 }
-                prom_types.insert(name.clone(), built.prom_type);
-                if let Err(error) = merger.add_family(built.family) {
-                    tracing::warn!(metric_name = %name, %error, "skipping typed metric family");
-                }
+                prom_types.insert(name, built.prom_type);
             }
         }
 
@@ -2109,6 +2115,46 @@ mod test_metric_families_combined {
         let collected = registry().metric_families_combined().expect("combined");
         assert!(names(&collected.families).contains(&"vllm:num_requests_running"));
         assert!(names(&collected.families).contains(&"dynamo_native_total"));
+    }
+
+    /// `units` and `prom_types` are keyed by family name, so a family the
+    /// merger rejects must not leave its metadata behind: it would then be
+    /// applied to whichever family did survive under that name. Here the
+    /// rejected entry claims `info`, which would flip the surviving gauge to a
+    /// non-monotonic Sum on the OTLP side.
+    #[test]
+    fn rejected_family_leaves_no_metadata_behind() {
+        let registry = MetricsRegistry::new();
+        registry.add_typed_callback(StdArc::new(|| {
+            Ok(vec![
+                crate::metrics::prom_typed::BuiltFamily {
+                    unit: String::new(),
+                    prom_type: "gauge".to_string(),
+                    family: gauge_family("vllm:cache_usage", "Cache usage", 0.5),
+                },
+                // Same name, different help -> rejected by the merger.
+                crate::metrics::prom_typed::BuiltFamily {
+                    unit: "seconds".to_string(),
+                    prom_type: "info".to_string(),
+                    family: gauge_family("vllm:cache_usage", "A different help", 1.0),
+                },
+            ])
+        }));
+
+        let collected = registry.metric_families_combined().expect("combined");
+
+        assert_eq!(
+            collected
+                .prom_types
+                .get("vllm:cache_usage")
+                .map(String::as_str),
+            Some("gauge"),
+            "the rejected family's type overwrote the accepted family's"
+        );
+        assert!(
+            !collected.units.contains_key("vllm:cache_usage"),
+            "the rejected family's unit was published for a family that has none"
+        );
     }
 
     /// The two surfaces are fed independently: typed callbacks reach OTLP,
