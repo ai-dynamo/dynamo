@@ -838,6 +838,32 @@ fn update_model_taints<'p>(
     })
 }
 
+static FETCH_MODEL_RUNTIME_MISMATCH_WARNING: std::sync::Once = std::sync::Once::new();
+
+fn ensure_fetch_model_runtime() -> anyhow::Result<&'static tokio::runtime::Runtime> {
+    let primary = rs::Worker::ensure_process_runtime()?;
+
+    // `Err(())` only means that the bridge runtime was already selected. It may already be
+    // borrowing `primary`, so identity has to be checked independently.
+    let _ = pyo3_async_runtimes::tokio::init_with_runtime(primary);
+    let bridge = pyo3_async_runtimes::tokio::get_runtime();
+
+    if !std::ptr::eq(bridge, primary) {
+        FETCH_MODEL_RUNTIME_MISMATCH_WARNING.call_once(|| {
+            tracing::warn!(
+                operation = "fetch_model",
+                runtime_bridge_mismatch = true,
+                pyo3_runtime_id = ?bridge.handle().id(),
+                dynamo_runtime_id = ?primary.handle().id(),
+                "the pyo3 async bridge was initialized before fetch_model and uses a different \
+                 Tokio runtime; model fetch will continue with separate runtimes"
+            );
+        });
+    }
+
+    Ok(primary)
+}
+
 /// Download a model from Hugging Face, returning its local path
 /// Example: `model_path = await fetch_model("Qwen/Qwen3-0.6B")`
 #[pyfunction]
@@ -847,8 +873,10 @@ fn fetch_model<'p>(
     remote_name: &str,
     ignore_weights: bool,
 ) -> PyResult<Bound<'p, PyAny>> {
+    let locals = pyo3_async_runtimes::tokio::get_current_locals(py)?;
     let repo = remote_name.to_string();
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    ensure_fetch_model_runtime().map_err(to_pyerr)?;
+    pyo3_async_runtimes::tokio::future_into_py_with_locals(py, locals, async move {
         LocalModel::fetch(&repo, ignore_weights)
             .await
             .map_err(to_pyerr)
