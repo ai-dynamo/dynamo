@@ -20,7 +20,7 @@ That image is the build's `RUNTIME_IMAGE`, so the result is a single "Dynamo + T
 | Service Discovery / Routing                    |  Ready  | Via the Dynamo Frontend                                         |
 | Triton backends (TensorRT, ONNX, PyTorch, ...) |  Ready  | Whatever the Triton release image ships                         |
 | TensorRT Plugins                               |  Ready  | Via `--backend-config='tensorrt,plugins=...'`                   |
-| Round-Robin / KV-Aware Routing                 | Partial | KV-aware routing is LLM-oriented; tensor models use round-robin |
+| Routing                                        | Round-Robin only | KV-aware routing is LLM-oriented; tensor models use round-robin |
 | Disaggregated Serving                          |   N/A   | Not applicable to generic tensor models                         |
 
 ## Known limitations
