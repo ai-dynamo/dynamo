@@ -5,7 +5,7 @@
 # The base carries the Dynamo runtime + ai-dynamo Python package; we
 # layer the engine wheel on top. No GPU, no model weights.
 ARG BASE_IMAGE=nvcr.io/nvidia/ai-dynamo/dynamo-frontend
-ARG BASE_IMAGE_TAG=1.3.0
+ARG BASE_IMAGE_TAG=1.4.0
 
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG}
 
