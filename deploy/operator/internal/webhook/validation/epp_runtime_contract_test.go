@@ -179,7 +179,6 @@ func TestEPPRequiresResolvableRuntimeVersionOnUpdate(t *testing.T) {
 			field.NewPath("spec"),
 			true,
 			schema.GroupKind{Group: "nvidia.com", Kind: "DynamoGraphDeployment"},
-			false,
 		)
 		if runtimeVersionOverrideError(errs) == nil {
 			t.Fatalf("EPP updated onto unresolvable image %q was admitted "+
@@ -202,7 +201,6 @@ func TestEPPUnchangedUnresolvableImageIsRatcheted(t *testing.T) {
 		field.NewPath("spec"),
 		true,
 		schema.GroupKind{Group: "nvidia.com", Kind: "DynamoGraphDeployment"},
-		false,
 	)
 	if err := runtimeVersionOverrideError(errs); err != nil {
 		t.Fatalf("unchanged pre-existing image lost its ratchet: %v", err)
