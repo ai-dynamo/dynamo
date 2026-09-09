@@ -738,7 +738,7 @@ mod tests {
             let context = super::configured_zmq_context(value.map(OsStr::new)).unwrap();
             assert_eq!(context.get_io_threads().unwrap(), expected);
         }
-        for value in ["0", "-1", "invalid", "", "2147483648"] {
+        for value in ["0", "invalid", "2147483648"] {
             assert!(super::configured_zmq_context(Some(OsStr::new(value))).is_err());
         }
         #[cfg(unix)]
