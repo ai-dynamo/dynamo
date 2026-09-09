@@ -884,7 +884,7 @@ Initialize the ImageLoader with caching, HTTP settings, and optional NIXL config
 
 <ParamField path="cache_size" type="int">
 Maximum number of images to store in the in-memory LRU cache.
-Defaults to CACHE_SIZE_MAXIMUM.
+Zero or less disables caching. Defaults to CACHE_SIZE_MAXIMUM.
 </ParamField>
 <ParamField path="http_timeout" type="float">
 Timeout in seconds for HTTP requests when fetching remote images.
@@ -909,7 +909,7 @@ load_image(image_url: str) -> Image.Image
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L206)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L210)
 
 <h4 id="api-dynamo-common-multimodal-image-loader-imageloader-load-image-batch">load_image_batch</h4>
 
@@ -947,7 +947,7 @@ as None. This is enabled only by backends that resolve such slots.
 - `ValueError` — If enable_frontend_decoding=True but nixl_connector is None
 - `ValueError` — If a UUID-only slot is received without opting in
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L283)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L287)
 </Accordion>
 
 <Accordion id="api-dynamo-common-backend-engine-llmengine" title="LLMEngine (class)">
