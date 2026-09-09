@@ -48,8 +48,6 @@ HARDCODED_REPLY = (
 )
 
 
-
-
 class HelloEngine(LLMEngine):
     def __init__(self, tokenizer_repo: str, delay: float = 0.05):
         self.tokenizer_repo = tokenizer_repo
