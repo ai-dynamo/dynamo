@@ -291,7 +291,7 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
 
         try:
             from vllm.engine.arg_utils import AsyncEngineArgs
-            from vllm.entrypoints.openai.cli_args import FrontendArgs
+            from vllm.entrypoints.launchers.cli_args import FrontendArgs
         except ModuleNotFoundError:
             logger.exception("Flag '--chat-processor vllm' requires vllm be installed.")
             sys.exit(1)

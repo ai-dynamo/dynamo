@@ -14,15 +14,15 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Protocol, TypeGuard, cast
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaFunctionCall,
+    DeltaMessage,
+    DeltaToolCall,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedFunction,
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaFunctionCall,
-    DeltaMessage,
-    DeltaToolCall,
 )
 from vllm.reasoning import ReasoningParser
 from vllm.renderers import ChatParams, merge_kwargs

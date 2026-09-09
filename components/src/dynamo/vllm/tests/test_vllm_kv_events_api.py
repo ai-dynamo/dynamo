@@ -83,6 +83,7 @@ class TestVllmKvEventsApi:
         10. kv_cache_spec_kind (semantic cache type; optional for older vLLM)
         11. kv_cache_spec_sliding_window (semantic cache window; optional for older vLLM)
         12. locality (per-tier storage locality; optional for older vLLM)
+        13. ownership (secondary offloading tier; added in vLLM 0.29)
 
         If vLLM adds/removes/reorders fields, this test will fail.
         """
@@ -104,6 +105,7 @@ class TestVllmKvEventsApi:
             expected_fields.append("kv_cache_spec_sliding_window")
         if _has_locality(BlockStored):
             expected_fields.append("locality")
+        expected_fields.append("ownership")
         expected_fields = tuple(expected_fields)
 
         actual_fields = BlockStored.__struct_fields__
@@ -131,6 +133,7 @@ class TestVllmKvEventsApi:
             expected_fields.append("kv_cache_spec_sliding_window")
         if _has_locality(BlockRemoved):
             expected_fields.append("locality")
+        expected_fields.append("ownership")
         expected_fields = tuple(expected_fields)
 
         actual_fields = BlockRemoved.__struct_fields__

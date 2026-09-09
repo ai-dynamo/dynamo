@@ -22,7 +22,7 @@ _vllm = importlib.import_module("vllm")
 _chat_protocol = importlib.import_module(
     "vllm.entrypoints.openai.chat_completion.protocol"
 )
-_engine_protocol = importlib.import_module("vllm.entrypoints.openai.engine.protocol")
+_engine_protocol = importlib.import_module("vllm.entrypoints.generate.base.protocol")
 _inputs_data = importlib.import_module("vllm.inputs")
 _reasoning = importlib.import_module("vllm.reasoning")
 _sampling_params = importlib.import_module("vllm.sampling_params")
@@ -480,6 +480,11 @@ class TestVllmRendererApi:
         core_output_fields = core_output_fields + tuple(
             fields + vllm_028_output_extra_fields for fields in core_output_fields
         )
+        core_output_fields += (
+            base_output_fields
+            + vllm_028_output_extra_fields
+            + ("spec_decode_metrics",),
+        )
         valid_output_fields = core_output_fields + tuple(
             fields + omni_output_extra_fields for fields in core_output_fields
         )
@@ -518,6 +523,8 @@ class TestVllmRendererApi:
             assert output.mm_cache_miss_hashes is None
         if "new_sampling_mask" in EngineCoreOutput.__struct_fields__:
             assert output.new_sampling_mask is None
+        if "spec_decode_metrics" in EngineCoreOutput.__struct_fields__:
+            assert output.spec_decode_metrics is None
         assert output.finish_reason is FinishReason.STOP
         assert output.stop_reason == "eos"
 
