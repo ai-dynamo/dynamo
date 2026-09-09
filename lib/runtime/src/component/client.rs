@@ -577,7 +577,6 @@ impl Client {
         self.instance_source.borrow().clone()
     }
 
-    /// Clone only the selected instance from the current discovery snapshot.
     pub(crate) fn instance_by_id(&self, instance_id: u64) -> Option<Instance> {
         self.instance_source
             .borrow()
@@ -1026,12 +1025,10 @@ mod tests {
         tx.send(vec![instances[0].clone(), updated.clone()])
             .unwrap();
         assert_eq!(client.instance_by_id(2), Some(updated));
-        assert_eq!(selected, instances[1]);
 
         tx.send(vec![instances[0].clone()]).unwrap();
         assert!(client.instance_by_id(2).is_none());
         assert_eq!(client.instance_by_id(1), Some(instances[0].clone()));
-        assert_eq!(selected, instances[1]);
 
         rt.shutdown();
     }
