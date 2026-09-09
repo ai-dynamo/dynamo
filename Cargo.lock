@@ -2451,9 +2451,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-custom-policy-example-adaptive"
+version = "1.5.0"
+dependencies = [
+ "dynamo-kv-router",
+ "fastrand",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "dynamo-custom-policy-example-catalog"
 version = "1.5.0"
 dependencies = [
+ "dynamo-custom-policy-example-adaptive",
  "dynamo-custom-policy-example-disagg-filter-score-pick",
  "dynamo-custom-policy-example-simple-filter-score-pick",
  "dynamo-custom-policy-example-simple-stacked-score-pick",

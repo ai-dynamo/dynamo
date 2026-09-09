@@ -26,6 +26,7 @@ Preferred routing taints are optional candidate metadata. A filter, scorer, or p
 
 | Crate | Use it for |
 |---|---|
+| [`adaptive`](adaptive/README.md) | Adjust cache/load scorer budgets with bounded AIMD or sigmoid control; includes phase-shift and bandit experiments |
 | [`soft-pin-repin`](soft-pin-repin/README.md) | Retain a soft session-affinity target until its active-request load exceeds a threshold, then repin |
 | `simple-filter-score-pick` | One filter, one scorer, and one picker show the complete policy flow |
 | `disagg-filter-score-pick` | Prefill and decode workers each need the complete policy flow |

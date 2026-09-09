@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+worker_selection:
+  aggregated: adaptive-aimd
+  prefill: adaptive-aimd
+  instances:
+    - name: adaptive-sigmoid
+      type: adaptive
+      parameters:
+        algorithm: sigmoid
+    - name: adaptive-aimd
+      type: adaptive
+      parameters:
+        algorithm: aimd

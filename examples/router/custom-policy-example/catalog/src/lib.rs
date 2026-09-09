@@ -11,6 +11,7 @@ use dynamo_kv_router::services::selection::{
 pub fn register(
     registry: &mut WorkerSelectionPolicyRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
+    adaptive_policy::register(registry)?;
     soft_pin_repin_policy::register(registry)?;
     simple_filter_score_pick_policy::register(registry)?;
     disagg_filter_score_pick_policy::register(registry)?;
@@ -25,6 +26,11 @@ mod tests {
     fn registers_all_policies() {
         let mut registry = WorkerSelectionPolicyRegistry::default();
         register(&mut registry).unwrap();
+
+        assert!(matches!(
+            adaptive_policy::register(&mut registry),
+            Err(WorkerSelectionPolicyRegistryError::Duplicate { name }) if name == "adaptive"
+        ));
 
         assert!(matches!(
             soft_pin_repin_policy::register(&mut registry),
