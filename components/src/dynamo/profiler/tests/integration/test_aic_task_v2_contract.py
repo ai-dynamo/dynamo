@@ -16,10 +16,6 @@ pytestmark = [
     pytest.mark.planner,
     pytest.mark.pre_merge,
     pytest.mark.timeout(60),
-    # Rapid still uses the compatibility API shipped by AISimulate 0.12.
-    pytest.mark.filterwarnings(
-        r"ignore:.*aiconfigurator\.sdk\.sweep\.sweep_agg.*:DeprecationWarning"
-    ),
 ]
 
 
