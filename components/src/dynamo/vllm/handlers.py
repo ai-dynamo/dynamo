@@ -34,11 +34,6 @@ from typing import (
 import numpy as np
 import torch
 from dynamo._core import Context
-from dynamo.artifacts.capture import (
-    GenerationArtifactSession,
-    generation_artifact_contents,
-    generation_artifact_settings,
-)
 from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.lora.manager import LoRAInfo, get_lora_manager
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
@@ -75,6 +70,11 @@ from dynamo.llm import (
 from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
 from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.vllm.generation_artifact import (
+    VllmGenerationArtifactSession,
+    generation_artifact_contents,
+    generation_artifact_settings,
+)
 from dynamo.vllm.kv_connector_protocols import (
     KvConnectorProtocol,
     make_kv_connector_protocol,
@@ -3722,18 +3722,20 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             self.model_max_len,
             enable_rl=self.config.enable_rl,
         )
-        generation_artifact_session = GenerationArtifactSession.from_backend_request(
-            request,
-            model_config=self.model_config,
-            enable_rl=self.config.enable_rl,
-            route_capture_enabled=bool(
-                getattr(
-                    getattr(self, "engine_args", None),
-                    "enable_return_routed_experts",
-                    False,
-                )
-            ),
-            choice_count=int(getattr(sampling_params, "n", 1) or 1),
+        generation_artifact_session = (
+            VllmGenerationArtifactSession.from_backend_request(
+                request,
+                model_config=self.model_config,
+                enable_rl=self.config.enable_rl,
+                route_capture_enabled=bool(
+                    getattr(
+                        getattr(self, "engine_args", None),
+                        "enable_return_routed_experts",
+                        False,
+                    )
+                ),
+                choice_count=int(getattr(sampling_params, "n", 1) or 1),
+            )
         )
         if generation_artifact_session is not None:
             generation_artifact_session.validate_route_start(

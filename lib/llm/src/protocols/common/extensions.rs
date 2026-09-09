@@ -9,12 +9,12 @@ use dynamo_protocols::types::StopReason;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::protocols::TokenIdType;
 use crate::protocols::agents::{
-    AgentContextHeaderValues, agent_context_header_values, session_affinity_header_value,
+    agent_context_header_values, session_affinity_header_value, AgentContextHeaderValues,
 };
 use crate::protocols::common::llm_backend::PromptLogprobs;
 use crate::protocols::common::timing::TimingInfo;
+use crate::protocols::TokenIdType;
 
 /// Request-level taint constraints carried by `nvext.routing_constraints`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
@@ -93,34 +93,21 @@ where
     Ok(value)
 }
 
-fn deserialize_artifact_contents<'de, D>(
-    deserializer: D,
-) -> Result<Vec<GenerationArtifactKind>, D::Error>
+fn deserialize_artifact_contents<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let values = Vec::<GenerationArtifactKind>::deserialize(deserializer)?;
+    let values = Vec::<String>::deserialize(deserializer)?;
     let mut unique = HashSet::new();
-    if values.iter().any(|value| !unique.insert(*value)) {
+    if values
+        .iter()
+        .any(|value| value.trim().is_empty() || !unique.insert(value))
+    {
         return Err(serde::de::Error::custom(
-            "generation_artifact.contents must not contain duplicates",
+            "generation_artifact.contents must contain unique non-empty strings",
         ));
     }
     Ok(values)
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum GenerationArtifactKind {
-    MoeRoutes,
-    SelectedLogprobs,
-    TopkLogprobs,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum GenerationArtifactFormat {
-    GenerationArtifactV1,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,10 +157,26 @@ pub struct GenerationArtifactDelivery {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct GenerationArtifactRequest {
-    pub format: GenerationArtifactFormat,
+    #[serde(deserialize_with = "deserialize_non_empty_string")]
+    pub format: String,
     #[serde(deserialize_with = "deserialize_artifact_contents")]
-    pub contents: Vec<GenerationArtifactKind>,
+    pub contents: Vec<String>,
     pub delivery: GenerationArtifactDelivery,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenerationArtifactResponseExpectation {
+    pub format: String,
+    pub contents: Vec<String>,
+}
+
+impl From<&GenerationArtifactRequest> for GenerationArtifactResponseExpectation {
+    fn from(request: &GenerationArtifactRequest) -> Self {
+        Self {
+            format: request.format.clone(),
+            contents: request.contents.clone(),
+        }
+    }
 }
 
 const REDACTED_ARTIFACT_SECRET: &str = "[REDACTED]";
@@ -922,15 +925,14 @@ pub(crate) fn merge_response_nvext(
 }
 
 /// Response nvext fields requested for a given request.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NvExtResponseFieldSelection {
     pub worker_id: bool,
     pub timing: bool,
     pub token_ids: bool,
     pub routed_experts: bool,
     pub engine_data: bool,
-    pub generation_artifact: bool,
-    pub generation_artifact_contents: [bool; 3],
+    pub generation_artifact: Option<GenerationArtifactResponseExpectation>,
     pub stop_reason: bool,
     pub completion_token_ids: bool,
     pub prompt_token_ids: bool,
@@ -964,15 +966,7 @@ impl NvExtResponseFieldSelection {
             selection.token_ids = true;
         }
         if let Some(artifact) = ext.generation_artifact.as_ref() {
-            selection.generation_artifact = true;
-            for kind in &artifact.contents {
-                let index = match kind {
-                    GenerationArtifactKind::MoeRoutes => 0,
-                    GenerationArtifactKind::SelectedLogprobs => 1,
-                    GenerationArtifactKind::TopkLogprobs => 2,
-                };
-                selection.generation_artifact_contents[index] = true;
-            }
+            selection.generation_artifact = Some(artifact.into());
         }
         selection
     }
@@ -1008,21 +1002,15 @@ impl NvExtResponseFieldSelection {
             None
         };
 
-        let generation_artifact = if self.generation_artifact {
+        let generation_artifact = if let Some(artifact) = self.generation_artifact.as_ref() {
             let receipt = engine_data_from_backend
                 .as_ref()
                 .and_then(|data| data.get("generation_artifact"))
                 .cloned();
             if receipt.is_none() && finish_reason_present {
-                let kinds = ["moe_routes", "selected_logprobs", "topk_logprobs"];
-                let contents = kinds
-                    .into_iter()
-                    .zip(self.generation_artifact_contents)
-                    .filter_map(|(kind, selected)| selected.then_some(kind))
-                    .collect::<Vec<_>>();
                 Some(serde_json::json!({
-                    "format": "generation_artifact_v1",
-                    "contents": contents,
+                    "format": artifact.format,
+                    "contents": artifact.contents,
                     "state": "failed",
                     "error_code": "artifact_receipt_missing",
                     "error": "generation worker did not return the requested artifact receipt"
@@ -1239,29 +1227,23 @@ mod tests {
         assert_eq!(upload.url, "s3://bucket/root/rollouts");
         assert!(!NvExtResponseFieldSelection::from_nvext(Some(&nvext)).engine_data);
 
-        assert!(
-            serde_json::from_value::<NvExt>(serde_json::json!({
-                "metadata_upload": {}
-            }))
-            .is_err()
-        );
-        assert!(
-            serde_json::from_value::<NvExt>(serde_json::json!({
-                "metadata_upload": {
-                    "url": ""
-                }
-            }))
-            .is_err()
-        );
-        assert!(
-            serde_json::from_value::<NvExt>(serde_json::json!({
-                "metadata_upload": {
-                    "url": "s3://bucket/root/rollouts",
-                    "format": "json"
-                }
-            }))
-            .is_err()
-        );
+        assert!(serde_json::from_value::<NvExt>(serde_json::json!({
+            "metadata_upload": {}
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<NvExt>(serde_json::json!({
+            "metadata_upload": {
+                "url": ""
+            }
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<NvExt>(serde_json::json!({
+            "metadata_upload": {
+                "url": "s3://bucket/root/rollouts",
+                "format": "json"
+            }
+        }))
+        .is_err());
     }
 
     #[test]
@@ -1301,8 +1283,14 @@ mod tests {
         assert!(nvext.has_non_cache_salt_fields());
 
         let selection = NvExtResponseFieldSelection::from_nvext(Some(&nvext));
-        assert!(selection.generation_artifact);
-        assert_eq!(selection.generation_artifact_contents, [true, true, false]);
+        assert_eq!(
+            selection
+                .generation_artifact
+                .as_ref()
+                .expect("artifact selection")
+                .contents,
+            vec!["moe_routes", "selected_logprobs"]
+        );
         assert!(!selection.engine_data);
 
         let mut observable = serde_json::json!({"extra_args": {"nvext": serialized}});
@@ -1336,18 +1324,13 @@ mod tests {
 
         for invalid in [
             serde_json::json!({
-                "format": "other",
+                "format": "",
                 "contents": [],
                 "delivery": {"mode": "object_store", "target": {"kind": "managed_fsspec", "profile": "p", "object_key": "x"}}
             }),
             serde_json::json!({
                 "format": "generation_artifact_v1",
                 "contents": ["moe_routes", "moe_routes"],
-                "delivery": {"mode": "object_store", "target": {"kind": "managed_fsspec", "profile": "p", "object_key": "x"}}
-            }),
-            serde_json::json!({
-                "format": "generation_artifact_v1",
-                "contents": ["unknown"],
                 "delivery": {"mode": "object_store", "target": {"kind": "managed_fsspec", "profile": "p", "object_key": "x"}}
             }),
             serde_json::json!({
@@ -1361,13 +1344,27 @@ mod tests {
                 "delivery": {"mode": "object_store", "target": {"kind": "presigned_http_put", "url": "https://example/x", "max_bytes": 0, "object_id": "x"}}
             }),
         ] {
-            assert!(
-                serde_json::from_value::<NvExt>(serde_json::json!({
-                    "generation_artifact": invalid
-                }))
-                .is_err()
-            );
+            assert!(serde_json::from_value::<NvExt>(serde_json::json!({
+                "generation_artifact": invalid
+            }))
+            .is_err());
         }
+
+        let opaque: NvExt = serde_json::from_value(serde_json::json!({
+            "generation_artifact": {
+                "format": "external_artifact_v2",
+                "contents": ["opaque_component"],
+                "delivery": {"mode": "object_store", "target": {"kind": "managed_fsspec", "profile": "p", "object_key": "x"}}
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            opaque
+                .generation_artifact
+                .expect("artifact request")
+                .contents,
+            vec!["opaque_component"]
+        );
     }
 
     #[test]
@@ -2031,32 +2028,32 @@ mod tests {
         );
     }
 
-    fn tracker_with_prefill_worker()
-    -> std::sync::Arc<crate::protocols::common::timing::RequestTracker> {
+    fn tracker_with_prefill_worker(
+    ) -> std::sync::Arc<crate::protocols::common::timing::RequestTracker> {
         use crate::protocols::common::timing::{RequestTracker, WORKER_TYPE_PREFILL};
         let tracker = std::sync::Arc::new(RequestTracker::new());
         tracker.record_worker(42, Some(0), WORKER_TYPE_PREFILL);
         tracker
     }
 
-    fn tracker_with_query_token_ids()
-    -> std::sync::Arc<crate::protocols::common::timing::RequestTracker> {
+    fn tracker_with_query_token_ids(
+    ) -> std::sync::Arc<crate::protocols::common::timing::RequestTracker> {
         use crate::protocols::common::timing::RequestTracker;
         let tracker = std::sync::Arc::new(RequestTracker::new());
         tracker.set_external_query_token_ids(vec![11u32, 22, 33]);
         tracker
     }
 
-    fn tracker_with_prompt_token_ids()
-    -> std::sync::Arc<crate::protocols::common::timing::RequestTracker> {
+    fn tracker_with_prompt_token_ids(
+    ) -> std::sync::Arc<crate::protocols::common::timing::RequestTracker> {
         use crate::protocols::common::timing::RequestTracker;
         let tracker = std::sync::Arc::new(RequestTracker::new());
         tracker.set_prompt_token_ids(vec![101u32, 102, 103]);
         tracker
     }
 
-    fn tracker_with_forwarded_worker_info()
-    -> std::sync::Arc<crate::protocols::common::timing::RequestTracker> {
+    fn tracker_with_forwarded_worker_info(
+    ) -> std::sync::Arc<crate::protocols::common::timing::RequestTracker> {
         use crate::protocols::common::timing::RequestTracker;
         let tracker = std::sync::Arc::new(RequestTracker::new());
         tracker.set_external_worker_info(WorkerIdInfo {
@@ -2070,11 +2067,9 @@ mod tests {
 
     #[test]
     fn build_response_nvext_all_false_returns_none() {
-        assert!(
-            NvExtResponseFieldSelection::default()
-                .build_response_nvext(None, false, None, None, None, None)
-                .is_none()
-        );
+        assert!(NvExtResponseFieldSelection::default()
+            .build_response_nvext(None, false, None, None, None, None)
+            .is_none());
     }
 
     #[test]
@@ -2126,11 +2121,9 @@ mod tests {
         };
         let tracker = tracker_with_prefill_worker();
 
-        assert!(
-            selection
-                .build_response_nvext(Some(&tracker), false, None, None, None, None)
-                .is_none()
-        );
+        assert!(selection
+            .build_response_nvext(Some(&tracker), false, None, None, None, None)
+            .is_none());
 
         let out = selection
             .build_response_nvext(Some(&tracker), true, None, None, None, None)
@@ -2174,7 +2167,10 @@ mod tests {
     #[test]
     fn build_response_nvext_projects_generation_artifact_without_engine_data() {
         let selection = NvExtResponseFieldSelection {
-            generation_artifact: true,
+            generation_artifact: Some(GenerationArtifactResponseExpectation {
+                format: "generation_artifact_v1".to_string(),
+                contents: vec!["moe_routes".to_string()],
+            }),
             ..Default::default()
         };
         let receipt = serde_json::json!({
@@ -2200,8 +2196,10 @@ mod tests {
     #[test]
     fn build_response_nvext_fails_closed_when_artifact_receipt_is_missing() {
         let selection = NvExtResponseFieldSelection {
-            generation_artifact: true,
-            generation_artifact_contents: [true, false, false],
+            generation_artifact: Some(GenerationArtifactResponseExpectation {
+                format: "external_artifact_v2".to_string(),
+                contents: vec!["opaque_component".to_string()],
+            }),
             ..Default::default()
         };
 
@@ -2212,7 +2210,11 @@ mod tests {
 
         assert_eq!(artifact["state"], "failed");
         assert_eq!(artifact["error_code"], "artifact_receipt_missing");
-        assert_eq!(artifact["contents"], serde_json::json!(["moe_routes"]));
+        assert_eq!(artifact["format"], "external_artifact_v2");
+        assert_eq!(
+            artifact["contents"],
+            serde_json::json!(["opaque_component"])
+        );
     }
 
     #[test]
@@ -2238,11 +2240,9 @@ mod tests {
         };
         let tracker = tracker_with_prompt_token_ids();
 
-        assert!(
-            selection
-                .build_response_nvext(Some(&tracker), false, None, None, None, None)
-                .is_none()
-        );
+        assert!(selection
+            .build_response_nvext(Some(&tracker), false, None, None, None, None)
+            .is_none());
 
         let out = selection
             .build_response_nvext(Some(&tracker), true, None, None, None, None)
@@ -2267,11 +2267,9 @@ mod tests {
         );
         let payload: PromptLogprobs = vec![None, Some(entry)];
 
-        assert!(
-            selection
-                .build_response_nvext(None, false, None, None, None, Some(payload.clone()))
-                .is_none()
-        );
+        assert!(selection
+            .build_response_nvext(None, false, None, None, None, Some(payload.clone()))
+            .is_none());
 
         let out = selection
             .build_response_nvext(None, true, None, None, None, Some(payload))

@@ -59,9 +59,7 @@ class _ExactHttpPutFileSystem(HTTPFileSystem):
         headers = dict(kwargs.pop("headers", {}))
         headers["Content-Length"] = str(len(value))
         session = await self.set_session()
-        async with session.put(
-            self.encode_url(url), data=value, headers=headers, **kwargs
-        ) as response:
+        async with session.put(url, data=value, headers=headers, **kwargs) as response:
             if not 200 <= response.status < 300:
                 raise ArtifactStorageError("presigned artifact PUT was not accepted")
 
