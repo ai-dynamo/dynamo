@@ -251,12 +251,34 @@ func TestValidateDynamoComponentDeploymentSharedSpecFieldPaths(t *testing.T) {
 	assertFieldPaths(t, errs, []string{
 		"spec.components[0].minAvailable",
 		"spec.components[0].sharedMemorySize",
-		"spec.components[0].type",
 		"spec.components[0].multinode",
+		"spec.components[0].type",
 		"spec.components[0].replicas",
 		"spec.components[0].eppConfig.configMapRef.name",
 		"spec.components[0].frontendSidecar",
 	})
+}
+
+func TestSupportsMultinodeComponentType(t *testing.T) {
+	tests := []struct {
+		componentType nvidiacomv1beta1.ComponentType
+		allowed       bool
+	}{
+		{componentType: nvidiacomv1beta1.ComponentTypeWorker, allowed: true},
+		{componentType: nvidiacomv1beta1.ComponentTypePrefill, allowed: true},
+		{componentType: nvidiacomv1beta1.ComponentTypeDecode, allowed: true},
+		{componentType: nvidiacomv1beta1.ComponentTypeFrontend},
+		{componentType: nvidiacomv1beta1.ComponentTypePlanner},
+		{componentType: nvidiacomv1beta1.ComponentTypeEPP},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.componentType), func(t *testing.T) {
+			if got := supportsMultinodeComponentType(tt.componentType); got != tt.allowed {
+				t.Fatalf("supportsMultinodeComponentType(%q) = %t, want %t", tt.componentType, got, tt.allowed)
+			}
+		})
+	}
 }
 
 func TestValidateProviderOverrideOutsideDGD(t *testing.T) {
