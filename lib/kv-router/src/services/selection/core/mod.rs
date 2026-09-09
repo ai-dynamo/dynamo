@@ -15,11 +15,13 @@ use crate::identity::RoutingPartitionId;
 use crate::indexer::{
     LowerTierQueryOptions, RoutingDecisionHashes, SharedKvCache, TieredMatchDetails,
 };
+use crate::kv_hints::{
+    KvHint, KvHintAction, KvSourceLocationsPayload, KvTransferCandidateSource, KvTransferCandidates,
+};
 use crate::protocols::{
     ActiveSequenceEvent, LocalBlockHash, PrefillLoadHint, RoutingConstraints, SharedCacheHits,
     WorkerAffinityTarget, WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
-use crate::router_hint::{RouterHint, RouterHintCandidateSource, RouterHintRootCandidates};
 use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::selector::WorkerSelectionPolicy;
 use crate::scheduling::{
@@ -76,7 +78,7 @@ struct PreparedSelectionInputs {
     isl_tokens: usize,
     overlap: OverlapSignals,
     shared_cache_hits: Option<SharedCacheHits>,
-    router_hint_candidates: Option<RouterHintRootCandidates>,
+    kv_transfer_candidates: Option<KvTransferCandidates>,
 }
 
 struct SelectionOperation {
@@ -806,8 +808,8 @@ impl SelectionCore {
         // Router hints are attached to bookings only, and only when a worker in
         // this partition can consume them and the indexer can retain the
         // matched chain (local, event-driven, no approximate writes).
-        let retain_router_hint_chain = book
-            && entry.indexer.supports_router_hint_chain_retention()
+        let retain_kv_transfer_chain = book
+            && entry.indexer.supports_kv_transfer_chain_retention()
             && self.catalog.has_router_hint_capable_workers(&key);
         let PreparedSelectionInputs {
             block_hashes,
@@ -815,7 +817,7 @@ impl SelectionCore {
             isl_tokens,
             overlap,
             shared_cache_hits,
-            router_hint_candidates,
+            kv_transfer_candidates,
         } = self
             .prepare_selection_inputs(
                 &entry,
@@ -823,7 +825,7 @@ impl SelectionCore {
                 self.kv_router_config
                     .assume_kv_reuse(router_config_override.as_ref()),
                 true,
-                retain_router_hint_chain,
+                retain_kv_transfer_chain,
             )
             .await?;
         let mode = if book {
@@ -878,8 +880,8 @@ impl SelectionCore {
             block_hashes: Some(block_hashes),
             isl_tokens,
             overlap,
-            router_hint_candidates,
-            retain_router_hint_chain,
+            kv_transfer_candidates,
+            retain_kv_transfer_chain,
             router_config_override,
             lora_name: prompt.lora_name,
             priority_jump,
@@ -943,13 +945,19 @@ impl SelectionCore {
             .map(|(threshold, total_kv_blocks)| {
                 potential_decode_blocks as f64 > threshold * total_kv_blocks as f64
             });
-        let router_hint = if retain_router_hint_chain {
-            router_hint_for_selection(
+        let kv_hint = if retain_kv_transfer_chain {
+            transfer_hint_for_selection(
                 &self.catalog.scheduler_configs_for_key(&key),
                 response.best_worker,
                 response.target_cached_prefix_blocks,
-                response.router_hint_candidates.as_ref(),
+                response.kv_transfer_candidates.as_ref(),
             )
+            .map(|payload| {
+                KvHint::new(
+                    selection_id.as_deref().unwrap_or_default(),
+                    vec![KvHintAction::fetch("a1", payload)],
+                )
+            })
         } else {
             None
         };
@@ -1005,7 +1013,7 @@ impl SelectionCore {
             potential_decode_blocks,
             decode_busy,
             worker_load,
-            router_hint,
+            kv_hint,
         })
     }
 
@@ -1443,7 +1451,7 @@ impl SelectionCore {
         prompt: &PromptRequest,
         assume_kv_reuse: bool,
         query_shared_cache: bool,
-        retain_router_hint_chain: bool,
+        retain_kv_transfer_chain: bool,
     ) -> Result<PreparedSelectionInputs, SelectionError> {
         let normalized = prompt.normalize_for_selection(
             entry.is_eagle,
@@ -1462,7 +1470,7 @@ impl SelectionCore {
                     .find_tiered_matches_with_options(
                         normalized.block_hashes.clone(),
                         LowerTierQueryOptions {
-                            retain_router_hint_chain,
+                            retain_kv_transfer_chain,
                         },
                     )
                     .await
@@ -1490,8 +1498,8 @@ impl SelectionCore {
         let tiered = tiered?;
         let overlap =
             OverlapAnalysis::new(&self.kv_router_config, entry.block_size, &tiered).signals();
-        let router_hint_candidates = retain_router_hint_chain
-            .then(|| tiered.router_hint_root_candidates().cloned())
+        let kv_transfer_candidates = retain_kv_transfer_chain
+            .then(|| tiered.kv_transfer_candidates().cloned())
             .flatten();
         drop(tiered);
         Ok(PreparedSelectionInputs {
@@ -1500,7 +1508,7 @@ impl SelectionCore {
             isl_tokens: normalized.isl_tokens,
             overlap,
             shared_cache_hits,
-            router_hint_candidates,
+            kv_transfer_candidates,
         })
     }
 
@@ -1581,24 +1589,24 @@ fn spawn_reservation_index_sweep(
 /// cache owner) holding a longer root-aligned prefix than the target's own
 /// `target_cached_prefix_blocks`, with a non-empty control endpoint. Mirrors the
 /// frontend `KvRouter::router_hint_for_selection`.
-fn router_hint_for_selection(
+fn transfer_hint_for_selection(
     configs: &HashMap<WorkerId, SelectionWorkerConfig>,
     target: WorkerWithDpRank,
     target_cached_prefix_blocks: u32,
-    candidates: Option<&RouterHintRootCandidates>,
-) -> Option<RouterHint> {
+    candidates: Option<&KvTransferCandidates>,
+) -> Option<KvSourceLocationsPayload> {
     let candidates = candidates?;
     let target_config = configs.get(&target.worker_id)?;
-    let target_metadata = target_config.router_hint_metadata_for_dp_rank(target.dp_rank)?;
+    let target_metadata = target_config.kv_hint_transfer_metadata_for_dp_rank(target.dp_rank)?;
 
     let prefix_blocks_to_beat = usize::try_from(target_cached_prefix_blocks).unwrap_or(usize::MAX);
     let (source, block_hashes) =
         candidates.best_source(prefix_blocks_to_beat, |source| match source {
-            RouterHintCandidateSource::Worker(worker) => {
+            KvTransferCandidateSource::Worker(worker) => {
                 worker != target
                     && configs.get(&worker.worker_id).is_some_and(|config| {
                         config
-                            .router_hint_metadata_for_dp_rank(worker.dp_rank)
+                            .kv_hint_transfer_metadata_for_dp_rank(worker.dp_rank)
                             .is_some_and(|source_metadata| {
                                 source_metadata.worker_type == target_metadata.worker_type
                                     && source_metadata
@@ -1607,7 +1615,7 @@ fn router_hint_for_selection(
                             })
                     })
             }
-            RouterHintCandidateSource::CacheOwner(owner) => candidates
+            KvTransferCandidateSource::CacheOwner(owner) => candidates
                 .routing_snapshot
                 .as_ref()
                 .and_then(|snapshot| snapshot.router_hint_source(owner))
@@ -1618,12 +1626,12 @@ fn router_hint_for_selection(
                 }),
         })?;
     let source_control_endpoint = match source {
-        RouterHintCandidateSource::Worker(worker) => configs
+        KvTransferCandidateSource::Worker(worker) => configs
             .get(&worker.worker_id)?
-            .router_hint_metadata_for_dp_rank(worker.dp_rank)?
+            .kv_hint_transfer_metadata_for_dp_rank(worker.dp_rank)?
             .source_control_endpoint?
             .to_string(),
-        RouterHintCandidateSource::CacheOwner(owner) => candidates
+        KvTransferCandidateSource::CacheOwner(owner) => candidates
             .routing_snapshot
             .as_ref()?
             .router_hint_source(owner)?
@@ -1634,7 +1642,7 @@ fn router_hint_for_selection(
     if block_hashes.is_empty() {
         return None;
     }
-    Some(RouterHint {
+    Some(KvSourceLocationsPayload {
         source_control_endpoint,
         block_hashes,
     })
@@ -1878,12 +1886,13 @@ mod tests {
     #[tokio::test]
     async fn bookings_populate_the_approximate_primary_without_kv_events() {
         // use_kv_events=false: the primary is approximate and bookings feed it.
-        let core = SelectionCore::new_local(
+        let core = SelectionCore::try_new_local(
             test_config(false),
             1,
             CancellationToken::new(),
             SelectionCacheConfig::default(),
-        );
+        )
+        .expect("valid test config");
         core.upsert_worker(worker(1)).await.expect("worker upsert");
         core.upsert_worker(worker(2)).await.expect("worker upsert");
 
@@ -2040,12 +2049,13 @@ mod tests {
         use crate::indexer::KvIndexerInterface;
         use crate::protocols::{BlockHashOptions, StorageTier, compute_block_hash_for_seq};
 
-        let core = SelectionCore::new_local(
+        let core = SelectionCore::try_new_local(
             test_config(true),
             1,
             CancellationToken::new(),
             SelectionCacheConfig::default(),
-        );
+        )
+        .expect("valid test config");
         for worker_id in [1, 2] {
             let mut request = worker_with_kv_events(worker_id);
             request.router_hint_worker_type = Some("decode".to_string());
@@ -2055,7 +2065,7 @@ mod tests {
         }
         let key = RoutingPartitionId::new("model", "default");
         let entry = core.entry(&key).expect("entry");
-        assert!(entry.indexer.supports_router_hint_chain_retention());
+        assert!(entry.indexer.supports_kv_transfer_chain_retention());
 
         // Worker 1 holds both blocks of the prompt; worker 2 holds nothing.
         let tokens: Vec<u32> = (1..=8).collect();
@@ -2082,23 +2092,28 @@ mod tests {
         request.prompt = prompt();
         request.pinned_worker = Some(WorkerWithDpRank::new(2, 0));
         let response = core.select_and_reserve(request).await.expect("reserve");
-        let hint = response.router_hint.expect("router hint for worker 2");
-        assert_eq!(hint.source_control_endpoint, "tcp://worker-1:9000");
-        assert_eq!(hint.block_hashes.len(), 2);
+        let hint = response.kv_hint.expect("router hint for worker 2");
+        assert_eq!(hint.message_id, "to-worker-2");
+        assert_eq!(hint.actions[0].action_type, "kv.fetch");
+        let payload: KvSourceLocationsPayload =
+            serde_json::from_value(serde_json::to_value(&hint.actions[0].payload).unwrap())
+                .unwrap();
+        assert_eq!(payload.source_control_endpoint, "tcp://worker-1:9000");
+        assert_eq!(payload.block_hashes.len(), 2);
 
         // Booking on worker 1 itself: nothing holds a longer prefix.
         let mut request = reserve_request("to-worker-1");
         request.prompt = prompt();
         request.pinned_worker = Some(WorkerWithDpRank::new(1, 0));
         let response = core.select_and_reserve(request).await.expect("reserve");
-        assert!(response.router_hint.is_none());
+        assert!(response.kv_hint.is_none());
 
         // Query-only selections never carry a hint.
         let mut request = select_request();
         request.prompt = prompt();
         request.pinned_worker = Some(WorkerWithDpRank::new(2, 0));
         let response = core.select(request).await.expect("select");
-        assert!(response.router_hint.is_none());
+        assert!(response.kv_hint.is_none());
     }
 
     #[tokio::test]
@@ -2106,12 +2121,13 @@ mod tests {
         use crate::indexer::KvIndexerInterface;
         use crate::protocols::{BlockHashOptions, StorageTier, compute_block_hash_for_seq};
 
-        let core = SelectionCore::new_local(
+        let core = SelectionCore::try_new_local(
             test_config(true),
             1,
             CancellationToken::new(),
             SelectionCacheConfig::default(),
-        );
+        )
+        .expect("valid test config");
         for worker_id in [1, 2] {
             core.upsert_worker(worker_with_kv_events(worker_id))
                 .await
@@ -2136,17 +2152,18 @@ mod tests {
         let mut request = reserve_request("plain");
         request.pinned_worker = Some(WorkerWithDpRank::new(2, 0));
         let response = core.select_and_reserve(request).await.expect("reserve");
-        assert!(response.router_hint.is_none());
+        assert!(response.kv_hint.is_none());
     }
 
     #[tokio::test]
     async fn event_driven_indexer_does_not_record_bookings() {
-        let core = SelectionCore::new_local(
+        let core = SelectionCore::try_new_local(
             test_config(true),
             1,
             CancellationToken::new(),
             SelectionCacheConfig::default(),
-        );
+        )
+        .expect("valid test config");
         core.upsert_worker(worker_with_kv_events(1))
             .await
             .expect("worker upsert");

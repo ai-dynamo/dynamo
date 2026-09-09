@@ -6,11 +6,11 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::identity::{RoutingPartitionId, default_routing_group};
+use crate::kv_hints::KvHint;
 use crate::protocols::{
-    DpRank, KvTransferEnforcement, RouterHintWorkerMetadata, RoutingConstraints,
+    DpRank, KvHintTransferWorkerMetadata, KvTransferEnforcement, RoutingConstraints,
     WorkerAffinityTarget, WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
-use crate::router_hint::RouterHint;
 use crate::scheduling::config::RouterConfigOverride;
 pub use crate::scheduling::{OverlapScoresResponse, SharedCacheOverlapScore, WorkerOverlapScore};
 use crate::scheduling::{PotentialLoad, SessionContext, WorkerSelectionInputTrigger};
@@ -100,15 +100,15 @@ impl WorkerConfigLike for SelectionWorkerConfig {
         self.kv_transfer_preferred_weight
     }
 
-    fn router_hint_metadata_for_dp_rank(
+    fn kv_hint_transfer_metadata_for_dp_rank(
         &self,
         dp_rank: DpRank,
-    ) -> Option<RouterHintWorkerMetadata<'_>> {
+    ) -> Option<KvHintTransferWorkerMetadata<'_>> {
         let worker_type = self.router_hint_worker_type.as_deref()?;
         if worker_type.is_empty() {
             return None;
         }
-        Some(RouterHintWorkerMetadata {
+        Some(KvHintTransferWorkerMetadata {
             worker_type,
             source_control_endpoint: self
                 .router_hint_source_control_endpoints
@@ -622,7 +622,7 @@ pub struct SelectResponse {
     /// only for bookings when the partition has router-hint-capable workers,
     /// the indexer can retain the matched chain, and a better source exists.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub router_hint: Option<RouterHint>,
+    pub kv_hint: Option<KvHint>,
 }
 
 /// Load snapshot of the chosen worker, as the scheduler projected it for this

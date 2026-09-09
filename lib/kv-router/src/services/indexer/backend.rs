@@ -426,7 +426,7 @@ impl Indexer {
 
     /// Router-hint chain retention needs a local primary whose hashes come
     /// only from engine events.
-    pub fn supports_router_hint_chain_retention(&self) -> bool {
+    pub fn supports_kv_transfer_chain_retention(&self) -> bool {
         !self.is_remote() && !self.records_routing_decisions()
     }
 
@@ -670,15 +670,15 @@ impl Indexer {
 
     /// [`Self::find_tiered_matches`] with lower-tier query options. Router-hint
     /// chain retention is honored only by a local event-driven primary (see
-    /// [`Self::supports_router_hint_chain_retention`]); other shapes ignore it.
+    /// [`Self::supports_kv_transfer_chain_retention`]); other shapes ignore it.
     pub async fn find_tiered_matches_with_options(
         &self,
         sequence: Vec<LocalBlockHash>,
         options: LowerTierQueryOptions,
     ) -> std::result::Result<TieredMatchDetails, KvRouterError> {
         let options = LowerTierQueryOptions {
-            retain_router_hint_chain: options.retain_router_hint_chain
-                && self.supports_router_hint_chain_retention(),
+            retain_kv_transfer_chain: options.retain_kv_transfer_chain
+                && self.supports_kv_transfer_chain_retention(),
         };
         let (device, lower_tier) = match self {
             Indexer::Single {
@@ -689,7 +689,7 @@ impl Indexer {
                 let device = primary
                     .find_match_details_with_options(
                         sequence.clone(),
-                        options.retain_router_hint_chain,
+                        options.retain_kv_transfer_chain,
                     )
                     .await?;
                 let lt = query_lower_tiers_with_options(lower_tier, &sequence, &device, options);
@@ -703,7 +703,7 @@ impl Indexer {
                 let device: MatchDetails = primary.backend().find_match_details_impl_with_options(
                     &sequence,
                     false,
-                    options.retain_router_hint_chain,
+                    options.retain_kv_transfer_chain,
                 );
                 let lt = query_lower_tiers_with_options(lower_tier, &sequence, &device, options);
                 (device, lt)
@@ -1118,7 +1118,7 @@ mod tests {
     async fn event_driven_policy_ignores_routing_decisions() {
         let indexer = policy_indexer(1, IndexerPolicy::event_driven());
         assert!(!indexer.records_routing_decisions());
-        assert!(indexer.supports_router_hint_chain_retention());
+        assert!(indexer.supports_kv_transfer_chain_retention());
         let worker = WorkerWithDpRank::new(7, 0);
         indexer
             .record_routing_decision(
@@ -1146,7 +1146,7 @@ mod tests {
                 },
             );
             assert!(indexer.records_routing_decisions());
-            assert!(!indexer.supports_router_hint_chain_retention());
+            assert!(!indexer.supports_kv_transfer_chain_retention());
             let worker = WorkerWithDpRank::new(7, 0);
             indexer
                 .record_routing_decision(
@@ -1301,7 +1301,7 @@ mod tests {
         );
         assert!(indexer.is_remote());
         assert!(indexer.records_routing_decisions());
-        assert!(!indexer.supports_router_hint_chain_retention());
+        assert!(!indexer.supports_kv_transfer_chain_retention());
 
         // Local events are dropped: the remote service owns the primary.
         indexer
