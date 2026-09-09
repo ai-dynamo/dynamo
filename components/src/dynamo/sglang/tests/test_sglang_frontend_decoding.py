@@ -646,12 +646,13 @@ def session_agent_context() -> Dict[str, Any]:
 
 
 def _enable_session_radix_cache(handler: Any) -> None:
-    """Set ``enable_session_radix_cache=True`` on ``handler.config.server_args``.
+    """Enable the former session-radix path on the test handler.
 
     The core-contract tests below run with the flag on because that is the most
     demanding state: if any code ever reads the flag again, on is the state that
     would re-enable the removed path. No production code reads it today.
     """
+    handler.enable_session_radix_cache = True
     handler.config = SimpleNamespace(
         server_args=SimpleNamespace(
             served_model_name="test-model", enable_session_radix_cache=True
