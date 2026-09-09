@@ -577,6 +577,8 @@ pub struct Worker {
 
 #[pymethods]
 impl Worker {
+    /// Create a single-use worker and offer the process runtime to the PyO3 bridge.
+    /// Transport overrides are resolved when the worker starts, without env writes.
     #[new]
     #[pyo3(signature = (engine, config, event_loop, raw = false))]
     fn new(

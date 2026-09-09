@@ -571,6 +571,8 @@ impl Worker {
         outcome
     }
 
+    /// Connect with per-worker transport settings, start the engine, and serve
+    /// requests until shutdown. The caller owns signal handling and cleanup.
     async fn run_inner(
         &mut self,
         runtime: Runtime,

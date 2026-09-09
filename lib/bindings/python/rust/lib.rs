@@ -844,6 +844,8 @@ fn update_model_taints<'p>(
 
 static FETCH_MODEL_RUNTIME_MISMATCH_WARNING: std::sync::Once = std::sync::Once::new();
 
+/// Return Dynamo's process runtime and register it with an uninitialized PyO3 bridge.
+/// Preserve an already selected bridge runtime, warning once if its identity differs.
 fn ensure_fetch_model_runtime() -> anyhow::Result<&'static tokio::runtime::Runtime> {
     let primary = rs::Worker::ensure_process_runtime()?;
 

@@ -796,6 +796,10 @@ pub struct DistributedConfig {
 }
 
 impl DistributedConfig {
+    /// Build distributed runtime configuration from environment defaults.
+    ///
+    /// # Panics
+    /// Panics if a discovery or transport setting is invalid.
     pub fn from_settings() -> DistributedConfig {
         Self::from_settings_with_overrides(None, None, None)
             .unwrap_or_else(|error| panic!("{error}"))
