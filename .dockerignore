@@ -25,13 +25,15 @@
 **/*.libtorch_model_store/*
 **/.git
 **/.github
-# Planner test images exercise the version-stamping script without copying the
-# rest of the GitHub metadata into every Docker build context.
+# Test images exercise these scripts without copying the rest of the GitHub
+# metadata into every Docker build context.
 !.github
 .github/*
 !.github/scripts
 .github/scripts/*
 !.github/scripts/apply_dev_version.py
+!.github/scripts/retry_kubectl.sh
+!.github/scripts/collect_vcluster_diagnostics.sh
 **/*backup*/
 .dockerignore
 **/target/*

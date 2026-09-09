@@ -19,6 +19,24 @@ pytestmark = [
 ]
 
 
+@pytest.fixture(autouse=True, params=[False, True], ids=["clean", "bash-startup"])
+def shell_startup_environment(request, tmp_path, monkeypatch):
+    for name in ("BASH_ENV", "ENV"):
+        monkeypatch.delenv(name, raising=False)
+    if request.param:
+        startup = tmp_path / "bashrc"
+        startup.write_text('echo "${PS1:?unexpected shell startup}"\nexit 99\n')
+        monkeypatch.delenv("PS1", raising=False)
+        monkeypatch.setenv("BASH_ENV", str(startup))
+        monkeypatch.setenv("ENV", str(startup))
+
+
+def shell_environment():
+    # CI images may source interactive configuration through BASH_ENV. These
+    # subprocesses test standalone scripts and must not execute that startup code.
+    return {k: v for k, v in os.environ.items() if k not in {"BASH_ENV", "ENV"}}
+
+
 @pytest.fixture
 def kubectl_stub(tmp_path, monkeypatch):
     executable = tmp_path / "kubectl"
@@ -62,6 +80,7 @@ def run_retry(*args):
         capture_output=True,
         text=True,
         timeout=5,
+        env=shell_environment(),
     )
 
 
@@ -138,7 +157,11 @@ def test_collects_logs_without_live_tunnel(tmp_path, monkeypatch):
     )
 
     result = subprocess.run(
-        ["bash", str(script), str(output)], capture_output=True, text=True, timeout=5
+        ["bash", str(script), str(output)],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        env=shell_environment(),
     )
 
     assert result.returncode == 0, result.stderr
