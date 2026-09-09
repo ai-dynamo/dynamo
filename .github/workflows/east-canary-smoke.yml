@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: AWS CI prod east canary smoke
+
+on:
+  push:
+    branches:
+      - ci/aws-ci-prod-east-canary
+    paths:
+      - .github/workflows/east-canary-smoke.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cpu-smoke:
+    name: East CPU smoke ${{ matrix.slot }}
+    runs-on: prod-default-v2-east-canary
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Verify runner and workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "slot=${{ matrix.slot }}"
+          echo "runner_name=${RUNNER_NAME}"
+          echo "runner_os=${RUNNER_OS}"
+          echo "runner_arch=${RUNNER_ARCH}"
+          echo "hostname=$(hostname)"
+          echo "sha=${GITHUB_SHA}"
+          test "${RUNNER_OS}" = Linux
+          test -f Cargo.toml
