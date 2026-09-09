@@ -750,6 +750,7 @@ mod tests {
     use super::*;
     use crate::pipeline::context::Controller;
     use crate::pipeline::network::tcp::test_utils::create_tcp_pair;
+    use crate::tls_utils::test_certs::{mtls_chain, self_signed_pair};
     use bytes::Bytes;
     use futures::StreamExt;
     use std::collections::HashMap;
@@ -2124,18 +2125,6 @@ mod tests {
 
     // ── TLS connector and SNI tests ──────────────────────────────────────────
 
-    fn make_ca_file() -> tempfile::NamedTempFile {
-        use std::io::Write;
-        let key_pair = rcgen::KeyPair::generate().unwrap();
-        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
-            .unwrap()
-            .self_signed(&key_pair)
-            .unwrap();
-        let mut f = tempfile::NamedTempFile::new().unwrap();
-        f.write_all(cert.pem().as_bytes()).unwrap();
-        f
-    }
-
     #[test]
     fn connector_no_env_vars_is_plaintext() {
         // Clear every var the builder reads, incl. the client-identity vars, so
@@ -2166,7 +2155,7 @@ mod tests {
 
     #[test]
     fn connector_with_ca_is_tls() {
-        let ca = make_ca_file();
+        let (ca, _) = self_signed_pair();
         temp_env::with_vars(
             [(
                 "DYN_TCP_TLS_CA_CERT_PATH",
@@ -2174,74 +2163,6 @@ mod tests {
             )],
             || assert!(build_tls_connector_from_env().unwrap().is_some()),
         );
-    }
-
-    // Self-signed cert + matching key, for use as a client identity.
-    fn make_identity_files() -> (tempfile::NamedTempFile, tempfile::NamedTempFile) {
-        use std::io::Write;
-        let key_pair = rcgen::KeyPair::generate().unwrap();
-        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
-            .unwrap()
-            .self_signed(&key_pair)
-            .unwrap();
-        let mut cert_file = tempfile::NamedTempFile::new().unwrap();
-        cert_file.write_all(cert.pem().as_bytes()).unwrap();
-        let mut key_file = tempfile::NamedTempFile::new().unwrap();
-        key_file
-            .write_all(key_pair.serialize_pem().as_bytes())
-            .unwrap();
-        (cert_file, key_file)
-    }
-
-    // CA + server leaf (SAN=localhost, serverAuth) + client leaf (clientAuth),
-    // both signed by the CA. Returns (ca, server_cert, server_key, client_cert,
-    // client_key) PEM temp files.
-    #[allow(clippy::type_complexity)]
-    fn make_mtls_chain() -> (
-        tempfile::NamedTempFile,
-        tempfile::NamedTempFile,
-        tempfile::NamedTempFile,
-        tempfile::NamedTempFile,
-        tempfile::NamedTempFile,
-    ) {
-        use std::io::Write;
-        fn write_pem(contents: &str) -> tempfile::NamedTempFile {
-            let mut f = tempfile::NamedTempFile::new().unwrap();
-            f.write_all(contents.as_bytes()).unwrap();
-            f
-        }
-        let ca_key = rcgen::KeyPair::generate().unwrap();
-        let mut ca_params = rcgen::CertificateParams::new(Vec::new()).unwrap();
-        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
-
-        let server_key = rcgen::KeyPair::generate().unwrap();
-        let mut server_params =
-            rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
-        server_params
-            .extended_key_usages
-            .push(rcgen::ExtendedKeyUsagePurpose::ServerAuth);
-        let server_cert = server_params
-            .signed_by(&server_key, &ca_cert, &ca_key)
-            .unwrap();
-
-        let client_key = rcgen::KeyPair::generate().unwrap();
-        let mut client_params =
-            rcgen::CertificateParams::new(vec!["dynamo-client".to_string()]).unwrap();
-        client_params
-            .extended_key_usages
-            .push(rcgen::ExtendedKeyUsagePurpose::ClientAuth);
-        let client_cert = client_params
-            .signed_by(&client_key, &ca_cert, &ca_key)
-            .unwrap();
-
-        (
-            write_pem(&ca_cert.pem()),
-            write_pem(&server_cert.pem()),
-            write_pem(&server_key.serialize_pem()),
-            write_pem(&client_cert.pem()),
-            write_pem(&client_key.serialize_pem()),
-        )
     }
 
     /// Live mTLS handshake over the **real** response-stream client path:
@@ -2253,7 +2174,7 @@ mod tests {
     async fn response_stream_client_mtls_handshake() {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-        let (ca, server_cert, server_key, client_cert, client_key) = make_mtls_chain();
+        let (ca, server_cert, server_key, client_cert, client_key) = mtls_chain();
 
         // mTLS server acceptor: requires a client cert signed by the CA.
         let server_config = crate::tls_utils::server_tls_config(
@@ -2304,8 +2225,8 @@ mod tests {
     #[test]
     fn connector_partial_client_identity_errors() {
         // A client cert without its key must fail closed (pair validation).
-        let ca = make_ca_file();
-        let (client_cert, _client_key) = make_identity_files();
+        let (ca, _) = self_signed_pair();
+        let (client_cert, _client_key) = self_signed_pair();
         temp_env::with_vars(
             [
                 (

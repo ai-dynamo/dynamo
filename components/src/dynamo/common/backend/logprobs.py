@@ -314,52 +314,42 @@ def build_sglang_logprob_kwargs(
 def extract_from_sglang_meta(
     meta_info: dict[str, Any],
     *,
-    num_output_tokens_in_chunk: Optional[int] = None,
     return_tokens_as_token_ids: bool = False,
 ) -> tuple[Optional[list[float]], Optional[list[list[dict[str, Any]]]]]:
     """Extract logprobs from SGLang's ``meta_info`` dict.
 
-    The pinned SGLang release and its N-1 predecessor align
-    ``output_token_logprobs`` and ``output_top_logprobs`` with each incremental
-    ``output_ids`` chunk. When provided, ``num_output_tokens_in_chunk`` keeps
-    malformed trailing metadata out of Dynamo's response.
+    Dynamo enables SGLang's incremental streaming output, so
+    ``output_token_logprobs`` and ``output_top_logprobs`` already align with
+    the current disjoint ``output_ids`` chunk and can be forwarded directly.
     """
     output_token_logprobs = meta_info.get("output_token_logprobs")
     if not output_token_logprobs:
         return None, None
 
-    new_logprobs = output_token_logprobs
-    if num_output_tokens_in_chunk is not None:
-        new_logprobs = new_logprobs[:num_output_tokens_in_chunk]
-    if not new_logprobs:
-        return None, None
-
-    log_probs = [float(entry[0]) for entry in new_logprobs]
+    log_probs = [float(entry[0]) for entry in output_token_logprobs]
 
     top_logprobs: Optional[list[list[dict[str, Any]]]] = None
     output_top = meta_info.get("output_top_logprobs")
     if output_top:
-        new_top = output_top[: len(new_logprobs)]
-        if new_top:
-            top_logprobs = []
-            for position_entries in new_top:
-                if position_entries is None:
-                    top_logprobs.append([])
-                    continue
-                position_list: list[dict[str, Any]] = []
-                for rank_idx, entry in enumerate(position_entries):
-                    tok_id = entry[1]
-                    token_str = (
-                        f"token_id:{tok_id}" if return_tokens_as_token_ids else entry[2]
-                    )
-                    position_list.append(
-                        {
-                            "rank": rank_idx + 1,
-                            "token_id": tok_id,
-                            "token": token_str,
-                            "logprob": float(entry[0]),
-                        }
-                    )
-                top_logprobs.append(position_list)
+        top_logprobs = []
+        for position_entries in output_top:
+            if position_entries is None:
+                top_logprobs.append([])
+                continue
+            position_list: list[dict[str, Any]] = []
+            for rank_idx, entry in enumerate(position_entries):
+                tok_id = entry[1]
+                token_str = (
+                    f"token_id:{tok_id}" if return_tokens_as_token_ids else entry[2]
+                )
+                position_list.append(
+                    {
+                        "rank": rank_idx + 1,
+                        "token_id": tok_id,
+                        "token": token_str,
+                        "logprob": float(entry[0]),
+                    }
+                )
+            top_logprobs.append(position_list)
 
     return log_probs, top_logprobs

@@ -36,8 +36,7 @@ TYPE_HEADING_RE = re.compile(r"^####\s+(?:v1beta1\s+)?(?P<name>\S+)\s*$")
 DCD_SPEC = "DynamoComponentDeploymentSpec"
 DGD_ONLY_DCD_REFERENCES = {
     "DynamoComponentDeploymentSharedSpec",
-    "MultinodeSpec",
-    "MultinodeRoleSpec",
+    "ComponentRoleSpec",
     "ProviderOverride",
 }
 DCD_REFERENCE_RE = re.compile(r"^- \[DynamoComponentDeploymentSpec\]\(#[^)]+\)\s*$")
@@ -56,15 +55,15 @@ def project_standalone_dcd_schema(markdown: str) -> str:
         if current_type == DCD_SPEC and line.startswith("| `providerOverride` "):
             continue
 
-        if current_type == DCD_SPEC and line.startswith("| `multinode` "):
+        if current_type == DCD_SPEC and line.startswith("| `roles` "):
             columns = line.rstrip("\n").split(" | ")
             columns[0] = re.sub(
-                r"_\[MultinodeSpec\]\(#[^)]+\)_", "_object_", columns[0]
+                r"_\[ComponentRoleSpec\]\(#[^)]+\) array_", "_object array_", columns[0]
             )
-            if "Standalone DCDs accept only" not in columns[1]:
+            if "Standalone DCD roles accept only" not in columns[1]:
                 columns[1] += (
-                    " Standalone DCDs accept only `nodeCount`; `leader` and `worker` "
-                    "are DGD-only provider contexts."
+                    " Standalone DCD roles accept only `name`; "
+                    "`providerOverride` is a DGD-only provider context."
                 )
             line = " | ".join(columns) + "\n"
 
