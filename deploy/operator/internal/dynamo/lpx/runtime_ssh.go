@@ -42,7 +42,7 @@ func sshVolumeMount(volumeName string) corev1.VolumeMount {
 	}
 }
 
-func addConductorSSHKey(podSpec *corev1.PodSpec, secretName, volumeName string) {
+func addConductorSSHKey(podSpec *corev1.PodSpec, conductor *corev1.Container, secretName, volumeName string) {
 	// Mount the source Secret and the writable destination used by OpenMPI.
 	addSSHVolumeWithDefaultMode(podSpec, secretName, volumeName, 0600)
 	podSpec.Volumes = setVolumeByName(podSpec.Volumes, corev1.Volume{
@@ -53,11 +53,10 @@ func addConductorSSHKey(podSpec *corev1.PodSpec, secretName, volumeName string) 
 	})
 
 	// Copy the key with OpenSSH's required mode before the conductor starts.
-	mainContainer := podSpec.Containers[0]
 	initContainer := corev1.Container{
 		Name:            conductorSSHKeyInitContainerName,
-		Image:           mainContainer.Image,
-		ImagePullPolicy: mainContainer.ImagePullPolicy,
+		Image:           conductor.Image,
+		ImagePullPolicy: conductor.ImagePullPolicy,
 		Command:         []string{"/bin/bash"},
 		Args:            []string{"-c", conductorSSHKeyInitCommand},
 		SecurityContext: &corev1.SecurityContext{

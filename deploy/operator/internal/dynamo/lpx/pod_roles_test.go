@@ -314,6 +314,25 @@ func TestConfigureNodeLocalLPURuntimeRoles(t *testing.T) {
 	require.Contains(t, testVolumeMountPaths(initContainer.VolumeMounts), "/sys")
 }
 
+func TestConfigureNodeLocalXTConductorSSHInitUsesMainImage(t *testing.T) {
+	t.Log("Place an unrelated sidecar before the XT conductor main container")
+	podSpec := corev1.PodSpec{Containers: []corev1.Container{
+		{Name: "metrics", Image: "metrics-sidecar", ImagePullPolicy: corev1.PullAlways},
+		{Name: commonconsts.MainContainerName, Image: "lpu-runtime", ImagePullPolicy: corev1.PullIfNotPresent},
+	}}
+
+	t.Log("Configure the conductor without deriving its runtime identity from list position")
+	require.NoError(t, configureNodeLocalConductorRuntime(&podSpec, BuildFamilyXT, "lpu-wkr-m-0", "ssh-secret"))
+
+	t.Log("Run SSH initialization with the resolved conductor image and preserve the sidecar")
+	require.Equal(t, "metrics", podSpec.Containers[0].Name)
+	require.Equal(t, "metrics-sidecar", podSpec.Containers[0].Image)
+	require.Equal(t, "conductor", podSpec.Containers[1].Name)
+	require.Len(t, podSpec.InitContainers, 1)
+	require.Equal(t, "lpu-runtime", podSpec.InitContainers[0].Image)
+	require.Equal(t, corev1.PullIfNotPresent, podSpec.InitContainers[0].ImagePullPolicy)
+}
+
 func TestConfigureDirectHybridAgentRuntimePreservesCustomEntrypoint(t *testing.T) {
 	t.Log("Define custom entrypoint and probe preservation cases")
 	customStartup := testExecProbe("custom-startup")

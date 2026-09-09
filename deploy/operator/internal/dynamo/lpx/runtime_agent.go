@@ -209,7 +209,7 @@ func configureNodeLocalConductorRuntime(
 	if isXT {
 		sshVolumeName = sshSecretName
 	}
-	addConductorSSHKey(conductorPodSpec, sshSecretName, sshVolumeName)
+	addConductorSSHKey(conductorPodSpec, conductor, sshSecretName, sshVolumeName)
 	return nil
 }
 
