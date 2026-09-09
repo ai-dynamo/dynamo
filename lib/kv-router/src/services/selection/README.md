@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Dynamo Selection Service
 
 The public deployment and HTTP API contract is documented in
@@ -21,11 +26,9 @@ and active-sequence accounting. Keep these implementation invariants explicit:
   runtime event plane in the frontend) or `Remote` (a standalone indexer
   serves it). The `Indexer` type itself is shared with the frontend
   (`services::indexer::backend`).
-- Session affinity (`services::selection::affinity::SessionAffinity`) is the
-  one session table: versioned bindings, TTL reaper, initialization/lease
-  lifecycle, hard and soft validation, replica apply. Hosts own the instance
-  and the replication transport (`AffinityReplicaSink`); the frontend wraps it
-  for pipeline streams and the runtime event plane.
+- Each partition owns its `SessionAffinity` table, including versioned bindings, idle TTL, and lease lifecycle. A reservation owns its affinity lease, so every reservation removal releases both. Frontend routing hosts share the partition table and one coordinator for stream leases and runtime replication.
+- Valid worker metadata updates preserve live bookings on surviving ranks and KV state from unchanged event sources. Catalog commits and ingress changes are serialized; partition policy factories can initialize independently.
+- The frontend request lease manager owns expiry for embedded partitions. Standalone partitions use periodic request expiry.
 - Selector replicas synchronize admission, prefill-complete, and free events.
 - **NOTE:** Output-block updates remain local. They are deliberately excluded
   from replica sync because their frequency would consume disproportionate

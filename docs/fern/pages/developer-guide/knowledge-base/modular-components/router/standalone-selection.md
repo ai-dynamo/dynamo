@@ -304,26 +304,11 @@ hash producer with the same algorithm, key, and key ID as the selector.
 
 ### `session_id`
 
-Both `POST /select` and `POST /select_and_reserve` accept an optional
-`session_id` string. It defaults to absent. Under the built-in selector,
-omitting it does not change selection; a custom policy that reads the field can
-select differently depending on whether it is present. The selector carries the
-value through scheduling and exposes it to worker-selection policy as
-`WorkerSelectionContext::session_id()`, so a custom picker or scorer can
-implement session affinity by preferring the worker a session used previously.
+Both `POST /select` and `POST /select_and_reserve` accept an optional `session_id` string. With `--session-affinity-ttl-secs` enabled, each model and routing group has its own binding table. `/select_and_reserve` binds a new session to the selected worker and holds its lease until the reservation is released or expires. The idle TTL starts when the last lease is released. `/select` can use an existing binding but does not create one.
 
-> [!NOTE]
-> `session_id` is an input to policy, not an affinity mechanism in itself. The
-> built-in selector ignores it, so it changes the chosen worker only when you
-> supply a custom picker or scorer that reads it. See
-> [Write Custom Routing Strategies](custom-worker-selection.mdx).
-> It is also distinct from the frontend's own session affinity, which binds
-> sessions from request headers rather than from this API; see
-> [Configuration and Tuning](configuration-and-tuning.md).
+Bindings replicate over the configured replica mesh. An explicit `affinity_target` or `pinned_worker` takes precedence over the session binding. Without a configured TTL, `session_id` is only policy input: custom policies can read it through `WorkerSelectionContext::session_id()`, while the built-in selector ignores it. See [Write Custom Routing Strategies](custom-worker-selection.mdx).
 
-The selection service does not persist, replicate, or expire `session_id`
-bindings. It is not part of the selection response and is not retained by the
-pending-selection cache, so a `POST /reservations` replay does not carry it.
+The pending-selection cache does not retain session metadata, so a later `POST /reservations` does not create a session binding. Use `/select_and_reserve` when the service should manage affinity. The frontend uses the same table implementation for request-header affinity; see [Configuration and Tuning](configuration-and-tuning.md).
 
 ### `session_context`
 
@@ -338,16 +323,12 @@ present, the flat `session_id` field is ignored.
     "session_id": "child-session",
     "parent_session_id": "root-session",
     "session_final": false,
-    "kv_hints": { "evict_session": false },
     "input_trigger": "tool_result"
   }
 }
 ```
 
-Only `session_id` is required inside the object. `input_trigger` is one of
-`user_message`, `tool_result`, or `other`. A custom policy reads the values
-through `WorkerSelectionContext::session_context()`; the built-in selector
-ignores them, exactly as it ignores `session_id`.
+Only `session_id` is required inside the object. `input_trigger` is one of `user_message`, `tool_result`, or `other`. The affinity table uses this session ID when a TTL is configured. Custom policies can read the remaining values through `WorkerSelectionContext::session_context()`.
 
 ## Ray Select-Then-Reserve Flow
 
