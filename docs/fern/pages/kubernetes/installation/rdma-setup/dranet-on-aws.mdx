@@ -315,8 +315,8 @@ kubectl exec <worker-pod> -- /opt/amazon/efa/bin/fi_info -p efa | grep domain
 **Visualize the PCIe topology on a node:**
 
 ```bash
-# Requires topoDranet.sh from the cnai-eks repo
-./validations/topoDranet.sh <node-name>
+# From the dynamo repo root
+./deploy/utils/topoDranet.sh <node-name>
 ```
 
 Example output confirming each GPU has 4 co-located EFAs on the same PCIe root:
