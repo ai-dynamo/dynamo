@@ -1295,11 +1295,14 @@ impl<
         }
     }
 
-    fn select_worker_for_request(
+    /// Keep projected loads valid until request handling ends, then reclaim only
+    /// their storage. The synchronous handler cannot retain a request borrow.
+    fn with_projected_request<R>(
         &mut self,
-        request: &mut SchedulingRequest,
+        mut request: SchedulingRequest,
         decay_now: Instant,
-    ) -> Result<SelectedWorkerForRequest, KvSchedulerError> {
+        handle: impl FnOnce(&Self, &mut SchedulingRequest) -> R,
+    ) -> R {
         std::mem::swap(&mut request.worker_loads, &mut self.projection_scratch);
         self.slots.project_worker_loads_into(
             request.token_seq.as_deref(),
@@ -1307,7 +1310,17 @@ impl<
             &mut request.worker_loads,
         );
 
-        let result = {
+        let result = handle(self, &mut request);
+        std::mem::swap(&mut request.worker_loads, &mut self.projection_scratch);
+        self.projection_scratch.clear();
+        result
+    }
+
+    fn select_worker_for_request(
+        &self,
+        request: &SchedulingRequest,
+    ) -> Result<SelectedWorkerForRequest, KvSchedulerError> {
+        {
             let workers = self.workers_with_configs.borrow();
             let overloaded_worker_ids = self
                 .overloaded_worker_provider
@@ -1372,34 +1385,31 @@ impl<
                         non_max_overlap_selection,
                     }
                 })
-        };
-        // The selected result owns every load value needed by booking and the
-        // response. Return the map's allocation to the actor on success or error.
-        std::mem::swap(&mut request.worker_loads, &mut self.projection_scratch);
-        self.projection_scratch.clear();
-        result
+        }
     }
 
     fn select_without_admission_inner(
         &mut self,
-        mut request: SchedulingRequest,
+        request: SchedulingRequest,
         decay_now: Instant,
     ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
-        let selected = self.select_worker_for_request(&mut request, decay_now)?;
-        let target_cached_prefix_blocks =
-            target_cached_prefix_blocks(&request, selected.selection.worker);
+        self.with_projected_request(request, decay_now, |actor, request| {
+            let selected = actor.select_worker_for_request(request)?;
+            let target_cached_prefix_blocks =
+                target_cached_prefix_blocks(request, selected.selection.worker);
 
-        Ok(AdvisorySchedulingResponse {
-            selected_worker_load: selected.selected_worker_load,
-            response: SchedulingResponse {
-                best_worker: selected.selection.worker,
-                effective_overlap_blocks: selected.selection.effective_overlap_blocks,
-                cached_tokens: selected.selection.cached_tokens,
-                selected_worker_tiers: selected.selected_worker_tiers,
-                target_cached_prefix_blocks,
-                kv_transfer_candidates: request.kv_transfer_candidates.take(),
-                potential_decode_blocks: selected.selection.potential_decode_blocks,
-            },
+            Ok(AdvisorySchedulingResponse {
+                selected_worker_load: selected.selected_worker_load,
+                response: SchedulingResponse {
+                    best_worker: selected.selection.worker,
+                    effective_overlap_blocks: selected.selection.effective_overlap_blocks,
+                    cached_tokens: selected.selection.cached_tokens,
+                    selected_worker_tiers: selected.selected_worker_tiers,
+                    target_cached_prefix_blocks,
+                    kv_transfer_candidates: request.kv_transfer_candidates.take(),
+                    potential_decode_blocks: selected.selection.potential_decode_blocks,
+                },
+            })
         })
     }
 
@@ -1407,12 +1417,23 @@ impl<
     /// compute projected load -> select worker -> book tracked state -> respond.
     fn admit_one(
         &mut self,
-        mut request: SchedulingRequest,
+        request: SchedulingRequest,
         attempt_tx: Option<oneshot::Sender<AttemptId>>,
         lifecycle_transfer: Option<Arc<AdmissionLifecycleTransfer>>,
         decay_now: Instant,
     ) -> bool {
-        let selected = match self.select_worker_for_request(&mut request, decay_now) {
+        self.with_projected_request(request, decay_now, |actor, request| {
+            actor.admit_projected(request, attempt_tx, lifecycle_transfer)
+        })
+    }
+
+    fn admit_projected(
+        &self,
+        request: &mut SchedulingRequest,
+        attempt_tx: Option<oneshot::Sender<AttemptId>>,
+        lifecycle_transfer: Option<Arc<AdmissionLifecycleTransfer>>,
+    ) -> bool {
+        let selected = match self.select_worker_for_request(request) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("scheduling failed: {e}");
@@ -1422,7 +1443,7 @@ impl<
         };
 
         let target_cached_prefix_blocks =
-            target_cached_prefix_blocks(&request, selected.selection.worker);
+            target_cached_prefix_blocks(request, selected.selection.worker);
         let response = SchedulingResponse {
             best_worker: selected.selection.worker,
             effective_overlap_blocks: selected.selection.effective_overlap_blocks,
@@ -1477,7 +1498,7 @@ impl<
     /// delivery loses that race, roll back the booking here.
     fn book_and_respond(
         &self,
-        mut request: SchedulingRequest,
+        request: &mut SchedulingRequest,
         attempt_tx: Option<oneshot::Sender<AttemptId>>,
         lifecycle_transfer: Option<Arc<AdmissionLifecycleTransfer>>,
         sequence_request: SequenceRequest,
@@ -2260,6 +2281,55 @@ mod tests {
             resp_tx: Some(tx),
         };
         (req, rx)
+    }
+
+    #[tokio::test]
+    async fn projections_survive_selection_and_reuse_storage_after_handling() {
+        let (queue, slots, _configs) = make_queue_with_sender(1, 16, 64, None, None);
+        let profile = PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs);
+        let mut actor = SchedulerQueueActor {
+            pending: PolicyQueue::new(profile.clone()),
+            cleanup: Arc::clone(&queue.cleanup),
+            profile,
+            pending_count: Arc::clone(&queue.pending_count),
+            pending_isl_tokens: Arc::clone(&queue.pending_isl_tokens),
+            class_counters: Arc::clone(&queue.class_counters),
+            slots: Arc::clone(&slots),
+            workers_with_configs: queue.workers_with_configs.clone(),
+            start_time: Instant::now(),
+            block_size: 16,
+            selector: DefaultWorkerSelector::new(None, "test"),
+            prefill_load_estimator: None,
+            overlap_scores_refresh: None::<Arc<NoopOverlapScoresRefresh>>,
+            overlap_refresh_after: None,
+            overloaded_worker_provider: None,
+            available_worker_provider: None,
+            non_max_overlap_selection_observer: Arc::new(OnceLock::new()),
+            projection_scratch: FxHashMap::default(),
+        };
+        let (seed, mut seed_rx) = make_request("seed", 64);
+        assert!(actor.admit_one(seed, None, None, decay_now()));
+        seed_rx.try_recv().unwrap().unwrap();
+        let worker = WorkerWithDpRank::new(0, 0);
+        let capacity = actor.projection_scratch.capacity();
+        assert!(capacity > 0);
+
+        for reject in [false, true] {
+            let (mut request, _rx) = make_request("query", 64);
+            if reject {
+                request.allowed_worker_ids = Some(HashSet::new());
+            }
+            let result = actor.with_projected_request(request, decay_now(), |actor, request| {
+                let selected = actor.select_worker_for_request(request);
+                assert_eq!(request.worker_load_for(worker).active_prefill_tokens, 64);
+                selected
+            });
+            assert_eq!(result.is_err(), reject);
+            assert!(actor.projection_scratch.is_empty());
+            assert_eq!(actor.projection_scratch.capacity(), capacity);
+        }
+        slots.free(&"seed".to_owned(), decay_now()).unwrap();
+        slots.assert_completely_drained(decay_now());
     }
 
     #[test]

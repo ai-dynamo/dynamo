@@ -299,16 +299,6 @@ impl PromptRegistry {
         )
     }
 
-    pub(super) fn project_worker_loads(
-        &self,
-        token_sequence: Option<&[SequenceHash]>,
-        decay_now: Instant,
-    ) -> FxHashMap<WorkerWithDpRank, WorkerLoadProjection> {
-        let mut projections = FxHashMap::default();
-        self.project_worker_loads_into(token_sequence, decay_now, &mut projections);
-        projections
-    }
-
     pub(super) fn project_worker_loads_into(
         &self,
         token_sequence: Option<&[SequenceHash]>,
