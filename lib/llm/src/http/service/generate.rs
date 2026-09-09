@@ -189,6 +189,14 @@ fn generate_cancelled_response() -> Response {
     )
 }
 
+fn generate_unavailable_response() -> Response {
+    generate_error_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "service_unavailable",
+        SanitizedError::Unavailable.to_string(),
+    )
+}
+
 fn generate_internal_error_response() -> Response {
     generate_error_response(
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -1026,11 +1034,7 @@ async fn generate_dispatch(
                     error = %format!("{error:#}"),
                     "no worker available for generate request"
                 );
-                return generate_error_response(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "service_unavailable",
-                    SanitizedError::Unavailable.to_string(),
-                );
+                return generate_unavailable_response();
             }
             tracing::error!(%request_id, error = %format!("{error:#}"), "engine generate call failed");
             return generate_internal_error_response();
@@ -1083,11 +1087,7 @@ async fn generate_dispatch(
             if super::metrics::request_was_unavailable(error.as_ref()) {
                 inflight_guard.mark_error(ErrorType::Unavailable);
                 tracing::warn!(%request_id, %error, "generate stream failed: no worker available");
-                return generate_error_response(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "service_unavailable",
-                    SanitizedError::Unavailable.to_string(),
-                );
+                return generate_unavailable_response();
             }
             inflight_guard.mark_error(ErrorType::Internal);
             tracing::error!(%request_id, %error, "failed to fold generate stream");
@@ -1205,6 +1205,8 @@ mod tests {
 
     struct WorkerUnavailableEngine;
 
+    struct WorkerUnavailableStreamEngine;
+
     struct MigrationMetricBackend {
         calls: AtomicU32,
     }
@@ -1248,6 +1250,27 @@ mod tests {
                 .message("Server unavailable: unknown endpoint a/generate")
                 .build()
                 .into())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for WorkerUnavailableStreamEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            // The dispatch call succeeds and the stream opens; the error arrives mid-stream, the
+            // way an exhausted migration surfaces it.
+            let context = request.context();
+            let stream = futures::stream::iter([Annotated::from_err(
+                dynamo_runtime::error::DynamoError::builder()
+                    .error_type(dynamo_runtime::error::ErrorType::WorkerUnavailable)
+                    .message("Server unavailable: unknown endpoint a/generate")
+                    .build(),
+            )]);
+            Ok(ResponseStream::new(Box::pin(stream), context))
         }
     }
 
@@ -2541,6 +2564,38 @@ mod tests {
             engine,
             dispatch_test_context(),
             "req-worker-unavailable".to_string(),
+            "test-model".to_string(),
+            state.clone(),
+            GenerateResponseOptions::default(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let metric_model = state.manager().metric_model_for("test-model");
+        assert_eq!(
+            state.metrics_clone().get_request_counter(
+                metric_model,
+                &Endpoint::Generate,
+                &RequestType::Unary,
+                &Status::Error,
+                &ErrorType::Unavailable,
+            ),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_unavailable_mid_stream_returns_503() {
+        let engine: crate::types::openai::generate::GenerateStreamingEngine =
+            Arc::new(WorkerUnavailableStreamEngine);
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+
+        let response = generate_dispatch_for_test(
+            engine,
+            dispatch_test_context(),
+            "req-worker-unavailable-stream".to_string(),
             "test-model".to_string(),
             state.clone(),
             GenerateResponseOptions::default(),

@@ -458,6 +458,69 @@ async fn dispatch(
 mod tests {
     use super::*;
 
+    use crate::protocols::common::llm_backend::LLMEngineOutput;
+    use crate::types::Annotated;
+    use dynamo_runtime::engine::AsyncEngine;
+    use dynamo_runtime::pipeline::{ManyOut, SingleIn};
+
+    struct WorkerUnavailableEngine;
+
+    #[async_trait::async_trait]
+    impl
+        AsyncEngine<
+            SingleIn<PreprocessedRequest>,
+            ManyOut<Annotated<LLMEngineOutput>>,
+            anyhow::Error,
+        > for WorkerUnavailableEngine
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<PreprocessedRequest>,
+        ) -> anyhow::Result<ManyOut<Annotated<LLMEngineOutput>>> {
+            Err(dynamo_runtime::error::DynamoError::builder()
+                .error_type(dynamo_runtime::error::ErrorType::WorkerUnavailable)
+                .message("Server unavailable: unknown endpoint a/generate")
+                .build()
+                .into())
+        }
+    }
+
+    fn dispatch_test_context() -> Context<PreprocessedRequest> {
+        Context::new(
+            PreprocessedRequest::builder()
+                .model("test-model".to_string())
+                .token_ids(vec![1])
+                .stop_conditions(Default::default())
+                .sampling_options(Default::default())
+                .output_options(Default::default())
+                .build()
+                .expect("build dispatch test request"),
+        )
+    }
+
+    #[tokio::test]
+    async fn worker_unavailable_dispatch_returns_503() {
+        let engine: crate::types::openai::generate::GenerateStreamingEngine =
+            std::sync::Arc::new(WorkerUnavailableEngine);
+        let state = crate::http::service::service_v2::HttpService::builder()
+            .build()
+            .unwrap()
+            .state_clone();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+
+        let response = dispatch(
+            engine,
+            dispatch_test_context(),
+            "req-sglang-worker-unavailable".to_string(),
+            "test-model".to_string(),
+            state,
+            ConnectionHandle::create_disabled(tx),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
     #[test]
     fn model_aliases_are_deduplicated_before_implicit_selection() {
         let manager = crate::discovery::ModelManager::new();
