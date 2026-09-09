@@ -314,7 +314,7 @@ kubectl exec <worker-pod> -- /opt/amazon/efa/bin/fi_info -p efa | grep domain
 
 ```bash
 # From the dynamo repo root
-./deploy/utils/topoDranet.sh <node-name>
+./deploy/utils/dranet_topo.sh <node-name>
 ```
 
 Example output confirming each GPU has 4 co-located EFAs on the same PCIe root:

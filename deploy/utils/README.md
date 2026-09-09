@@ -157,6 +157,26 @@ For complete benchmarking and profiling workflows:
 
 - This setup is focused on benchmarking and profiling resources only - the main Dynamo platform must be installed separately.
 
+## dranet_topo.sh — DRANET PCIe topology viewer
+
+Displays the GPU ↔ EFA co-location topology on EKS nodes, derived from DRA
+`ResourceSlice` objects published by `aws-dranet` and `nvidia-dra-driver-gpu`. Shows
+which GPUs and EFAs share a PCIe root complex — the topology the DRA scheduler uses for
+`pcieRoot` co-location constraints.
+
+**Requirements:** `kubectl` and `jq` configured against a cluster with `aws-dranet` and
+`nvidia-dra-driver-gpu` installed.
+
+```bash
+# All GPU nodes
+./deploy/utils/dranet_topo.sh
+
+# Specific node
+./deploy/utils/dranet_topo.sh <node-name>
+```
+
+See [DRANET (DRA-native EFA) on EKS](../../docs/fern/pages/kubernetes/installation/rdma-setup/dranet-on-aws.mdx) for the full DRANET setup guide.
+
 ## convert_api_version.py — nvidia.com apiVersion converter
 
 Converts Dynamo CRD manifests (DynamoGraphDeployment, DynamoComponentDeployment,
