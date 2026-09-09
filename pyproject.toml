@@ -204,6 +204,7 @@ known_third_party = ["vllm", "tensorrt_llm", "sglang", "tokenspeed", "aiconfigur
 
 [tool.pytest.ini_options]
 minversion = "8.0"
+pythonpath = ["benchmarks"]
 tmp_path_retention_policy = "failed"
 
 # NOTE

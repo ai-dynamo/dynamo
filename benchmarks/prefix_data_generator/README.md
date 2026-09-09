@@ -147,7 +147,7 @@ I find this to be the most "robust" end-to-end test. It is important to sample a
 Run the CPU-only regression suite from the repository root, using its Python environment:
 
 ```bash
-PYTHONPATH=benchmarks .venv/bin/python -m pytest -c pyproject.toml benchmarks/prefix_data_generator/tests -q
+.venv/bin/python -m pytest -c pyproject.toml benchmarks/prefix_data_generator/tests -q
 ```
 
 The suite requires the benchmark Python dependencies and pytest. It does not download
