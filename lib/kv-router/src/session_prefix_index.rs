@@ -550,6 +550,45 @@ mod tests {
     }
 
     #[test]
+    fn route_matches_plus_stored_tails_keep_shared_sessions_separate() {
+        let trunk = hashes(vec![1, 2]);
+        let session_a_tail = hashes(vec![3]);
+        let session_b_tail = hashes(vec![4]);
+        let indexer = SessionPrefixIndexer::new();
+
+        indexer
+            .update_session_from_stored_blocks("session-a", None, &trunk)
+            .unwrap();
+        indexer
+            .update_session_from_match("session-a", trunk[1])
+            .unwrap();
+        indexer
+            .update_session_from_match("session-b", trunk[1])
+            .unwrap();
+
+        indexer
+            .update_session_from_stored_blocks("session-a", Some(trunk[1]), &session_a_tail)
+            .unwrap();
+        indexer
+            .update_session_from_stored_blocks("session-b", Some(trunk[1]), &session_b_tail)
+            .unwrap();
+
+        assert_eq!(
+            indexer.node_count(),
+            4,
+            "the shared trunk must remain one physical lineage"
+        );
+        assert_eq!(
+            lineage_of(&indexer, "session-a"),
+            vec![vec![trunk[0], trunk[1], session_a_tail[0]]]
+        );
+        assert_eq!(
+            lineage_of(&indexer, "session-b"),
+            vec![vec![trunk[0], trunk[1], session_b_tail[0]]]
+        );
+    }
+
+    #[test]
     fn stored_blocks_graft_onto_a_node_first_seen_as_a_match() {
         let chain = hashes(vec![1, 2]);
         let indexer = SessionPrefixIndexer::new();

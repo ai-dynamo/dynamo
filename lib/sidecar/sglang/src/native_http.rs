@@ -60,6 +60,12 @@ pub(crate) fn request(
     body.insert("input_ids".into(), serde_json::json!(request.token_ids));
     body.insert("rid".into(), Value::String(request_id.to_string()));
     body.insert("stream".into(), Value::Bool(true));
+    if let Some(agent_context) = request.agent_context.as_ref() {
+        body.insert(
+            "session_id".into(),
+            Value::String(agent_context.session_id.clone()),
+        );
+    }
 
     let routing = request.routing.as_ref();
     if let Some(priority) = routing.and_then(|routing| routing.priority) {
@@ -518,6 +524,30 @@ mod tests {
                 .get("min_new_tokens")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn agent_context_session_id_overrides_native_payload() {
+        let mut canonical = canonical_request();
+        canonical.agent_context =
+            Some(serde_json::from_value(json!({"session_id": "canonical-session"})).unwrap());
+        canonical.extra_args = Some(json!({
+            "sglang_tito": {
+                "session_id": "native-session"
+            }
+        }));
+
+        let native = request(
+            &canonical,
+            "request-id",
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(native.body["session_id"], "canonical-session");
     }
 
     #[test]

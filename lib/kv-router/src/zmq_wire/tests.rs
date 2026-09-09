@@ -120,6 +120,28 @@ impl Default for MapBlockStoredFixture {
 }
 
 #[derive(Serialize)]
+struct SglangBlockStoredMetadataFixture<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_salt: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<&'a str>,
+}
+
+fn sglang_block_stored(metadata: SglangBlockStoredMetadataFixture<'_>) -> Vec<u8> {
+    to_vec_named(&(
+        "BlockStored",
+        vec![BlockHashValue::Unsigned(11)],
+        Option::<BlockHashValue>::None,
+        vec![10u32, 11],
+        2usize,
+        Option::<u64>::None,
+        Option::<String>::None,
+        metadata,
+    ))
+    .unwrap()
+}
+
+#[derive(Serialize)]
 struct MapBlockRemovedFixture {
     #[serde(rename = "type")]
     event_type: &'static str,
@@ -178,6 +200,60 @@ fn block_stored_session_id_reaches_canonical_router_event() {
     let event = placement.into_router_event().unwrap();
     assert_eq!(event.session_id.as_deref(), Some("session-1"));
     assert_eq!(event.session_id_or_unattributed(), "session-1");
+}
+
+#[test]
+fn sglang_block_stored_metadata_reaches_canonical_router_event() {
+    let encoded = sglang_block_stored(SglangBlockStoredMetadataFixture {
+        cache_salt: Some("tenant-a"),
+        session_id: Some("session-sglang"),
+    });
+    let raw: RawKvEvent = from_slice(&encoded).unwrap();
+    let RawKvEvent::BlockStored {
+        cache_namespace,
+        session_id,
+        ..
+    } = &raw
+    else {
+        panic!("expected BlockStored");
+    };
+    assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
+    assert_eq!(session_id.as_deref(), Some("session-sglang"));
+
+    let event = convert_event(
+        raw,
+        42,
+        2,
+        WorkerWithDpRank::new(7, 0),
+        &Arc::new(AtomicU32::new(0)),
+        None,
+        None,
+    )
+    .unwrap()
+    .into_router_event()
+    .unwrap();
+    assert_eq!(event.session_id.as_deref(), Some("session-sglang"));
+}
+
+#[test]
+fn sglang_session_only_metadata_does_not_change_legacy_fields() {
+    let encoded = sglang_block_stored(SglangBlockStoredMetadataFixture {
+        cache_salt: None,
+        session_id: Some("session-sglang"),
+    });
+    let event: RawKvEvent = from_slice(&encoded).unwrap();
+    let RawKvEvent::BlockStored {
+        lora_name,
+        cache_namespace,
+        session_id,
+        ..
+    } = event
+    else {
+        panic!("expected BlockStored");
+    };
+    assert_eq!(lora_name, None);
+    assert_eq!(cache_namespace, None);
+    assert_eq!(session_id.as_deref(), Some("session-sglang"));
 }
 
 #[test]

@@ -132,7 +132,10 @@ pub(crate) fn build_generate_request(
         routing_key: request.mdc_sum.clone(),
         routed_dp_rank,
         trace_headers,
-        session_id: None,
+        session_id: request
+            .agent_context
+            .as_ref()
+            .map(|context| context.session_id.clone()),
         disaggregated_params: resolve_disaggregated_params(
             request,
             mode,
@@ -621,6 +624,24 @@ mod tests {
             mapped.disaggregated_params.unwrap().bootstrap_room,
             i64::MAX
         );
+    }
+
+    #[test]
+    fn request_maps_agent_context_session_id() {
+        let mut request = request();
+        request.agent_context =
+            Some(serde_json::from_value(json!({"session_id": "session-a"})).unwrap());
+
+        let mapped = build_generate_request(
+            &request,
+            "rid-session",
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(mapped.session_id.as_deref(), Some("session-a"));
     }
 
     #[test]

@@ -33,6 +33,21 @@ impl<'de> Deserialize<'de> for RawKvEvent {
 
 struct RawKvEventVisitor;
 
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum BlockStoredPositionSeven {
+    LoraName(String),
+    SglangMetadata(SglangBlockStoredMetadata),
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SglangBlockStoredMetadata {
+    #[serde(default)]
+    cache_salt: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+}
+
 impl<'de> Visitor<'de> for RawKvEventVisitor {
     type Value = RawKvEvent;
 
@@ -203,28 +218,52 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 // Position 5 was lora_id in older formats; consume and discard for compat.
                 let _lora_id: Option<u64> = seq.next_element()?.unwrap_or(None);
                 let medium: Option<String> = normalize_medium(seq.next_element()?.unwrap_or(None));
-                let lora_name: Option<String> = seq.next_element()?.unwrap_or(None);
-                let extra_keys: Option<Vec<Option<Vec<ExtraKeyItem>>>> =
+                let position_seven: Option<BlockStoredPositionSeven> =
                     seq.next_element()?.unwrap_or(None);
-                let mut trailing = std::array::from_fn(|_| None);
-                let mut trailing_len = 0;
-                while trailing_len < trailing.len() {
-                    let Some(field) = seq.next_element::<Option<BlockStoredTrailingField>>()?
-                    else {
-                        break;
+                let (lora_name, cache_namespace, session_id, block_mm_infos, parsed) =
+                    match position_seven {
+                        Some(BlockStoredPositionSeven::SglangMetadata(metadata)) => {
+                            while seq.next_element::<IgnoredAny>()?.is_some() {}
+                            (
+                                None,
+                                metadata.cache_salt,
+                                metadata.session_id,
+                                None,
+                                ParsedBlockStoredTrailing::default(),
+                            )
+                        }
+                        legacy => {
+                            let lora_name = legacy.and_then(|field| match field {
+                                BlockStoredPositionSeven::LoraName(value) => Some(value),
+                                BlockStoredPositionSeven::SglangMetadata(_) => unreachable!(),
+                            });
+                            let extra_keys: Option<Vec<Option<Vec<ExtraKeyItem>>>> =
+                                seq.next_element()?.unwrap_or(None);
+                            let mut trailing = std::array::from_fn(|_| None);
+                            let mut trailing_len = 0;
+                            while trailing_len < trailing.len() {
+                                let Some(field) =
+                                    seq.next_element::<Option<BlockStoredTrailingField>>()?
+                                else {
+                                    break;
+                                };
+                                trailing[trailing_len] = field;
+                                trailing_len += 1;
+                            }
+                            while seq.next_element::<IgnoredAny>()?.is_some() {}
+                            let mut parsed =
+                                parse_block_stored_trailing::<A::Error>(trailing, trailing_len)?;
+                            let cache_namespace = extra_keys_to_cache_namespace(
+                                extra_keys.as_deref(),
+                                lora_name.as_deref(),
+                            );
+                            let block_mm_infos = parsed
+                                .block_mm_infos
+                                .take()
+                                .or_else(|| extra_keys_to_block_mm_infos(extra_keys));
+                            (lora_name, cache_namespace, None, block_mm_infos, parsed)
+                        }
                     };
-                    trailing[trailing_len] = field;
-                    trailing_len += 1;
-                }
-                while seq.next_element::<IgnoredAny>()?.is_some() {}
-
-                let parsed = parse_block_stored_trailing::<A::Error>(trailing, trailing_len)?;
-
-                let cache_namespace =
-                    extra_keys_to_cache_namespace(extra_keys.as_deref(), lora_name.as_deref());
-                let block_mm_infos = parsed
-                    .block_mm_infos
-                    .or_else(|| extra_keys_to_block_mm_infos(extra_keys));
                 let (raw_token_ids, is_eagle) = normalize_token_ids(token_ids);
 
                 Ok(RawKvEvent::BlockStored {
@@ -242,9 +281,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     kv_cache_spec_sliding_window: parsed.metadata.kv_cache_spec_sliding_window,
                     locality: parsed.locality,
                     ownership: parsed.ownership,
-                    // vLLM emits session_id in its named-map format. Legacy
-                    // positional layouts have no unambiguous session slot.
-                    session_id: None,
+                    session_id,
                 })
             }
             "BlockRemoved" => {
@@ -298,6 +335,7 @@ struct ParsedCommonTrailing {
     ownership: Option<String>,
 }
 
+#[derive(Default)]
 struct ParsedBlockStoredTrailing {
     metadata: KvCacheEventMetadata,
     block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
