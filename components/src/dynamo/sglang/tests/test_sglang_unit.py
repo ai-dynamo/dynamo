@@ -1938,13 +1938,19 @@ async def test_worker_teardown_surfaces_cancellation_after_metrics_unwind():
 
     metrics_task = asyncio.create_task(metrics_loop())
     await started.wait()
-    outer = asyncio.create_task(
-        finish_worker_teardown(
-            metrics_task,
-            lambda: steps.append("handler.cleanup"),
-            deferred,
-        )
-    )
+
+    async def caller():
+        try:
+            await finish_worker_teardown(
+                metrics_task,
+                lambda: steps.append("handler.cleanup"),
+                deferred,
+            )
+        except asyncio.CancelledError:
+            steps.append("caller.cancelled")
+            raise
+
+    outer = asyncio.create_task(caller())
 
     await unwinding.wait()
     outer.cancel()
@@ -1953,7 +1959,7 @@ async def test_worker_teardown_surfaces_cancellation_after_metrics_unwind():
     with pytest.raises(asyncio.CancelledError):
         await outer
 
-    assert steps == ["handler.cleanup", "run_deferred_handlers"]
+    assert steps == ["handler.cleanup", "run_deferred_handlers", "caller.cancelled"]
     assert metrics_task.cancelled()
 
 
@@ -1973,7 +1979,14 @@ async def test_worker_teardown_surfaces_cancellation_after_deferred_cleanup():
         await release_deferred.wait()
         steps.append("run_deferred_handlers")
 
-    outer = asyncio.create_task(finish_worker_teardown(metrics_task, cleanup, deferred))
+    async def caller():
+        try:
+            await finish_worker_teardown(metrics_task, cleanup, deferred)
+        except asyncio.CancelledError:
+            steps.append("caller.cancelled")
+            raise
+
+    outer = asyncio.create_task(caller())
     await deferred_started.wait()
     outer.cancel()
     release_deferred.set()
@@ -1981,7 +1994,7 @@ async def test_worker_teardown_surfaces_cancellation_after_deferred_cleanup():
     with pytest.raises(asyncio.CancelledError):
         await outer
 
-    assert steps == ["handler.cleanup", "run_deferred_handlers"]
+    assert steps == ["handler.cleanup", "run_deferred_handlers", "caller.cancelled"]
     assert metrics_task.cancelled()
 
 
