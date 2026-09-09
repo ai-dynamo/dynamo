@@ -15,15 +15,23 @@ import os
 
 import pytest
 
-from tests.serve.common import WORKSPACE_DIR, params_with_model_mark, run_serve_deployment
+from tests.serve.common import (
+    WORKSPACE_DIR,
+    params_with_model_mark,
+    run_serve_deployment,
+)
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import chat_payload_default
 
-
-def _sidecar_dir(backend: str) -> str:
-    return os.environ.get(f"{backend.upper()}_SIDECAR_DIR") or os.path.join(
-        WORKSPACE_DIR, f"lib/sidecar/{backend}"
-    )
+vllm_sidecar_dir = os.environ.get("VLLM_SIDECAR_DIR") or os.path.join(
+    WORKSPACE_DIR, "lib/sidecar/vllm"
+)
+sglang_sidecar_dir = os.environ.get("SGLANG_SIDECAR_DIR") or os.path.join(
+    WORKSPACE_DIR, "lib/sidecar/sglang"
+)
+trtllm_sidecar_dir = os.environ.get("TRTLLM_SIDECAR_DIR") or os.path.join(
+    WORKSPACE_DIR, "lib/sidecar/trtllm"
+)
 
 
 # Sequential stage only: no profiled_vram_gib mark yet, since actual peak VRAM
@@ -33,7 +41,7 @@ def _sidecar_dir(backend: str) -> str:
 sidecar_configs = {
     "vllm_aggregated": EngineConfig(
         name="vllm_aggregated",
-        directory=_sidecar_dir("vllm"),
+        directory=vllm_sidecar_dir,
         script_name="agg.sh",
         marks=[
             pytest.mark.vllm,
@@ -49,7 +57,7 @@ sidecar_configs = {
     ),
     "sglang_aggregated": EngineConfig(
         name="sglang_aggregated",
-        directory=_sidecar_dir("sglang"),
+        directory=sglang_sidecar_dir,
         script_name="agg.sh",
         marks=[
             pytest.mark.sglang,
@@ -65,7 +73,7 @@ sidecar_configs = {
     ),
     "trtllm_aggregated": EngineConfig(
         name="trtllm_aggregated",
-        directory=_sidecar_dir("trtllm"),
+        directory=trtllm_sidecar_dir,
         script_name="agg.sh",
         marks=[
             pytest.mark.trtllm,

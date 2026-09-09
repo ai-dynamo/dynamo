@@ -382,9 +382,12 @@ jobs:
   sidecar-vllm-test-image:
     name: dynamo-sidecar (vllm test image)
     needs: [changed-files, vllm-build, sidecar-build]
-    # vllm-build and sidecar-build both also trigger on `sidecar` (see their
-    # own if: conditions), so both are guaranteed to have run whenever this does.
-    if: needs.changed-files.outputs.sidecar == 'true'
+    # always(): vllm-build doesn't trigger on `sidecar` (a lib/sidecar/**-only
+    # PR leaves it skipped), and sidecar-build itself can fail independently of
+    # this job's own gate. Without always(), GitHub Actions auto-skips this job
+    # whenever either needed job fails outright (skip is fine either way; see
+    # the tags step below for the fallback each case resolves to).
+    if: always() && needs.changed-files.outputs.sidecar == 'true'
     runs-on: prod-builder-v3
     permissions:
       contents: read
@@ -419,8 +422,17 @@ jobs:
         else
           echo "base_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:main-vllm-runtime-test" >> "${GITHUB_OUTPUT}"
         fi
-        # Must stay in sync with shared-build-sidecar.yml's calculate-target-tag step.
-        echo "sidecar_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}-dynamo-sidecar" >> "${GITHUB_OUTPUT}"
+        # sidecar-build shares this job's own if: condition, so it always
+        # attempts to run here — but it can still fail on its own (as opposed
+        # to being skipped). Fall back to the floating main-dynamo-sidecar tag
+        # (published by post-merge-ci.yml) rather than pulling a tag this run
+        # never pushed. Must stay in sync with shared-build-sidecar.yml's
+        # calculate-target-tag step.
+        if [ "${{ needs.sidecar-build.result }}" = "success" ]; then
+          echo "sidecar_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}-dynamo-sidecar" >> "${GITHUB_OUTPUT}"
+        else
+          echo "sidecar_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:main-dynamo-sidecar" >> "${GITHUB_OUTPUT}"
+        fi
         echo "image_tag=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}-vllm-sidecar-test" >> "${GITHUB_OUTPUT}"
     - name: Build and Push sidecar test image
       uses: $/.github/actions/docker-remote-build
@@ -458,9 +470,12 @@ jobs:
   sidecar-sglang-test-image:
     name: dynamo-sidecar (sglang test image)
     needs: [changed-files, sglang-build, sidecar-build]
-    # sglang-build and sidecar-build both also trigger on `sidecar` (see their
-    # own if: conditions), so both are guaranteed to have run whenever this does.
-    if: needs.changed-files.outputs.sidecar == 'true'
+    # always(): sglang-build doesn't trigger on `sidecar` (a lib/sidecar/**-only
+    # PR leaves it skipped), and sidecar-build itself can fail independently of
+    # this job's own gate. Without always(), GitHub Actions auto-skips this job
+    # whenever either needed job fails outright (skip is fine either way; see
+    # the tags step below for the fallback each case resolves to).
+    if: always() && needs.changed-files.outputs.sidecar == 'true'
     runs-on: prod-builder-v3
     permissions:
       contents: read
@@ -495,8 +510,17 @@ jobs:
         else
           echo "base_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:main-sglang-runtime-test" >> "${GITHUB_OUTPUT}"
         fi
-        # Must stay in sync with shared-build-sidecar.yml's calculate-target-tag step.
-        echo "sidecar_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}-dynamo-sidecar" >> "${GITHUB_OUTPUT}"
+        # sidecar-build shares this job's own if: condition, so it always
+        # attempts to run here — but it can still fail on its own (as opposed
+        # to being skipped). Fall back to the floating main-dynamo-sidecar tag
+        # (published by post-merge-ci.yml) rather than pulling a tag this run
+        # never pushed. Must stay in sync with shared-build-sidecar.yml's
+        # calculate-target-tag step.
+        if [ "${{ needs.sidecar-build.result }}" = "success" ]; then
+          echo "sidecar_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}-dynamo-sidecar" >> "${GITHUB_OUTPUT}"
+        else
+          echo "sidecar_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:main-dynamo-sidecar" >> "${GITHUB_OUTPUT}"
+        fi
         echo "image_tag=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}-sglang-sidecar-test" >> "${GITHUB_OUTPUT}"
     - name: Build and Push sidecar test image
       uses: $/.github/actions/docker-remote-build
@@ -534,9 +558,12 @@ jobs:
   sidecar-trtllm-test-image:
     name: dynamo-sidecar (trtllm test image)
     needs: [changed-files, trtllm-build, sidecar-build]
-    # trtllm-build and sidecar-build both also trigger on `sidecar` (see their
-    # own if: conditions), so both are guaranteed to have run whenever this does.
-    if: needs.changed-files.outputs.sidecar == 'true'
+    # always(): trtllm-build doesn't trigger on `sidecar` (a lib/sidecar/**-only
+    # PR leaves it skipped), and sidecar-build itself can fail independently of
+    # this job's own gate. Without always(), GitHub Actions auto-skips this job
+    # whenever either needed job fails outright (skip is fine either way; see
+    # the tags step below for the fallback each case resolves to).
+    if: always() && needs.changed-files.outputs.sidecar == 'true'
     runs-on: prod-builder-v3
     permissions:
       contents: read
@@ -571,8 +598,17 @@ jobs:
         else
           echo "base_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:main-trtllm-runtime-test" >> "${GITHUB_OUTPUT}"
         fi
-        # Must stay in sync with shared-build-sidecar.yml's calculate-target-tag step.
-        echo "sidecar_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}-dynamo-sidecar" >> "${GITHUB_OUTPUT}"
+        # sidecar-build shares this job's own if: condition, so it always
+        # attempts to run here — but it can still fail on its own (as opposed
+        # to being skipped). Fall back to the floating main-dynamo-sidecar tag
+        # (published by post-merge-ci.yml) rather than pulling a tag this run
+        # never pushed. Must stay in sync with shared-build-sidecar.yml's
+        # calculate-target-tag step.
+        if [ "${{ needs.sidecar-build.result }}" = "success" ]; then
+          echo "sidecar_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}-dynamo-sidecar" >> "${GITHUB_OUTPUT}"
+        else
+          echo "sidecar_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:main-dynamo-sidecar" >> "${GITHUB_OUTPUT}"
+        fi
         echo "image_tag=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}-trtllm-sidecar-test" >> "${GITHUB_OUTPUT}"
     - name: Build and Push sidecar test image
       uses: $/.github/actions/docker-remote-build
@@ -1044,7 +1080,10 @@ jobs:
       # Keep the outer step budget above the test's 450s timeout so pytest can
       # finish teardown and upload diagnostics instead of being killed first.
       cpu_e2e_test_timeout_minutes: 15
-      gpu_test_markers: pre_merge and vllm and gpu_1
+      # not sidecar: sidecar-marked tests need dynamo-vllm-sidecar layered onto
+      # the image (see sidecar-vllm-test below), which this plain vllm-runtime
+      # image doesn't have.
+      gpu_test_markers: pre_merge and vllm and gpu_1 and not sidecar
       gpu_test_timeout_minutes: 45
       # Profiled tests run in the parallel stage; unprofiled fall through to sequential.
       # 24 GiB admits all currently profiled vLLM tests (max is ~20.4 GiB) on a 48 GiB GPU.
@@ -1087,7 +1126,10 @@ jobs:
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and sglang and gpu_0
-      gpu_test_markers: pre_merge and sglang and gpu_1
+      # not sidecar: sidecar-marked tests need dynamo-sglang-sidecar layered
+      # onto the image (see sidecar-sglang-test below), which this plain
+      # sglang-runtime image doesn't have.
+      gpu_test_markers: pre_merge and sglang and gpu_1 and not sidecar
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled SGLang pool
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
@@ -1130,7 +1172,10 @@ jobs:
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and trtllm and gpu_0
-      gpu_test_markers: pre_merge and trtllm and gpu_1
+      # not sidecar: sidecar-marked tests need dynamo-trtllm-sidecar layered
+      # onto the image (see sidecar-trtllm-test below), which this plain
+      # trtllm-runtime image doesn't have.
+      gpu_test_markers: pre_merge and trtllm and gpu_1 and not sidecar
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled TRT-LLM pool
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.

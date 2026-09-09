@@ -815,7 +815,10 @@ jobs:
       enable_coverage: true
       run_cpu_only_tests: true
       cpu_only_test_markers: vllm and gpu_0
-      gpu_test_markers: vllm and gpu_1
+      # not sidecar: sidecar-marked tests need dynamo-vllm-sidecar layered onto
+      # the image (see pr.yaml's sidecar-vllm-test), which this plain
+      # vllm-runtime image doesn't have.
+      gpu_test_markers: vllm and gpu_1 and not sidecar
       gpu_test_timeout_minutes: 240
       # Profiled tests run in the parallel stage; unprofiled fall through to sequential.
       # 24 GiB admits all currently profiled vLLM tests (max is ~20.4 GiB) on a 48 GiB GPU.
@@ -887,7 +890,7 @@ jobs:
       platform: '["amd64"]'
       enable_coverage: true
       run_sanity_check: false
-      gpu_test_markers: vllm and (gpu_1 or gpu_2)
+      gpu_test_markers: vllm and (gpu_1 or gpu_2) and not sidecar
       gpu_test_timeout_minutes: 240
       # 80 GiB H100 admits more of the profiled pool per slot than the 24 GiB lanes.
       run_gpu_parallel_tests: true
@@ -914,7 +917,7 @@ jobs:
       run_cpu_only_tests: true
       cpu_only_test_markers: sglang and gpu_0
       # Exclude h100 tests: they need >24 GiB and run on the sglang-h100-test lane below.
-      gpu_test_markers: sglang and gpu_1 and not h100
+      gpu_test_markers: sglang and gpu_1 and not h100 and not sidecar
       gpu_test_timeout_minutes: 240
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled SGLang pool
@@ -986,7 +989,7 @@ jobs:
       platform: '["amd64"]'
       enable_coverage: true
       run_sanity_check: false
-      gpu_test_markers: sglang and (gpu_1 or gpu_2)
+      gpu_test_markers: sglang and (gpu_1 or gpu_2) and not sidecar
       gpu_test_timeout_minutes: 240
       # 80 GiB H100 admits more of the profiled pool per slot than the 24 GiB lanes.
       run_gpu_parallel_tests: true
@@ -1012,7 +1015,7 @@ jobs:
       enable_coverage: true
       run_cpu_only_tests: true
       cpu_only_test_markers: trtllm and gpu_0
-      gpu_test_markers: trtllm and gpu_1
+      gpu_test_markers: trtllm and gpu_1 and not sidecar
       gpu_test_timeout_minutes: 240
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled TRT-LLM pool
@@ -1062,7 +1065,7 @@ jobs:
       platform: '["amd64"]'
       enable_coverage: true
       run_sanity_check: false
-      gpu_test_markers: trtllm and (gpu_1 or gpu_2)
+      gpu_test_markers: trtllm and (gpu_1 or gpu_2) and not sidecar
       gpu_test_timeout_minutes: 240
       # 80 GiB H100 admits more of the profiled pool per slot than the 24 GiB lanes.
       run_gpu_parallel_tests: true

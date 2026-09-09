@@ -464,7 +464,10 @@ jobs:
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
-      gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1'
+      # not sidecar: sidecar-marked tests need dynamo-vllm-sidecar layered onto
+      # the image (see pr.yaml's sidecar-vllm-test), which this plain
+      # vllm-runtime image doesn't have.
+      gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1 and not sidecar'
       gpu_test_timeout_minutes: 120
       # Profiled tests (those carrying @pytest.mark.profiled_vram_gib(N)) run concurrently in
       # the parallel stage; the rest fall through to the sequential stage. 24 GiB admits all
@@ -562,7 +565,10 @@ jobs:
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and sglang and gpu_0'
-      gpu_test_markers: '(pre_merge or post_merge) and sglang and gpu_1'
+      # not sidecar: sidecar-marked tests need dynamo-sglang-sidecar layered
+      # onto the image (see pr.yaml's sidecar-sglang-test), which this plain
+      # sglang-runtime image doesn't have.
+      gpu_test_markers: '(pre_merge or post_merge) and sglang and gpu_1 and not sidecar'
       gpu_test_timeout_minutes: 120
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled SGLang pool
@@ -602,7 +608,10 @@ jobs:
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
-      gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1'
+      # not sidecar: sidecar-marked tests need dynamo-trtllm-sidecar layered
+      # onto the image (see pr.yaml's sidecar-trtllm-test), which this plain
+      # trtllm-runtime image doesn't have.
+      gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1 and not sidecar'
       gpu_test_timeout_minutes: 120
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled TRT-LLM pool
