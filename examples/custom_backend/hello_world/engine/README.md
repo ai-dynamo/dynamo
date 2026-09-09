@@ -25,7 +25,7 @@ What it demonstrates:
 - **The unified backend contract** — `from_args` → `start` → `generate`
   → `cleanup`, with cancellation via `context.is_stopped()`. The
   framework owns registration, discovery, serving, and shutdown; the
-  engine is ~200 lines.
+  engine is ~250 lines.
 - **KV-aware routing with synthetic events** — on every request the
   engine publishes the prompt's full run of 16-token blocks as
   `BlockStored` KV events. The router recomputes each block's **match
@@ -336,8 +336,8 @@ learned which worker holds the prefix from the engine's KV events and
 pinned every repeat prompt to it. One `published` line despite several
 requests is the engine's dedup (identical blocks are published once).
 To see the router's scoring itself, add `DYN_LOG=debug` on the frontend
-component and grep its logs for `blocks overlap` (`0/4` on the first
-request, `3/4` on repeats).
+component and grep its logs for `blocks overlap` (`0/N` on the first
+request, near-full overlap on repeats).
 
 ### Cleanup
 
@@ -373,7 +373,7 @@ requires: `tokenizer_config.json` carries the chat template that renders
 
 ```text
 src/hello_engine/engine.py    the LLMEngine subclass (all the logic)
-src/hello_engine/main.py      3-line entry point: run(HelloEngine)
+src/hello_engine/main.py      entry point: hand HelloEngine to run()
 src/hello_engine/tokenizer/   bundled byte-level mock tokenizer (~6 KB)
 Dockerfile                    engine layered on the Dynamo base image
 deploy/dgd.yaml               DynamoGraphDeployment (frontend + workers)
