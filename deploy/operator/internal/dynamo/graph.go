@@ -1957,7 +1957,7 @@ func applyCompilationCache(container *corev1.Container, component *v1beta1.Dynam
 		if mount.Name == compilationCache.PVCName && mount.MountPath == "" {
 			mount.MountPath = mountPath
 		}
-		if mount.Name == compilationCache.PVCName && mount.MountPath == mountPath && mount.SubPath == "" {
+		if mount.Name == compilationCache.PVCName && mount.MountPath == mountPath {
 			mount.SubPath = compilationCache.SubPath
 		}
 		if mount.MountPath != mountPath {
