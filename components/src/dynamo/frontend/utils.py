@@ -186,13 +186,14 @@ def extract_mm_urls(
             url = media_value.get("url") if isinstance(media_value, dict) else None
             if isinstance(url, str) and url:
                 mm_data.setdefault(part_type, []).append({"Url": url})
-            elif isinstance(uuid_value, str) and part_type == "image_url":
-                mm_data.setdefault(part_type, []).append({"UuidOnly": uuid_value})
             elif isinstance(uuid_value, str):
-                raise ValueError(
-                    "UUID-only cache reuse is not supported for media modality "
-                    f"`{part_type}`; provide a media URL"
-                )
+                if part_type == "image_url":
+                    mm_data.setdefault(part_type, []).append({"UuidOnly": uuid_value})
+                else:
+                    raise ValueError(
+                        "UUID-only cache reuse is not supported for media modality "
+                        f"`{part_type}`; provide a media URL"
+                    )
             else:
                 raise ValueError(
                     f"{part_type} part must contain a non-empty URL or uuid"
