@@ -616,10 +616,6 @@ async def test_aggregated_fd_on_no_images_passes_none():
     assert captured["image_data"] is None
 
 
-# NVBug 6418893: SGLang rejects a `session_params.id` not created through
-# `open_session`, so no handler may synthesize one from `agent_context`.
-
-
 class _GenerateRecorder:
     """Stands in for ``sgl.Engine``, recording each ``async_generate`` call.
 
@@ -695,7 +691,7 @@ async def test_aggregated_decode_omits_session_params_for_agent_context(
     session_agent_context: Dict[str, Any],
 ):
     """Aggregated decode must not turn ``agent_context.session_id`` into
-    ``session_params`` (NVBug 6418893).
+    ``session_params``.
     """
     handler = _new_decode_handler(enable_frontend_decoding=False)
     _enable_session_radix_cache(handler)
@@ -721,8 +717,7 @@ async def test_aggregated_decode_omits_session_params_for_agent_context(
 async def test_disaggregated_decode_omits_session_params_for_agent_context(
     session_agent_context: Dict[str, Any],
 ):
-    """Disaggregated decode must not attach ``session_params`` either
-    (NVBug 6418893).
+    """Disaggregated decode must not attach ``session_params`` either.
 
     ``DecodeWorkerHandler.generate`` reaches the engine through a separate
     disaggregated branch, so that call site needs its own coverage.
@@ -758,7 +753,7 @@ async def test_disaggregated_decode_omits_session_params_for_agent_context(
 async def test_prefill_omits_session_params_for_agent_context(
     session_agent_context: Dict[str, Any],
 ):
-    """Prefill must not attach ``session_params`` either (NVBug 6418893).
+    """Prefill must not attach ``session_params`` either.
 
     ``PrefillWorkerHandler.generate`` has its own engine call site, so it needs
     coverage independent of the decode handler.
