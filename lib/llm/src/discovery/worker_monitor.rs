@@ -331,19 +331,9 @@ impl WorkerLoadState {
     }
 
     /// Authoritative backend KV occupancy for one rank, as `(used, total)`.
-    ///
-    /// `kv_used_blocks` is published by the worker itself; the vLLM publisher
-    /// sets it to `num_gpu_blocks * kv_cache_usage`, against the same
-    /// per-rank block count that fills `kv_total_blocks`. The ratio is
-    /// therefore identical to the engine's own `kv_cache_usage_perc` on any
-    /// block geometry. The router's `active_decode_blocks` is a different
-    /// quantity -- the unique LOGICAL footprint of sequences this router
-    /// tracks, after shared-prefix accounting -- and reads far lower.
     pub fn kv_occupancy(&self, dp_rank: u32) -> Option<(u64, u64)> {
         // Deliberately NO staleness window. The worker publishes on CHANGE, so
         // silence means "unchanged", not "gone" -- a plateau at high occupancy
-        // is exactly when a time-based expiry would blind this gate. Liveness
-        // is membership: these states are dropped when the worker leaves.
         let used = *self.kv_used_blocks.get(&dp_rank)?;
         let total = *self.kv_total_blocks.get(&dp_rank)?;
         (total > 0).then_some((used, total))

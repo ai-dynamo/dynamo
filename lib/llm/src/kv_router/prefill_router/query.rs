@@ -712,11 +712,6 @@ mod tests {
 
     /// The continuation config every continuation test shares: force-on, so
     /// the decode-load condition cannot mask what is actually under test, plus
-    /// a per-test cap. `None` means the cap is deliberately absent.
-    ///
-    /// Nothing validates this config. It reaches `PrefillContinuePolicy` via
-    /// `disabled_with_prefill_continue`, not `KvRouter::new`, which the KV arm
-    /// of the harness builds its own config for.
     fn continue_config(max_concurrent: Option<usize>) -> dynamo_kv_router::config::KvRouterConfig {
         dynamo_kv_router::config::KvRouterConfig {
             prefill_continue_enabled: true,
@@ -731,11 +726,6 @@ mod tests {
     async fn round_robin_has_no_interlock_signal_so_nothing_continues() {
         // The interlock reads a KV route preview, so on the built-in plane it
         // cannot be read at all. An unread safety check is not a passed one:
-        // the feature refuses rather than continue unchecked.
-        //
-        // This is the whole reason the continuation tests below are KV-routed,
-        // and it is what a benchmark arm has to get right — a round-robin arm
-        // with the flag set is a control arm, not a treatment arm.
         let runtime = Runtime::from_current().unwrap();
         let discovery_root = tempfile::tempdir().unwrap();
         let dispatch = Arc::new(RecordingDispatch::completed());
@@ -821,9 +811,6 @@ mod tests {
     async fn without_a_readable_decode_pool_nothing_continues() {
         // The other continuation tests set `force`, which waives the
         // decode-load test and nothing else. Drop it and the decision has to
-        // stand on a real decode signal — which this harness has no decode
-        // routing host to provide. Unknown decode load is not an empty decode
-        // pool, so the request hands off.
         let runtime = Runtime::from_current().unwrap();
         let discovery_root = tempfile::tempdir().unwrap();
         let dispatch = Arc::new(RecordingDispatch::completed());
@@ -912,8 +899,6 @@ mod tests {
 
         // Finish-time gauges key on a recorded decode worker, and a request
         // that stays in the prefill phase never records one — so without this
-        // transition inter-token latency is missing from exactly the arms
-        // running the feature.
         assert_eq!(tracker.phase(), RequestPhase::Continuation);
         assert_eq!(
             tracker.decode_worker_id(),
@@ -934,13 +919,6 @@ mod tests {
     async fn a_capped_worker_is_demoted() {
         // The dispatch-time demotion only fires when the pool looks free but
         // the *chosen* worker is not. A cap of zero cannot reach it — that
-        // refuses before routing — and neither can a busy worker the scheduler
-        // then avoids, because the scheduler balances load.
-        //
-        // The real shape is a census the scheduler cannot see: fill three of
-        // the four workers, leave one free so the pool minimum still passes the
-        // pre-routing check, then send one request per worker. Whichever ones
-        // land on a filled worker must be demoted.
         let runtime = Runtime::from_current().unwrap();
         let discovery_root = tempfile::tempdir().unwrap();
         let dispatch = Arc::new(RecordingDispatch::completed());
@@ -1048,8 +1026,6 @@ mod tests {
     async fn without_a_configured_cap_nothing_continues() {
         // Startup validation asks for a cap, but it does not run on every path
         // a router can be built from, so a config can reach dispatch with none.
-        // An unbounded continuation is worse than no continuation, so the
-        // absent cap must refuse rather than waive the bound.
         let runtime = Runtime::from_current().unwrap();
         let discovery_root = tempfile::tempdir().unwrap();
         let dispatch = Arc::new(RecordingDispatch::completed());

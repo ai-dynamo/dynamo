@@ -665,23 +665,9 @@ pub fn register_router_queue_metrics(
 
 /// Why the router did or did not keep a request generating on its prefill
 /// worker.
-///
-/// The feature's failure mode is silence: it is default-off, every gate fails
-/// closed, and a misconfigured deployment looks exactly like an idle one. These
-/// answer "why did it never fire?" without turning on debug logging.
 pub struct PrefillContinueMetrics {
     /// Each pre-routing decision the router actually made, labelled `continue`
     /// or the refusal reason.
-    ///
-    /// A request arriving while the feature is off is not counted: the router
-    /// returns before deciding, and counting one per request would duplicate an
-    /// existing request counter to say nothing. `disabled` therefore stays at
-    /// zero, and every series at zero is itself the signal that the feature is
-    /// off.
-    ///
-    /// `continue` counts requests the router *asked* to continue, not ones that
-    /// did. Dispatch can still withdraw the ask once it knows the worker, so
-    /// continuations actually served is `continue` minus `demotions_total`.
     pub decisions_total: IntCounterVec,
     /// Continuations the router asked for and then withdrew at dispatch, once
     /// the chosen worker was known.
@@ -693,11 +679,6 @@ pub struct PrefillContinueMetrics {
     /// `prefill_continue_decode_busy_threshold`.
     pub decode_occupancy: prometheus::Histogram,
     /// Every attempted decode-occupancy read, by outcome.
-    ///
-    /// The histogram counts readings that succeeded, so on its own it cannot
-    /// say what share of probes had a source at all. The decision counters
-    /// cannot either: the prefill interlock is evaluated first, so a busy
-    /// prefill worker masks `decode_load_unknown`. This is the denominator.
     pub decode_occupancy_reads_total: IntCounterVec,
 }
 
@@ -739,8 +720,6 @@ pub static PREFILL_CONTINUE_METRICS: LazyLock<PrefillContinueMetrics> = LazyLock
             )
             // Occupancy is a fraction, so the range is fixed and even steps
             // read directly as a threshold sweep.
-            // Divide rather than multiply: `3.0 * 0.05` is 0.15000000000000002,
-            // which reads badly as a `le` label on a threshold sweep.
             .buckets((0..=20).map(|step| f64::from(step) / 20.0).collect()),
         )
         .expect("Failed to create prefill_continue_decode_occupancy histogram"),
@@ -816,16 +795,6 @@ const PREFILL_CONTINUE_DEMOTION_REASONS: &[&str] = &[
 
 /// Create every series up front, so "it never fired" reads as a zero rather
 /// than as an empty query.
-///
-/// A counter vector with no observations exposes no samples at all, so a
-/// default-off deployment would publish nothing and an operator could not tell
-/// the feature apart from a broken exporter. The label set is finite and small,
-/// so materializing all of it costs nothing and removes the ambiguity.
-///
-/// `disabled` is materialized but never incremented: the router returns before
-/// deciding when the feature is off, rather than counting a decision per
-/// request that it did not make. Every series sitting at zero *is* the signal
-/// that the feature is off.
 fn materialize_prefill_continue_series(m: &PrefillContinueMetrics) {
     for label in [
         prefill_continue_decision::CONTINUE,

@@ -2,16 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! How many continuations each prefill worker is running right now.
-//!
-//! The router already has a prefill-busy interlock, and it cannot do this job.
-//! That interlock reads the worker's active prefill tokens, and the router
-//! clears that figure when a request produces its **first token**. One token
-//! into a four-thousand-token continuation the worker therefore reports no
-//! prefill load at all, so the interlock bounds whether a continuation *starts*
-//! and never bounds how many are *running*.
-//!
-//! This census is the bound that actually holds. It counts what the router
-//! itself handed out, so nothing it counts can be cleared underneath it.
 
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -41,10 +31,6 @@ struct WorkerContinuations {
 pub(super) struct ContinuationCensus {
     in_flight: Mutex<HashMap<WorkerId, WorkerContinuations>>,
     /// The published gauge, held rather than reached for.
-    ///
-    /// A census is per router but the global gauge is per process, so a test
-    /// touching the global would race every other test that admits. Owning the
-    /// handle lets a test hold its own and keeps the production path identical.
     active: IntGauge,
 }
 
@@ -59,14 +45,6 @@ impl Default for ContinuationCensus {
 
 impl ContinuationCensus {
     /// Take a place on `worker_id` if the cap leaves one.
-    ///
-    /// Tests the cap and takes the place under one lock. Reading the count and
-    /// then incrementing it would let two requests arriving together both see
-    /// the last free place and both take it.
-    ///
-    /// The cap is required, not optional. Startup validation asks for one, but
-    /// it does not run on every path a router can be built from, so a bound
-    /// this could waive would be no bound at all.
     pub(super) fn try_admit(
         self: &Arc<Self>,
         worker_id: WorkerId,
@@ -103,11 +81,6 @@ impl ContinuationCensus {
 
     /// The emptiest routable worker's count, or `None` when there is nothing to
     /// route to.
-    ///
-    /// This is what the pre-routing decision can honestly ask. It cannot ask
-    /// "has *the* worker room", because the worker is not chosen yet; it can
-    /// ask "has *any* worker room", and the per-worker bound is then applied
-    /// for real at dispatch.
     pub(super) fn min_in_flight(&self, routable: &[WorkerId]) -> Option<usize> {
         let in_flight = self.in_flight.lock();
         routable
@@ -119,8 +92,6 @@ impl ContinuationCensus {
     fn release(&self, worker_id: WorkerId) {
         // Unconditional, and before the map: the gauge counts permits, and this
         // runs exactly once per permit. Pairing it with the map instead would
-        // let the early return below skip a decrement and ratchet the gauge up
-        // for the life of the process.
         self.active.dec();
         let mut in_flight = self.in_flight.lock();
         let Some(running) = in_flight.get_mut(&worker_id) else {
@@ -144,11 +115,6 @@ pub(super) struct ContinuationPermit {
 
 impl ContinuationPermit {
     /// Tie this permit's life to the stream it accounts for.
-    ///
-    /// A continuation ends when its stream ends, deep in the client's read
-    /// loop, so nothing the router holds has the right lifetime. The place goes
-    /// back at the end of the stream, and also if the stream is dropped first,
-    /// which is what a client disconnect should do.
     pub(super) fn into_stream(self, stream: ManyOut<LlmResponse>) -> ManyOut<LlmResponse> {
         let context = stream.context();
         ResponseStream::new(

@@ -343,8 +343,6 @@ fn kv_router_config_from_lookup(
     }
     // The gate no longer projects the request's output onto the reading, so
     // this setting is gone. Say so: the JSON form rejects the key outright, but
-    // an old script that exports the variable would otherwise get a different
-    // policy with no signal at all.
     if get_env("DYN_ROUTER_PREFILL_CONTINUE_OUTPUT_RESERVE_TOKENS").is_some() {
         tracing::warn!(
             "DYN_ROUTER_PREFILL_CONTINUE_OUTPUT_RESERVE_TOKENS is set and is ignored. The \
@@ -993,34 +991,16 @@ pub struct KvRouterConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub prefill_continue_enabled: bool,
 
-    /// Continue when the selected decode worker reports it is holding more than
-    /// this fraction of its KV capacity. When unset the feature never triggers,
-    /// unless `prefill_continue_force` is set. Leaving it unset fails closed.
-    ///
-    /// The reading is the worker's own, taken before this request is admitted,
-    /// and nothing is projected onto it. So the value means one thing only:
-    /// how full decode must already be before prefill keeps a request.
-    ///
-    /// **Set it above 1.0 to get a calibration arm.** The router still reads
-    /// occupancy and still fills the `prefill_continue_decode_occupancy`
-    /// histogram, and every request refuses with `decode_has_room`. That arm
-    /// pays the same probe cost as the treatment arm, so the two differ in this
-    /// value alone. Read the histogram, freeze a threshold, then run the
-    /// treatment. Do not pick the threshold after seeing the treatment.
+    /// Continue when the chosen decode worker holds more than this fraction of
+    /// its KV capacity. Unset fails closed. Above 1.0 gives a calibration arm:
+    /// the histogram still fills and every request refuses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefill_continue_decode_busy_threshold: Option<f64>,
 
-    /// Back off when the prefill worker's own load exceeds this fraction of one
-    /// batch's token budget. When unset, falls back to `router_queue_threshold`,
-    /// which is the same unit.
-    ///
-    /// **It must be raised as concurrency rises.** One request of ISL `n` costs
-    /// `n / max_num_batched_tokens` batches, so a value of 1.6 admits a single
-    /// in-flight request. On B200 at concurrency 128 that refused 92.8% of
-    /// requests. Size it for the prefill depth you expect, not for one request.
-    ///
-    /// This gate sees ordinary prefill work. It cannot see continuations. The
-    /// per-worker cap below is what bounds those.
+    /// Back off when prefill load exceeds this many batches of token budget.
+    /// Unset falls back to `router_queue_threshold`. Raise it with concurrency:
+    /// one request of ISL n costs n / max_num_batched_tokens batches.
+    /// Sees ordinary prefill only; the cap below bounds continuations.
     ///
     /// It deliberately does not read `conditional_disagg_prefill_busy_threshold`:
     /// that would move this feature's back-off point whenever an unrelated
@@ -1030,29 +1010,15 @@ pub struct KvRouterConfig {
 
     /// Continue only for a request whose remaining token budget is at or below
     /// this cap. This is an eligibility gate, not a limit the router imposes: the
-    /// budget is a hard upper bound the request already carries, so a continuation
-    /// cannot outrun it and needs no separate enforcement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefill_continue_max_budget_tokens: Option<u32>,
 
     /// Maximum concurrent continuations per prefill worker.
-    ///
-    /// Required whenever the feature is enabled, and enforced at dispatch,
-    /// where the chosen worker is known. This is the bound that holds. The
-    /// prefill-load interlock reads a figure the router clears at a request's
-    /// first token, so it cannot count a running continuation. This cap can.
-    ///
-    /// Set it to at least 2 if migration is in play. A migration retry builds
-    /// its replacement stream before dropping the failed attempt, so the two
-    /// briefly overlap; at a cap of 1 every retry of a continuation is refused
-    /// and hands off instead. A cap of 0 is a kill switch, not a setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefill_continue_max_concurrent: Option<usize>,
 
     /// Continue every eligible request, whatever the decode load. Requires
     /// `prefill_continue_enabled`; the budget cap and the concurrency cap still
-    /// apply. Bring-up only: it makes the feature testable on a deployment whose
-    /// decode pool never fills, where the trigger would otherwise never fire.
     #[serde(default, skip_serializing_if = "is_default")]
     pub prefill_continue_force: bool,
 }

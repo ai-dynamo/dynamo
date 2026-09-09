@@ -225,14 +225,6 @@ pub(crate) const BYPASS_REMOTE_PREFILL_ANNOTATION: &str = "x-bypass-remote-prefi
 pub(crate) const PREFILL_CONTINUE_ANNOTATION: &str = "x-prefill-continue";
 
 /// Drop any client-supplied copy of the router-owned routing markers.
-///
-/// Both markers select a routing path, so honoring a client copy would let a
-/// caller pick its own. The router stamps them itself after its policies run.
-///
-/// Matches the bare marker and its `marker:value` form, because
-/// `PreprocessedRequest::get_annotation_value` reads values off a `marker:`
-/// prefix. Stripping only the bare form would leave `x-prefill-continue:1`
-/// intact for any future valued read.
 fn strip_router_owned_annotations(annotations: &mut Vec<String>) {
     fn is_router_owned(annotation: &str, marker: &str) -> bool {
         annotation == marker
@@ -320,19 +312,10 @@ where
     /// and changes when the binding is rebuilt.
     prefill_router_mode: RouterMode,
     /// Live per-worker runtime configuration for the prefill endpoint.
-    ///
-    /// Read rather than snapshotted, because the binding is only rebuilt when
-    /// the endpoint itself changes: a worker joining an existing endpoint would
-    /// never be seen by a value captured at activation.
     prefill_runtime_configs: RuntimeConfigWatch,
 }
 
 /// Why the router may not ask this prefill pool for a continuation.
-///
-/// Carries the reason rather than a bare `false`, for the same reason
-/// [`PrefillContinueSkip`] does: during bring-up this gate is the likeliest
-/// explanation for "the feature never fired", and an operator needs to be told
-/// which worker is holding it back.
 #[derive(Debug, PartialEq, Eq)]
 enum PrefillPoolCapability {
     /// Every routable worker declared it understands the marker.
@@ -344,23 +327,11 @@ enum PrefillPoolCapability {
     Undeclared(Vec<WorkerId>),
 }
 
-/// Ask whether every worker the router could pick declared it understands the
-/// continuation marker.
-///
-/// Unanimous, not first-wins. One worker that ignores the marker answers with a
-/// handoff message and pins cache blocks, so a mixed pool turns the feature off
-/// rather than gambling on which worker gets selected.
-///
-/// The question is asked of `routable`, not of the config map, because the two
-/// are not the same set. The map holds only workers that have both registered
-/// and had a card discovered, so a worker that is already selectable but whose
-/// card has not arrived yet is missing from it entirely — and a check that only
-/// walked the map would read unanimous while that worker took a marked request.
-///
-/// Both inputs are sampled before a worker is selected, and they are sampled
-/// separately, so this narrows the window rather than closing it: a worker that
-/// becomes routable afterwards can still be handed a marked request. Closing it
-/// for good means re-checking the chosen worker at dispatch.
+    /// Does every routable worker understand the continuation marker?
+    ///
+    /// Unanimous, not first-wins: one worker that ignores it pins cache blocks.
+    /// Asked of `routable`, not the config map, which omits undiscovered workers.
+    /// Narrows the window rather than closing it; the pool can change after.
 fn prefill_pool_capability(
     routable: &[WorkerId],
     runtime_configs: &HashMap<WorkerId, ModelRuntimeConfig>,
@@ -426,10 +397,6 @@ where
 }
 
 /// Put a request that asked to continue back on today's handoff path.
-///
-/// Both halves of the ask have to come off together. Leaving the marker on
-/// would have the worker generate a whole response that nothing returns;
-/// leaving the budget unclamped would have it generate one that nothing reads.
 fn demote_to_handoff(request: &mut PreprocessedRequest) {
     request
         .annotations
@@ -443,12 +410,6 @@ where
 {
     /// Decide, before routing, whether this request should keep generating on
     /// its prefill worker.
-    ///
-    /// Every signal here is a property of the pool or the request, because a
-    /// worker has usually not been chosen yet — the exception is a request that
-    /// names its own, which is asked about directly. Either way the per-worker
-    /// bound and the chosen worker's capability are settled again at dispatch,
-    /// which is the authoritative check.
     async fn wants_prefill_continuation(
         &self,
         request: &SingleIn<PreprocessedRequest>,
@@ -525,16 +486,6 @@ where
     }
 
     /// Read the decode pool's headroom for this request.
-    ///
-    /// A preview needs a KV-routed decode set, so anything else reports nothing
-    /// and the policy refuses on `DecodeLoadUnknown`. That is the honest
-    /// answer: without the preview there is no way to tell a full decode pool
-    /// from an idle one.
-    ///
-    /// A cancelled request is reported as unknown like any other failure, which
-    /// refuses, and the ordinary handoff it falls back to then fails on the
-    /// same cancelled context. Deliberate, unlike the sibling decision, which
-    /// re-raises cancellation because it is about to dispatch on it.
     async fn peek_decode_headroom(
         &self,
         request: &SingleIn<PreprocessedRequest>,
@@ -591,11 +542,6 @@ where
                         record(prefill_continue_occupancy_read::UNREPORTED);
                         // Say this loudly once, but not on a healthy cold
                         // start: capacity is seeded at discovery while usage
-                        // waits for the worker's first `ActiveLoad`, so a
-                        // working worker reads unknown for its first few
-                        // requests. A plane that never publishes clears this
-                        // immediately. Per-worker coverage lives in
-                        // `decode_occupancy_reads_total`, not here.
                         const SETTLING_READS: u64 = 100;
                         static WARNED: std::sync::Once = std::sync::Once::new();
                         let unreported = PREFILL_CONTINUE_METRICS
@@ -637,9 +583,6 @@ where
 
     /// Read whether the prefill worker this request would land on is over its
     /// own busy line.
-    ///
-    /// Probes the caller's binding rather than re-reading it, so the interlock
-    /// cannot end up asking a different pool than the capability gate did.
     async fn peek_prefill_busy(
         &self,
         request: &SingleIn<PreprocessedRequest>,
@@ -859,9 +802,6 @@ where
         propagate_first_response_guard(&context, &mut prefill_context)?;
         // Kept so the continuation arm can link this context to the client's
         // once dispatch confirms the request really is continuing. Linking here
-        // would be too early: dispatch can still demote, and `link_child` has
-        // no inverse, so the handoff path would be left carrying a cancel route
-        // into the prefill leg that it does not have today.
         let prefill_ctx = prefill_context.context();
         if let Some(session_affinity) = session_affinity {
             prefill_context.insert(
@@ -890,29 +830,11 @@ where
             let outcome = if let Some(permit) = prepared.continuation_permit {
                 // Outranks bootstrap: that path backgrounds the prefill stream and
                 // dispatches a decode leg, which would discard the response. Drop
-                // the phase permit as the ordinary path does, so a migration retry
-                // can set Prefill again.
                 drop(prefill_phase_barrier);
-                // Move the request out of its prefill phase even though the
-                // worker does not change.
+                // Record before the stream is polled, or inter-token latency
+                // never gets a decode worker to attribute to.
                 //
-                // The frontend latches worker attribution from the tracker on
-                // the first response chunk and resolves the inter-token latency
-                // gauge from the decode worker it finds there. A continuation
-                // never dispatches one, so that latch saw nothing and the gauge
-                // was never written: inter-token latency was emitted for every
-                // arm except the ones running this feature. Recording it here,
-                // before the stream can be polled, is what fixes it.
-                //
-                // `Continuation` records the same worker as both legs and stays
-                // distinct from `Aggregated`, so the arm is still tellable apart
-                // in an A/B. Note the decode worker type is recorded as
-                // `prefill`; see the field's doc for why, and query it that way.
-                //
-                // The barrier above must be dropped first: the phase semaphore
-                // holds a single permit, so setting a phase while holding it
-                // would deadlock. The permit taken here is bound, not dropped,
-                // so it covers the recording below.
+                // Drop the barrier first: the phase semaphore has one permit.
                 if let Some(tracker) = tracker.as_ref() {
                     let _continuation_phase_permit =
                         tracker.set_phase(RequestPhase::Continuation).await;
@@ -928,8 +850,6 @@ where
                 engine_ctx.link_child(prefill_ctx.clone());
                 // link_child does not replay state already set, so a cancel that
                 // arrived before the link would be lost and the worker would
-                // generate a whole response for a client that is gone. Migration
-                // guards the same race the same way.
                 if engine_ctx.is_stopped() || engine_ctx.is_killed() {
                     prefill_ctx.stop_generating();
                 }
@@ -1061,11 +981,6 @@ where
     }
 
     /// Whether this router needs the decode set's `RoutingHost` installed.
-    ///
-    /// Both pre-routing decisions read decode load through it, and without it
-    /// they can only ever answer "unknown", which both of them treat as a
-    /// refusal. So the host has to be installed for either feature, not just
-    /// the one that first needed it.
     pub(crate) fn needs_decode_routing_host(&self) -> bool {
         self.conditional_disagg_enabled() || self.prefill_continue_policy.is_enabled()
     }
@@ -1144,18 +1059,6 @@ where
     }
     /// Take a place in the census for `worker_id`, or put the request back on
     /// today's handoff.
-    ///
-    /// Two things can refuse here, and both need the chosen worker:
-    ///
-    /// - the worker is already running its share of continuations, and
-    /// - the worker never declared it understands the marker. The pool check
-    ///   before routing reads the routable set, but that set is sampled before
-    ///   selection; a worker that appeared in between reaches this point
-    ///   unchecked. Asking again once it is chosen closes that window.
-    ///
-    /// Demoting means undoing both halves of the ask: the marker comes off, so
-    /// the worker builds its usual handoff, and the one-token clamp goes back
-    /// on, so it stops after the token that handoff carries.
     fn admit_continuation(
         &self,
         request: &mut PreprocessedRequest,
@@ -1732,10 +1635,6 @@ mod tests {
     fn the_wire_constants_are_pinned() {
         // The vLLM worker declares these separately, in Python. Every other
         // test here refers to the symbol, so a rename on either side would
-        // disable the feature with both suites green, and the router would
-        // report a plain handoff — indistinguishable from the policy choosing
-        // one. The matching asserts are in
-        // components/src/dynamo/vllm/tests/test_vllm_worker_handler.py.
         assert_eq!(PREFILL_CONTINUE_ANNOTATION, "x-prefill-continue");
         assert_eq!(PREFILL_CONTINUE_CAPABILITY, "prefill_continue");
     }
@@ -1774,8 +1673,6 @@ mod tests {
     fn a_routable_worker_with_no_card_yet_is_a_refusal() {
         // The runtime-config watch lists only workers that both registered and
         // had a card discovered, so a worker can be selectable before it
-        // appears there. Walking the map alone would read this pool as
-        // unanimous and send the marker to a worker of unknown capability.
         let configs = pool(&[true, true]);
         let mut routable = all_routable(&configs);
         routable.push(99);

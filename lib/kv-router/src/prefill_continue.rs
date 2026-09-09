@@ -2,22 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Decide whether a request keeps generating on its prefill worker.
-//!
-//! In disaggregated serving a prefill worker stops after one token and hands the
-//! request to a decode worker. When the decode pool has no room, that handoff has
-//! nowhere to go. This policy decides when the prefill worker keeps generating
-//! instead, which converts a request that would have thrashed the decode pool into
-//! one that is served on capacity that is already idle.
-//!
-//! The policy is a pure function of measured load and the request's own budget, so
-//! it is testable without a runtime and carries no model or engine knowledge.
 
 use crate::scheduling::config::KvRouterConfig;
 
 /// Why a request was not allowed to keep generating on its prefill worker.
-///
-/// Carried instead of a bare `false` so the caller can report it: an operator
-/// asking "why did the feature never fire?" needs the reason, not the outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PrefillContinueSkip {
@@ -39,16 +27,6 @@ pub enum PrefillContinueSkip {
     /// The request has no bounded budget, so the commitment cannot be bounded.
     BudgetUnbounded,
     /// The request asks for several sequences.
-    ///
-    /// Two reasons, and the second is why this refusal is permanent rather
-    /// than a placeholder. A continuation's stream carries no sequence index,
-    /// so the sequences would merge and the first to finish would end the
-    /// response for all of them — that part is a few lines of Python away from
-    /// being fixed. But the token budget is *per sequence*: `n` sequences
-    /// commit the worker to `n` times the request's `max_tokens`, while the
-    /// budget this policy reads reports one times. Emitting the index without
-    /// also fixing that would give a correct-looking answer backed by a
-    /// commitment nothing bounds, which is worse than refusing.
     MultipleSequences,
     /// The prefill worker already holds its maximum concurrent continuations.
     ConcurrencyCapReached,
@@ -59,11 +37,6 @@ pub enum PrefillContinueSkip {
 
 impl PrefillContinueSkip {
     /// Every reason, so a caller can create the metric series up front.
-    ///
-    /// A counter with no observations exposes no sample at all, so an operator
-    /// asking "why did it never fire?" would get an empty query rather than a
-    /// zero. The enum is `#[non_exhaustive]`, which stops a caller building
-    /// this list itself, so it lives here where a new variant is added.
     pub const ALL: &'static [Self] = &[
         Self::Disabled,
         Self::NoTrigger,
@@ -79,10 +52,6 @@ impl PrefillContinueSkip {
     ];
 
     /// A stable, low-cardinality label for metrics.
-    ///
-    /// Deliberately not `Debug`: these become a Prometheus label value, so
-    /// renaming a variant must not silently rename a series an operator has a
-    /// dashboard on.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Disabled => "disabled",
@@ -123,19 +92,11 @@ impl PrefillContinueDecision {
 }
 
 /// What the router measured for one request, at the moment it must decide.
-///
-/// Every field is optional where the signal can genuinely be missing, so the
-/// policy can distinguish "measured, and fine" from "could not measure".
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
 pub struct PrefillContinueDecisionInput {
     /// What the chosen decode worker reports it is holding, as a fraction of
     /// what it can hold. A snapshot taken before this request is admitted, so
-    /// it contains neither this prompt nor its future output.
-    ///
-    /// `None` means the worker has not reported, which the policy refuses on.
-    /// `RoutePlanSignals::decode_occupancy` produces it, and the sibling bypass
-    /// gate reads the same one.
     pub decode_occupancy: Option<f64>,
 
     /// Whether the prefill worker holding this request is over its busy line.
@@ -169,9 +130,6 @@ pub struct PrefillContinuePolicy {
 
 impl PrefillContinueDecisionInput {
     /// The decode-side measurement, which every decision needs.
-    ///
-    /// `#[non_exhaustive]` forbids struct-expression syntax outside this crate,
-    /// so the caller in `dynamo-llm` builds through these rather than a literal.
     pub fn new(decode_occupancy: Option<f64>) -> Self {
         Self {
             decode_occupancy,
@@ -235,19 +193,12 @@ impl PrefillContinuePolicy {
     }
 
     /// Whether this policy evaluates the prefill-load interlock at all.
-    ///
-    /// False when no busy threshold is configured, because there is then
-    /// nothing to evaluate the signal against.
     pub fn needs_prefill_worker_busy(&self) -> bool {
         self.interlock_threshold().is_some()
     }
 
     /// The interlock threshold in force, inheriting the router-wide queue
     /// threshold when the feature does not set its own.
-    ///
-    /// One source of truth: the router probes with exactly the value the policy
-    /// will judge the answer against. Named apart from the field so that
-    /// dropping the parens inside this file cannot silently bypass `enabled`.
     pub fn interlock_threshold(&self) -> Option<f64> {
         if self.enabled {
             self.prefill_busy_threshold
@@ -257,21 +208,11 @@ impl PrefillContinuePolicy {
     }
 
     /// The per-worker ceiling on concurrent continuations, if one is set.
-    ///
-    /// Enforced where the worker is known, which is at dispatch. [`Self::decide`]
-    /// runs before a worker is chosen, so its own cap check can only ever be a
-    /// pool-level filter on a count the caller measured; the authoritative
-    /// bound is the router's per-worker census.
     pub fn max_concurrent(&self) -> Option<usize> {
         self.max_concurrent
     }
 
     /// The gates that cost nothing to evaluate.
-    ///
-    /// Measuring load costs a scheduler selection apiece, so the caller runs
-    /// this first and only measures when it returns `None`. These are the same
-    /// gates, in the same order, that [`Self::decide`] applies — it is written
-    /// in terms of this so the two cannot drift apart.
     pub fn preflight(
         &self,
         remaining_budget_tokens: Option<u32>,
@@ -286,12 +227,6 @@ impl PrefillContinuePolicy {
 
         // The commitment cannot be undone once made, so it is bounded here, at
         // admission, against a budget the request already carries.
-        //
-        // A request with no budget of its own is refused whether or not a cap
-        // is configured. Nesting this inside the cap left the default
-        // configuration admitting an unbounded continuation, which then held
-        // its worker until the model chose to stop — and clients that omit
-        // `max_tokens` are the common case, not the exception.
         let Some(budget) = remaining_budget_tokens else {
             return Some(Skip::BudgetUnbounded);
         };
@@ -317,18 +252,11 @@ impl PrefillContinuePolicy {
     }
 
     /// Whether the caller needs to measure decode load for this policy.
-    ///
-    /// False under the bring-up override, which continues without consulting
-    /// decode load at all, so measuring it would be a scheduler selection spent
-    /// on an answer nothing reads.
     pub fn needs_decode_load(&self) -> bool {
         self.enabled && !self.force
     }
 
     /// The decision.
-    ///
-    /// Order matters: every safety gate runs before `force`, so the bring-up
-    /// switch relaxes the decode-load trigger and nothing else.
     pub fn decide(&self, input: PrefillContinueDecisionInput) -> PrefillContinueDecision {
         use PrefillContinueSkip as Skip;
 
@@ -342,8 +270,6 @@ impl PrefillContinuePolicy {
 
         // The interlock: the feature spends prefill capacity to relieve decode,
         // so a loaded prefill worker has nothing to give. Its threshold is a
-        // multiple of one batch's token budget, so it must be raised as
-        // concurrency rises; at 1.6 it admits a single in-flight request.
         if self.needs_prefill_worker_busy() {
             match input.prefill_worker_busy {
                 Some(true) => return PrefillContinueDecision::Skip(Skip::PrefillBusy),
@@ -398,10 +324,6 @@ mod tests {
     }
 
     /// Decode occupancy as blocks-out-of-total, with everything else unset.
-    /// A request that is admissible on every axis except the one under test.
-    ///
-    /// Carries a budget, because an absent one is now a refusal in its own
-    /// right and would mask whichever gate the test is actually about.
     fn decode_load(used: usize, total: usize) -> PrefillContinueDecisionInput {
         PrefillContinueDecisionInput {
             decode_occupancy: (total > 0).then(|| used as f64 / total as f64),
@@ -474,8 +396,6 @@ mod tests {
 
         // 89 of 100 blocks is under the line, and it stays under it however
         // much this request will go on to generate. A projection would need
-        // the physical cost of the prompt on that engine, which no worker
-        // reports, so the gate does not attempt one.
         let input = PrefillContinueDecisionInput {
             remaining_budget_tokens: Some(64_000),
             ..decode_load(89, 100)
