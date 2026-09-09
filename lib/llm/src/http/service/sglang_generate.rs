@@ -387,10 +387,11 @@ async fn dispatch(
             let was_cancelled = request_context.is_killed()
                 || super::metrics::request_was_cancelled(error.as_ref());
             let was_rejected = super::metrics::request_was_rejected(error.as_ref());
+            let was_unavailable = super::metrics::request_was_unavailable(error.as_ref());
             let invalid_argument = find_invalid_argument_in_chain(error.as_ref());
             inflight_guard.mark_error(if was_cancelled {
                 ErrorType::Cancelled
-            } else if was_rejected {
+            } else if was_rejected || was_unavailable {
                 ErrorType::Unavailable
             } else if invalid_argument.is_some() {
                 ErrorType::Validation
@@ -408,6 +409,17 @@ async fn dispatch(
                 return error_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "engine rejected the request".to_string(),
+                );
+            }
+            if was_unavailable {
+                tracing::warn!(
+                    %request_id,
+                    error = %format!("{error:#}"),
+                    "no worker available for SGLang generate request"
+                );
+                return error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    SanitizedError::Unavailable.to_string(),
                 );
             }
             if let Some(invalid_argument) = invalid_argument {
@@ -445,6 +457,50 @@ async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::http::service::generate::tests::{WorkerUnavailableEngine, dispatch_test_context};
+    use crate::http::service::metrics::{Endpoint, RequestType, Status};
+
+    #[tokio::test]
+    async fn worker_unavailable_dispatch_returns_503() {
+        let engine: crate::types::openai::generate::GenerateStreamingEngine =
+            std::sync::Arc::new(WorkerUnavailableEngine);
+        let state = crate::http::service::service_v2::HttpService::builder()
+            .build()
+            .unwrap()
+            .state_clone();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+
+        let response = dispatch(
+            engine,
+            dispatch_test_context(),
+            "req-sglang-worker-unavailable".to_string(),
+            "test-model".to_string(),
+            state.clone(),
+            ConnectionHandle::create_disabled(tx),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read error response");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("parse error response");
+        assert_eq!(body["error"]["message"], "Service temporarily unavailable");
+        assert!(!body.to_string().contains("unknown endpoint"));
+
+        let metric_model = state.manager().metric_model_for("test-model");
+        assert_eq!(
+            state.metrics_clone().get_request_counter(
+                metric_model,
+                &Endpoint::Generate,
+                &RequestType::Stream,
+                &Status::Error,
+                &ErrorType::Unavailable,
+            ),
+            1
+        );
+    }
 
     #[test]
     fn model_aliases_are_deduplicated_before_implicit_selection() {
@@ -487,6 +543,11 @@ mod tests {
             ),
             (
                 DynamoErrorType::Unavailable,
+                ErrorType::Unavailable,
+                "Service temporarily unavailable",
+            ),
+            (
+                DynamoErrorType::WorkerUnavailable,
                 ErrorType::Unavailable,
                 "Service temporarily unavailable",
             ),
