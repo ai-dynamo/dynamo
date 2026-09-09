@@ -96,6 +96,68 @@ Most deployments should leave this at `1.0`. Lower it only when cache-rich worke
 
 `--no-router-kv-events` (env `DYN_ROUTER_USE_KV_EVENTS=false`) disables event tracking; the router predicts cache state from its own routing decisions instead of consuming real KV events. Predictions use TTL expiration by default. Experimental `--router-approximate-cache-policy lru` uses each worker data-parallel rank's advertised physical KV capacity and request-lifecycle releases; it is local to one Frontend replica and requires a positive per-rank `total_kv_blocks`. Use approximate mode only when you are not confident the backend emits KV events correctly.
 
+## Swap the Worker-Selection Policy
+
+The knobs above tune Dynamo's built-in cost model. To replace the worker-ranking step entirely, select
+one of the built-in worker-selection policies that ship with the Dynamo frontend. This needs
+configuration only — no custom image. It applies to this Frontend topology; the standalone EPP in
+the [GAIE topology](gateway-api.mdx) links no policy catalog.
+
+Put the policy in a `ConfigMap`:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: router-policy
+data:
+  worker-selection.yaml: |
+    worker_selection:
+      aggregated: dynamo-two-tier-cost-fn
+      instances:
+        - name: dynamo-two-tier-cost-fn
+          type: dynamo-two-tier-cost-fn
+```
+
+Mount it on the Frontend and point `--router-policy-config` at the mounted file:
+
+```yaml
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    podTemplate:
+      spec:
+        volumes:
+        - name: router-policy
+          configMap:
+            name: router-policy
+        containers:
+        - name: main
+          command:
+          - python3
+          - -m
+          - dynamo.frontend
+          args:
+          - --router-mode
+          - kv
+          - --router-policy-config
+          - /etc/dynamo/router/worker-selection.yaml
+          volumeMounts:
+          - name: router-policy
+            mountPath: /etc/dynamo/router
+```
+
+Because the file is startup-only, changing the `ConfigMap` requires a Frontend restart. A policy type
+that is not linked into the running image fails startup with the list of linked types rather than
+silently falling back, so a typo surfaces in the Frontend logs immediately.
+
+To A/B against the built-in selector, set `DYN_ROUTER_WORKER_SELECTION_POLICY=default` on the Frontend
+and restart — the `ConfigMap` stays as it is.
+
+For the available policy types and per-stage prefill/decode selection, see
+[Worker-Selection Policies](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#worker-selection-policies).
+
 ## Routing with Disaggregated Serving
 
 In a disaggregated graph, the router operates over prefill and decode workers separately. The prefill workers publish KV events (the second step above) and the router selects among them; the internal prefill router activates automatically. See [Router with Disaggregated Serving](../../developer-guide/knowledge-base/modular-components/router/disaggregated-serving.md).

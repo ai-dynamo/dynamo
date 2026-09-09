@@ -22,10 +22,13 @@ name = "_core"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = []
-# Links a policy catalog selected by the dependency alias below. Private images replace
-# that dependency with their catalog crate; the stock image does not enable this feature.
+default = ["custom-policy"]
+# Links the worker-selection policies Dynamo ships plus the replaceable catalog selected by the
+# dependency alias below. Enabled by default so a deployment can select a shipped policy through
+# router-policy YAML without rebuilding. A private image replaces only the catalog dependency, so
+# its policies are added alongside the shipped ones rather than displacing them.
 custom-policy = [
+  "dep:dynamo-custom-policy-builtin",
   "dep:dynamo-worker-selection-policy-catalog",
   "dynamo-kv-router/standalone-selection",
 ]
@@ -95,6 +98,7 @@ uuid = { version = "1.18.1" }
 
 # kv-indexer / slot-tracker / shared kv-router types
 dynamo-kv-router = { path = "../../kv-router" }
+dynamo-custom-policy-builtin = { path = "../../router-plugins/builtin", optional = true }
 dynamo-worker-selection-policy-catalog = { path = "../../router-plugins/catalog", optional = true }
 clap = { version = "4.5", features = ["derive"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
