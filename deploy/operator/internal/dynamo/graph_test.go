@@ -7805,7 +7805,6 @@ func TestApplyCompilationCacheExistingMount(t *testing.T) {
 				MountPath: mountPath,
 				SubPath:   "model",
 			}},
-			subpath: "model",
 			expectedMounts: []corev1.VolumeMount{{
 				Name:      "compilation-cache",
 				MountPath: mountPath,
