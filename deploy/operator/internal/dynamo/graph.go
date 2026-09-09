@@ -1367,12 +1367,10 @@ func expandMultinodeGMSRoles(componentName string, numberOfNodes int32, totalEng
 // For short DGD names the PCS name equals the DGD name (backwards compatible).
 // For long names, the PCS name is truncated with a deterministic 4-char hash
 // suffix to guarantee uniqueness and reconcile-loop stability.
+// Components must be the exact subset materialized by this PodCliqueSet.
 func PCSNameForDGD(dgdName string, components []v1beta1.DynamoComponentDeploymentSharedSpec) string {
 	maxComponentBudget := 0
 	for i := range components {
-		if components[i].ManagedByExternalController() {
-			continue
-		}
 		budget := ComponentNameBudget(&components[i])
 		if budget > maxComponentBudget {
 			maxComponentBudget = budget

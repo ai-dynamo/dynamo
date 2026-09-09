@@ -208,7 +208,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 		oldComponents = componentsByName(oldDGD.Spec.Components)
 	}
 	specOpts := dynamoGraphDeploymentSpecValidationOptions{
-		pcsName:                 dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components),
+		pcsName:                 dynamo.PCSNameForDGD(dgd.Name, ordinaryGroveComponents(dgd.Spec.Components)),
 		generation:              dgd.Generation,
 		workloadProvider:        workloadProvider,
 		grovePathway:            grovePathway,

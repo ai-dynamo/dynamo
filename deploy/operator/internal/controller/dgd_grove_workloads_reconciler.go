@@ -72,19 +72,21 @@ func newGroveWorkloadsReconciler(
 
 func (r *groveWorkloadsReconciler) Reconcile(
 	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	source *nvidiacomv1beta1.DynamoGraphDeployment,
+	ordinary *nvidiacomv1beta1.DynamoGraphDeployment,
 	restartState *dynamo.RestartState,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
 ) (ReconcileResult, error) {
 	logger := log.FromContext(ctx)
 
-	workerHashTransition, err := r.rollout.planUnsupportedWorkerHashTransition(dgd)
+	workerHashTransition, err := r.rollout.planUnsupportedWorkerHashTransition(source)
 	if err != nil {
 		return ReconcileResult{}, failWorkloadProgram(reasonRollingUpdateFailed, err)
 	}
 	renderedPodCliqueSet, err := r.renderer.Render(
 		ctx,
-		dgd,
+		source,
+		ordinary,
 		restartState,
 		checkpointInfos,
 		workerHashTransition.hashChanged,
@@ -95,7 +97,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	}
 	if len(renderedPodCliqueSet.desired.Spec.Template.Cliques) == 0 {
 		if existing := renderedPodCliqueSet.existing; existing != nil {
-			if !metav1.IsControlledBy(existing, dgd) {
+			if !metav1.IsControlledBy(existing, source) {
 				return ReconcileResult{}, fmt.Errorf("refusing to delete a foreign empty-graph PodCliqueSet %q", existing.Name)
 			}
 			if existing.DeletionTimestamp.IsZero() {
@@ -106,13 +108,13 @@ func (r *groveWorkloadsReconciler) Reconcile(
 			}
 			return ReconcileResult{State: nvidiacomv1beta1.DGDStatePending, Reason: "RemovingEmptyPodCliqueSet", Message: "Waiting for the removed ordinary workload"}, nil
 		}
-		stableResources, err := r.stableResources.Reconcile(ctx, dgd, renderedPodCliqueSet.renderDeployment)
+		stableResources, err := r.stableResources.Reconcile(ctx, source, renderedPodCliqueSet.renderDeployment)
 		if err != nil {
 			return ReconcileResult{}, err
 		}
 		return checkResourcesReadiness(stableResources), nil
 	}
-	syncedPodCliqueSet, pcsWasWritten, err := r.reconcilePodCliqueSet(ctx, dgd, renderedPodCliqueSet)
+	syncedPodCliqueSet, pcsWasWritten, err := r.reconcilePodCliqueSet(ctx, source, renderedPodCliqueSet)
 	if err != nil {
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile the Grove PodCliqueSet: %w", err)
 	}
@@ -121,8 +123,8 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		// Pre-existing legacy PCS without a suffix is the only case where unstamped is valid.
 		isLegacyUnsuffixed := workerHashTransition.noCurrentAnnotation &&
 			renderedPodCliqueSet.existing != nil &&
-			!podCliqueSetUsesGroveWorkerHashSuffix(dgd, renderedPodCliqueSet.existing)
-		observed, err := podCliqueSetObservesWorkerHash(dgd, renderedPodCliqueSet.existing, isLegacyUnsuffixed)
+			!podCliqueSetUsesGroveWorkerHashSuffix(source, renderedPodCliqueSet.existing)
+		observed, err := podCliqueSetObservesWorkerHash(source, renderedPodCliqueSet.existing, isLegacyUnsuffixed)
 		if err != nil {
 			return ReconcileResult{}, failWorkloadProgram(
 				reasonRollingUpdateFailed,
@@ -130,7 +132,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 			)
 		}
 		if observed {
-			if err := r.rollout.commitUnsupportedWorkerHashTransition(ctx, dgd, workerHashTransition, true); err != nil {
+			if err := r.rollout.commitUnsupportedWorkerHashTransition(ctx, source, workerHashTransition, true); err != nil {
 				return ReconcileResult{}, failWorkloadProgram(
 					reasonRollingUpdateFailed,
 					fmt.Errorf("project observed Grove worker hash: %w", err),
@@ -144,7 +146,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile Grove scaling: %w", err)
 	}
 
-	stableResources, err := r.stableResources.Reconcile(ctx, dgd, renderedPodCliqueSet.renderDeployment)
+	stableResources, err := r.stableResources.Reconcile(ctx, source, renderedPodCliqueSet.renderDeployment)
 	if err != nil {
 		return ReconcileResult{}, err
 	}

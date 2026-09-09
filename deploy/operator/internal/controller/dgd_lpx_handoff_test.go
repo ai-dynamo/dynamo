@@ -64,6 +64,37 @@ func newLPXHandoffFixture(t *testing.T, fixture string) (*v1alpha1.LPXGraphDeplo
 	return child, source, kube
 }
 
+// projectLPXChildStatus applies the production call-site composition for focused tests.
+func projectLPXChildStatus(
+	source *v1beta1.DynamoGraphDeployment,
+	child *v1alpha1.LPXGraphDeployment,
+	result *ReconcileResult,
+	status *v1beta1.DynamoGraphDeploymentStatus,
+) {
+	previousLPX := status.LPX
+	*result, status.LPX = mergeLPXChildStatus(source, child, *result)
+	status.Placement = lpxPlacementProjection(source, child, status.Placement, previousLPX, status.LPX)
+}
+
+func TestOrdinaryGroveProjectionExcludesLPXWithoutMutatingSource(t *testing.T) {
+	t.Log("Project the exact DGD-owned component subset from a hybrid graph")
+	source := newLPXHandoffSource(t, "node-local-v2-hybrid")
+	source.Spec.Components = append(source.Spec.Components, v1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentName: "prefill",
+		ComponentType: v1beta1.ComponentTypePrefill,
+	})
+	before := source.DeepCopy()
+	ordinary := projectOrdinaryGroveDeployment(source)
+
+	require.Equal(t, before, source)
+	require.Nil(t, ordinary.GetComponentByName("lpx"))
+	require.Len(t, ordinary.Spec.Components, len(source.Spec.Components)-1)
+
+	t.Log("Keep the projected value independently mutable by later Grove preparation")
+	ordinary.Spec.Components[0].ComponentName = "ordinary-copy"
+	require.Equal(t, before, source)
+}
+
 func TestLPXHandoffCreatesOnlyAnOwnedReference(t *testing.T) {
 	t.Log("Create the generated handoff from a real source DGD")
 	source := newLPXHandoffSource(t, "node-local-v2-lpu-only")
@@ -276,9 +307,13 @@ func TestLPXRestartUsesPersistedSelectionAndCurrentChildStatus(t *testing.T) {
 			unchanged, err := handoff.Reconcile(t.Context(), source)
 			require.NoError(t, err)
 			require.Empty(t, unchanged.Annotations[dynamo.LPXRestartAnnotation])
-			progress := (&DynamoGraphDeploymentReconciler{
+			resolveProgress := (&DynamoGraphDeploymentReconciler{
 				Client: kube, RuntimeConfig: &commoncontroller.RuntimeConfig{},
 			}).newGroveProgram().resolveRestartProgress
+			ordinaryDGD := projectOrdinaryGroveDeployment(source)
+			progress := func(ctx context.Context, source *v1beta1.DynamoGraphDeployment, inProgress []string) []string {
+				return resolveProgress(ctx, source, ordinaryDGD, inProgress)
+			}
 			restart := newDGDRestartReconciler().Resolve(t.Context(), source, &source.Status, progress)
 			require.Equal(t, []string{"lpx"}, restart.Status.InProgress)
 
@@ -423,9 +458,13 @@ func TestSpecDecodeRestartRollsTheSharedChildOnce(t *testing.T) {
 					return reader.Get(ctx, key, obj, opts...)
 				},
 			})
-			progress := (&DynamoGraphDeploymentReconciler{
+			resolveProgress := (&DynamoGraphDeploymentReconciler{
 				Client: observed, RuntimeConfig: &commoncontroller.RuntimeConfig{},
 			}).newGroveProgram().resolveRestartProgress
+			ordinaryDGD := projectOrdinaryGroveDeployment(source)
+			progress := func(ctx context.Context, source *v1beta1.DynamoGraphDeployment, inProgress []string) []string {
+				return resolveProgress(ctx, source, ordinaryDGD, inProgress)
+			}
 			restarter := newDGDRestartReconciler()
 			source.Status.Restart = restarter.Resolve(t.Context(), source, &source.Status, progress).Status
 			require.NotEmpty(t, source.Status.Restart.InProgress)
@@ -476,6 +515,7 @@ func TestSpecDecodeRestartRollsTheSharedChildOnce(t *testing.T) {
 				v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend, Replicas: ptr.To(int32(1))},
 				v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill, Replicas: ptr.To(int32(1))},
 			)
+			ordinaryDGD = projectOrdinaryGroveDeployment(source)
 			child.Status.Components["draft"] = v1beta1.ComponentReplicaStatus{Ready: true, Replicas: 2}
 			require.NoError(t, kube.Status().Update(t.Context(), child))
 			requested := []string{"draft", "frontend", "lpx", "prefill", "removed"}
@@ -487,7 +527,7 @@ func TestSpecDecodeRestartRollsTheSharedChildOnce(t *testing.T) {
 
 			t.Log("An unobserved ordinary PCS cannot hold back either ready LPX member")
 			pcs := &grovev1alpha1.PodCliqueSet{
-				ObjectMeta: metav1.ObjectMeta{Name: dynamo.PCSNameForDGD(source.Name, source.Spec.Components), Namespace: source.Namespace, Generation: 2},
+				ObjectMeta: metav1.ObjectMeta{Name: dynamo.PCSNameForDGD(ordinaryDGD.Name, ordinaryDGD.Spec.Components), Namespace: source.Namespace, Generation: 2},
 				Status:     grovev1alpha1.PodCliqueSetStatus{ObservedGeneration: ptr.To(int64(1))},
 			}
 			require.NoError(t, kube.Create(t.Context(), pcs))
@@ -500,7 +540,7 @@ func TestSpecDecodeRestartRollsTheSharedChildOnce(t *testing.T) {
 			pcs.Status.ObservedGeneration = ptr.To(pcs.Generation)
 			require.NoError(t, kube.Update(t.Context(), pcs))
 			prefill := &grovev1alpha1.PodClique{
-				ObjectMeta: metav1.ObjectMeta{Name: dynamo.GroveComponentResourceName(source, "prefill"), Namespace: source.Namespace, Generation: 1},
+				ObjectMeta: metav1.ObjectMeta{Name: dynamo.GroveComponentResourceName(ordinaryDGD, "prefill"), Namespace: source.Namespace, Generation: 1},
 				Spec:       grovev1alpha1.PodCliqueSpec{Replicas: 1},
 				Status:     grovev1alpha1.PodCliqueStatus{ObservedGeneration: ptr.To(int64(1)), Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1},
 			}
@@ -587,7 +627,8 @@ func TestLPXPendingDownloadDoesNotBlockOrdinaryWorkloads(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, v1beta1.DGDStatePending, result.Status.State)
 	pcs := &grovev1alpha1.PodCliqueSet{}
-	key := client.ObjectKey{Namespace: source.Namespace, Name: dynamo.PCSNameForDGD(source.Name, source.Spec.Components)}
+	ordinaryDGD := projectOrdinaryGroveDeployment(source)
+	key := client.ObjectKey{Namespace: source.Namespace, Name: dynamo.PCSNameForDGD(ordinaryDGD.Name, ordinaryDGD.Spec.Components)}
 	require.NoError(t, kube.Get(t.Context(), key, pcs))
 	require.True(t, metav1.IsControlledBy(pcs, source))
 	require.Len(t, pcs.Spec.Template.Cliques, 1)
@@ -606,6 +647,13 @@ func TestLPXPendingDownloadDoesNotBlockOrdinaryWorkloads(t *testing.T) {
 	require.Equal(t, dynamo.HashModelName("test/model"), service.Labels[consts.KubeLabelDynamoBaseModelHash])
 	require.Equal(t, "enabled", service.Annotations["example.com/model-discovery"])
 	require.True(t, metav1.IsControlledBy(service, source))
+
+	t.Log("Observe the created PCS before committing its worker hash")
+	require.Empty(t, source.Annotations[consts.AnnotationCurrentWorkerHashV2])
+	_, err = program.Reconcile(t.Context(), workloadProgramRequest{DGD: source})
+	require.NoError(t, err)
+	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(source), source))
+	require.NotEmpty(t, source.Annotations[consts.AnnotationCurrentWorkerHashV2])
 
 	t.Log("A pending ordinary checkpoint retains its startup and scaling gates alongside the pending child")
 	prefill := source.GetComponentByName("prefill")
@@ -653,7 +701,7 @@ func TestLPXPendingDownloadDoesNotBlockOrdinaryWorkloads(t *testing.T) {
 	t.Log("Removing the last ordinary component deletes its PCS without disturbing the child")
 	source.Spec.Components = source.Spec.Components[:1]
 	for range 2 {
-		_, err = program.workloads.Reconcile(t.Context(), source, nil, nil)
+		_, err = program.workloads.Reconcile(t.Context(), source, projectOrdinaryGroveDeployment(source), nil, nil)
 		require.NoError(t, err)
 		require.True(t, apierrors.IsNotFound(kube.Get(t.Context(), key, pcs)))
 	}

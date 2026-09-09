@@ -270,7 +270,7 @@ func TestGroveRenderDeploymentWorkerHashSuffix(t *testing.T) {
 			before := dgd.DeepCopy()
 
 			t.Log("Render the Grove deployment")
-			rendered, err := groveRenderDeployment(dgd, nil, tt.workerHashSuffix)
+			rendered, err := groveRenderDeployment(projectOrdinaryGroveDeployment(dgd), dgd, nil, tt.workerHashSuffix)
 			require.NoError(t, err)
 			worker := rendered.GetComponentByName("worker")
 			require.NotNil(t, worker)

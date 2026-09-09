@@ -14,13 +14,11 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/thirdparty/lpxscheduler/v1alpha1"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
-	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	groveschedulerv1alpha1 "github.com/ai-dynamo/grove/scheduler/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -175,35 +173,6 @@ func lpxPodGangPredicate() predicate.Predicate {
 		},
 		GenericFunc: func(event.GenericEvent) bool { return false },
 	}
-}
-
-// OwnsPodClique verifies the LPX owner chain before suppressing ordinary DGD readiness events.
-// Annotations are authorable hints; missing cached owners must not hide updates.
-func OwnsPodClique(ctx context.Context, reader client.Reader, clique *grovev1alpha1.PodClique) bool {
-	if clique == nil || reader == nil || !lpxPodCliqueMaterializationEvent(clique) {
-		return false
-	}
-	owner := metav1.GetControllerOf(clique)
-	if owner == nil || owner.Kind != groveconstants.KindPodCliqueScalingGroup || owner.APIVersion != grovev1alpha1.SchemeGroupVersion.String() || owner.UID == "" {
-		return false
-	}
-	group := &grovev1alpha1.PodCliqueScalingGroup{}
-	if err := reader.Get(ctx, client.ObjectKey{Namespace: clique.Namespace, Name: owner.Name}, group); err != nil || group.UID != owner.UID {
-		return false
-	}
-	owner = metav1.GetControllerOf(group)
-	if owner == nil || owner.Kind != groveconstants.KindPodCliqueSet || owner.APIVersion != grovev1alpha1.SchemeGroupVersion.String() || owner.UID == "" {
-		return false
-	}
-	pcs := &grovev1alpha1.PodCliqueSet{}
-	if err := reader.Get(ctx, client.ObjectKey{Namespace: clique.Namespace, Name: owner.Name}, pcs); err != nil || pcs.UID != owner.UID {
-		return false
-	}
-	owner = metav1.GetControllerOf(pcs)
-	return owner != nil && owner.Kind == nvidiacomv1alpha1.LPXGraphDeploymentGVK.Kind &&
-		owner.APIVersion == nvidiacomv1alpha1.GroupVersion.String() && owner.UID != "" &&
-		owner.Name == clique.Labels[consts.KubeLabelDynamoGraphDeploymentName] &&
-		string(owner.UID) == clique.Annotations[dynamo.LPXDeploymentUIDAnnotation]
 }
 
 func lpxPodCliqueMaterializationEvent(obj client.Object) bool {

@@ -120,6 +120,7 @@ func TestGroveWorkloadsReconciler_EvaluatesReadinessOnce(t *testing.T) {
 	result, err := reconciler.newGroveProgram().workloads.Reconcile(
 		context.Background(),
 		dgd,
+		projectOrdinaryGroveDeployment(dgd),
 		nil,
 		nil,
 	)
@@ -236,7 +237,7 @@ func TestGroveWorkloadsReconciler_DoesNotCommitWorkerHashWhenPodCliqueSetSyncFai
 			t.Log("Reconcile the full workload transition")
 			observedDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
 			require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), observedDGD))
-			_, err = workloads.Reconcile(context.Background(), observedDGD, nil, nil)
+			_, err = workloads.Reconcile(context.Background(), observedDGD, projectOrdinaryGroveDeployment(observedDGD), nil, nil)
 
 			t.Log("Verify the failed PCS sync leaves the persisted DGD hash unchanged")
 			require.Error(t, err)
@@ -323,7 +324,7 @@ func TestGroveWorkloadsReconciler_RecoversWorkerHashCommitAfterPodCliqueSetSync(
 	t.Log("Persist the PCS suffix without projecting the DGD hash from the write receipt")
 	observedDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
 	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), observedDGD))
-	_, err = workloads.Reconcile(context.Background(), observedDGD, nil, nil)
+	_, err = workloads.Reconcile(context.Background(), observedDGD, projectOrdinaryGroveDeployment(observedDGD), nil, nil)
 	require.NoError(t, err)
 
 	t.Log("Verify the write receipt leaves the parent hash unchanged")
@@ -342,7 +343,7 @@ func TestGroveWorkloadsReconciler_RecoversWorkerHashCommitAfterPodCliqueSetSync(
 	t.Log("Observe the suffix on a later reconcile, then reject the parent projection")
 	freshDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
 	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), freshDGD))
-	_, err = workloads.Reconcile(context.Background(), freshDGD, nil, nil)
+	_, err = workloads.Reconcile(context.Background(), freshDGD, projectOrdinaryGroveDeployment(freshDGD), nil, nil)
 	require.Error(t, err)
 	assert.Equal(t, 1, pcsUpdateCalls)
 	assert.Equal(t, 1, dgdUpdateCalls)
@@ -351,7 +352,7 @@ func TestGroveWorkloadsReconciler_RecoversWorkerHashCommitAfterPodCliqueSetSync(
 	failDGDUpdate = false
 	freshDGD = &nvidiacomv1beta1.DynamoGraphDeployment{}
 	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), freshDGD))
-	_, err = workloads.Reconcile(context.Background(), freshDGD, nil, nil)
+	_, err = workloads.Reconcile(context.Background(), freshDGD, projectOrdinaryGroveDeployment(freshDGD), nil, nil)
 	require.NoError(t, err)
 
 	t.Log("Verify the retry commits the target hash without rewriting the PCS")
@@ -364,7 +365,7 @@ func TestGroveWorkloadsReconciler_RecoversWorkerHashCommitAfterPodCliqueSetSync(
 	t.Log("Verify the completed transition is idempotent")
 	idempotentDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
 	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), idempotentDGD))
-	_, err = workloads.Reconcile(context.Background(), idempotentDGD, nil, nil)
+	_, err = workloads.Reconcile(context.Background(), idempotentDGD, projectOrdinaryGroveDeployment(idempotentDGD), nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, 1, pcsUpdateCalls)
 	assert.Equal(t, 2, dgdUpdateCalls)
@@ -648,7 +649,7 @@ func TestGroveWorkloadsReconciler_SkipsHashObservationWhenHashIsCurrent(t *testi
 	t.Log("Reconcile: hash observation block must be skipped entirely when needsCommit is false")
 	observedDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
 	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), observedDGD))
-	_, err = workloads.Reconcile(context.Background(), observedDGD, nil, nil)
+	_, err = workloads.Reconcile(context.Background(), observedDGD, projectOrdinaryGroveDeployment(observedDGD), nil, nil)
 	require.NoError(t, err)
 
 	assert.Zero(t, dgdUpdateCalls, "DGD must not be updated when the hash annotation is already current")
@@ -727,14 +728,14 @@ func TestGroveWorkloadsReconciler_DefersHashCommitUntilPCSWriteObserved(t *testi
 			t.Log("First reconcile writes the PCS; commit must be deferred")
 			observedDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
 			require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), observedDGD))
-			_, err = workloads.Reconcile(context.Background(), observedDGD, nil, nil)
+			_, err = workloads.Reconcile(context.Background(), observedDGD, projectOrdinaryGroveDeployment(observedDGD), nil, nil)
 			require.NoError(t, err)
 			assert.Zero(t, dgdUpdateCalls, "hash annotation must not be committed on the reconcile that writes the PCS")
 
 			t.Log("Second reconcile is a no-op PCS sync; commit must proceed")
 			freshDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
 			require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), freshDGD))
-			_, err = workloads.Reconcile(context.Background(), freshDGD, nil, nil)
+			_, err = workloads.Reconcile(context.Background(), freshDGD, projectOrdinaryGroveDeployment(freshDGD), nil, nil)
 			require.NoError(t, err)
 			assert.Equal(t, 1, dgdUpdateCalls, "hash annotation must be committed once the PCS write is observed")
 

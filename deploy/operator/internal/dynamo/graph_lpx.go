@@ -86,7 +86,7 @@ func RenderLPXBasePodCliqueSet(
 }
 
 const (
-	LPXDeploymentUIDAnnotation        = "lpx.nvidia.com/deployment-uid"
+	LPXDeploymentUIDAnnotation        = dynamolpx.DeploymentUIDAnnotation
 	LPXDeploymentGenerationAnnotation = "lpx.nvidia.com/deployment-generation"
 	LPXInputRevisionAnnotation        = "lpx.nvidia.com/input-revision"
 	LPXRestartAnnotation              = "lpx.nvidia.com/restart-id"

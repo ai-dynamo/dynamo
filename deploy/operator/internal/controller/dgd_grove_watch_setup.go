@@ -21,8 +21,8 @@ import (
 	"context"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	lpxcontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller/lpx"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	dynamolpx "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -105,7 +105,7 @@ func (s *groveWatchSetup) mapPodCliqueToRequests(
 ) []ctrl.Request {
 	podClique, ok := obj.(*grovev1alpha1.PodClique)
 	// LPX owns its role observations; the DGD watches the aggregate child status.
-	if !ok || podClique == nil || lpxcontroller.OwnsPodClique(ctx, s.reader, podClique) {
+	if !ok || podClique == nil || dynamolpx.OwnsPodClique(ctx, s.reader, podClique) {
 		return nil
 	}
 

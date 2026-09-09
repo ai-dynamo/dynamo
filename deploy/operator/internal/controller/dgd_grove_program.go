@@ -92,6 +92,7 @@ func (p *groveProgram) Reconcile(
 		programResult.Fail(req.DGD.Generation, reasonSelectedWorkloadProviderUnavailable, err)
 		return programResult, reconcile.TerminalError(err)
 	}
+	var ordinaryDGD *nvidiacomv1beta1.DynamoGraphDeployment
 
 	defer func() {
 		if retErr != nil {
@@ -101,7 +102,10 @@ func (p *groveProgram) Reconcile(
 			}
 			programResult.Fail(req.DGD.Generation, reason, retErr)
 		}
-		p.topology.Reconcile(ctx, req.DGD, &programResult)
+		if ordinaryDGD == nil {
+			ordinaryDGD = projectOrdinaryGroveDeployment(req.DGD)
+		}
+		p.topology.Reconcile(ctx, ordinaryDGD, &programResult)
 	}()
 	log.FromContext(ctx).Info(
 		"Reconciling Grove resources",
@@ -119,13 +123,16 @@ func (p *groveProgram) Reconcile(
 	if err != nil {
 		return programResult, err
 	}
+	ordinaryDGD = projectOrdinaryGroveDeployment(req.DGD)
 
 	previousRestart := programResult.Status.Restart
 	restart := p.restart.Resolve(
 		ctx,
 		req.DGD,
 		&programResult.Status,
-		p.resolveRestartProgress,
+		func(ctx context.Context, source *nvidiacomv1beta1.DynamoGraphDeployment, inProgress []string) []string {
+			return p.resolveRestartProgress(ctx, source, ordinaryDGD, inProgress)
+		},
 	)
 	recordRestartTransition(previousRestart, restart.Status, &programResult)
 	programResult.Status.Restart = restart.Status
@@ -138,6 +145,7 @@ func (p *groveProgram) Reconcile(
 	result, err := p.workloads.Reconcile(
 		ctx,
 		req.DGD,
+		ordinaryDGD,
 		restart.State,
 		checkpoints.Infos,
 	)
@@ -153,7 +161,15 @@ func (p *groveProgram) Reconcile(
 	if err != nil {
 		return programResult, fmt.Errorf("reconcile LPX child: %w", err)
 	}
-	projectLPXChildStatus(req.DGD, child, &result, &programResult.Status)
+	previousLPX := programResult.Status.LPX
+	result, programResult.Status.LPX = mergeLPXChildStatus(req.DGD, child, result)
+	programResult.Status.Placement = lpxPlacementProjection(
+		req.DGD,
+		child,
+		programResult.Status.Placement,
+		previousLPX,
+		programResult.Status.LPX,
+	)
 	result = applyCheckpointStartupReadiness(result, checkpoints.Infos)
 	if child != nil && !child.DeletionTimestamp.IsZero() {
 		programResult.RequeueAfter = 5 * time.Second

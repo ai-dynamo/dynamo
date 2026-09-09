@@ -10936,13 +10936,6 @@ func TestPCSNameForDGD(t *testing.T) {
 			Multinode:     &v1beta1.MultinodeSpec{NodeCount: 2},
 		}
 	}
-	lpxComponent := func(name string) v1beta1.DynamoComponentDeploymentSharedSpec {
-		return v1beta1.DynamoComponentDeploymentSharedSpec{
-			ComponentName: name,
-			ComponentType: v1beta1.ComponentTypeLPX,
-			LPX:           &v1beta1.LPXConfig{BuildID: "build-id"},
-		}
-	}
 	interPodGMSComponent := func(name string) v1beta1.DynamoComponentDeploymentSharedSpec {
 		return v1beta1.DynamoComponentDeploymentSharedSpec{
 			ComponentName: name,
@@ -10995,15 +10988,6 @@ func TestPCSNameForDGD(t *testing.T) {
 			wantLen: 26,
 		},
 		{
-			name:    "normal PCS name does not budget LPX worker cliques",
-			dgdName: "abcdefghijklmnopqrstuvwxyzabcdef",
-			components: []v1beta1.DynamoComponentDeploymentSharedSpec{
-				lpxComponent("lpu"),
-			},
-			// LPX has its own PCS name budget, so this name stays unchanged.
-			wantLen: 32,
-		},
-		{
 			name:    "deterministic - same input always produces same output",
 			dgdName: "deepseek-v32-fp4-trtllm-dgd1",
 			components: []v1beta1.DynamoComponentDeploymentSharedSpec{
@@ -11021,14 +11005,6 @@ func TestPCSNameForDGD(t *testing.T) {
 			// VllmPrefillWorker multinode: PCSG=17, PCLQ=17+1+3=21 → budget=38, pcsBudget=45-38=7
 			// 7 < minPCSNameLength(8), so clamped to 8
 			wantLen: 8,
-		},
-		{
-			name:    "normal PCS name is independent of LPX role expansion",
-			dgdName: "deepseek-v32-fp4-lpu-dgd",
-			components: []v1beta1.DynamoComponentDeploymentSharedSpec{
-				lpxComponent("lpu"),
-			},
-			want: "deepseek-v32-fp4-lpu-dgd",
 		},
 		{
 			name:       "empty components - no truncation needed",
@@ -11063,9 +11039,6 @@ func TestPCSNameForDGD(t *testing.T) {
 			maxComponentBudget := 0
 			for i := range tt.components {
 				component := &tt.components[i]
-				if component.IsLPX() {
-					continue
-				}
 				budget := ComponentNameBudget(component)
 				if budget > maxComponentBudget {
 					maxComponentBudget = budget

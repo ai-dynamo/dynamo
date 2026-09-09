@@ -20,7 +20,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strings"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -72,12 +71,13 @@ func newGroveWorkloadRenderer(
 
 func (r *groveWorkloadRenderer) Render(
 	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	source *nvidiacomv1beta1.DynamoGraphDeployment,
+	ordinary *nvidiacomv1beta1.DynamoGraphDeployment,
 	restartState *dynamo.RestartState,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
 	workerGenerationChanged bool,
 ) (*grovePodCliqueSetRender, error) {
-	if dgd == nil {
+	if source == nil || ordinary == nil {
 		return nil, fmt.Errorf("cannot render Grove PodCliqueSet without a DynamoGraphDeployment")
 	}
 	if r.reader == nil {
@@ -85,8 +85,8 @@ func (r *groveWorkloadRenderer) Render(
 	}
 	existingPodCliqueSet := &grovev1alpha1.PodCliqueSet{}
 	key := types.NamespacedName{
-		Name:      dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components),
-		Namespace: dgd.Namespace,
+		Name:      dynamo.PCSNameForDGD(ordinary.Name, ordinary.Spec.Components),
+		Namespace: ordinary.Namespace,
 	}
 	if err := r.reader.Get(ctx, key, existingPodCliqueSet); err != nil {
 		if !apierrors.IsNotFound(err) {
@@ -95,8 +95,8 @@ func (r *groveWorkloadRenderer) Render(
 		existingPodCliqueSet = nil
 	}
 
-	workerHashSuffixNeeded := shouldRenderGroveWorkerHashSuffix(dgd, existingPodCliqueSet, workerGenerationChanged)
-	renderDeployment, err := groveRenderDeployment(dgd, existingPodCliqueSet, workerHashSuffixNeeded)
+	workerHashSuffixNeeded := shouldRenderGroveWorkerHashSuffix(ordinary, existingPodCliqueSet, workerGenerationChanged)
+	renderDeployment, err := groveRenderDeployment(ordinary, source, existingPodCliqueSet, workerHashSuffixNeeded)
 	if err != nil {
 		return nil, err
 	}
@@ -131,18 +131,11 @@ func (r *groveWorkloadRenderer) Render(
 }
 
 func groveRenderDeployment(
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	ordinary *nvidiacomv1beta1.DynamoGraphDeployment,
+	hashSource *nvidiacomv1beta1.DynamoGraphDeployment,
 	pcs *grovev1alpha1.PodCliqueSet,
 	workerHashSuffix bool,
 ) (*nvidiacomv1beta1.DynamoGraphDeployment, error) {
-	// Exclude externally managed templates before copying the ordinary render inputs.
-	ordinary := *dgd
-	externallyManaged := func(component nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) bool {
-		return component.ManagedByExternalController()
-	}
-	if slices.ContainsFunc(dgd.Spec.Components, externallyManaged) {
-		ordinary.Spec.Components = slices.DeleteFunc(slices.Clone(dgd.Spec.Components), externallyManaged)
-	}
 	renderDeployment := ordinary.DeepCopy()
 
 	// Compatibility and worker labels mutate only the independently owned copy.
@@ -150,7 +143,7 @@ func groveRenderDeployment(
 	if !workerHashSuffix {
 		return renderDeployment, nil
 	}
-	if err := applyGroveWorkerHashSuffix(renderDeployment, dgd); err != nil {
+	if err := applyGroveWorkerHashSuffix(renderDeployment, hashSource); err != nil {
 		return nil, err
 	}
 	return renderDeployment, nil
