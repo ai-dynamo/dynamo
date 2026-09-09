@@ -26,21 +26,19 @@ What it demonstrates:
   → `cleanup`, with cancellation via `context.is_stopped()`. The
   framework owns registration, discovery, serving, and shutdown; the
   engine is ~200 lines.
-- **KV-aware routing with synthetic events** — the engine publishes a
-  `BlockStored` KV event for each full 16-token block of every prompt,
-  with **chained block identities**: each block's hash folds in its
-  parent's, so a hash uniquely names the whole prefix up to that block —
-  the same scheme real engines use. New blocks are published under their
-  `parent_hash`, so the router's radix tree links them below the shared
-  prefix. Send a prompt that shares a prefix (or an exact repeat) and
-  the router scores real overlap:
+- **KV-aware routing with synthetic events** — on every request the
+  engine publishes the prompt's full run of 16-token blocks as
+  `BlockStored` KV events. The router recomputes each block's **match
+  key from the token content itself**, so identical prefixes genuinely
+  match in its radix tree; the `block_hashes` we send are just node IDs
+  (a plain counter). Send a prompt that shares a prefix (or an exact
+  repeat) and the router scores real overlap:
 
   ```text
   request 1:  [ROUTING] Best: worker_…  0/11 blocks overlap   ← cold
-  engine:     published 10 KV block(s) for prompt (0 shared-prefix block(s) skipped)
+  engine:     published 10 KV block(s) for prompt
   request 2:  [ROUTING] Best: worker_…  10/11 blocks overlap  ← exact repeat pins
   request 3:  [ROUTING] Best: worker_…  9/12 blocks overlap   ← shared prefix + new tail
-  engine:     published 2 KV block(s) for prompt (9 shared-prefix block(s) skipped)
   ```
 
 ## How it works
@@ -60,14 +58,13 @@ flowchart LR
     W1 -. "KV events<br/>(block hashes)" .-> F
 ```
 
-The engine hashes each 16-token block chained on its parent and
-publishes only the not-yet-published tail of that chain, anchored with
-`parent_hash` under the shared prefix. The router's radix tree learns
-which worker "holds" which prefix, so a repeat prompt routes back to
-the same worker (`0/11 → 10/11 blocks overlap`) — and a prompt sharing
-only the beginning (same system prompt, new question) still scores
-partial overlap. With no cache knowledge, requests would round-robin
-instead.
+On every request the engine publishes the prompt's full run of
+16-token blocks. The router recomputes each block's match key from the
+token content, so its radix tree learns which worker "holds" which
+prefix: a repeat prompt routes back to the same worker
+(`0/11 → 10/11 blocks overlap`) — and a prompt sharing only the
+beginning (same system prompt, new question) still scores partial
+overlap. With no cache knowledge, requests would round-robin instead.
 
 ## Run without Docker
 
@@ -318,10 +315,10 @@ One line sends one event:
 
 ```python
 publisher.publish_stored(
-    token_ids=[...],            # the tokens in the cached blocks
+    token_ids=[...],            # the tokens — the router matches on THESE
     num_block_tokens=[16, 16],  # block sizes
-    block_hashes=[h1, h2],      # our chained IDs for the blocks
-    parent_hash=h0,             # the block these chain under (None = root)
+    block_hashes=[7, 8],        # our node IDs (any per-worker-unique ints)
+    parent_hash=None,           # what the run's first block chains under
 )
 ```
 
@@ -348,18 +345,19 @@ the router finds our blocks in its tree:
 
 ```text
 request 1:  [ROUTING] Best: worker_…  0/11 blocks overlap   ← cold
-engine:     published 10 KV block(s) for prompt (0 shared-prefix block(s) skipped)
+engine:     published 10 KV block(s) for prompt
 request 2:  [ROUTING] Best: worker_…  10/11 blocks overlap  ← pinned to us
 request 3:  [ROUTING] Best: worker_…  9/12 blocks overlap   ← shared prefix + new tail
-engine:     published 2 KV block(s) for prompt (9 shared-prefix block(s) skipped)
 ```
 
-One design choice makes this demo real: block hashes are **chained**
-(`blake2b` of the parent's hash + the block's 16 tokens), so a hash
-uniquely names the whole prefix up to that block. Identical prompts
-produce identical chains and genuinely match in the router's tree, and
-a prompt sharing only a prefix matches exactly the shared part — the
-tail publishes under its `parent_hash` and extends the tree from there.
+The part that surprises most newcomers: **matching keys on the tokens,
+not on our hashes.** The router recomputes each block's match key from
+the `token_ids` in the event, so identical prefixes match no matter
+what IDs the engine picked — `block_hashes` are only node identities
+(for parent links and `publish_removed`), which is why a plain counter
+is enough. We republish the full run on every request; re-stores are
+idempotent in the router's tree. A real engine tracks its cache and
+publishes deltas, plus `publish_removed` when blocks are evicted.
 
 Not implemented here (deliberately): the sibling **KV metrics** channel
 (`ComponentSnapshot` gauges — "how full is my cache"). See

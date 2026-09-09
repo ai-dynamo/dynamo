@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import hashlib
 import logging
 import os
 from collections.abc import AsyncGenerator
@@ -49,19 +48,6 @@ HARDCODED_REPLY = (
 )
 
 
-def _block_hash(parent_hash: Optional[int], token_block: list[int]) -> int:
-    """Hash a block's tokens *chained on its parent's hash*, so a block's
-    ID uniquely identifies the whole prefix up to and including it — the
-    same scheme real engines use. Two prompts that share a prefix produce
-    the same chain of IDs for the shared part, which is exactly what lets
-    the router's radix tree score partial overlap."""
-    digest = hashlib.blake2b(
-        str(parent_hash).encode()
-        + b"|"
-        + b",".join(str(t).encode() for t in token_block),
-        digest_size=8,
-    ).digest()
-    return int.from_bytes(digest, "big") >> 1  # keep it a positive i64
 
 
 class HelloEngine(LLMEngine):
@@ -70,7 +56,7 @@ class HelloEngine(LLMEngine):
         self.delay = delay
         self._reply_token_ids: Optional[list[int]] = None  # set in start()
         self._publisher = None  # set when the framework hands us one
-        self._published_blocks: set[int] = set()  # don't re-publish a block
+        self._next_block_id = 0  # monotonic node IDs for published blocks
 
     # ------------------------------------------------------------------
     # from_args: CLI -> (engine, WorkerConfig)   [called first]
@@ -233,42 +219,37 @@ class HelloEngine(LLMEngine):
         self._publisher = publisher
 
     def _publish_prompt_blocks(self, prompt_tokens: list[int]) -> None:
-        """Publish the prompt's not-yet-published tail of full 16-token
-        blocks, parented under the already-published prefix.
+        """Publish the prompt's full run of complete 16-token blocks.
 
-        Because block hashes are chained (see `_block_hash`), the set of
-        published hashes can only ever cover a contiguous *prefix* of any
-        prompt's chain — so we walk until the first unpublished block and
-        publish everything from there in one call, with `parent_hash`
-        anchoring it under the shared prefix in the router's radix tree.
+        Two things a newcomer should not misread here (see the router's
+        indexer docs):
+
+        - **Matching is on token content.** The router recomputes each
+          block's match key from the ``token_ids`` we pass — our
+          ``block_hashes`` play no part in prefix matching.
+        - **``block_hashes`` are node identities**, used for parent
+          links and ``publish_removed``. They only need to be unique per
+          worker, so a plain counter is enough (``sample_engine.py``
+          does the same).
+
+        We publish the whole run on every request, from position 0
+        (``parent_hash=None``). Re-stores are idempotent in the router's
+        tree, so this needs no bookkeeping — a real engine would track
+        its cache and publish deltas plus ``publish_removed`` on
+        eviction.
         """
-        if self._publisher is None:  # KV routing disabled by operator
+        publisher = self._publisher  # local ref: cleanup() may null the field
+        if publisher is None:  # KV routing disabled by operator
             return
-        parent: Optional[int] = None
-        chain: list[int] = []  # chained hash per full block
-        for b in range(len(prompt_tokens) // BLOCK_SIZE):
-            block = prompt_tokens[b * BLOCK_SIZE : (b + 1) * BLOCK_SIZE]
-            parent = _block_hash(parent, block)
-            chain.append(parent)
-
-        # Longest already-published prefix of the chain.
-        first_new = 0
-        while first_new < len(chain) and chain[first_new] in self._published_blocks:
-            first_new += 1
-        if first_new == len(chain):
-            return  # whole prompt already known to the router
-
-        new_hashes = chain[first_new:]
-        self._published_blocks.update(new_hashes)
-        self._publisher.publish_stored(
-            token_ids=prompt_tokens[first_new * BLOCK_SIZE : len(chain) * BLOCK_SIZE],
-            num_block_tokens=[BLOCK_SIZE] * len(new_hashes),
-            block_hashes=new_hashes,
-            # Anchor under the last already-published block (None = root).
-            parent_hash=chain[first_new - 1] if first_new > 0 else None,
+        num_blocks = len(prompt_tokens) // BLOCK_SIZE
+        if num_blocks == 0:
+            return
+        block_ids = list(range(self._next_block_id, self._next_block_id + num_blocks))
+        self._next_block_id += num_blocks
+        publisher.publish_stored(
+            token_ids=prompt_tokens[: num_blocks * BLOCK_SIZE],
+            num_block_tokens=[BLOCK_SIZE] * num_blocks,
+            block_hashes=block_ids,
+            parent_hash=None,  # the run starts at position 0
         )
-        logger.info(
-            "published %d KV block(s) for prompt (%d shared-prefix block(s) skipped)",
-            len(new_hashes),
-            first_new,
-        )
+        logger.info("published %d KV block(s) for prompt", num_blocks)
