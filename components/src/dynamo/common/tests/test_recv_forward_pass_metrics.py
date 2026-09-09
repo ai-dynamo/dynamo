@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import builtins
+import importlib
 import io
 import logging
 import queue
@@ -21,6 +23,19 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.timeout(10),
 ]
+
+
+def test_capture_import_does_not_require_plotting(monkeypatch):
+    original_import = builtins.__import__
+
+    def without_matplotlib(name, *args, **kwargs):
+        if name == "matplotlib" or name.startswith("matplotlib."):
+            raise ModuleNotFoundError("plotting is unavailable in this runtime")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", without_matplotlib)
+    importlib.reload(recorder)
+    assert recorder._parse_args([]).output is None
 
 
 class Subscriber:

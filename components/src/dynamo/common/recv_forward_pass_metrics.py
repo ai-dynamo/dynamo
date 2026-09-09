@@ -52,16 +52,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO
 
-import matplotlib
-import matplotlib.pyplot as plt
 import msgspec
 
 from dynamo.common.forward_pass_metrics import ForwardPassMetrics, decode
 from dynamo.llm import FpmEventSubscriber
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
-
-matplotlib.use("Agg")
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -72,6 +68,13 @@ def _save_plot(path: str, history: list[tuple[float, ForwardPassMetrics]]) -> No
     if not history:
         logger.warning("No data collected, skipping plot.")
         return
+
+    # Plotting is optional: runtime images used for capture need not contain
+    # matplotlib or its dependencies. Load them only for --save-plot.
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
 
     ts = [t for t, _ in history]
     num_prefill = [m.scheduled_requests.num_prefill_requests for _, m in history]
