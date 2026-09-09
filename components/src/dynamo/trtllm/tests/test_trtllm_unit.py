@@ -755,7 +755,6 @@ async def test_init_llm_worker_strips_num_postprocess_workers_from_extra_engine_
     assert "num_postprocess_workers" not in engine_args
 
 
-
 @pytest.mark.core
 @pytest.mark.asyncio
 async def test_unsupported_backend_exits_cleanly(monkeypatch):
