@@ -814,3 +814,174 @@ pub(super) struct CleanupEdge {
     pub(super) key: LocalBlockHash,
     pub(super) child: Weak<Node>,
 }
+
+#[cfg(test)]
+mod split_insert_tests {
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    fn blocks(hashes: &[u64]) -> Vec<KvCacheStoredBlockData> {
+        hashes
+            .iter()
+            .map(|&hash| KvCacheStoredBlockData {
+                block_hash: ExternalSequenceBlockHash(hash),
+                tokens_hash: LocalBlockHash(hash),
+                mm_extra_info: None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn high_fanout_insert_and_split_serialize_without_losing_children() {
+        for split_wins in [false, true] {
+            let inserting_worker = WorkerWithDpRank::new(0, 0);
+            let splitting_worker = WorkerWithDpRank::new(1, 0);
+            let parent = Arc::new(Node::from_blocks_for_worker(
+                &blocks(&[1, 2, 3, 4]),
+                inserting_worker,
+            ));
+            parent.promote_worker_to_full_edge(splitting_worker);
+            let mut original_children = Vec::new();
+            for key in 10..15 {
+                let child = Arc::new(Node::from_blocks_for_worker(
+                    &blocks(&[key]),
+                    inserting_worker,
+                ));
+                let ParentChildPlan::MissingChild { shape_version } = parent
+                    .child_lookup_plan(Some(ExternalSequenceBlockHash(4)), LocalBlockHash(key))
+                else {
+                    panic!("fixture child should be missing");
+                };
+                assert!(matches!(
+                    parent.insert_child_if_still_missing(
+                        LocalBlockHash(key),
+                        child.clone(),
+                        shape_version,
+                    ),
+                    InsertChildOutcome::Inserted(_),
+                ));
+                original_children.push((LocalBlockHash(key), child));
+            }
+
+            let new_child = Arc::new(Node::from_blocks_for_worker(
+                &blocks(&[99]),
+                inserting_worker,
+            ));
+            let ParentChildPlan::MissingChild { shape_version } =
+                parent.child_lookup_plan(Some(ExternalSequenceBlockHash(4)), LocalBlockHash(99))
+            else {
+                panic!("new tail child should be missing");
+            };
+            let split_blocks = blocks(&[90]);
+            let split_plan = parent
+                .plan_store_parent_edge(ExternalSequenceBlockHash(2), &split_blocks)
+                .expect("interior parent should produce a split plan");
+
+            let split_outcome = if split_wins {
+                // Suspend the split after it acquires exclusive shape ownership,
+                // before state mutation, so the captured insertion cannot win.
+                let state_guard = parent.state.write();
+                let split_parent = parent.clone();
+                let splitter = thread::spawn(move || {
+                    split_parent.apply_store_parent_edge_plan(
+                        splitting_worker,
+                        split_plan,
+                        &split_blocks,
+                    )
+                });
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let split_has_shape_gate = loop {
+                    if parent.shape_gate.try_read().is_none() {
+                        break true;
+                    }
+                    if Instant::now() >= deadline {
+                        break false;
+                    }
+                    thread::yield_now();
+                };
+
+                let (started_tx, started_rx) = mpsc::channel();
+                let insert_parent = parent.clone();
+                let insert_child = new_child.clone();
+                let inserter = thread::spawn(move || {
+                    started_tx.send(()).unwrap();
+                    insert_parent.insert_child_if_still_missing(
+                        LocalBlockHash(99),
+                        insert_child,
+                        shape_version,
+                    )
+                });
+                let insertion_started = started_rx.recv_timeout(Duration::from_secs(5));
+                // Release and join before asserting, so a failed rendezvous does
+                // not strand either thread while holding the fixture's lock.
+                drop(state_guard);
+                let outcome = splitter.join().unwrap();
+                let insertion = inserter.join().unwrap();
+                assert!(split_has_shape_gate, "split did not obtain its shape gate");
+                insertion_started.expect("insertion thread did not start");
+                assert!(matches!(insertion, InsertChildOutcome::Stale));
+                outcome
+            } else {
+                // An insert under an already-internal parent does not invalidate
+                // the split plan; its newly published child must transfer too.
+                assert!(matches!(
+                    parent.insert_child_if_still_missing(
+                        LocalBlockHash(99),
+                        new_child.clone(),
+                        shape_version,
+                    ),
+                    InsertChildOutcome::Inserted(_),
+                ));
+                parent.apply_store_parent_edge_plan(splitting_worker, split_plan, &split_blocks)
+            };
+
+            let ParentEdgeAction::InsertFromParent(Some(split)) = split_outcome else {
+                panic!("interior split should commit in either serialization order");
+            };
+            let suffix = split.suffix;
+            assert_eq!(parent.edge_local_hashes_for_test(), vec![1, 2]);
+            assert_eq!(suffix.edge_local_hashes_for_test(), vec![3, 4]);
+            let prefix_children = parent.child_edges_snapshot();
+            assert_eq!(prefix_children.len(), 1);
+            assert_eq!(prefix_children[0].0, LocalBlockHash(3));
+            assert!(Arc::ptr_eq(&prefix_children[0].1, &suffix));
+
+            if split_wins {
+                assert_eq!(suffix.child_edges_snapshot().len(), original_children.len());
+                assert!(suffix.child_snapshot(LocalBlockHash(99)).is_none());
+                let ParentChildPlan::MissingChild { shape_version } = suffix
+                    .child_lookup_plan(Some(ExternalSequenceBlockHash(4)), LocalBlockHash(99))
+                else {
+                    panic!("retry should resolve the original tail in the suffix");
+                };
+                assert!(matches!(
+                    suffix.insert_child_if_still_missing(
+                        LocalBlockHash(99),
+                        new_child.clone(),
+                        shape_version,
+                    ),
+                    InsertChildOutcome::Inserted(_),
+                ));
+            }
+
+            assert_eq!(
+                suffix.child_edges_snapshot().len(),
+                original_children.len() + 1
+            );
+            for (key, original_child) in original_children {
+                assert!(Arc::ptr_eq(
+                    &suffix.child_snapshot(key).expect("original child was lost"),
+                    &original_child,
+                ));
+            }
+            assert!(Arc::ptr_eq(
+                &suffix.child_snapshot(LocalBlockHash(99)).unwrap(),
+                &new_child,
+            ));
+            assert!(parent.child_snapshot(LocalBlockHash(99)).is_none());
+        }
+    }
+}
