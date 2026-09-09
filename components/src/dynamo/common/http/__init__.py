@@ -1,25 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Backend-neutral facade for Dynamo's HTTP fetch client.
+"""Facade for Dynamo's HTTP fetch client (aiohttp).
 
-Env var ``DYN_HTTP_BACKEND`` selects the implementation behind the
-process-wide singleton used by :func:`fetch_bytes`:
+:func:`fetch_bytes` runs over a process-wide :class:`AiohttpClient` singleton.
+Callers catch the unified exception classes (``HttpTimeoutError``,
+``HttpConnectionError``, ``HttpStatusError``). For SSRF-safe fetches (e.g. from
+``ImageLoader``) pass a ``UrlValidationPolicy`` — :func:`fetch_bytes` then
+follows redirects manually and revalidates each hop against the policy.
 
-  - ``aiohttp`` (default) — :class:`AiohttpClient` over an
-    ``aiohttp.ClientSession``.
-  - ``httpx`` — :class:`HttpxClient` over an ``httpx.AsyncClient``
-    (fixed config: decoupled pool timeout, ``max_keepalive_connections``
-    matches ``max_connections``).
-
-Callers use :func:`fetch_bytes` and catch the unified exception classes
-(``HttpTimeoutError``, ``HttpConnectionError``, ``HttpStatusError``).
-For SSRF-safe fetches (e.g. from ``ImageLoader``) pass a
-``UrlValidationPolicy`` — :func:`fetch_bytes` then follows redirects
-manually and revalidates each hop against the policy.
-
-Tests / advanced callers can also instantiate :class:`AiohttpClient` or
-:class:`HttpxClient` directly and bypass the singleton.
+``DYN_HTTP_BACKEND`` is retained for back-compat but only ``aiohttp`` is
+supported; any other value logs a warning and uses aiohttp. The former httpx
+backend was removed — aiohttp scales better under fan-out (httpx hit
+``PoolTimeout``; see README) and has a native DNS-resolver hook for SSRF
+pinning that httpx lacks.
 """
 
 from __future__ import annotations
@@ -43,31 +37,30 @@ from .base import (
     HttpStatusError,
     HttpTimeoutError,
 )
-from .httpx_client import HttpxClient
 
 logger = logging.getLogger(__name__)
 
 
-_VALID_BACKENDS = ("aiohttp", "httpx")
 _default: Optional[HttpClient] = None
 
 
 def _create_client() -> HttpClient:
-    """Pick a concrete client class based on ``DYN_HTTP_BACKEND``.
+    """Instantiate the aiohttp client (the only supported backend).
 
     Mirrors any legacy ``DYN_MM_HTTP_*`` env vars to their canonical
     ``DYN_HTTP_*`` names first, so the client's lazy ``from_env()``
-    inside ``HttpClient.__init__`` sees the migrated values.
+    inside ``HttpClient.__init__`` sees the migrated values. A stale
+    ``DYN_HTTP_BACKEND`` other than ``aiohttp`` is ignored with a warning.
     """
     _apply_legacy_env_aliases()
     name = os.environ.get("DYN_HTTP_BACKEND", "aiohttp").lower()
-    if name == "aiohttp":
-        return AiohttpClient()
-    if name == "httpx":
-        return HttpxClient()
-    raise ValueError(
-        f"DYN_HTTP_BACKEND={name!r} is invalid; must be one of {_VALID_BACKENDS}"
-    )
+    if name not in ("", "aiohttp"):
+        logger.warning(
+            "DYN_HTTP_BACKEND=%r is no longer supported (the httpx backend was "
+            "removed); using aiohttp.",
+            name,
+        )
+    return AiohttpClient()
 
 
 def get_default_client() -> HttpClient:
@@ -101,7 +94,6 @@ async def close_http_client() -> None:
 __all__ = [
     "HttpClient",
     "AiohttpClient",
-    "HttpxClient",
     "HttpError",
     "HttpTimeoutError",
     "HttpConnectionError",
