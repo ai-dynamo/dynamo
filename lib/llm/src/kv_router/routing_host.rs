@@ -93,23 +93,30 @@ fn classifier_abort_error(error: &KvSchedulerError) -> Arc<AbortCause> {
     }
 }
 
-/// Operator log plus the client-facing error for a classifier failure. A typed
-/// [`DynamoError`] returned by the plugin passes through so flow-control
-/// rejections keep their status; everything else is sanitized to hide
-/// classifier internals from the client.
+/// The client-facing error for a classifier failure. A typed [`DynamoError`]
+/// returned by the plugin is an intentional, client-visible decision (flow
+/// control) and passes through with its status; everything else is sanitized
+/// to hide classifier internals from the client and logged for the operator.
 fn classifier_failure_response(request_id: &str, error: &KvSchedulerError) -> Error {
-    // The client only sees the mapped error below, so this log is the
-    // operator's sole copy of the original failure.
-    tracing::error!(request_id = %request_id, error = %error, "request classifier failed");
     if let KvSchedulerError::RequestClassifierFailed(source) = error {
         let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(source.as_ref());
         while let Some(current) = cause {
             if let Some(typed) = current.downcast_ref::<DynamoError>() {
+                // A load-shedding classifier rejects by design, one request at
+                // a time; that is not an operator error.
+                tracing::debug!(
+                    request_id = %request_id,
+                    error = %typed,
+                    "request classifier rejected request"
+                );
                 return typed.clone().into();
             }
             cause = current.source();
         }
     }
+    // The client only sees the sanitized error below, so this log is the
+    // operator's sole copy of the original failure.
+    tracing::error!(request_id = %request_id, error = %error, "request classifier failed");
     DynamoError::builder()
         .error_type(ErrorType::Unknown)
         .message("request classifier failed")
