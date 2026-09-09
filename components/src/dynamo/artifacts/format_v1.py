@@ -99,6 +99,10 @@ def _align_up(value: int) -> int:
     return (value + _ALIGNMENT - 1) & ~(_ALIGNMENT - 1)
 
 
+def _encode_manifest(value: Any) -> bytes:
+    return msgspec.msgpack.encode(value, order="deterministic")
+
+
 def _integer_array(value: Any, field: str) -> np.ndarray:
     array = np.asarray(value)
     if array.dtype.kind not in "iu" or array.dtype == np.dtype("bool"):
@@ -137,6 +141,11 @@ def _logprob_array(value: Any) -> np.ndarray:
         )
     if not np.isfinite(array).all():
         raise GenerationArtifactFormatError("selected logprobs must be finite")
+    float32_limit = np.finfo(np.float32).max
+    if array.size and np.abs(array).max() > float32_limit:
+        raise GenerationArtifactFormatError(
+            "selected logprobs must be finite when represented as fp32"
+        )
     return np.ascontiguousarray(array, dtype=np.dtype("<f4"))
 
 
@@ -157,8 +166,14 @@ def _validate_choice(
 ) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None]:
     sequence = _token_array(choice.sequence_token_ids)
     sequence_length = len(sequence)
-    if isinstance(choice.choice_index, bool) or choice.choice_index < 0:
-        raise GenerationArtifactFormatError("choice_index must be non-negative")
+    if (
+        isinstance(choice.choice_index, bool)
+        or not isinstance(choice.choice_index, int)
+        or choice.choice_index < 0
+    ):
+        raise GenerationArtifactFormatError(
+            "choice_index must be a non-negative integer"
+        )
     if isinstance(choice.prompt_token_count, bool) or not isinstance(
         choice.prompt_token_count, int
     ):
@@ -177,9 +192,10 @@ def _validate_choice(
             raise GenerationArtifactFormatError(
                 "moe routes must contain routers and selected experts"
             )
-        if routes.shape[0] > sequence_length:
+        expected_route_rows = max(sequence_length - 1, 0)
+        if routes.shape[0] != expected_route_rows:
             raise GenerationArtifactFormatError(
-                "route token count exceeds the sequence token count"
+                "route token count must equal sequence length minus one"
             )
         routers = routes.shape[1]
         if len(choice.router_ids) != routers or len(choice.expert_counts) != routers:
@@ -239,6 +255,13 @@ def encode_generation_artifact(
     if not view.choices:
         raise GenerationArtifactFormatError("at least one choice is required")
     indexes = [choice.choice_index for choice in view.choices]
+    if any(
+        isinstance(index, bool) or not isinstance(index, int) or index < 0
+        for index in indexes
+    ):
+        raise GenerationArtifactFormatError(
+            "choice_index must be a non-negative integer"
+        )
     if indexes != sorted(set(indexes)):
         raise GenerationArtifactFormatError("choice indexes must be unique and ordered")
 
@@ -288,7 +311,7 @@ def encode_generation_artifact(
     payload = b"".join(payload_parts)
     if len(payload) > _MAX_PAYLOAD_BYTES:
         raise GenerationArtifactFormatError("artifact payload exceeds configured limit")
-    manifest = msgspec.msgpack.encode({"choices": manifest_choices})
+    manifest = _encode_manifest({"choices": manifest_choices})
     if len(manifest) > _MAX_MANIFEST_BYTES:
         raise GenerationArtifactFormatError(
             "artifact manifest exceeds configured limit"
@@ -326,7 +349,8 @@ def _read_tensor(
     if not isinstance(reference, Mapping):
         raise GenerationArtifactFormatError("tensor reference must be an object")
     _strict_keys(reference, {"dtype", "shape", "offset", "byte_count"}, "tensor")
-    dtype = _WIRE_TO_NUMPY.get(reference["dtype"])
+    wire_dtype = reference["dtype"]
+    dtype = _WIRE_TO_NUMPY.get(wire_dtype) if isinstance(wire_dtype, str) else None
     if dtype is None:
         raise GenerationArtifactFormatError("unsupported tensor dtype")
     shape = reference["shape"]
@@ -371,8 +395,10 @@ def decode_generation_artifact(data: bytes) -> DecodedGenerationArtifact:
     )
     if magic != MAGIC:
         raise GenerationArtifactFormatError("invalid artifact magic")
-    if major != MAJOR_VERSION or minor != MINOR_VERSION:
+    if major != MAJOR_VERSION:
         raise GenerationArtifactFormatError("unsupported major version")
+    if minor != MINOR_VERSION:
+        raise GenerationArtifactFormatError("unsupported minor version")
     if codec not in (CODEC_NONE, CODEC_ZSTD):
         raise GenerationArtifactFormatError("unsupported codec")
     if manifest_bytes > _MAX_MANIFEST_BYTES or payload_bytes > _MAX_PAYLOAD_BYTES:
@@ -409,7 +435,7 @@ def decode_generation_artifact(data: bytes) -> DecodedGenerationArtifact:
         raise GenerationArtifactFormatError("invalid MessagePack manifest") from exc
     if not isinstance(manifest, dict):
         raise GenerationArtifactFormatError("manifest must be an object")
-    if msgspec.msgpack.encode(manifest) != manifest_data:
+    if _encode_manifest(manifest) != manifest_data:
         raise GenerationArtifactFormatError("manifest encoding is not canonical")
     _strict_keys(manifest, {"choices"}, "manifest")
     raw_choices = manifest["choices"]
@@ -447,6 +473,10 @@ def decode_generation_artifact(data: bytes) -> DecodedGenerationArtifact:
         sequence, offset = _read_tensor(
             raw_choice["sequence_token_ids"], payload, offset
         )
+        if sequence.dtype != np.dtype("<i8"):
+            raise GenerationArtifactFormatError(
+                "sequence token tensor dtype must be i64"
+            )
         routes = None
         router_ids: tuple[int, ...] = ()
         expert_counts: tuple[int, ...] = ()
@@ -486,6 +516,11 @@ def decode_generation_artifact(data: bytes) -> DecodedGenerationArtifact:
                         "moe route token_start must be zero"
                     )
                 routes, offset = _read_tensor(component["expert_ids"], payload, offset)
+                canonical_routes = _integer_array(routes, "moe_routes.expert_ids")
+                if routes.dtype != canonical_routes.dtype:
+                    raise GenerationArtifactFormatError(
+                        "route tensor dtype is not canonical"
+                    )
                 raw_router_ids = component["router_ids"]
                 raw_expert_counts = component["expert_counts"]
                 if (
@@ -517,6 +552,10 @@ def decode_generation_artifact(data: bytes) -> DecodedGenerationArtifact:
                         "selected logprob token_start must be an integer"
                     )
                 selected, offset = _read_tensor(component["logprobs"], payload, offset)
+                if selected.dtype != np.dtype("<f4"):
+                    raise GenerationArtifactFormatError(
+                        "selected logprob tensor dtype must be fp32"
+                    )
             else:
                 raise GenerationArtifactFormatError("unsupported component kind")
         choice = GenerationArtifactChoice(

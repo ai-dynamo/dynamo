@@ -30,7 +30,7 @@ mistune>=3.3.0  # JupyterLab stack; see note above jupyter-server
 # Required by ai_dynamo_runtime + gpu_memory_service. Upstream tensorrt-llm/release
 # does not ship them; vllm/vllm-openai does (which is why DYN-2204's vllm path
 # does not need this).
-msgspec>=0.19.0
+msgspec==0.19.0
 # NIXL is unpinned here; trtllm_runtime.Dockerfile installs it from NIXL_REF.
 # Bundled by the upstream image at an older patch release; floor keeps it on
 # the current patch line.

@@ -29,6 +29,7 @@ _HTTP_CONNECT_TIMEOUT_SECONDS = 10
 _HTTP_TOTAL_TIMEOUT_SECONDS = 60
 _DEFAULT_MAX_PRESIGNED_TTL_SECONDS = 3600
 _DEFAULT_MANAGED_TIMEOUT_SECONDS = 60
+_DEFAULT_MANAGED_CLEANUP_TIMEOUT_SECONDS = 5
 _MAX_URL_BYTES = 8192
 _MAX_OBJECT_ID_BYTES = 512
 _MAX_PROFILE_CONFIG_BYTES = 1 << 20
@@ -62,6 +63,12 @@ class _ExactHttpPutFileSystem(HTTPFileSystem):
         async with session.put(url, data=value, headers=headers, **kwargs) as response:
             if not 200 <= response.status < 300:
                 raise ArtifactStorageError("presigned artifact PUT was not accepted")
+
+    async def aclose(self) -> None:
+        session = self._session
+        self._session = None
+        if session is not None:
+            await session.close()
 
     pipe_file = sync_wrapper(_pipe_file)
 
@@ -362,6 +369,7 @@ async def _put_presigned(data: bytes, target: PresignedHttpPutTarget) -> None:
         raise ArtifactStorageError("presigned target has expired")
     headers = dict(target.required_headers)
     filesystem = _ExactHttpPutFileSystem(
+        asynchronous=True,
         encoded=True,
         client_kwargs={
             "timeout": aiohttp.ClientTimeout(
@@ -370,17 +378,21 @@ async def _put_presigned(data: bytes, target: PresignedHttpPutTarget) -> None:
             )
         },
     )
+    operation_error: Exception | asyncio.CancelledError | None = None
     try:
-        await asyncio.to_thread(
-            filesystem.pipe_file,
-            target.url,
-            data,
-            headers=headers,
-            allow_redirects=False,
+        await filesystem._pipe_file(
+            target.url, data, headers=headers, allow_redirects=False
         )
-    except ArtifactStorageError:
-        raise
-    except Exception:  # noqa: BLE001 - provider exceptions are not standardized
+    except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001
+        operation_error = exc
+    try:
+        await filesystem.aclose()
+    except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001
+        if operation_error is None:
+            operation_error = exc
+    if operation_error is not None:
+        if isinstance(operation_error, (ArtifactStorageError, asyncio.CancelledError)):
+            raise operation_error
         raise ArtifactStorageError("presigned artifact PUT failed") from None
 
 
@@ -420,13 +432,16 @@ async def _put_managed(data: bytes, target: ManagedFsspecTarget) -> None:
     if timeout <= 0:
         raise ArtifactStorageError("managed artifact timeout is invalid")
     try:
+        if urlsplit(profile["url"]).scheme not in {"s3", "s3a"}:
+            raise ArtifactStorageError(
+                "managed artifact profile must use an s3-compatible provider"
+            )
         storage_options = dict(profile["storage_options"])
-        if urlsplit(profile["url"]).scheme in {"s3", "s3a"}:
-            config_kwargs = dict(storage_options.get("config_kwargs") or {})
-            config_kwargs.setdefault("connect_timeout", min(timeout, 10))
-            config_kwargs.setdefault("read_timeout", timeout)
-            config_kwargs.setdefault("retries", {"max_attempts": 2, "mode": "standard"})
-            storage_options["config_kwargs"] = config_kwargs
+        config_kwargs = dict(storage_options.get("config_kwargs") or {})
+        config_kwargs.setdefault("connect_timeout", min(timeout, 10))
+        config_kwargs.setdefault("read_timeout", timeout)
+        config_kwargs.setdefault("retries", {"max_attempts": 2, "mode": "standard"})
+        storage_options["config_kwargs"] = config_kwargs
         filesystem, root = url_to_fs(
             profile["url"],
             asynchronous=True,
@@ -438,12 +453,24 @@ async def _put_managed(data: bytes, target: ManagedFsspecTarget) -> None:
                 "managed artifact profile must use an async fsspec backend"
             )
         path = "/".join(part for part in (root.rstrip("/"), target.object_key) if part)
-        session = await filesystem.set_session()
+        session = None
+        operation_error = None
         try:
             async with asyncio.timeout(timeout):
+                session = await filesystem.set_session()
                 await filesystem._pipe_file(path, data, mode="create")
-        finally:
-            await session.__aexit__(None, None, None)
+        except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001
+            operation_error = exc
+        if session is not None:
+            cleanup_timeout = min(timeout, _DEFAULT_MANAGED_CLEANUP_TIMEOUT_SECONDS)
+            try:
+                async with asyncio.timeout(cleanup_timeout):
+                    await session.close()
+            except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001
+                if operation_error is None:
+                    operation_error = exc
+        if operation_error is not None:
+            raise operation_error
     except ArtifactStorageError:
         raise
     except Exception:  # noqa: BLE001 - fsspec implementations vary by provider
