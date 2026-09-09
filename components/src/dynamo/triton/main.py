@@ -19,7 +19,6 @@ from dynamo.common.utils.runtime import create_runtime
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.triton.args import Config
 from dynamo.triton.backend_args import DynamoTritonConfig, parse_args
 from dynamo.triton.handlers import RequestHandler
 from dynamo.triton.health_check import TritonHealthCheckPayload
@@ -208,12 +207,18 @@ async def init_worker(
     # Register and serve every model concurrently. Each model gets its own
     # endpoint URI (<namespace>.<server_id>.<model_name>) and its own handler bound
     # to that model, so requests are routed by model name via Dynamo's frontend.
-    async with asyncio.TaskGroup as tg:
+    async with asyncio.TaskGroup() as aio_tasks:
         for name in model_names:
-            tg.create_task(
+            aio_tasks.create_task(
                 _register_and_serve(
-                    runtime, config, server, model_repository, name, worker_state.endpoints
-                )
+                    runtime,
+                    config,
+                    server,
+                    model_repository,
+                    name,
+                    worker_state.endpoints,
+                ),
+                name=f"dynamo.triton/model={name}",
             )
 
 
@@ -239,7 +244,7 @@ async def worker() -> None:
         # Allowing the server to be "stopped" multiple times leads to
         # unspecified outcomes.
         server = worker_state.server
-        worker_state.server= None
+        worker_state.server = None
 
         # Server.stop() is blocking (unloads models, frees GPU memory); run
         # it off the event loop so the shutdown coroutine isn't blocked.

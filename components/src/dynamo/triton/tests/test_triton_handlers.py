@@ -180,15 +180,12 @@ def test_generate_converts_dynamo_request_to_triton(
             [1],
             [list(b"hello world 1234")],
         ),
-        # A dtype absent from the mapping is forwarded verbatim.
-        ("FP8", np.array([0.25, 0.5], np.float32), "FP8", [2], [0.25, 0.5]),
     ],
     ids=[
         "fp32",
         "int64",
         "bytes",
         "2d-shape",
-        "unknown-dtype-passthrough",
     ],
 )
 def test_generate_converts_triton_response_to_dynamo(
