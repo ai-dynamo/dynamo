@@ -58,7 +58,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 </ParamField>
 
 <ParamField path="replicas" type="integer">
-  Desired number of pods for this component. Minimum `0`. When `scalingAdapter` is set, this field is owned by the [DynamoGraphDeploymentScalingAdapter](full-api-reference.mdx#dynamographdeploymentscalingadapter) and should not be modified directly.
+  Desired number of complete component instances. For a single-node component, each instance is one pod. For a multinode component, each instance contains all of its roles. Minimum `0`. When `scalingAdapter` is set, this field is owned by the [DynamoGraphDeploymentScalingAdapter](full-api-reference.mdx#dynamographdeploymentscalingadapter) and should not be modified directly.
 </ParamField>
 
 <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
@@ -74,6 +74,19 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 <Indent>
   <ParamField path="nodeCount" type="integer" default="2">
     Number of nodes to deploy. Minimum `2`. Total GPUs used is `nodeCount × container GPU request`.
+  </ParamField>
+</Indent>
+
+<ParamField path="roles" type="[]ComponentRoleSpec">
+  Optional explicit structure of a compound component. In this release, roles are supported for multinode components and must contain exactly one `leader` and one `worker`. Their cardinality remains derived from `multinode.nodeCount`. Omit the field to retain the implicit leader/worker layout.
+</ParamField>
+
+<Indent>
+  <ParamField path="name" type="string" required={true}>
+    Semantic role name. Multinode components allow `leader` and `worker`.
+  </ParamField>
+  <ParamField path="providerOverride" type="ProviderOverride">
+    Provider configuration for the workload unit generated for this role. Available only on components embedded in a DGD; standalone DCD OpenAPI omits this field.
   </ParamField>
 </Indent>
 
