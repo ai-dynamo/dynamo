@@ -11823,7 +11823,8 @@ spec:
                         description: |-
                           Roles expose the named Pod-producing parts inside a compound component.
                           When set for a multinode component, this list must contain exactly one
-                          leader and one worker role whose resolved replica counts add up to multinode.nodeCount.
+                          leader and one worker role. Their logical cardinality derives from
+                          multinode.nodeCount; replicas may be omitted or assert the derived values.
                           Omission preserves the implicit multinode role layout.
                         items:
                           description: |-
@@ -11869,9 +11870,11 @@ spec:
                               type: object
                             replicas:
                               description: |-
-                                Replicas declares the number of Pods of this role in one complete component
-                                instance. For multinode components, admission defaults leader to 1 and worker
-                                to Multinode.NodeCount minus 1. Explicit values must match those counts.
+                                Replicas optionally asserts the logical cardinality of this role in one
+                                complete component instance. The enclosing component type defines the
+                                cardinality. For multinode components, omitted values are derived from
+                                Multinode.NodeCount; when set, leader must be 1 and worker must be
+                                Multinode.NodeCount minus 1.
                               format: int32
                               minimum: 1
                               type: integer
@@ -21096,8 +21099,8 @@ spec:
                         description: |-
                           roles expose the named Pod-producing parts inside a compound component.
                           When set for a multinode component, this list must contain exactly one
-                          leader and one worker role. Admission defaults their replica counts from
-                          multinode.nodeCount.
+                          leader and one worker role. Their logical cardinality derives from
+                          multinode.nodeCount; replicas may be omitted or assert the derived values.
                           Omission preserves the implicit multinode role layout.
                         items:
                           description: |-
@@ -21143,9 +21146,11 @@ spec:
                               type: object
                             replicas:
                               description: |-
-                                replicas declares the number of Pods of this role in one complete component
-                                instance. For multinode components, admission defaults leader to 1 and worker
-                                to multinode.nodeCount minus 1. Explicit values must match those counts.
+                                replicas optionally asserts the logical cardinality of this role in one
+                                complete component instance. The enclosing component type defines the
+                                cardinality. For multinode components, omitted values are derived from
+                                multinode.nodeCount; when set, leader must be 1 and worker must be
+                                multinode.nodeCount minus 1.
                               format: int32
                               minimum: 1
                               type: integer

@@ -807,7 +807,6 @@ func validateComponentRolesUpdate(
 			explicitComponent, implicitComponent = implicitComponent, explicitComponent
 		}
 		if explicitComponent.Multinode != nil && implicitComponent.Multinode != nil &&
-			explicitComponent.Multinode.NodeCount == implicitComponent.Multinode.NodeCount &&
 			dynamo.ExplicitMultinodeRolesMatchImplicit(explicitComponent) {
 			return nil
 		}

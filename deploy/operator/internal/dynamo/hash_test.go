@@ -161,10 +161,9 @@ func TestComputeBetaDGDWorkersSpecHash_CanonicalizesExplicitRoleOrder(t *testing
 		},
 	}))
 	dgd.Spec.Components[0].Roles = []v1beta1.ComponentRoleSpec{
-		{Name: v1beta1.ComponentRoleLeader, Replicas: ptr.To(int32(1))},
+		{Name: v1beta1.ComponentRoleLeader},
 		{
-			Name:     v1beta1.ComponentRoleWorker,
-			Replicas: ptr.To(int32(3)),
+			Name: v1beta1.ComponentRoleWorker,
 			ProviderOverride: &v1beta1.ProviderOverride{
 				APIVersion: "grove.io/v1alpha1",
 				Target:     "PodCliqueTemplateSpec",
@@ -182,6 +181,14 @@ func TestComputeBetaDGDWorkersSpecHash_CanonicalizesExplicitRoleOrder(t *testing
 
 	t.Log("Verify the order-only update keeps the worker generation stable")
 	assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, dgd), mustComputeBetaDGDWorkersSpecHash(t, reordered))
+
+	t.Log("Make the same cardinality assertions explicit")
+	explicitReplicas := dgd.DeepCopy()
+	explicitReplicas.Spec.Components[0].Roles[0].Replicas = ptr.To(int32(1))
+	explicitReplicas.Spec.Components[0].Roles[1].Replicas = ptr.To(int32(3))
+
+	t.Log("Verify optional role cardinality assertions do not create a worker generation")
+	assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, dgd), mustComputeBetaDGDWorkersSpecHash(t, explicitReplicas))
 }
 
 func TestComputeBetaDGDWorkersSpecHash_IgnoresNonWorkers(t *testing.T) {

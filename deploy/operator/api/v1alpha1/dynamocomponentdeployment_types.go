@@ -164,7 +164,8 @@ type DynamoComponentDeploymentSharedSpec struct {
 	Multinode *MultinodeSpec `json:"multinode,omitempty"`
 	// Roles expose the named Pod-producing parts inside a compound component.
 	// When set for a multinode component, this list must contain exactly one
-	// leader and one worker role whose resolved replica counts add up to multinode.nodeCount.
+	// leader and one worker role. Their logical cardinality derives from
+	// multinode.nodeCount; replicas may be omitted or assert the derived values.
 	// Omission preserves the implicit multinode role layout.
 	// +optional
 	// +listType=map

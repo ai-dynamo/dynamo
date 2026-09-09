@@ -262,37 +262,6 @@ func TestDGDDefaulter_DefaultsNilReplicas(t *testing.T) {
 	}
 }
 
-func TestDGDDefaulter_DefaultsMultinodeRoleReplicas(t *testing.T) {
-	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
-		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
-			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
-				{
-					ComponentName: "worker",
-					Multinode:     &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4},
-					Roles: []nvidiacomv1beta1.ComponentRoleSpec{
-						{Name: nvidiacomv1beta1.ComponentRoleLeader},
-						{Name: nvidiacomv1beta1.ComponentRoleWorker},
-					},
-				},
-			},
-		},
-	}
-
-	defaulter := NewDGDDefaulter("0.9.0")
-	if err := defaulter.Default(admissionCtx(admissionv1.Update, nvidiacomv1beta1.DynamoGraphDeploymentGVK), dgd); err != nil {
-		t.Fatalf("Default() unexpected error: %v", err)
-	}
-
-	roles := dgd.Spec.Components[0].Roles
-	if got := ptr.Deref(roles[0].Replicas, 0); got != 1 {
-		t.Fatalf("leader replicas = %d, want 1", got)
-	}
-	if got := ptr.Deref(roles[1].Replicas, 0); got != 3 {
-		t.Fatalf("worker replicas = %d, want 3", got)
-	}
-}
-
 func TestDGDDefaulter_DefaultsProviderOverrideTargets(t *testing.T) {
 	t.Log("Build a DGD with omitted targets at every supported provider context")
 	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
@@ -311,12 +280,10 @@ func TestDGDDefaulter_DefaultsProviderOverrideTargets(t *testing.T) {
 					Roles: []nvidiacomv1beta1.ComponentRoleSpec{
 						{
 							Name:             nvidiacomv1beta1.ComponentRoleLeader,
-							Replicas:         ptr.To(int32(1)),
 							ProviderOverride: providerOverrideForDefaulting(`{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"host"}}}`),
 						},
 						{
 							Name:             nvidiacomv1beta1.ComponentRoleWorker,
-							Replicas:         ptr.To(int32(1)),
 							ProviderOverride: providerOverrideForDefaulting(`{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"host"}}}`),
 						},
 					},

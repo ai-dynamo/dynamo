@@ -288,12 +288,11 @@ func TestValidateProviderOverrideOutsideDGD(t *testing.T) {
 
 func TestValidateComponentRolesRejectsDuplicateMultinodeRole(t *testing.T) {
 	t.Log("Build an explicit multinode role list with the leader declared twice")
-	one := int32(1)
 	component := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 		Multinode: &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
 		Roles: []nvidiacomv1beta1.ComponentRoleSpec{
-			{Name: nvidiacomv1beta1.ComponentRoleLeader, Replicas: &one},
-			{Name: nvidiacomv1beta1.ComponentRoleLeader, Replicas: &one},
+			{Name: nvidiacomv1beta1.ComponentRoleLeader},
+			{Name: nvidiacomv1beta1.ComponentRoleLeader},
 		},
 	}
 	validation := &sharedValidation{ctx: context.Background()}

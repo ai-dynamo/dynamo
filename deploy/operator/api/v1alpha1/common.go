@@ -76,9 +76,11 @@ type ComponentRoleSpec struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Name string `json:"name"`
 
-	// Replicas declares the number of Pods of this role in one complete component
-	// instance. For multinode components, admission defaults leader to 1 and worker
-	// to Multinode.NodeCount minus 1. Explicit values must match those counts.
+	// Replicas optionally asserts the logical cardinality of this role in one
+	// complete component instance. The enclosing component type defines the
+	// cardinality. For multinode components, omitted values are derived from
+	// Multinode.NodeCount; when set, leader must be 1 and worker must be
+	// Multinode.NodeCount minus 1.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	Replicas *int32 `json:"replicas,omitempty"`

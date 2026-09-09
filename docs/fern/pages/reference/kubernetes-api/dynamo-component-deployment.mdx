@@ -86,7 +86,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
     Semantic role name. Multinode components allow `leader` and `worker`.
   </ParamField>
   <ParamField path="replicas" type="integer">
-    Optional number of Pods of this role in one complete component instance. For multinode, admission defaults an omitted value to `leader: 1` or `worker: multinode.nodeCount - 1`; an explicit value must match that fixed shape.
+    Optional assertion of the role's logical cardinality in one complete component instance. For multinode, an omitted value is derived as `leader: 1` or `worker: multinode.nodeCount - 1` without being persisted; an explicit value must match that fixed shape.
   </ParamField>
   <ParamField path="providerOverride" type="ProviderOverride">
     Provider configuration for the workload unit generated for this role. Available only on components embedded in a DGD; standalone DCD OpenAPI omits this field.

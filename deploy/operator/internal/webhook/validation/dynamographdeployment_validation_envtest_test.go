@@ -70,7 +70,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		notWantErr         string
 		wantPodAnnotations map[string]string
 		wantProvider       string
-		wantRoleReplicas   map[string]int32
 	}{
 		// Baseline create-path rules.
 		{
@@ -1020,8 +1019,8 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
 				worker.Multinode = &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 4}
 				worker.Roles = []nvidiacomv1alpha1.ComponentRoleSpec{
-					{Name: nvidiacomv1alpha1.ComponentRoleLeader, Replicas: k8sptr.To(int32(1))},
-					{Name: nvidiacomv1alpha1.ComponentRoleWorker, Replicas: k8sptr.To(int32(3))},
+					{Name: nvidiacomv1alpha1.ComponentRoleLeader},
+					{Name: nvidiacomv1alpha1.ComponentRoleWorker},
 				}
 			}),
 		},
@@ -1030,7 +1029,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
 				worker.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
-					{Name: nvidiacomv1beta1.ComponentRoleLeader, Replicas: k8sptr.To(int32(1))},
+					{Name: nvidiacomv1beta1.ComponentRoleLeader},
 				}
 			}),
 			wantWebhookErrs: []string{"spec.components[1].roles: Forbidden: roles are supported only for component shapes that define a role schema; this release supports multinode components"},
@@ -1041,7 +1040,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker := betaWorkerComponent(dgd)
 				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4}
 				worker.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
-					{Name: nvidiacomv1beta1.ComponentRoleLeader, Replicas: k8sptr.To(int32(1))},
+					{Name: nvidiacomv1beta1.ComponentRoleLeader},
 				}
 			}),
 			wantWebhookErrs: []string{`spec.components[1].roles: Required value: must contain the "worker" role`},
@@ -1052,28 +1051,13 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker := betaWorkerComponent(dgd)
 				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4}
 				worker.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
-					{Name: "coordinator", Replicas: k8sptr.To(int32(1))},
+					{Name: "coordinator"},
 				}
 			}),
 			wantWebhookErrs: []string{
 				`spec.components[1].roles[0].name: Unsupported value: "coordinator": supported values: "leader", "worker"`,
 				`spec.components[1].roles: Required value: must contain the "leader" role`,
 				`spec.components[1].roles: Required value: must contain the "worker" role`,
-			},
-		},
-		{
-			name: "explicit multinode roles default omitted replicas",
-			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				worker := betaWorkerComponent(dgd)
-				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4}
-				worker.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
-					{Name: nvidiacomv1beta1.ComponentRoleLeader},
-					{Name: nvidiacomv1beta1.ComponentRoleWorker},
-				}
-			}),
-			wantRoleReplicas: map[string]int32{
-				nvidiacomv1beta1.ComponentRoleLeader: 1,
-				nvidiacomv1beta1.ComponentRoleWorker: 3,
 			},
 		},
 		{
@@ -2354,13 +2338,17 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name: "node count and explicit role replicas update together",
 			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				setBetaExplicitMultinodeRoles(worker, 2)
+				worker.Roles[0].Replicas = k8sptr.To(int32(1))
+				worker.Roles[1].Replicas = k8sptr.To(int32(1))
 			}),
 			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				setBetaExplicitMultinodeRoles(worker, 3)
+				worker.Roles[0].Replicas = k8sptr.To(int32(1))
+				worker.Roles[1].Replicas = k8sptr.To(int32(2))
 			}),
 		},
 		{
-			name: "explicit role replicas must accompany a node count update",
+			name: "node count update with omitted role replicas remains allowed",
 			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				setBetaExplicitMultinodeRoles(worker, 2)
 			}),
@@ -2368,7 +2356,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				setBetaExplicitMultinodeRoles(worker, 2)
 				worker.Multinode.NodeCount = 3
 			}),
-			wantWebhookErrs: []string{`spec.components[1].roles[1].replicas: Invalid value: 1: must equal 2 for multinode role "worker"`},
 		},
 		{
 			name: "implicit to semantically equivalent explicit roles is allowed",
@@ -2389,14 +2376,13 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "implicit to explicit roles cannot also change the resolved cardinality",
+			name: "implicit to explicit roles can accompany a node count update",
 			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
 			}),
 			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				setBetaExplicitMultinodeRoles(worker, 3)
 			}),
-			wantWebhookErrs: []string{"spec.components[1].roles: Forbidden: cannot switch between implicit and explicit roles while changing the resolved role model; make the equivalent role structure explicit first"},
 		},
 		{
 			name: "explicit role list reorder is allowed",
@@ -2851,7 +2837,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				}
 			}
 			actual := runAdmissionTest(t, test)
-			if tt.wantPodAnnotations != nil || tt.wantProvider != "" || tt.wantRoleReplicas != nil {
+			if tt.wantPodAnnotations != nil || tt.wantProvider != "" {
 				t.Log("Convert the admitted DGD for result assertions")
 				var actualDGD nvidiacomv1beta1.DynamoGraphDeployment
 				if err := runtime.DefaultUnstructuredConverter.FromUnstructured(actual.Object, &actualDGD); err != nil {
@@ -2861,23 +2847,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					t.Log("Verify creation-time routing intent determined the admitted workload provider")
 					if got := actualDGD.Annotations[consts.KubeAnnotationWorkloadProvider]; got != tt.wantProvider {
 						t.Fatalf("workload provider = %q, want %q", got, tt.wantProvider)
-					}
-				}
-				if tt.wantRoleReplicas != nil {
-					t.Log("Verify admission persisted the defaulted multinode role replicas")
-					component := actualDGD.GetComponentByName(dgdAdmissionWorkerName)
-					if component == nil {
-						t.Fatalf("admitted DGD has no component %q", dgdAdmissionWorkerName)
-					}
-					for i := range component.Roles {
-						role := &component.Roles[i]
-						want, exists := tt.wantRoleReplicas[role.Name]
-						if !exists {
-							continue
-						}
-						if got := k8sptr.Deref(role.Replicas, 0); got != want {
-							t.Fatalf("role %q replicas = %d, want %d", role.Name, got, want)
-						}
 					}
 				}
 				if tt.wantPodAnnotations == nil {
@@ -3140,8 +3109,8 @@ func setBetaExplicitMultinodeRoles(
 ) {
 	worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: nodeCount}
 	worker.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
-		{Name: nvidiacomv1beta1.ComponentRoleLeader, Replicas: k8sptr.To(int32(1))},
-		{Name: nvidiacomv1beta1.ComponentRoleWorker, Replicas: k8sptr.To(nodeCount - 1)},
+		{Name: nvidiacomv1beta1.ComponentRoleLeader},
+		{Name: nvidiacomv1beta1.ComponentRoleWorker},
 	}
 }
 
