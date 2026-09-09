@@ -118,6 +118,7 @@ spec:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `throughput_adjustment_interval_seconds` | int | `180` | Seconds between throughput-based scaling decisions. |
+| `max_throughput_scaling_replicas` | int | `8` | Maximum replica-count change per component from one throughput observation. The capped target persists until the next throughput observation. GPU and power budgets may reduce it further; endpoint and out-of-band budget recovery take precedence. |
 | `throughput_metrics_source` | string | `frontend` | Prometheus traffic source for throughput scaling: `frontend` reads `dynamo_frontend_*` metrics from the public Frontend; `router` reads `dynamo_component_router_*` metrics from a LocalRouter. Use `router` for pool-local Planner in GlobalPlanner deployments. |
 | `min_endpoint` | int | `1` | Minimum endpoints for `agg` mode. In `disagg` mode, applies the same minimum to prefill and decode. In `prefill` or `decode` mode, supplies the active role when its role-specific field is `null`. May be `0` for scale-to-zero compatibility. |
 | `prefill_min_endpoint` | int or `null` | `null` | Minimum prefill endpoints for `disagg` and `prefill` modes. When set, replaces the prefill value from `min_endpoint`. Must be at least `1`. |

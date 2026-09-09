@@ -50,7 +50,7 @@ from dynamo.llm import (
 )
 from dynamo.runtime import Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.vllm.router_hints import enable_router_hint_support
+from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
 from dynamo.vllm.worker_factory import WorkerFactory
 
 from . import envs
@@ -229,6 +229,7 @@ async def worker(argv: list[str] | None = None) -> None:
         discovery_backend=config.discovery_backend,
         request_plane=config.request_plane,
         event_plane=config.event_plane,
+        response_plane=config.response_plane,
     )
 
     if snapshot_controller is not None:
@@ -703,6 +704,19 @@ def setup_vllm_engine(
 
     # Pass benchmark config to InstrumentedScheduler via additional_config.
     if hasattr(config, "_benchmark_additional_config"):
+        # Dense DP ranks are independent vLLM engines and cannot synchronize a
+        # multi-rank self-benchmark. Reject before AsyncLLM starts those engines.
+        if (
+            vllm_config.parallel_config.data_parallel_size > 1
+            and not vllm_config.model_config.is_moe
+        ):
+            raise ValueError(
+                "--benchmark-mode cannot be combined with --data-parallel-size "
+                f"{vllm_config.parallel_config.data_parallel_size} on a dense "
+                "(non-MoE) model. The attention-DP self-benchmark requires an MoE "
+                "model because vLLM runs dense data-parallel ranks as independent "
+                "engines. Use --data-parallel-size 1 or benchmark an MoE model."
+            )
         bench = config._benchmark_additional_config
         if fpm_worker_id and bench["output_path"] == "/tmp/benchmark_results.json":
             short_id = fpm_worker_id[-8:]
@@ -829,7 +843,7 @@ async def register_vllm_model(
     dp_range = get_dp_range_for_worker(vllm_config)
     state_agent_enabled = state_agent_settings(config) is not None
     apply_data_parallel_runtime_config(runtime_config, dp_range)
-    enable_router_hint_support(
+    publish_kv_hint_capabilities(
         runtime_config,
         config.engine_args,
         worker_type,

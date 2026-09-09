@@ -15,7 +15,6 @@ from __future__ import annotations
 import logging
 import os
 import queue
-import shutil
 from functools import partial
 
 import numpy as np
@@ -32,7 +31,7 @@ except ImportError:
     triton_echo_client = None
 
 from tests.utils.constants import QWEN
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.managed_process import ManagedProcess, check_health_ready
 
 logger = logging.getLogger(__name__)
 
@@ -56,18 +55,13 @@ class MockWorkerProcess(ManagedProcess):
 
         log_dir = f"{request.node.name}_{worker_id}"
 
-        try:
-            shutil.rmtree(log_dir)
-        except FileNotFoundError:
-            pass
-
         super().__init__(
             command=command,
             env=env,
             health_check_urls=[
                 # gRPC doesn't expose endpoint for listing models, so skip this check
                 # (f"http://localhost:{grpc_port}/v1/models", check_models_api),
-                (f"http://localhost:{system_port}/health", self.is_ready),
+                (f"http://localhost:{system_port}/health", check_health_ready),
             ],
             timeout=300,
             display_output=True,
@@ -76,20 +70,6 @@ class MockWorkerProcess(ManagedProcess):
             straggler_commands=["echo_tensor_worker.py"],
             log_dir=log_dir,
         )
-
-    def is_ready(self, response) -> bool:
-        try:
-            status = (response.json() or {}).get("status")
-        except ValueError:
-            logger.warning("%s health response is not valid JSON", self.worker_id)
-            return False
-
-        is_ready = status == "ready"
-        if is_ready:
-            logger.info("%s status is ready", self.worker_id)
-        else:
-            logger.warning("%s status is not ready: %s", self.worker_id, status)
-        return is_ready
 
 
 @pytest.fixture(scope="function")

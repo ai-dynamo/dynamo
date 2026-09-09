@@ -719,7 +719,6 @@ struct KvRouterConfigSerde {
     _legacy_router_reset_states: bool,
     router_ttl_secs: f64,
     router_queue_threshold: Option<f64>,
-    #[serde(default)]
     router_policy_config: Option<String>,
     router_event_threads: u32,
     skip_initial_worker_wait: bool,
@@ -733,9 +732,7 @@ struct KvRouterConfigSerde {
     conditional_disagg_policy: ConditionalDisaggPolicyKind,
     conditional_disagg_eff_isl_threshold: usize,
     conditional_disagg_eff_isl_ratio_threshold: f64,
-    #[serde(default)]
     conditional_disagg_prefill_busy_threshold: Option<f64>,
-    #[serde(default)]
     conditional_disagg_decode_busy_threshold: Option<f64>,
     #[serde(default)]
     prefill_continue_enabled: bool,
@@ -893,7 +890,6 @@ pub struct KvRouterConfig {
     pub router_queue_threshold: Option<f64>,
 
     /// Optional startup-only YAML configuration for policy-class queues and custom worker selection.
-    #[serde(default)]
     pub router_policy_config: Option<String>,
 
     /// Optional prefill worker-selection instance override.
@@ -956,7 +952,6 @@ pub struct KvRouterConfig {
     /// populated by routing decisions; `find_matches` queries both the
     /// event-driven primary and local side indexer and returns the per-worker
     /// maximum overlap.
-    #[serde(default)]
     pub router_predicted_ttl_secs: Option<f64>,
 
     /// Enable conditional-disagg bypass. When true, the `PrefillRouter`

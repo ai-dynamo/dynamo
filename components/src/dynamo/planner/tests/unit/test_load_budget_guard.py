@@ -125,3 +125,31 @@ def test_load_loop_still_scales_down_above_floor():
     decision = _decision(state, 34, None)
     assert decision is not None
     assert (decision.num_prefill, decision.num_decode) == (34, 35)
+
+
+def test_single_load_loop_holds_scale_down_at_fixed_budget():
+    state = _state(1, 64)
+    state._config.mode = "decode"
+    state._config.enable_throughput_scaling = False
+
+    decision = _decision(state, None, 63)
+
+    assert decision is not None
+    assert decision.num_decode == 64
+    assert state.diagnostics().load_decision_reason == "gpu_budget_guard_hold"
+
+
+def test_agg_load_loop_holds_scale_down_at_fixed_budget():
+    state = _state(1, 64)
+    state._config.mode = "agg"
+    state._config.enable_throughput_scaling = False
+
+    def _agg(_self, _stats, _workers):
+        return 63
+
+    state._agg_easy_decision = MethodType(_agg, state)
+    decision = _decision(state, None, 63)
+
+    assert decision is not None
+    assert decision.num_decode == 64
+    assert state.diagnostics().load_decision_reason == "gpu_budget_guard_hold"

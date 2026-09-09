@@ -20,8 +20,11 @@ package validation
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -63,6 +66,7 @@ func (v *DynamoComponentDeploymentValidator) validate(
 	}
 
 	allErrs := validation.validateDynamoComponentDeployment(dcd)
+	allErrs = append(allErrs, validation.validateWorkerClassCheckpointRefOwnership(dcd)...)
 	alpha, err := alphaDynamoComponentDeploymentForValidation(dcd)
 	if err != nil {
 		return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoComponentDeployment fields: %w", err)
@@ -91,6 +95,7 @@ func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 	}
 
 	allErrs := validation.validateDynamoComponentDeployment(newDCD)
+	allErrs = append(allErrs, validation.validateWorkerClassCheckpointRefOwnership(newDCD)...)
 	newAlpha, err := alphaDynamoComponentDeploymentForValidation(newDCD)
 	if err != nil {
 		return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoComponentDeployment fields: %w", err)
@@ -112,6 +117,45 @@ func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 
 	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentUpdate(newDCD, oldDCD)...)
 	return validation.warnings, invalidDynamoComponentDeploymentError(newDCD, allErrs)
+}
+
+// validateWorkerClassCheckpointRefOwnership limits worker checkpointRef to
+// DCDs marked as DGD-controller-owned, the supported source for worker
+// compatibility. The owner reference selects behavior; it is not an
+// authorization boundary for Snapshot access.
+func (v *dynamoComponentDeploymentValidation) validateWorkerClassCheckpointRefOwnership(
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+) field.ErrorList {
+	switch dcd.Spec.ComponentType {
+	case nvidiacomv1beta1.ComponentTypeWorker,
+		nvidiacomv1beta1.ComponentTypePrefill,
+		nvidiacomv1beta1.ComponentTypeDecode:
+	default:
+		return nil
+	}
+	if dcd.Spec.Experimental == nil ||
+		dcd.Spec.Experimental.Checkpoint == nil ||
+		dcd.Spec.Experimental.Checkpoint.CheckpointRef == nil ||
+		strings.TrimSpace(*dcd.Spec.Experimental.Checkpoint.CheckpointRef) == "" {
+		return nil
+	}
+
+	controller := metav1.GetControllerOf(dcd)
+	if controller != nil && controller.Kind == nvidiacomv1beta1.DynamoGraphDeploymentGVK.Kind {
+		groupVersion, err := schema.ParseGroupVersion(controller.APIVersion)
+		if err == nil && groupVersion.Group == nvidiacomv1beta1.GroupVersion.Group {
+			return nil
+		}
+	}
+
+	checkpointRefPath := field.NewPath("spec", "experimental", "checkpoint", "checkpointRef")
+	if v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
+		checkpointRefPath = field.NewPath("spec", "checkpoint", "checkpointRef")
+	}
+	return field.ErrorList{field.Forbidden(
+		checkpointRefPath,
+		"worker-class checkpointRef is supported only on DynamoGraphDeployment-managed components",
+	)}
 }
 
 // validateDynamoComponentDeployment validates dcd. dcd must not be nil.

@@ -437,24 +437,12 @@ func groveTopologyOverrideCompositionErrors(
 		if providerOverrideWritesGroveTopology(component.ProviderOverride, provider, provideroverride.ScopeComponent, component) {
 			allErrs = append(allErrs, field.Forbidden(componentPath.Child("providerOverride", "value"), detail))
 		}
-		if component.Multinode == nil {
-			continue
-		}
-		if component.Multinode.Leader != nil && providerOverrideWritesGroveTopology(
-			component.Multinode.Leader.ProviderOverride,
-			provider,
-			provideroverride.ScopeMultinodeLeader,
-			component,
-		) {
-			allErrs = append(allErrs, field.Forbidden(componentPath.Child("multinode", "leader", "providerOverride", "value"), detail))
-		}
-		if component.Multinode.Worker != nil && providerOverrideWritesGroveTopology(
-			component.Multinode.Worker.ProviderOverride,
-			provider,
-			provideroverride.ScopeMultinodeWorker,
-			component,
-		) {
-			allErrs = append(allErrs, field.Forbidden(componentPath.Child("multinode", "worker", "providerOverride", "value"), detail))
+		for roleIndex := range component.Roles {
+			role := &component.Roles[roleIndex]
+			scope, ok := provideroverride.ScopeForComponentRole(role.Name)
+			if ok && providerOverrideWritesGroveTopology(role.ProviderOverride, provider, scope, component) {
+				allErrs = append(allErrs, field.Forbidden(componentPath.Child("roles").Index(roleIndex).Child("providerOverride", "value"), detail))
+			}
 		}
 	}
 	return allErrs
