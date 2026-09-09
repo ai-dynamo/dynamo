@@ -66,7 +66,7 @@ def _cv2_lacks_video_backend() -> bool:
         return False
     build_info = cv2.getBuildInformation()
     return not any(
-        re.search(rf"^\s*{backend}:\s*YES", build_info, re.M)
+        re.search(rf"^\s*{backend}:\s*YES", build_info, re.MULTILINE)
         for backend in ("FFMPEG", "GSTREAMER")
     )
 
@@ -231,10 +231,13 @@ class VideoLoader:
             ) from exc
         except SystemError as exc:
             # A cv2 with no video backend fails inside VideoCapture rather than
-            # on import. Translate only when that is actually the case: the
-            # decode may be running a different backend entirely, and an
-            # unrelated SystemError must keep its own message.
-            if not _cv2_lacks_video_backend():
+            # on import, as "<class 'cv2.VideoCapture'> returned a result with
+            # an exception set". Require the error to name cv2 as well as the
+            # build to lack a backend: the build says nothing about which
+            # decoder this media_io actually ran, so a configured non-OpenCV
+            # backend raising SystemError would otherwise be hidden behind a
+            # recommendation to reinstall OpenCV.
+            if "cv2" not in str(exc) or not _cv2_lacks_video_backend():
                 raise
             raise video_decoder_missing(
                 "vllm",

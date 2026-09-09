@@ -378,6 +378,28 @@ async def test_backendless_cv2_does_not_pre_empt_a_working_decode(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_other_backend_system_error_is_not_blamed_on_opencv(monkeypatch):
+    """A different decoder's SystemError must survive on a backendless image.
+
+    _cv2_lacks_video_backend() describes the installed cv2 build; it does not
+    prove this media_io ran OpenCV. On the shipped image it is always true, so
+    keying only on it would relabel every backend's SystemError as a missing
+    OpenCV and bury the real failure.
+    """
+    loader = VideoLoader()
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "vp9")
+    monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
+    monkeypatch.setattr(video_loader_module, "_cv2_lacks_video_backend", lambda: True)
+
+    class _OtherBackendMediaIO:
+        def load_bytes(self, content: bytes):
+            raise SystemError("torchcodec decoder failed to initialise")
+
+    with pytest.raises(SystemError, match="torchcodec"):
+        await loader._decode_video_bytes(b"vp9-bytes", _OtherBackendMediaIO())
+
+
+@pytest.mark.asyncio
 async def test_unrelated_system_error_keeps_its_own_message(monkeypatch):
     """A SystemError from anywhere else must not be blamed on the codec."""
     loader = VideoLoader()

@@ -57,7 +57,9 @@ pytestmark = [
 # H.264/H.265 via NVDEC; audio has no hardware path and is opt-in only.
 # Mirrors the build-time guard's pattern in wheel_builder.Dockerfile: `aac` is
 # anchored to a word start so it cannot match inside an unrelated identifier.
-_DISALLOWED_RE = re.compile(r"h\.?264|h\.?265|hevc|(?:^|\s)aac|nvenc|cuvid|nvdec", re.I)
+_DISALLOWED_RE = re.compile(
+    r"h\.?264|h\.?265|hevc|(?:^|\s)aac|nvenc|cuvid|nvdec", re.IGNORECASE
+)
 # Present by construction, so a broken FFmpeg cannot masquerade as a pass.
 _REQUIRED = ("vp9",)
 
@@ -162,7 +164,7 @@ def _assert_cv2_carries_no_codec() -> None:
 
     build_info = cv2.getBuildInformation()
     for backend in ("FFMPEG", "GSTREAMER"):
-        match = re.search(rf"^\s*{backend}:\s*(\S+)", build_info, re.M)
+        match = re.search(rf"^\s*{backend}:\s*(\S+)", build_info, re.MULTILINE)
         assert not (match and match.group(1).upper() == "YES"), (
             f"the shipped cv2 was built with {backend}; it must be built with "
             f"-DWITH_{backend}=OFF so the image carries no software video codec"
