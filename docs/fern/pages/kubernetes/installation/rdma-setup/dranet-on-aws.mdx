@@ -339,10 +339,6 @@ The libfabric GB200 `fi_mr_reg` EFAULT issue documented in
 DRANET changes how EFA interfaces are allocated and injected, but does not change the
 libfabric version in the container.
 
-**Disagg startup restarts.** During startup, NIXL peer discovery can span multiple restart
-cycles before both prefill and decode workers are simultaneously alive and past model load.
-This is a known startup race; workers converge within a few minutes.
-
 ## Common Failure Modes
 
 | Symptom | Likely cause | Fix |
@@ -351,7 +347,6 @@ This is a known startup race; workers converge within a few minutes.
 | TTFT ~10 s, 1–5 GB/s | UCX host-staged (no GPU-Direct) | Switch to LIBFABRIC |
 | `/dev/infiniband/` missing in pod | NRI not enabled in containerd | Step 1 |
 | `fi_mr_reg` EFAULT on GB200 | libfabric CUDA dmabuf bug | See [efa-on-aws.mdx](efa-on-aws.mdx#known-issues) |
-| Workers restart repeatedly at startup | NIXL peer discovery startup race | Wait ~5 min; workers converge |
 | `rdma_write_bytes` shows 0 | Not a failure — EFA SRD uses SEND | Use `nixl_bytes_transferred` metric |
 
 ## References
