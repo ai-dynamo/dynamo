@@ -6,7 +6,11 @@ use std::{collections::HashSet, sync::Arc};
 use super::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse};
 use crate::{
     protocols::{
-        common::{self, extensions::NvExtProvider, timing::RequestTracker},
+        common::{
+            self,
+            extensions::{NvExtProvider, NvExtResponseInput},
+            timing::RequestTracker,
+        },
         openai::{
             convert_backend_top_logprobs,
             delta_common::{self, DeltaGeneratorOptions, DeltaGeneratorState},
@@ -242,7 +246,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         );
 
         // Map backend finish reasons to OpenAI's finish reasons.
-        let finish_reason = match delta.finish_reason {
+        let finish_reason = match delta.finish_reason.as_ref() {
             Some(common::FinishReason::EoS) => Some(dynamo_protocols::types::FinishReason::Stop),
             Some(common::FinishReason::Stop) => Some(dynamo_protocols::types::FinishReason::Stop),
             Some(common::FinishReason::Length) => {
@@ -255,7 +259,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
                 Some(dynamo_protocols::types::FinishReason::ContentFilter)
             }
             Some(common::FinishReason::Error(err_msg)) => {
-                return Err(anyhow::anyhow!(err_msg));
+                return Err(anyhow::anyhow!(err_msg.clone()));
             }
             None => None,
         };
@@ -278,14 +282,19 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         let prompt_logprobs_payload =
             common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_ref());
         let completion_token_ids_slice: &[u32] = &delta.token_ids;
-        if let Some(nvext_response) = self.state.options().response_fields.build_response_nvext(
-            Some(self.state.tracker_ref()),
-            finish_reason.is_some(),
-            delta.engine_data,
-            stop_reason,
-            Some(completion_token_ids_slice),
-            prompt_logprobs_payload,
-        ) && let Ok(nvext_json) = serde_json::to_value(&nvext_response)
+        if let Some(nvext_response) =
+            self.state
+                .options()
+                .response_fields
+                .build_response_nvext(NvExtResponseInput {
+                    tracker: Some(self.state.tracker_ref()),
+                    finish_reason: delta.finish_reason.as_ref(),
+                    engine_data: delta.engine_data,
+                    stop_reason,
+                    completion_token_ids: Some(completion_token_ids_slice),
+                    prompt_logprobs: prompt_logprobs_payload,
+                })
+            && let Ok(nvext_json) = serde_json::to_value(&nvext_response)
         {
             stream_response.nvext = Some(nvext_json);
             if let Some(ref info) = nvext_response.worker_id {
@@ -674,6 +683,26 @@ mod tests {
         let response_json = serde_json::to_value(&response).expect("serialize response");
         assert!(response_json["choices"][0].get("stop_reason").is_none());
         assert_eq!(response_json["nvext"]["stop_reason"], "END");
+    }
+
+    #[test]
+    fn test_cancelled_detailed_finish_reason_preserves_openai_finish_reason() {
+        let request =
+            create_test_request_with_extra_fields(vec!["detailed_finish_reason".to_string()]);
+        let mut generator = request.response_generator("req-cancelled-nvext".to_string());
+        let mut output = final_backend_output();
+        output.finish_reason = Some(common::FinishReason::Cancelled);
+
+        let response = generator
+            .choice_from_postprocessor(output)
+            .expect("choice generation");
+        let response_json = serde_json::to_value(response).expect("serialize response");
+
+        assert_eq!(response_json["choices"][0]["finish_reason"], "stop");
+        assert_eq!(
+            response_json["nvext"]["detailed_finish_reason"],
+            "cancelled"
+        );
     }
 
     #[test]
