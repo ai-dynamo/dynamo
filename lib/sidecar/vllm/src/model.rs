@@ -145,7 +145,7 @@ impl DiscoveredModel {
             llm: Some(LlmRegistration {
                 context_length: nonzero(self.server.max_model_len),
                 kv_cache_block_size: nonzero(self.server.kv_block_size),
-                total_kv_blocks: nonzero(self.server.total_kv_blocks),
+                total_kv_blocks: self.total_kv_blocks_per_rank(),
                 max_num_seqs: nonzero(self.server.max_running_requests),
                 max_num_batched_tokens: nonzero(self.server.max_batched_tokens),
                 data_parallel_size: parallelism
@@ -161,6 +161,36 @@ impl DiscoveredModel {
             .parallelism
             .as_ref()
             .map_or(1, |parallelism| parallelism.data_parallel_size)
+    }
+
+    fn total_kv_blocks_per_rank(&self) -> Option<u64> {
+        let total_kv_blocks = nonzero(self.server.total_kv_blocks)?;
+        let data_parallel_size = u64::from(self.data_parallel_size());
+        // Control exposes only the aggregate across DP engines. This arithmetic-mean
+        // estimate assumes homogeneous ranks; exact division does not prove they are equal.
+        // TODO(rank-aware-kv-capacity): consume a per-rank Control response when available and
+        // publish it atomically; never relabel this quotient as exact for hard admission.
+        let per_rank = total_kv_blocks / data_parallel_size;
+
+        if per_rank == 0 {
+            tracing::warn!(
+                total_kv_blocks,
+                data_parallel_size,
+                "vLLM reported fewer total KV blocks than DP ranks; publishing one block per rank"
+            );
+            return Some(1);
+        }
+
+        if total_kv_blocks % data_parallel_size != 0 {
+            tracing::warn!(
+                total_kv_blocks,
+                data_parallel_size,
+                per_rank,
+                "vLLM aggregate KV blocks are not divisible by DP ranks; publishing floor per-rank capacity"
+            );
+        }
+
+        Some(per_rank)
     }
 }
 

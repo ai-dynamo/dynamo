@@ -221,6 +221,10 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         // picker and for the stream-end bookkeeping keyed on the request ID.
         if let Some(header_map) = &hdr.headers {
             ctx.request_headers = envoy_helpers::collect_headers(header_map);
+            // Client-owned routing metadata must not influence selection. A
+            // trusted replacement can only come back through `PickResult`.
+            ctx.request_headers
+                .retain(|(key, _)| !envoy_helpers::is_prefiller_host_port_header(key));
 
             if let Some(id) =
                 envoy_helpers::extract_header_value(header_map, metadata::REQUEST_ID_HEADER_KEY)
@@ -264,6 +268,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             &result.endpoint,
             None,
             &result.headers,
+            result.selected_prefill_endpoint.as_deref(),
         ));
         Ok(())
     }
@@ -317,6 +322,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             &result.endpoint,
             Some(ctx.request_size),
             &result.headers,
+            result.selected_prefill_endpoint.as_deref(),
         ));
 
         // Inject nvext.token_data into the request body JSON so the backend
@@ -935,7 +941,11 @@ impl ExtProcError {
                 status_code: StatusCode::ServiceUnavailable,
                 message: msg,
             },
-            PickError::TokenizationFailed(msg) => Self {
+            PickError::InvalidRequest(msg) => Self {
+                status_code: StatusCode::BadRequest,
+                message: msg,
+            },
+            PickError::MetadataHeadersInvalid(msg) => Self {
                 status_code: StatusCode::BadRequest,
                 message: msg,
             },
@@ -1581,5 +1591,15 @@ mod tests {
     fn overloaded_pick_error_maps_to_503() {
         let err = ExtProcError::from_pick_error(PickError::Overloaded);
         assert_eq!(err.status_code, StatusCode::ServiceUnavailable);
+    }
+
+    /// Metadata headers over the frontend's limits map to a client 400, not a
+    /// retryable 503: the frontend rejects these requests too.
+    #[test]
+    fn metadata_headers_invalid_maps_to_400() {
+        let err = ExtProcError::from_pick_error(PickError::MetadataHeadersInvalid(
+            "metadata headers exceed the limit of 64 entries".to_string(),
+        ));
+        assert_eq!(err.status_code, StatusCode::BadRequest);
     }
 }

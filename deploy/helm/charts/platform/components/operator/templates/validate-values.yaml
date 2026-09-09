@@ -136,6 +136,25 @@ Remove 'dynamo-operator.checkpoint.readyForCheckpointFilePath' from your values.
 ` }}
 {{- end }}
 
+{{/* ---- Legacy DynamoCheckpoint implementation settings ---- */}}
+
+{{- if and (hasKey .Values "checkpoint") (hasKey .Values.checkpoint "cleanupImage") }}
+  {{- fail `
+BREAKING CHANGE: 'dynamo-operator.checkpoint.cleanupImage' has been removed.
+The standalone Snapshot operator owns snapshot artifact lifecycle.
+Remove 'dynamo-operator.checkpoint.cleanupImage' from your values.yaml.
+` }}
+{{- end }}
+
+{{- if and (hasKey .Values "checkpoint") (hasKey .Values.checkpoint "storage") }}
+  {{- fail `
+BREAKING CHANGE: 'dynamo-operator.checkpoint.storage' has been removed.
+Configure storage on the standalone Snapshot release instead (or under
+'snapshot.storage' when Snapshot is bundled with the Dynamo platform chart).
+Remove 'dynamo-operator.checkpoint.storage' from your values.yaml.
+` }}
+{{- end }}
+
 {{/* ---- Debug/internal images (removed) ---- */}}
 
 {{- if and (hasKey .Values "dynamo") (hasKey .Values.dynamo "internalImages") }}

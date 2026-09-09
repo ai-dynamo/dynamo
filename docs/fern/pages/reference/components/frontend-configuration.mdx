@@ -623,6 +623,13 @@ path that does not exist only prints a loader warning, and the process continues
 glibc allocator.
 </Note>
 
+<Note>
+  Released vLLM, SGLang, TensorRT-LLM, and standalone frontend images up to and including v1.5.0 do
+  not ship `libjemalloc2`; images from later releases include it. Verify with
+  `dpkg -L libjemalloc2 | grep 'libjemalloc.so'`. On older images, install the package into a shared
+  volume with an initContainer or use a custom image.
+</Note>
+
 <ParamField path="LD_PRELOAD" type="string" default="unset">
   Preload jemalloc for the frontend process. The library path depends on the container architecture:
 
