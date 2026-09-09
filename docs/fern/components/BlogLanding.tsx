@@ -7,7 +7,7 @@ const ARTICLES = [
   {
     title: "Load-Aware LoRA Routing and Placement in Dynamo",
     description:
-      "How load estimation, deterministic placement, request filtering, and min-cost flow reduce LoRA routing and adapter-cache churn.",
+      "How load estimation, deterministic placement, request filtering, and min-cost flow reduce LoRA routing churn in a deterministic simulation.",
     href: "/dynamo/dev/digest/load-aware-lora-routing",
     date: "September 8, 2026",
     readTime: "11 min read",

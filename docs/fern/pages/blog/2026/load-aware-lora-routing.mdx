@@ -4,7 +4,7 @@
 title: "Load-Aware LoRA Routing and Placement in Dynamo"
 sidebar-title: Load-Aware LoRA Routing
 subtitle: "Biswa Ranjan Panda — September 2026"
-description: "How Dynamo combines load estimation, deterministic placement, request filtering, and min-cost flow to reduce LoRA routing churn and improve adapter-cache hit rate."
+description: "How Dynamo's load-aware LoRA routing reduces desired-placement churn in a deterministic simulation, and what that means for modeled adapter-cache behavior."
 keywords: NVIDIA Dynamo, LoRA, load-aware routing, adapter placement, min-cost flow, reinforcement learning, LLM inference
 last-updated: September 8, 2026
 hide-page-actions: true
@@ -26,19 +26,20 @@ Reinforcement learning systems increasingly run several training jobs against on
 
 NVIDIA Dynamo now uses a load-aware control loop to keep that traffic concentrated without statically pinning every adapter. The controller sizes replica sets from recent demand, places them with deterministic Highest Random Weight (HRW) hashing or a global min-cost flow (MCF) solver, and filters each request to the selected workers before the normal routing policy runs.
 
-In a corrected simulation of 100 LoRAs competing for 32 resident slots, the full MCF configuration reduced routing-target churn by **98.1% to 98.9%** and modeled adapter-cache churn by **34.7% to 43.0%** compared with a stateless random baseline across four traffic patterns. Adapter hit rate increased by **17.5 to 23.8 percentage points**. The distinction between routing churn and physical adapter churn matters: MCF produced much more stable desired placements than HRW, but the additional cache-level gain over HRW was smaller.
+In a corrected simulation of 100 LoRAs competing for 32 resident slots, the full MCF configuration reduced routing-target churn by **98.1% to 98.9%** and modeled adapter-cache churn by **34.7% to 43.0%** compared with a stateless random baseline that reselected workers every tick. Adapter hit rate increased by **17.5 to 23.8 percentage points**. The distinction between routing churn and physical adapter churn matters: MCF reduced mean route churn by another **64.4%** relative to HRW, but reduced modeled adapter-cache churn by only another **2.6%**.
 
 This post explains the mechanism stack, the corrected measurement model, and what the results mean for multi-LoRA inference.
 
 ## Routing, Placement, and Residency
 
-Three related states appear in a multi-LoRA deployment:
+Four related states appear in the production design and simulation:
 
 | State | Meaning | Owner |
 |---|---|---|
 | Lifecycle state | Which workers know about an adapter and can serve it | Worker lifecycle APIs and the deployment orchestrator |
 | Desired placement | Which workers the frontend prefers for requests to an adapter | `LoraController` and `LoraRoutingTable` |
 | Backend-reported availability | Which adapters workers report as registered or loaded | Worker model cards and `LoraStateTracker` |
+| Simulated residency | Which adapters the benchmark's LRU cache model holds | `ResidencyModel` in the simulation harness |
 
 The desired replica set is a routing decision, not an imperative load or unload command. Dynamo's frontend does not reconcile `LoraRoutingTable` entries into worker lifecycle calls. Workers publish adapter availability and capacity state through discovery, and each frontend uses that state when it computes and filters routes. Availability does not always prove physical engine residency: for example, a vLLM prefill worker can publish an adapter after registering its metadata and activate it lazily when a request arrives.
 
@@ -82,7 +83,7 @@ Dynamo records arrivals in a bucketed sliding window and smooths the signal with
 
 ### Demand-Proportional Replica Sizing
 
-Static pinning prevents scatter but cannot respond when one training run becomes hot. The controller computes each active LoRA's share of recent demand and turns that share into a replica count. It caps the count at the worker count and normalizes all replica counts to the cluster's reported slot budget with the largest remainder method.
+Static pinning prevents scatter but cannot respond when one training run becomes hot. The controller computes each active LoRA's share of recent demand and turns that share into a replica count. It caps the count at the worker count and, when the raw counts exceed the cluster's reported slot budget, normalizes them down to that budget with the largest remainder method.
 
 Hot adapters can therefore use several workers, while cold adapters consume fewer routing targets. When the number of active LoRAs exceeds the available slot budget, the controller preserves a bounded route for overflow demand instead of scattering it across the fleet.
 
@@ -116,7 +117,7 @@ The solver includes previous hosts in each adapter's candidate set and freezes u
 
 MCF targets global stability. The results show that it delivers that stability at the routing-table level, while backend cache behavior determines how much of the logical win becomes fewer physical swaps.
 
-## Measuring the Request Path
+## How the Simulation Measures the Request Path
 
 The original simulation measured changes in desired replica sets and called them adapter churn. It also ran 200 logical ticks without advancing time, which prevented the sliding window from expiring naturally. Those choices could make placement look either artificially stable or artificially noisy.
 
@@ -124,8 +125,10 @@ The original simulation measured changes in desired replica sets and called them
 
 1. A virtual clock advances three seconds per tick, which exercises the production 90-second load window and EMA behavior.
 2. Simulated requests pass through the production `LoraFilter` path.
-3. Each worker has a capacity-bounded least recently used (LRU) adapter cache. A request to a worker without the adapter records a load; exceeding four resident adapters records an eviction.
+3. Each worker has a capacity-bounded least recently used (LRU) adapter cache. A request to a worker without the adapter records a load; a miss on a worker already holding four adapters evicts the least recently used one.
 4. The export separates routing-target churn, adapter-cache churn, cache hit rate, occupancy, load balance, solve time, and overflow.
+
+The harness drives `LoraStateTracker` from the synthetic LRU model, so backend-reported availability and simulated residency are identical by construction. It does not model the gap between metadata registration and engine activation that can occur on a vLLM prefill worker.
 
 The comparison uses eight workers, four resident adapter slots per worker, 100 LoRAs, 200 controller ticks, a three-second timestep, a three-tick scale-down cooldown, and seed 42. It exercises four traffic patterns:
 
@@ -136,7 +139,7 @@ The comparison uses eight workers, four resident adapter slots per worker, 100 L
 
 Random receives the same demand-derived replica budget and load window as HRW and MCF, but selects workers independently on each tick. It is a stateless simulation baseline, not Dynamo's production default.
 
-These are deterministic, single-seed simulation results from commit `fa604bbe`. They validate relative software behavior under a controlled residency model. They do not measure GPU load latency, Time To First Token (TTFT), throughput, or end-to-end training time.
+These are deterministic, single-seed simulation results from [`fa604bbe`](https://github.com/ai-dynamo/dynamo/commit/fa604bbe099d3c685db7d7c9c836db3c08e369df). Reproduce them with `cargo test -p dynamo-llm --test lora_simulation -- test_export_csv --ignored --nocapture`, then inspect `target/lora_sim_csv/v2/summary.csv`. They validate relative software behavior under a controlled residency model. They do not measure GPU load latency, Time To First Token (TTFT), throughput, or end-to-end training time.
 
 ## Results
 
@@ -145,28 +148,30 @@ Two metrics capture different parts of the system:
 - **Routing-target churn** counts worker additions and removals in desired replica sets. Lower values mean a more stable routing plan.
 - **Adapter-cache churn** counts modeled adapter loads and LRU evictions on the workers selected by actual requests. Lower values mean less physical cache movement in the simulation.
 
-The following table averages the four workload totals. Percentages are cumulative unless the cell explicitly names the preceding row.
+The following table averages the four workload totals. Each percentage compares that row with the stateless baseline unless the cell names another row.
 
-| Configuration | Mean Route Churn | Mean Adapter Churn | Mean Hit Rate | Improvement Stack |
+| Configuration | Mean Route Churn | Mean Adapter Churn | Mean Hit Rate | Change vs Baseline |
 |---|---:|---:|---:|---|
 | Stateless Random baseline | 32,198 | 6,866 | 46.9% | Baseline |
 | Sticky, slot-aware HRW configuration | 1,246 | 4,356 | 66.5% | 96.1% less route churn, 36.6% less adapter churn, +19.6 points hit rate |
 | Global MCF configuration (replaces HRW) | 443 | 4,244 | 67.4% | 64.4% less route churn and 2.6% less adapter churn than HRW; 98.6%, 38.2%, and +20.4 points versus baseline |
 
+Percentage and point changes use unrounded workload values; displayed averages are rounded independently.
+
 MCF's final improvement over the stateless baseline remained consistent across all four traffic patterns:
 
-| Workload | Route Churn Reduction | Adapter Churn Reduction | Hit-Rate Increase | MCF Route Reduction vs HRW | MCF Adapter Reduction vs HRW |
-|---|---:|---:|---:|---:|---:|
-| Zipf and Poisson | 98.8% | 37.9% | +19.7 points | 68.8% | 3.1% |
-| Daily | 98.6% | 38.9% | +20.8 points | 66.6% | 3.6% |
-| Traffic spikes | 98.9% | 34.7% | +17.5 points | 71.3% | 1.4% |
-| MMPP | 98.1% | 43.0% | +23.8 points | 49.1% | 2.3% |
+| Workload | Route Churn Reduction vs Baseline | Adapter Churn Reduction vs Baseline | Hit-Rate Increase vs Baseline | MCF Route Reduction vs HRW | MCF Adapter Reduction vs HRW | MCF Hit-Rate Increase vs HRW |
+|---|---:|---:|---:|---:|---:|---:|
+| Zipf and Poisson | 98.8% | 37.9% | +19.7 points | 68.8% | 3.1% | +1.0 points |
+| Daily | 98.6% | 38.9% | +20.8 points | 66.6% | 3.6% | +1.2 points |
+| Traffic spikes | 98.9% | 34.7% | +17.5 points | 71.3% | 1.4% | +0.5 points |
+| MMPP | 98.1% | 43.0% | +23.8 points | 49.1% | 2.3% | +0.7 points |
 
 ### Stable, Capacity-Aware HRW Delivers Most of the Measured Gain
 
 Moving from stateless random placement to HRW removed an average of 96.1% of routing-target changes. More importantly, modeled adapter churn fell 36.6% and hit rate rose from 46.9% to 66.5%. The cache stayed almost full in every arm, so the gain came from keeping the right adapters resident in the synthetic LRU model, not from using more capacity.
 
-Random and HRW share the same load estimator, demand-derived replica budget, production request filter, and synthetic cache model in this experiment. The measured delta therefore isolates stable, capacity-aware HRW placement; it does not independently quantify load estimation or filtering. A hardware benchmark still needs to translate the modeled cache reduction into TTFT and throughput.
+Random and HRW share the same load estimator, demand-derived replica budget, production request filter, and synthetic cache model in this experiment. The measured delta therefore reflects the complete HRW controller configuration: deterministic sticky, capacity-aware placement together with scale-down hysteresis and warm-route retention, compared with per-tick random selection under the same replica budget. It does not independently quantify load estimation, filtering, or hysteresis. A hardware benchmark still needs to translate the modeled cache reduction into TTFT and throughput.
 
 ### MCF Stabilizes the Plan More Than the Cache
 
@@ -176,23 +181,22 @@ This is not a contradiction. A route-set change does not always cause a cache mi
 
 ### Saturation Makes Zero Churn Unrealistic
 
-Mean occupancy stayed between 98.8% and 99.8%. Every workload asked a 32-slot cluster to serve a 100-adapter catalog, and the MCF solver reported soft overflow throughout the runs. Under that pressure, every algorithm recorded adapter movement on nearly every tick.
+Mean occupancy stayed between 98.8% and 99.8%. Every workload asked a 32-slot cluster to serve a 100-adapter catalog, and the MCF solver reported soft overflow in every workload. Under that pressure, every algorithm recorded adapter movement on nearly every tick.
 
 The useful result is therefore not a claim of churn-free operation. It is the reduction in cache movement and the increase in hits while the cache remains saturated.
 
 ## Operating the Feature
 
-HRW is the default allocation algorithm when LoRA support and allocation are enabled. Select MCF through the frontend environment when global churn minimization is worth the additional controller work:
+Set `DYN_LORA_ENABLED=true` to enable LoRA request handling. Allocation defaults to enabled with HRW; to select MCF, set the algorithm explicitly:
 
 ```bash
 export DYN_LORA_ENABLED=true
-export DYN_LORA_ALLOCATION_ENABLED=true
 export DYN_LORA_ALLOCATION_ALGORITHM=mcf
 ```
 
 Keep the default three-second timestep, 90-second effective window, EMA smoothing, and three-tick scale-down cooldown as a starting point. Tune them only against measured traffic: a shorter window reacts faster but follows more noise, while a longer cooldown retains replicas longer after demand falls.
 
-Monitor `dynamo_frontend_lora_replica_factor`, `dynamo_frontend_lora_estimated_load`, `dynamo_frontend_lora_active_requests`, and the LoRA churn and overflow metrics. Use the [LoRA adapter operations guide](../../kubernetes/operations/lora-adapters.md) for lifecycle configuration and the [router operations guide](../../developer-guide/knowledge-base/modular-components/router/router-operations.md) for frontend replica synchronization behavior.
+Monitor `dynamo_frontend_lora_replica_factor{endpoint,lora}`, `dynamo_frontend_lora_estimated_load{endpoint,lora}`, and `dynamo_frontend_lora_active_requests{endpoint,lora}`. When using MCF, also monitor `dynamo_frontend_lora_churn_loads_total{endpoint}`, `dynamo_frontend_lora_churn_unloads_total{endpoint}`, and `dynamo_frontend_lora_overflow_count{endpoint}`. The MCF churn gauges count changes to desired placement, not physical adapter loads or evictions on workers. Use the [LoRA adapter operations guide](../../kubernetes/operations/lora-adapters.md) for lifecycle configuration and the [router operations guide](../../developer-guide/knowledge-base/modular-components/router/router-operations.md) for frontend replica synchronization behavior.
 
 ## Current Boundary and Next Measurements
 
