@@ -826,14 +826,14 @@ impl AddressedPushRouter {
 /// normal responses, including the empty "queued" ACK.
 fn detect_worker_rejection_response(res_bytes: &[u8]) -> Option<DynamoError> {
     const OVERLOAD_PREFIX: &[u8] = b"Server overloaded:";
-    const UNAVAILABLE_PREFIX: &[u8] = b"Server unavailable:";
+    let unavailable_prefix = crate::pipeline::network::ACK_UNAVAILABLE_PREFIX.as_bytes();
 
     let error_type = if res_bytes.starts_with(OVERLOAD_PREFIX) {
         // This ACK came from the one worker addressed by this dispatch. It says
         // nothing about capacity elsewhere in the eligible pool, so preserve
         // worker scope for migration instead of reporting pool exhaustion.
         ErrorType::WorkerOverloaded
-    } else if res_bytes.starts_with(UNAVAILABLE_PREFIX) {
+    } else if res_bytes.starts_with(unavailable_prefix) {
         // Same scope: the addressed server is up but has no handler for this
         // instance, or is closing its worker pool. Other instances may still
         // serve the endpoint, so this stays migratable.
