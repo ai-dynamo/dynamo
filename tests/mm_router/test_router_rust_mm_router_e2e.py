@@ -41,7 +41,7 @@ import requests
 
 from tests.conftest import EtcdServer, NatsServer
 from tests.utils.gpu_args import build_gpu_mem_args
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import allocate_ports
 from tests.utils.router_logs import (
@@ -67,13 +67,6 @@ pytestmark = [
     # multi-process budget, which made every test in this file exclusive.
     pytest.mark.profiled_vram_gib(7.6),
 ]
-
-
-def _check_ready(response) -> bool:
-    try:
-        return (response.json() or {}).get("status") == "ready"
-    except ValueError:
-        return False
 
 
 def _make_process_env(
@@ -138,7 +131,7 @@ class VLLMWorkerProcess(ManagedProcess):
             ],
             env=_make_process_env(DYN_SYSTEM_PORT=str(system_port)),
             health_check_urls=[
-                (f"http://localhost:{system_port}/health", _check_ready)
+                (f"http://localhost:{system_port}/health", check_health_ready)
             ],
             timeout=900,
             straggler_commands=["-m dynamo.vllm"],
