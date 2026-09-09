@@ -38,6 +38,91 @@ pub struct HttpError {
     pub message: String,
 }
 
+/// Frontend-owned HTTP disposition derived only from semantic error class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClientErrorAction {
+    NoDelivery,
+    Respond {
+        status: StatusCode,
+        public_message: &'static str,
+    },
+}
+
+/// Total class-to-HTTP policy. Backends never select these status codes.
+pub(crate) fn http_action_for_class(class: dynamo_runtime::error::ErrorClass) -> ClientErrorAction {
+    use dynamo_runtime::error::ErrorClass;
+
+    let response = |status, public_message| ClientErrorAction::Respond {
+        status,
+        public_message,
+    };
+
+    match class.normalized() {
+        ErrorClass::InvalidRequest => response(StatusCode::BAD_REQUEST, "Invalid request"),
+        ErrorClass::Unauthenticated => {
+            response(StatusCode::UNAUTHORIZED, "Authentication required")
+        }
+        ErrorClass::PermissionDenied => response(StatusCode::FORBIDDEN, "Permission denied"),
+        ErrorClass::NotFound => response(StatusCode::NOT_FOUND, "Resource not found"),
+        ErrorClass::Conflict => response(StatusCode::CONFLICT, "Request conflict"),
+        ErrorClass::PayloadTooLarge => {
+            response(StatusCode::PAYLOAD_TOO_LARGE, "Request payload too large")
+        }
+        ErrorClass::UnsupportedMedia => {
+            response(StatusCode::UNSUPPORTED_MEDIA_TYPE, "Unsupported media type")
+        }
+        ErrorClass::RateLimited => response(StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded"),
+        ErrorClass::CapacityExhausted => {
+            response(overload_status_code(), "Service temporarily unavailable")
+        }
+        ErrorClass::Unavailable => response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service temporarily unavailable",
+        ),
+        ErrorClass::BackendProtocol => response(StatusCode::BAD_GATEWAY, "Bad gateway"),
+        ErrorClass::DeadlineExceeded => {
+            response(StatusCode::GATEWAY_TIMEOUT, "Request deadline exceeded")
+        }
+        ErrorClass::NotImplemented => {
+            response(StatusCode::NOT_IMPLEMENTED, "Operation not implemented")
+        }
+        ErrorClass::Cancelled => ClientErrorAction::NoDelivery,
+        ErrorClass::Internal => {
+            response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
+        }
+        _ => unreachable!("normalized error class must be canonical"),
+    }
+}
+
+pub(crate) fn http_action_for_error(error: &DynamoError) -> ClientErrorAction {
+    http_action_for_class(error.class())
+}
+
+/// Return the first DynamoError only when it already uses the canonical class
+/// vocabulary. Legacy variants continue through compatibility handling.
+pub(crate) fn find_canonical_error_in_chain<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a DynamoError> {
+    use dynamo_runtime::error::ErrorClass;
+
+    let mut current = Some(err);
+    let mut fallback = None;
+    while let Some(error) = current {
+        if let Some(dynamo_error) = error.downcast_ref::<DynamoError>() {
+            let raw_class = dynamo_error.error_type();
+            if raw_class == raw_class.normalized() && raw_class != ErrorClass::Cancelled {
+                if dynamo_error.reason().as_str() == "runtime.unclassified" {
+                    fallback.get_or_insert(dynamo_error);
+                } else {
+                    return Some(dynamo_error);
+                }
+            }
+        }
+        current = error.source();
+    }
+    fallback
+}
+
 /// Construct a typed invalid-argument error for validation performed at an
 /// HTTP protocol adapter boundary.
 pub(crate) fn invalid_argument(message: impl Into<String>) -> DynamoError {
@@ -352,5 +437,104 @@ mod tests {
             BackendStatusAction::triage(StatusCode::from_u16(399).unwrap()),
             BackendStatusAction::Sanitize(SanitizedError::Internal)
         );
+    }
+
+    #[test]
+    fn canonical_lookup_skips_legacy_wrapper() {
+        use dynamo_runtime::error::{ErrorClass, ErrorReason};
+
+        let inner = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .reason(ErrorReason::new("request.invalid").unwrap())
+            .build();
+        let outer = DynamoError::builder()
+            .error_type(DynamoErrorType::Unknown)
+            .cause(inner)
+            .build();
+
+        assert_eq!(
+            find_canonical_error_in_chain(&outer).map(DynamoError::class),
+            Some(ErrorClass::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn canonical_lookup_retains_unclassified_as_fallback() {
+        let error = DynamoError::builder()
+            .class(dynamo_runtime::error::ErrorClass::Internal)
+            .reason(dynamo_runtime::error::ErrorReason::new("runtime.unclassified").unwrap())
+            .build();
+
+        assert_eq!(
+            find_canonical_error_in_chain(&error).map(|error| error.reason().as_str()),
+            Some("runtime.unclassified")
+        );
+    }
+
+    #[test]
+    fn semantic_classes_have_total_http_policy() {
+        use dynamo_runtime::error::ErrorClass;
+
+        let cases = [
+            (ErrorClass::InvalidRequest, Some(StatusCode::BAD_REQUEST)),
+            (ErrorClass::Unauthenticated, Some(StatusCode::UNAUTHORIZED)),
+            (ErrorClass::PermissionDenied, Some(StatusCode::FORBIDDEN)),
+            (ErrorClass::NotFound, Some(StatusCode::NOT_FOUND)),
+            (ErrorClass::Conflict, Some(StatusCode::CONFLICT)),
+            (
+                ErrorClass::PayloadTooLarge,
+                Some(StatusCode::PAYLOAD_TOO_LARGE),
+            ),
+            (
+                ErrorClass::UnsupportedMedia,
+                Some(StatusCode::UNSUPPORTED_MEDIA_TYPE),
+            ),
+            (ErrorClass::RateLimited, Some(StatusCode::TOO_MANY_REQUESTS)),
+            (ErrorClass::CapacityExhausted, Some(overload_status_code())),
+            (ErrorClass::BackendProtocol, Some(StatusCode::BAD_GATEWAY)),
+            (
+                ErrorClass::Unavailable,
+                Some(StatusCode::SERVICE_UNAVAILABLE),
+            ),
+            (
+                ErrorClass::DeadlineExceeded,
+                Some(StatusCode::GATEWAY_TIMEOUT),
+            ),
+            (
+                ErrorClass::NotImplemented,
+                Some(StatusCode::NOT_IMPLEMENTED),
+            ),
+            (
+                ErrorClass::Internal,
+                Some(StatusCode::INTERNAL_SERVER_ERROR),
+            ),
+            (ErrorClass::Cancelled, None),
+        ];
+
+        for (class, expected_status) in cases {
+            match (http_action_for_class(class), expected_status) {
+                (ClientErrorAction::Respond { status, .. }, Some(expected)) => {
+                    assert_eq!(status, expected, "{class}");
+                }
+                (ClientErrorAction::NoDelivery, None) => {}
+                (actual, expected) => panic!("{class}: got {actual:?}, expected {expected:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_classes_normalize_before_http_policy() {
+        use dynamo_runtime::error::ErrorClass;
+
+        for (class, expected) in [
+            (ErrorClass::InvalidArgument, StatusCode::BAD_REQUEST),
+            (ErrorClass::WorkerOverloaded, overload_status_code()),
+            (ErrorClass::Unknown, StatusCode::INTERNAL_SERVER_ERROR),
+        ] {
+            assert!(matches!(
+                http_action_for_class(class),
+                ClientErrorAction::Respond { status, .. } if status == expected
+            ));
+        }
     }
 }

@@ -626,12 +626,22 @@ impl AnthropicStreamConverter {
 
     /// Append error events when the stream ends due to a backend error.
     pub fn append_error_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
-        let error_event = AnthropicStreamEvent::Error {
-            error: AnthropicErrorBody {
+        self.append_error_events_with_body(
+            events,
+            AnthropicErrorBody {
                 error_type: "api_error".to_string(),
                 message: "An internal error occurred during generation.".to_string(),
             },
-        };
+        );
+    }
+
+    /// Append a terminal error event whose body was selected by the HTTP protocol boundary.
+    pub fn append_error_events_with_body(
+        &mut self,
+        events: &mut Vec<Result<Event, anyhow::Error>>,
+        error: AnthropicErrorBody,
+    ) {
+        let error_event = AnthropicStreamEvent::Error { error };
         events.push(make_sse_event("error", &error_event));
     }
 }
