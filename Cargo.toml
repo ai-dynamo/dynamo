@@ -61,7 +61,7 @@ aisimulate-core = { version = "=0.1.0-dev.2" }
 dynamo-runtime = { path = "lib/runtime", version = "1.5.0" }
 dynamo-llm = { path = "lib/llm", version = "1.5.0" }
 dynamo-rl = { path = "lib/rl", version = "1.5.0" }
-dynamo-tokenizers = { version = "=1.8.0" }
+dynamo-tokenizers = { version = "=1.8.1" }
 dynamo-renderer = { version = "=5.1.0" }
 dynamo-tokens = { path = "lib/tokens", version = "1.5.0" }
 dynamo-truthy = { path = "lib/truthy", version = "1.5.0" }
@@ -198,6 +198,9 @@ sha2 = { version = "0.10" }
 tokio-rustls = { version = "0.26" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = { version = "2" }
+
+[patch.crates-io]
+dynamo-tokenizers = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "7f567fb5fd97ffb5bb1d2bc27f1bf404852313e2" }
 
 [profile.dev.package]
 insta.opt-level = 3

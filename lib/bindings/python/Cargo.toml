@@ -130,6 +130,9 @@ dynamo-llm = { path = "../../llm", default-features = false }
 opentelemetry_sdk = { version = "0.31.0", features = ["trace"] }
 tracing-subscriber = { version = "0.3", features = ["registry"] }
 
+[patch.crates-io]
+dynamo-tokenizers = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "7f567fb5fd97ffb5bb1d2bc27f1bf404852313e2" }
+
 [profile.profiling]
 inherits = "release"
 debug = true
