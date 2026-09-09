@@ -485,7 +485,6 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				oldObject:          tt.oldRequest,
 				gates:              gates,
 				seedWithoutWebhook: tt.seedWithoutWebhook,
-				withoutTopology:    true,
 				wantSchemaError:    tt.wantSchemaErr,
 				wantCELError:       tt.wantCELErr,
 				wantWebhookErrors:  tt.wantWebhook,

@@ -28,6 +28,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
@@ -92,9 +93,27 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		logger.Error(err, "failed to generate the Grove GangSet")
 		return ReconcileResult{}, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
 	}
+	if len(renderedPodCliqueSet.desired.Spec.Template.Cliques) == 0 {
+		if existing := renderedPodCliqueSet.existing; existing != nil {
+			if !metav1.IsControlledBy(existing, dgd) {
+				return ReconcileResult{}, fmt.Errorf("refusing to delete a foreign empty-graph PodCliqueSet %q", existing.Name)
+			}
+			if existing.DeletionTimestamp.IsZero() {
+				uid, version := existing.UID, existing.ResourceVersion
+				if err := r.syncer.Delete(ctx, existing, &client.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &version}}); client.IgnoreNotFound(err) != nil {
+					return ReconcileResult{}, err
+				}
+			}
+			return ReconcileResult{State: nvidiacomv1beta1.DGDStatePending, Reason: "RemovingEmptyPodCliqueSet", Message: "Waiting for the removed ordinary workload"}, nil
+		}
+		stableResources, err := r.stableResources.Reconcile(ctx, dgd, renderedPodCliqueSet.renderDeployment)
+		if err != nil {
+			return ReconcileResult{}, err
+		}
+		return checkResourcesReadiness(stableResources), nil
+	}
 	syncedPodCliqueSet, pcsWasWritten, err := r.reconcilePodCliqueSet(ctx, dgd, renderedPodCliqueSet)
 	if err != nil {
-		logger.Error(err, "failed to reconcile the Grove PodCliqueSet")
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile the Grove PodCliqueSet: %w", err)
 	}
 	// Defer commit if the PCS was written this reconcile; the informer hasn't caught up yet.
@@ -120,7 +139,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		}
 	}
 
-	if err := r.scaler.Reconcile(ctx, dgd, checkpointInfos); err != nil {
+	if err := r.scaler.Reconcile(ctx, renderedPodCliqueSet.renderDeployment, checkpointInfos); err != nil {
 		logger.Error(err, "failed to reconcile Grove scaling")
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile Grove scaling: %w", err)
 	}
@@ -132,7 +151,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 
 	podCliqueSetResource, readiness, err := r.observePodCliqueSetReadiness(
 		ctx,
-		dgd,
+		renderedPodCliqueSet.renderDeployment,
 		syncedPodCliqueSet,
 	)
 	if err != nil {

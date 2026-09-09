@@ -35,6 +35,8 @@ processor:
     # Keep SharedSpec so embedded fields are documented once
     # - "DynamoComponentDeploymentOverridesSpec$"
     - "ConversionContext$"
+    # LPXGraphDeployment is an operator-generated private child, not a public API.
+    - "LPXGraphDeployment.*$"
     - "DynamoComponentDeploymentStatus$"
     - "BaseStatus$"
     - "ExcludedNamespacesChecker"

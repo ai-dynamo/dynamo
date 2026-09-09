@@ -167,6 +167,34 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{"spec.roles[0].podTemplate: Forbidden: is not supported for this component role"},
 		},
 		{
+			name: "v1alpha1 rejects the legacy lpu component type",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = "lpu"
+			}),
+			wantCELErr: "spec: Invalid value: componentType lpu is not supported; use lpx",
+		},
+		{
+			name: "standalone v1alpha1 canonical lpx component is rejected",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = "lpx"
+				dcd.Spec.LPX = &nvidiacomv1beta1.LPXConfig{BuildID: "test/build"}
+				dcd.Spec.Roles = []nvidiacomv1alpha1.ComponentRoleSpec{{Name: nvidiacomv1alpha1.ComponentRoleLeader}}
+			}),
+			wantCELErr:   "spec: Invalid value: standalone LPX DynamoComponentDeployments are not supported; use DynamoGraphDeployment",
+			wantWarnings: []string{`unknown field "spec.lpx"`},
+		},
+		{
+			name: "standalone canonical lpx component is rejected",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeLPX
+				dcd.Spec.PodTemplate = nil
+				dcd.Spec.LPX = &nvidiacomv1beta1.LPXConfig{BuildID: "test/build"}
+				dcd.Spec.Roles = []nvidiacomv1beta1.ComponentRoleSpec{{Name: nvidiacomv1beta1.ComponentRoleLeader}}
+			}),
+			wantCELErr:   "spec: Invalid value: standalone LPX DynamoComponentDeployments are not supported; use DynamoGraphDeployment",
+			wantWarnings: []string{`unknown field "spec.lpx"`},
+		},
+		{
 			name: "v1beta1 main image is required when pod template is absent on create",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.PodTemplate = nil
@@ -1802,7 +1830,6 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				oldObject:          tt.oldDeployment,
 				gates:              gates,
 				seedWithoutWebhook: tt.seedWithoutWebhook,
-				withoutTopology:    true,
 				wantSchemaError:    tt.wantSchemaErr,
 				wantCELError:       tt.wantCELErr,
 				wantWebhookErrors:  tt.wantWebhookErrs,

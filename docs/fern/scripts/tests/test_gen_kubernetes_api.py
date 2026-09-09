@@ -48,9 +48,9 @@ EXPECTED_TYPE_COUNTS = {
     # (PodReference, PodSnapshotSource/Spec/Status,
     # PodSnapshotContentSource/Spec/Status, PodSnapshotReference), which are
     # owned by github.com/ai-dynamo/snapshot.
-    "nvidia.com/v1alpha1": 69,
-    "nvidia.com/v1beta1": 69,
-    "operator.config.dynamo.nvidia.com/v1alpha1": 28,
+    "nvidia.com/v1alpha1": 68,
+    "nvidia.com/v1beta1": 76,
+    "operator.config.dynamo.nvidia.com/v1alpha1": 30,
 }
 EXPECTED_OPERATOR_DEFAULT_SECTIONS = (
     "Pod Specification Defaults",
@@ -394,6 +394,7 @@ def test_raw_reference_omits_dgd_only_fields_from_standalone_dcd_docs(
         by_name = {type_.name: type_ for type_ in package.types}
         dcd = by_name["DynamoComponentDeploymentSpec"]
         assert "providerOverride" not in {field.name for field in dcd.fields}
+        assert "lpx" not in {field.name for field in dcd.fields}
         dcd_multinode = next(field for field in dcd.fields if field.name == "multinode")
         assert "MultinodeSpec" in dcd_multinode.type
         dcd_roles = next(field for field in dcd.fields if field.name == "roles")
@@ -413,6 +414,17 @@ def test_raw_reference_omits_dgd_only_fields_from_standalone_dcd_docs(
             assert "DynamoComponentDeploymentSpec" not in {
                 ref.name for ref in by_name[type_name].appears_in
             }
+
+
+def test_shared_lpx_type_links_across_api_versions(
+    reference: kubernetes_api_discovery.KubernetesReference,
+) -> None:
+    rendered = kubernetes_api_rendering.render_mdx(reference)
+    alpha = rendered.split("## nvidia.com/v1beta1", 1)[0]
+    for name in ("LPXConfig", "SchedulingSpec", "DynamoGraphDeploymentLPXStatus"):
+        assert f"See [{name}](#{name.lower()})." in alpha
+    lpx = rendered.split('<Accordion id="lpxconfig"', 1)[1].split("</Accordion>", 1)[0]
+    assert lpx.count("[DynamoComponentDeploymentSharedSpec]") == 1
 
 
 def test_check_mode_returns_zero_on_fresh_outputs(workspace: Path) -> None:

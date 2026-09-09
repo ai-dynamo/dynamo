@@ -1,0 +1,230 @@
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: dgd-lpx-v2-vllm
+  namespace: inference-engine
+spec:
+  components:
+    - name: frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - args:
+                - --model-name
+                - meta-llama/Llama-3.2-1B-Instruct
+                - --router-mode
+                - kv
+                - --router-reset-states
+                - --no-decode-fallback
+              command:
+                - python3
+                - -m
+                - dynamo.frontend
+              env:
+                - name: HF_HOME
+                  value: /nfs/huggingface
+                - name: HF_HUB_CACHE
+                  value: /nfs/huggingface/hub
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+              name: main
+              volumeMounts:
+                - mountPath: /nfs
+                  name: model-storage
+    - name: lpu
+      type: lpx
+      extraPodSpecMergeStrategy: strategic
+      replicas: 2
+      lpx:
+        buildId: llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c
+      roles:
+      - name: leader
+        replicas: 1
+        podTemplate:
+          spec:
+            affinity:
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                  - matchExpressions:
+                    - key: kubernetes.io/hostname
+                      operator: In
+                      values:
+                      - c1v2-b300n1-nic1
+            containers:
+            - args:
+              - --dynamo-model-name
+              - meta-llama/Llama-3.2-1B-Instruct
+              - --model-card
+              - /etc/cyborg/model-card.json
+              - --use-disagg-prefill
+              - --nixl-kv-layout
+              - HND
+              - --num-layers
+              - '16'
+              env:
+              - name: GLUE_RDMA_PATH_MTU
+                value: '1024'
+              image: us-docker.pkg.dev/nv-hwlpu-20260103060253/cyborg/cyborg:build-862
+              name: main
+              resources:
+                limits:
+                  nvidia.com/gpu: '1'
+              volumeMounts:
+              - mountPath: /etc/cyborg/model-card.json
+                name: cyborg-model-card
+                readOnly: true
+                subPath: model-card.json
+              - mountPath: /nfs
+                name: model-storage
+            tolerations:
+            - key: nvidia.com/gpu
+              operator: Exists
+            volumes:
+            - configMap:
+                name: dgd-lpx-v2-vllm-cyborg-model-card
+              name: cyborg-model-card
+      - name: worker
+        podTemplate:
+          spec:
+            affinity:
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                  - matchExpressions:
+                    - key: kubernetes.io/hostname
+                      operator: In
+                      values:
+                      - c1r1-lpu1
+                      - c1r1-lpu2
+                      - c1r1-lpu3
+                      - c1r1-lpu4
+                      - c1r1-lpu5
+                      - c1r1-lpu6
+                      - c1r1-lpu7
+                      - c1r1-lpu8
+                      - c1r2-lpu1
+                      - c1r2-lpu2
+                      - c1r2-lpu3
+                      - c1r2-lpu4
+                      - c1r2-lpu5
+                      - c1r2-lpu6
+                      - c1r2-lpu7
+                      - c1r2-lpu8
+                      - c1r7-lpu1
+                      - c1r7-lpu2
+                      - c1r7-lpu3
+                      - c1r7-lpu4
+                      - c1r7-lpu5
+                      - c1r7-lpu6
+                      - c1r7-lpu7
+                      - c1r7-lpu8
+            containers:
+            - args:
+              - -c
+              - "readarray -t partition_node_counts < /configs/nodes_per_partition\nreadarray -t partition_node_offsets < /configs/partition_node_offsets\n\
+                part=\"\"\nfor i in \"${!partition_node_counts[@]}\"; do\n  if (( GROVE_PCLQ_POD_INDEX >= partition_node_offsets[i]\
+                \ &&\n        GROVE_PCLQ_POD_INDEX < partition_node_offsets[i] + partition_node_counts[i] )); then\n    part=\"\
+                ${i}\"\n    break\n  fi\ndone\n: \"${part:?no partition row for Grove pod index ${GROVE_PCLQ_POD_INDEX}}\"\nexec\
+                \ agent-hybrid-v2 \\\n  --assemble-dir \"${GAS_DIR}\" \\\n  --part \"${part}\" \\\n  --port \"${RDMA_PORT}\" \\\
+                \n  --nic \"${NIC_NAME}\" \\\n  --metadata-file \"$(mktemp)\" \\\n  --readiness-port \"${READINESS_PORT}\""
+              image: us-docker.pkg.dev/nv-hwlpu-20260103060253/lpu-monorepo/agent-hybrid-v2:steved-1node.dfefd5a16f
+              name: main
+              volumeMounts:
+              - mountPath: /nfs
+                name: model-storage
+    - name: prefill
+      type: prefill
+      replicas: 1
+      sharedMemorySize: 16Gi
+      podTemplate:
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: kubernetes.io/hostname
+                        operator: In
+                        values:
+                          - c1v2-b300n1-nic1
+          containers:
+            - args:
+                - --model
+                - meta-llama/Llama-3.2-1B-Instruct
+                - --served-model-name
+                - meta-llama/Llama-3.2-1B-Instruct
+                - --tensor-parallel-size
+                - "1"
+                - --disaggregation-mode
+                - prefill
+                - --kv-transfer-config
+                - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+                - --attention-backend
+                - FLASH_ATTN
+                - --max-num-seqs
+                - "1"
+                - --gpu-memory-utilization
+                - "0.8"
+                - --max-model-len
+                - "8192"
+                - --enforce-eager
+                - --block-size
+                - "32"
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              env:
+                - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+                  value: "5600"
+                - name: VLLM_KV_CACHE_LAYOUT
+                  value: HND
+                - name: UCX_NET_DEVICES
+                  value: all
+                - name: HF_HOME
+                  value: /nfs/huggingface
+                - name: HF_HUB_CACHE
+                  value: /nfs/huggingface/hub
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+                - name: HF_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      key: token
+                      name: hf-token-secret
+                      optional: true
+                - name: VLLM_USE_FLASHINFER_SAMPLER
+                  value: "0"
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+              name: main
+              resources:
+                limits:
+                  nvidia.com/gpu: "1"
+              securityContext:
+                capabilities:
+                  add:
+                    - IPC_LOCK
+                    - SYS_RESOURCE
+                privileged: true
+                runAsUser: 0
+              volumeMounts:
+                - mountPath: /dev/infiniband
+                  name: infiniband
+                - mountPath: /nfs
+                  name: model-storage
+              workingDir: /workspace/examples/backends/vllm
+          hostIPC: true
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Exists
+          volumes:
+            - hostPath:
+                path: /dev/infiniband
+                type: Directory
+              name: infiniband

@@ -257,6 +257,35 @@ vLLM and SGLang take tensor/pipeline/data parallelism as CLI flags (covered in t
 
 You normally do not need to set the top-level `spec.backendFramework` field — the operator infers the backend from the worker command. Set it explicitly (`vllm`, `sglang`, or `trtllm`) only when a feature needs the framework known up front, such as GMS failover or multinode TensorRT-LLM.
 
+For LPX on LPU hardware, declare the build and runtime roles in a `type: lpx` component:
+
+```yaml
+spec:
+  components:
+  - name: lpx
+    type: lpx
+    lpx:
+      buildId: my-model/build
+    roles:
+    - name: worker
+      podTemplate:
+        spec:
+          containers:
+          - name: main
+            image: <lpu-runtime-image>
+            volumeMounts:
+            - name: model-storage
+              mountPath: /models
+          volumes:
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+```
+
+Create the `model-storage` PVC in the DGD's namespace with storage accessible to all LPX Pods. Replace `my-model/build` with a build available through the configured LPX model registry and `<lpu-runtime-image>` with its compatible runtime image. The `worker` role configures Agent Pods; the optional `leader` role configures the conductor. With one LPX component, the conductor reuses the worker template unless the leader supplies a separate `podTemplate`. For a hybrid engine, configure the hybrid runtime template on the leader role.
+
+For LPU+LPU speculative decoding, declare separate draft and target LPX components: the draft has only a `worker` role; the target has `leader` and `worker` roles. All LPX components share one LPX deployment and PodCliqueSet, separate from ordinary components. See [LPX component fields](../../reference/kubernetes-api/dynamo-component-deployment.mdx#spec-reference) for replica counts and template requirements.
+
 For per-backend setup and tuning, see [vLLM](../../developer-guide/knowledge-base/modular-components/backends/vllm/overview.md), [SGLang](../../developer-guide/knowledge-base/modular-components/backends/sglang/overview.md), and [TensorRT-LLM](../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/overview.md).
 
 > [!NOTE]

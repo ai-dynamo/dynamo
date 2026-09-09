@@ -28,7 +28,6 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -36,11 +35,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8sptr "k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
-)
-
-const (
-	// maxCombinedResourceNameLength is kept as a local alias for readability.
-	maxCombinedResourceNameLength = consts.MaxCombinedGroveResourceNameLength
 )
 
 type clusterTopologyInfo struct {
@@ -184,24 +178,6 @@ func grovePathwayForDynamoGraphDeployment(
 		)
 	}
 	return true, ""
-}
-
-func dgdComponentResourceNameLength(
-	dgdName string,
-	components []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
-	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
-) (int, string) {
-	pcsName := dynamo.PCSNameForDGD(dgdName, components)
-	componentName := component.ComponentName
-	combinedLength := len(pcsName) + len(strings.ToLower(componentName))
-	detail := "PCS name + component name"
-
-	if component.UsesPCSG() {
-		longestPodCliqueName := dynamo.LongestPodCliqueNameForDGDComponent(componentName, component)
-		combinedLength += len(longestPodCliqueName)
-		detail = fmt.Sprintf("PCS name + PCSG name + longest PodClique name %q", longestPodCliqueName)
-	}
-	return combinedLength, detail
 }
 
 func hasIntraPodFailover(spec *nvidiacomv1beta1.DynamoGraphDeploymentSpec) bool {

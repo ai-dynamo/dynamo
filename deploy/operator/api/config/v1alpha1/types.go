@@ -18,6 +18,7 @@
 package v1alpha1
 
 import (
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -61,6 +62,9 @@ type OperatorConfiguration struct {
 	// Checkpoint/restore configuration
 	Checkpoint CheckpointConfiguration `json:"checkpoint"`
 
+	// Pod generation defaults
+	PodGeneration PodGenerationConfiguration `json:"podGeneration"`
+
 	// Discovery backend configuration
 	Discovery DiscoveryConfiguration `json:"discovery"`
 
@@ -72,6 +76,9 @@ type OperatorConfiguration struct {
 
 	// HTTP/2 and TLS settings
 	Security SecurityConfiguration `json:"security"`
+
+	// LPX scheduler integration and model-registry configuration.
+	LPX LPXConfiguration `json:"lpx"`
 }
 
 // ServerConfiguration holds server bind addresses and ports.
@@ -387,6 +394,14 @@ func (c *CheckpointConfiguration) EffectiveSeccompProfile() string {
 		return DefaultSeccompProfile
 	}
 	return c.Seccomp.Profile
+}
+
+// PodGenerationConfiguration holds pod generation defaults applied by the operator.
+type PodGenerationConfiguration struct {
+	// DefaultExtraPodSpecMergeStrategy is the operator-wide fallback when a
+	// component leaves spec.extraPodSpecMergeStrategy unset.
+	// +kubebuilder:default="override"
+	DefaultExtraPodSpecMergeStrategy nvidiacomv1alpha1.ExtraPodSpecMergeStrategy `json:"defaultExtraPodSpecMergeStrategy,omitempty"`
 }
 
 // DiscoveryConfiguration holds discovery backend settings.

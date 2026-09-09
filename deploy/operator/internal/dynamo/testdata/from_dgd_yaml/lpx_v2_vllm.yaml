@@ -1,0 +1,975 @@
+data:
+  lpu_servers-0: |-
+    lpu-0-lpu-wkr-m-0-0
+    lpu-0-lpu-wkr-m-0-1
+    lpu-0-lpu-wkr-m-0-2
+    lpu-0-lpu-wkr-m-0-3
+    lpu-0-lpu-wkr-m-0-4
+    lpu-0-lpu-wkr-m-0-5
+    lpu-0-lpu-wkr-m-0-6
+    lpu-0-lpu-wkr-m-0-7
+    lpu-0-lpu-wkr-m-0-8
+    lpu-0-lpu-wkr-m-0-9
+    lpu-0-lpu-wkr-m-0-10
+    lpu-0-lpu-wkr-m-0-11
+    lpu-0-lpu-wkr-m-0-12
+    lpu-0-lpu-wkr-m-0-13
+    lpu-0-lpu-wkr-m-0-14
+    lpu-0-lpu-wkr-m-0-15
+    lpu-0-lpu-wkr-m-0-16
+  lpu_servers-1: |-
+    lpu-1-lpu-wkr-m-0-0
+    lpu-1-lpu-wkr-m-0-1
+    lpu-1-lpu-wkr-m-0-2
+    lpu-1-lpu-wkr-m-0-3
+    lpu-1-lpu-wkr-m-0-4
+    lpu-1-lpu-wkr-m-0-5
+    lpu-1-lpu-wkr-m-0-6
+    lpu-1-lpu-wkr-m-0-7
+    lpu-1-lpu-wkr-m-0-8
+    lpu-1-lpu-wkr-m-0-9
+    lpu-1-lpu-wkr-m-0-10
+    lpu-1-lpu-wkr-m-0-11
+    lpu-1-lpu-wkr-m-0-12
+    lpu-1-lpu-wkr-m-0-13
+    lpu-1-lpu-wkr-m-0-14
+    lpu-1-lpu-wkr-m-0-15
+    lpu-1-lpu-wkr-m-0-16
+  tokenizer_dir: /testdata/llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c/tokenizer
+metadata:
+  annotations:
+    lpx.nvidia.com/deployment-generation: "1"
+    lpx.nvidia.com/deployment-uid: lpx-render-uid
+    lpx.nvidia.com/input-revision: sha256:c17686b52fee750e3fc2887ce0a47c0968ae96093c59c6886b3766a5eb434ae9
+    scheduling.lpu.nvidia.com/dgd-generation: "1"
+    scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
+  name: dgd-lpx-v2-vllm-decode
+  namespace: inference-engine
+---
+data:
+  datacenter.toml: |
+    model_base_paths = ['/nfs']
+
+    [datacenters]
+    [datacenters.racks]
+    [datacenters.racks.lpu-wkr-m-0]
+    available_nodes = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    node_name_template = '${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-lpu-wkr-m-0-{node}.${GROVE_HEADLESS_SERVICE}'
+    preferred_start = 0
+  gas_dir: /nfs/llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c
+  model_config.toml: |
+    type = 'Single'
+
+    [iop]
+    model_path = '/nfs/llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c'
+    tokenizer_path = '/nfs/llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c/tokenizer'
+
+    [scheduler]
+
+    [setup]
+    resolved_partitions_dir = '/configs'
+    setup_ops_format = 'agent_v2'
+  nodes_per_partition: |-
+    1
+    1
+    1
+    1
+    1
+    1
+    1
+    1
+    1
+    1
+    1
+    1
+    1
+    1
+    1
+    1
+    1
+  partition_ids: |-
+    0
+    1
+    2
+    3
+    4
+    5
+    6
+    7
+    8
+    9
+    10
+    11
+    12
+    13
+    14
+    15
+    16
+  partition_indices: |-
+    0
+    1
+    2
+    3
+    4
+    5
+    6
+    7
+    8
+    9
+    10
+    11
+    12
+    13
+    14
+    15
+    16
+  partition_models: |-
+    default
+    default
+    default
+    default
+    default
+    default
+    default
+    default
+    default
+    default
+    default
+    default
+    default
+    default
+    default
+    default
+    default
+  partition_node_offsets: |-
+    0
+    1
+    2
+    3
+    4
+    5
+    6
+    7
+    8
+    9
+    10
+    11
+    12
+    13
+    14
+    15
+    16
+  partition_paths: |-
+    part-0
+    part-1
+    part-2
+    part-3
+    part-4
+    part-5
+    part-6
+    part-7
+    part-8
+    part-9
+    part-10
+    part-11
+    part-12
+    part-13
+    part-14
+    part-15
+    part-16
+  topologies: |-
+    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
+    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
+    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
+    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
+    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
+    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
+    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
+    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
+    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
+    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
+    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
+    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
+    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
+    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
+    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
+    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
+    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
+metadata:
+  annotations:
+    lpx.nvidia.com/deployment-generation: "1"
+    lpx.nvidia.com/deployment-uid: lpx-render-uid
+    lpx.nvidia.com/input-revision: sha256:c17686b52fee750e3fc2887ce0a47c0968ae96093c59c6886b3766a5eb434ae9
+    scheduling.lpu.nvidia.com/dgd-generation: "1"
+    scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
+  name: dgd-lpx-v2-vllm-lpu
+  namespace: inference-engine
+---
+metadata:
+  annotations:
+    lpx.nvidia.com/deployment-generation: "1"
+    lpx.nvidia.com/deployment-uid: lpx-render-uid
+    lpx.nvidia.com/input-revision: sha256:c17686b52fee750e3fc2887ce0a47c0968ae96093c59c6886b3766a5eb434ae9
+    scheduling.lpu.nvidia.com/dgd-generation: "1"
+    scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
+    scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:12f2d0ae40fa84798f025eafc6bf5ecbe38cdc7adb797e3e41726b4c8c916114
+  labels:
+    nvidia.com/dynamo-graph-deployment-name: dgd-lpx-v2-vllm
+  name: dgd-lpx-v2-2c5c68ef-lpx
+  namespace: inference-engine
+spec:
+  replicas: 1
+  template:
+    cliqueStartupType: CliqueStartupTypeExplicit
+    cliques:
+    - annotations:
+        lpx.nvidia.com/deployment-generation: "1"
+        lpx.nvidia.com/deployment-uid: lpx-render-uid
+        lpx.nvidia.com/input-revision: sha256:c17686b52fee750e3fc2887ce0a47c0968ae96093c59c6886b3766a5eb434ae9
+        nvidia.com/extra-resources-hash: a9c40c6452f37713460176f888205de0185c5478ab3a4aa2a06936caa86ff0c4
+        scheduling.lpu.nvidia.com/dgd-generation: "1"
+        scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:12f2d0ae40fa84798f025eafc6bf5ecbe38cdc7adb797e3e41726b4c8c916114
+        scheduling.lpu.nvidia.com/role: cyborg-worker
+      labels:
+        lpx.nvidia.com/execution-role: gpu
+        lpx.nvidia.com/serving: "true"
+        lpx.nvidia.com/stage: lpu
+        nvidia.com/dynamo-component: lpu
+        nvidia.com/dynamo-component-type: lpx
+        nvidia.com/dynamo-graph-deployment-name: dgd-lpx-v2-vllm
+        nvidia.com/dynamo-namespace: inference-engine-dgd-lpx-v2-vllm
+        nvidia.com/metrics-enabled: "true"
+        nvidia.com/selector: dgd-lpx-v2-vllm-lpu
+      name: lpu-engine-gpu
+      spec:
+        minAvailable: 1
+        podSpec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                    - c1v2-b300n1-nic1
+          containers:
+          - args:
+            - --dynamo-model-name
+            - meta-llama/Llama-3.2-1B-Instruct
+            - --model-card
+            - /etc/cyborg/model-card.json
+            - --use-disagg-prefill
+            - --nixl-kv-layout
+            - HND
+            - --num-layers
+            - "16"
+            env:
+            - name: CYBORG_BATCH_SIZE
+              value: "1"
+            - name: CYBORG_FPGA_GPI_IO_FPGA_COUNT
+              value: "1"
+            - name: CYBORG_FPGA_GPI_REPLICA_INDEX
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['grove.io/podclique-pod-index']
+            - name: CYBORG_SWA_CACHE_IDS
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['grove.io/podclique-pod-index']
+            - name: DYN_COMPONENT
+              value: decode
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_FORWARDPASS_METRIC_PORT
+              value: "20380"
+            - name: DYN_HEALTH_CHECK_ENABLED
+              value: "false"
+            - name: DYN_NAMESPACE
+              value: inference-engine-dgd-lpx-v2-vllm
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: dgd-lpx-v2-vllm
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: inference-engine
+            - name: DYN_SYSTEM_ENABLED
+              value: "true"
+            - name: DYN_SYSTEM_PORT
+              value: "9090"
+            - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+              value: '["generate"]'
+            - name: ETCD_ENDPOINTS
+              value: etcd-address
+            - name: GBUILD_MANIFEST_PATH
+              value: /nfs/llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c/manifest.v2.capnp.bin
+            - name: GLUE_RDMA_PATH_MTU
+              value: "1024"
+            - name: LPX_ENGINE_REPLICA
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['grove.io/podcliquescalinggroup-replica-index']
+            - name: NATS_SERVER
+              value: nats-address
+            - name: NIXL_TELEMETRY_ENABLE
+              value: "n"
+            - name: NIXL_TELEMETRY_EXPORTER
+              value: prometheus
+            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+              value: "19090"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: RDMA_PORT
+              value: "19877"
+            - name: SERVER_HOSTS_FILE
+              value: /configs/lpu_servers-$(LPX_ENGINE_REPLICA)
+            - name: TOKENIZER_DIR
+              valueFrom:
+                configMapKeyRef:
+                  key: tokenizer_dir
+                  name: dgd-lpx-v2-vllm-decode
+            - name: TOTAL_REPLICAS
+              value: "1"
+            image: us-docker.pkg.dev/nv-hwlpu-20260103060253/cyborg/cyborg:build-862
+            livenessProbe:
+              failureThreshold: 1
+              httpGet:
+                path: /live
+                port: system
+              periodSeconds: 5
+              timeoutSeconds: 4
+            name: main
+            ports:
+            - containerPort: 9090
+              name: system
+              protocol: TCP
+            - containerPort: 19090
+              name: nixl
+              protocol: TCP
+            readinessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /health
+                port: system
+              periodSeconds: 10
+              timeoutSeconds: 4
+            resources:
+              limits:
+                nvidia.com/gpu: "1"
+            startupProbe:
+              failureThreshold: 720
+              httpGet:
+                path: /live
+                port: system
+              periodSeconds: 10
+              timeoutSeconds: 5
+            volumeMounts:
+            - mountPath: /etc/cyborg/model-card.json
+              name: cyborg-model-card
+              readOnly: true
+              subPath: model-card.json
+            - mountPath: /nfs
+              name: model-storage
+            - mountPath: /dev/infiniband
+              name: infiniband
+            - mountPath: /configs
+              name: config
+            - mountPath: /dev/shm
+              name: shared-memory
+          restartPolicy: Always
+          schedulerName: default-scheduler
+          securityContext:
+            fsGroup: 1000
+            fsGroupChangePolicy: OnRootMismatch
+          terminationGracePeriodSeconds: 60
+          tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+          volumes:
+          - configMap:
+              name: dgd-lpx-v2-vllm-cyborg-model-card
+            name: cyborg-model-card
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+          - hostPath:
+              path: /dev/infiniband
+              type: Directory
+            name: infiniband
+          - configMap:
+              name: dgd-lpx-v2-vllm-decode
+            name: config
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+            name: shared-memory
+        replicas: 1
+        roleName: lpu-engine-gpu
+        startsAfter:
+        - lpu-wkr-m-0
+    - annotations:
+        lpx.nvidia.com/deployment-generation: "1"
+        lpx.nvidia.com/deployment-uid: lpx-render-uid
+        lpx.nvidia.com/input-revision: sha256:c17686b52fee750e3fc2887ce0a47c0968ae96093c59c6886b3766a5eb434ae9
+        nvidia.com/extra-resources-hash: d782ea49a4ae530a65fb915ae77c6d4b603d6bee3f5b336a52d026439b8f2d41
+        scheduling.lpu.nvidia.com/dgd-generation: "1"
+        scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:12f2d0ae40fa84798f025eafc6bf5ecbe38cdc7adb797e3e41726b4c8c916114
+        scheduling.lpu.nvidia.com/model: default
+        scheduling.lpu.nvidia.com/role: agent
+        scheduling.lpu.nvidia.com/workload-mode: v2StrictHybrid
+      labels:
+        lpx.nvidia.com/execution-role: lpu
+        lpx.nvidia.com/stage: lpu
+        nvidia.com/dynamo-component: lpu
+        nvidia.com/dynamo-component-type: lpx
+        nvidia.com/dynamo-graph-deployment-name: dgd-lpx-v2-vllm
+        nvidia.com/dynamo-namespace: inference-engine-dgd-lpx-v2-vllm
+        nvidia.com/metrics-enabled: "true"
+        nvidia.com/selector: dgd-lpx-v2-vllm-lpu
+      name: lpu-wkr-m-0
+      spec:
+        minAvailable: 17
+        podSpec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                    - c1r1-lpu1
+                    - c1r1-lpu2
+                    - c1r1-lpu3
+                    - c1r1-lpu4
+                    - c1r1-lpu5
+                    - c1r1-lpu6
+                    - c1r1-lpu7
+                    - c1r1-lpu8
+                    - c1r2-lpu1
+                    - c1r2-lpu2
+                    - c1r2-lpu3
+                    - c1r2-lpu4
+                    - c1r2-lpu5
+                    - c1r2-lpu6
+                    - c1r2-lpu7
+                    - c1r2-lpu8
+                    - c1r7-lpu1
+                    - c1r7-lpu2
+                    - c1r7-lpu3
+                    - c1r7-lpu4
+                    - c1r7-lpu5
+                    - c1r7-lpu6
+                    - c1r7-lpu7
+                    - c1r7-lpu8
+          containers:
+          - args:
+            - -c
+            - |-
+              readarray -t partition_node_counts < /configs/nodes_per_partition
+              readarray -t partition_node_offsets < /configs/partition_node_offsets
+              part=""
+              for i in "${!partition_node_counts[@]}"; do
+                if (( GROVE_PCLQ_POD_INDEX >= partition_node_offsets[i] &&
+                      GROVE_PCLQ_POD_INDEX < partition_node_offsets[i] + partition_node_counts[i] )); then
+                  part="${i}"
+                  break
+                fi
+              done
+              : "${part:?no partition row for Grove pod index ${GROVE_PCLQ_POD_INDEX}}"
+              exec agent-hybrid-v2 \
+                --assemble-dir "${GAS_DIR}" \
+                --part "${part}" \
+                --port "${RDMA_PORT}" \
+                --nic "${NIC_NAME}" \
+                --metadata-file "$(mktemp)" \
+                --readiness-port "${READINESS_PORT}"
+            command:
+            - /bin/bash
+            env:
+            - name: DYN_COMPONENT
+              value: lpx
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_NAMESPACE
+              value: inference-engine-dgd-lpx-v2-vllm
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: dgd-lpx-v2-vllm
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: inference-engine
+            - name: ETCD_ENDPOINTS
+              value: etcd-address
+            - name: GAS_DIR
+              valueFrom:
+                configMapKeyRef:
+                  key: gas_dir
+                  name: dgd-lpx-v2-vllm-lpu
+            - name: GLUE_RDMA_PATH_MTU
+              value: "1024"
+            - name: LPU_MODEL_NAME
+              value: default
+            - name: NATS_SERVER
+              value: nats-address
+            - name: NIC_NAME
+              value: mlx5_0
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: RDMA_PORT
+              value: "19877"
+            - name: READINESS_PORT
+              value: "19878"
+            - name: TOPOLOGIES
+              valueFrom:
+                configMapKeyRef:
+                  key: topologies
+                  name: dgd-lpx-v2-vllm-lpu
+            - name: UCX_TLS
+              value: tcp
+            image: us-docker.pkg.dev/nv-hwlpu-20260103060253/lpu-monorepo/agent-hybrid-v2:steved-1node.dfefd5a16f
+            name: agent
+            readinessProbe:
+              failureThreshold: 6
+              httpGet:
+                path: /readyz
+                port: 19878
+                scheme: HTTP
+              periodSeconds: 5
+              successThreshold: 1
+              timeoutSeconds: 1
+            resources:
+              limits:
+                hugepages-2Mi: 4Gi
+                lpu.nvidia.com/lpu: "8"
+              requests:
+                cpu: "62"
+                hugepages-2Mi: 4Gi
+                lpu.nvidia.com/lpu: "8"
+            securityContext:
+              privileged: true
+              runAsUser: 0
+            startupProbe:
+              failureThreshold: 60
+              httpGet:
+                path: /readyz
+                port: 19878
+                scheme: HTTP
+              periodSeconds: 5
+              successThreshold: 1
+              timeoutSeconds: 1
+            stdin: true
+            tty: true
+            volumeMounts:
+            - mountPath: /nfs
+              name: model-storage
+            - mountPath: /dev/shm
+              name: shared-memory
+            - mountPath: /configs
+              name: config
+            - mountPath: /dev/hugepages
+              name: hugepages
+            - mountPath: /sys
+              name: host-sys
+            - mountPath: /dev
+              name: host-dev
+            - mountPath: /ssh-pk
+              name: ssh-secret
+              readOnly: true
+            - mountPath: /tmp
+              name: tmp
+          dnsPolicy: ClusterFirstWithHostNet
+          hostIPC: true
+          hostNetwork: true
+          restartPolicy: Always
+          schedulerName: lpx-scheduler
+          securityContext:
+            runAsGroup: 0
+            runAsUser: 0
+          terminationGracePeriodSeconds: 60
+          tolerations:
+          - key: lpu.nvidia.com/node
+            operator: Exists
+          - key: lpu.nvidia.com/lpu
+            operator: Exists
+          - key: lpu.nvidia.com/node-v2
+            operator: Exists
+          volumes:
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+            name: shared-memory
+          - configMap:
+              name: dgd-lpx-v2-vllm-lpu
+            name: config
+          - emptyDir: {}
+            name: tmp
+          - name: ssh-secret
+            secret:
+              defaultMode: 420
+              secretName: ssh-secret
+          - hostPath:
+              path: /dev
+              type: Directory
+            name: host-dev
+          - hostPath:
+              path: /sys
+              type: Directory
+            name: host-sys
+          - emptyDir:
+              medium: HugePages
+            name: hugepages
+        replicas: 17
+        roleName: lpu-wkr-m-0
+    headlessServiceConfig:
+      publishNotReadyAddresses: true
+    podCliqueScalingGroups:
+    - annotations:
+        lpx.nvidia.com/deployment-generation: "1"
+        lpx.nvidia.com/deployment-uid: lpx-render-uid
+        lpx.nvidia.com/input-revision: sha256:c17686b52fee750e3fc2887ce0a47c0968ae96093c59c6886b3766a5eb434ae9
+        scheduling.lpu.nvidia.com/dgd-generation: "1"
+        scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:12f2d0ae40fa84798f025eafc6bf5ecbe38cdc7adb797e3e41726b4c8c916114
+      cliqueNames:
+      - lpu-wkr-m-0
+      - lpu-engine-gpu
+      minAvailable: 1
+      name: lpu
+      replicas: 2
+    terminationDelay: 15m0s
+status:
+  availableReplicas: 0
+  updatedReplicas: 0
+---
+metadata:
+  labels:
+    nvidia.com/dynamo-graph-deployment-name: dgd-lpx-v2-vllm
+  name: dgd-lpx-v2-vllm
+  namespace: inference-engine
+spec:
+  replicas: 1
+  template:
+    cliqueStartupType: CliqueStartupTypeAnyOrder
+    cliques:
+    - labels:
+        nvidia.com/dynamo-component: frontend
+        nvidia.com/dynamo-component-type: frontend
+        nvidia.com/dynamo-graph-deployment-name: dgd-lpx-v2-vllm
+        nvidia.com/dynamo-namespace: inference-engine-dgd-lpx-v2-vllm
+        nvidia.com/metrics-enabled: "true"
+        nvidia.com/selector: dgd-lpx-v2-vllm-frontend
+      name: frontend
+      spec:
+        minAvailable: 1
+        podSpec:
+          containers:
+          - args:
+            - --model-name
+            - meta-llama/Llama-3.2-1B-Instruct
+            - --router-mode
+            - kv
+            - --router-reset-states
+            - --no-decode-fallback
+            command:
+            - python3
+            - -m
+            - dynamo.frontend
+            env:
+            - name: DYNAMO_PORT
+              value: "8000"
+            - name: DYN_COMPONENT
+              value: frontend
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_HTTP_PORT
+              value: "8000"
+            - name: DYN_NAMESPACE
+              value: inference-engine-dgd-lpx-v2-vllm
+            - name: DYN_NAMESPACE_PREFIX
+              value: inference-engine-dgd-lpx-v2-vllm
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: dgd-lpx-v2-vllm
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: inference-engine
+            - name: ETCD_ENDPOINTS
+              value: etcd-address
+            - name: HF_HOME
+              value: /nfs/huggingface
+            - name: HF_HUB_CACHE
+              value: /nfs/huggingface/hub
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: NATS_SERVER
+              value: nats-address
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+            livenessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /live
+                port: http
+              initialDelaySeconds: 15
+              periodSeconds: 10
+              timeoutSeconds: 1
+            name: main
+            ports:
+            - containerPort: 8000
+              name: http
+              protocol: TCP
+            readinessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /health
+                port: http
+              initialDelaySeconds: 10
+              periodSeconds: 10
+              timeoutSeconds: 3
+            resources: {}
+            volumeMounts:
+            - mountPath: /nfs
+              name: model-storage
+            - mountPath: /dev/shm
+              name: shared-memory
+          restartPolicy: Always
+          securityContext:
+            fsGroup: 1000
+            fsGroupChangePolicy: OnRootMismatch
+          terminationGracePeriodSeconds: 60
+          volumes:
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+            name: shared-memory
+        replicas: 1
+        roleName: frontend
+    - labels:
+        nvidia.com/dynamo-component: prefill
+        nvidia.com/dynamo-component-type: prefill
+        nvidia.com/dynamo-graph-deployment-name: dgd-lpx-v2-vllm
+        nvidia.com/dynamo-namespace: inference-engine-dgd-lpx-v2-vllm
+        nvidia.com/dynamo-sub-component-type: prefill
+        nvidia.com/metrics-enabled: "true"
+        nvidia.com/selector: dgd-lpx-v2-vllm-prefill
+      name: prefill
+      spec:
+        minAvailable: 1
+        podSpec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                    - c1v2-b300n1-nic1
+          containers:
+          - args:
+            - --model
+            - meta-llama/Llama-3.2-1B-Instruct
+            - --served-model-name
+            - meta-llama/Llama-3.2-1B-Instruct
+            - --tensor-parallel-size
+            - "1"
+            - --disaggregation-mode
+            - prefill
+            - --kv-transfer-config
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+            - --attention-backend
+            - FLASH_ATTN
+            - --max-num-seqs
+            - "1"
+            - --gpu-memory-utilization
+            - "0.8"
+            - --max-model-len
+            - "8192"
+            - --enforce-eager
+            - --block-size
+            - "32"
+            command:
+            - python3
+            - -m
+            - dynamo.vllm
+            env:
+            - name: DYN_COMPONENT
+              value: prefill
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_FORWARDPASS_METRIC_PORT
+              value: "20380"
+            - name: DYN_HEALTH_CHECK_ENABLED
+              value: "false"
+            - name: DYN_NAMESPACE
+              value: inference-engine-dgd-lpx-v2-vllm
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: dgd-lpx-v2-vllm
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: inference-engine
+            - name: DYN_SYSTEM_ENABLED
+              value: "true"
+            - name: DYN_SYSTEM_PORT
+              value: "9090"
+            - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+              value: '["generate"]'
+            - name: ETCD_ENDPOINTS
+              value: etcd-address
+            - name: HF_HOME
+              value: /nfs/huggingface
+            - name: HF_HUB_CACHE
+              value: /nfs/huggingface/hub
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: token
+                  name: hf-token-secret
+                  optional: true
+            - name: NATS_SERVER
+              value: nats-address
+            - name: NIXL_TELEMETRY_ENABLE
+              value: "n"
+            - name: NIXL_TELEMETRY_EXPORTER
+              value: prometheus
+            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+              value: "19090"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: TRANSFORMERS_OFFLINE
+              value: "1"
+            - name: UCX_NET_DEVICES
+              value: all
+            - name: VLLM_KV_CACHE_LAYOUT
+              value: HND
+            - name: VLLM_NIXL_SIDE_CHANNEL_PORT
+              value: "5600"
+            - name: VLLM_USE_FLASHINFER_SAMPLER
+              value: "0"
+            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.1
+            livenessProbe:
+              failureThreshold: 1
+              httpGet:
+                path: /live
+                port: system
+              periodSeconds: 5
+              timeoutSeconds: 4
+            name: main
+            ports:
+            - containerPort: 9090
+              name: system
+              protocol: TCP
+            - containerPort: 19090
+              name: nixl
+              protocol: TCP
+            readinessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /health
+                port: system
+              periodSeconds: 10
+              timeoutSeconds: 4
+            resources:
+              limits:
+                nvidia.com/gpu: "1"
+            securityContext:
+              capabilities:
+                add:
+                - IPC_LOCK
+                - SYS_RESOURCE
+              privileged: true
+              runAsUser: 0
+            startupProbe:
+              failureThreshold: 720
+              httpGet:
+                path: /live
+                port: system
+              periodSeconds: 10
+              timeoutSeconds: 5
+            volumeMounts:
+            - mountPath: /dev/infiniband
+              name: infiniband
+            - mountPath: /nfs
+              name: model-storage
+            - mountPath: /dev/shm
+              name: shared-memory
+            workingDir: /workspace/examples/backends/vllm
+          hostIPC: true
+          restartPolicy: Always
+          securityContext:
+            fsGroup: 1000
+            fsGroupChangePolicy: OnRootMismatch
+          terminationGracePeriodSeconds: 60
+          tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+          volumes:
+          - hostPath:
+              path: /dev/infiniband
+              type: Directory
+            name: infiniband
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 16Gi
+            name: shared-memory
+        replicas: 1
+        roleName: prefill
+    headlessServiceConfig:
+      publishNotReadyAddresses: true
+    terminationDelay: 15m0s
+status:
+  availableReplicas: 0
+  updatedReplicas: 0

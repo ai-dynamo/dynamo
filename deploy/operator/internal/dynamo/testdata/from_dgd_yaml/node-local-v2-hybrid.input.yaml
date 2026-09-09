@@ -1,0 +1,59 @@
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: node-local-v2-hybrid
+  namespace: test
+  uid: 22222222-2222-4222-8222-222222222222
+  generation: 1
+  annotations:
+    scheduling.lpu.nvidia.com/scheduler-backend: lpx-scheduler
+spec:
+  components:
+    - name: lpu
+      type: lpx
+      replicas: 1
+      lpx:
+        buildId: node-local-v2-connected-lpx
+      roles:
+      - name: leader
+        replicas: 1
+        podTemplate:
+          spec:
+            resourceClaims:
+            - name: gpu
+              resourceClaimTemplateName: decode-gpu
+            containers:
+            - name: main
+              image: example.invalid/gpu-runtime:test
+              command:
+              - /opt/gpu-runtime
+              args:
+              - serve
+              volumeMounts:
+              - name: config
+                mountPath: /configs
+              - name: infiniband
+                mountPath: /dev/infiniband
+              resources:
+                claims:
+                - name: gpu
+      - name: worker
+        podTemplate:
+          spec:
+            containers:
+            - name: main
+              image: example.invalid/lpu-runtime:test
+              command:
+              - /opt/dynamo-lpu
+              args:
+              - serve
+              resources:
+                limits:
+                  lpu.nvidia.com/devices: '1'
+              volumeMounts:
+              - mountPath: /nfs
+                name: model-storage
+            volumes:
+            - name: model-storage
+              persistentVolumeClaim:
+                claimName: model-storage

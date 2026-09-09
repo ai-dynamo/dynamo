@@ -92,7 +92,7 @@ type ComponentRoleSpec struct {
 
 	// PodTemplate defines the Pod configuration for this role. Admission permits
 	// it only when the enclosing component type explicitly supports role-specific
-	// Pod templates. No component type supports it in this release.
+	// Pod templates. LPX components support role-specific Pod templates.
 	// +optional
 	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 }
@@ -472,10 +472,10 @@ type DynamoCheckpointIdentity struct {
 	// +kubebuilder:validation:Required
 	Model string `json:"model"`
 
-	// BackendFramework is the runtime framework (vllm, sglang, trtllm).
+	// BackendFramework is the runtime framework (vllm, sglang, trtllm, lpu).
 	// Deprecated: legacy identity only.
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Enum=vllm;sglang;trtllm
+	// +kubebuilder:validation:Enum=vllm;sglang;trtllm;lpu
 	BackendFramework string `json:"backendFramework"`
 
 	// DynamoVersion is the Dynamo platform version.

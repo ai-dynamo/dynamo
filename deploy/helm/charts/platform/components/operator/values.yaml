@@ -22,6 +22,16 @@
 # the cluster-wide operator.
 upgradeCRD: true
 
+# LPX is an externally installed scheduler integration. Enabling it only
+# configures the Dynamo operator; this chart never installs LPX resources.
+lpx:
+  # -- Enable node-local LpuPipelineRequest production. Startup verifies that the
+  # externally installed LPX API serves scheduling.lpu.nvidia.com/v1alpha1
+  # LpuPipelineRequest resources and fails otherwise.
+  enabled: false
+  # -- Configure the LPU model registry used by the LPX integration.
+  modelRegistryURL: ""
+
 # Environment variables to pass to operator Deployment.
 env: []
 
@@ -70,6 +80,7 @@ controllerManager:
     namespace: ""
 
   manager:
+    defaultExtraPodSpecMergeStrategy: override
     containerSecurityContext:
       allowPrivilegeEscalation: false
       capabilities:
@@ -90,6 +101,8 @@ controllerManager:
       requests:
         cpu: 512m
         memory: 1Gi
+    volumeMounts: []
+    volumes: []
   replicas: 1
   serviceAccount:
     annotations: {}

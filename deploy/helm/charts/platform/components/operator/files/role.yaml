@@ -254,6 +254,7 @@ rules:
   - dynamographdeployments
   - dynamographdeploymentscalingadapters
   - dynamomodels
+  - lpxgraphdeployments
   verbs:
   - create
   - delete
@@ -269,6 +270,7 @@ rules:
   - dynamographdeploymentrequests/finalizers
   - dynamographdeployments/finalizers
   - dynamomodels/finalizers
+  - lpxgraphdeployments/finalizers
   verbs:
   - update
 - apiGroups:
@@ -279,6 +281,7 @@ rules:
   - dynamographdeployments/status
   - dynamographdeploymentscalingadapters/status
   - dynamomodels/status
+  - lpxgraphdeployments/status
   verbs:
   - get
   - patch
@@ -352,6 +355,25 @@ rules:
   - get
   - list
   - patch
+  - update
+  - watch
+- apiGroups:
+  - scheduler.grove.io
+  resources:
+  - podgangs
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - scheduling.lpu.nvidia.com
+  resources:
+  - lpupipelinerequests
+  verbs:
+  - create
+  - delete
+  - get
+  - list
   - update
   - watch
 - apiGroups:

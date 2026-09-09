@@ -19,6 +19,7 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"strings"
 
@@ -28,6 +29,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -68,7 +70,7 @@ func (r *dgdScalingAdaptersReconciler) Reconcile(
 			},
 		}
 
-		// Remove the adapter when scaling is no longer enabled for the component.
+		// Remove the adapter when component-level scaling is no longer enabled.
 		if component.ScalingAdapter == nil {
 			if err := r.Delete(ctx, adapter); err != nil {
 				if apierrors.IsNotFound(err) {
@@ -151,7 +153,7 @@ func (r *dgdScalingAdaptersReconciler) Reconcile(
 		}
 	}
 
-	// Delete adapters whose components have been removed from the DGD.
+	// Delete adapters whose component target was removed.
 	adapterList := &nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapterList{}
 	if err := r.List(
 		ctx,
@@ -166,11 +168,17 @@ func (r *dgdScalingAdaptersReconciler) Reconcile(
 	for i := range adapterList.Items {
 		adapter := &adapterList.Items[i]
 		componentName := adapter.Spec.DGDRef.ServiceName
+
+		// Retain adapters whose component still exists.
 		if dgd.GetComponentByName(componentName) != nil {
 			continue
 		}
 
-		logger.Info("Deleting orphaned DynamoGraphDeploymentScalingAdapter", "adapter", adapter.Name, "component", componentName)
+		logger.Info(
+			"Deleting orphaned DynamoGraphDeploymentScalingAdapter",
+			"adapter", adapter.Name,
+			"component", componentName,
+		)
 		if err := r.Delete(ctx, adapter); err != nil {
 			if apierrors.IsNotFound(err) {
 				continue
@@ -196,5 +204,19 @@ func (r *dgdScalingAdaptersReconciler) Reconcile(
 }
 
 func generateAdapterName(dgdName, componentName string) string {
-	return fmt.Sprintf("%s-%s", dgdName, strings.ToLower(componentName))
+	name := fmt.Sprintf("%s-%s", dgdName, strings.ToLower(componentName))
+	if len(k8svalidation.IsDNS1123Subdomain(name)) == 0 {
+		return name
+	}
+
+	// Preserve uniqueness after constraining an invalid combination to a DNS label.
+	hash := sha256.Sum256([]byte(name))
+	hashSuffix := fmt.Sprintf("-%x", hash[:8])
+	prefix := strings.ReplaceAll(name, ".", "-")
+	maxPrefixLength := k8svalidation.DNS1123LabelMaxLength - len(hashSuffix)
+	if len(prefix) > maxPrefixLength {
+		prefix = prefix[:maxPrefixLength]
+	}
+	prefix = strings.TrimRight(prefix, "-")
+	return prefix + hashSuffix
 }

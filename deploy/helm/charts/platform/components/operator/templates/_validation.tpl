@@ -117,3 +117,13 @@ Validation for discoveryBackend configuration
   {{- fail (printf "VALIDATION ERROR: discoveryBackend must be 'kubernetes' (default) or 'etcd'. Got: '%s'" $discoveryBackend) -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Validation for defaultExtraPodSpecMergeStrategy configuration
+*/}}
+{{- define "dynamo-operator.validateExtraPodSpecMergeStrategy" -}}
+{{- $strategy := default "override" .Values.controllerManager.manager.defaultExtraPodSpecMergeStrategy -}}
+{{- if and (ne $strategy "override") (ne $strategy "strategic") -}}
+  {{- fail (printf "VALIDATION ERROR: controllerManager.manager.defaultExtraPodSpecMergeStrategy must be 'override' or 'strategic'. Got: '%s'" $strategy) -}}
+{{- end -}}
+{{- end -}}

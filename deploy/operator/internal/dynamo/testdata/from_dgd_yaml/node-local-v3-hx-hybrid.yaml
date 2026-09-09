@@ -1,0 +1,603 @@
+data:
+  datacenter.toml: |
+    model_base_paths = ['/nfs']
+
+    [datacenters]
+    [datacenters.racks]
+    [datacenters.racks.lpu-wkr-m-0]
+    available_nodes = [0]
+    node_name_template = '${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-lpu-wkr-m-0-{node}.${GROVE_HEADLESS_SERVICE}'
+    preferred_start = 0
+  gas_dir: /nfs/node-local-v3-hx-connected-lpx
+  model_config.toml: |
+    type = 'Single'
+
+    [iop]
+    batch_size = 1
+    cpu_embeddings = false
+    dkvc = false
+    input_size = 1
+    model_path = '/nfs/node-local-v3-hx-connected-lpx'
+    num_kv_caches = 1
+    output_size = 1
+    prop_sync = false
+    sequence_length = 8192
+    stop_tokens = [1]
+    tokenizer_path = '/nfs/node-local-v3-hx-connected-lpx/tokenizer'
+
+    [scheduler]
+
+    [setup]
+    resolved_partitions_dir = '/configs'
+    setup_ops_format = 'agent_v2'
+  nodes_per_partition: "1"
+  partition_ids: "1"
+  partition_indices: "0"
+  partition_models: default
+  partition_node_offsets: "0"
+  partition_paths: part-1
+  topologies: opaque-v3-topology
+metadata:
+  annotations:
+    lpx.nvidia.com/deployment-generation: "1"
+    lpx.nvidia.com/deployment-uid: lpx-render-uid
+    lpx.nvidia.com/input-revision: sha256:a234fc949b9761ea6f6bf523930025ea27b373bb8b2dfda3dd3b4512b6533c6c
+    scheduling.lpu.nvidia.com/dgd-generation: "1"
+    scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
+  name: node-local-v3-hx-hybrid-lpu
+  namespace: test
+---
+metadata:
+  annotations:
+    lpx.nvidia.com/deployment-generation: "1"
+    lpx.nvidia.com/deployment-uid: lpx-render-uid
+    lpx.nvidia.com/input-revision: sha256:a234fc949b9761ea6f6bf523930025ea27b373bb8b2dfda3dd3b4512b6533c6c
+    scheduling.lpu.nvidia.com/dgd-generation: "1"
+    scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
+    scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:8fdccd781b4850f821d63b39d26c3a176fc1a06c246b350af31af22c7542bd64
+  labels:
+    nvidia.com/dynamo-graph-deployment-name: node-local-v3-hx-hybrid
+  name: node-local-b112da53-lpx
+  namespace: test
+spec:
+  replicas: 1
+  template:
+    cliqueStartupType: CliqueStartupTypeExplicit
+    cliques:
+    - annotations:
+        lpx.nvidia.com/deployment-generation: "1"
+        lpx.nvidia.com/deployment-uid: lpx-render-uid
+        lpx.nvidia.com/input-revision: sha256:a234fc949b9761ea6f6bf523930025ea27b373bb8b2dfda3dd3b4512b6533c6c
+        scheduling.lpu.nvidia.com/dgd-generation: "1"
+        scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:8fdccd781b4850f821d63b39d26c3a176fc1a06c246b350af31af22c7542bd64
+        scheduling.lpu.nvidia.com/role: cyborg-worker
+      labels:
+        lpx.nvidia.com/execution-role: gpu
+        lpx.nvidia.com/serving: "true"
+        lpx.nvidia.com/stage: lpu
+        nvidia.com/dynamo-component: lpu
+        nvidia.com/dynamo-component-type: lpx
+        nvidia.com/dynamo-graph-deployment-name: node-local-v3-hx-hybrid
+        nvidia.com/dynamo-namespace: test-node-local-v3-hx-hybrid
+        nvidia.com/metrics-enabled: "true"
+        nvidia.com/selector: node-local-v3-hx-hybrid-lpu
+      name: lpu-engine-gpu
+      spec:
+        minAvailable: 1
+        podSpec:
+          containers:
+          - args:
+            - serve
+            command:
+            - /opt/gpu-runtime
+            env:
+            - name: CYBORG_BATCH_SIZE
+              value: "1"
+            - name: CYBORG_FPGA_GPI_IO_FPGA_COUNT
+              value: "1"
+            - name: CYBORG_FPGA_GPI_REPLICA_INDEX
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['grove.io/podclique-pod-index']
+            - name: CYBORG_SWA_CACHE_IDS
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['grove.io/podclique-pod-index']
+            - name: DYN_COMPONENT
+              value: decode
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_FORWARDPASS_METRIC_PORT
+              value: "20380"
+            - name: DYN_HEALTH_CHECK_ENABLED
+              value: "false"
+            - name: DYN_NAMESPACE
+              value: test-node-local-v3-hx-hybrid
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: node-local-v3-hx-hybrid
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: test
+            - name: DYN_SYSTEM_ENABLED
+              value: "true"
+            - name: DYN_SYSTEM_PORT
+              value: "9090"
+            - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+              value: '["generate"]'
+            - name: ETCD_ENDPOINTS
+              value: etcd-address
+            - name: GBUILD_MANIFEST_PATH
+              value: /nfs/node-local-v3-hx-connected-lpx/manifest.v2.capnp.bin
+            - name: NATS_SERVER
+              value: nats-address
+            - name: NIXL_TELEMETRY_ENABLE
+              value: "n"
+            - name: NIXL_TELEMETRY_EXPORTER
+              value: prometheus
+            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+              value: "19090"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            image: example.invalid/gpu-runtime:test
+            livenessProbe:
+              failureThreshold: 1
+              httpGet:
+                path: /live
+                port: system
+              periodSeconds: 5
+              timeoutSeconds: 4
+            name: main
+            ports:
+            - containerPort: 9090
+              name: system
+              protocol: TCP
+            - containerPort: 19090
+              name: nixl
+              protocol: TCP
+            readinessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /health
+                port: system
+              periodSeconds: 10
+              timeoutSeconds: 4
+            resources:
+              claims:
+              - name: gpu
+            startupProbe:
+              failureThreshold: 720
+              httpGet:
+                path: /live
+                port: system
+              periodSeconds: 10
+              timeoutSeconds: 5
+            volumeMounts:
+            - mountPath: /dev/shm
+              name: shared-memory
+            - mountPath: /nfs
+              name: model-storage
+          resourceClaims:
+          - name: gpu
+            resourceClaimTemplateName: decode-gpu
+          restartPolicy: Always
+          schedulerName: default-scheduler
+          securityContext:
+            fsGroup: 1000
+            fsGroupChangePolicy: OnRootMismatch
+          terminationGracePeriodSeconds: 60
+          volumes:
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+            name: shared-memory
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+        replicas: 1
+        roleName: lpu-engine-gpu
+        startsAfter:
+        - lpu-wkr-m-0
+    - annotations:
+        lpx.nvidia.com/deployment-generation: "1"
+        lpx.nvidia.com/deployment-uid: lpx-render-uid
+        lpx.nvidia.com/input-revision: sha256:a234fc949b9761ea6f6bf523930025ea27b373bb8b2dfda3dd3b4512b6533c6c
+        nvidia.com/extra-resources-hash: 8803dd921b1a97775b917767487276baa0462067b92142d4456e4409df78ee42
+        scheduling.lpu.nvidia.com/dgd-generation: "1"
+        scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:8fdccd781b4850f821d63b39d26c3a176fc1a06c246b350af31af22c7542bd64
+        scheduling.lpu.nvidia.com/model: default
+        scheduling.lpu.nvidia.com/role: agent
+        scheduling.lpu.nvidia.com/workload-mode: v3HxStrictHybrid
+      labels:
+        lpx.nvidia.com/execution-role: lpu
+        lpx.nvidia.com/stage: lpu
+        nvidia.com/dynamo-component: lpu
+        nvidia.com/dynamo-component-type: lpx
+        nvidia.com/dynamo-graph-deployment-name: node-local-v3-hx-hybrid
+        nvidia.com/dynamo-namespace: test-node-local-v3-hx-hybrid
+        nvidia.com/metrics-enabled: "true"
+        nvidia.com/selector: node-local-v3-hx-hybrid-lpu
+      name: lpu-wkr-m-0
+      spec:
+        minAvailable: 1
+        podSpec:
+          containers:
+          - args:
+            - -c
+            - "set -euo pipefail\n\nrun_lpu_system_init() {\n\tif [[ ! -e /dev/fd
+              ]]; then\n\t\tln -svf /proc/self/fd /dev/fd || true\n\tfi\n\tmkdir -p
+              /tmp\n\tmkdir -p /var/run/dpdk/rte || true\n\tchmod 777 /var/run/dpdk/rte
+              || true\n\tulimit -l unlimited || true\n\n\tif command -v lpu-system-init
+              >/dev/null 2>&1; then\n\t\tlocal init_ok=\"unknown\"\n\t\tlocal init_status=0\n\t\tfor
+              attempt in $(seq 1 2); do\n\t\t\techo \"Running lpu-system-init (attempt
+              ${attempt})...\"\n\t\t\tlocal init_output\n\t\t\tlocal -a init_args=(--ci-precommand)\n\t\t\tif
+              (( attempt == 2 )); then\n\t\t\t\tinit_args+=(--ci-remediation-commands)\n\t\t\tfi\n\t\t\tset
+              +e\n\t\t\tinit_output=\"$(lpu-system-init \"${init_args[@]}\" 2>&1)\"\n\t\t\tinit_status=$?\n\t\t\tset
+              -e\n\t\t\techo \"${init_output}\"\n\t\t\tinit_ok=\"$(echo \"${init_output}\"
+              | grep -o '\"ok\": *[a-z]*' | tail -1 | grep -o 'true\\|false' || echo
+              \"unknown\")\"\n\t\t\tif (( init_status == 0 )) && [[ \"${init_ok}\"
+              != \"false\" ]]; then\n\t\t\t\tbreak\n\t\t\tfi\n\t\t\tif (( attempt
+              == 1 )); then\n\t\t\t\tif (( init_status != 0 )); then\n\t\t\t\t\techo
+              \"lpu-system-init exited with status ${init_status}; retrying with remediation\"
+              >&2\n\t\t\t\telse\n\t\t\t\t\techo \"lpu-system-init reported ok=false;
+              retrying with remediation\" >&2\n\t\t\t\tfi\n\t\t\tfi\n\t\tdone\n\t\tif
+              (( init_status != 0 )) || [[ \"${init_ok}\" == \"false\" ]]; then\n\t\t\techo
+              \"lpu-system-init failed after 2 attempts; aborting\" >&2\n\t\t\texit
+              1\n\t\tfi\n\telse\n\t\techo \"lpu-system-init not found; continuing
+              without pre-init\" >&2\n\tfi\n}\n\nset -euo pipefail\n\nLPU_CONFIG_DIR=\"${LPU_CONFIG_DIR:-/configs}\"\nCLIQUE_POD_INDEX=\"${GROVE_PCLQ_POD_INDEX:-}\"\nif
+              ! [[ \"${CLIQUE_POD_INDEX}\" =~ ^[0-9]+$ ]]; then\n\techo \"GROVE_PCLQ_POD_INDEX
+              must be a non-negative integer, got ${CLIQUE_POD_INDEX:-<empty>}\" >&2\n\texit
+              1\nfi\n\nreadarray -t PARTITION_NODE_COUNTS < \"${LPU_CONFIG_DIR}/nodes_per_partition\"\nreadarray
+              -t PARTITION_NODE_OFFSETS < \"${LPU_CONFIG_DIR}/partition_node_offsets\"\nif
+              (( ${#PARTITION_NODE_COUNTS[@]} == 0 || ${#PARTITION_NODE_COUNTS[@]}
+              != ${#PARTITION_NODE_OFFSETS[@]} )); then\n\techo \"nodes_per_partition
+              and partition_node_offsets must contain the same non-zero number of
+              rows\" >&2\n\texit 1\nfi\n\nif [[ -f \"${LPU_CONFIG_DIR}/partition_models\"
+              ]]; then\n\treadarray -t PARTITION_MODELS < \"${LPU_CONFIG_DIR}/partition_models\"\n\treadarray
+              -t PARTITION_INDICES < \"${LPU_CONFIG_DIR}/partition_indices\"\n\tif
+              [[ -z \"${LPU_MODEL_NAME:-}\" ]]; then\n\t\techo \"LPU_MODEL_NAME is
+              required when partition_models is configured\" >&2\n\t\texit 1\n\tfi\n\tif
+              (( ${#PARTITION_MODELS[@]} != ${#PARTITION_NODE_COUNTS[@]} || ${#PARTITION_INDICES[@]}
+              != ${#PARTITION_NODE_COUNTS[@]} )); then\n\t\techo \"partition_models
+              and partition_indices must match the partition config row count\" >&2\n\t\texit
+              1\n\tfi\nelse\n\tPARTITION_MODELS=()\n\tPARTITION_INDICES=()\nfi\n\nCONFIG_PARTITION_INDEX=\"\"\nLOGICAL_PARTITION_INDEX=\"\"\nPARTITION_RANK=\"\"\nNODE_COUNT=\"\"\nNODE_OFFSET=\"\"\nPARTITION_MATCH_COUNT=0\nfor
+              i in \"${!PARTITION_NODE_COUNTS[@]}\"; do\n\trow_node_count=\"${PARTITION_NODE_COUNTS[$i]}\"\n\trow_node_offset=\"${PARTITION_NODE_OFFSETS[$i]}\"\n\tif
+              ! [[ \"${row_node_count}\" =~ ^[1-9][0-9]*$ && \"${row_node_offset}\"
+              =~ ^[0-9]+$ ]]; then\n\t\techo \"Invalid partition row ${i}: node count
+              ${row_node_count}, node offset ${row_node_offset}\" >&2\n\t\texit 1\n\tfi\n\tif
+              (( ${#PARTITION_MODELS[@]} > 0 )) && [[ \"${PARTITION_MODELS[$i]}\"
+              != \"${LPU_MODEL_NAME}\" ]]; then\n\t\tcontinue\n\tfi\n\tif (( CLIQUE_POD_INDEX
+              < row_node_offset || CLIQUE_POD_INDEX >= row_node_offset + row_node_count
+              )); then\n\t\tcontinue\n\tfi\n\n\tCONFIG_PARTITION_INDEX=\"${i}\"\n\tLOGICAL_PARTITION_INDEX=\"${PARTITION_INDICES[$i]:-${i}}\"\n\tPARTITION_RANK=\"$((CLIQUE_POD_INDEX
+              - row_node_offset))\"\n\tNODE_COUNT=\"${row_node_count}\"\n\tNODE_OFFSET=\"${row_node_offset}\"\n\tPARTITION_MATCH_COUNT=$((PARTITION_MATCH_COUNT
+              + 1))\ndone\n\nif (( PARTITION_MATCH_COUNT != 1 )); then\n\techo \"Grove
+              pod index ${CLIQUE_POD_INDEX} matched ${PARTITION_MATCH_COUNT} partition
+              rows for model ${LPU_MODEL_NAME:-<default>}\" >&2\n\texit 1\nfi\nif
+              ! [[ \"${LOGICAL_PARTITION_INDEX}\" =~ ^[0-9]+$ ]]; then\n\techo \"Invalid
+              logical partition index ${LOGICAL_PARTITION_INDEX} for config row ${CONFIG_PARTITION_INDEX}\"
+              >&2\n\texit 1\nfi\n\n# Preserve legacy Agent names from Dynamo's runtime
+              partition mapping.\nexport PARTITION_ID=\"${LOGICAL_PARTITION_INDEX}\"\nexport
+              RANK_IN_PARTITION=\"${PARTITION_RANK}\"\n\nAGENT_BINARY=\"${AGENT_BINARY:-agent-hybrid-v2-roce}\"\nHOME=\"${HOME:-/root}\"\nMPI_SSH_PORT=\"${MPI_SSH_PORT:-2222}\"\nREADINESS_PORT=\"${READINESS_PORT:-19878}\"\nRDMA_PORT=\"${RDMA_PORT:-19877}\"\n\nreadarray
+              -t SOURCE_PARTITIONS < \"${LPU_CONFIG_DIR}/partition_ids\"\nreadarray
+              -t PARTITION_PATHS < \"${LPU_CONFIG_DIR}/partition_paths\"\nreadarray
+              -t TOPOLOGIES < \"${LPU_CONFIG_DIR}/topologies\"\n\nSOURCE_PARTITION=\"${SOURCE_PARTITIONS[$CONFIG_PARTITION_INDEX]}\"\nPARTITION_PATH=\"${PARTITION_PATHS[$CONFIG_PARTITION_INDEX]}\"\nTOPOLOGY=\"${TOPOLOGIES[$CONFIG_PARTITION_INDEX]}\"\n\nagent_part_from_partition_path()
+              {\n\tlocal part_path=\"$1\"\n\tlocal part_name=\"${part_path##*/}\"\n\tif
+              [[ \"${part_name}\" =~ ^part-?([0-9]+)$ ]]; then\n\t\tprintf \"%s\\n\"
+              \"${BASH_REMATCH[1]}\"\n\t\treturn\n\tfi\n\n\tprintf \"%s\\n\" \"${SOURCE_PARTITION}\"\n}\n\nagent_assemble_dir_from_partition_path()
+              {\n\tlocal part_path=\"$1\"\n\tlocal agent_part=\"$2\"\n\tlocal part_name=\"${part_path##*/}\"\n\tlocal
+              parent=\"${part_path%/*}\"\n\tif [[ \"${part_name}\" != \"part-${agent_part}\"
+              ]]; then\n\t\tlocal assemble_dir=\"/tmp/dynamo-agent-assemble/row-${CONFIG_PARTITION_INDEX}\"\n\t\tmkdir
+              -p \"${assemble_dir}\"\n\t\tln -sfn \"${GAS_DIR}/${part_path}\" \"${assemble_dir}/part-${agent_part}\"\n\t\tprintf
+              \"%s\\n\" \"${assemble_dir}\"\n\t\treturn\n\tfi\n\tif [[ \"${parent}\"
+              == \"${part_path}\" ]]; then\n\t\tprintf \"%s\\n\" \"${GAS_DIR}\"\n\t\treturn\n\tfi\n\tprintf
+              \"%s/%s\\n\" \"${GAS_DIR}\" \"${parent}\"\n}\n\nAGENT_PART=\"$(agent_part_from_partition_path
+              \"${PARTITION_PATH}\")\"\nAGENT_ASSEMBLE_DIR=\"$(agent_assemble_dir_from_partition_path
+              \"${PARTITION_PATH}\" \"${AGENT_PART}\")\"\n\nsetup_ssh() {\n\tmkdir
+              -p \"${HOME}/.ssh\" \"${HOME}/.ssh/host_keys\"\n\tcp /ssh-pk/private.key
+              \"${HOME}/.ssh/id_rsa\"\n\tcp /ssh-pk/private.key.pub \"${HOME}/.ssh/id_rsa.pub\"\n\tcp
+              /ssh-pk/private.key.pub \"${HOME}/.ssh/authorized_keys\"\n\tchmod 600
+              \"${HOME}/.ssh/id_rsa\" \"${HOME}/.ssh/authorized_keys\"\n\tchmod 644
+              \"${HOME}/.ssh/id_rsa.pub\"\n\tprintf \"Host *\\nIdentityFile %s/.ssh/id_rsa\\nStrictHostKeyChecking
+              no\\nPort %s\\n\" \"${HOME}\" \"${MPI_SSH_PORT}\" > \"${HOME}/.ssh/config\"\n\n\tssh-keygen
+              -t rsa -f \"${HOME}/.ssh/host_keys/ssh_host_rsa_key\" -N \"\" -q\n\tssh-keygen
+              -t ecdsa -f \"${HOME}/.ssh/host_keys/ssh_host_ecdsa_key\" -N \"\" -q\n\tssh-keygen
+              -t ed25519 -f \"${HOME}/.ssh/host_keys/ssh_host_ed25519_key\" -N \"\"
+              -q\n}\n\nrun_sshd() {\n\tsetup_ssh\n\techo \"Starting sshd on port ${MPI_SSH_PORT}
+              for partition ${LOGICAL_PARTITION_INDEX} rank ${PARTITION_RANK}\"\n\texec
+              /bin/sshd -D -e \\\n\t\t-o \"PidFile none\" \\\n\t\t-o \"Port ${MPI_SSH_PORT}\"
+              \\\n\t\t-o \"AuthorizedKeysFile ${HOME}/.ssh/authorized_keys\" \\\n\t\t-o
+              \"StrictModes no\" \\\n\t\t-o \"PermitRootLogin yes\" \\\n\t\t-o \"PubkeyAuthentication
+              yes\" \\\n\t\t-o \"SetEnv PARTITION_ID=\\\"${PARTITION_ID}\\\" RANK_IN_PARTITION=\\\"${RANK_IN_PARTITION}\\\"\"
+              \\\n\t\t-h \"${HOME}/.ssh/host_keys/ssh_host_rsa_key\" \\\n\t\t-h \"${HOME}/.ssh/host_keys/ssh_host_ecdsa_key\"
+              \\\n\t\t-h \"${HOME}/.ssh/host_keys/ssh_host_ed25519_key\"\n}\n\npartition_hostnames()
+              {\n\tfor ((rank = 0; rank < NODE_COUNT; rank++)); do\n\t\tlocal node_index=$((NODE_OFFSET
+              + rank))\n\t\tprintf \"%s-%d.%s\\n\" \"${GROVE_PCLQ_NAME}\" \"${node_index}\"
+              \"${GROVE_HEADLESS_SERVICE}\"\n\tdone\n}\n\nwait_for_peer_ssh() {\n\tlocal
+              host=\"$1\"\n\tfor i in $(seq 1 120); do\n\t\tif ssh -o ConnectTimeout=2
+              \"root@${host}\" echo ok >/dev/null 2>&1; then\n\t\t\techo \"${host}:${MPI_SSH_PORT}
+              reachable\"\n\t\t\treturn\n\t\tfi\n\t\tif [[ \"${i}\" == \"120\" ]];
+              then\n\t\t\techo \"${host}:${MPI_SSH_PORT} unreachable after 120 attempts\"
+              >&2\n\t\t\texit 1\n\t\tfi\n\t\tsleep 1\n\tdone\n}\n\nrun_lpu_system_init\ncommand
+              -v \"${AGENT_BINARY}\"\n\nif (( NODE_COUNT == 1 )); then\n\techo \"Starting
+              ${AGENT_BINARY} for logical partition ${LOGICAL_PARTITION_INDEX}, source
+              partition ${SOURCE_PARTITION}, part path ${PARTITION_PATH}, assemble-dir
+              ${AGENT_ASSEMBLE_DIR}, topology ${TOPOLOGY}\"\n\texec \"${AGENT_BINARY}\"
+              \\\n\t\t--assemble-dir \"${AGENT_ASSEMBLE_DIR}\" \\\n\t\t--part \"${AGENT_PART}\"
+              \\\n\t\t--topology \"${TOPOLOGY}\" \\\n\t\t--port \"${RDMA_PORT}\" \\\n\t\t--readiness-port
+              \"${READINESS_PORT}\" \\\n\t\t--stage-name continue\nfi\n\nif [[ \"${PARTITION_RANK}\"
+              != \"0\" ]]; then\n\trun_sshd\nfi\n\nsetup_ssh\nPARTITION_HOSTS=\"$(partition_hostnames)\"\nreadarray
+              -t NODE_HOSTS <<< \"${PARTITION_HOSTS}\"\n\nMPI_HOSTS=()\nMPI_HOSTS+=(\"${POD_IP}:1\")\nfor
+              host in \"${NODE_HOSTS[@]:1}\"; do\n\tMPI_HOSTS+=(\"${host}:1\")\ndone\nMPI_HOST_LIST=$(IFS=,;
+              echo \"${MPI_HOSTS[*]}\")\n\nfor host in \"${NODE_HOSTS[@]:1}\"; do\n\twait_for_peer_ssh
+              \"${host}\"\ndone\n\nMPI_ARGS=(\n\t--allow-run-as-root\n\t--host \"${MPI_HOST_LIST}\"\n\t-np
+              \"${NODE_COUNT}\"\n\t--map-by ppr:1:node:OVERSUBSCRIBE\n\t--mca pml
+              ob1\n\t--mca btl tcp,self\n\t--mca mtl ^ofi\n\t--mca plm_rsh_args \"-p
+              ${MPI_SSH_PORT}\"\n\t--bind-to none\n\t-x GROQ_DRACO_NETWORK_UP_CHECK_TIMEOUT\n\t-x
+              DRACO_FORCE_RECONFIGURE\n\t-x DRACO_MAXFILE_OVERRIDE\n\t-x LPU_VSAP_DIB_CREDIT_AUTO_RESTORE_US\n\t--output
+              TAG\n)\nif [[ -n \"${MPI_BTL_TCP_IF_INCLUDE:-}\" ]]; then\n\tMPI_ARGS+=(--mca
+              btl_tcp_if_include \"${MPI_BTL_TCP_IF_INCLUDE}\")\nfi\n\necho \"Starting
+              mpirun for logical partition ${LOGICAL_PARTITION_INDEX}, source partition
+              ${SOURCE_PARTITION}, part path ${PARTITION_PATH}, assemble-dir ${AGENT_ASSEMBLE_DIR},
+              topology ${TOPOLOGY}\"\nexec numactl --cpunodebind=0 --membind=0 mpirun
+              \"${MPI_ARGS[@]}\" -- \\\n\t\"${AGENT_BINARY}\" \\\n\t\t--assemble-dir
+              \"${AGENT_ASSEMBLE_DIR}\" \\\n\t\t--part \"${AGENT_PART}\" \\\n\t\t--topology
+              \"${TOPOLOGY}\" \\\n\t\t--multinode \\\n\t\t--port \"${RDMA_PORT}\"
+              \\\n\t\t--readiness-port \"${READINESS_PORT}\" \\\n\t\t--stage-name
+              continue\n"
+            command:
+            - /bin/bash
+            env:
+            - name: DYN_COMPONENT
+              value: lpx
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_NAMESPACE
+              value: test-node-local-v3-hx-hybrid
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: node-local-v3-hx-hybrid
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: test
+            - name: ETCD_ENDPOINTS
+              value: etcd-address
+            - name: GAS_DIR
+              valueFrom:
+                configMapKeyRef:
+                  key: gas_dir
+                  name: node-local-v3-hx-hybrid-lpu
+            - name: GLUE_RDMA_PATH_MTU
+              value: "1024"
+            - name: LPU_MODEL_NAME
+              value: default
+            - name: NATS_SERVER
+              value: nats-address
+            - name: NIC_NAME
+              value: mlx5_0
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: RDMA_PORT
+              value: "19877"
+            - name: READINESS_PORT
+              value: "19878"
+            - name: TOPOLOGIES
+              valueFrom:
+                configMapKeyRef:
+                  key: topologies
+                  name: node-local-v3-hx-hybrid-lpu
+            - name: UCX_TLS
+              value: tcp
+            image: example.invalid/lpu-runtime:test
+            name: agent
+            readinessProbe:
+              exec:
+                command:
+                - /bin/bash
+                - -c
+                - "set -euo pipefail\n\nLPU_CONFIG_DIR=\"${LPU_CONFIG_DIR:-/configs}\"\nCLIQUE_POD_INDEX=\"${GROVE_PCLQ_POD_INDEX:-}\"\nif
+                  ! [[ \"${CLIQUE_POD_INDEX}\" =~ ^[0-9]+$ ]]; then\n\techo \"GROVE_PCLQ_POD_INDEX
+                  must be a non-negative integer, got ${CLIQUE_POD_INDEX:-<empty>}\"
+                  >&2\n\texit 1\nfi\n\nreadarray -t PARTITION_NODE_COUNTS < \"${LPU_CONFIG_DIR}/nodes_per_partition\"\nreadarray
+                  -t PARTITION_NODE_OFFSETS < \"${LPU_CONFIG_DIR}/partition_node_offsets\"\nif
+                  (( ${#PARTITION_NODE_COUNTS[@]} == 0 || ${#PARTITION_NODE_COUNTS[@]}
+                  != ${#PARTITION_NODE_OFFSETS[@]} )); then\n\techo \"nodes_per_partition
+                  and partition_node_offsets must contain the same non-zero number
+                  of rows\" >&2\n\texit 1\nfi\n\nif [[ -f \"${LPU_CONFIG_DIR}/partition_models\"
+                  ]]; then\n\treadarray -t PARTITION_MODELS < \"${LPU_CONFIG_DIR}/partition_models\"\n\treadarray
+                  -t PARTITION_INDICES < \"${LPU_CONFIG_DIR}/partition_indices\"\n\tif
+                  [[ -z \"${LPU_MODEL_NAME:-}\" ]]; then\n\t\techo \"LPU_MODEL_NAME
+                  is required when partition_models is configured\" >&2\n\t\texit
+                  1\n\tfi\n\tif (( ${#PARTITION_MODELS[@]} != ${#PARTITION_NODE_COUNTS[@]}
+                  || ${#PARTITION_INDICES[@]} != ${#PARTITION_NODE_COUNTS[@]} ));
+                  then\n\t\techo \"partition_models and partition_indices must match
+                  the partition config row count\" >&2\n\t\texit 1\n\tfi\nelse\n\tPARTITION_MODELS=()\n\tPARTITION_INDICES=()\nfi\n\nCONFIG_PARTITION_INDEX=\"\"\nLOGICAL_PARTITION_INDEX=\"\"\nPARTITION_RANK=\"\"\nNODE_COUNT=\"\"\nNODE_OFFSET=\"\"\nPARTITION_MATCH_COUNT=0\nfor
+                  i in \"${!PARTITION_NODE_COUNTS[@]}\"; do\n\trow_node_count=\"${PARTITION_NODE_COUNTS[$i]}\"\n\trow_node_offset=\"${PARTITION_NODE_OFFSETS[$i]}\"\n\tif
+                  ! [[ \"${row_node_count}\" =~ ^[1-9][0-9]*$ && \"${row_node_offset}\"
+                  =~ ^[0-9]+$ ]]; then\n\t\techo \"Invalid partition row ${i}: node
+                  count ${row_node_count}, node offset ${row_node_offset}\" >&2\n\t\texit
+                  1\n\tfi\n\tif (( ${#PARTITION_MODELS[@]} > 0 )) && [[ \"${PARTITION_MODELS[$i]}\"
+                  != \"${LPU_MODEL_NAME}\" ]]; then\n\t\tcontinue\n\tfi\n\tif (( CLIQUE_POD_INDEX
+                  < row_node_offset || CLIQUE_POD_INDEX >= row_node_offset + row_node_count
+                  )); then\n\t\tcontinue\n\tfi\n\n\tCONFIG_PARTITION_INDEX=\"${i}\"\n\tLOGICAL_PARTITION_INDEX=\"${PARTITION_INDICES[$i]:-${i}}\"\n\tPARTITION_RANK=\"$((CLIQUE_POD_INDEX
+                  - row_node_offset))\"\n\tNODE_COUNT=\"${row_node_count}\"\n\tNODE_OFFSET=\"${row_node_offset}\"\n\tPARTITION_MATCH_COUNT=$((PARTITION_MATCH_COUNT
+                  + 1))\ndone\n\nif (( PARTITION_MATCH_COUNT != 1 )); then\n\techo
+                  \"Grove pod index ${CLIQUE_POD_INDEX} matched ${PARTITION_MATCH_COUNT}
+                  partition rows for model ${LPU_MODEL_NAME:-<default>}\" >&2\n\texit
+                  1\nfi\nif ! [[ \"${LOGICAL_PARTITION_INDEX}\" =~ ^[0-9]+$ ]]; then\n\techo
+                  \"Invalid logical partition index ${LOGICAL_PARTITION_INDEX} for
+                  config row ${CONFIG_PARTITION_INDEX}\" >&2\n\texit 1\nfi\n\nif ((
+                  NODE_COUNT > 1 )) && [[ \"${PARTITION_RANK}\" != \"0\" ]]; then\n\tcat
+                  < /dev/null > \"/dev/tcp/127.0.0.1/${MPI_SSH_PORT:-2222}\"\nelse\n\texec
+                  3<>\"/dev/tcp/127.0.0.1/${READINESS_PORT:-19878}\"\n\tprintf \"GET
+                  /readyz HTTP/1.0\\r\\n\\r\\n\" >&3\n\tread -r STATUS <&3\n\t[[ \"${STATUS}\"
+                  == *\" 200 \"* ]]\nfi"
+              failureThreshold: 6
+              periodSeconds: 5
+              successThreshold: 1
+              timeoutSeconds: 1
+            resources:
+              limits:
+                hugepages-2Mi: 4Gi
+                nvidia.com/lpu: "16"
+              requests:
+                cpu: "62"
+                hugepages-2Mi: 4Gi
+                nvidia.com/lpu: "16"
+            securityContext:
+              privileged: true
+              runAsUser: 0
+            startupProbe:
+              exec:
+                command:
+                - /bin/bash
+                - -c
+                - "set -euo pipefail\n\nLPU_CONFIG_DIR=\"${LPU_CONFIG_DIR:-/configs}\"\nCLIQUE_POD_INDEX=\"${GROVE_PCLQ_POD_INDEX:-}\"\nif
+                  ! [[ \"${CLIQUE_POD_INDEX}\" =~ ^[0-9]+$ ]]; then\n\techo \"GROVE_PCLQ_POD_INDEX
+                  must be a non-negative integer, got ${CLIQUE_POD_INDEX:-<empty>}\"
+                  >&2\n\texit 1\nfi\n\nreadarray -t PARTITION_NODE_COUNTS < \"${LPU_CONFIG_DIR}/nodes_per_partition\"\nreadarray
+                  -t PARTITION_NODE_OFFSETS < \"${LPU_CONFIG_DIR}/partition_node_offsets\"\nif
+                  (( ${#PARTITION_NODE_COUNTS[@]} == 0 || ${#PARTITION_NODE_COUNTS[@]}
+                  != ${#PARTITION_NODE_OFFSETS[@]} )); then\n\techo \"nodes_per_partition
+                  and partition_node_offsets must contain the same non-zero number
+                  of rows\" >&2\n\texit 1\nfi\n\nif [[ -f \"${LPU_CONFIG_DIR}/partition_models\"
+                  ]]; then\n\treadarray -t PARTITION_MODELS < \"${LPU_CONFIG_DIR}/partition_models\"\n\treadarray
+                  -t PARTITION_INDICES < \"${LPU_CONFIG_DIR}/partition_indices\"\n\tif
+                  [[ -z \"${LPU_MODEL_NAME:-}\" ]]; then\n\t\techo \"LPU_MODEL_NAME
+                  is required when partition_models is configured\" >&2\n\t\texit
+                  1\n\tfi\n\tif (( ${#PARTITION_MODELS[@]} != ${#PARTITION_NODE_COUNTS[@]}
+                  || ${#PARTITION_INDICES[@]} != ${#PARTITION_NODE_COUNTS[@]} ));
+                  then\n\t\techo \"partition_models and partition_indices must match
+                  the partition config row count\" >&2\n\t\texit 1\n\tfi\nelse\n\tPARTITION_MODELS=()\n\tPARTITION_INDICES=()\nfi\n\nCONFIG_PARTITION_INDEX=\"\"\nLOGICAL_PARTITION_INDEX=\"\"\nPARTITION_RANK=\"\"\nNODE_COUNT=\"\"\nNODE_OFFSET=\"\"\nPARTITION_MATCH_COUNT=0\nfor
+                  i in \"${!PARTITION_NODE_COUNTS[@]}\"; do\n\trow_node_count=\"${PARTITION_NODE_COUNTS[$i]}\"\n\trow_node_offset=\"${PARTITION_NODE_OFFSETS[$i]}\"\n\tif
+                  ! [[ \"${row_node_count}\" =~ ^[1-9][0-9]*$ && \"${row_node_offset}\"
+                  =~ ^[0-9]+$ ]]; then\n\t\techo \"Invalid partition row ${i}: node
+                  count ${row_node_count}, node offset ${row_node_offset}\" >&2\n\t\texit
+                  1\n\tfi\n\tif (( ${#PARTITION_MODELS[@]} > 0 )) && [[ \"${PARTITION_MODELS[$i]}\"
+                  != \"${LPU_MODEL_NAME}\" ]]; then\n\t\tcontinue\n\tfi\n\tif (( CLIQUE_POD_INDEX
+                  < row_node_offset || CLIQUE_POD_INDEX >= row_node_offset + row_node_count
+                  )); then\n\t\tcontinue\n\tfi\n\n\tCONFIG_PARTITION_INDEX=\"${i}\"\n\tLOGICAL_PARTITION_INDEX=\"${PARTITION_INDICES[$i]:-${i}}\"\n\tPARTITION_RANK=\"$((CLIQUE_POD_INDEX
+                  - row_node_offset))\"\n\tNODE_COUNT=\"${row_node_count}\"\n\tNODE_OFFSET=\"${row_node_offset}\"\n\tPARTITION_MATCH_COUNT=$((PARTITION_MATCH_COUNT
+                  + 1))\ndone\n\nif (( PARTITION_MATCH_COUNT != 1 )); then\n\techo
+                  \"Grove pod index ${CLIQUE_POD_INDEX} matched ${PARTITION_MATCH_COUNT}
+                  partition rows for model ${LPU_MODEL_NAME:-<default>}\" >&2\n\texit
+                  1\nfi\nif ! [[ \"${LOGICAL_PARTITION_INDEX}\" =~ ^[0-9]+$ ]]; then\n\techo
+                  \"Invalid logical partition index ${LOGICAL_PARTITION_INDEX} for
+                  config row ${CONFIG_PARTITION_INDEX}\" >&2\n\texit 1\nfi\n\nif ((
+                  NODE_COUNT > 1 )) && [[ \"${PARTITION_RANK}\" != \"0\" ]]; then\n\tcat
+                  < /dev/null > \"/dev/tcp/127.0.0.1/${MPI_SSH_PORT:-2222}\"\nelse\n\texec
+                  3<>\"/dev/tcp/127.0.0.1/${READINESS_PORT:-19878}\"\n\tprintf \"GET
+                  /readyz HTTP/1.0\\r\\n\\r\\n\" >&3\n\tread -r STATUS <&3\n\t[[ \"${STATUS}\"
+                  == *\" 200 \"* ]]\nfi"
+              failureThreshold: 240
+              periodSeconds: 5
+              successThreshold: 1
+              timeoutSeconds: 1
+            stdin: true
+            tty: true
+            volumeMounts:
+            - mountPath: /nfs
+              name: model-storage
+            - mountPath: /dev/shm
+              name: shared-memory
+            - mountPath: /configs
+              name: config
+            - mountPath: /dev/hugepages
+              name: hugepages
+            - mountPath: /sys
+              name: host-sys
+            - mountPath: /dev
+              name: host-dev
+            - mountPath: /ssh-pk
+              name: ssh-secret
+              readOnly: true
+            - mountPath: /tmp
+              name: tmp
+          dnsPolicy: ClusterFirstWithHostNet
+          hostIPC: true
+          hostNetwork: true
+          restartPolicy: Always
+          schedulerName: lpx-scheduler
+          securityContext:
+            runAsGroup: 0
+            runAsUser: 0
+          terminationGracePeriodSeconds: 60
+          tolerations:
+          - key: lpu.nvidia.com/node
+            operator: Exists
+          - key: lpu.nvidia.com/lpu
+            operator: Exists
+          - key: lpu.nvidia.com/node-v2
+            operator: Exists
+          volumes:
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+            name: shared-memory
+          - configMap:
+              name: node-local-v3-hx-hybrid-lpu
+            name: config
+          - emptyDir: {}
+            name: tmp
+          - name: ssh-secret
+            secret:
+              defaultMode: 420
+              secretName: ssh-secret
+          - hostPath:
+              path: /dev
+              type: Directory
+            name: host-dev
+          - hostPath:
+              path: /sys
+              type: Directory
+            name: host-sys
+          - emptyDir:
+              medium: HugePages
+            name: hugepages
+        replicas: 1
+        roleName: lpu-wkr-m-0
+    headlessServiceConfig:
+      publishNotReadyAddresses: true
+    podCliqueScalingGroups:
+    - annotations:
+        lpx.nvidia.com/deployment-generation: "1"
+        lpx.nvidia.com/deployment-uid: lpx-render-uid
+        lpx.nvidia.com/input-revision: sha256:a234fc949b9761ea6f6bf523930025ea27b373bb8b2dfda3dd3b4512b6533c6c
+        scheduling.lpu.nvidia.com/dgd-generation: "1"
+        scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:8fdccd781b4850f821d63b39d26c3a176fc1a06c246b350af31af22c7542bd64
+      cliqueNames:
+      - lpu-wkr-m-0
+      - lpu-engine-gpu
+      minAvailable: 1
+      name: lpu
+      replicas: 1
+    terminationDelay: 15m0s
+status:
+  availableReplicas: 0
+  updatedReplicas: 0

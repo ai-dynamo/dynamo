@@ -29,6 +29,18 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
+// +kubebuilder:validation:Enum=override;strategic
+type ExtraPodSpecMergeStrategy string
+
+const (
+	ExtraPodSpecMergeStrategyOverride  ExtraPodSpecMergeStrategy = "override"
+	ExtraPodSpecMergeStrategyStrategic ExtraPodSpecMergeStrategy = "strategic"
+)
+
+func (s ExtraPodSpecMergeStrategy) IsValid() bool {
+	return s == ExtraPodSpecMergeStrategyOverride || s == ExtraPodSpecMergeStrategyStrategic
+}
+
 const (
 	// DynamoComponentDeploymentConditionTypeAvailable indicates the component is
 	// available and serving traffic.
@@ -47,8 +59,10 @@ const (
 )
 
 // DynamoComponentDeploymentSpec defines the desired state of a DynamoComponentDeployment.
+// +kubebuilder:validation:XValidation:rule="!(has(self.type) && self.type == 'lpx')",message="standalone LPX DynamoComponentDeployments are not supported; use DynamoGraphDeployment"
 type DynamoComponentDeploymentSpec struct {
-	// backendFramework specifies the backend framework.
+	// backendFramework specifies the GPU backend framework (for example,
+	// "sglang", "vllm", or "trtllm").
 	// +kubebuilder:validation:Enum=sglang;vllm;trtllm
 	BackendFramework string `json:"backendFramework,omitempty"`
 
@@ -65,13 +79,19 @@ type DynamoComponentDeploymentSpec struct {
 // volumeMounts, annotations, labels, extraPodMetadata, extraPodSpec) are
 // replaced with a single `podTemplate` field holding a native
 // `corev1.PodTemplateSpec`. The operator injects its defaults into the
-// container named `"main"` and merges user overrides using strategic-merge-by-name
-// semantics. Users can add sidecars, init containers, and pod-level configuration
-// directly in `podTemplate` without any `extraPodSpec`-style escape hatch.
+// container named `"main"` and merges user overrides according to
+// `extraPodSpecMergeStrategy`. Users can add sidecars, init containers, and
+// pod-level configuration directly in `podTemplate` without any
+// `extraPodSpec`-style escape hatch.
 // +kubebuilder:validation:XValidation:rule="!has(self.eppConfig) || (has(self.type) && self.type == 'epp')",message="eppConfig may only be set when type is epp"
 // +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas unless replicas is 0"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)",message="minAvailable is immutable after creation"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.type) || (has(self.type) && self.type == oldSelf.type)",message="type is immutable after it is set"
+// +kubebuilder:validation:XValidation:rule="!has(self.lpx) || (has(self.type) && self.type == 'lpx')",message="lpx may only be set when type is lpx"
+// +kubebuilder:validation:XValidation:rule="!(has(self.type) && self.type == 'lpx') || has(self.lpx)",message="lpx is required when type is lpx"
+// +kubebuilder:validation:XValidation:rule="!(has(self.type) && self.type == 'lpx') || !has(self.podTemplate)",message="LPX Pod templates belong to roles"
+// +kubebuilder:validation:XValidation:rule="!(has(self.type) && self.type == 'lpx' && has(self.replicas) && (self.replicas < 1 || self.replicas > 9))",message="replicas must be between 1 and 9 when type is lpx"
+// +kubebuilder:validation:XValidation:rule="!(has(self.type) && self.type == 'lpx' && has(self.scalingAdapter))",message="scalingAdapter is not supported when type is lpx"
 type DynamoComponentDeploymentSharedSpec struct {
 	// providerOverride configures the primary Grove unit representing this DGD
 	// component. With apiVersion `grove.io/v1alpha1`, target is
@@ -135,6 +155,13 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 
+	// extraPodSpecMergeStrategy controls how podTemplate is merged with the
+	// operator-generated pod and container defaults. When omitted, the operator
+	// uses its configured defaultExtraPodSpecMergeStrategy, which defaults to
+	// "override".
+	// +optional
+	ExtraPodSpecMergeStrategy ExtraPodSpecMergeStrategy `json:"extraPodSpecMergeStrategy,omitempty"`
+
 	// replicas is the desired number of Pods for this component. When
 	// `scalingAdapter` is set on this component, this field is managed by
 	// the DynamoGraphDeploymentScalingAdapter and should not be modified
@@ -172,6 +199,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// leader and one worker role. Admission defaults omitted replicas to 1 for
 	// leader and multinode.nodeCount minus 1 for worker. Omitting the roles list
 	// preserves the implicit multinode role layout.
+	// LPX components require a worker role and may declare a leader role.
 	// +optional
 	// +listType=map
 	// +listMapKey=name
@@ -206,6 +234,11 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// migration is started by clearing this field.
 	// +optional
 	EPPConfig *EPPConfig `json:"eppConfig,omitempty"`
+
+	// lpx holds LPX integration configuration. Only meaningful when
+	// `type` is `lpx`.
+	// +optional
+	LPX *LPXConfig `json:"lpx,omitempty"`
 
 	// frontendSidecar optionally designates a container in
 	// `podTemplate.spec.containers` as the frontend sidecar. The value must
@@ -275,7 +308,7 @@ type DynamoComponentDeploymentStatus struct {
 // +kubebuilder:storageversion
 // +kubebuilder:resource:shortName=dcd
 // +kubebuilder:printcolumn:name="Available",type="string",JSONPath=".status.conditions[?(@.type=='Available')].status",description="Available"
-// +kubebuilder:printcolumn:name="Backend",type="string",JSONPath=`.spec.backendFramework`,description="Backend framework (sglang, vllm, trtllm)"
+// +kubebuilder:printcolumn:name="Backend",type="string",JSONPath=`.spec.backendFramework`,description="GPU backend framework"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // DynamoComponentDeployment is the Schema for the dynamocomponentdeployments API.

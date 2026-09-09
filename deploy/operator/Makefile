@@ -4,10 +4,10 @@ IMG ?= controller:latest
 
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
 ENVTEST_K8S_VERSION = 1.30.0
-ENVTEST_PACKAGES ?= ./internal/controller ./internal/webhook/validation
+ENVTEST_PACKAGES ?= ./internal/controller/... ./internal/webhook/validation ./cmd/crd-apply
 ENVTEST_ASSETS_CMD = $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path
 
-CLUSTERTEST_PACKAGES ?= ./internal/testing/clusterenv ./internal/controller
+CLUSTERTEST_PACKAGES ?= ./internal/testing/clusterenv ./internal/controller/...
 CLUSTERTEST_TIMEOUT ?= 30m
 CLUSTERTEST_KIND_NAME ?= dynamo-clustertest-v136
 CLUSTERTEST_CONTEXT = kind-$(CLUSTERTEST_KIND_NAME)
@@ -282,6 +282,11 @@ manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and C
 			$(YQ) eval '.metadata.annotations."helm.sh/resource-policy" = "keep"' -i "$$file"; \
 		fi; \
 	done
+	# Compact LPX schemas last: subsequent schema edits could change an aliased role.
+	for file in config/crd/bases/nvidia.com_dynamographdeployments.yaml config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml; do \
+		$(YQ) --from-file api/scripts/lpx-crd-schema.yq -i --indent 2 $$file || exit 1; \
+	done
+
 .PHONY: generate
 generate: controller-gen generate-pydantic ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt_" paths="./..."
@@ -304,10 +309,10 @@ vet: ## Run go vet against code.
 
 .PHONY: test
 test: manifests generate fmt vet setup-envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$$($(ENVTEST_ASSETS_CMD))" go test $$(go list ./... | grep -vE '/cmd($$|/)') -coverprofile cover.out
+	KUBEBUILDER_ASSETS="$$($(ENVTEST_ASSETS_CMD))" go test $$(go list ./... | grep -vE '/cmd($$|/)') ./cmd/crd-apply -coverprofile cover.out
 
 .PHONY: envtest
-envtest: setup-envtest ## Run envtest-backed operator tests.
+envtest: setup-envtest yq ## Run envtest-backed operator tests.
 	KUBEBUILDER_ASSETS="$$($(ENVTEST_ASSETS_CMD))" go test $(ENVTEST_PACKAGES)
 
 .PHONY: setup-clustertest

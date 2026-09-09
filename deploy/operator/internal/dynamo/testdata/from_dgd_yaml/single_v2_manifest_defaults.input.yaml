@@ -1,0 +1,28 @@
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  annotations:
+    scheduling.lpu.nvidia.com/scheduler-backend: lpx-scheduler
+  generation: 1
+  name: dgd-single-v2-manifest-defaults
+  namespace: inference-engine
+  uid: 22222222-2222-4222-8222-222222222222
+spec:
+  components:
+    - name: lpx
+      type: lpx
+      extraPodSpecMergeStrategy: strategic
+      replicas: 1
+      lpx:
+        buildId: single-v2-manifest-defaults/build_manifest_defaults
+      roles:
+      - name: leader
+      - name: worker
+        podTemplate:
+          spec:
+            containers:
+            - image: nvcr.io/nvidia/ai-dynamo/lpu-runtime:v2
+              name: main
+              volumeMounts:
+              - mountPath: /nfs
+                name: model-storage

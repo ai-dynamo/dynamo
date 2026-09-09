@@ -58,7 +58,6 @@ func NewDGDDefaulter(operatorVersion string) *DGDDefaulter {
 // On every operation: defaults nil component Replicas to 1 and persists the
 // replica counts implied by explicit multinode roles.
 // On CREATE: sets the controller-owned workload provider from routing intent before provider-specific defaults.
-// Existing unannotated DGDs remain unselected for controller-side workload adoption.
 // On the Grove pathway: defaults nil MinAvailable to 1. Scaling to replicas=0
 // does not rewrite MinAvailable; it remains the component's configured minimum viable unit.
 // On CREATE: stamps nvidia.com/dynamo-operator-origin-version with the operator version.

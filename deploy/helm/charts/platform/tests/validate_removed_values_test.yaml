@@ -97,6 +97,22 @@ tests:
     asserts:
       - notFailedTemplate: {}
 
+  - it: should reject bundled Grove with LPX
+    set:
+      global.grove.install: true
+      dynamo-operator.lpx.enabled: true
+    asserts:
+      - failedTemplate:
+          errorPattern: "bundled Grove v0.1.0-alpha.13 does not support"
+
+  - it: should allow externally installed scheduler-scoped Grove with LPX
+    set:
+      global.grove.install: false
+      global.grove.enabled: true
+      dynamo-operator.lpx.enabled: true
+    asserts:
+      - notFailedTemplate: {}
+
   # --- Default values should render cleanly ---
 
   - it: should render successfully with default values

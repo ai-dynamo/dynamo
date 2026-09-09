@@ -1314,7 +1314,8 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 							Spec: corev1.PodSpec{
 								TerminationGracePeriodSeconds: ptr.To(int64(10)),
 								SecurityContext: &corev1.PodSecurityContext{
-									FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+									FSGroup:             ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+									FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
 								},
 								Volumes: []corev1.Volume{
 									{
@@ -1455,7 +1456,8 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 							Spec: corev1.PodSpec{
 								TerminationGracePeriodSeconds: ptr.To(int64(10)),
 								SecurityContext: &corev1.PodSecurityContext{
-									FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+									FSGroup:             ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+									FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
 								},
 								Volumes: []corev1.Volume{
 									{
@@ -2211,6 +2213,7 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 				serviceReplicaStatus: &v1beta1.ComponentReplicaStatus{
 					ComponentKind:   v1beta1.ComponentKindLeaderWorkerSet,
 					ComponentNames:  []string{"test-component-0"},
+					Ready:           true,
 					ReadyReplicas:   ptr.To(int32(1)),
 					UpdatedReplicas: 1,
 					Replicas:        1,
@@ -2289,6 +2292,7 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 				serviceReplicaStatus: &v1beta1.ComponentReplicaStatus{
 					ComponentKind:   v1beta1.ComponentKindLeaderWorkerSet,
 					ComponentNames:  []string{"test-component-0"},
+					Ready:           true,
 					ReadyReplicas:   ptr.To(int32(3)),
 					UpdatedReplicas: 3,
 					Replicas:        3,
@@ -2585,6 +2589,7 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 				serviceReplicaStatus: &v1beta1.ComponentReplicaStatus{
 					ComponentKind:     v1beta1.ComponentKindDeployment,
 					ComponentNames:    []string{"test-component"},
+					Ready:             true,
 					Replicas:          2,
 					UpdatedReplicas:   2,
 					ReadyReplicas:     ptr.To(int32(2)),

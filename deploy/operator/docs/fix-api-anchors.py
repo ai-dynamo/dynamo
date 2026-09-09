@@ -38,6 +38,7 @@ DGD_ONLY_DCD_REFERENCES = {
     "DynamoComponentDeploymentSharedSpec",
     "ComponentRoleSpec",
     "ProviderOverride",
+    "LPXConfig",
 }
 DCD_REFERENCE_RE = re.compile(r"^- \[DynamoComponentDeploymentSpec\]\(#[^)]+\)\s*$")
 
@@ -52,7 +53,9 @@ def project_standalone_dcd_schema(markdown: str) -> str:
         if heading:
             current_type = heading.group("name")
 
-        if current_type == DCD_SPEC and line.startswith("| `providerOverride` "):
+        if current_type == DCD_SPEC and line.startswith(
+            ("| `providerOverride` ", "| `lpx` ")
+        ):
             continue
 
         if current_type == DCD_SPEC and line.startswith("| `roles` "):

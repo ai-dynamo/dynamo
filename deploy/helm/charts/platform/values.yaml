@@ -49,10 +49,13 @@ global:
   grove:
     # -- Whether this chart should install the bundled Grove subchart.
     # When true, deploys the Grove operator cluster-wide. Integration is automatically enabled.
+    # The bundled version cannot be used with LPX; LPX requires an externally installed
+    # scheduler-scoped Grove build that supports disjoint schedulers in one PodCliqueSet.
     # NOTE: For production environments, it is recommended to install Grove separately.
     install: false
     # -- Whether to enable Grove integration (multinode orchestration via PodCliqueSets).
     # Set to true when Grove is available in the cluster (installed externally).
+    # LPX users must provide the scheduler-scoped Grove build and enable its lpx-scheduler profile.
     # Automatically true when install=true. The operator uses this to decide whether to
     # create PodCliqueSets for multinode deployments.
     enabled: false
@@ -87,6 +90,17 @@ dynamo-operator:
 
   # -- URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true).
   modelExpressURL: ""
+
+  # LPX is installed and operated separately. These values only opt the
+  # Dynamo operator into producing node-local scheduling requests.
+  lpx:
+    # -- Enable LPX integration. Startup verifies that the externally installed
+    # LPX API serves scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest
+    # resources and fails otherwise.
+    enabled: false
+    # -- Configure the LPU model registry used by the LPX integration.
+    modelRegistryURL: ""
+
   # -- DEVELOPMENT AND TESTING ONLY: Namespace-restricted mode is not supported for production. Use cluster-wide mode for production deployments.
   namespaceRestriction:
     # -- DEVELOPMENT AND TESTING ONLY: Enable namespace-restricted reconciliation and admission. Not supported for production.

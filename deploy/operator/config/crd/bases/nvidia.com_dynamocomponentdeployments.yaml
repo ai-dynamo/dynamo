@@ -667,7 +667,9 @@ spec:
                       type: integer
                   type: object
                 backendFramework:
-                  description: BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm")
+                  description: |-
+                    BackendFramework specifies the GPU backend framework (for example,
+                    "sglang", "vllm", or "trtllm").
                   enum:
                     - sglang
                     - vllm
@@ -711,12 +713,13 @@ spec:
                       properties:
                         backendFramework:
                           description: |-
-                            BackendFramework is the runtime framework (vllm, sglang, trtllm).
+                            BackendFramework is the runtime framework (vllm, sglang, trtllm, lpu).
                             Deprecated: legacy identity only.
                           enum:
                             - vllm
                             - sglang
                             - trtllm
+                            - lpu
                           type: string
                         dtype:
                           description: |-
@@ -10700,6 +10703,14 @@ spec:
                       x-kubernetes-list-type: map
                   required: []
                   type: object
+                extraPodSpecMergeStrategy:
+                  description: |-
+                    ExtraPodSpecMergeStrategy controls how extraPodSpec is merged with the
+                    operator-generated pod and container defaults.
+                  enum:
+                    - override
+                    - strategic
+                  type: string
                 failover:
                   description: |-
                     Failover configures GMS (GPU Memory Service) failover for this service.
@@ -11465,6 +11476,7 @@ spec:
                     leader and one worker role. Admission defaults omitted replicas to 1 for
                     leader and multinode.nodeCount minus 1 for worker. Omitting the roles list
                     preserves the implicit multinode role layout.
+                    LPX components require a worker role and may declare a leader role.
                   items:
                     description: |-
                       ComponentRoleSpec configures one named Pod-producing role inside a compound component.
@@ -11482,7 +11494,7 @@ spec:
                         description: |-
                           PodTemplate defines the Pod configuration for this role. Admission permits
                           it only when the enclosing component type explicitly supports role-specific
-                          Pod templates. No component type supports it in this release.
+                          Pod templates. LPX components support role-specific Pod templates.
                         properties:
                           metadata:
                             description: |-
@@ -19706,12 +19718,20 @@ spec:
                   type: array
               type: object
               x-kubernetes-validations:
+                - message: standalone LPX DynamoComponentDeployments are not supported; use DynamoGraphDeployment
+                  rule: '!(has(self.componentType) && self.componentType == ''lpx'')'
                 - message: minAvailable must be less than or equal to replicas unless replicas is 0
                   rule: '!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
                 - message: minAvailable is immutable after creation
                   rule: '!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)'
                 - message: componentType is immutable after it is set
                   rule: '!has(oldSelf.componentType) || (has(self.componentType) && self.componentType == oldSelf.componentType)'
+                - message: componentType lpu is not supported; use lpx
+                  rule: '!has(self.componentType) || self.componentType != ''lpu'''
+                - message: replicas must be between 1 and 9 when componentType is lpx
+                  rule: '!(has(self.componentType) && self.componentType == ''lpx'' && has(self.replicas) && (self.replicas < 1 || self.replicas > 9))'
+                - message: scalingAdapter is not supported when componentType is lpx
+                  rule: '!(has(self.componentType) && self.componentType == ''lpx'' && has(self.scalingAdapter) && has(self.scalingAdapter.enabled) && self.scalingAdapter.enabled == true)'
             status:
               description: Status reflects the current observed state of the component deployment.
               properties:
@@ -19839,6 +19859,11 @@ spec:
                       format: int64
                       minimum: 0
                       type: integer
+                    ready:
+                      description: |-
+                        Ready is the binary determination of whether the correct number of replicas
+                        are scheduled and available.
+                      type: boolean
                     readyReplicas:
                       description: |-
                         ReadyReplicas is the number of ready replicas.
@@ -19897,7 +19922,7 @@ spec:
           jsonPath: .status.conditions[?(@.type=='Available')].status
           name: Available
           type: string
-        - description: Backend framework (sglang, vllm, trtllm)
+        - description: GPU backend framework
           jsonPath: .spec.backendFramework
           name: Backend
           type: string
@@ -19935,7 +19960,9 @@ spec:
               description: spec defines the desired state for this Dynamo component deployment.
               properties:
                 backendFramework:
-                  description: backendFramework specifies the backend framework.
+                  description: |-
+                    backendFramework specifies the GPU backend framework (for example,
+                    "sglang", "vllm", or "trtllm").
                   enum:
                     - sglang
                     - vllm
@@ -20180,12 +20207,13 @@ spec:
                           properties:
                             backendFramework:
                               description: |-
-                                backendFramework is the runtime framework (`vllm`, `sglang`, `trtllm`).
+                                backendFramework is the runtime framework (`vllm`, `sglang`, `trtllm`, or `lpu`).
                                 Deprecated: legacy identity only.
                               enum:
                                 - vllm
                                 - sglang
                                 - trtllm
+                                - lpu
                               type: string
                             dtype:
                               description: |-
@@ -20404,6 +20432,16 @@ spec:
                           type: boolean
                       type: object
                   type: object
+                extraPodSpecMergeStrategy:
+                  description: |-
+                    extraPodSpecMergeStrategy controls how podTemplate is merged with the
+                    operator-generated pod and container defaults. When omitted, the operator
+                    uses its configured defaultExtraPodSpecMergeStrategy, which defaults to
+                    "override".
+                  enum:
+                    - override
+                    - strategic
+                  type: string
                 frontendSidecar:
                   description: |-
                     frontendSidecar optionally designates a container in
@@ -28641,6 +28679,7 @@ spec:
                     leader and one worker role. Admission defaults omitted replicas to 1 for
                     leader and multinode.nodeCount minus 1 for worker. Omitting the roles list
                     preserves the implicit multinode role layout.
+                    LPX components require a worker role and may declare a leader role.
                   items:
                     description: |-
                       ComponentRoleSpec configures one named Pod-producing role inside a compound component.
@@ -28658,7 +28697,7 @@ spec:
                         description: |-
                           podTemplate defines the Pod configuration for this role. Admission permits
                           it only when the enclosing component type explicitly supports role-specific
-                          Pod templates. No component type supports it in this release.
+                          Pod templates. LPX components support role-specific Pod templates.
                         properties:
                           metadata:
                             description: |-
@@ -36846,10 +36885,13 @@ spec:
                     - decode
                     - planner
                     - epp
+                    - lpx
                   type: string
               required: []
               type: object
               x-kubernetes-validations:
+                - message: standalone LPX DynamoComponentDeployments are not supported; use DynamoGraphDeployment
+                  rule: '!(has(self.type) && self.type == ''lpx'')'
                 - message: eppConfig may only be set when type is epp
                   rule: '!has(self.eppConfig) || (has(self.type) && self.type == ''epp'')'
                 - message: minAvailable must be less than or equal to replicas unless replicas is 0
@@ -36858,6 +36900,12 @@ spec:
                   rule: '!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)'
                 - message: type is immutable after it is set
                   rule: '!has(oldSelf.type) || (has(self.type) && self.type == oldSelf.type)'
+                - message: LPX Pod templates belong to roles
+                  rule: '!(has(self.type) && self.type == ''lpx'') || !has(self.podTemplate)'
+                - message: replicas must be between 1 and 9 when type is lpx
+                  rule: '!(has(self.type) && self.type == ''lpx'' && has(self.replicas) && (self.replicas < 1 || self.replicas > 9))'
+                - message: scalingAdapter is not supported when type is lpx
+                  rule: '!(has(self.type) && self.type == ''lpx'' && has(self.scalingAdapter))'
             status:
               description: status reflects the current observed state of the component deployment.
               properties:
@@ -36910,6 +36958,11 @@ spec:
                       format: int64
                       minimum: 0
                       type: integer
+                    ready:
+                      description: |-
+                        ready is the binary determination of whether the correct number of replicas
+                        are scheduled and available.
+                      type: boolean
                     readyReplicas:
                       description: |-
                         readyReplicas is the number of ready replicas. Populated for

@@ -17,6 +17,7 @@
 {{- include "dynamo-operator.validateClusterWideInstallation" . -}}
 {{- include "dynamo-operator.validateConfiguration" . -}}
 {{- include "dynamo-operator.validateDiscoveryBackend" . -}}
+{{- include "dynamo-operator.validateExtraPodSpecMergeStrategy" . -}}
 
 ---
 apiVersion: apps/v1
@@ -136,6 +137,9 @@ spec:
         - mountPath: /tmp/k8s-webhook-server/serving-certs
           name: cert
           readOnly: true
+        {{- with .Values.controllerManager.manager.volumeMounts }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       securityContext:
         runAsNonRoot: true
       serviceAccountName: {{ include "dynamo-operator.fullname" . }}-controller-manager
@@ -151,3 +155,6 @@ spec:
           # Allow the pod to start before the secret exists so the
           # in-operator cert-controller can bootstrap it at runtime.
           optional: true
+      {{- with .Values.controllerManager.manager.volumes }}
+      {{- toYaml . | nindent 6 }}
+      {{- end }}

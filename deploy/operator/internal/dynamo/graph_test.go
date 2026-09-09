@@ -844,7 +844,9 @@ func TestAppendMissingPVCVolumesForMountsAddsMissingPVCs(t *testing.T) {
 	}
 	mounts := []corev1.VolumeMount{
 		{Name: "cache", MountPath: "/cache"},
+		{Name: "cache", MountPath: "/cache-copy"},
 		{Name: "model-cache", MountPath: "/models"},
+		{Name: "model-cache", MountPath: "/models-copy"},
 	}
 
 	got := appendMissingPVCVolumesForMounts(volumes, mounts)
@@ -1244,7 +1246,7 @@ func TestGenerateGrovePodCliqueSet_ProjectsClusterTopologyDomainsToWorkerCliques
 	assert.False(t, hasTopologyLabelVolume(cliques["frontend"].Spec.PodSpec.Volumes))
 }
 
-func TestGenerateLabelsAndAnnotations_UsePreservedAlphaDGDServiceMetadata(t *testing.T) {
+func TestGeneratePodMetadata_UsePreservedAlphaDGDServiceMetadata(t *testing.T) {
 	alpha := &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd",
@@ -1274,16 +1276,13 @@ func TestGenerateLabelsAndAnnotations_UsePreservedAlphaDGDServiceMetadata(t *tes
 	component := service
 	ensurePodTemplate(component).Annotations["pod-template-annotation"] = "from-pod-template"
 
-	labels, err := generateLabels(component, beta, "worker", DiscoveryContext{})
-	require.NoError(t, err)
-	assert.Equal(t, "kept", labels["legacy-label"])
-	assert.Equal(t, "legacy-sub", labels[commonconsts.KubeLabelDynamoSubComponentType])
+	metadata := generatePodMetadata(component, beta, getDGDAlphaComponent(beta, "worker"), "worker", DiscoveryContext{})
+	assert.Equal(t, "kept", metadata.Labels["legacy-label"])
+	assert.Equal(t, "legacy-sub", metadata.Labels[commonconsts.KubeLabelDynamoSubComponentType])
 
-	annotations, err := generateAnnotations(component, beta, "worker")
-	require.NoError(t, err)
-	assert.Equal(t, "from-dgd", annotations["dgd-annotation"])
-	assert.Equal(t, "kept", annotations["legacy-annotation"])
-	assert.Equal(t, "from-pod-template", annotations["pod-template-annotation"])
+	assert.Equal(t, "from-dgd", metadata.Annotations["dgd-annotation"])
+	assert.Equal(t, "kept", metadata.Annotations["legacy-annotation"])
+	assert.Equal(t, "from-pod-template", metadata.Annotations["pod-template-annotation"])
 }
 
 // TestGenerateComponentContext tests the generateComponentContext function
@@ -1996,6 +1995,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 					Labels: map[string]string{
 						commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
 					},
+					Annotations: make(map[string]string),
 				},
 				Spec: grovev1alpha1.PodCliqueSetSpec{
 					Replicas: 1,
@@ -2041,7 +2041,8 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										},
 										TerminationGracePeriodSeconds: ptr.To(int64(10)),
 										SecurityContext: &corev1.PodSecurityContext{
-											FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroup:             ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
 										},
 										ImagePullSecrets: []corev1.LocalObjectReference{
 											{
@@ -2236,7 +2237,8 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										ServiceAccountName:            commonconsts.PlannerServiceAccountName,
 										TerminationGracePeriodSeconds: ptr.To(int64(60)),
 										SecurityContext: &corev1.PodSecurityContext{
-											FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroup:             ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
 										},
 										RestartPolicy: corev1.RestartPolicyAlways,
 
@@ -2608,6 +2610,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 					Labels: map[string]string{
 						commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
 					},
+					Annotations: make(map[string]string),
 				},
 				Spec: grovev1alpha1.PodCliqueSetSpec{
 					Replicas: 1,
@@ -2655,7 +2658,8 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										RestartPolicy:                 corev1.RestartPolicyAlways,
 										TerminationGracePeriodSeconds: ptr.To(int64(60)),
 										SecurityContext: &corev1.PodSecurityContext{
-											FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroup:             ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
 										},
 										Volumes: []corev1.Volume{
 											{
@@ -2869,7 +2873,8 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										RestartPolicy:                 corev1.RestartPolicyAlways,
 										TerminationGracePeriodSeconds: ptr.To(int64(60)),
 										SecurityContext: &corev1.PodSecurityContext{
-											FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroup:             ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
 										},
 										Volumes: []corev1.Volume{
 											{
@@ -3055,7 +3060,8 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										},
 										TerminationGracePeriodSeconds: ptr.To(int64(10)),
 										SecurityContext: &corev1.PodSecurityContext{
-											FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroup:             ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
 										},
 										RestartPolicy: corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
@@ -3218,7 +3224,8 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										TerminationGracePeriodSeconds: ptr.To(int64(60)),
 										ServiceAccountName:            commonconsts.PlannerServiceAccountName,
 										SecurityContext: &corev1.PodSecurityContext{
-											FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroup:             ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
 										},
 										RestartPolicy: corev1.RestartPolicyAlways,
 										Volumes: []corev1.Volume{
@@ -3631,6 +3638,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 					Labels: map[string]string{
 						commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
 					},
+					Annotations: make(map[string]string),
 				},
 				Spec: grovev1alpha1.PodCliqueSetSpec{
 					Replicas: 1,
@@ -3687,7 +3695,8 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										},
 										TerminationGracePeriodSeconds: ptr.To(int64(60)),
 										SecurityContext: &corev1.PodSecurityContext{
-											FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroup:             ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
 										},
 										RestartPolicy: corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
@@ -3877,7 +3886,8 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									PodSpec: corev1.PodSpec{
 										TerminationGracePeriodSeconds: ptr.To(int64(60)),
 										SecurityContext: &corev1.PodSecurityContext{
-											FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroup:             ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
 										},
 										Volumes: []corev1.Volume{
 											{
@@ -4064,7 +4074,8 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										},
 										TerminationGracePeriodSeconds: ptr.To(int64(10)),
 										SecurityContext: &corev1.PodSecurityContext{
-											FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroup:             ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
 										},
 										RestartPolicy: corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
@@ -4227,7 +4238,8 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										TerminationGracePeriodSeconds: ptr.To(int64(60)),
 										ServiceAccountName:            commonconsts.PlannerServiceAccountName,
 										SecurityContext: &corev1.PodSecurityContext{
-											FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroup:             ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
 										},
 										Volumes: []corev1.Volume{
 											{
@@ -6292,6 +6304,40 @@ func TestGenerateBasePodSpec_InitContainerPullSecrets(t *testing.T) {
 	}
 }
 
+func TestGenerateBasePodSpec_EmptyMainContainerPortsOverrideWorkerDefaults(t *testing.T) {
+	podSpec, err := GenerateBasePodSpec(
+		&v1beta1.DynamoComponentDeploymentSharedSpec{
+			ComponentName: "worker",
+			ComponentType: v1beta1.ComponentTypeWorker,
+			PodTemplate: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  commonconsts.MainContainerName,
+							Ports: []corev1.ContainerPort{},
+						},
+					},
+				},
+			},
+		},
+		BackendFrameworkVLLM,
+		&mockSecretsRetriever{},
+		"test-deployment",
+		"default",
+		RoleMain,
+		1,
+		&configv1alpha1.OperatorConfiguration{},
+		commonconsts.MultinodeDeploymentTypeGrove,
+		"worker",
+		nil,
+		staticContainerGPUCount(0),
+	)
+
+	require.NoError(t, err)
+	require.NotEmpty(t, podSpec.Containers)
+	require.Empty(t, podSpec.Containers[0].Ports)
+}
+
 func TestGenerateBasePodSpec_DisableImagePullSecretDiscovery(t *testing.T) {
 	tests := []struct {
 		name                     string
@@ -6509,6 +6555,7 @@ func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
 				nil,                        // Use default deployer
 				staticContainerGPUCount(0), // No GPUs needed by this test
 			)
+
 			if !assert.NoError(t, err) {
 				return
 			}
@@ -6649,7 +6696,8 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 				TerminationGracePeriodSeconds: ptr.To(int64(60)),
 				SecurityContext: &corev1.PodSecurityContext{
 					// Only fsGroup is injected by default for volume permissions
-					FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+					FSGroup:             ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+					FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
 				},
 				Volumes: []corev1.Volume{
 					{
@@ -6824,6 +6872,7 @@ func TestGenerateBasePodSpec_GPUMemoryServiceExtraClientContainers(t *testing.T)
 		nil,
 		staticContainerGPUCount(0),
 	)
+
 	require.NoError(t, err)
 
 	t.Log("Verify every requested container is wired as a GMS client")
@@ -7185,6 +7234,7 @@ func TestGenerateBasePodSpec_TRTLLMSSHMountUsesSecretVolume(t *testing.T) {
 		nil,
 		staticContainerGPUCount(0),
 	)
+
 	require.NoError(t, err)
 
 	var sshVolumes []corev1.Volume
@@ -7678,6 +7728,7 @@ func TestGenerateBasePodSpec_ConvertedCompilationCacheMountIsNotDuplicated(t *te
 				nil,
 				staticContainerGPUCount(0),
 			)
+
 			require.NoError(t, err)
 			require.NotEmpty(t, podSpec.Containers)
 
@@ -7718,6 +7769,7 @@ func TestGenerateBasePodSpec_ConvertedCompilationCacheUsesDefaultMount(t *testin
 		nil,
 		staticContainerGPUCount(0),
 	)
+
 	require.NoError(t, err)
 	require.NotEmpty(t, podSpec.Containers)
 	assert.Contains(t, podSpec.Containers[0].VolumeMounts, corev1.VolumeMount{
@@ -7958,7 +8010,8 @@ func TestGenerateBasePodSpec_SecurityContext(t *testing.T) {
 				ComponentType: commonconsts.ComponentTypeFrontend,
 			},
 			expectedSecurityContext: &corev1.PodSecurityContext{
-				FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+				FSGroup:             ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+				FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
 			},
 			description: "Operator should only inject fsGroup for volume permissions, not UID/GID (backward compatible)",
 		},
@@ -8663,8 +8716,8 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 	}
 }
 
-func TestGenerateLabels_ReassertsRestoreIdentityLabelsAfterMetadataMerge(t *testing.T) {
-	labels, err := generateLabels(
+func TestGeneratePodMetadata_ReassertsRestoreIdentityLabelsAfterMetadataMerge(t *testing.T) {
+	labels := generatePodMetadata(
 		betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
 			ComponentType:   commonconsts.ComponentTypeWorker,
 			DynamoNamespace: ptr.To("default-test-dgd"),
@@ -8690,10 +8743,10 @@ func TestGenerateLabels_ReassertsRestoreIdentityLabelsAfterMetadataMerge(t *test
 		betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
 		}),
+		nil,
 		"Worker",
 		DiscoveryContext{Backend: configv1alpha1.DiscoveryBackendKubernetes},
-	)
-	require.NoError(t, err)
+	).Labels
 	assert.Equal(t, "test-dgd-worker", labels[commonconsts.KubeLabelDynamoSelector])
 	assert.Equal(t, "Worker", labels[commonconsts.KubeLabelDynamoComponent])
 	assert.Equal(t, "default-test-dgd", labels[commonconsts.KubeLabelDynamoNamespace])
@@ -9147,7 +9200,7 @@ func TestGenerateGrovePodCliqueSet_SingleNodeForceScalingGroup(t *testing.T) {
 	}
 
 	got, err := GenerateGrovePodCliqueSet(
-		context.Background(),
+		t.Context(),
 		beta,
 		&configv1alpha1.OperatorConfiguration{},
 		&controller_common.RuntimeConfig{},
@@ -10883,6 +10936,25 @@ func TestPCSNameForDGD(t *testing.T) {
 			Multinode:     &v1beta1.MultinodeSpec{NodeCount: 2},
 		}
 	}
+	lpxComponent := func(name string) v1beta1.DynamoComponentDeploymentSharedSpec {
+		return v1beta1.DynamoComponentDeploymentSharedSpec{
+			ComponentName: name,
+			ComponentType: v1beta1.ComponentTypeLPX,
+			LPX:           &v1beta1.LPXConfig{BuildID: "build-id"},
+		}
+	}
+	interPodGMSComponent := func(name string) v1beta1.DynamoComponentDeploymentSharedSpec {
+		return v1beta1.DynamoComponentDeploymentSharedSpec{
+			ComponentName: name,
+			Experimental: &v1beta1.ExperimentalSpec{
+				GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{
+					Mode: v1beta1.GMSModeInterPod,
+				},
+			},
+		}
+	}
+	multinodeGMSComponent := interPodGMSComponent("decode")
+	multinodeGMSComponent.Multinode = &v1beta1.MultinodeSpec{NodeCount: 11}
 
 	tests := []struct {
 		name       string
@@ -10892,13 +10964,15 @@ func TestPCSNameForDGD(t *testing.T) {
 		wantLen    int // 0 means check exact match via want; >0 means check length
 	}{
 		{
-			name:    "short name passes through unchanged",
-			dgdName: "trtllm-disagg",
+			name:    "single-node inter-pod GMS budgets the GMS clique name",
+			dgdName: "deepseek-v32-fp4-trtllm-dgd1",
 			components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				singleNodeComponent("prefill"),
-				singleNodeComponent("decode"),
+				interPodGMSComponent("decode"),
 			},
-			want: "trtllm-disagg",
+			// decode GMS: PCSG=6, PCLQ=len("decode-gms-0")=12 → budget=18,
+			// pcsBudget=45-18=27; dgdName is 28 chars → needs truncation to 27.
+			wantLen: 27,
 		},
 		{
 			name:    "short name with multinode passes through unchanged",
@@ -10911,18 +10985,27 @@ func TestPCSNameForDGD(t *testing.T) {
 		},
 		{
 			name:    "long name gets truncated with hash",
-			dgdName: "deepseek-v32-fp4-trtllm-dgd",
+			dgdName: "deepseek-v32-fp4-trtllm-dgd1",
 			components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				multinodeComponent("prefill"),
-				multinodeComponent("decode"),
+				multinodeGMSComponent,
 			},
-			// prefill multinode: PCSG=7, PCLQ=7+1+3=11 → budget=18, pcsBudget=45-18=27
-			// dgdName is 28 chars → needs truncation to 27
-			wantLen: 27,
+			// decode multinode GMS: PCSG=6, PCLQ=len("decode-wkr-10")=13 → budget=19,
+			// pcsBudget=45-19=26; dgdName is 28 chars → needs truncation to 26.
+			wantLen: 26,
+		},
+		{
+			name:    "normal PCS name does not budget LPX worker cliques",
+			dgdName: "abcdefghijklmnopqrstuvwxyzabcdef",
+			components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				lpxComponent("lpu"),
+			},
+			// LPX has its own PCS name budget, so this name stays unchanged.
+			wantLen: 32,
 		},
 		{
 			name:    "deterministic - same input always produces same output",
-			dgdName: "deepseek-v32-fp4-trtllm-dgd",
+			dgdName: "deepseek-v32-fp4-trtllm-dgd1",
 			components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 				multinodeComponent("prefill"),
 			},
@@ -10938,6 +11021,14 @@ func TestPCSNameForDGD(t *testing.T) {
 			// VllmPrefillWorker multinode: PCSG=17, PCLQ=17+1+3=21 → budget=38, pcsBudget=45-38=7
 			// 7 < minPCSNameLength(8), so clamped to 8
 			wantLen: 8,
+		},
+		{
+			name:    "normal PCS name is independent of LPX role expansion",
+			dgdName: "deepseek-v32-fp4-lpu-dgd",
+			components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				lpxComponent("lpu"),
+			},
+			want: "deepseek-v32-fp4-lpu-dgd",
 		},
 		{
 			name:       "empty components - no truncation needed",
@@ -10972,19 +11063,10 @@ func TestPCSNameForDGD(t *testing.T) {
 			maxComponentBudget := 0
 			for i := range tt.components {
 				component := &tt.components[i]
-				lowerName := strings.ToLower(component.ComponentName)
-				var budget int
-				if component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled() {
-					maxCliqueNameLen := 0
-					for _, role := range expandRolesForComponent(component.ComponentName, component.Replicas, component.GetNumberOfNodes(), component) {
-						if cliqueNameLen := len(strings.ToLower(role.Name)); cliqueNameLen > maxCliqueNameLen {
-							maxCliqueNameLen = cliqueNameLen
-						}
-					}
-					budget = len(lowerName) + maxCliqueNameLen
-				} else {
-					budget = len(lowerName)
+				if component.IsLPX() {
+					continue
 				}
+				budget := ComponentNameBudget(component)
 				if budget > maxComponentBudget {
 					maxComponentBudget = budget
 				}

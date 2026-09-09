@@ -1,0 +1,62 @@
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: node-local-v3-hx-specdecode
+  namespace: test
+  uid: 44444444-4444-4444-8444-444444444444
+  generation: 1
+  annotations:
+    scheduling.lpu.nvidia.com/scheduler-backend: lpx-scheduler
+spec:
+  components:
+    - name: draft
+      type: lpx
+      replicas: 2
+      lpx:
+        buildId: node-local-v3-hx-sd-draft
+      roles:
+      - name: worker
+        podTemplate:
+          spec:
+            containers:
+            - name: main
+              image: example.invalid/lpu-runtime:test
+              args:
+              - --instance-model-name
+              - test/v3-specdecode
+              resources:
+                limits:
+                  lpu.nvidia.com/devices: '1'
+              volumeMounts:
+              - name: model-storage
+                mountPath: /nfs
+            volumes:
+            - name: model-storage
+              persistentVolumeClaim:
+                claimName: model-storage
+    - name: lpu
+      type: lpx
+      replicas: 1
+      lpx:
+        buildId: node-local-v3-hx-sd-target
+      roles:
+      - name: leader
+      - name: worker
+        podTemplate:
+          spec:
+            containers:
+            - name: main
+              image: example.invalid/lpu-runtime:test
+              args:
+              - --instance-model-name
+              - test/v3-specdecode
+              resources:
+                limits:
+                  lpu.nvidia.com/devices: '1'
+              volumeMounts:
+              - name: model-storage
+                mountPath: /nfs
+            volumes:
+            - name: model-storage
+              persistentVolumeClaim:
+                claimName: model-storage

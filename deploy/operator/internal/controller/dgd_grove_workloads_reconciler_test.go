@@ -49,7 +49,7 @@ import (
 const updatedWorkerVersion = "new"
 
 func TestGroveWorkloadsReconciler_EvaluatesReadinessOnce(t *testing.T) {
-	t.Log("Build a ready frontend and its DGD")
+	t.Log("Build a ready frontend alongside an independently owned LPX component")
 	dgd := betaDGD(t, &nvidiacomv1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"},
 		Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
@@ -62,6 +62,9 @@ func TestGroveWorkloadsReconciler_EvaluatesReadinessOnce(t *testing.T) {
 			},
 		},
 	})
+	lpxSource := newLPXHandoffSource(t, "node-local-v2-hybrid")
+	dgd.Spec.Components = append(dgd.Spec.Components, lpxSource.Spec.Components[0])
+	wantSpec := dgd.Spec.DeepCopy()
 	podClique := &grovev1alpha1.PodClique{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       "graph-0-frontend",
@@ -126,6 +129,10 @@ func TestGroveWorkloadsReconciler_EvaluatesReadinessOnce(t *testing.T) {
 	assert.Equal(t, nvidiacomv1beta1.DGDStateSuccessful, result.State)
 	assert.Equal(t, 1, scaleUpdates)
 	assert.Equal(t, 1, podCliqueReads)
+	require.Len(t, result.ComponentStatus, 1)
+	assert.Equal(t, nvidiacomv1beta1.ComponentKindPodClique, result.ComponentStatus["frontend"].ComponentKind)
+	assert.Equal(t, []string{"graph-0-frontend"}, result.ComponentStatus["frontend"].ComponentNames)
+	assert.Equal(t, *wantSpec, dgd.Spec)
 }
 
 func TestGroveWorkloadsReconciler_DoesNotCommitWorkerHashWhenPodCliqueSetSyncFails(t *testing.T) {
@@ -249,10 +256,13 @@ func TestGroveWorkloadsReconciler_RecoversWorkerHashCommitAfterPodCliqueSetSync(
 			Envs:          []corev1.EnvVar{{Name: "WORKER_VERSION", Value: "old"}},
 		},
 	})
+	lpxSource := newLPXHandoffSource(t, "node-local-v2-hybrid")
+	dgd.Spec.Components = append(dgd.Spec.Components, lpxSource.Spec.Components[0])
 	currentHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
 	require.NoError(t, err)
 	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHashV2: currentHash}
 	dgd.GetComponentByName("prefill").PodTemplate.Spec.Containers[0].Env[0].Value = updatedWorkerVersion
+	wantSpec := dgd.Spec.DeepCopy()
 	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
 	require.NoError(t, err)
 	legacyPCS := &grovev1alpha1.PodCliqueSet{
@@ -325,6 +335,7 @@ func TestGroveWorkloadsReconciler_RecoversWorkerHashCommitAfterPodCliqueSetSync(
 	storedDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
 	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), storedDGD))
 	assert.Equal(t, currentHash, storedDGD.Annotations[consts.AnnotationCurrentWorkerHashV2])
+	assert.Equal(t, *wantSpec, storedDGD.Spec)
 	assert.Equal(t, 1, pcsUpdateCalls)
 	assert.Zero(t, dgdUpdateCalls)
 
@@ -346,6 +357,7 @@ func TestGroveWorkloadsReconciler_RecoversWorkerHashCommitAfterPodCliqueSetSync(
 	t.Log("Verify the retry commits the target hash without rewriting the PCS")
 	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), storedDGD))
 	assert.Equal(t, wantHash, storedDGD.Annotations[consts.AnnotationCurrentWorkerHashV2])
+	assert.Equal(t, *wantSpec, storedDGD.Spec)
 	assert.Equal(t, 1, pcsUpdateCalls)
 	assert.Equal(t, 2, dgdUpdateCalls)
 

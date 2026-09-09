@@ -23,6 +23,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
@@ -54,34 +55,6 @@ const (
 	DGDStateFailed       DGDState = "failed"
 )
 
-// PlacementScoreState describes whether placement score is available and how
-// complete the reported score is for a graph deployment. See the v1beta1
-// PlacementScoreState for the authoritative semantics of each value.
-// +kubebuilder:validation:Enum=Reported;Partial;Unsupported;Unknown
-type PlacementScoreState string
-
-const (
-	PlacementScoreStateReported    PlacementScoreState = "Reported"
-	PlacementScoreStatePartial     PlacementScoreState = "Partial"
-	PlacementScoreStateUnsupported PlacementScoreState = "Unsupported"
-	PlacementScoreStateUnknown     PlacementScoreState = "Unknown"
-)
-
-// PlacementStatus groups DGD-level scheduler placement fields under a single
-// status object so future placement signals can be added without a schema
-// break. See the v1beta1 PlacementStatus for the authoritative field docs.
-type PlacementStatus struct {
-	// Score is the DGD-level scheduler placement score. Normalized to [0.0, 1.0]
-	// where higher is better and 1.0 is the best possible placement.
-	// +optional
-	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Maximum=1
-	Score *float64 `json:"score,omitempty"`
-	// State indicates placement score reporting state.
-	// +optional
-	State PlacementScoreState `json:"state,omitempty"`
-}
-
 // DynamoGraphDeploymentSpec defines the desired state of DynamoGraphDeployment.
 // +kubebuilder:validation:XValidation:rule="oldSelf.hasValue() || !has(self.restart)",message="spec.restart must be unset on create; set spec.restart.id after creation to request a restart",optionalOldSelf=true
 type DynamoGraphDeploymentSpec struct {
@@ -91,6 +64,10 @@ type DynamoGraphDeploymentSpec struct {
 	// `spec.template.topologyConstraint`. It cannot select or change the provider.
 	// +optional
 	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
+
+	// Scheduling configures attempts for LPX components. Omission means no deadline.
+	// +optional
+	Scheduling *v1beta1.SchedulingSpec `json:"scheduling,omitempty"`
 
 	// Annotations to propagate to all child resources (PCS, DCD, Deployments, and pod templates).
 	// Service-level annotations take precedence over these values.
@@ -200,14 +177,13 @@ type DynamoGraphDeploymentStatus struct {
 	// The map key is the service name from spec.services.
 	// +optional
 	Checkpoints map[string]ServiceCheckpointStatus `json:"checkpoints,omitempty"`
+	// LPX contains the status of the graph's LPX workload, when present.
+	// +optional
+	LPX *v1beta1.DynamoGraphDeploymentLPXStatus `json:"lpx,omitempty"`
 	// RollingUpdate tracks the progress of operator manged rolling updates.
 	// Currently only supported for singl-node, non-Grove deployments (DCD/Deployment).
 	// +optional
 	RollingUpdate *RollingUpdateStatus `json:"rollingUpdate,omitempty"`
-	// Placement groups DGD-level scheduler placement signals (score, reporting
-	// state, and any future placement fields).
-	// +optional
-	Placement *PlacementStatus `json:"placement,omitempty"`
 }
 
 // ServiceCheckpointStatus contains checkpoint information for a single service.
@@ -323,6 +299,11 @@ type ServiceReplicaStatus struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	GPUsPerReplica *int64 `json:"gpusPerReplica,omitempty"`
+
+	// Ready is the binary determination of whether the correct number of replicas
+	// are scheduled and available.
+	// +optional
+	Ready bool `json:"ready"`
 
 	// Replicas is the total number of non-terminated replicas.
 	// Required for all component kinds.

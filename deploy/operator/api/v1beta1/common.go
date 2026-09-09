@@ -29,7 +29,7 @@ import (
 // was used as a workaround for disaggregated serving), `prefill` and `decode`
 // are first-class values: users can set them directly and downstream consumers
 // (e.g., the EPP) can filter on the pod label `nvidia.com/dynamo-component-type`.
-// +kubebuilder:validation:Enum=frontend;worker;prefill;decode;planner;epp
+// +kubebuilder:validation:Enum=frontend;worker;prefill;decode;planner;epp;lpx
 type ComponentType string
 
 const (
@@ -39,6 +39,7 @@ const (
 	ComponentTypeDecode   ComponentType = "decode"
 	ComponentTypePlanner  ComponentType = "planner"
 	ComponentTypeEPP      ComponentType = "epp"
+	ComponentTypeLPX      ComponentType = "lpx"
 )
 
 const (
@@ -136,9 +137,21 @@ type ComponentRoleSpec struct {
 
 	// podTemplate defines the Pod configuration for this role. Admission permits
 	// it only when the enclosing component type explicitly supports role-specific
-	// Pod templates. No component type supports it in this release.
+	// Pod templates. LPX components support role-specific Pod templates.
 	// +optional
 	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
+}
+
+// ComponentRole returns the authored role, or nil when the component does not declare it.
+// The shared spec must not be nil.
+func (s *DynamoComponentDeploymentSharedSpec) ComponentRole(name string) *ComponentRoleSpec {
+	// Resolve the role by its stable authored name.
+	for i := range s.Roles {
+		if s.Roles[i].Name == name {
+			return &s.Roles[i]
+		}
+	}
+	return nil
 }
 
 // MultinodeSpec configures a multinode component.
@@ -509,10 +522,10 @@ type DynamoCheckpointIdentity struct {
 	// +kubebuilder:validation:MinLength=1
 	Model string `json:"model"`
 
-	// backendFramework is the runtime framework (`vllm`, `sglang`, `trtllm`).
+	// backendFramework is the runtime framework (`vllm`, `sglang`, `trtllm`, or `lpu`).
 	// Deprecated: legacy identity only.
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Enum=vllm;sglang;trtllm
+	// +kubebuilder:validation:Enum=vllm;sglang;trtllm;lpu
 	BackendFramework string `json:"backendFramework"`
 
 	// dynamoVersion is the Dynamo platform version.
@@ -714,6 +727,10 @@ type PlacementStatus struct {
 	// for the semantics of each value.
 	// +optional
 	State PlacementScoreState `json:"state,omitempty"`
+
+	// lpxAttempt is Dynamo's durable aggregate LPX scheduling-attempt authority record.
+	// +optional
+	LPXAttempt *LPXAttemptStatus `json:"lpxAttempt,omitempty"`
 }
 
 // RestartPhase enumerates phases of a graph-level restart.
@@ -824,6 +841,11 @@ type ComponentReplicaStatus struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	GPUsPerReplica *int64 `json:"gpusPerReplica,omitempty"`
+
+	// ready is the binary determination of whether the correct number of replicas
+	// are scheduled and available.
+	// +optional
+	Ready bool `json:"ready"`
 
 	// replicas is the total number of non-terminated replicas.
 	// +kubebuilder:validation:Minimum=0
