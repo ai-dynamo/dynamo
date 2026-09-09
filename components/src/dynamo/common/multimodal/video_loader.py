@@ -51,14 +51,9 @@ logger = logging.getLogger(__name__)
 def _cv2_lacks_video_backend() -> bool:
     """Whether the installed OpenCV imports but can open no video.
 
-    The runtime images rebuild OpenCV from source with every video backend off,
-    so the image carries no software codec. ``cv2.resize`` still works, which is
-    what mistral_common needs to tokenize a still image, but ``VideoCapture``
-    opens nothing and vLLM surfaces that as ``SystemError`` -- not the
-    ``ImportError`` the decode path converts into an actionable error.
-
-    A cv2 that is absent entirely answers False: the ImportError path names that
-    case more precisely than this one can.
+    Such a build fails through ``SystemError`` from ``VideoCapture`` rather
+    than the ``ImportError`` the decode path converts. An absent cv2 answers
+    False: the ImportError path names that case more precisely.
     """
     try:
         import cv2

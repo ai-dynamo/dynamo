@@ -308,7 +308,7 @@ async def test_decode_video_bytes_missing_decoder_is_actionable(monkeypatch):
     msg = str(exc_info.value)
     assert "'vp9'" in msg  # names the codec
     assert VALIDATED_SPECS["opencv-python-headless"] in msg  # bounded spec
-    assert "pip install" in msg  # a remedy the reader can run
+    assert "pip install" in msg
     assert "cv2" in msg
 
 
@@ -345,7 +345,6 @@ async def test_decode_video_bytes_backendless_cv2_is_actionable(monkeypatch):
 
     msg = str(exc_info.value)
     assert "'vp9'" in msg
-    # The remedy swaps the source build for the wheel of the same version.
     assert "opencv-python-headless==5.0.0.93" in msg
     assert "--force-reinstall" in msg
     assert "video backend" in msg

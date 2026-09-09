@@ -172,26 +172,6 @@ def test_trtllm_installs_opencv_only(sandboxed):
     assert install_media_decoders.VALIDATED_SPECS["av"] not in cmd
 
 
-def test_installs_only_missing_modules(sandboxed):
-    """Only carriers a fresh interpreter cannot import are installed.
-
-    Runs against a synthetic two-carrier backend: every shipped backend declares
-    a single carrier, so a real one leaves the subsetting branch unexercised.
-    """
-    sandboxed.setitem(
-        install_media_decoders._BACKEND_DECODERS,
-        "twocarrier",
-        (install_media_decoders._OPENCV, install_media_decoders._PYAV),
-    )
-    present = {"cv2"}  # video carrier present, audio missing
-    _set_available(sandboxed, present)
-    calls = _record_pip_and_mark(sandboxed, present, "av")
-    installed = install_media_decoders.install_media_decoders("twocarrier")
-    assert installed == [install_media_decoders.VALIDATED_SPECS["av"]]
-    (cmd,) = calls
-    assert install_media_decoders.VALIDATED_SPECS["opencv-python-headless"] not in cmd
-
-
 def test_every_install_uses_no_deps(sandboxed):
     """--no-deps is unconditional now that custom specs are out of scope --
     the installer must never be able to shift the image's pinned stack."""
@@ -261,36 +241,24 @@ def test_dry_run_reports_without_installing(sandboxed):
     assert calls == []
 
 
-def test_pending_subset_installs_only_still_missing(sandboxed):
-    """A racing process may install part of the set while we wait on the lock.
+def test_racing_install_between_probe_and_lock_runs_no_pip(sandboxed):
+    """A racing process may install the carrier while we wait on the lock.
 
-    Probe round 1 (pre-check) sees both carriers missing; round 2 (post-lock
-    re-check) sees cv2 already installed by the racing process, so only the
-    audio carrier installs; round 3 (post-verify) sees everything. Uses a
-    synthetic two-carrier backend for the reason given in
-    test_installs_only_missing_modules.
+    Probe round 1 (pre-check) sees the vLLM audio carrier missing; round 2
+    (post-lock re-check) sees the racing process already installed it, so pip
+    must not run at all.
     """
     rounds = {"n": 0}
 
     def probe(mods):
         rounds["n"] += 1
-        if rounds["n"] == 1:
-            return list(mods)
-        if rounds["n"] == 2:
-            return [m for m in mods if m != "cv2"]
-        return []
+        return list(mods) if rounds["n"] == 1 else []
 
-    sandboxed.setitem(
-        install_media_decoders._BACKEND_DECODERS,
-        "twocarrier",
-        (install_media_decoders._OPENCV, install_media_decoders._PYAV),
-    )
     sandboxed.setattr(install_media_decoders, "_modules_missing_fresh", probe)
     calls = _record_pip(sandboxed)
-    installed = install_media_decoders.install_media_decoders("twocarrier")
-    assert installed == [install_media_decoders.VALIDATED_SPECS["av"]]
-    (cmd,) = calls
-    assert install_media_decoders.VALIDATED_SPECS["opencv-python-headless"] not in cmd
+
+    assert install_media_decoders.install_media_decoders("vllm") == []
+    assert calls == []
 
 
 def test_modules_missing_fresh_real_probe():

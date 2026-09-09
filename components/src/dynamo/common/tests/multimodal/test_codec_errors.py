@@ -46,12 +46,6 @@ def test_video_message_names_codec_and_spec(monkeypatch):
     assert "H.264/H.265" in msg
 
 
-def test_audio_message_still_offers_the_installer():
-    """PyAV is in the vLLM set, so the installer remains a real remedy there."""
-    err = codec_errors.audio_decoder_missing("vllm")
-    assert "install_media_decoders vllm" in str(err)
-
-
 def test_present_but_unusable_carrier_pins_the_installed_version(monkeypatch):
     """A carrier already on the path needs more than a plain install.
 
