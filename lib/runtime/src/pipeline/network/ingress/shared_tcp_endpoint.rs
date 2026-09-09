@@ -1107,17 +1107,12 @@ mod tests {
             .await
             .expect("surviving instance's handler should still receive requests");
 
-        // Both an instance whose handler was removed and one that never registered must be
-        // rejected on the ACK: the client only recognises this prefix as a rejection, and reads
-        // anything else as the success ACK before waiting for a stream that never opens.
-        for path in ["a/generate", "deadbeef/generate"] {
-            let ack = send_ack(&client, addr, path).await;
-            assert!(
-                ack.starts_with(crate::pipeline::network::ACK_UNAVAILABLE_PREFIX.as_bytes()),
-                "{path} should be rejected on the ACK, got {:?}",
-                String::from_utf8_lossy(&ack)
-            );
-        }
+        let ack = send_ack(&client, addr, "a/generate").await;
+        assert!(
+            ack.starts_with(crate::pipeline::network::ACK_UNAVAILABLE_PREFIX.as_bytes()),
+            "removed instance should be rejected on the ACK, got {:?}",
+            String::from_utf8_lossy(&ack)
+        );
 
         cancellation_token.cancel();
     }

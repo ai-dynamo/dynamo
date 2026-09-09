@@ -2496,8 +2496,6 @@ pub(crate) mod tests {
         await_cancelled_dispatch(task, dropped.as_ref(), state.as_ref()).await;
     }
 
-    /// Dispatch one default request through `engine` on a fresh service and return the
-    /// response with the service state, so the caller can assert on the metrics it produced.
     async fn dispatch_engine(
         engine: crate::types::openai::generate::GenerateStreamingEngine,
         request_id: &str,
