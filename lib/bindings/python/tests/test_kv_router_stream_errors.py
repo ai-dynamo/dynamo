@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import contextlib
 import uuid
 from dataclasses import dataclass
 
@@ -59,13 +58,17 @@ class _Worker:
         return cls(endpoint_path, runtime, server_task)
 
     async def stop(self):
+        """Shut the runtime down and return once the endpoint's cleanup has finished.
+
+        `serve_endpoint` resolves only after the endpoint has unregistered from discovery
+        and from the request-plane server, so awaiting it after `shutdown()` is the barrier
+        that proves the handler removal has run.
+        """
         if self.stopped:
             return
         self.stopped = True
-        self.server_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await self.server_task
         self.runtime.shutdown()
+        await asyncio.wait_for(self.server_task, timeout=10)
 
 
 async def _wait_for_single_instance(endpoint):
@@ -73,11 +76,6 @@ async def _wait_for_single_instance(endpoint):
     instances = await client.wait_for_instances()
     assert len(instances) == 1
     return client
-
-
-async def _wait_until_deregistered(client):
-    while client.instance_ids():
-        await asyncio.sleep(0.05)
 
 
 async def _generate_and_collect(router, response_buffer_size):
@@ -152,23 +150,15 @@ async def test_worker_teardown_leaves_sibling_worker_reachable(
     """Regression test for ai-dynamo/dynamo#14261."""
     monkeypatch.setenv("DYN_ROUTER_MIN_INITIAL_WORKERS", "1")
     torn_down, survivor = worker_pair
-    torn_down_client = await _wait_for_single_instance(
-        router_runtime.endpoint(torn_down.endpoint_path)
-    )
+    # Both handlers must be registered before the teardown, or the removal it triggers
+    # has nothing of the survivor's to remove and the test proves nothing.
+    await _wait_for_single_instance(router_runtime.endpoint(torn_down.endpoint_path))
     survivor_endpoint = router_runtime.endpoint(survivor.endpoint_path)
     await _wait_for_single_instance(survivor_endpoint)
 
+    # Returns after the torn-down endpoint's handler removal has run, so the survivor's
+    # request is issued after that removal rather than racing it.
     await torn_down.stop()
-    # The endpoint's detached cleanup task unregisters from discovery and then from the shared
-    # TCP server, so the instance disappearing is the cue that the handler sweep is about to
-    # run; the sleep covers the rest of that task. Bounded, so a regression here reports as
-    # this wait timing out rather than as the opaque whole-test timeout of #14261. The sleep
-    # fails open: if it is ever too short the sweep has not run, the survivor was never at
-    # risk, and this test passes without proving anything. `unregister_endpoint_removes_only_
-    # the_callers_instance` in shared_tcp_endpoint.rs is the deterministic proof; this test
-    # covers the same bug through the real Python teardown path.
-    await asyncio.wait_for(_wait_until_deregistered(torn_down_client), timeout=10)
-    await asyncio.sleep(0.2)
 
     router = KvRouter(survivor_endpoint, 4, KvRouterConfig(use_kv_events=False))
     with pytest.raises(ValueError, match="intentional KV-router failure"):
