@@ -20,7 +20,7 @@ from dynamo.frontend.vllm_processor import EngineFactory
 EngineFactory(config: FrontendConfig, flags: Namespace)
 ```
 
-[`components/src/dynamo/frontend/vllm_processor.py#L1089`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/vllm_processor.py#L1089)
+[`components/src/dynamo/frontend/vllm_processor.py#L1088`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/vllm_processor.py#L1088)
 
 **Public methods**
 
@@ -32,7 +32,7 @@ __init__(config: FrontendConfig, flags: Namespace)
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/vllm_processor.py#L1090)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/vllm_processor.py#L1089)
 
 <h4 id="api-dynamo-frontend-vllm-processor-enginefactory-chat-engine-factory">chat_engine_factory</h4>
 
@@ -42,7 +42,7 @@ chat_engine_factory(instance_id: ModelCardInstanceId, mdc: ModelDeploymentCard, 
 
 Called by Rust when a model is discovered.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/vllm_processor.py#L1109)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/vllm_processor.py#L1108)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-frontend-args-frontendarggroup" title="FrontendArgGroup (class)">
@@ -422,7 +422,7 @@ chunk and fails with ``missing field `id```. The client then gets a 500 and
 never sees the message. The HTTP layer reads the text back off ``comment``.
 See ``depythonize_annotated`` in ``lib/bindings/python/rust/engine.rs``.
 
-[`components/src/dynamo/frontend/utils.py#L232`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/utils.py#L232)
+[`components/src/dynamo/frontend/utils.py#L230`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/utils.py#L230)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-main-async-main" title="async_main (function)">
@@ -469,7 +469,7 @@ the discriminator proving the argument was invalid.
 Returns None when ``exc`` is not that shape, so callers fall through to
 their existing handling instead of inventing a status.
 
-[`components/src/dynamo/frontend/utils.py#L247`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/utils.py#L247)
+[`components/src/dynamo/frontend/utils.py#L245`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/utils.py#L245)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-sglang-prepost-build-response-format-guided-decoding" title="build_response_format_guided_decoding (function)">
@@ -571,7 +571,7 @@ Intended to be called once at processor startup with
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-utils-extract-mm-urls" title="extract_mm_urls (function)">
-Extract media and vLLM image processor-cache UUIDs from chat messages.
+Extract media and vLLM processor-cache UUIDs from chat messages.
 
 ```python
 from dynamo.frontend.utils import extract_mm_urls
@@ -583,8 +583,7 @@ extract_mm_urls(messages: list[dict[str, Any]]) -> tuple[dict[str, list[dict[str
 
 URL-backed parts become ``Url`` variants. Image parts with no URL and an
 opaque ``uuid`` become ``UuidOnly`` variants for vLLM's multimodal
-processor cache. Cache UUIDs on audio and video are rejected. Image UUID
-lists preserve slot order
+processor cache. UUID lists preserve slot order for every media type
 
 ```
 ({"image_url": [{"Url": "https://..."}, {"UuidOnly": "image-1"}]},
@@ -630,7 +629,7 @@ handle_engine_error(engine_response: Any, request_id: str, logger: logging.Logge
 
 Called when engine_response is None or missing 'token_ids'.
 
-[`components/src/dynamo/frontend/utils.py#L293`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/utils.py#L293)
+[`components/src/dynamo/frontend/utils.py#L291`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/utils.py#L291)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-utils-legacy-guided-decoding" title="legacy_guided_decoding (function)">
@@ -689,7 +688,7 @@ from dynamo.frontend.utils import make_backend_error
 make_backend_error(engine_response: dict[str, Any]) -> dict[str, Any]
 ```
 
-[`components/src/dynamo/frontend/utils.py#L210`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/utils.py#L210)
+[`components/src/dynamo/frontend/utils.py#L208`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/utils.py#L208)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-utils-make-internal-error" title="make_internal_error (function)">
@@ -703,7 +702,7 @@ from dynamo.frontend.utils import make_internal_error
 make_internal_error(request_id: str, detail: str | None = None) -> dict[str, Any]
 ```
 
-[`components/src/dynamo/frontend/utils.py#L221`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/utils.py#L221)
+[`components/src/dynamo/frontend/utils.py#L219`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/frontend/utils.py#L219)
 </Accordion>
 
 <Accordion id="api-dynamo-frontend-vllm-processor-map-finish-reason" title="map_finish_reason (function)">
