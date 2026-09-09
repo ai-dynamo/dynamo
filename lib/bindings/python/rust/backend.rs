@@ -229,6 +229,7 @@ impl LlmRegistration {
         data_parallel_start_rank = None,
         bootstrap_host = None,
         bootstrap_port = None,
+        enable_eagle = false,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -241,6 +242,7 @@ impl LlmRegistration {
         data_parallel_start_rank: Option<u32>,
         bootstrap_host: Option<String>,
         bootstrap_port: Option<u16>,
+        enable_eagle: bool,
     ) -> Self {
         Self {
             inner: RsLlmRegistration {
@@ -251,6 +253,7 @@ impl LlmRegistration {
                 max_num_batched_tokens,
                 data_parallel_size,
                 data_parallel_start_rank,
+                enable_eagle,
                 bootstrap_host,
                 bootstrap_port,
             },
@@ -292,6 +295,11 @@ impl LlmRegistration {
     #[getter]
     fn bootstrap_port(&self) -> Option<u16> {
         self.inner.bootstrap_port
+    }
+
+    #[getter]
+    fn enable_eagle(&self) -> bool {
+        self.inner.enable_eagle
     }
 }
 
@@ -888,6 +896,7 @@ impl PyEngineCore {
                     max_num_batched_tokens: opt_attr::<u64>(&v, "max_num_batched_tokens")?,
                     data_parallel_size: opt_attr::<u32>(&v, "data_parallel_size")?,
                     data_parallel_start_rank: opt_attr::<u32>(&v, "data_parallel_start_rank")?,
+                    enable_eagle: opt_attr::<bool>(&v, "enable_eagle")?.unwrap_or(false),
                     bootstrap_host: opt_attr::<String>(&v, "bootstrap_host")?,
                     bootstrap_port: opt_attr::<u16>(&v, "bootstrap_port")?,
                 }),
