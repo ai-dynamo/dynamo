@@ -13,7 +13,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_kv_router::protocols::StorageTier as RouterStorageTier;
-use dynamo_kv_router::zmq_wire::{KvEventSourceKind, Locality, RawKvEvent};
+use dynamo_kv_router::zmq_wire::{KvEventOwnership, Locality, RawKvEvent};
 
 use super::SharedCacheStatusTracker;
 use super::tracker::{
@@ -156,7 +156,7 @@ fn process_event(
     // Compatibility with v1.2 framework-only producers during v1.4 rolling upgrades.
     // TODO(v1.5): Remove with the legacy consolidator subscription after v1.2
     // leaves N-2 and residency-v2 producers use only the versioned source.
-    if event.source_kind() != Ok(KvEventSourceKind::Framework) {
+    if event.ownership() != Ok(KvEventOwnership::Framework) {
         tracing::warn!("Ignoring non-framework event on the legacy consolidator stream");
         return;
     }
@@ -297,7 +297,7 @@ mod tests {
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
             locality,
-            source_kind: None,
+            ownership: None,
         }
     }
 

@@ -36,12 +36,7 @@ def _parse_backend_params(values: list[str]) -> dict[str, str]:
 def _build_parser():
     parser = _build_v0_parser()
     parser.description = "Load exact GMS V1 weights into a fresh rank-local server."
-    parser.add_argument(
-        "--device",
-        type=int,
-        default=0,
-        help="CUDA-visible rank-local device ordinal.",
-    )
+    parser.set_defaults(device=0)
     parser.add_argument(
         "--posix-backend-param",
         action="append",

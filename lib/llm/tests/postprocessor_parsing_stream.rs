@@ -3235,6 +3235,44 @@ async fn response_format_gemma4_bare_json_stays_content() {
     assert_eq!(content, json);
 }
 
+#[tokio::test]
+async fn gemma4_without_enable_thinking_keeps_parser_markers_as_content() {
+    let preprocessor = build_preprocessor(Some("gemma4"), None);
+
+    let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+        "model": "dummy-gemma4-model",
+        "messages": [
+            {
+                "role": "user",
+                "content": "answer plainly"
+            }
+        ],
+        "stream": true
+    }))
+    .unwrap();
+
+    let text = "<|channel>thought\nshould stay plain<channel|>final answer";
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(text), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+
+    let DrainOutput {
+        reasoning, content, ..
+    } = drain_stream(output_stream).await;
+
+    assert!(
+        reasoning.is_empty(),
+        "Gemma 4 reasoning parser must be gated off without enable_thinking=true, got: {reasoning:?}"
+    );
+    assert_eq!(content, text);
+}
+
 /// MiniMax append-think is a force-reasoning parser that is not yet proven to
 /// preserve native reasoning before guided JSON. Structured bare JSON should
 /// therefore use the legacy guided-output bypass and remain assistant content.
@@ -3545,6 +3583,82 @@ async fn tool_calls_qwen3_coder_auto_routes_through_experimental_gate() {
         finish_reasons.contains(&FinishReason::ToolCalls),
         "{path}: expected ToolCalls finish_reason, got: {finish_reasons:?}"
     );
+}
+
+async fn forbidden_qwen3_coder_tool_call(
+    request: &NvCreateChatCompletionRequest,
+) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
+    let tool_call = concat!(
+        "<tool_call>\n<function=get_weather>\n",
+        "<parameter=location>San Francisco</parameter>\n",
+        "</function>\n</tool_call>"
+    );
+    let preprocessor = build_preprocessor(Some("qwen3"), Some("qwen3_coder"));
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(tool_call), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+
+    preprocessor
+        .postprocessor_parsing_stream(input_stream, request, false, false)
+        .expect("postprocessor_parsing_stream should build")
+        .collect()
+        .await
+}
+
+fn assert_forbidden_tool_call_is_suppressed(
+    case: &str,
+    responses: &[Annotated<NvCreateChatCompletionStreamResponse>],
+) {
+    let choices: Vec<_> = responses
+        .iter()
+        .filter_map(|response| response.data.as_ref())
+        .flat_map(|response| response.inner.choices.iter())
+        .collect();
+    assert!(
+        choices
+            .iter()
+            .all(|choice| choice.delta.tool_calls.is_none()),
+        "{case}: a request that forbids tools exposed delta.tool_calls"
+    );
+    assert!(
+        choices
+            .iter()
+            .all(|choice| choice.finish_reason != Some(FinishReason::ToolCalls)),
+        "{case}: a request that forbids tools retained finish_reason=tool_calls"
+    );
+    let terminal = choices
+        .iter()
+        .position(|choice| choice.finish_reason == Some(FinishReason::Stop))
+        .expect("the suppressed call must terminate with finish_reason=stop");
+    assert!(
+        choices[terminal + 1..]
+            .iter()
+            .all(|choice| choice.finish_reason.is_none()),
+        "{case}: another terminal choice appeared after finish_reason=stop"
+    );
+}
+
+#[tokio::test]
+async fn unified_stream_with_no_tools_suppresses_parser_tool_call() {
+    let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "What's the weather?"}],
+        "stream": true
+    }))
+    .unwrap();
+
+    let responses = forbidden_qwen3_coder_tool_call(&request).await;
+    assert_forbidden_tool_call_is_suppressed("no tools", &responses);
+}
+
+#[tokio::test]
+async fn unified_stream_with_tool_choice_none_suppresses_parser_tool_call() {
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::None);
+
+    let responses = forbidden_qwen3_coder_tool_call(&request).await;
+    assert_forbidden_tool_call_is_suppressed("tool_choice=none", &responses);
 }
 
 /// DeepSeek V4/GLM + required + `prompt_injected_reasoning=true` +
@@ -4462,5 +4576,653 @@ async fn postprocessor_parsing_stream_force_nonempty_whitespace_only_turn_surviv
     assert_eq!(
         content, "\n  ",
         "whitespace-only output must not vanish for a force_nonempty_content request"
+    );
+}
+
+// ── Muse unified parser routing (default-on) ──────────────────────────────────
+
+/// One muse turn: a `to=self` thought, one `get_weather` call, then the visible
+/// `to=user` answer. Raw model markup, one channel per streamed chunk.
+const MUSE_MARKUP_SHAPE: [&str; 3] = [
+    "<|start|>assistant to=self<|message|>Look it up.<|eom|>",
+    "<|start|>assistant to=get_weather<|message|><atem:invoke name=\"get_weather\"><atem:parameter name=\"location\">Paris</atem:parameter></atem:invoke><|eom|>",
+    "<|start|>assistant to=user<|message|>It's 18C.<|eot|>",
+];
+
+/// Default-on routing: `tool_call_parser=muse_glimmer`, NO reasoning parser. The
+/// guard routes the whole turn through the v2 UNIFIED parser, which owns
+/// reasoning + content + tool calls in one pass — all three surface cleanly with
+/// no marker leak, and neither the v1 reasoning stage nor the jail runs.
+#[tokio::test]
+async fn postprocessor_parsing_stream_muse_routes_to_unified() {
+    let preprocessor = build_preprocessor(None, Some("muse_glimmer"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+
+    let out = solo_output(&preprocessor, &request, &MUSE_MARKUP_SHAPE).await;
+
+    assert_eq!(
+        out.reasoning, "Look it up.",
+        "reasoning_content must come from the unified parser"
+    );
+    assert_eq!(
+        out.content, "It's 18C.",
+        "content must be the stripped answer"
+    );
+    assert_eq!(
+        out.tool_calls.len(),
+        1,
+        "expected one tool call: {:?}",
+        out.tool_calls
+    );
+    assert_eq!(out.tool_calls[0].0.as_deref(), Some("get_weather"));
+    let args: Value = serde_json::from_str(&out.tool_calls[0].1).unwrap();
+    assert_eq!(args, serde_json::json!({"location": "Paris"}));
+    for marker in ["<|start|>", "<|message|>", "<atem:invoke"] {
+        assert!(
+            !out.content.contains(marker) && !out.reasoning.contains(marker),
+            "marker {marker:?} leaked: content={:?} reasoning={:?}",
+            out.content,
+            out.reasoning
+        );
+    }
+}
+
+#[tokio::test]
+async fn postprocessor_parsing_stream_muse_force_nonempty_matches_batch_policy() {
+    let preprocessor = build_preprocessor(None, Some("muse_glimmer"));
+    let mut request = streaming_tool_request(ChatCompletionToolChoiceOption::None);
+    request.chat_template_args =
+        Some(serde_json::from_value(serde_json::json!({"force_nonempty_content": true})).unwrap());
+
+    let reasoning_only = solo_output(&preprocessor, &request, &MUSE_MARKUP_SHAPE[..1]).await;
+    assert_eq!(reasoning_only.content, "Look it up.");
+    assert!(reasoning_only.reasoning.is_empty());
+
+    let reasoning_and_answer = solo_output(
+        &preprocessor,
+        &request,
+        &[MUSE_MARKUP_SHAPE[0], MUSE_MARKUP_SHAPE[2]],
+    )
+    .await;
+    assert_eq!(reasoning_and_answer.reasoning, "Look it up.");
+    assert_eq!(reasoning_and_answer.content, "It's 18C.");
+}
+
+#[tokio::test]
+async fn muse_force_nonempty_keeps_reasoning_before_a_tool_call_on_the_wire() {
+    let preprocessor = build_preprocessor(None, Some("muse_glimmer"));
+    let mut request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+    request.chat_template_args =
+        Some(serde_json::from_value(serde_json::json!({"force_nonempty_content": true})).unwrap());
+    let input_stream = stream::iter(
+        vec![
+            mock_content_chunk(MUSE_MARKUP_SHAPE[0]),
+            mock_content_chunk(MUSE_MARKUP_SHAPE[1]),
+            mock_final_chunk(),
+        ]
+        .into_iter()
+        .map(Annotated::from_data),
+    );
+    let responses = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor stream")
+        .collect::<Vec<_>>()
+        .await;
+    let choices: Vec<_> = responses
+        .iter()
+        .filter_map(|response| response.data.as_ref())
+        .flat_map(|data| data.inner.choices.iter())
+        .collect();
+    let reasoning = choices
+        .iter()
+        .position(|choice| choice.delta.reasoning_content.is_some())
+        .expect("reasoning delta");
+    let tool = choices
+        .iter()
+        .position(|choice| choice.delta.tool_calls.is_some())
+        .expect("tool-call delta");
+
+    assert!(reasoning < tool, "reasoning must precede the tool call");
+    assert!(choices.iter().all(|choice| {
+        !(choice.delta.reasoning_content.is_some() && choice.delta.tool_calls.is_some())
+    }));
+}
+
+/// `tool_choice=Required` is excluded by the guard (auto/none only), so the turn
+/// falls through to the guided-decode + jail path. No reasoning parser is
+/// configured there, so `reasoning_content` can never be produced — proof the
+/// unified parser (which would yield "Look it up.") did NOT engage.
+#[tokio::test]
+async fn postprocessor_parsing_stream_muse_required_does_not_route_to_unified() {
+    let preprocessor = build_preprocessor(None, Some("muse_glimmer"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+
+    let out = solo_output(&preprocessor, &request, &MUSE_MARKUP_SHAPE).await;
+
+    assert!(
+        out.reasoning.is_empty(),
+        "Required must NOT route to unified; reasoning_content must stay empty, got {:?}",
+        out.reasoning
+    );
+    // Empty reasoning alone also passes if the unified parser ran and dropped it, so
+    // assert the POSITIVE signal of the jail path: it does not strip muse markers.
+    assert!(
+        out.content.contains("<|start|>"),
+        "the jail path leaves muse markup in content; got {:?}",
+        out.content
+    );
+    assert!(
+        out.tool_calls
+            .iter()
+            .all(|(name, _)| name.as_deref() != Some("get_weather")),
+        "the unified parser must not produce a native-markup call here: {:?}",
+        out.tool_calls
+    );
+}
+
+/// A structural-tag request must stay on the guided-decode + jail path, exactly as a
+/// forced `tool_choice` does: it emits guided JSON, not the native ATEM markup the
+/// unified parser reads. The guard carries `!uses_tool_call_structural_tag` for that,
+/// and nothing pinned it — a refactor could drop the clause and every other muse test
+/// would still pass, because they all run with the flag false.
+///
+/// `solo_output` hardcodes `false, false`, so this drives
+/// `postprocessor_parsing_stream` directly to set the flag.
+#[tokio::test]
+async fn postprocessor_parsing_stream_muse_structural_tag_does_not_route_to_unified() {
+    let preprocessor = build_preprocessor(None, Some("muse_glimmer"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+
+    let mut input: Vec<NvCreateChatCompletionStreamResponse> = MUSE_MARKUP_SHAPE
+        .iter()
+        .map(|text| mock_multi_choice_content_chunk(&[(0, *text)]))
+        .collect();
+    input.push(mock_multi_choice_final_chunk(&[0]));
+
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(
+            stream::iter(input.into_iter().map(Annotated::from_data)),
+            &request,
+            false,
+            // The one axis under test.
+            true,
+        )
+        .expect("postprocessor_parsing_stream should build");
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
+        output_stream.collect().await;
+    let out = demux_by_choice(&output_chunks)
+        .remove(&0)
+        .map(|acc| ChoiceOutput {
+            reasoning: acc.reasoning,
+            content: acc.content,
+            tool_calls: acc
+                .tool_calls
+                .into_values()
+                .map(|tc| (tc.name, tc.arguments))
+                .collect(),
+        })
+        .unwrap_or_default();
+
+    // No reasoning parser is configured, so any `reasoning_content` at all could only
+    // have come from the unified parser engaging.
+    assert!(
+        out.reasoning.is_empty(),
+        "structural-tag must NOT route to unified; reasoning stayed {:?}",
+        out.reasoning
+    );
+    // The positive jail signal: that path does not strip muse markers.
+    assert!(
+        out.content.contains("<|start|>"),
+        "the jail path leaves muse markup in content; got {:?}",
+        out.content
+    );
+    assert!(
+        out.tool_calls
+            .iter()
+            .all(|(name, _)| name.as_deref() != Some("get_weather")),
+        "the unified parser must not produce a native-markup call here: {:?}",
+        out.tool_calls
+    );
+}
+
+/// `unified_family` keys on EITHER parser name, so a card that sets only
+/// `--dyn-reasoning-parser muse_glimmer` must route the stream to unified as well.
+/// The batch path pins this (`test_muse_unified_batch_finalize_routes_on_reasoning_name_only`);
+/// streaming had no equivalent.
+#[tokio::test]
+async fn postprocessor_parsing_stream_muse_reasoning_name_only_routes_to_unified() {
+    let preprocessor = build_preprocessor(Some("muse_glimmer"), None);
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+
+    let out = solo_output(&preprocessor, &request, &MUSE_MARKUP_SHAPE).await;
+
+    assert_eq!(out.reasoning, "Look it up.");
+    assert_eq!(out.content, "It's 18C.");
+}
+
+/// Explicit `tool_choice=None` must route to unified like auto — the guard's
+/// "auto/none only" contract. A stream guard that matched only unset+auto let None fall
+/// through to the Basic reasoning fallback, which leaked raw markers into content and
+/// dropped reasoning; the batch path always routed it, so only streaming regressed.
+#[tokio::test]
+async fn postprocessor_parsing_stream_muse_none_routes_to_unified() {
+    let preprocessor = build_preprocessor(None, Some("muse_glimmer"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::None);
+
+    let out = solo_output(&preprocessor, &request, &MUSE_MARKUP_SHAPE).await;
+
+    assert_eq!(
+        out.reasoning, "Look it up.",
+        "tool_choice=None must route to unified; reasoning_content must come from it"
+    );
+    assert_eq!(
+        out.content, "It's 18C.",
+        "content must be the stripped answer"
+    );
+    for marker in ["<|start|>", "<|message|>", "<atem:invoke"] {
+        assert!(
+            !out.content.contains(marker) && !out.reasoning.contains(marker),
+            "marker {marker:?} leaked under tool_choice=None: content={:?} reasoning={:?}",
+            out.content,
+            out.reasoning
+        );
+    }
+    // Routing here is for the split and the stripping ONLY. The caller disabled tool
+    // calling, so the parsed call must be dropped rather than surfaced — the contract
+    // every other family gets from `should_apply_tool_jail` returning false for `none`.
+    assert!(
+        out.tool_calls.is_empty(),
+        "tool_choice=None must not return tool_calls, got {:?}",
+        out.tool_calls
+    );
+}
+
+// Guided tool-call routing matrix.
+//
+// For a forced `tool_choice` (`Required` or `Named`), a per-choice pre-commit
+// classifier buffers the stream until the first non-whitespace byte arrives.
+// `[` (required) or `{` (named) means the model is emitting guided JSON, so the
+// request streams as guided JSON. Anything else means NATIVE markup, and the
+// buffer is replayed UNTOUCHED into the existing v1 jail. Nothing may be emitted
+// before that decision is made.
+//
+// | # | Row                                                        | Proves                                                                        |
+// |---|------------------------------------------------------------|-------------------------------------------------------------------------------|
+// | 1 | minimax_m2 + required + native XML (thinking disabled)      | NATIVE classification does not break the existing v1 jail extraction (regression) |
+// | 2 | minimax_m2 + required + reasoning then native XML           | NATIVE replay preserves the pre-`</think>` reasoning split                     |
+// | 3 | qwen3_coder + required + guided JSON array                  | leading `[` under Required routes to guided JSON, args stay valid JSON         |
+// | 4 | qwen3_coder + named + bare guided arguments object          | leading `{` under Named routes to guided JSON, name comes from the request     |
+// | 5 | qwen3_coder + required + whitespace then guided array       | leading whitespace is skipped, classification lands on the first real byte     |
+// | 6 | minimax_m2 + required + native XML containing a later `{`   | only the FIRST non-whitespace byte classifies; an inner brace stays NATIVE     |
+// | 7 | qwen3_coder + required + whitespace-only first chunk        | classification survives a chunk boundary and lands on the later `[`            |
+// | 8 | minimax_m2 + named + native XML containing a later `{`      | named classification also uses only the first non-whitespace byte               |
+
+/// Row 1 - Regression. MiniMax M2 with thinking disabled emits its native
+/// `<minimax:tool_call>` XML directly. The first non-whitespace byte is `<`, so
+/// the classifier must pick NATIVE and replay the buffer into the v1 jail
+/// untouched: the tool call still extracts cleanly, no markup leaks into
+/// content, and the turn terminates with `finish_reason=ToolCalls`.
+#[tokio::test]
+async fn route_matrix_minimax_m2_required_native_xml_stays_native() {
+    let preprocessor = build_preprocessor(Some("minimax_m2"), Some("minimax_m2"));
+    let mut request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+    request.chat_template_args =
+        Some(serde_json::from_value(serde_json::json!({"thinking": false})).unwrap());
+    let tool_call = "<minimax:tool_call>\
+<invoke name=\"get_weather\"><parameter name=\"location\">San Francisco</parameter></invoke>\
+</minimax:tool_call>";
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(tool_call), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        reasoning,
+        content,
+        tool_calls,
+        finish_reasons,
+    } = drain_stream(output_stream).await;
+
+    let case = "row 1: minimax_m2 + required + native XML";
+    assert!(
+        reasoning.is_empty(),
+        "{case}: native markup must not become reasoning_content, got: {reasoning:?}"
+    );
+    assert!(
+        !content.contains("minimax:tool_call"),
+        "{case}: native markup must not leak into content, got: {content:?}"
+    );
+    assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
+    assert!(
+        finish_reasons.contains(&FinishReason::ToolCalls),
+        "{case}: expected ToolCalls finish_reason, got: {finish_reasons:?}"
+    );
+}
+
+/// Row 2 - Same NATIVE classification, but reasoning precedes the XML. The
+/// classifier sees `I` (not `[`/`{`), routes NATIVE, and the replayed buffer
+/// still splits at `</think>`: reasoning lands in `reasoning_content`, the tool
+/// call is extracted, and neither the think markers nor the XML leak.
+#[tokio::test]
+async fn route_matrix_minimax_m2_required_reasoning_before_native_xml_stays_native() {
+    let preprocessor = build_preprocessor(Some("minimax_m2"), Some("minimax_m2"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+    let tool_call = "<minimax:tool_call>\
+<invoke name=\"get_weather\"><parameter name=\"location\">San Francisco</parameter></invoke>\
+</minimax:tool_call>";
+    let input_stream = stream::iter(
+        vec![
+            mock_content_chunk("I should call weather."),
+            mock_content_chunk("</think>"),
+            mock_content_chunk(tool_call),
+            mock_final_chunk(),
+        ]
+        .into_iter()
+        .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, true, false)
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        reasoning,
+        content,
+        tool_calls,
+        finish_reasons,
+    } = drain_stream(output_stream).await;
+
+    let case = "row 2: minimax_m2 + required + reasoning before native XML";
+    assert_eq!(
+        reasoning, "I should call weather.",
+        "{case}: reasoning_content should hold only the pre-</think> text"
+    );
+    assert!(
+        !content.contains("minimax:tool_call"),
+        "{case}: native markup must not leak into content, got: {content:?}"
+    );
+    assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
+    assert!(
+        finish_reasons.contains(&FinishReason::ToolCalls),
+        "{case}: expected ToolCalls finish_reason, got: {finish_reasons:?}"
+    );
+}
+
+/// Row 3 - `tool_choice=Required` with a guided JSON array payload. The first
+/// non-whitespace byte is `[`, so the request streams as guided JSON even though
+/// the model family (`qwen3_coder`) has a native markup parser configured. The
+/// tool call is extracted, arguments are valid JSON, and nothing leaks.
+#[tokio::test]
+async fn route_matrix_qwen3_coder_required_guided_json_array_routes_guided() {
+    let guided = r#"[{"name": "get_weather", "parameters": {"location": "San Francisco"}}]"#;
+    let preprocessor = build_preprocessor(None, Some("qwen3_coder"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(guided), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, true, false)
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        reasoning,
+        content,
+        tool_calls,
+        finish_reasons,
+    } = drain_stream(output_stream).await;
+
+    let case = "row 3: qwen3_coder + required + guided JSON array";
+    assert!(
+        reasoning.is_empty(),
+        "{case}: guided JSON must not become reasoning_content, got: {reasoning:?}"
+    );
+    assert!(
+        content.trim().is_empty(),
+        "{case}: guided JSON must be fully consumed, content should be empty, got: {content:?}"
+    );
+    assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
+    assert!(
+        finish_reasons.contains(&FinishReason::ToolCalls),
+        "{case}: expected ToolCalls finish_reason, got: {finish_reasons:?}"
+    );
+}
+
+/// Row 4 - `tool_choice=Named` with a bare guided arguments object. The first
+/// non-whitespace byte is `{`, so the stream routes as guided JSON; the payload
+/// carries only the arguments, so the function name must come from the request's
+/// named tool choice.
+#[tokio::test]
+async fn route_matrix_qwen3_coder_named_bare_arguments_object_routes_guided() {
+    let bare_params = r#"{"location": "San Francisco"}"#;
+    let preprocessor = build_preprocessor(None, Some("qwen3_coder"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Named(
+        ChatCompletionNamedToolChoice {
+            r#type: ChatCompletionToolType::Function,
+            function: FunctionName {
+                name: "get_weather".to_string(),
+            },
+        },
+    ));
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(bare_params), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, true, false)
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        reasoning,
+        content,
+        tool_calls,
+        finish_reasons,
+    } = drain_stream(output_stream).await;
+
+    let case = "row 4: qwen3_coder + named + bare guided arguments object";
+    assert!(
+        reasoning.is_empty(),
+        "{case}: guided JSON must not become reasoning_content, got: {reasoning:?}"
+    );
+    assert!(
+        content.trim().is_empty(),
+        "{case}: guided JSON must be fully consumed, content should be empty, got: {content:?}"
+    );
+    // The name is NOT in the payload; it can only come from the named tool choice.
+    assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
+    assert!(
+        finish_reasons.contains(&FinishReason::ToolCalls),
+        "{case}: expected ToolCalls finish_reason, got: {finish_reasons:?}"
+    );
+}
+
+/// Row 5 - Leading whitespace before the guided payload. The classifier skips
+/// whitespace and decides on the first REAL byte (`[`), so the request still
+/// routes as guided JSON and the whitespace never reaches the client.
+#[tokio::test]
+async fn route_matrix_qwen3_coder_required_leading_whitespace_still_guided() {
+    let guided =
+        "  \n\t [{\"name\": \"get_weather\", \"parameters\": {\"location\": \"San Francisco\"}}]";
+    let preprocessor = build_preprocessor(None, Some("qwen3_coder"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(guided), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, true, false)
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        reasoning,
+        content,
+        tool_calls,
+        finish_reasons,
+    } = drain_stream(output_stream).await;
+
+    let case = "row 5: qwen3_coder + required + leading whitespace + guided JSON array";
+    assert!(
+        reasoning.is_empty(),
+        "{case}: guided JSON must not become reasoning_content, got: {reasoning:?}"
+    );
+    assert!(
+        content.trim().is_empty(),
+        "{case}: guided JSON must be fully consumed, content should be empty, got: {content:?}"
+    );
+    assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
+    assert!(
+        finish_reasons.contains(&FinishReason::ToolCalls),
+        "{case}: expected ToolCalls finish_reason, got: {finish_reasons:?}"
+    );
+}
+
+/// Row 6 - Native markup whose TEXT contains a `{` after the opening tag. The
+/// classifier looks only at the first non-whitespace byte (`<`), so this must be
+/// classified NATIVE and handled by the v1 jail. The inner brace stays part of
+/// the parameter value; it must never be reinterpreted as tool arguments, and the
+/// markup must not leak into content.
+#[tokio::test]
+async fn route_matrix_minimax_m2_required_native_xml_with_inner_brace_stays_native() {
+    let preprocessor = build_preprocessor(Some("minimax_m2"), Some("minimax_m2"));
+    let mut request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+    request.chat_template_args =
+        Some(serde_json::from_value(serde_json::json!({"thinking": false})).unwrap());
+    // The `{` appears well after the first byte and inside a parameter value.
+    let tool_call = "<minimax:tool_call>\
+<invoke name=\"get_weather\"><parameter name=\"location\">San Francisco {CA}</parameter></invoke>\
+</minimax:tool_call>";
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(tool_call), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        reasoning,
+        content,
+        tool_calls,
+        finish_reasons,
+    } = drain_stream(output_stream).await;
+
+    let case = "row 6: minimax_m2 + required + native XML containing a later `{`";
+    assert!(
+        reasoning.is_empty(),
+        "{case}: native markup must not become reasoning_content, got: {reasoning:?}"
+    );
+    assert!(
+        !content.contains("minimax:tool_call") && !content.contains('{'),
+        "{case}: native markup must not leak into content, got: {content:?}"
+    );
+    // The brace is data, not structure: it stays inside the argument value.
+    assert_clean_tool_call(case, &content, &tool_calls, "San Francisco {CA}");
+    assert!(
+        finish_reasons.contains(&FinishReason::ToolCalls),
+        "{case}: expected ToolCalls finish_reason, got: {finish_reasons:?}"
+    );
+}
+
+/// Row 7 - The guided payload is split across chunks and the FIRST chunk is
+/// whitespace only. The classifier must stay undecided across that chunk
+/// boundary (emitting nothing) and commit on the `[` that arrives in a later
+/// chunk, then stream the reassembled payload as guided JSON.
+#[tokio::test]
+async fn route_matrix_qwen3_coder_required_whitespace_only_first_chunk_defers_classification() {
+    let preprocessor = build_preprocessor(None, Some("qwen3_coder"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+    let input_stream = stream::iter(
+        vec![
+            mock_content_chunk(" \n "),
+            mock_content_chunk("  "),
+            mock_content_chunk("[{\"name\": \"get_weather\", "),
+            mock_content_chunk("\"parameters\": {\"location\": "),
+            mock_content_chunk("\"San Francisco\"}}]"),
+            mock_final_chunk(),
+        ]
+        .into_iter()
+        .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, true, false)
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        reasoning,
+        content,
+        tool_calls,
+        finish_reasons,
+    } = drain_stream(output_stream).await;
+
+    let case = "row 7: qwen3_coder + required + whitespace-only first chunk + split guided JSON";
+    assert!(
+        reasoning.is_empty(),
+        "{case}: guided JSON must not become reasoning_content, got: {reasoning:?}"
+    );
+    assert!(
+        content.trim().is_empty(),
+        "{case}: guided JSON must be fully consumed, content should be empty, got: {content:?}"
+    );
+    assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
+    assert!(
+        finish_reasons.contains(&FinishReason::ToolCalls),
+        "{case}: expected ToolCalls finish_reason, got: {finish_reasons:?}"
+    );
+}
+
+/// Row 8: NAMED choice + native markup whose text contains a later `{`.
+///
+/// This is the row that actually pins "first non-whitespace byte only". A named choice
+/// looks for `{`, and native MiniMax XML frequently contains one inside a parameter
+/// value - so a classifier that scanned anywhere would mistake that brace for the start
+/// of an argument object and stream the markup as tool arguments. Row 6 cannot catch
+/// this: it is a `required` row, whose opener is `[`, and the XML contains no `[`.
+#[tokio::test]
+async fn route_matrix_minimax_m2_named_native_xml_with_inner_brace_stays_native() {
+    let preprocessor = build_preprocessor(Some("minimax_m2"), Some("minimax_m2"));
+    let mut request = streaming_tool_request(ChatCompletionToolChoiceOption::Named(
+        ChatCompletionNamedToolChoice {
+            r#type: ChatCompletionToolType::Function,
+            function: FunctionName {
+                name: "get_weather".to_string(),
+            },
+        },
+    ));
+    request.chat_template_args =
+        Some(serde_json::from_value(serde_json::json!({"thinking": false})).unwrap());
+    let tool_call = "<minimax:tool_call>\
+<invoke name=\"get_weather\"><parameter name=\"location\">San Francisco {CA}</parameter></invoke>\
+</minimax:tool_call>";
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(tool_call), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        content,
+        tool_calls,
+        ..
+    } = drain_stream(output_stream).await;
+
+    let case = "row 8: minimax_m2 + named + native XML containing an inner brace";
+    assert!(
+        !content.contains("minimax:tool_call"),
+        "{case}: native markup must not leak into content, got: {content:?}"
+    );
+    assert_eq!(tool_calls.len(), 1, "{case}: expected one tool call");
+    assert_eq!(
+        tool_calls[0].name.as_deref(),
+        Some("get_weather"),
+        "{case}: wrong tool name"
+    );
+    let args: serde_json::Value = serde_json::from_str(&tool_calls[0].arguments)
+        .unwrap_or_else(|e| panic!("{case}: arguments not valid JSON: {e}"));
+    assert_eq!(
+        args,
+        serde_json::json!({"location": "San Francisco {CA}"}),
+        "{case}: the inner brace must stay argument DATA, not become structure"
     );
 }

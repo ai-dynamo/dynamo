@@ -15,8 +15,8 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    discovery::{KvWorkerMonitor, allocator::AllocatorTrimOnDrop},
-    kv_router::{EncoderRouter, prefill_router::PrefillRouterLifecycle},
+    discovery::{LoadThresholdHandle, allocator::AllocatorTrimOnDrop},
+    kv_router::{EncoderRouter, RoutingLoadContext, prefill_router::PrefillRouterLifecycle},
     model_card::ModelDeploymentCard,
     types::{
         RealtimeBidirectionalEngine,
@@ -159,8 +159,11 @@ pub struct WorkerSet {
     pub(crate) realtime_engine: Option<RealtimeBidirectionalEngine>,
     pub(crate) generate_engine: Option<GenerateStreamingEngine>,
 
-    /// Worker monitor for load-based rejection
-    pub(crate) worker_monitor: Option<KvWorkerMonitor>,
+    /// Owns load monitoring for routed surfaces that do not use `RoutingHost`.
+    load_context: Option<Arc<RoutingLoadContext>>,
+
+    /// Shared configuration handle for this routing load context.
+    pub(crate) load_thresholds: Option<LoadThresholdHandle>,
 
     /// Prefill router for disaggregated serving. Stored here so the watcher can
     /// deactivate it when all prefill workers die, and reactivate when they rejoin.
@@ -201,7 +204,8 @@ impl WorkerSet {
             tensor_engine: None,
             realtime_engine: None,
             generate_engine: None,
-            worker_monitor: None,
+            load_context: None,
+            load_thresholds: None,
             prefill_router: None,
             encoder_router: None,
             instance_count_rx: None,
@@ -222,6 +226,15 @@ impl WorkerSet {
     pub(crate) fn set_topology_endpoint(&mut self, endpoint: Endpoint) {
         self.endpoint_id = Some(endpoint.id());
         self.topology_endpoint = Some(endpoint);
+    }
+
+    pub(crate) fn set_load_context(&mut self, load_context: Arc<RoutingLoadContext>) {
+        self.load_context = Some(load_context);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn load_context(&self) -> Option<&Arc<RoutingLoadContext>> {
+        self.load_context.as_ref()
     }
 
     pub(crate) fn topology_endpoint(&self) -> Option<&Endpoint> {
@@ -282,10 +295,9 @@ impl WorkerSet {
 
     /// Check whether this worker set advertises `capability` in its runtime configuration.
     pub fn supports_runtime_capability(&self, capability: &str) -> bool {
-        matches!(
-            self.card.runtime_config.runtime_data.get(capability),
-            Some(serde_json::Value::Bool(true))
-        )
+        self.card
+            .runtime_config
+            .supports_runtime_capability(capability)
     }
 
     /// Whether this set has any decode engine (chat or completions)
@@ -341,10 +353,18 @@ impl WorkerSet {
 
     /// Build ParsingOptions from this WorkerSet's card configuration.
     pub fn parsing_options(&self) -> crate::protocols::openai::ParsingOptions {
-        crate::protocols::openai::ParsingOptions::new(
-            self.card.runtime_config.tool_call_parser.clone(),
-            self.card.runtime_config.reasoning_parser.clone(),
-        )
+        crate::protocols::openai::ParsingOptions {
+            structural_tag_mode: self.card.runtime_config.structural_tag_mode,
+            structural_tag_scope: self.card.runtime_config.structural_tag_scope,
+            exclude_tools_when_tool_choice_none: self
+                .card
+                .runtime_config
+                .exclude_tools_when_tool_choice_none,
+            ..crate::protocols::openai::ParsingOptions::new(
+                self.card.runtime_config.tool_call_parser.clone(),
+                self.card.runtime_config.reasoning_parser.clone(),
+            )
+        }
     }
 
     /// Number of active workers in this set, derived from the Client's discovery watcher.
@@ -428,7 +448,8 @@ impl WorkerSet {
             // inject the adapter identity. Fail closed instead of serving the base weights.
             realtime_engine: None,
             generate_engine,
-            worker_monitor: self.worker_monitor.clone(),
+            load_context: self.load_context.clone(),
+            load_thresholds: self.load_thresholds.clone(),
             prefill_router: self.prefill_router.clone(),
             encoder_router: self.encoder_router.clone(),
             instance_count_rx: self.instance_count_rx.clone(),

@@ -46,6 +46,17 @@ def test_invalid_environment():
         )
 
 
+def test_max_throughput_scaling_replicas_defaults_to_eight():
+    config = PlannerConfig(namespace="test-ns")
+
+    assert config.max_throughput_scaling_replicas == 8
+
+
+def test_max_throughput_scaling_replicas_must_be_positive():
+    with pytest.raises(ValidationError):
+        PlannerConfig(namespace="test-ns", max_throughput_scaling_replicas=0)
+
+
 # ---------------------------------------------------------------------------
 # Power-awareness validator (DGD-owned caps; read-only)
 # ---------------------------------------------------------------------------
@@ -221,6 +232,40 @@ def test_throughput_metrics_source_invalid():
     """throughput_metrics_source rejects invalid values."""
     with pytest.raises(ValidationError):
         PlannerConfig(namespace="test-ns", throughput_metrics_source="invalid")
+
+
+def test_prometheus_request_timeout_defaults_to_ten_seconds(monkeypatch):
+    monkeypatch.delenv("DYN_PLANNER_PROMETHEUS_REQUEST_TIMEOUT_SECONDS", raising=False)
+    config = PlannerConfig(namespace="test-ns")
+
+    assert config.metric_pulling_prometheus_request_timeout_seconds == 10.0
+
+
+def test_prometheus_request_timeout_uses_environment_default(monkeypatch):
+    monkeypatch.setenv("DYN_PLANNER_PROMETHEUS_REQUEST_TIMEOUT_SECONDS", "2.5")
+
+    config = PlannerConfig(namespace="test-ns")
+
+    assert config.metric_pulling_prometheus_request_timeout_seconds == 2.5
+
+
+@pytest.mark.parametrize("timeout", [0, -1])
+def test_prometheus_request_timeout_rejects_non_positive_values(timeout):
+    with pytest.raises(ValidationError):
+        PlannerConfig(
+            namespace="test-ns",
+            metric_pulling_prometheus_request_timeout_seconds=timeout,
+        )
+
+
+@pytest.mark.parametrize("timeout", ["0", "-1"])
+def test_prometheus_request_timeout_rejects_non_positive_environment_values(
+    monkeypatch, timeout
+):
+    monkeypatch.setenv("DYN_PLANNER_PROMETHEUS_REQUEST_TIMEOUT_SECONDS", timeout)
+
+    with pytest.raises(ValidationError):
+        PlannerConfig(namespace="test-ns")
 
 
 @pytest.mark.parametrize("bucket_size", [1, 4, 9, 16, 25])

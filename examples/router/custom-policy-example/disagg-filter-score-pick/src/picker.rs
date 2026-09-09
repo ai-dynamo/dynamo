@@ -4,7 +4,7 @@
 //! Pickers for prefill and decode routing partitions.
 
 use dynamo_kv_router::{
-    WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicyError,
+    WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicyError, WorkerType,
 };
 
 /// Finds the candidate row with the lowest accumulated scorer cost.
@@ -43,5 +43,29 @@ impl WorkerPicker for DecodePicker {
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         lowest_cost_row(input)
+    }
+}
+
+/// Rejects worker-pool roles that this disaggregated example does not support.
+pub(crate) struct UnsupportedWorkerTypePicker {
+    worker_type: WorkerType,
+}
+
+impl UnsupportedWorkerTypePicker {
+    pub(crate) fn new(worker_type: WorkerType) -> Self {
+        Self { worker_type }
+    }
+}
+
+impl WorkerPicker for UnsupportedWorkerTypePicker {
+    fn pick(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        _input: WorkerInputView<'_>,
+    ) -> Result<usize, WorkerSelectionPolicyError> {
+        Err(WorkerSelectionPolicyError::failed(format!(
+            "disagg-filter-score-pick does not support worker type {:?}; expected prefill or decode",
+            self.worker_type.as_str()
+        )))
     }
 }

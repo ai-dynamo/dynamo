@@ -146,7 +146,7 @@ pub struct BackendOutput {
 
     /// Router-computed data handed back to the frontend (e.g. per-request timing from
     /// a standalone router) so it joins this request's trace/metrics. Dynamo-internal,
-    /// consumed by the frontend and not surfaced to clients. See [`RoutingData`].
+    /// consumed by the frontend and not surfaced to clients. See [`RoutingData`](crate::protocols::common::timing::RoutingData).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_data: Option<crate::protocols::common::timing::RoutingData>,
 }
@@ -232,7 +232,7 @@ pub struct LLMEngineOutput {
     pub engine_data: Option<serde_json::Value>,
 
     /// Router-computed data handed back to the frontend (e.g. standalone-router timing).
-    /// Dynamo-internal; consumed by the frontend. See [`RoutingData`].
+    /// Dynamo-internal; consumed by the frontend. See [`RoutingData`](crate::protocols::common::timing::RoutingData).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_data: Option<crate::protocols::common::timing::RoutingData>,
 }
@@ -390,11 +390,11 @@ impl MaybeError for LLMEngineOutput {
     }
 }
 
-/// Raw output from embedding engines containing embedding vectors
+/// Raw output from embedding engines containing base64-encoded float32 vectors.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct EmbeddingsEngineOutput {
-    /// Generated embedding vectors (one per input text)
-    pub embeddings: Vec<Vec<f64>>,
+    /// One standard-base64 string per input embedding.
+    pub embeddings: Vec<String>,
 
     /// Token usage information
     pub prompt_tokens: u32,

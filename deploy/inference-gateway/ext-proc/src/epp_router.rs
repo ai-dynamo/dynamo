@@ -7,8 +7,8 @@
 //! no Dynamo `DistributedRuntime`, no etcd/NATS, and no embedded KV router.
 //! Instead it composes:
 //!
-//! - a [`VllmRenderClient`] tokenization,
-//! - a [`PodDiscovery`] that discovers Ready raw vLLM pods from Kubernetes,
+//! - a [`RenderClient`] that tokenizes prompts via a render sidecar,
+//! - a [`PodDiscovery`] that discovers Ready worker pods from Kubernetes,
 //! - a [`TopologyAdapter`] that registers those pods into the selector, and
 //! - a [`Selector`] (in-process, runtime-free selection service) that picks a
 //!   worker.
@@ -26,36 +26,58 @@ use std::time::Duration;
 use anyhow::Result;
 use tokio::sync::Semaphore;
 
-use dynamo_kv_router::services::selection::SelectionService;
+use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
+use dynamo_llm::http::service::metadata::extract_metadata_from_header_pairs;
 use dynamo_llm::protocols::common::extensions::{
     AgentHints, HEADER_REQUEST_PRIORITY, HEADER_REQUEST_STRICT_PRIORITY, resolve_request_priority,
 };
 use serde::Deserialize;
 
-use crate::epp_standalone_config::EppStandaloneConfig;
+use crate::epp_standalone_config::{EppStandaloneConfig, RendererProtocol};
 use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo};
 use crate::pod_discovery::PodDiscovery;
+use crate::render_http::RenderError;
 use crate::selector::{SelectRequest, Selector};
+use crate::sglang_renderer_client::SglangRendererClient;
 use crate::topology_adapter::{RegistrationDefaults, TopologyAdapter};
-use crate::vllm_render_client::{VllmRenderClient, VllmRenderError};
+use crate::vllm_render_client::VllmRenderClient;
+
+/// Resolve the request's scheduling policy class from the Dynamo metadata
+/// headers. Goes through the frontend's metadata extractor (rather than a
+/// hardcoded header name) so custom `DYN_METADATA_HEADER` prefixes, trimming,
+/// and duplicate handling stay aligned with the integrated router.
+pub(crate) fn requested_policy_class(
+    headers: &[(String, String)],
+) -> Result<Option<String>, PickError> {
+    let metadata =
+        extract_metadata_from_header_pairs(headers.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .map_err(|e| PickError::MetadataHeadersInvalid(e.to_string()))?;
+    Ok(metadata.get("policy-class").cloned())
+}
+
+/// Protocol-dispatched render client for the standalone EPP.
+enum RenderClient {
+    Vllm(VllmRenderClient),
+    Sglang(SglangRendererClient),
+}
+
+impl RenderClient {
+    async fn render_chat(&self, body: bytes::Bytes) -> Result<Vec<u32>, RenderError> {
+        match self {
+            Self::Vllm(c) => c.render_chat(body).await,
+            Self::Sglang(c) => c.render_chat(body).await,
+        }
+    }
+}
 
 /// Standalone endpoint picker backed by the standalone selection service.
 pub struct EppRouter {
-    renderer: VllmRenderClient,
+    renderer: RenderClient,
     reflector: Arc<PodDiscovery>,
     selector: Arc<Selector>,
     // Kept alive for the lifetime of the router; the reconcile loop runs on it.
     _adapter: TopologyAdapter,
     reflector_ready: Arc<AtomicBool>,
-    /// Peer-discovery readiness (replicated mode only): `None` when replication
-    /// is off, else a flag that latches `true` after the initial peer-set sync
-    /// (EndpointSlice LIST + reconcile). ANDed with `reflector_ready` to form the
-    /// health signal, so a replica does not serve before its peers are discovered
-    /// and its replica-sync sockets are connected. Note: this proves only that
-    /// future load deltas will flow — it does NOT bootstrap the load already in
-    /// flight on peers; that converges from live deltas as pre-existing requests
-    /// drain (same warm-up shape as the KV index).
-    peer_ready: Option<Arc<AtomicBool>>,
     model_name: String,
     /// Bounds total concurrent in-flight `pick()`s. HTTP/2 stream multiplexing
     /// means the TCP-connection cap (`MAX_CONCURRENT_CONNECTIONS`) does NOT bound
@@ -68,58 +90,27 @@ pub struct EppRouter {
 
 impl EppRouter {
     /// Assemble the standalone runtime from the validated selector config.
-    pub async fn from_selector(cfg: EppStandaloneConfig) -> Result<Self> {
-        let selector = Arc::new(Selector::new(&cfg).await?);
-        let (renderer, reflector, reflector_ready) = Self::dependencies(&cfg).await?;
-        Ok(Self::from_selector_parts(
-            cfg,
-            renderer,
-            reflector,
-            reflector_ready,
-            selector,
-        ))
-    }
-
-    /// Assemble a custom EPP image around a prebuilt selection service.
-    pub async fn from_selection_service(
+    pub async fn from_selector(
         cfg: EppStandaloneConfig,
-        service: SelectionService,
+        policy_registry: WorkerSelectionPolicyRegistry,
     ) -> Result<Self> {
-        let selector = Arc::new(Selector::from_service(&cfg, service).await?);
-        let (renderer, reflector, reflector_ready) = Self::dependencies(&cfg).await?;
-        Ok(Self::from_selector_parts(
-            cfg,
-            renderer,
-            reflector,
-            reflector_ready,
-            selector,
-        ))
-    }
-
-    async fn dependencies(
-        cfg: &EppStandaloneConfig,
-    ) -> Result<(VllmRenderClient, Arc<PodDiscovery>, Arc<AtomicBool>)> {
-        let renderer = VllmRenderClient::new(
-            &cfg.tokenizer_service_url,
-            Duration::from_millis(cfg.tokenization_timeout_ms),
-            cfg.tokenizer_max_response_bytes,
-        )?;
-
-        let (reflector, reflector_ready) = PodDiscovery::spawn(cfg).await?;
+        let selector = Arc::new(Selector::new(&cfg, policy_registry).await?);
+        let timeout = Duration::from_millis(cfg.tokenization_timeout_ms);
+        let max_response_bytes = cfg.tokenizer_max_response_bytes;
+        let renderer = match cfg.renderer_protocol {
+            RendererProtocol::VllmRender => RenderClient::Vllm(VllmRenderClient::new(
+                &cfg.tokenizer_service_url,
+                timeout,
+                max_response_bytes,
+            )?),
+            RendererProtocol::SglangRenderer => RenderClient::Sglang(SglangRendererClient::new(
+                &cfg.tokenizer_service_url,
+                timeout,
+                max_response_bytes,
+            )?),
+        };
+        let (reflector, reflector_ready) = PodDiscovery::spawn(&cfg).await?;
         let reflector = Arc::new(reflector);
-
-        Ok((renderer, reflector, reflector_ready))
-    }
-
-    fn from_selector_parts(
-        cfg: EppStandaloneConfig,
-        renderer: VllmRenderClient,
-        reflector: Arc<PodDiscovery>,
-        reflector_ready: Arc<AtomicBool>,
-        selector: Arc<Selector>,
-    ) -> Self {
-        let peer_ready = selector.peer_ready();
-
         let defaults = RegistrationDefaults::from_config(&cfg);
         let adapter =
             TopologyAdapter::spawn(reflector.as_ref().clone(), selector.clone(), defaults);
@@ -127,37 +118,32 @@ impl EppRouter {
         // Readiness is driven solely by the live pod+pool signal (see `is_ready`);
         // we do not block startup on a schedulable worker. A valid, empty pool is
         // ready immediately and returns 503 per-request until capacity appears.
-        Self {
+        Ok(Self {
             renderer,
             reflector,
             selector,
             _adapter: adapter,
             reflector_ready,
-            peer_ready,
             model_name: cfg.model_name,
             inflight: Arc::new(Semaphore::new(cfg.max_inflight_requests)),
-        }
+        })
     }
 
-    /// Overall EPP readiness for the gRPC health signal: the pod reflector is
-    /// ready (workers synced + pool resolved) AND, in replicated mode, the peer
-    /// set has finished its initial sync. Polled by the health mirror in `main`.
+    /// Overall EPP readiness for the gRPC health signal: the pod reflector has
+    /// synced workers and resolved its InferencePool. Polled by the health mirror in `main`.
     pub fn is_ready(&self) -> bool {
-        compute_ready(
-            self.reflector_ready.load(Ordering::Acquire),
-            self.peer_ready.as_ref().map(|p| p.load(Ordering::Acquire)),
-        )
+        self.reflector_ready.load(Ordering::Acquire)
     }
 
     /// Tokenize a chat body for routing → `(token_ids, priority_jump,
-    /// strict_priority)`. Priority uses header-over-body precedence via
-    /// [`resolve_request_priority`].
+    /// strict_priority, expected_output_tokens)`. Priority uses header-over-body
+    /// precedence via [`resolve_request_priority`]
     async fn tokenize(
         &self,
         request_body: bytes::Bytes,
         priority_header: Option<String>,
         strict_priority_header: Option<String>,
-    ) -> Result<(Vec<u32>, Option<f64>, Option<u32>), TokenizeError> {
+    ) -> Result<(Vec<u32>, Option<f64>, Option<u32>, Option<u32>), TokenizeError> {
         // Parse only `nvext.agent_hints` for priority — the worker re-parses the
         // full body anyway, so we skip allocating the large `messages`/tools
         // fields. Malformed JSON still fails here (→ 400); a well-formed body that
@@ -169,13 +155,23 @@ impl EppRouter {
             priority_header.as_deref(),
             strict_priority_header.as_deref(),
         );
+        let expected_output_tokens = hints
+            .nvext
+            .as_ref()
+            .and_then(|n| n.agent_hints.as_ref())
+            .and_then(|h| h.osl);
         // Moves the `Bytes` into reqwest (zero-copy) rather than copying.
         let token_ids = self
             .renderer
             .render_chat(request_body)
             .await
             .map_err(TokenizeError::Render)?;
-        Ok((token_ids, resolved.priority_jump, resolved.strict_priority))
+        Ok((
+            token_ids,
+            resolved.priority_jump,
+            resolved.strict_priority,
+            expected_output_tokens,
+        ))
     }
 
     /// Ready workers inside an Envoy `candidate_subset`, resolved in a single index
@@ -195,15 +191,15 @@ impl EppRouter {
     }
 }
 
-/// Overall EPP health: pod readiness AND, when replicated (`peer_ready = Some`),
-/// the initial peer sync. `None` means no replication → pod readiness alone.
-fn compute_ready(pod_ready: bool, peer_ready: Option<bool>) -> bool {
-    pod_ready && peer_ready.unwrap_or(true)
-}
-
 /// True if a scheme-less `ip:port` endpoint is covered by an Envoy subset,
 /// matching either the full `ip:port` or the bare `ip`.
-fn endpoint_in_subset(
+///
+/// Matches the bare-IP case via `IpAddr`, never `endpoint.split(':')`: a
+/// bracketed IPv6 endpoint (`[fd00::2]:8000`) splits into garbage on `:`,
+/// silently never matching a bare `fd00::2` candidate. Shared with
+/// [`crate::epp::Router::subset_to_worker_ids`], the other Envoy
+/// candidate_subset matcher in this crate.
+pub(crate) fn endpoint_in_subset(
     endpoint: &str,
     candidates: &HashSet<&str>,
     candidate_ips: &HashSet<IpAddr>,
@@ -322,10 +318,11 @@ impl EndpointPicker for EppRouter {
             first_header(&req.headers, HEADER_REQUEST_PRIORITY).map(str::to_owned);
         let strict_priority_header =
             first_header(&req.headers, HEADER_REQUEST_STRICT_PRIORITY).map(str::to_owned);
-        let (tokens, priority_jump, strict_priority) = self
+        let (tokens, priority_jump, strict_priority, expected_output_tokens) = self
             .tokenize(req.body.clone(), priority_header, strict_priority_header)
             .await
             .map_err(|e| e.into_pick_error(&req.request_id))?;
+        let policy_class = requested_policy_class(&req.headers)?;
 
         // EPP-minted booking key (not the reused `x-request-id`): stays
         // EPP-known/releasable and rides back on `PickResult::reservation_id`,
@@ -350,9 +347,12 @@ impl EndpointPicker for EppRouter {
             // Effective header-over-body values; `None` only when unset everywhere.
             priority_jump,
             strict_priority,
+            expected_output_tokens,
+            policy_class,
         };
 
         // On either error return below the guard (still armed) frees the booking.
+
         let resp = match self.selector.select_and_reserve(select_req).await {
             Ok(resp) => resp,
             Err(e) => return Err(PickError::RoutingFailed(e.to_string())),
@@ -461,8 +461,8 @@ impl<R: ReservationReleaser> Drop for ReservationGuard<R> {
 enum TokenizeError {
     /// The request body could not be parsed — a genuine client (400) error.
     InvalidBody(serde_json::Error),
-    /// The vLLM render call failed; the specific variant decides the status.
-    Render(VllmRenderError),
+    /// The renderer call failed; the specific variant decides the status.
+    Render(RenderError),
 }
 
 impl TokenizeError {
@@ -473,30 +473,30 @@ impl TokenizeError {
             // The serde message describes the client's own JSON, not our
             // internals, so it is safe to surface as a 400.
             TokenizeError::InvalidBody(e) => {
-                PickError::TokenizationFailed(format!("invalid request body: {e}"))
+                PickError::InvalidRequest(format!("invalid request body: {e}"))
             }
             TokenizeError::Render(e) => {
-                tracing::warn!(request_id, error = %e, "Tokenization Render failed");
-                match e {
-                    VllmRenderError::Unavailable { .. } => PickError::TokenizerUnavailable,
-                    VllmRenderError::Timeout { .. } => PickError::TokenizerTimeout,
-                    // Only the renderer's payload-validation statuses (400/422)
-                    // mean the client's request was bad → surface as a client 400.
-                    // Auth/misconfig (401/403/404), overload (429/503), any other
-                    // 4xx, and 5xx are the renderer's or our own fault — never blame
-                    // the client's payload for those (`is_client_error()` would).
-                    VllmRenderError::UpstreamStatus { status, .. } => match status.as_u16() {
-                        400 | 422 => PickError::TokenizationFailed(
-                            "request rejected by tokenization service".to_string(),
-                        ),
-                        // Renderer overloaded / temporarily unavailable → retryable.
-                        429 | 503 => PickError::TokenizerUnavailable,
-                        _ => PickError::TokenizerUpstreamError,
-                    },
-                    // A too-large or contract-breaking success is the renderer's
-                    // fault (→ 502).
-                    VllmRenderError::InvalidResponse { .. }
-                    | VllmRenderError::ResponseTooLarge { .. } => PickError::TokenizerUpstreamError,
+                tracing::warn!(request_id, error = %e, "Tokenization render failed");
+                match &e {
+                    RenderError::Unavailable { .. } => PickError::TokenizerUnavailable,
+                    RenderError::Timeout { .. } => PickError::TokenizerTimeout,
+                    RenderError::InvalidResponse { .. } | RenderError::ResponseTooLarge { .. } => {
+                        PickError::TokenizerUpstreamError
+                    }
+                    RenderError::UpstreamStatus { status, .. } => {
+                        match status.as_u16() {
+                            // Only payload-validation statuses (400/422) mean the
+                            // client's request was bad → surface as a client 400.
+                            // Auth/misconfig (401/403/404), overload (429/503), any
+                            // other 4xx, and 5xx are the renderer's or our own fault.
+                            400 | 422 => PickError::InvalidRequest(
+                                "request rejected by tokenization service".to_string(),
+                            ),
+                            // Renderer overloaded / temporarily unavailable → retryable.
+                            429 | 503 => PickError::TokenizerUnavailable,
+                            _ => PickError::TokenizerUpstreamError,
+                        }
+                    }
                 }
             }
         }
@@ -508,12 +508,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn requested_policy_class_uses_frontend_metadata_extraction() {
+        // The class rides a Dynamo metadata header; the extractor strips the
+        // prefix, trims, and honors the first of repeated headers.
+        let headers: Vec<(String, String)> = vec![
+            (
+                "x-dynamo-meta-policy-class".to_string(),
+                " latency ".to_string(),
+            ),
+            (
+                "x-dynamo-meta-policy-class".to_string(),
+                "throughput".to_string(),
+            ),
+            ("x-request-id".to_string(), "irrelevant".to_string()),
+        ];
+        assert_eq!(
+            requested_policy_class(&headers).unwrap().as_deref(),
+            Some("latency")
+        );
+
+        // Mixed-case header names match as well.
+        let headers: Vec<(String, String)> = vec![(
+            "X-Dynamo-Meta-Policy-Class".to_string(),
+            "express".to_string(),
+        )];
+        assert_eq!(
+            requested_policy_class(&headers).unwrap().as_deref(),
+            Some("express")
+        );
+
+        // No metadata header → no policy class.
+        let headers: Vec<(String, String)> = vec![("x-request-id".to_string(), "r1".to_string())];
+        assert_eq!(requested_policy_class(&headers).unwrap(), None);
+    }
+
+    #[test]
     fn render_upstream_status_maps_to_correct_pick_error() {
-        use crate::vllm_render_client::VllmRenderError;
         use reqwest::StatusCode;
 
         let map = |status: StatusCode| {
-            TokenizeError::Render(VllmRenderError::UpstreamStatus {
+            TokenizeError::Render(RenderError::UpstreamStatus {
                 status,
                 body: String::new(),
             })
@@ -523,11 +557,11 @@ mod tests {
         // Renderer validated the client's payload and rejected it → client 400.
         assert!(matches!(
             map(StatusCode::BAD_REQUEST),
-            PickError::TokenizationFailed(_)
+            PickError::InvalidRequest(_)
         ));
         assert!(matches!(
             map(StatusCode::UNPROCESSABLE_ENTITY),
-            PickError::TokenizationFailed(_)
+            PickError::InvalidRequest(_)
         ));
 
         // Auth / misconfiguration is NOT an invalid client payload → upstream 502,
@@ -554,18 +588,6 @@ mod tests {
             map(StatusCode::SERVICE_UNAVAILABLE),
             PickError::TokenizerUnavailable
         ));
-    }
-
-    #[test]
-    fn compute_ready_gates_on_pod_and_peer() {
-        // No replication (peer_ready = None): readiness == pod readiness.
-        assert!(compute_ready(true, None));
-        assert!(!compute_ready(false, None));
-        // Replicated: both must be ready. A pod that is worker-ready but hasn't
-        // finished its initial peer sync stays NOT_SERVING.
-        assert!(compute_ready(true, Some(true)));
-        assert!(!compute_ready(true, Some(false)));
-        assert!(!compute_ready(false, Some(true)));
     }
 
     #[test]

@@ -7,8 +7,42 @@ from __future__ import annotations
 
 import shlex
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
+
+
+def map_cuda_visible_devices(
+    logical_indices: Iterable[int], inherited: str | None
+) -> str:
+    """Map logical device indices through an inherited CUDA assignment.
+
+    GPU-parallel tests receive a restricted ``CUDA_VISIBLE_DEVICES`` from the
+    scheduler. A nested backend process must select from that visible-device
+    list instead of replacing it with physical indices, which would escape the
+    scheduler assignment. UUID and MIG tokens are deliberately kept opaque.
+
+    When no assignment is inherited, logical indices retain their normal CUDA
+    meaning and are serialized directly.
+    """
+    requested = list(logical_indices)
+    if any(index < 0 for index in requested):
+        raise ValueError(f"CUDA device indices must be non-negative: {requested}")
+
+    if inherited is None:
+        return ",".join(str(index) for index in requested)
+
+    visible = [token.strip() for token in inherited.split(",") if token.strip()]
+    if not visible:
+        raise ValueError("CUDA_VISIBLE_DEVICES does not expose any devices")
+
+    unavailable = [index for index in requested if index >= len(visible)]
+    if unavailable:
+        raise ValueError(
+            "Requested logical CUDA device(s) "
+            f"{unavailable} but CUDA_VISIBLE_DEVICES exposes only {visible}"
+        )
+
+    return ",".join(visible[index] for index in requested)
 
 
 def _call_gpu_utils_function(

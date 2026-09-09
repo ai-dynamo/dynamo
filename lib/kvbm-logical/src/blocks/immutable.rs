@@ -222,7 +222,7 @@ impl<T: BlockMetadata + Sync> ImmutableBlock<T> {
     ///   stash a heterogeneous list of pins (different `T`s) can still
     ///   address each slot unambiguously at runtime.
     ///
-    /// See [`crate::blocks::pin`] for the rationale.
+    /// See `crate::blocks::pin` for the rationale.
     pub fn pin(&self) -> LifecyclePinRef {
         LifecyclePinRef::new(self.inner.clone() as Arc<dyn LifecyclePin>)
     }

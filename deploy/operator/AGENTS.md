@@ -9,6 +9,21 @@ SPDX-License-Identifier: Apache-2.0
 - Keep chart-only grants in the manual section of the platform chart's
   `../helm/charts/platform/components/operator/templates/manager-rbac.yaml`.
 
+## Reconciliation and Admission Semantics
+
+- Reconciler state convergence must be level-based. Derive actions from desired
+  and observed state on every invocation; never depend on the request operation
+  or informer event edge to determine what to do.
+- Kubernetes Event emission is intentionally edge-based. Derive these edges
+  from explicit object state, such as a spec/status difference or a durable
+  annotation, never from informer delivery semantics.
+- An operator-only upgrade must not roll or materially alter unchanged
+  workloads unless an explicit, documented migration or opt-in requires it.
+- Admission validation should enforce state invariants independent of the
+  request operation. Distinguish between `CREATE` and `UPDATE` only for
+  exceptional, intentional API semantics, and document why the distinction is
+  required.
+
 ## Go Code Style
 
 - Put a one-line story comment above every multi-line block of logically
@@ -16,6 +31,37 @@ SPDX-License-Identifier: Apache-2.0
 - Separate multi-line semantic blocks from surrounding code with one blank
   line. Do not add trailing blank lines before a closing delimiter or between
   a block-leading comment and its code.
+- Getter, resolver, renderer, converter, and hash functions must not mutate
+  their inputs unless mutation is an explicit, documented part of the contract.
+- Avoid forwarding helpers that merely rename or wrap one call. Test-only
+  static resolvers and convenience helpers belong in `_test.go` files, not
+  production code.
+- Do not add production fields, types, or extension points solely for
+  hypothetical future use.
+- An extension point introduced for testability must also be used by production
+  code. Tests may override the value or implementation supplied through that
+  production path; do not add a parallel test-only extension point.
+
+## Function Preconditions and Nil Handling
+
+- Treat pointer inputs as non-nil by default. Document non-nil preconditions in
+  the function's Go doc.
+- A function may accept `nil` only when this is explicitly supported as part of
+  its domain semantics, such as a mode that does not require the argument.
+  Document the supported `nil` cases in the function's Go doc.
+- Do not defensively check pointer inputs for `nil` unless `nil` has an explicit
+  domain meaning.
+- When `nil` is not such a supported domain value, callers must establish the
+  non-nil precondition before calling the function.
+- If a function validates caller-provided input, return an error for invalid
+  values. Do not disguise an invalid call by returning a zero value.
+- Do not overload a zero value to mean "not found" when absence must be
+  distinguished from a valid zero value. Return an explicit presence boolean
+  alongside the value, for example:
+  `func NestedValue(x any, path ...string) (value any, found bool)`.
+- Getters and transformation functions must not translate a `nil` input into a
+  zero value by default. Do so only when nil-tolerant behavior is an intentional,
+  documented API convention, such as JSON-path-style getters.
 
 ## Go Test Style
 
