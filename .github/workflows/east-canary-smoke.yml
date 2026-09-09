@@ -14,9 +14,9 @@ permissions:
   contents: read
 
 jobs:
-  one-gpu-v1-smoke:
-    name: East one-GPU v1 DinD capacity smoke
-    runs-on: prod-tester-amd-gpu-v1-east-canary
+  four-gpu-v1-smoke:
+    name: East four-GPU v1 DinD capacity smoke
+    runs-on: prod-tester-amd-gpu-4-v1-east-canary
     timeout-minutes: 30
     steps:
       - name: Verify Docker and nested GPU access
@@ -36,4 +36,4 @@ jobs:
           printf '%s\n' "${gpu_output}"
           gpu_count=$(printf '%s\n' "${gpu_output}" | grep -c '^/dev/nvidia[0-9]')
           echo "gpu_device_count=${gpu_count}"
-          test "${gpu_count}" -eq 1
+          test "${gpu_count}" -eq 4
