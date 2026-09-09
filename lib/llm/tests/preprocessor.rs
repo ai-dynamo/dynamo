@@ -657,7 +657,7 @@ mod cached_multimodal_uuid {
     }
 
     #[tokio::test]
-    async fn preserves_url_and_uuid_only_slot_alignment() {
+    async fn preserves_multimodal_cache_uuid_alignment() {
         let messages = r#"[
             {
                 "role": "user",
@@ -672,6 +672,16 @@ mod cached_multimodal_uuid {
                         "type": "image_url",
                         "image_url": null,
                         "uuid": "image-b"
+                    },
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": "https://example.com/video.mp4"},
+                        "uuid": "video-a"
+                    },
+                    {
+                        "type": "audio_url",
+                        "audio_url": {"url": "https://example.com/audio.wav"},
+                        "uuid": "audio-a"
                     }
                 ]
             }
@@ -695,17 +705,24 @@ mod cached_multimodal_uuid {
             .await
             .unwrap();
 
-        let images = &preprocessed.multi_modal_data.as_ref().unwrap()["image_url"];
+        let media = preprocessed.multi_modal_data.as_ref().unwrap();
+        let uuids = preprocessed.multi_modal_uuids.as_ref().unwrap();
+        for (modality, expected_uuid) in [
+            ("image_url", "image-a"),
+            ("video_url", "video-a"),
+            ("audio_url", "audio-a"),
+        ] {
+            assert!(matches!(media[modality][0], MultimodalData::Url(_)));
+            assert_eq!(uuids[modality][0], Some(expected_uuid.to_string()));
+        }
+
+        let images = &media["image_url"];
         assert_eq!(images.len(), 2);
-        assert!(matches!(images[0], MultimodalData::Url(_)));
         assert!(matches!(
             &images[1],
             MultimodalData::UuidOnly(value) if value == "image-b"
         ));
-        assert_eq!(
-            preprocessed.multi_modal_uuids.as_ref().unwrap()["image_url"],
-            vec![Some("image-a".to_string()), Some("image-b".to_string())]
-        );
+        assert_eq!(uuids["image_url"][1], Some("image-b".to_string()));
         assert!(
             preprocessed
                 .extra_args
@@ -717,33 +734,28 @@ mod cached_multimodal_uuid {
     }
 
     #[tokio::test]
-    async fn rejects_audio_and_video_cache_uuids() {
-        for messages in [
-            r#"[{
-                "role": "user",
-                "content": [{
-                    "type": "video_url",
-                    "video_url": {"url": "https://example.com/video.mp4"},
-                    "uuid": "cached-video"
-                }]
-            }]"#,
-            r#"[{
-                "role": "user",
-                "content": [{
-                    "type": "audio_url",
-                    "audio_url": {"url": "https://example.com/audio.wav"},
-                    "uuid": "cached-audio"
-                }]
-            }]"#,
-        ] {
-            let request = Request::from(messages, None, None, "test-model".to_string());
+    async fn rejects_uuid_only_audio_and_video() {
+        for (part_type, uuid) in [("video_url", "cached-video"), ("audio_url", "cached-audio")] {
+            let messages = format!(
+                r#"[{{
+                    "role": "user",
+                    "content": [{{
+                        "type": "{part_type}",
+                        "{part_type}": null,
+                        "uuid": "{uuid}"
+                    }}]
+                }}]"#
+            );
+            let request = Request::from(&messages, None, None, "test-model".to_string());
             let error = make_preprocessor()
                 .preprocess_request(&request, None)
                 .await
-                .expect_err("audio and video cache UUIDs must be rejected");
+                .expect_err("UUID-only audio and video must be rejected");
 
             assert!(
-                format!("{error:#}").contains("supported only for image_url parts with vLLM"),
+                format!("{error:#}").contains(&format!(
+                    "UUID-only cache reuse is not supported for media modality `{part_type}`"
+                )),
                 "unexpected error: {error:#}"
             );
             assert_invalid_argument(&error);
