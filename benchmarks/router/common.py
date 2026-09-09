@@ -9,7 +9,6 @@ import json
 import logging
 import os
 
-import numpy as np
 from prefix_data_generator.synthesizer import Synthesizer
 
 # Default values
@@ -251,7 +250,7 @@ def prepare_trace_dataset(args, output_dir, logger):
                 requests.append(json.loads(line.strip()))
 
         for request in requests:
-            osl = request.get("output_tokens", 0)
+            osl = request.get("output_length", request.get("output_tokens", 0))
             if "nvext" not in request:
                 request["nvext"] = {}
             request["nvext"].setdefault("agent_hints", {})["osl"] = osl
@@ -287,8 +286,6 @@ def prepare_trace_dataset(args, output_dir, logger):
     )
     logger.info(f"  Random seed: {args.seed}")
 
-    np.random.seed(args.seed)
-
     synthesizer = Synthesizer(
         args.input_dataset,
         block_size=args.block_size,
@@ -297,6 +294,7 @@ def prepare_trace_dataset(args, output_dir, logger):
         prefix_root_multiplier=args.prefix_root_multiplier,
         prompt_len_multiplier=args.prompt_len_multiplier,
         osl_multiplier=args.osl_multiplier,
+        seed=args.seed,
     )
 
     if args.num_requests is None:
@@ -319,7 +317,7 @@ def prepare_trace_dataset(args, output_dir, logger):
 
     if args.use_expected_osl:
         for request in requests:
-            osl = request.get("output_tokens", 0)
+            osl = request.get("output_length", request.get("output_tokens", 0))
             if "nvext" not in request:
                 request["nvext"] = {}
             request["nvext"].setdefault("agent_hints", {})["osl"] = osl

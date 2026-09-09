@@ -74,6 +74,12 @@ ignore_missing_imports = true
 check_untyped_defs = true
 
 [tool.pytest.ini_options]
+pythonpath = ["."]
+markers = [
+    "post_merge: CPU benchmark regressions",
+    "gpu_0: requires no GPUs",
+    "unit: unit tests",
+]
 addopts = [
     "-ra",
     "--showlocals",
