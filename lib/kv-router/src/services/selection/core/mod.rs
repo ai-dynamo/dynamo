@@ -1873,9 +1873,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_context_reaches_worker_selection() {
-        use super::super::types::{
-            SelectionKvHints, SelectionSessionContext,
-        };
+        use super::super::types::SelectionSessionContext;
 
         let (factory, observed) = capturing_policy_factory();
         let core = core_with_hooks_and_policy(SelectionHostHooks::default(), Some(factory));
@@ -1887,9 +1885,7 @@ mod tests {
             session_id: "child-session".to_string(),
             parent_session_id: Some("root-session".to_string()),
             session_final: Some(true),
-            kv_hints: Some(SelectionKvHints {
-                evict_session: true,
-            }),
+            input_trigger: Some(super::super::types::SelectionInputTrigger::ToolResult),
         });
         core.select(request).await.expect("select");
 
@@ -1907,7 +1903,10 @@ mod tests {
         assert_eq!(context.session_id(), "child-session");
         assert_eq!(context.parent_session_id(), Some("root-session"));
         assert_eq!(context.session_final(), Some(true));
-        assert!(context.kv_hints().expect("kv hints").evict_session());
+        assert_eq!(
+            context.input_trigger(),
+            Some(crate::scheduling::WorkerSelectionInputTrigger::ToolResult)
+        );
 
         let legacy = observations[1]
             .session_context
@@ -2225,7 +2224,8 @@ mod tests {
             1,
             CancellationToken::new(),
             SelectionCacheConfig::default(),
-        ).expect("valid test config");
+        )
+        .expect("valid test config");
         let mut request = worker(1);
         request.total_kv_blocks = Some(1000);
         core.upsert_worker(request).await.expect("worker upsert");
@@ -2268,7 +2268,8 @@ mod tests {
             1,
             CancellationToken::new(),
             SelectionCacheConfig::default(),
-        ).expect("valid test config");
+        )
+        .expect("valid test config");
         core.upsert_worker(worker(1)).await.expect("worker upsert");
         let mut request = select_request();
         request.advisory = true;
@@ -2286,7 +2287,8 @@ mod tests {
             1,
             CancellationToken::new(),
             SelectionCacheConfig::default(),
-        ).expect("valid test config");
+        )
+        .expect("valid test config");
         for (worker_id, routing_group) in [(1, "group-a"), (2, "group-b")] {
             let mut request = worker(worker_id);
             request.routing_group = routing_group.to_string();
@@ -2351,7 +2353,8 @@ mod tests {
             1,
             CancellationToken::new(),
             SelectionCacheConfig::default(),
-        ).expect("valid test config");
+        )
+        .expect("valid test config");
         core.upsert_worker(worker(1)).await.expect("worker upsert");
         core.select_and_reserve(reserve_request("live"))
             .await

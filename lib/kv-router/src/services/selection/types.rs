@@ -12,9 +12,7 @@ use crate::protocols::{
 };
 use crate::scheduling::config::RouterConfigOverride;
 pub use crate::scheduling::{OverlapScoresResponse, SharedCacheOverlapScore, WorkerOverlapScore};
-use crate::scheduling::{
-    PotentialLoad, SessionContext, WorkerSelectionKvHints,
-};
+use crate::scheduling::{PotentialLoad, SessionContext, WorkerSelectionInputTrigger};
 use crate::services::overlap::MooncakeOverlapSummary;
 
 use super::input::PromptRequest;
@@ -439,15 +437,20 @@ impl SelectAndReserveRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct SelectionSessionContext {
     pub session_id: String,
+    #[serde(default)]
     pub parent_session_id: Option<String>,
+    #[serde(default)]
     pub session_final: Option<bool>,
-    pub kv_hints: Option<SelectionKvHints>,
+    #[serde(default)]
+    pub input_trigger: Option<SelectionInputTrigger>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-pub struct SelectionKvHints {
-    #[serde(default)]
-    pub evict_session: bool,
+#[serde(rename_all = "snake_case")]
+pub enum SelectionInputTrigger {
+    UserMessage,
+    ToolResult,
+    Other,
 }
 
 impl From<SelectionSessionContext> for SessionContext {
@@ -457,14 +460,16 @@ impl From<SelectionSessionContext> for SessionContext {
             session_id,
             parent_session_id,
             session_final,
-            kv_hints,
+            input_trigger,
         } = context;
         SessionContext::new(
             session_id,
             parent_session_id,
             session_final,
-            kv_hints.map(|SelectionKvHints { evict_session }| {
-                WorkerSelectionKvHints::new(evict_session)
+            input_trigger.map(|trigger| match trigger {
+                SelectionInputTrigger::UserMessage => WorkerSelectionInputTrigger::UserMessage,
+                SelectionInputTrigger::ToolResult => WorkerSelectionInputTrigger::ToolResult,
+                SelectionInputTrigger::Other => WorkerSelectionInputTrigger::Other,
             }),
         )
     }
@@ -474,9 +479,9 @@ fn resolve_session_context(
     session_context: Option<SelectionSessionContext>,
     session_id: Option<String>,
 ) -> Option<SessionContext> {
-    session_context.map(SessionContext::from).or_else(|| {
-        session_id.map(|session_id| SessionContext::new(session_id, None, None, None))
-    })
+    session_context
+        .map(SessionContext::from)
+        .or_else(|| session_id.map(|session_id| SessionContext::new(session_id, None, None, None)))
 }
 
 /// Booking request: replay the selection cached under `selection_id`, or book
@@ -616,7 +621,7 @@ mod tests {
                 "session_id": "child",
                 "parent_session_id": "root",
                 "session_final": false,
-                "kv_hints": { "evict_session": true }
+                "input_trigger": "user_message"
             }
         }))
         .expect("valid select request");
@@ -627,7 +632,10 @@ mod tests {
         assert_eq!(context.session_id(), "child");
         assert_eq!(context.parent_session_id(), Some("root"));
         assert_eq!(context.session_final(), Some(false));
-        assert!(context.kv_hints().expect("kv hints").evict_session());
+        assert_eq!(
+            context.input_trigger(),
+            Some(WorkerSelectionInputTrigger::UserMessage)
+        );
     }
 
     #[test]
@@ -640,7 +648,6 @@ mod tests {
         let context = request.take_session_context().expect("legacy context");
         assert_eq!(context.session_id(), "legacy");
         assert_eq!(context.parent_session_id(), None);
-        assert_eq!(context.kv_hints(), None);
 
         let mut request: SelectAndReserveRequest =
             serde_json::from_value(serde_json::json!({ "token_ids": [1, 2, 3, 4] }))
