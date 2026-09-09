@@ -90,8 +90,7 @@ type ModelKey = (String, String, u64);
 #[derive(Clone)]
 pub struct RlDiscoveryConfig {
     pub runtime: Arc<DistributedRuntime>,
-    /// Which Dynamo namespaces this listener searches. See [`resolve_namespace_filter`].
-    pub namespace_filter: NamespaceFilter,
+    pub namespace: String,
     pub rl_endpoint: String,
     pub component_filter: Option<Vec<String>>,
     pub request_timeout: Duration,
@@ -184,11 +183,7 @@ fn namespace_in_scope(filter: &NamespaceFilter, namespace: &str) -> bool {
 
 impl RlDiscoveryConfig {
     pub fn from_env(runtime: Arc<DistributedRuntime>) -> Self {
-        let namespace_filter = resolve_namespace_filter(
-            std::env::var("DYN_NAMESPACE").ok().as_deref(),
-            std::env::var("DYN_NAMESPACE_PREFIX").ok().as_deref(),
-            std::env::var("DYN_NAMESPACE_WORKER_SUFFIX").ok().as_deref(),
-        );
+        let namespace = std::env::var("DYN_NAMESPACE").unwrap_or_else(|_| DEFAULT_NAMESPACE.into());
         let rl_endpoint =
             std::env::var("DYN_RL_ENDPOINT").unwrap_or_else(|_| DEFAULT_RL_ENDPOINT.into());
         let component_filter = parse_csv_env("DYN_RL_COMPONENTS")
@@ -206,7 +201,7 @@ impl RlDiscoveryConfig {
 
         Self {
             runtime,
-            namespace_filter,
+            namespace,
             rl_endpoint,
             component_filter,
             request_timeout,
@@ -259,6 +254,7 @@ type EndpointKey = (String, String, String);
 #[derive(Clone)]
 pub struct RlDiscoveryState {
     config: Arc<RlDiscoveryConfig>,
+    namespace_filter: NamespaceFilter,
     /// Cache of request-plane clients keyed by (namespace, component, endpoint).
     /// A `Client` spawns a runtime-lived instance-monitor task and has no per-client
     /// Drop cleanup, so building one per request would leak a task per (request*worker).
@@ -271,9 +267,31 @@ pub struct RlDiscoveryState {
 
 impl RlDiscoveryState {
     pub fn new(config: RlDiscoveryConfig) -> Self {
+        let namespace_filter = NamespaceFilter::Exact(config.namespace.clone());
+        Self::new_with_namespace_filter(config, namespace_filter)
+    }
+
+    /// Constructs the listener state using namespace-scope environment variables.
+    ///
+    /// This is deliberately separate from [`Self::new`] so callers that supply an
+    /// explicit configuration retain an exact namespace scope.
+    pub fn new_from_env(config: RlDiscoveryConfig) -> Self {
+        let namespace_filter = resolve_namespace_filter(
+            Some(&config.namespace),
+            std::env::var("DYN_NAMESPACE_PREFIX").ok().as_deref(),
+            std::env::var("DYN_NAMESPACE_WORKER_SUFFIX").ok().as_deref(),
+        );
+        Self::new_with_namespace_filter(config, namespace_filter)
+    }
+
+    fn new_with_namespace_filter(
+        config: RlDiscoveryConfig,
+        namespace_filter: NamespaceFilter,
+    ) -> Self {
         let permits = config.max_concurrent_probes.max(1);
         Self {
             config: Arc::new(config),
+            namespace_filter,
             clients: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             probe_semaphore: Arc::new(tokio::sync::Semaphore::new(permits)),
         }
@@ -334,7 +352,7 @@ async fn workers_handler(State(state): State<RlDiscoveryState>) -> impl IntoResp
     match list_workers(&state).await {
         Ok(workers) => Json(RlWorkersResponse {
             protocol_version: RL_WORKERS_PROTOCOL_VERSION,
-            namespace: namespace_scope(&state.config.namespace_filter).to_string(),
+            namespace: namespace_scope(&state.namespace_filter).to_string(),
             workers,
         })
         .into_response(),
@@ -356,7 +374,7 @@ async fn list_workers(state: &RlDiscoveryState) -> anyhow::Result<Vec<RlWorkerIn
     let config = &state.config;
     // `DiscoveryQuery` has no prefix-scoped variant, so a prefix or global scope lists
     // everything and filters here; an exact scope keeps its narrow query unchanged.
-    let (endpoint_query, model_query) = match &config.namespace_filter {
+    let (endpoint_query, model_query) = match &state.namespace_filter {
         NamespaceFilter::Exact(namespace) => (
             DiscoveryQuery::NamespacedEndpoints {
                 namespace: namespace.clone(),
@@ -381,7 +399,7 @@ async fn list_workers(state: &RlDiscoveryState) -> anyhow::Result<Vec<RlWorkerIn
         .into_iter()
         .filter(|instance| match instance {
             DiscoveryInstance::Model { namespace, .. } => {
-                namespace_in_scope(&config.namespace_filter, namespace)
+                namespace_in_scope(&state.namespace_filter, namespace)
             }
             _ => true,
         })
@@ -394,7 +412,7 @@ async fn list_workers(state: &RlDiscoveryState) -> anyhow::Result<Vec<RlWorkerIn
             DiscoveryInstance::Endpoint(endpoint) => Some(endpoint),
             _ => None,
         })
-        .filter(|endpoint| namespace_in_scope(&config.namespace_filter, &endpoint.namespace))
+        .filter(|endpoint| namespace_in_scope(&state.namespace_filter, &endpoint.namespace))
         .filter(|endpoint| endpoint.endpoint == config.rl_endpoint)
         .filter(|endpoint| {
             config
@@ -952,14 +970,17 @@ mod tests {
         distributed: &Arc<DistributedRuntime>,
         namespace_filter: NamespaceFilter,
     ) -> RlDiscoveryState {
-        RlDiscoveryState::new(RlDiscoveryConfig {
-            runtime: distributed.clone(),
+        RlDiscoveryState::new_with_namespace_filter(
+            RlDiscoveryConfig {
+                runtime: distributed.clone(),
+                namespace: "ns".to_string(),
+                rl_endpoint: "rl".to_string(),
+                component_filter: None,
+                request_timeout: Duration::from_secs(1),
+                max_concurrent_probes: 1,
+            },
             namespace_filter,
-            rl_endpoint: "rl".to_string(),
-            component_filter: None,
-            request_timeout: Duration::from_secs(1),
-            max_concurrent_probes: 1,
-        })
+        )
     }
 
     #[tokio::test]
@@ -987,6 +1008,60 @@ mod tests {
         assert!(workers.is_empty(), "unexpected workers: {workers:?}");
 
         started.shutdown().await.expect("endpoint shutdown");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn from_env_discovers_worker_in_suffix_namespace() {
+        temp_env::async_with_vars(
+            [
+                ("DYN_NAMESPACE", Some("ns")),
+                ("DYN_NAMESPACE_PREFIX", None::<&str>),
+                ("DYN_NAMESPACE_WORKER_SUFFIX", Some("abc123")),
+            ],
+            async {
+                let distributed = test_runtime().await;
+                let started = start_rl_endpoint(&distributed, "ns-abc123").await;
+                let state = RlDiscoveryState::new_from_env(RlDiscoveryConfig::from_env(
+                    distributed.clone(),
+                ));
+
+                let workers = list_workers(&state).await.expect("list");
+                let namespaces: Vec<&str> = workers
+                    .iter()
+                    .map(|worker| worker.namespace.as_str())
+                    .collect();
+                assert_eq!(namespaces, ["ns-abc123"]);
+
+                started.shutdown().await.expect("endpoint shutdown");
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn explicit_config_ignores_environment_namespace_scope() {
+        temp_env::async_with_vars(
+            [
+                ("DYN_NAMESPACE_PREFIX", Some("other")),
+                ("DYN_NAMESPACE_WORKER_SUFFIX", Some("abc123")),
+            ],
+            async {
+                let distributed = test_runtime().await;
+                let state = RlDiscoveryState::new(RlDiscoveryConfig {
+                    runtime: distributed,
+                    namespace: "ns".to_string(),
+                    rl_endpoint: "rl".to_string(),
+                    component_filter: None,
+                    request_timeout: Duration::from_secs(1),
+                    max_concurrent_probes: 1,
+                });
+
+                assert_eq!(namespace_scope(&state.namespace_filter), "ns");
+            },
+        )
+        .await;
     }
 
     #[test]

@@ -2921,6 +2921,8 @@ dependencies = [
  "futures",
  "serde",
  "serde_json",
+ "serial_test",
+ "temp-env",
  "tokio",
  "tracing",
  "url",
