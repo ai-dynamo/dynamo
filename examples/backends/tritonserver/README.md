@@ -14,7 +14,7 @@ This example shows how to run Triton Server models through Dynamo's distributed 
 ```
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────────────────┐
 │  Triton Client  │────▶│  Dynamo Frontend│────▶│       Dynamo Worker         │
-│  (KServe gRPC)  │     │  (port 8787)    │     │  ┌───────────────────────┐  │
+│  (KServe gRPC)  │     │  (port 8000)    │     │  ┌───────────────────────┐  │
 └─────────────────┘     └─────────────────┘     │  │    Triton Server      │  │
                               │                 │  │  (Python bindings)    │  │
                               ▼                 │  └───────────────────────┘  │
