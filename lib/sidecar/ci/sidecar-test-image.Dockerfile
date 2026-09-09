@@ -13,6 +13,9 @@ FROM ${SIDECAR_IMAGE} AS sidecar
 
 FROM ${BASE_IMAGE}
 ARG BACKEND
+# container/Dockerfile.test ends as USER dynamo (non-root); /usr/local/bin
+# isn't writable by it, so the symlink/pip-install below need root.
+USER root
 COPY --from=sidecar /usr/local/bin/dynamo-${BACKEND}-sidecar /usr/local/bin/dynamo-${BACKEND}-sidecar
 
 # vllm-rs ships inside the vllm wheel, not on PATH — lib/sidecar/vllm/launch/agg.sh
@@ -32,3 +35,7 @@ RUN if [ "$BACKEND" = "vllm" ]; then \
 RUN if [ "$BACKEND" = "trtllm" ]; then \
       python3 -m pip install --no-cache-dir "smg-grpc-proto>=0.4.2"; \
     fi
+
+# Match container/Dockerfile.test's own root-then-drop-back pattern: only the
+# steps above need root.
+USER dynamo

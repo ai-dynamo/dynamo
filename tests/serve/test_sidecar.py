@@ -51,6 +51,10 @@ sidecar_configs = {
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
+        # Piped (non-tty) stdout is block-buffered by default, so without this
+        # a hung/slow launch shows literally nothing in CI logs until the
+        # process is killed. Real Python subprocess behavior, not a guess.
+        env={"PYTHONUNBUFFERED": "1"},
         request_payloads=[
             chat_payload_default(),
         ],
@@ -62,11 +66,18 @@ sidecar_configs = {
         marks=[
             pytest.mark.sglang,
             pytest.mark.gpu_1,
-            # First-run wiring smoke: adjust once CI has measured actual duration.
-            pytest.mark.timeout(360),
+            # First observed CI run: 3 retries each hit this wall with zero
+            # visible output (see PYTHONUNBUFFERED below) and no process exit,
+            # while the trtllm_aggregated case above passed in ~173s the same
+            # run. Doubled from the mainline dynamo.sglang aggregated test's
+            # budget (360s) rather than left unchanged, pending a second CI
+            # run with visible logs to tell a genuine hang from cold-start
+            # slowness unique to this launch path.
+            pytest.mark.timeout(720),
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
+        env={"PYTHONUNBUFFERED": "1"},
         request_payloads=[
             chat_payload_default(),
         ],
@@ -78,14 +89,17 @@ sidecar_configs = {
         marks=[
             pytest.mark.trtllm,
             pytest.mark.gpu_1,
-            # First-run wiring smoke: adjust once CI has measured actual duration.
+            # Observed ~173s in CI; 650s leaves ample margin.
             pytest.mark.timeout(650),
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
-        # TRT-LLM blocks greedy n>1 by default; matches the guard already
-        # enabled for the equivalent dynamo.trtllm scenario in test_trtllm.py.
-        env={"TLLM_ALLOW_N_GREEDY_DECODING": "1"},
+        env={
+            # TRT-LLM blocks greedy n>1 by default; matches the guard already
+            # enabled for the equivalent dynamo.trtllm scenario in test_trtllm.py.
+            "TLLM_ALLOW_N_GREEDY_DECODING": "1",
+            "PYTHONUNBUFFERED": "1",
+        },
         request_payloads=[
             chat_payload_default(),
         ],
