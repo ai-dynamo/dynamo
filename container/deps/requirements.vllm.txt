@@ -11,6 +11,7 @@
 
 --no-binary imageio-ffmpeg
 
+msgspec==0.19.0
 s3fs>=2026.4.0,<2027.0
 imageio-ffmpeg>=0.6.0  # binary skipped per --no-binary directive at top of file
 # The upstream vllm-openai image bundles pillow at an older patch release;
@@ -23,3 +24,4 @@ pillow>=12.3.0
 # rejects; 2.2.0 bundles only libavutil + libavformat (container demux, no codec).
 # Requires NVIDIA_DRIVER_CAPABILITIES to include "video" or it cannot import.
 PyNvVideoCodec>=2.2.0
+zstandard==0.23.0

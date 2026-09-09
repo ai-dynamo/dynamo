@@ -13,6 +13,7 @@ from dynamo.artifacts.storage import (
     ManagedFsspecTarget,
     PresignedHttpPutTarget,
     put_artifact,
+    target_from_settings,
 )
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
@@ -28,10 +29,13 @@ def _allow_test_presigned_hosts(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_managed_fsspec_writes_exact_profile_object(monkeypatch) -> None:
+@pytest.mark.parametrize("protocol", ["s3", "gs"])
+async def test_managed_fsspec_writes_exact_profile_object(
+    monkeypatch, protocol: str
+) -> None:
     monkeypatch.setenv(
         "DYN_GENERATION_ARTIFACT_STORAGE_PROFILES",
-        '{"training":{"url":"s3://artifacts/run","allowed_prefixes":["request-1"],"create_only":true}}',
+        f'{{"training":{{"url":"{protocol}://artifacts/run","allowed_prefixes":["request-1"],"create_only":true}}}}',
     )
     payload = b"artifact-bytes"
     stored = {}
@@ -45,7 +49,7 @@ async def test_managed_fsspec_writes_exact_profile_object(monkeypatch) -> None:
         stored[path] = data
 
     filesystem = SimpleNamespace(
-        protocol="s3",
+        protocol=protocol,
         async_impl=True,
         set_session=AsyncMock(return_value=session),
         _pipe_file=pipe_file,
@@ -54,7 +58,7 @@ async def test_managed_fsspec_writes_exact_profile_object(monkeypatch) -> None:
     with patch(
         "dynamo.artifacts.storage.url_to_fs",
         return_value=(filesystem, "artifacts/run"),
-    ):
+    ) as url_to_fs:
         receipt = await put_artifact(
             payload,
             ManagedFsspecTarget(
@@ -69,6 +73,10 @@ async def test_managed_fsspec_writes_exact_profile_object(monkeypatch) -> None:
                 ),
             )
 
+    if protocol == "s3":
+        assert "config_kwargs" in url_to_fs.call_args.kwargs
+    else:
+        assert "config_kwargs" not in url_to_fs.call_args.kwargs
     assert stored["artifacts/run/request-1/output.dynexp"] == payload
     assert receipt.actual_bytes == len(payload)
     assert receipt.sha256 == hashlib.sha256(payload).hexdigest()
@@ -233,6 +241,27 @@ def test_presigned_target_rejects_invalid_capability_fields(kwargs) -> None:
     }
     with pytest.raises(ArtifactStorageError):
         PresignedHttpPutTarget(**values)
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        {"kind": "presigned_http_put", "max_bytes": 1024, "object_id": "id"},
+        {
+            "kind": "presigned_http_put",
+            "url": "https://example.test/x",
+            "max_bytes": "1024",
+            "object_id": "id",
+        },
+        {"kind": "managed_fsspec", "profile": "training"},
+        {"kind": "managed_fsspec", "profile": 1, "object_key": "authorized/x"},
+    ],
+)
+def test_target_from_settings_rejects_missing_or_mistyped_required_fields(
+    target,
+) -> None:
+    with pytest.raises(ArtifactStorageError):
+        target_from_settings({"delivery": {"mode": "object_store", "target": target}})
 
 
 @pytest.mark.asyncio

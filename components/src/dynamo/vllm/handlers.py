@@ -33,19 +33,6 @@ from typing import (
 
 import numpy as np
 import torch
-from vllm import PoolingParams
-from vllm.config import ModelConfig
-from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
-from vllm.lora.request import LoRARequest
-from vllm.outputs import RequestOutput
-from vllm.renderers.embed_utils import safe_load_prompt_embeds
-from vllm.sampling_params import (
-    RequestOutputKind,
-    SamplingParams,
-    StructuredOutputsParams,
-)
-from vllm.v1.engine.exceptions import EngineDeadError
-
 from dynamo._core import Context
 from dynamo.artifacts.capture import (
     GenerationArtifactSession,
@@ -93,6 +80,19 @@ from dynamo.vllm.kv_connector_protocols import (
     make_kv_connector_protocol,
 )
 from dynamo.vllm.router_hints import enable_router_hint_support
+
+from vllm import PoolingParams
+from vllm.config import ModelConfig
+from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
+from vllm.lora.request import LoRARequest
+from vllm.outputs import RequestOutput
+from vllm.renderers.embed_utils import safe_load_prompt_embeds
+from vllm.sampling_params import (
+    RequestOutputKind,
+    SamplingParams,
+    StructuredOutputsParams,
+)
+from vllm.v1.engine.exceptions import EngineDeadError
 
 from .args import Config
 from .cache_info import get_configured_kv_event_block_size
@@ -3727,7 +3727,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             model_config=self.model_config,
             enable_rl=self.config.enable_rl,
             route_capture_enabled=bool(
-                getattr(self.engine_args, "enable_return_routed_experts", False)
+                getattr(
+                    getattr(self, "engine_args", None),
+                    "enable_return_routed_experts",
+                    False,
+                )
             ),
             choice_count=int(getattr(sampling_params, "n", 1) or 1),
         )
@@ -3807,9 +3811,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         prompt_token_count=len(
                             _prompt_token_ids_for_engine_data(request, prompt)
                         ),
-                        max_tokens=int(
-                            getattr(sampling_params, "max_tokens", 0) or 0
-                        ),
+                        max_tokens=int(getattr(sampling_params, "max_tokens", 0) or 0),
                     )
                 try:
                     async for tok in self.generate_tokens(

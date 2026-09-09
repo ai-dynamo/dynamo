@@ -206,33 +206,37 @@ pub(crate) fn redact_generation_artifact_json(value: &mut serde_json::Value) {
             }
         }
         serde_json::Value::Object(object) => {
-            if let Some(serde_json::Value::Object(artifact)) = object.get_mut("generation_artifact")
-            {
-                if let Some(serde_json::Value::Object(target)) = artifact
-                    .get_mut("delivery")
-                    .and_then(serde_json::Value::as_object_mut)
-                    .and_then(|delivery| delivery.get_mut("target"))
-                {
+            match object
+                .get_mut("generation_artifact")
+                .and_then(serde_json::Value::as_object_mut)
+                .and_then(|artifact| {
+                    artifact
+                        .get_mut("delivery")
+                        .and_then(serde_json::Value::as_object_mut)
+                        .and_then(|delivery| delivery.get_mut("target"))
+                        .and_then(serde_json::Value::as_object_mut)
+                }) {
+                Some(target)
                     if target.get("kind").and_then(serde_json::Value::as_str)
-                        == Some("presigned_http_put")
+                        == Some("presigned_http_put") =>
+                {
+                    if target.contains_key("url") {
+                        target.insert(
+                            "url".to_string(),
+                            serde_json::Value::String(REDACTED_ARTIFACT_SECRET.to_string()),
+                        );
+                    }
+                    if let Some(headers) = target
+                        .get_mut("required_headers")
+                        .and_then(serde_json::Value::as_object_mut)
                     {
-                        if target.contains_key("url") {
-                            target.insert(
-                                "url".to_string(),
-                                serde_json::Value::String(REDACTED_ARTIFACT_SECRET.to_string()),
-                            );
-                        }
-                        if let Some(headers) = target
-                            .get_mut("required_headers")
-                            .and_then(serde_json::Value::as_object_mut)
-                        {
-                            for value in headers.values_mut() {
-                                *value =
-                                    serde_json::Value::String(REDACTED_ARTIFACT_SECRET.to_string());
-                            }
+                        for value in headers.values_mut() {
+                            *value =
+                                serde_json::Value::String(REDACTED_ARTIFACT_SECRET.to_string());
                         }
                     }
                 }
+                _ => {}
             }
             for value in object.values_mut() {
                 redact_generation_artifact_json(value);
