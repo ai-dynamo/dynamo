@@ -9,95 +9,29 @@ on:
       - ci/aws-ci-prod-east-canary
     paths:
       - .github/workflows/east-canary-smoke.yml
-  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  cpu-smoke:
-    name: East CPU smoke ${{ matrix.slot }}
-    runs-on: prod-default-v2-east-canary
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        slot: [1, 2]
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Verify runner and workspace
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "slot=${{ matrix.slot }}"
-          echo "runner_name=${RUNNER_NAME}"
-          echo "runner_os=${RUNNER_OS}"
-          echo "runner_arch=${RUNNER_ARCH}"
-          echo "hostname=$(hostname)"
-          echo "sha=${GITHUB_SHA}"
-          test "${RUNNER_OS}" = Linux
-          test -f Cargo.toml
-
-  cpu-runner-family-smoke:
-    name: East CPU pool ${{ matrix.runner }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        runner:
-          - prod-default-v1-east-canary
-          - prod-default-small-v2-east-canary
-          - prod-builder-amd-v1-east-canary
-          - prod-builder-arm-v1-east-canary
-          - prod-builder-v3-east-canary
-          - prod-deploy-tester-v1-east-canary
-          - prod-skopeo-v1-east-canary
-          - prod-tester-amd-v1-east-canary
-          - prod-tester-arm-v1-east-canary
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Verify runner and workspace
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "requested_pool=${{ matrix.runner }}"
-          echo "runner_name=${RUNNER_NAME}"
-          echo "runner_os=${RUNNER_OS}"
-          echo "runner_arch=${RUNNER_ARCH}"
-          echo "hostname=$(hostname)"
-          test "${RUNNER_OS}" = Linux
-          test -f Cargo.toml
-
-  v2-cpu-container-smoke:
-    name: East v2 CPU container ${{ matrix.runner }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        runner:
-          - prod-tester-amd-v2-east-canary
-          - prod-tester-arm-v2-east-canary
+  one-gpu-v2-smoke:
+    name: East one-GPU v2 capacity smoke
+    runs-on: prod-tester-amd-gpu-v2-east-canary
+    timeout-minutes: 30
     container:
       image: ${{ vars.ECR_REGISTRY }}/dockerhub/busybox:1.37
     steps:
-      - name: Verify Kubernetes container hook
+      - name: Verify GPU Kubernetes container hook
         shell: sh
         run: |
           set -eu
-          echo "requested_pool=${{ matrix.runner }}"
           echo "runner_name=${RUNNER_NAME}"
           echo "runner_os=${RUNNER_OS}"
           echo "runner_arch=${RUNNER_ARCH}"
           echo "hostname=$(hostname)"
-          test "${RUNNER_OS}" = Linux
-          test -d "${GITHUB_WORKSPACE}"
+          ls -l /dev/nvidia*
+          set -- /dev/nvidia[0-9]*
+          test -e "$1"
+          echo "gpu_device_count=$#"
+          test -d /scratch
+          test -d /models
