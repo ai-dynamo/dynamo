@@ -24,7 +24,7 @@ flowchart LR
     Validate --> Reserve["Accounting and reservation"]
 ```
 
-For multiple compile-checked policies, see the [custom policy examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example). The experimental [adaptive policy](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/custom-policy-example/adaptive/README.md) adjusts cache/load scorer budgets using policy-local state and the existing picker API. Its reproducible simulation compares signal controllers with fixed weights and delayed-feedback bandits; simulated results do not establish inference-engine performance. Repository contributors who use a coding agent must also provide the [worker-selection API rules](https://github.com/ai-dynamo/dynamo/blob/main/lib/kv-router/src/scheduling/CLAUDE.md).
+For multiple compile-checked policies, see the [custom policy examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example). The experimental [adaptive policy](https://github.com/ai-dynamo/dynamo/blob/2343b33df19ea637bfe0e450057e3216366eb843/examples/router/custom-policy-example/adaptive/README.md) adjusts cache/load scorer budgets using policy-local state and the existing picker API. Its reproducible simulation compares signal controllers with fixed weights and delayed-feedback bandits; simulated results do not establish inference-engine performance. Repository contributors who use a coding agent must also provide the [worker-selection API rules](https://github.com/ai-dynamo/dynamo/blob/main/lib/kv-router/src/scheduling/CLAUDE.md).
 
 ## Choose the Policy Stage
 
