@@ -47,7 +47,6 @@ pub struct DeltaGenerator {
     service_tier: Option<dynamo_protocols::types::ServiceTierResponse>,
     /// Choice indices for which the assistant role has already been emitted.
     emitted_role_choices: HashSet<u32>,
-    /// Whether the request explicitly excludes top-logprob alternatives.
     suppress_top_logprobs: bool,
 }
 

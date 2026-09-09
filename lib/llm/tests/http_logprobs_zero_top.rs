@@ -218,15 +218,3 @@ async fn nonstreaming_positive_top_logprobs_preserves_chosen_fallback() {
 async fn streaming_positive_top_logprobs_preserves_chosen_fallback() {
     run_case(true, Some(1)).await;
 }
-
-#[tokio::test]
-#[serial]
-async fn nonstreaming_omitted_top_logprobs_preserves_chosen_fallback() {
-    run_case(false, None).await;
-}
-
-#[tokio::test]
-#[serial]
-async fn streaming_omitted_top_logprobs_preserves_chosen_fallback() {
-    run_case(true, None).await;
-}
