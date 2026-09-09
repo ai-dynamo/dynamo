@@ -3,6 +3,7 @@
 
 import asyncio
 import logging
+import os
 import sys
 
 import uvloop
@@ -43,7 +44,10 @@ async def worker(argv: list[str] | None = None):
     config = await parse_args(argv)
     dump_config(config.dynamo_args.dump_config_to, config)
 
-    if config.server_args.load_format == "gms":
+    if (
+        config.server_args.load_format == "gms"
+        and os.environ.get("DYN_GMS_USE_V1") != "true"
+    ):
         from gpu_memory_service.integrations.sglang import setup_gms
 
         override_server_args(
@@ -71,6 +75,7 @@ async def worker(argv: list[str] | None = None):
         discovery_backend=dynamo_args.discovery_backend,
         request_plane=dynamo_args.request_plane,
         event_plane=dynamo_args.event_plane,
+        response_plane=dynamo_args.response_plane,
     )
 
     # Keep the flock alive for process lifetime. Linux releases it on exit.

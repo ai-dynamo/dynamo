@@ -3,8 +3,9 @@
 
 from __future__ import annotations
 
+import sys
 from contextlib import contextmanager
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -12,6 +13,7 @@ import pytest
 pytest.importorskip("gpu_memory_service", reason="gpu_memory_service is required")
 torch = pytest.importorskip("torch", reason="torch is required")
 
+import gpu_memory_service.integrations.sglang as gms_sglang  # noqa: E402
 import gpu_memory_service.integrations.sglang.memory_saver as gms_memory_saver  # noqa: E402
 from gpu_memory_service.common.locks import (  # noqa: E402
     GrantedLockType,
@@ -29,6 +31,65 @@ pytestmark = [
     pytest.mark.sglang,
     pytest.mark.core,
 ]
+
+
+@pytest.fixture
+def fake_gms_model_loader(monkeypatch):
+    model_loader = ModuleType("gpu_memory_service.integrations.sglang.model_loader")
+    model_loader.GMSModelLoader = object
+    monkeypatch.setitem(
+        sys.modules,
+        "gpu_memory_service.integrations.sglang.model_loader",
+        model_loader,
+    )
+    monkeypatch.setattr(gms_sglang, "_gms_initialized", False)
+    monkeypatch.setattr(gms_sglang, "_gms_lock_mode", None)
+    monkeypatch.setattr(gms_sglang, "_gms_ro_connect_timeout_ms", None)
+
+
+def test_setup_gms_declares_memory_saver(monkeypatch, fake_gms_model_loader):
+    class ReadOnlyServerArgs:
+        def __setattr__(self, name, value):
+            raise AssertionError(f"unexpected direct assignment: {name}={value!r}")
+
+    server_args = ReadOnlyServerArgs()
+    declare_late_resolution = Mock()
+    monkeypatch.setattr(gms_sglang, "declare_late_resolution", declare_late_resolution)
+
+    loader = gms_sglang.setup_gms(server_args)
+
+    declare_late_resolution.assert_called_once_with(
+        server_args,
+        "dynamo.gms",
+        enable_memory_saver=True,
+    )
+    assert loader is object
+    assert gms_sglang.is_gms_active()
+
+
+def test_setup_gms_uses_override_when_declaration_is_unavailable(
+    monkeypatch,
+    fake_gms_model_loader,
+):
+    override = Mock()
+    server_args = SimpleNamespace(override=override)
+    monkeypatch.setattr(gms_sglang, "declare_late_resolution", None)
+
+    gms_sglang.setup_gms(server_args)
+
+    override.assert_called_once_with("dynamo.gms", enable_memory_saver=True)
+
+
+def test_setup_gms_assigns_memory_saver_for_legacy_args(
+    monkeypatch,
+    fake_gms_model_loader,
+):
+    server_args = SimpleNamespace(enable_memory_saver=False)
+    monkeypatch.setattr(gms_sglang, "declare_late_resolution", None)
+
+    gms_sglang.setup_gms(server_args)
+
+    assert server_args.enable_memory_saver is True
 
 
 class _FakeManager:

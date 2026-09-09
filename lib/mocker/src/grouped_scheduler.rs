@@ -20,7 +20,7 @@ use aisimulate_core::engine::{
     Admission, Command, CommandEffects, CommandResult, ForwardPassMetrics, KvEvent, Metrics,
     PassCompletionEffects,
 };
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
 use dynamo_kv_router::protocols::StorageTier;
 #[cfg(test)]
 use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData};
@@ -42,11 +42,11 @@ use crate::generalized_live::{
     GroupedLiveDriverConfig, GroupedLiveEngineHandle, GroupedLiveEvent, GroupedLiveRuntime,
     GroupedPassBoundary, spawn_grouped_live_engine,
 };
+use crate::live::LiveRouteDelivery;
 use crate::scheduler::{
     AdmissionEvent, MockerMetrics, SchedulerCancellationEnvelope, SchedulerCommand,
-    SchedulerCommandEffects, SchedulerCommandEnvelope, SchedulerCommandResult,
-    SchedulerEventSendError, SchedulerEventSender, SchedulerHandle, SchedulerLifecycleEvent,
-    handoff_channel_capacity,
+    SchedulerCommandEffects, SchedulerCommandEnvelope, SchedulerCommandResult, SchedulerHandle,
+    SchedulerLifecycleEvent, handoff_channel_capacity,
 };
 
 /// Per-rank Dynamo sinks consumed by [`create_grouped_scheduler`].
@@ -181,24 +181,35 @@ pub fn create_grouped_scheduler(
 ) -> Result<GroupedSchedulers> {
     let rank_sinks = rank_sinks
         .into_iter()
-        .map(|sinks| GroupedSchedulerRankEventSinks {
-            event_tx: sinks.output_tx.map(SchedulerEventSender::from),
+        .map(|sinks| RankSinks {
+            output: sinks
+                .output_tx
+                .map(RankOutputSink::Channel)
+                .unwrap_or_default(),
             kv_event_publishers: sinks.kv_event_publishers,
             fpm_publisher: sinks.fpm_publisher,
         })
         .collect();
-    create_grouped_scheduler_with_event_senders(args, rank_sinks, cancellation_token)
+    create_grouped_scheduler_with_rank_sinks(args, rank_sinks, cancellation_token)
 }
 
-pub(crate) struct GroupedSchedulerRankEventSinks {
-    pub(crate) event_tx: Option<SchedulerEventSender>,
+#[derive(Clone, Default)]
+pub(crate) enum RankOutputSink {
+    #[default]
+    None,
+    Channel(mpsc::UnboundedSender<Vec<OutputSignal>>),
+    Routes(LiveRouteDelivery),
+}
+
+pub(crate) struct RankSinks {
+    pub(crate) output: RankOutputSink,
     pub(crate) kv_event_publishers: KvEventPublishers,
     pub(crate) fpm_publisher: FpmPublisher,
 }
 
-pub(crate) fn create_grouped_scheduler_with_event_senders(
+pub(crate) fn create_grouped_scheduler_with_rank_sinks(
     args: MockEngineArgs,
-    rank_sinks: Vec<GroupedSchedulerRankEventSinks>,
+    rank_sinks: Vec<RankSinks>,
     cancellation_token: Option<CancellationToken>,
 ) -> Result<GroupedSchedulers> {
     let emit_kv_events = rank_sinks
@@ -231,10 +242,10 @@ pub(crate) fn create_grouped_scheduler_with_event_senders(
 
 /// Construct the historical one-rank scheduler facade while retaining the
 /// caller's externally visible DP-rank identity.
-pub(crate) fn create_single_rank_scheduler_with_event_sender(
+pub(crate) fn create_single_rank_scheduler_with_rank_sink(
     args: MockEngineArgs,
     dp_rank: u32,
-    rank_sink: GroupedSchedulerRankEventSinks,
+    rank_sink: RankSinks,
     cancellation_token: Option<CancellationToken>,
 ) -> Result<GroupedSchedulers> {
     let emit_kv_events = !rank_sink.kv_event_publishers.is_empty();
@@ -254,7 +265,7 @@ pub(crate) fn create_single_rank_scheduler_with_event_sender(
 
 fn create_grouped_scheduler_from_components(
     components: EngineComponents,
-    rank_sinks: Vec<GroupedSchedulerRankEventSinks>,
+    rank_sinks: Vec<RankSinks>,
     rank_identities: Vec<RankIdentity>,
     cancellation_token: Option<CancellationToken>,
 ) -> Result<GroupedSchedulers> {
@@ -332,7 +343,7 @@ fn create_grouped_scheduler_from_components(
 
         dispatch_ranks.push(RankDispatch {
             external_dp_rank,
-            event_tx: sinks.event_tx,
+            output: sinks.output,
             kv_event_publishers: sinks.kv_event_publishers,
             fpm_publisher: sinks.fpm_publisher,
             lifecycle_tx,

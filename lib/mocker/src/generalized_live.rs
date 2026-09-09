@@ -4,11 +4,14 @@
 //! Tokio/wall-clock driver for one logical generalized mock engine.
 //!
 //! The AISimulate engine remains runtime-neutral: it eagerly computes a pass
-//! and returns an absolute modeled completion time. This module owns the live
-//! concerns around that contract: bounded control lanes, wall-clock sleeps,
-//! mid-pass cancellation, attention-DP barrier release, and ordered effect
-//! delivery. Dynamo-specific transport and metric publication stay outside the
-//! driver and consume [`GroupedLiveEvent`] values.
+//! and returns an absolute modeled completion time. While work remains ready,
+//! this driver carries that modeled completion forward as the next pass start
+//! deadline. It uses wall time for sleeps and when work resumes after idle.
+//!
+//! This module also owns bounded control lanes, mid-pass cancellation,
+//! attention-DP barrier release, and ordered effect delivery. Dynamo-specific
+//! transport and metric publication stay outside the driver and consume
+//! [`GroupedLiveEvent`] values.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -31,13 +34,14 @@ use tokio_util::sync::CancellationToken;
 #[cfg(test)]
 use uuid::Uuid;
 
-#[cfg(not(test))]
-use crate::common::utils::sleep_until_precise;
+use crate::common::utils::ReusablePreciseTimer;
 
 /// Engine type driven by the native live runtime.
 pub type GroupedEngine = GeneralizedMockerEngine<SchedulerRank>;
 
-/// Bounded-channel sizing for one grouped live engine.
+const ABSOLUTE_PASS_MAX_CATCH_UP: Duration = Duration::from_millis(5);
+
+/// Bounded-channel configuration for one grouped live engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GroupedLiveDriverConfig {
     /// Capacity shared independently by the ordinary-command and cancellation
@@ -293,6 +297,8 @@ pub fn spawn_grouped_live_engine(
             cancel_token: actor_cancel_token,
             clock_origin,
             deferred_commands: VecDeque::new(),
+            engine_time_ms: 0.0,
+            next_pass_deadline_ms: None,
         }
         .run()
         .await
@@ -319,6 +325,33 @@ struct GroupedLiveActor {
     cancel_token: CancellationToken,
     clock_origin: Instant,
     deferred_commands: VecDeque<ControlEnvelope>,
+    engine_time_ms: f64,
+    next_pass_deadline_ms: Option<f64>,
+}
+
+fn select_pass_start(wall_ms: f64, engine_time_ms: f64, next_deadline_ms: Option<f64>) -> f64 {
+    let Some(deadline_ms) = next_deadline_ms else {
+        return wall_ms.max(engine_time_ms);
+    };
+
+    let catch_up_floor_ms = (wall_ms - ABSOLUTE_PASS_MAX_CATCH_UP.as_secs_f64() * 1_000.0).max(0.0);
+    deadline_ms.max(catch_up_floor_ms).max(engine_time_ms)
+}
+
+fn select_internal_work_time(
+    wall_ms: f64,
+    engine_time_ms: f64,
+    deadline_ms: f64,
+    active_pass_sequence: bool,
+) -> Option<f64> {
+    if deadline_ms > wall_ms.max(engine_time_ms) {
+        return None;
+    }
+    if active_pass_sequence {
+        Some(engine_time_ms.max(deadline_ms))
+    } else {
+        Some(engine_time_ms.max(wall_ms))
+    }
 }
 
 #[derive(Debug)]
@@ -341,6 +374,8 @@ impl GroupedLiveActor {
     }
 
     async fn run_until_stopped(&mut self) -> Result<()> {
+        let mut pass_timer = ReusablePreciseTimer::default();
+        let mut internal_timer = ReusablePreciseTimer::default();
         loop {
             if self.cancel_token.is_cancelled() {
                 return Ok(());
@@ -348,7 +383,8 @@ impl GroupedLiveActor {
 
             self.process_due_internal_work().await?;
             if !self.engine.is_ready() {
-                if !self.wait_for_idle_work().await? {
+                self.next_pass_deadline_ms = None;
+                if !self.wait_for_idle_work(&mut internal_timer).await? {
                     return Ok(());
                 }
                 continue;
@@ -358,23 +394,35 @@ impl GroupedLiveActor {
             // so a continuously refilled control lane cannot starve a pass.
             self.apply_idle_control_snapshot().await?;
             if !self.engine.is_ready() {
+                self.next_pass_deadline_ms = None;
                 continue;
             }
 
-            let started_at_ms = self.elapsed_ms();
+            let started_at_ms = select_pass_start(
+                self.elapsed_ms(),
+                self.engine_time_ms,
+                self.next_pass_deadline_ms,
+            );
+            self.advance_engine_time(started_at_ms);
             let Some(started) = self.engine.execute_pass(started_at_ms)? else {
+                self.next_pass_deadline_ms = None;
                 continue;
             };
             let pass_id = started.pass_id;
             let end_ms = started.end_ms;
+            self.next_pass_deadline_ms = Some(end_ms);
             let zero_duration = end_ms <= started_at_ms;
             self.publish(GroupedLiveEvent::PassStarted(started)).await?;
 
-            if !self.wait_for_pass_boundary(end_ms).await? {
+            if !self
+                .wait_for_pass_boundary(end_ms, &mut pass_timer, &mut internal_timer)
+                .await?
+            {
                 return Ok(());
             }
-            let completed_at_ms = self.elapsed_ms().max(end_ms);
+            let completed_at_ms = self.advance_engine_time(end_ms);
             let completed = self.engine.complete_pass(pass_id, completed_at_ms)?;
+            self.clear_pass_deadline_if_not_ready();
             let (boundary_tx, boundary_rx) = mpsc::channel(1);
             self.publish(GroupedLiveEvent::PassCompleted {
                 completed,
@@ -399,6 +447,26 @@ impl GroupedLiveActor {
 
     fn elapsed_ms(&self) -> f64 {
         self.clock_origin.elapsed().as_secs_f64() * 1_000.0
+    }
+
+    fn advance_engine_time(&mut self, candidate_ms: f64) -> f64 {
+        self.engine_time_ms = self.engine_time_ms.max(candidate_ms);
+        self.engine_time_ms
+    }
+
+    fn command_time_ms(&mut self) -> f64 {
+        let candidate_ms = if self.next_pass_deadline_ms.is_some() {
+            self.engine_time_ms
+        } else {
+            self.elapsed_ms()
+        };
+        self.advance_engine_time(candidate_ms)
+    }
+
+    fn clear_pass_deadline_if_not_ready(&mut self) {
+        if !self.engine.is_ready() {
+            self.next_pass_deadline_ms = None;
+        }
     }
 
     async fn publish(&self, event: GroupedLiveEvent) -> Result<()> {
@@ -432,9 +500,9 @@ impl GroupedLiveActor {
             };
             match request {
                 BoundaryRequest::Apply { command, reply } => {
-                    let result = self
-                        .engine
-                        .apply_command_effects(command, self.elapsed_ms());
+                    let now_ms = self.command_time_ms();
+                    let result = self.engine.apply_command_effects(command, now_ms);
+                    self.clear_pass_deadline_if_not_ready();
                     let _ = reply.send(result);
                 }
                 BoundaryRequest::Finish { reply } => {
@@ -449,8 +517,9 @@ impl GroupedLiveActor {
         let command_id = envelope.command_id;
         let is_request_cancellation =
             matches!(&envelope.command.command, Command::CancelRequest { .. });
-        let now_ms = self.elapsed_ms();
+        let now_ms = self.command_time_ms();
         let result = self.engine.apply_command_effects(envelope.command, now_ms);
+        self.clear_pass_deadline_if_not_ready();
         match result {
             Ok(effects) => {
                 let event = GroupedLiveEvent::CommandApplied {
@@ -473,9 +542,12 @@ impl GroupedLiveActor {
         }
     }
 
-    async fn wait_for_idle_work(&mut self) -> Result<bool> {
+    async fn wait_for_idle_work(
+        &mut self,
+        internal_timer: &mut ReusablePreciseTimer,
+    ) -> Result<bool> {
         let deadline_ms = self.engine.next_internal_deadline_ms();
-        let deadline = sleep_until_ms(self.clock_origin, deadline_ms);
+        let deadline = sleep_until_ms(internal_timer, self.clock_origin, deadline_ms);
         tokio::pin!(deadline);
         tokio::select! {
             biased;
@@ -519,13 +591,19 @@ impl GroupedLiveActor {
         Ok(())
     }
 
-    async fn wait_for_pass_boundary(&mut self, end_ms: f64) -> Result<bool> {
-        let pass_deadline = sleep_until_ms(self.clock_origin, Some(end_ms));
+    async fn wait_for_pass_boundary(
+        &mut self,
+        end_ms: f64,
+        pass_timer: &mut ReusablePreciseTimer,
+        internal_timer: &mut ReusablePreciseTimer,
+    ) -> Result<bool> {
+        let pass_deadline = sleep_until_ms(pass_timer, self.clock_origin, Some(end_ms));
         tokio::pin!(pass_deadline);
         let mut accept_commands = true;
         loop {
             let internal_deadline_ms = self.engine.next_internal_deadline_ms();
-            let internal_deadline = sleep_until_ms(self.clock_origin, internal_deadline_ms);
+            let internal_deadline =
+                sleep_until_ms(internal_timer, self.clock_origin, internal_deadline_ms);
             tokio::pin!(internal_deadline);
             tokio::select! {
                 biased;
@@ -559,7 +637,7 @@ impl GroupedLiveActor {
         let command_id = envelope.command_id;
         let is_request_cancellation =
             matches!(&envelope.command.command, Command::CancelRequest { .. });
-        let now_ms = self.elapsed_ms();
+        let now_ms = self.command_time_ms();
         let result = self.engine.apply_command_effects(envelope.command, now_ms);
         match result {
             Ok(effects) => {
@@ -604,14 +682,18 @@ impl GroupedLiveActor {
     }
 
     async fn process_due_internal_work(&mut self) -> Result<()> {
-        let now_ms = self.elapsed_ms();
-        if !self
-            .engine
-            .next_internal_deadline_ms()
-            .is_some_and(|deadline| deadline <= now_ms)
-        {
+        let Some(deadline_ms) = self.engine.next_internal_deadline_ms() else {
             return Ok(());
-        }
+        };
+        let Some(candidate_ms) = select_internal_work_time(
+            self.elapsed_ms(),
+            self.engine_time_ms,
+            deadline_ms,
+            self.next_pass_deadline_ms.is_some(),
+        ) else {
+            return Ok(());
+        };
+        let now_ms = self.advance_engine_time(candidate_ms);
         self.engine.process_internal_work(now_ms)?;
         Ok(())
     }
@@ -624,16 +706,17 @@ fn command_can_apply_during_pass(command: &Command) -> bool {
     )
 }
 
-async fn sleep_until_ms(origin: Instant, deadline_ms: Option<f64>) {
+async fn sleep_until_ms(
+    timer: &mut ReusablePreciseTimer,
+    origin: Instant,
+    deadline_ms: Option<f64>,
+) {
     let Some(deadline_ms) = deadline_ms else {
         std::future::pending::<()>().await;
         return;
     };
     let deadline = origin + Duration::from_secs_f64(deadline_ms.max(0.0) / 1_000.0);
-    #[cfg(test)]
-    tokio::time::sleep_until(deadline).await;
-    #[cfg(not(test))]
-    sleep_until_precise(deadline.into_std()).await;
+    timer.sleep_until(deadline.into_std()).await;
 }
 
 #[cfg(test)]
@@ -725,6 +808,228 @@ mod tests {
         events.recv().await.expect("live actor must remain active")
     }
 
+    fn ten_ms_runtime() -> GroupedLiveRuntime {
+        runtime_with_config(
+            1,
+            EngineConfig {
+                num_gpu_blocks: 128,
+                block_size: 4,
+                max_num_seqs: 8,
+                max_num_batched_tokens: 256,
+                timing_model: TimingModelConfig::Fixed {
+                    prefill_ms: 10.0,
+                    decode_ms: 10.0,
+                },
+                ..EngineConfig::default()
+            },
+        )
+    }
+
+    async fn first_completion_after_ten_ms(
+        runtime: &mut GroupedLiveRuntime,
+        request_id: u128,
+        output_len: usize,
+    ) -> (f64, GroupedPassBoundary) {
+        runtime
+            .handle
+            .apply_command(SchedulerCommand::new(
+                0,
+                Command::Submit(request(request_id, 4, output_len)),
+            ))
+            .await
+            .unwrap();
+        assert!(matches!(
+            next_event(&mut runtime.events).await,
+            GroupedLiveEvent::CommandApplied { .. }
+        ));
+        let GroupedLiveEvent::PassStarted(first) = next_event(&mut runtime.events).await else {
+            panic!("expected first pass start");
+        };
+        tokio::time::advance(Duration::from_millis(10)).await;
+        let GroupedLiveEvent::PassCompleted { boundary, .. } =
+            next_event(&mut runtime.events).await
+        else {
+            panic!("expected first pass completion");
+        };
+        (first.end_ms, boundary)
+    }
+
+    #[test]
+    fn absolute_pass_start_is_bounded_and_monotonic() {
+        assert_eq!(ABSOLUTE_PASS_MAX_CATCH_UP, Duration::from_millis(5));
+        assert_eq!(select_pass_start(12.0, 0.0, Some(10.0)), 10.0);
+        assert_eq!(select_pass_start(30.0, 0.0, Some(10.0)), 25.0);
+        assert_eq!(select_pass_start(30.0, 28.0, Some(10.0)), 28.0);
+        assert_eq!(select_pass_start(100.0, 28.0, None), 100.0);
+        assert_eq!(select_pass_start(9.0, 0.0, Some(10.0)), 10.0);
+    }
+
+    #[test]
+    fn internal_work_uses_the_active_modeled_timeline() {
+        assert_eq!(
+            select_internal_work_time(30.0, 10.0, 12.0, true),
+            Some(12.0)
+        );
+        assert_eq!(
+            select_internal_work_time(30.0, 15.0, 12.0, true),
+            Some(15.0)
+        );
+        assert_eq!(
+            select_internal_work_time(30.0, 10.0, 12.0, false),
+            Some(30.0)
+        );
+        assert_eq!(select_internal_work_time(11.0, 10.0, 12.0, true), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn default_deadline_removes_finish_delay_without_skipping_finish() {
+        let mut runtime = ten_ms_runtime();
+        let (first_end_ms, boundary) = first_completion_after_ten_ms(&mut runtime, 201, 3).await;
+
+        tokio::time::advance(Duration::from_millis(2)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            runtime.events.try_recv().is_err(),
+            "the actor must not start another pass before Finish"
+        );
+        boundary.finish().await.unwrap();
+        let GroupedLiveEvent::PassStarted(second) = next_event(&mut runtime.events).await else {
+            panic!("expected second pass start");
+        };
+        assert_eq!(second.started_at_ms, first_end_ms);
+        assert_eq!(second.end_ms, first_end_ms + 10.0);
+
+        runtime.handle.shutdown();
+        runtime.actor.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn boundary_command_keeps_a_carried_deadline() {
+        let mut runtime = ten_ms_runtime();
+        let (first_end_ms, boundary) = first_completion_after_ten_ms(&mut runtime, 202, 3).await;
+
+        tokio::time::advance(Duration::from_millis(2)).await;
+        boundary
+            .apply_command(SchedulerCommand::new(
+                0,
+                Command::Submit(request(203, 4, 1)),
+            ))
+            .await
+            .unwrap();
+        boundary.finish().await.unwrap();
+        let GroupedLiveEvent::PassStarted(second) = next_event(&mut runtime.events).await else {
+            panic!("expected second pass start");
+        };
+        assert_eq!(second.started_at_ms, first_end_ms);
+
+        runtime.handle.shutdown();
+        runtime.actor.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queued_control_keeps_a_carried_deadline() {
+        let mut runtime = ten_ms_runtime();
+        let (first_end_ms, boundary) = first_completion_after_ten_ms(&mut runtime, 204, 3).await;
+
+        tokio::time::advance(Duration::from_millis(2)).await;
+        let queued = runtime
+            .handle
+            .enqueue_command(SchedulerCommand::new(
+                0,
+                Command::Submit(request(205, 4, 1)),
+            ))
+            .await
+            .unwrap();
+        boundary.finish().await.unwrap();
+        assert!(matches!(
+            next_event(&mut runtime.events).await,
+            GroupedLiveEvent::CommandApplied { .. }
+        ));
+        queued.response.await.unwrap().unwrap();
+        let GroupedLiveEvent::PassStarted(second) = next_event(&mut runtime.events).await else {
+            panic!("expected second pass start");
+        };
+        assert_eq!(second.started_at_ms, first_end_ms);
+
+        runtime.handle.shutdown();
+        runtime.actor.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queued_control_after_a_drained_boundary_starts_from_wall_time() {
+        let mut runtime = ten_ms_runtime();
+        let (first_end_ms, boundary) = first_completion_after_ten_ms(&mut runtime, 210, 1).await;
+
+        tokio::time::advance(Duration::from_millis(20)).await;
+        let queued = runtime
+            .handle
+            .enqueue_command(SchedulerCommand::new(
+                0,
+                Command::Submit(request(211, 4, 1)),
+            ))
+            .await
+            .unwrap();
+        boundary.finish().await.unwrap();
+        assert!(matches!(
+            next_event(&mut runtime.events).await,
+            GroupedLiveEvent::CommandApplied { .. }
+        ));
+        queued.response.await.unwrap().unwrap();
+        let GroupedLiveEvent::PassStarted(second) = next_event(&mut runtime.events).await else {
+            panic!("expected second pass start");
+        };
+        assert_eq!(second.started_at_ms, first_end_ms + 20.0);
+
+        runtime.handle.shutdown();
+        runtime.actor.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn default_catch_up_is_bounded_after_a_long_finish_delay() {
+        let mut runtime = ten_ms_runtime();
+        let (first_end_ms, boundary) = first_completion_after_ten_ms(&mut runtime, 206, 3).await;
+
+        tokio::time::advance(Duration::from_millis(20)).await;
+        boundary.finish().await.unwrap();
+        let GroupedLiveEvent::PassStarted(second) = next_event(&mut runtime.events).await else {
+            panic!("expected second pass start");
+        };
+        assert_eq!(second.started_at_ms, first_end_ms + 15.0);
+        assert_eq!(second.end_ms, second.started_at_ms + 10.0);
+
+        runtime.handle.shutdown();
+        runtime.actor.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn default_deadline_restarts_from_wall_time_after_idle() {
+        let mut runtime = ten_ms_runtime();
+        let (first_end_ms, boundary) = first_completion_after_ten_ms(&mut runtime, 207, 1).await;
+        boundary.finish().await.unwrap();
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(Duration::from_millis(100)).await;
+        runtime
+            .handle
+            .apply_command(SchedulerCommand::new(
+                0,
+                Command::Submit(request(208, 4, 1)),
+            ))
+            .await
+            .unwrap();
+        assert!(matches!(
+            next_event(&mut runtime.events).await,
+            GroupedLiveEvent::CommandApplied { .. }
+        ));
+        let GroupedLiveEvent::PassStarted(second) = next_event(&mut runtime.events).await else {
+            panic!("expected second pass start");
+        };
+        assert_eq!(second.started_at_ms, first_end_ms + 100.0);
+
+        runtime.handle.shutdown();
+        runtime.actor.await.unwrap().unwrap();
+    }
+
     fn ready_actor(
         event_tx: mpsc::Sender<GroupedLiveEvent>,
         cancel_token: CancellationToken,
@@ -759,6 +1064,8 @@ mod tests {
             cancel_token,
             clock_origin: Instant::now(),
             deferred_commands: VecDeque::new(),
+            engine_time_ms: 0.0,
+            next_pass_deadline_ms: None,
         }
     }
 
@@ -970,6 +1277,61 @@ mod tests {
         actor.await.unwrap().unwrap();
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn pass_boundary_uses_reusable_timerfd() {
+        let mut engine = EngineFactory::new(EngineConfig {
+            num_gpu_blocks: 128,
+            block_size: 4,
+            max_num_seqs: 8,
+            max_num_batched_tokens: 256,
+            timing_model: TimingModelConfig::Fixed {
+                prefill_ms: 5.0,
+                decode_ms: 0.0,
+            },
+            ..EngineConfig::default()
+        })
+        .unwrap()
+        .build(EngineIdentity::new(7), NonZeroU32::new(1).unwrap())
+        .unwrap();
+        engine
+            .apply_command_effects(
+                SchedulerCommand::new(0, Command::Submit(request(12, 4, 2))),
+                0.0,
+            )
+            .unwrap();
+        let started = engine.execute_pass(0.0).unwrap().unwrap();
+
+        let (_command_tx, command_rx) = mpsc::channel(1);
+        let (_cancellation_tx, cancellation_rx) = mpsc::channel(1);
+        let (event_tx, _events) = mpsc::channel(1);
+        let mut actor = GroupedLiveActor {
+            engine,
+            command_rx,
+            cancellation_rx,
+            event_tx,
+            cancel_token: CancellationToken::new(),
+            clock_origin: Instant::now(),
+            deferred_commands: VecDeque::new(),
+            engine_time_ms: 0.0,
+            next_pass_deadline_ms: Some(started.end_ms),
+        };
+        let mut pass_timer = ReusablePreciseTimer::with_timerfd_for_test();
+        let mut internal_timer = ReusablePreciseTimer::default();
+        let waited_at = std::time::Instant::now();
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            actor.wait_for_pass_boundary(started.end_ms, &mut pass_timer, &mut internal_timer),
+        )
+        .await
+        .expect("pass boundary did not complete")
+        .unwrap();
+
+        assert!(waited_at.elapsed() >= Duration::from_millis(1));
+        assert_eq!(pass_timer.timerfd_create_attempts(), 1);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn queued_cancellation_preempts_an_overdue_pass_boundary() {
         let mut engine = EngineFactory::new(EngineConfig {
@@ -1025,8 +1387,17 @@ mod tests {
             cancel_token: CancellationToken::new(),
             clock_origin: Instant::now() - Duration::from_millis(200),
             deferred_commands: VecDeque::new(),
+            engine_time_ms: 0.0,
+            next_pass_deadline_ms: None,
         };
-        assert!(actor.wait_for_pass_boundary(started.end_ms).await.unwrap());
+        let mut pass_timer = ReusablePreciseTimer::default();
+        let mut internal_timer = ReusablePreciseTimer::default();
+        assert!(
+            actor
+                .wait_for_pass_boundary(started.end_ms, &mut pass_timer, &mut internal_timer,)
+                .await
+                .unwrap()
+        );
         response
             .try_recv()
             .expect("queued cancellation must be applied before the overdue boundary")

@@ -37,6 +37,7 @@ use crate::{
     preprocessor::PreprocessedRequest,
     protocols::common::{
         FinishReason,
+        extensions::SessionAffinityId,
         llm_backend::LLMEngineOutput,
         timing::{RequestPhase, RoutingData, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL},
     },
@@ -54,7 +55,7 @@ mod occupancy;
 mod request_guard;
 
 use builtin::BuiltinWorkerSelector;
-use cancellation::cancel_on_stop;
+use cancellation::{CleanupBudget, DispatchCancellation, StagedKv, await_with_cleanup_policy};
 use kv_selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 use occupancy::HostedOccupancy;
 pub(crate) use request_guard::prompt_private_blocks;
@@ -62,6 +63,9 @@ use request_guard::{KvRequestCleanup, LoraLoadGuard, RequestGuard};
 
 const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
 const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
+
+/// Bounds the wait for a worker's trailing typed error after a terminal frame.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) fn is_cancelled(error: &Error) -> bool {
     match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[])
@@ -85,31 +89,84 @@ where
         let stopped = context.stopped();
         tokio::pin!(stopped);
 
+        // Migration acts on errors only; a shutting-down worker sends its error after the terminal frame.
+        let mut drainable_terminal = false;
+        let mut pending_terminal: Option<Annotated<LLMEngineOutput>> = None;
+        // Armed only while draining: a worker that goes quiet without EOF must not hang us.
+        let drain_deadline = tokio::time::sleep(Duration::ZERO);
+        tokio::pin!(drain_deadline);
+
         let completed = loop {
             tokio::select! {
                 biased;
 
                 _ = &mut stopped => {
                     tracing::debug!(request_id = context.id(), "Request cancelled, ending stream");
+                    // The client is gone, so the withheld frame has nowhere to go.
+                    drop(pending_terminal.take());
                     break false;
                 }
 
                 item = response_stream.next() => {
                     let Some(item) = item else {
-                        break true;
+                        // EOF while draining means no trailing error is coming.
+                        if drainable_terminal {
+                            guard.record_migration_failure(None);
+                        }
+                        break !drainable_terminal;
                     };
-                    let item_failed = response_item_failed(&item);
+                    let outcome = classify_response_item(&item);
                     guard.on_item(&item).await;
-                    if item_failed {
-                        guard.record_migration_failure(item.error.clone());
-                        // Release the failed attempt before Migration can observe
-                        // the item and start another one. This keeps serialized
-                        // retries free of stale-cleanup ABA races.
-                        guard.abort().await;
-                        yield item;
-                        break false;
+                    match outcome {
+                        ResponseItemOutcome::Failed => {
+                            // Supersedes the withheld frame: never end a request about to be retried.
+                            drop(pending_terminal.take());
+                            guard.record_migration_failure(item.error.clone());
+                            // Release the failed attempt before Migration can observe
+                            // the item and start another one. This keeps serialized
+                            // retries free of stale-cleanup ABA races.
+                            guard.abort().await;
+                            yield item;
+                            break false;
+                        }
+                        ResponseItemOutcome::DrainableTerminal => {
+                            // Armed once: re-arming per frame would let a flood of terminals
+                            // postpone the deadline forever.
+                            if !drainable_terminal {
+                                drainable_terminal = true;
+                                drain_deadline.as_mut().reset(tokio::time::Instant::now() + DRAIN_TIMEOUT);
+                            }
+                            // Only the newest terminal frame can be the last one.
+                            if let Some(previous) = pending_terminal.replace(item) {
+                                yield previous;
+                            }
+                            // `biased` polls this arm first, so an always-ready stream would
+                            // otherwise starve the deadline below. Compare the clock rather than
+                            // `is_elapsed()`: a `Sleep` that is never polled never reports elapsed.
+                            if tokio::time::Instant::now() >= drain_deadline.deadline() {
+                                guard.record_migration_failure(None);
+                                break false;
+                            }
+                        }
+                        ResponseItemOutcome::Healthy => {
+                            // More data followed, so the withheld frame was not last after all.
+                            drainable_terminal = false;
+                            if let Some(previous) = pending_terminal.take() {
+                                yield previous;
+                            }
+                            yield item;
+                        }
                     }
-                    yield item;
+                }
+
+                // Last arm: a frame that is already available always beats an expired drain.
+                _ = &mut drain_deadline, if drainable_terminal => {
+                    tracing::debug!(
+                        request_id = context.id(),
+                        "Terminal frame was not followed by an error within {DRAIN_TIMEOUT:?}, ending stream"
+                    );
+                    guard.record_migration_failure(None);
+                    break false;
                 }
             }
         };
@@ -118,6 +175,10 @@ where
             guard.finish().await;
         } else {
             guard.abort().await;
+        }
+        // Released only now: the drain proved it was last, and the booking is already gone.
+        if let Some(pending) = pending_terminal.take() {
+            yield pending;
         }
     }
 }
@@ -207,6 +268,9 @@ where
     selection: WorkerSelection,
     cleanup: KvRequestCleanup<Sel>,
     affinity: Option<AffinityAcquire>,
+    /// Carried forward from the [`RoutePreview`] this plan was admitted from, so
+    /// preview, admission and dispatch draw on one budget instead of three.
+    budget: CleanupBudget,
 }
 
 /// A KV route selected without scheduler admission.
@@ -214,6 +278,8 @@ pub(crate) struct RoutePreview {
     request_id: String,
     phase: RequestPhase,
     signals: RoutePlanSignals,
+    /// Starts here because the conditional route's first stage is the preview.
+    budget: CleanupBudget,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -228,6 +294,13 @@ pub(crate) struct RoutePlanSignals {
 impl RoutePreview {
     pub(crate) fn signals(&self) -> RoutePlanSignals {
         self.signals
+    }
+
+    /// Starts the budget's clock and reports what is left, so a test can follow
+    /// one budget across the real preview/plan/dispatch chain.
+    #[cfg(test)]
+    pub(crate) fn cleanup_budget_remaining(&self) -> std::time::Duration {
+        self.budget.remaining()
     }
 }
 
@@ -244,6 +317,11 @@ where
 {
     pub(crate) fn signals(&self) -> RoutePlanSignals {
         self.signals
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cleanup_budget_remaining(&self) -> std::time::Duration {
+        self.budget.remaining()
     }
 
     #[cfg(test)]
@@ -517,17 +595,58 @@ where
         (start..end).contains(&dp_rank)
     }
 
+    /// Take a session-affinity slot under the same cleanup policy as every other
+    /// routing stage.
+    ///
+    /// `acquire_with_context` cancels its own wait as soon as the context stops,
+    /// and it runs upstream of every other stage. A decode leg with staged KV
+    /// would therefore die here — before any of the wrapped stages could let it
+    /// through — whenever a concurrent request for the same session is still
+    /// `Initializing`. On that path we wait through the stop instead, drawing on
+    /// the request's shared budget so the wait is still bounded.
+    #[allow(clippy::too_many_arguments)]
+    async fn acquire_affinity_slot(
+        &self,
+        affinity: &AffinityCoordinator,
+        session_id: &SessionAffinityId,
+        requested_target: Option<AffinityTarget>,
+        context: &dyn AsyncEngineContext,
+        phase: RequestPhase,
+        staged_kv: StagedKv,
+        budget: &CleanupBudget,
+    ) -> Result<AffinityAcquire, Error> {
+        match DispatchCancellation::for_request(phase, staged_kv) {
+            DispatchCancellation::CancelWhenStopped => {
+                affinity
+                    .acquire_with_context(session_id, requested_target, context)
+                    .await
+            }
+            DispatchCancellation::DispatchWhenStopped => await_with_cleanup_policy(
+                context,
+                phase,
+                staged_kv,
+                "affinity.acquire",
+                budget,
+                affinity.acquire(session_id, requested_target),
+            )
+            .await
+            .and_then(|result| result),
+        }
+    }
+
     async fn select_with_session_affinity<T, Select, SelectionFuture>(
         &self,
         request: &SingleIn<PreprocessedRequest>,
         phase: RequestPhase,
         is_query_only: bool,
+        budget: &CleanupBudget,
         mut select: Select,
     ) -> Result<(T, Option<AffinityAcquire>), Error>
     where
         Select: FnMut(Option<AffinityTarget>) -> SelectionFuture,
         SelectionFuture: Future<Output = Result<T, Error>>,
     {
+        let staged_kv = StagedKv::for_request(request.content());
         let Some(affinity) = self.affinity.as_ref() else {
             return Ok((select(None).await?, None));
         };
@@ -541,8 +660,16 @@ where
         }
 
         let request_context = request.context();
-        let operation = affinity
-            .acquire_with_context(&session_id, explicit, request_context.as_ref())
+        let operation = self
+            .acquire_affinity_slot(
+                affinity,
+                &session_id,
+                explicit,
+                request_context.as_ref(),
+                phase,
+                staged_kv,
+                budget,
+            )
             .await?;
         let target = operation.target();
         match select(target).await {
@@ -554,8 +681,16 @@ where
                     && target.is_some_and(|target| !self.affinity_target_is_valid(target)) =>
             {
                 operation.invalidate();
-                let retry = affinity
-                    .acquire_with_context(&session_id, None, request_context.as_ref())
+                let retry = self
+                    .acquire_affinity_slot(
+                        affinity,
+                        &session_id,
+                        None,
+                        request_context.as_ref(),
+                        phase,
+                        staged_kv,
+                        budget,
+                    )
                     .await?;
                 let selection = select(retry.target()).await?;
                 Ok((selection, Some(retry)))
@@ -617,6 +752,8 @@ where
         &self,
         request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        // One cleanup budget for this request's whole route through the host.
+        let budget = CleanupBudget::default();
         if !matches!(&self.policy, RoutingPolicy::Kv(_)) {
             let phase = request
                 .tracker
@@ -638,7 +775,7 @@ where
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let (mut selection, mut operation) = self
-            .select_with_affinity(&request, phase, is_query_only)
+            .select_with_affinity(&request, phase, is_query_only, &budget)
             .await?;
         if is_query_only {
             let routing_parts = RoutingRequestParts::new(&request);
@@ -685,13 +822,19 @@ where
             return Ok(ResponseStream::new(Box::pin(stream), stream_context));
         }
 
-        let guard = match self.track_selection(&request, &mut selection, false).await {
+        let guard = match self
+            .track_selection(&request, &mut selection, phase, false, &budget)
+            .await
+        {
             Ok(guard) => guard,
             Err(error) => return Err(error),
         };
         drop(route_guard);
         let selected_target = route_target(selection.worker);
-        let stream = match self.dispatch_selection(request, selection, guard).await {
+        let stream = match self
+            .dispatch_selection(request, selection, guard, &budget)
+            .await
+        {
             Ok(stream) => stream,
             Err(error) => {
                 if self.session_affinity_mode == SessionAffinityMode::Hard
@@ -712,16 +855,29 @@ where
     }
 }
 
-fn response_item_failed(item: &Annotated<LLMEngineOutput>) -> bool {
-    item.error.is_some()
-        || item.event.as_deref() == Some("error")
-        || item
-            .data
-            .as_ref()
-            .and_then(|data| data.finish_reason.as_ref())
-            .is_some_and(|reason| {
-                matches!(reason, FinishReason::Error(_) | FinishReason::Cancelled)
-            })
+enum ResponseItemOutcome {
+    /// The stream is healthy and must keep running.
+    Healthy,
+    /// Terminal by finish reason only; withheld while the stream drains for a trailing error.
+    DrainableTerminal,
+    /// Terminal and carries the error itself. Yielded, and the stream ends.
+    Failed,
+}
+
+fn classify_response_item(item: &Annotated<LLMEngineOutput>) -> ResponseItemOutcome {
+    if item.error.is_some() || item.event.as_deref() == Some("error") {
+        return ResponseItemOutcome::Failed;
+    }
+    let terminal = item
+        .data
+        .as_ref()
+        .and_then(|data| data.finish_reason.as_ref())
+        .is_some_and(|reason| matches!(reason, FinishReason::Error(_) | FinishReason::Cancelled));
+    if terminal {
+        ResponseItemOutcome::DrainableTerminal
+    } else {
+        ResponseItemOutcome::Healthy
+    }
 }
 
 #[cfg(test)]
