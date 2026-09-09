@@ -551,6 +551,9 @@ async def parse_args(args: list[str]) -> Config:
 
     if is_snapshot_enabled():
         configure_snapshot_capture_env()
+        # SGLang's scheduler launcher reads the raw field before late
+        # resolution, so snapshot mode must enable it before ServerArgs creation.
+        parsed_args.enable_memory_saver = True
 
     # TODO: sglang downloads the model in `from_cli_args`, which means we had to
     # fetch_model (download the model) here, in `parse_args`. `parse_args` should not

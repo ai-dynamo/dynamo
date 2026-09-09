@@ -517,6 +517,52 @@ async def test_parse_args_applies_dynamo_defaults_before_resolution(
     await parse_args(sys.argv[1:])
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("snapshot_enabled", "gms_v1", "expected"),
+    [
+        (False, False, False),
+        (True, False, True),
+        (False, True, True),
+        (True, True, True),
+    ],
+)
+async def test_parse_args_sets_raw_memory_saver_before_resolution(
+    monkeypatch, mock_sglang_cli, tmp_path, snapshot_enabled, gms_v1, expected
+):
+    monkeypatch.setattr(
+        "dynamo.sglang.args.configure_snapshot_capture_env", lambda: None
+    )
+    if snapshot_enabled:
+        monkeypatch.setenv(SNAPSHOT_CONTROL_DIR_ENV, str(tmp_path))
+        monkeypatch.setenv("NCCL_CUMEM_ENABLE", "0")
+    else:
+        monkeypatch.delenv(SNAPSHOT_CONTROL_DIR_ENV, raising=False)
+    if gms_v1:
+        monkeypatch.setenv("DYN_GMS_USE_V1", "true")
+    else:
+        monkeypatch.delenv("DYN_GMS_USE_V1", raising=False)
+    server_args = SimpleNamespace(
+        disaggregation_mode="null",
+        dllm_algorithm=None,
+        kv_events_config=None,
+        get_model_config=lambda: SimpleNamespace(is_multimodal=False),
+    )
+
+    def resolve(parsed_args):
+        # SGLang 0.5.19 copies this raw field unchanged; late resolution does
+        # not update it before the parent process launches the scheduler.
+        server_args.enable_memory_saver = parsed_args.enable_memory_saver
+        return server_args
+
+    monkeypatch.setattr("dynamo.sglang.args.ServerArgs.from_cli_args", resolve)
+    mock_sglang_cli(model="/tmp")
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.server_args.enable_memory_saver is expected
+
+
 def test_compat_filters_async_generate_kwargs_for_older_engines():
     class OldEngine:
         async def async_generate(self, input_ids=None, sampling_params=None):
