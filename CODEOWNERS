@@ -474,7 +474,6 @@ requirements.txt                                                                
 /lib/llm/src/grpc.rs                                                                                    @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/http.rs                                                                                    @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/lora.rs                                                                                    @ai-dynamo/dynamo-frontend-codeowners
-/docs/backends/triton                                                                                   @ai-dynamo/dynamo-backend-triton-codeowners
 /tests/frontend/grpc/                                                                                   @ai-dynamo/dynamo-frontend-codeowners
 /tests/router/configs/                                                                                  @ai-dynamo/dynamo-router-codeowners
 /lib/llm/src/kv_router/                                                                                 @ai-dynamo/dynamo-router-codeowners
@@ -541,7 +540,6 @@ requirements.txt                                                                
 /lib/llm/src/block_manager/offload/                                                                     @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/block_manager/state.rs                                                                     @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/block_manager/storage/                                                                     @ai-dynamo/dynamo-kv-memory-codeowners
-/container/launch_message/triton.txt                                                                    @ai-dynamo/dynamo-backend-triton-codeowners
 /lib/backend-common/examples/mocker/                                                                    @ai-dynamo/dynamo-performance-codeowners
 /lib/bindings/python/rust/parsers.rs                                                                    @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/block_manager/layout.rs                                                                    @ai-dynamo/dynamo-kv-memory-codeowners
@@ -578,6 +576,7 @@ requirements.txt                                                                
 /components/src/dynamo/trtllm/request_handlers/diffusion/                                               @ai-dynamo/dynamo-diffusion-codeowners
 /lib/llm/src/block_manager/v2/physical/transfer/nixl_agent/                                             @ai-dynamo/dynamo-kv-memory-codeowners
 /components/src/dynamo/sglang/request_handlers/image_diffusion/                                         @ai-dynamo/dynamo-diffusion-codeowners
+/docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/triton/                     @ai-dynamo/dynamo-backend-triton-codeowners
 
 # --- Shared ownership: multi-team (any one approves; wins via last-match) ---
 /.codex/                                                                                                @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
