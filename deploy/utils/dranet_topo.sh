@@ -1,11 +1,13 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 set -euo pipefail
 
 # DRANET PCIe Topology Viewer
 # Shows GPU ↔ EFA co-location by PCIe root complex, derived from DRA ResourceSlices.
 # This reflects the topology that the Kubernetes scheduler uses for pcieRoot constraints.
 #
-# Usage: topoDranet.sh [node-name]
+# Usage: dranet_topo.sh [node-name]
 #   If node-name is omitted, shows topology for all GPU nodes.
 
 NODE="${1:-}"
@@ -16,7 +18,8 @@ show_node_topology() {
   echo "PCIe Topology: ${node}"
   echo "======================================================================"
 
-  kubectl get resourceslices -o json | jq -r --arg node "$node" '
+  local out
+  out=$(kubectl get resourceslices -o json 2>&1 | jq -r --arg node "$node" '
     [.items[] | select(.spec.driver=="gpu.nvidia.com" and .spec.nodeName==$node) |
      .spec.devices[] |
      {root: .attributes."resource.kubernetes.io/pcieRoot".string,
@@ -42,7 +45,13 @@ show_node_topology() {
     ($efas[] | select(.root==$root) |
      "  EFA  \(.efa)  \(.pci)  \(.rdma)  NUMA:\(.numa)"),
     ""
-  ' 2>/dev/null || echo "  (no DRA ResourceSlices found for this node)"
+  ') || { echo "  (failed to query DRA ResourceSlices; check kubectl access and jq)" >&2; return 1; }
+
+  if [ -z "${out//[[:space:]]/}" ]; then
+    echo "  (no DRA ResourceSlices found for this node)"
+  else
+    printf '%s\n' "$out"
+  fi
 }
 
 if [ -n "${NODE}" ]; then

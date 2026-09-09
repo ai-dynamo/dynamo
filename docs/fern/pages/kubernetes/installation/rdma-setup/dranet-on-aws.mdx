@@ -141,6 +141,7 @@ until ! kubectl get daemonset nvidia-device-plugin-daemonset -n gpu-operator &>/
   sleep 5; done
 
 helm repo add nvidia https://helm.ngc.nvidia.com/nvidia
+helm repo update nvidia
 helm install nvidia-dra-driver-gpu nvidia/nvidia-dra-driver-gpu \
   --version 25.12.0 \
   --create-namespace \
