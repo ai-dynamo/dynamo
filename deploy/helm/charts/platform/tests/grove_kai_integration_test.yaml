@@ -22,10 +22,19 @@ tests:
     set:
       global.grove.install: true
       global.kai-scheduler.install: true
+      kai-scheduler.scheduler.args.default-staleness-grace-period: "-1"
     asserts:
       - equal:
           path: spec.args["default-staleness-grace-period"]
           value: "-1"
+
+  - it: preserves KAI stale PodGroup eviction without Grove
+    template: charts/kai-scheduler/templates/default-shard.yaml
+    set:
+      global.kai-scheduler.install: true
+    asserts:
+      - notExists:
+          path: spec.args
 
   - it: upgrades Grove CRDs before starting its operator
     template: charts/grove/templates/deployment.yaml

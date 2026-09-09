@@ -301,10 +301,6 @@ kai-scheduler:
     tolerations: []
     # -- Affinity for kai-scheduler pods
     affinity: {}
-  scheduler:
-    args:
-      # -- Disable KAI's stale PodGroup eviction because Grove owns PodGroup termination timing.
-      default-staleness-grace-period: "-1"
 
 # etcd configuration - distributed key-value store
 # Installation is controlled by global.etcd.install above.

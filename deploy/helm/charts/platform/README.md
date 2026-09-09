@@ -231,7 +231,6 @@ Kubernetes: `>=1.30.0-0`
 | grove.config.server.healthProbes.enable | bool | `true` | Enable Grove's webhook-aware liveness and readiness probes. The readiness endpoint stays false until certificates and the webhook server are ready. |
 | kai-scheduler.global.tolerations | list | `[]` | Node tolerations for kai-scheduler pods |
 | kai-scheduler.global.affinity | object | `{}` | Affinity for kai-scheduler pods |
-| kai-scheduler.scheduler.args.default-staleness-grace-period | string | `"-1"` | Disable KAI's stale PodGroup eviction because Grove owns PodGroup termination timing. |
 | etcd.image.repository | string | `"bitnamilegacy/etcd"` | following bitnami announcement for brownout - https://github.com/bitnami/charts/tree/main/bitnami/etcd#%EF%B8%8F-important-notice-upcoming-changes-to-the-bitnami-catalog, we need to use the legacy repository until we migrate to the new "secure" repository |
 
 ### NATS Configuration
@@ -296,7 +295,7 @@ For **production environments**, Kai Scheduler and Grove should be installed sep
 
 Grove should be upgraded in lockstep with Dynamo while Grove APIs are not stable. Dynamo 1.3.x expects Grove's earlier `ClusterTopology` API and is incompatible with the newer `ClusterTopologyBinding` API; Dynamo 1.4.x expects `ClusterTopologyBinding`.
 
-Grove `v0.1.0-alpha.13` enables its `kai-scheduler` backend by default. When using Grove with KAI Scheduler, disable KAI's independent stale PodGroup eviction by setting `scheduler.args.default-staleness-grace-period` to `"-1"`; Grove owns PodGroup termination timing. The bundled subcharts configure this automatically. The bundled Grove subchart also enables its CRD installer so new and updated Grove CRDs are applied before its operator starts during upgrades.
+Grove `v0.1.0-alpha.13` enables its `kai-scheduler` backend by default. When using Grove with KAI Scheduler, disable KAI's independent stale PodGroup eviction by setting `scheduler.args.default-staleness-grace-period` to `"-1"` in the KAI Scheduler chart; Grove owns PodGroup termination timing. Keep KAI's normal cleanup behavior when using KAI without Grove. The bundled Grove subchart also enables its CRD installer so new and updated Grove CRDs are applied before its operator starts during upgrades.
 
 After installing them separately, enable Dynamo integration:
 
@@ -328,7 +327,14 @@ global:
     install: true   # Deploys the bundled kai-scheduler subchart (integration auto-enabled)
   grove:
     install: true   # Deploys the bundled Grove subchart (integration auto-enabled)
+
+kai-scheduler:
+  scheduler:
+    args:
+      default-staleness-grace-period: "-1"  # Grove owns PodGroup cleanup
 ```
+
+The chart requires this KAI override when bundled KAI is combined with either bundled or externally managed Grove. KAI-only installations should omit it.
 
 Note: `global.*.install` controls whether the bundled subcharts are deployed. When set, integration is automatically enabled. `global.*.enabled` can be set independently when using externally-managed installations.
 
