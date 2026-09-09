@@ -369,7 +369,7 @@ def test_fixed_timing_keeps_aic_identity_out_of_runtime_args(monkeypatch) -> Non
     monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
     monkeypatch.setattr(
         simulation,
-        "materialize_aic_num_gpu_blocks",
+        "resolve_aic_num_gpu_blocks",
         lambda payload: payload,
     )
     engine_args = simulation.DynamoReplayRunner._engine_args(

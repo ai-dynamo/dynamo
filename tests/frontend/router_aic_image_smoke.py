@@ -31,7 +31,7 @@ def main() -> None:
         "--aic-model-path",
         "Qwen/Qwen3-32B",
         "--aic-backend-version",
-        "0.19.0",
+        "0.24.0",
     ]
 
     from aiconfigurator_core.sdk.engine import EngineHandle
