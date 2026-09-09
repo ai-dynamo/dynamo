@@ -28,11 +28,12 @@ jobs:
           echo "runner_arch=${RUNNER_ARCH}"
           echo "hostname=$(hostname)"
           docker info
-          gpu_output=$(docker run --rm --gpus all \
-            --entrypoint nvidia-smi \
-            210086341041.dkr.ecr.us-west-2.amazonaws.com/dynamo-ci/aws/dynamo/actions-runner/dind:gpu \
-            -L)
+          gpu_output=$(docker run --rm --gpus all busybox:1.37 sh -c '
+            for device in /dev/nvidia[0-9]*; do
+              [ -e "${device}" ] && printf "%s\n" "${device}"
+            done
+          ')
           printf '%s\n' "${gpu_output}"
-          gpu_count=$(printf '%s\n' "${gpu_output}" | grep -c '^GPU ')
+          gpu_count=$(printf '%s\n' "${gpu_output}" | grep -c '^/dev/nvidia[0-9]')
           echo "gpu_device_count=${gpu_count}"
           test "${gpu_count}" -eq 1
