@@ -43,6 +43,7 @@ from tests.utils.payload_builder import (
     guided_decoding_chat_payload_default,
     image_token_metrics_payload,
     kv_events_metrics_payload,
+    lora_chat_payload,
     metric_payload_default,
     responses_payload_default,
     responses_stream_payload_default,
@@ -55,7 +56,6 @@ from tests.utils.payloads import (
     ResponsesStreamPayload,
     SGLangDisaggRouterMetricsPayload,
     VideoGenerationPayload,
-    lora_chat_payload,
 )
 from tests.utils.port_utils import allocate_contiguous_ports, deallocate_ports
 

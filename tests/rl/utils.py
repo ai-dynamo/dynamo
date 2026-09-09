@@ -8,17 +8,9 @@ from __future__ import annotations
 import os
 
 import pytest
-import requests
 
-from tests.utils.gpu_args import build_gpu_mem_args
-from tests.utils.payloads import check_models_api
-
-
-def check_model_registered(response: requests.Response, *, model: str) -> bool:
-    if not check_models_api(response):
-        return False
-    data = response.json()
-    return any(item.get("id") == model for item in data.get("data", []))
+from tests.utils.gpu_args import build_vllm_gpu_mem_args
+from tests.utils.http_checks import check_model_registered as check_model_registered
 
 
 def process_env(**extra: str) -> dict[str, str]:
@@ -43,7 +35,4 @@ def prepare_log_dir(request: pytest.FixtureRequest, suffix: str) -> str:
 def vllm_gpu_mem_args(default_utilization: str = "0.4") -> list[str]:
     # Honor the GPU scheduler's per-worker KV-cache budget under bin-packing;
     # fall back to a conservative utilization for serial runs.
-    return build_gpu_mem_args("build_vllm_gpu_mem_args") or [
-        "--gpu-memory-utilization",
-        default_utilization,
-    ]
+    return build_vllm_gpu_mem_args(default_utilization)
