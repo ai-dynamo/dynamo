@@ -755,10 +755,6 @@ async def test_init_llm_worker_strips_num_postprocess_workers_from_extra_engine_
     assert "num_postprocess_workers" not in engine_args
 
 
-# ---- Tests for backend validation on Python 3.10/3.11 (issue found by Devin
-# Review on PR #9819) and the extra_engine_args collision-warning gap
-# (found by @tanmayv25 on the same PR) ----
-
 
 @pytest.mark.core
 @pytest.mark.asyncio
