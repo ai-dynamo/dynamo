@@ -29,10 +29,6 @@ OLD_DISTRIBUTED_RUNTIME_WARNING = (
     "the pyo3 async bridge built its own tokio runtime before this "
     "DistributedRuntime was created"
 )
-BACKEND_OVERRIDE_WARNING = (
-    "runtime was already constructed elsewhere; overrides ignored"
-)
-
 CHILD = textwrap.dedent(
     f"""\
     import asyncio
@@ -124,7 +120,9 @@ CHILD = textwrap.dedent(
         await asyncio.wait_for(wait_for_listener_release(), timeout=5)
 
     no_loop_error = None
-    if scenario == "no_loop_then_backend_worker":
+    if scenario == "no_loop_then_fetch":
+        # The missing-loop error must win over invalid runtime settings and
+        # leave runtime initialization retryable once those settings are fixed.
         try:
             core.fetch_model(MODEL, True)
         except RuntimeError as error:
@@ -162,8 +160,7 @@ CHILD = textwrap.dedent(
             await fetch_cached_models()
             await exercise_backend_startup_and_cleanup()
             await fetch_cached_models()
-        elif scenario == "no_loop_then_backend_worker":
-            await exercise_backend_startup_and_cleanup()
+        elif scenario == "no_loop_then_fetch":
             await fetch_cached_models()
         elif scenario == "invalid_config_then_fetch":
             try:
@@ -198,9 +195,9 @@ SCENARIOS = [
     pytest.param("detached_then_fetch", False, id="detached-then-fetch"),
     pytest.param("fetch_then_backend_worker", False, id="backend-after-fetch"),
     pytest.param(
-        "no_loop_then_backend_worker",
+        "no_loop_then_fetch",
         False,
-        id="no-loop-then-backend-worker",
+        id="no-loop-then-fetch",
     ),
     pytest.param(
         "invalid_config_then_fetch",
@@ -243,8 +240,7 @@ def _isolated_child_env(cache: Path, scenario: str, system_port: int) -> dict[st
         {
             "DYN_RUNTIME_NUM_WORKER_THREADS": (
                 "0"
-                if scenario
-                in ("invalid_config_then_fetch", "no_loop_then_backend_worker")
+                if scenario in ("invalid_config_then_fetch", "no_loop_then_fetch")
                 else "1"
             ),
             "DYN_RUNTIME_MAX_BLOCKING_THREADS": "1",
@@ -264,7 +260,7 @@ def _isolated_child_env(cache: Path, scenario: str, system_port: int) -> dict[st
             "PYTHONDONTWRITEBYTECODE": "1",
         }
     )
-    if scenario in ("fetch_then_backend_worker", "no_loop_then_backend_worker"):
+    if scenario == "fetch_then_backend_worker":
         env.update(
             DYN_DISCOVERY_BACKEND="etcd",
             DYN_REQUEST_PLANE="nats",
@@ -344,5 +340,3 @@ def test_fetch_model_runtime_bridge_orders(
 
     if scenario in ("fetch_first_distributed_runtime", "detached_then_fetch"):
         assert OLD_DISTRIBUTED_RUNTIME_WARNING not in result.stderr, diagnostic
-    if scenario in ("fetch_then_backend_worker", "no_loop_then_backend_worker"):
-        assert BACKEND_OVERRIDE_WARNING not in result.stderr, diagnostic
