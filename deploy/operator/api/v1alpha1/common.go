@@ -136,7 +136,6 @@ type VolumeMount struct {
 	// a backend-specific default will be used.
 	// +optional
 	MountPoint string `json:"mountPoint,omitempty"`
-	// SubPath specifics the subPath for the volume mount.
 	// Only used when UseAsCompilationCache is true
 	SubPath string `json:"subPath,omitempty"`
 	// UseAsCompilationCache indicates this volume should be used as a compilation cache.
