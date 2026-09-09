@@ -572,8 +572,8 @@ def plot_comparison_summary(csv_dir: Path, save: bool, out_dir: Path):
 def plot_route_pressure(csv_dir: Path, save: bool, out_dir: Path):
     """Scatter route-target pressure vs churn, one dot per (scenario, algorithm).
 
-    Route targets are controller intent, not observed resident adapters. Values above 100% mean
-    the routing table names more targets than the resident cache can hold simultaneously.
+    Route targets are controller intent, not observed resident adapters. Counts include inactive
+    cold-start pins, so values above 100% do not imply simultaneous adapter residency.
     """
 
     colors = {"HRW": "#2196F3", "Random": "#F44336", "MCF": "#4CAF50"}
@@ -654,7 +654,7 @@ def plot_route_pressure(csv_dir: Path, save: bool, out_dir: Path):
     ax.set_ylabel("Total routing-target churn (adds + removes)", fontsize=12)
     ax.set_title(
         "Routing-Target Pressure vs Churn\n"
-        "Values above 100% indicate soft over-subscription and potential cache swaps",
+        "Logical targets include inactive pins and can exceed resident cache capacity",
         fontsize=13,
         fontweight="bold",
     )

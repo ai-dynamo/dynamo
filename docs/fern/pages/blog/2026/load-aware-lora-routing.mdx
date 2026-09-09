@@ -139,7 +139,7 @@ The comparison uses eight workers, four resident adapter slots per worker, 100 L
 
 Random receives the same demand-derived replica budget and load window as HRW and MCF, but selects workers independently on each tick. It is a stateless simulation baseline, not Dynamo's production default.
 
-These are deterministic, single-seed simulation results from [`fa604bbe`](https://github.com/ai-dynamo/dynamo/commit/fa604bbe099d3c685db7d7c9c836db3c08e369df). Reproduce them with `cargo test -p dynamo-llm --test lora_simulation -- test_export_csv --ignored --nocapture`, then inspect `target/lora_sim_csv/v2/summary.csv`. They validate relative software behavior under a controlled residency model. They do not measure GPU load latency, Time To First Token (TTFT), throughput, or end-to-end training time.
+These are deterministic, single-seed simulation results regenerated from [`53ced98cd1`](https://github.com/ai-dynamo/dynamo/commit/53ced98cd1e3ed30297b50e53298f91227b71fa0), the `main` revision used for this analysis. Reproduce the data with `cargo test -p dynamo-llm --test lora_simulation -- test_export_csv --ignored --nocapture`, then inspect `target/lora_sim_csv/v2/summary.csv`. To generate every figure, install Matplotlib and NumPy in the active environment and run `python lib/llm/tests/lora_simulation/plot_lora_churn.py --save`. These results validate relative software behavior under a controlled residency model. They do not measure GPU load latency, Time To First Token (TTFT), throughput, or end-to-end training time.
 
 ## Results
 
@@ -157,6 +157,10 @@ The following table averages the four workload totals. Each percentage compares 
 | Global MCF configuration (replaces HRW) | 443 | 4,244 | 67.4% | 64.4% less route churn and 2.6% less adapter churn than HRW; 98.6%, 38.2%, and +20.4 points versus baseline |
 
 Percentage and point changes use unrounded workload values; displayed averages are rounded independently.
+
+![Grouped logarithmic bar chart comparing total routing-target churn for Random, HRW, and MCF across Zipf and Poisson, daily, traffic-spike, and MMPP workloads. Random records about 30,000 to 34,000 changes, HRW about 1,100 to 1,300, and MCF 374 to 565.](../_assets/load-aware-lora-routing/lora_churn_summary.png)
+
+*Figure 1. Total desired routing-target churn across the four workloads. The logarithmic axis keeps all three configurations visible.*
 
 MCF's final improvement over the stateless baseline remained consistent across all four traffic patterns:
 
@@ -184,6 +188,38 @@ This is not a contradiction. A route-set change does not always cause a cache mi
 Mean occupancy stayed between 98.8% and 99.8%. Every workload asked a 32-slot cluster to serve a 100-adapter catalog, and the MCF solver reported soft overflow in every workload. Under that pressure, every algorithm recorded adapter movement on nearly every tick.
 
 The useful result is therefore not a claim of churn-free operation. It is the reduction in cache movement and the increase in hits while the cache remains saturated.
+
+![Scatter plot comparing average desired route targets as a percentage of resident slot capacity with total routing-target churn. MCF points have the lowest churn, HRW points are higher, and Random points are highest on the logarithmic churn axis.](../_assets/load-aware-lora-routing/routing_pressure_vs_churn.png)
+
+*Figure 2. Desired routing-target pressure versus routing-target churn. The target count includes inactive cold-start pins, so values above 100% do not imply simultaneous adapter residency or measured GPU occupancy.*
+
+## Workload Traces
+
+The aggregate values hide when movement occurs. Each dashboard below shows per-tick desired routing-target churn, cumulative desired routing-target churn, and the generated demand trace. These figures do not show physical adapter loads or evictions; those remain the separate adapter-cache metrics reported in the tables above.
+
+### Zipf and Poisson
+
+![Three-panel Zipf and Poisson workload dashboard showing per-tick routing-target churn, cumulative routing-target churn, and total request load with active LoRA count over 200 ticks.](../_assets/load-aware-lora-routing/lora_churn_hot_lora_poisson.png)
+
+*Figure 3. A skewed popularity distribution keeps a few adapters hot while a long tail appears intermittently.*
+
+### Daily Traffic
+
+![Three-panel daily workload dashboard showing per-tick routing-target churn, cumulative routing-target churn, and two sinusoidal day-and-night request cycles with active LoRA count.](../_assets/load-aware-lora-routing/lora_churn_daily.png)
+
+*Figure 4. Two smooth day-and-night cycles test whether placement follows sustained demand without reacting to every short dip.*
+
+### Traffic Spikes
+
+![Three-panel traffic-spike workload dashboard showing per-tick routing-target churn, cumulative routing-target churn, and five-times flash-crowd events at ticks 50 and 130 followed by exponential decay.](../_assets/load-aware-lora-routing/lora_churn_spike.png)
+
+*Figure 5. Two flash-crowd events test placement response and recovery after abrupt load increases.*
+
+### Markov-Modulated Poisson Process
+
+![Three-panel MMPP workload dashboard showing per-tick routing-target churn, cumulative routing-target churn, and request load across calm, busy, and surge Markov states.](../_assets/load-aware-lora-routing/lora_churn_mmpp.png)
+
+*Figure 6. Correlated regime changes test stability during steady states and movement at abrupt transitions.*
 
 ## Operating the Feature
 
