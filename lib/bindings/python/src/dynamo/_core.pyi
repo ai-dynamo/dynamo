@@ -2842,6 +2842,14 @@ class KvDcRelay:
     async def health(self) -> Dict[str, Any]:
         ...
 
+    async def stats(self) -> Dict[str, Any]:
+        """Available only in builds with the ckf-diagnostics Cargo feature."""
+        ...
+
+    async def snapshot(self, serving_endpoint: str) -> Dict[str, Any]:
+        """Available only in builds with the ckf-diagnostics Cargo feature."""
+        ...
+
     async def flush(self) -> None:
         ...
 
