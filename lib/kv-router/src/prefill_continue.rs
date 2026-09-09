@@ -5,71 +5,58 @@
 
 use crate::scheduling::config::KvRouterConfig;
 
-/// Why a request was not allowed to keep generating on its prefill worker.
+/// The skip reasons, written once.
 ///
-/// `EnumCount` is load-bearing: it is what makes a variant missing from `ALL`
-/// fail a test instead of silently losing its metric series.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumCount)]
-#[non_exhaustive]
-pub enum PrefillContinueSkip {
-    /// The feature is off.
-    Disabled,
-    /// The feature is on but no decode trigger is configured, so it can never
-    /// fire. Distinct from `Disabled` so the reason an operator reads is true.
-    NoTrigger,
-    /// The decode pool can take the request, so the normal handoff is correct.
-    DecodeHasRoom,
-    /// Decode load could not be read. Fail closed rather than guess.
-    DecodeLoadUnknown,
-    /// The prefill worker is over its own busy line, so it has nothing to donate.
-    PrefillBusy,
-    /// Prefill load could not be read. An unchecked safety check is not a pass.
-    PrefillLoadUnknown,
-    /// The request may generate more than the continuation cap allows.
-    BudgetAboveCap,
-    /// The request has no bounded budget, so the commitment cannot be bounded.
-    BudgetUnbounded,
-    /// The request asks for several sequences.
-    MultipleSequences,
-    /// The prefill worker already holds its maximum concurrent continuations.
-    ConcurrencyCapReached,
-    /// A cap is configured but the running count could not be read. Refuse
-    /// rather than assume zero, or a broken counter silently lifts the cap.
-    ConcurrencyUnknown,
+/// The enum, `ALL` and `as_str` are generated from this one list, so a new
+/// reason cannot reach the enum but miss `ALL` and lose its metric series.
+macro_rules! skip_reasons {
+    ($($(#[$meta:meta])* $variant:ident => $label:literal,)+) => {
+        /// Why a request was not allowed to keep generating on its prefill worker.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        #[non_exhaustive]
+        pub enum PrefillContinueSkip {
+            $($(#[$meta])* $variant,)+
+        }
+
+        impl PrefillContinueSkip {
+            /// Every reason, so a caller can create the metric series up front.
+            pub const ALL: &'static [Self] = &[$(Self::$variant,)+];
+
+            /// A stable, low-cardinality label for metrics.
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $label,)+
+                }
+            }
+        }
+    };
 }
 
-impl PrefillContinueSkip {
-    /// Every reason, so a caller can create the metric series up front.
-    pub const ALL: &'static [Self] = &[
-        Self::Disabled,
-        Self::NoTrigger,
-        Self::DecodeHasRoom,
-        Self::DecodeLoadUnknown,
-        Self::PrefillBusy,
-        Self::PrefillLoadUnknown,
-        Self::BudgetAboveCap,
-        Self::BudgetUnbounded,
-        Self::MultipleSequences,
-        Self::ConcurrencyCapReached,
-        Self::ConcurrencyUnknown,
-    ];
-
-    /// A stable, low-cardinality label for metrics.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Disabled => "disabled",
-            Self::NoTrigger => "no_trigger",
-            Self::DecodeHasRoom => "decode_has_room",
-            Self::DecodeLoadUnknown => "decode_load_unknown",
-            Self::PrefillBusy => "prefill_busy",
-            Self::PrefillLoadUnknown => "prefill_load_unknown",
-            Self::BudgetAboveCap => "budget_above_cap",
-            Self::BudgetUnbounded => "budget_unbounded",
-            Self::MultipleSequences => "multiple_sequences",
-            Self::ConcurrencyCapReached => "concurrency_cap_reached",
-            Self::ConcurrencyUnknown => "concurrency_unknown",
-        }
-    }
+skip_reasons! {
+    /// The feature is off.
+    Disabled => "disabled",
+    /// The feature is on but no decode trigger is configured, so it can never
+    /// fire. Distinct from `Disabled` so the reason an operator reads is true.
+    NoTrigger => "no_trigger",
+    /// The decode pool can take the request, so the normal handoff is correct.
+    DecodeHasRoom => "decode_has_room",
+    /// Decode load could not be read. Fail closed rather than guess.
+    DecodeLoadUnknown => "decode_load_unknown",
+    /// The prefill worker is over its own busy line, so it has nothing to donate.
+    PrefillBusy => "prefill_busy",
+    /// Prefill load could not be read. An unchecked safety check is not a pass.
+    PrefillLoadUnknown => "prefill_load_unknown",
+    /// The request may generate more than the continuation cap allows.
+    BudgetAboveCap => "budget_above_cap",
+    /// The request has no bounded budget, so the commitment cannot be bounded.
+    BudgetUnbounded => "budget_unbounded",
+    /// The request asks for several sequences.
+    MultipleSequences => "multiple_sequences",
+    /// The prefill worker already holds its maximum concurrent continuations.
+    ConcurrencyCapReached => "concurrency_cap_reached",
+    /// A cap is configured but the running count could not be read. Refuse
+    /// rather than assume zero, or a broken counter silently lifts the cap.
+    ConcurrencyUnknown => "concurrency_unknown",
 }
 
 /// The decision itself.
@@ -667,13 +654,9 @@ mod tests {
             assert_eq!(reason.as_str(), pinned);
             assert!(labels.insert(pinned), "labels must be distinct: {pinned}");
         }
-        // `ALL` drives which metric series exist, so a variant missing from it
-        // is a series that never appears.
-        assert_eq!(
-            labels.len(),
-            <PrefillContinueSkip as strum::EnumCount>::COUNT,
-            "every reason must appear in ALL, or its metric series never exists"
-        );
+        // `ALL` is generated from the same list as the enum, so it cannot be
+        // short. This pins the labels themselves, which a rename would break.
+        assert_eq!(labels.len(), PrefillContinueSkip::ALL.len());
     }
 
     #[test]
