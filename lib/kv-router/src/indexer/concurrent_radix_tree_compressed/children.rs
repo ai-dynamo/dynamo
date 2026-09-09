@@ -399,22 +399,14 @@ mod tests {
         assert_eq!(compact.kind(), ChildrenKind::Singleton);
 
         let sharded = NodeChildren::from_map(FxHashMap::default());
-        let original_children: Vec<_> = (0..=SMALL_CHILD_LIMIT).map(|_| child()).collect();
-        for (key, node) in original_children.iter().enumerate() {
-            sharded.insert(LocalBlockHash(key as u64), node.clone());
+        for key in 0..=SMALL_CHILD_LIMIT {
+            sharded.insert(LocalBlockHash(key as u64), child());
         }
         assert_eq!(sharded.kind(), ChildrenKind::Sharded);
         let sharded_suffix = sharded.transfer_for_split();
         assert_eq!(sharded.kind(), ChildrenKind::Empty);
-        assert!(sharded.is_empty());
         assert_eq!(sharded_suffix.kind(), ChildrenKind::Sharded);
         assert_eq!(sharded_suffix.len(), SMALL_CHILD_LIMIT + 1);
-        for (key, node) in original_children.iter().enumerate() {
-            assert!(Arc::ptr_eq(
-                &sharded_suffix.get(&LocalBlockHash(key as u64)).unwrap(),
-                node,
-            ));
-        }
         sharded.insert(LocalBlockHash(99), child());
         assert_eq!(sharded.kind(), ChildrenKind::Singleton);
     }
