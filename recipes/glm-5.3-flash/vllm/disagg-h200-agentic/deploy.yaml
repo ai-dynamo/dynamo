@@ -36,7 +36,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: vllm/vllm-openai:glm53-flash
+              image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.1
               imagePullPolicy: IfNotPresent
               command:
                 - /bin/bash
@@ -44,7 +44,6 @@ spec:
               args:
                 - |
                   set -euo pipefail
-                  python3 -m pip install ai-dynamo==1.4.1
                   exec python3 -m dynamo.frontend \
                     --http-host 0.0.0.0 \
                     --http-port 8000 \
