@@ -284,6 +284,11 @@ impl ScoredWorkerCandidate {
 }
 
 impl WorkerCacheInput {
+    /// Return tier-weighted prefix overlap in KV blocks.
+    pub fn effective_overlap_blocks(&self) -> f64 {
+        self.effective_overlap_blocks
+    }
+
     /// Return device-resident prefix overlap in KV blocks.
     pub fn device_overlap_blocks(&self) -> f64 {
         self.device_overlap_blocks

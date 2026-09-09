@@ -14,7 +14,8 @@ pub fn register(
     soft_pin_repin_policy::register(registry)?;
     simple_filter_score_pick_policy::register(registry)?;
     disagg_filter_score_pick_policy::register(registry)?;
-    simple_stacked_score_pick_policy::register(registry)
+    simple_stacked_score_pick_policy::register(registry)?;
+    cache_affinity_budget_policy::register(registry)
 }
 
 #[cfg(test)]
@@ -41,6 +42,10 @@ mod tests {
         assert!(matches!(
             simple_stacked_score_pick_policy::register(&mut registry),
             Err(WorkerSelectionPolicyRegistryError::Duplicate { name }) if name == "simple-stacked-score-pick"
+        ));
+        assert!(matches!(
+            cache_affinity_budget_policy::register(&mut registry),
+            Err(WorkerSelectionPolicyRegistryError::Duplicate { name }) if name == "cache-affinity-budget"
         ));
     }
 }
