@@ -2,10 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+from typing import AsyncGenerator
 
 import numpy as np
+from tritonserver import MemoryType as TritonMemoryType
 from tritonserver import Model as TritonModel
 from tritonserver import Server as TritonServer
+from tritonserver import Tensor as TritonTensor
 from tritonserver import TritonError
 
 from dynamo.common.backend.health_check import is_probe
@@ -31,7 +34,7 @@ class RequestHandler:
             out["name"]: out["datatype"] for out in model.metadata()["outputs"]
         }
 
-    async def generate(self, request: dict) -> dict:
+    async def generate(self, request: dict) -> AsyncGenerator[dict, None]:
         logger.debug(f"Received request: {request}")
 
         # Short-circuit health probes before inference to avoid poisoning stateful models.
@@ -56,12 +59,22 @@ class RequestHandler:
                     raise TypeError(
                         f"Requested dtype '{triton_dtype}', for output '{output_name}', is not supported."
                     )
+
                 if triton_dtype == "BYTES":
                     # String/BYTES tensors are not DLPack-compatible; pull them as
                     # an object array of bytes via the Triton Tensor API.
                     response_arr = output_tensor.to_bytes_array()
                 else:
+                    # Handle GPU memory tensors by moving them to host memory
+                    # before sending them to the worker protocol as a response.
+                    if (
+                        isinstance(output_tensor, TritonTensor)
+                        and output_tensor.memory_type != TritonMemoryType.CPU
+                    ):
+                        output_tensor = output_tensor.to_host()
+
                     response_arr = np.from_dlpack(output_tensor)
+
                 dtype_str = TRITON_TO_DYNAMO_DTYPE.get(triton_dtype, triton_dtype)
                 response_tensors.append(
                     {

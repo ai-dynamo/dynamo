@@ -19,7 +19,6 @@ from dynamo.common.utils.runtime import create_runtime
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.triton.args import Config
 from dynamo.triton.backend_args import DynamoTritonConfig, parse_args
 from dynamo.triton.handlers import RequestHandler
 from dynamo.triton.health_check import TritonHealthCheckPayload
@@ -54,7 +53,7 @@ def _triton_supports_log_callback() -> bool:
 
 def _read_model_config(
     model: TritonModel, model_name: str, repository_path: str
-) -> str:
+) -> bytes:
     model_config = None if model is None else model.config()
     if model_config is None or len(model_config) == 0:
         logger.debug("Failed to read model config from Triton.")
@@ -151,7 +150,7 @@ class WorkerState:
 
 async def init_worker(
     runtime: DistributedRuntime,
-    config: Config,
+    config: DynamoTritonConfig,
     worker_state: Optional[WorkerState] = None,
 ):
     logger.info("Starting Triton Runtime for Dynamo")
@@ -209,14 +208,19 @@ async def init_worker(
     # Register and serve every model concurrently. Each model gets its own
     # endpoint URI (<namespace>.<server_id>.<model_name>) and its own handler bound
     # to that model, so requests are routed by model name via Dynamo's frontend.
-    await asyncio.gather(
-        *[
-            _register_and_serve(
-                runtime, config, server, model_repository, name, worker_state.endpoints
+    async with asyncio.TaskGroup() as aio_tasks:
+        for name in model_names:
+            aio_tasks.create_task(
+                _register_and_serve(
+                    runtime,
+                    config,
+                    server,
+                    model_repository,
+                    name,
+                    worker_state.endpoints,
+                ),
+                name=f"dynamo.triton/model={name}",
             )
-            for name in model_names
-        ]
-    )
 
 
 async def worker() -> None:
@@ -236,6 +240,13 @@ async def worker() -> None:
         if worker_state.server is None:
             return
 
+        # Use a local copy of server and set work_state.server to None
+        # to make this call idempotent.
+        # Allowing the server to be "stopped" multiple times leads to
+        # unspecified outcomes.
+        server = worker_state.server
+        worker_state.server = None
+
         # Server.stop() is blocking (unloads models, frees GPU memory); run
         # it off the event loop so the shutdown coroutine isn't blocked.
         if worker_state.metrics_bridge is not None:
@@ -243,12 +254,12 @@ async def worker() -> None:
             # before tearing down the native server.
             await asyncio.to_thread(
                 _stop_triton_server,
-                worker_state.server,
+                server,
                 worker_state.metrics_bridge,
             )
         else:
             # Metrics collection disabled: just stop the server.
-            await asyncio.to_thread(worker_state.server.stop)
+            await asyncio.to_thread(server.stop)
 
     install_signal_handlers(
         loop,

@@ -12,6 +12,8 @@ import sys
 
 import pytest
 
+pytest.importorskip("tritonserver")
+
 # Cached result of probing tritonclient / tritonserver.
 # `None` = not attempted, `True` = importable, `False` = raised.
 _tritonclient_importable: bool | None = None

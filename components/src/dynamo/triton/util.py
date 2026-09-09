@@ -119,4 +119,4 @@ def numpy_to_dynamo_values(arr: np.ndarray, data_type: str) -> list:
             for item in flat
         ]
 
-    return arr.flatten().tolist()
+    return arr.ravel().tolist()
