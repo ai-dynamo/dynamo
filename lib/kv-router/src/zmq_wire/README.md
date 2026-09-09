@@ -28,7 +28,7 @@ fixed positional prefix followed by an optional metadata tail.
 4 block_size
 5 old lora_id slot
 6 medium
-7 lora_name
+7 lora_name (vLLM string) or BlockStoredMetadata (SGLang map)
 8 extra_keys
 ```
 
@@ -73,8 +73,14 @@ vLLM's `BlockStored` tuple includes the vLLM-compatible fixed prefix before
 the metadata tail, so `group_idx` and cache metadata are parsed from tail
 positions.
 
-SGLang currently emits a shorter positional `BlockStored` shape ending at
-`lora_id`, and does not emit cache-group metadata. That parses correctly
-because the tuple terminates early. If SGLang later adds positional metadata,
-it must either include the vLLM-compatible placeholder fields before the tail
-or use map/object events with named fields.
+SGLang emits the vLLM-compatible prefix through `medium` (positions 0 to 6)
+and does not emit cache-group metadata. An unsalted event terminates at
+position 6 and parses because the tuple ends early.
+
+Since SGLang 0.5.18 (sgl-project/sglang#30827), a stored node that carries a
+`cache_salt` is emitted as `BlockStoredWithMetadata`: the same prefix plus a
+`BlockStoredMetadata` map at position 7 with the key `cache_salt`.
+sgl-project/sglang#37482 adds a `session_id` key to that map. The parser tells
+this map apart from vLLM's `lora_name` string by type, maps `cache_salt` to the
+cache namespace, and ignores keys it does not model. SGLang never emits
+`extra_keys` or the tail fields, so the map is the last element.

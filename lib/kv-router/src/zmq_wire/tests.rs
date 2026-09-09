@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -50,6 +51,119 @@ fn test_deserialize_bigram_block_stored_sequence() {
         }
         other => panic!("expected BlockStored, got {other:?}"),
     }
+}
+
+/// SGLang >= 0.5.18 appends its `BlockStoredMetadata` map at position 7 when the
+/// stored node carries a `cache_salt` (sgl-project/sglang#30827). vLLM puts its
+/// `lora_name` string in the same slot, so the decoder must accept both shapes.
+#[test]
+fn test_deserialize_sglang_positional_block_stored_metadata_map() {
+    let encoded = to_vec(&(
+        "BlockStored",
+        vec![BlockHashValue::Unsigned(11), BlockHashValue::Unsigned(12)],
+        Option::<BlockHashValue>::None,
+        vec![1u32, 2, 3, 4],
+        2usize,
+        Option::<u64>::None,
+        Option::<String>::None,
+        BTreeMap::from([("cache_salt", "tenant-a")]),
+    ))
+    .unwrap();
+    let event: RawKvEvent = from_slice(&encoded).unwrap();
+
+    match event {
+        RawKvEvent::BlockStored {
+            block_hashes,
+            token_ids,
+            lora_name,
+            cache_namespace,
+            ..
+        } => {
+            assert_eq!(block_hashes.len(), 2);
+            assert_eq!(token_ids, vec![1, 2, 3, 4]);
+            assert_eq!(lora_name, None);
+            assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
+        }
+        other => panic!("expected BlockStored, got {other:?}"),
+    }
+}
+
+/// Keys the raw event does not model yet (sgl-project/sglang#37482 adds
+/// `session_id`) and an empty `cache_salt` must not fail the event.
+#[test]
+fn test_deserialize_sglang_positional_metadata_ignores_unknown_keys() {
+    let encoded = to_vec(&(
+        "BlockStored",
+        vec![BlockHashValue::Unsigned(11)],
+        Option::<BlockHashValue>::None,
+        vec![1u32, 2],
+        2usize,
+        Option::<u64>::None,
+        Option::<String>::None,
+        BTreeMap::from([("cache_salt", ""), ("session_id", "session-a")]),
+    ))
+    .unwrap();
+    let event: RawKvEvent = from_slice(&encoded).unwrap();
+
+    match event {
+        RawKvEvent::BlockStored {
+            lora_name,
+            cache_namespace,
+            ..
+        } => {
+            assert_eq!(lora_name, None);
+            assert_eq!(cache_namespace, None);
+        }
+        other => panic!("expected BlockStored, got {other:?}"),
+    }
+}
+
+/// The vLLM `lora_name` string at position 7 still decodes as before.
+#[test]
+fn test_deserialize_positional_lora_name_string_still_decodes() {
+    let encoded = to_vec(&(
+        "BlockStored",
+        vec![BlockHashValue::Unsigned(11)],
+        Option::<BlockHashValue>::None,
+        vec![1u32, 2],
+        2usize,
+        Option::<u64>::None,
+        Option::<String>::None,
+        Some("adapter-a"),
+    ))
+    .unwrap();
+    let event: RawKvEvent = from_slice(&encoded).unwrap();
+
+    match event {
+        RawKvEvent::BlockStored { lora_name, .. } => {
+            assert_eq!(lora_name.as_deref(), Some("adapter-a"));
+        }
+        other => panic!("expected BlockStored, got {other:?}"),
+    }
+}
+
+/// The listener decodes a whole `EventBatch` at once, so one salted SGLang event
+/// used to drop every event in its batch. The batch must decode end to end.
+#[test]
+fn test_decode_event_batch_with_sglang_metadata_event() {
+    let salted = (
+        "BlockStored",
+        vec![BlockHashValue::Unsigned(11)],
+        Option::<BlockHashValue>::None,
+        vec![1u32, 2],
+        2usize,
+        Option::<u64>::None,
+        Option::<String>::None,
+        BTreeMap::from([("cache_salt", "tenant-a")]),
+    );
+    let encoded = to_vec(&(1.0f64, vec![salted], Option::<i32>::None)).unwrap();
+
+    let batch = decode_event_batch(&encoded).expect("batch with SGLang metadata must decode");
+    assert_eq!(batch.events.len(), 1);
+    assert!(matches!(
+        &batch.events[0],
+        RawKvEvent::BlockStored { cache_namespace, .. } if cache_namespace.as_deref() == Some("tenant-a")
+    ));
 }
 
 #[test]

@@ -31,6 +31,27 @@ impl<'de> Deserialize<'de> for RawKvEvent {
     }
 }
 
+/// SGLang's typed `BlockStoredMetadata` map. Since SGLang 0.5.18 a positional
+/// `BlockStored` carries this map at position 7 whenever the stored node has a
+/// `cache_salt` (sgl-project/sglang#30827); unsalted events end at position 6.
+/// sgl-project/sglang#37482 adds a `session_id` key that the raw event does not
+/// model yet, so unknown keys are ignored rather than rejected.
+#[derive(Debug, Default, Deserialize)]
+struct SglangBlockStoredMetadata {
+    #[serde(default)]
+    cache_salt: Option<String>,
+}
+
+/// Position 7 of a positional `BlockStored` is vLLM's `lora_name` string or
+/// SGLang's `BlockStoredMetadata` map. Both producers encode with `array_like`,
+/// so the slot type is the only way to tell them apart.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum LoraNameOrSglangMetadata {
+    LoraName(String),
+    SglangMetadata(SglangBlockStoredMetadata),
+}
+
 struct RawKvEventVisitor;
 
 impl<'de> Visitor<'de> for RawKvEventVisitor {
@@ -198,7 +219,16 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 // Position 5 was lora_id in older formats; consume and discard for compat.
                 let _lora_id: Option<u64> = seq.next_element()?.unwrap_or(None);
                 let medium: Option<String> = normalize_medium(seq.next_element()?.unwrap_or(None));
-                let lora_name: Option<String> = seq.next_element()?.unwrap_or(None);
+                let (lora_name, sglang_metadata) = match seq
+                    .next_element::<Option<LoraNameOrSglangMetadata>>()?
+                    .unwrap_or(None)
+                {
+                    Some(LoraNameOrSglangMetadata::LoraName(name)) => (Some(name), None),
+                    Some(LoraNameOrSglangMetadata::SglangMetadata(metadata)) => {
+                        (None, Some(metadata))
+                    }
+                    None => (None, None),
+                };
                 let extra_keys: Option<Vec<Option<Vec<ExtraKeyItem>>>> =
                     seq.next_element()?.unwrap_or(None);
                 let mut trailing = std::array::from_fn(|_| None);
@@ -215,8 +245,14 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
 
                 let parsed = parse_block_stored_trailing::<A::Error>(trailing, trailing_len)?;
 
-                let cache_namespace =
-                    extra_keys_to_cache_namespace(extra_keys.as_deref(), lora_name.as_deref());
+                // SGLang's typed metadata names the salt directly, like the named-map
+                // path; legacy producers derive it from extra_keys and lora_name.
+                let cache_namespace = sglang_metadata
+                    .and_then(|metadata| metadata.cache_salt)
+                    .filter(|cache_salt| !cache_salt.is_empty())
+                    .or_else(|| {
+                        extra_keys_to_cache_namespace(extra_keys.as_deref(), lora_name.as_deref())
+                    });
                 let block_mm_infos = parsed
                     .block_mm_infos
                     .or_else(|| extra_keys_to_block_mm_infos(extra_keys));
