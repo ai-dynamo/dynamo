@@ -120,7 +120,7 @@ pub async fn completion_response_stream(
             );
             return Status::resource_exhausted(e.to_string());
         }
-        dispatch_error_status(&e, "Failed to generate completions")
+        dispatch_error_status(e.as_ref(), "Failed to generate completions")
     })?;
 
     // capture the context to cancel the stream if the client disconnects

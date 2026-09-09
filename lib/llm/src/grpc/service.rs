@@ -17,8 +17,11 @@ use crate::http::service::metrics::request_was_unavailable;
 /// Anything else is a server fault and keeps `INTERNAL` (13). The unavailable
 /// message is sanitized to match the HTTP frontends; only the internal arm keeps
 /// the caller's context string.
-pub(crate) fn dispatch_error_status(error: &anyhow::Error, internal_context: &str) -> Status {
-    if request_was_unavailable(error.as_ref()) {
+pub(crate) fn dispatch_error_status(
+    error: &(dyn std::error::Error + 'static),
+    internal_context: &str,
+) -> Status {
+    if request_was_unavailable(error) {
         return Status::unavailable(SanitizedError::Unavailable.to_string());
     }
     Status::internal(format!("{internal_context}: {error}"))
@@ -40,7 +43,7 @@ mod tests {
     #[test]
     fn unavailable_dispatch_errors_map_to_grpc_unavailable() {
         for error_type in [ErrorType::WorkerUnavailable, ErrorType::Unavailable] {
-            let status = dispatch_error_status(&error(error_type), "ctx");
+            let status = dispatch_error_status(error(error_type).as_ref(), "ctx");
             assert_eq!(status.code(), tonic::Code::Unavailable, "{error_type}");
             assert_eq!(status.message(), "Service temporarily unavailable");
         }
@@ -48,7 +51,7 @@ mod tests {
 
     #[test]
     fn other_dispatch_errors_stay_internal_with_context() {
-        let status = dispatch_error_status(&error(ErrorType::Unknown), "ctx");
+        let status = dispatch_error_status(error(ErrorType::Unknown).as_ref(), "ctx");
         assert_eq!(status.code(), tonic::Code::Internal);
         assert!(status.message().starts_with("ctx: "));
     }

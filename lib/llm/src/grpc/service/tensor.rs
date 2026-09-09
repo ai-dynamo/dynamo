@@ -120,7 +120,7 @@ pub async fn tensor_response_stream(
                 .inc_rejection(&model_name, crate::http::service::metrics::Endpoint::Tensor);
             return Status::resource_exhausted(e.to_string());
         }
-        dispatch_error_status(&e, "Failed to generate tensor response stream")
+        dispatch_error_status(e.as_ref(), "Failed to generate tensor response stream")
     })?;
 
     // capture the context to cancel the stream if the client disconnects
