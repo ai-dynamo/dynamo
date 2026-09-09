@@ -27,7 +27,7 @@ The Slime external-engine support lives in the upstream Slime repository. The Dy
 | Source | Files |
 |---|---|
 | Slime | [`slime/rollout/`](https://github.com/THUDM/slime/tree/4c1ab40203952b3dcc8582b653f3a83f2c6e8128/slime/rollout) |
-| Dynamo | [`examples/rl/slime/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/rl/slime) |
+| Dynamo | [`examples/rl/slime/`](https://github.com/ai-dynamo/dynamo/blob/main/examples/README.md#integration-examples) |
 
 ## Prerequisites
 
@@ -144,7 +144,7 @@ The integration does not recover a replaced external engine during a Slime job.
 
 ## Upstream Resources
 
-- [Dynamo Slime example](https://github.com/ai-dynamo/dynamo/tree/main/examples/rl/slime)
+- [Dynamo Slime example](https://github.com/ai-dynamo/dynamo/blob/main/examples/README.md#integration-examples)
 - [Slime streaming external-rollout change](https://github.com/THUDM/slime/pull/2272)
 - [Slime external rollout engine guide](https://github.com/THUDM/slime/blob/4c1ab40203952b3dcc8582b653f3a83f2c6e8128/docs/en/advanced/external-rollout-engines.md)
 - [Shared RL integration reference](integration-reference.md)
