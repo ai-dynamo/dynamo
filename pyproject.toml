@@ -130,6 +130,15 @@ sglang_tests = "dynamo.sglang.tests.conftest"
 "dynamo.planner" = "dynamo.planner.simulation:create_provider"
 "dynamo.router" = "dynamo.router.simulation:create_provider"
 
+[project.entry-points."aisimulate.output_adapters"]
+"dgd" = "dynamo.profiler.sweeper.dgd_output_adapter:DgdOutputAdapter"
+
+# SPECULATIVE: group name and factory-return shape not confirmed against a
+# real aisimulate diff, unlike aisimulate.output_adapters above -- see
+# dynamo.profiler.sweeper.stack_provider's module docstring.
+[project.entry-points."aisimulate.stacks"]
+"dynamo" = "dynamo.profiler.sweeper.stack_provider:create_stack"
+
 [dependency-groups]
 docs = [
     # Core Sphinx
