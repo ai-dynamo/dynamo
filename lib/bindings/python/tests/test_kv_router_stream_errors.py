@@ -75,6 +75,11 @@ async def _wait_for_single_instance(endpoint):
     return client
 
 
+async def _wait_until_deregistered(client):
+    while client.instance_ids():
+        await asyncio.sleep(0.05)
+
+
 async def _generate_and_collect(router, response_buffer_size):
     stream = await router.generate(
         [1, 2, 3],
@@ -93,23 +98,31 @@ async def router_runtime(temp_file_store):
 
 @pytest.fixture
 async def error_router_endpoint(router_runtime):
+    # try/finally, not teardown after the yield: a failure in setup would otherwise leave the
+    # worker runtime and its detached cleanup task alive in the next test, which is the
+    # cross-test contamination this module's regression test exists to catch.
     worker = await _Worker.start(f"error-router-{uuid.uuid4().hex}.worker.generate")
-    endpoint = router_runtime.endpoint(worker.endpoint_path)
-    await _wait_for_single_instance(endpoint)
-    yield endpoint
-    await worker.stop()
+    try:
+        endpoint = router_runtime.endpoint(worker.endpoint_path)
+        await _wait_for_single_instance(endpoint)
+        yield endpoint
+    finally:
+        await worker.stop()
 
 
 @pytest.fixture
 async def worker_pair(router_runtime):
     suffix = uuid.uuid4().hex
-    workers = [
-        await _Worker.start(f"worker-{name}-{suffix}.worker.generate")
-        for name in ("a", "b")
-    ]
-    yield workers
-    for worker in workers:
-        await worker.stop()
+    workers = []
+    try:
+        for name in ("a", "b"):
+            workers.append(
+                await _Worker.start(f"worker-{name}-{suffix}.worker.generate")
+            )
+        yield workers
+    finally:
+        for worker in workers:
+            await worker.stop()
 
 
 @pytest.mark.asyncio
@@ -146,11 +159,15 @@ async def test_worker_teardown_leaves_sibling_worker_reachable(
     await _wait_for_single_instance(survivor_endpoint)
 
     await torn_down.stop()
-    # The endpoint's detached cleanup task unregisters from discovery and then from the
-    # shared TCP server, so the instance disappearing is the cue that the handler sweep
-    # is about to run; the short sleep covers the rest of that task.
-    while torn_down_client.instance_ids():
-        await asyncio.sleep(0.05)
+    # The endpoint's detached cleanup task unregisters from discovery and then from the shared
+    # TCP server, so the instance disappearing is the cue that the handler sweep is about to
+    # run; the sleep covers the rest of that task. Bounded, so a regression here reports as
+    # this wait timing out rather than as the opaque whole-test timeout of #14261. The sleep
+    # fails open: if it is ever too short the sweep has not run, the survivor was never at
+    # risk, and this test passes without proving anything. `unregister_endpoint_removes_only_
+    # the_callers_instance` in shared_tcp_endpoint.rs is the deterministic proof; this test
+    # covers the same bug through the real Python teardown path.
+    await asyncio.wait_for(_wait_until_deregistered(torn_down_client), timeout=10)
     await asyncio.sleep(0.2)
 
     router = KvRouter(survivor_endpoint, 4, KvRouterConfig(use_kv_events=False))
