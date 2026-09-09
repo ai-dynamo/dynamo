@@ -98,6 +98,7 @@ async fn apply_jail_transformation(
     NvCreateChatCompletionStreamResponse {
         inner: out.data.unwrap(),
         nvext: None,
+        prompt_logprobs: None,
         llm_metrics: None,
     }
 }

@@ -122,6 +122,7 @@ fn load_test_data(file_path: &str) -> TestData {
                     service_tier: None,
                 },
                 nvext: None,
+                prompt_logprobs: None,
                 llm_metrics: None,
             };
 
@@ -1431,6 +1432,7 @@ mod tests {
                     service_tier: None,
                 },
                 nvext: None,
+                prompt_logprobs: None,
                 llm_metrics: None,
             }),
             event: None,
@@ -2200,6 +2202,7 @@ fn make_glm47_chunk(
                 system_fingerprint: None,
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
         }),
         event: None,
@@ -2398,6 +2401,7 @@ fn deepseek_v4_partial_invoke_chunk() -> Annotated<NvCreateChatCompletionStreamR
                 system_fingerprint: None,
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
         }),
         event: None,

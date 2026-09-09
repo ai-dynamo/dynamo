@@ -370,10 +370,13 @@ impl LLMEngineOutput {
 
 pub(crate) fn prompt_logprobs_from_engine_data(
     engine_data: Option<&serde_json::Value>,
-) -> Option<PromptLogprobs> {
-    engine_data?
-        .get("prompt_logprobs")
-        .and_then(|value| serde_json::from_value(value.clone()).ok())
+) -> anyhow::Result<Option<PromptLogprobs>> {
+    let Some(value) = engine_data.and_then(|data| data.get("prompt_logprobs")) else {
+        return Ok(None);
+    };
+    serde_json::from_value(value.clone())
+        .map(Some)
+        .map_err(|error| anyhow::anyhow!("invalid prompt_logprobs payload: {error}"))
 }
 
 impl MaybeError for LLMEngineOutput {
