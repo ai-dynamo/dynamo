@@ -458,6 +458,7 @@ async fn dispatch(
 mod tests {
     use super::*;
 
+    use crate::http::service::metrics::{Endpoint, RequestType, Status};
     use crate::protocols::common::llm_backend::LLMEngineOutput;
     use crate::types::Annotated;
     use dynamo_runtime::engine::AsyncEngine;
@@ -513,12 +514,30 @@ mod tests {
             dispatch_test_context(),
             "req-sglang-worker-unavailable".to_string(),
             "test-model".to_string(),
-            state,
+            state.clone(),
             ConnectionHandle::create_disabled(tx),
         )
         .await;
 
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read error response");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("parse error response");
+        assert_eq!(body["error"]["message"], "Service temporarily unavailable");
+        assert!(!body.to_string().contains("unknown endpoint"));
+
+        let metric_model = state.manager().metric_model_for("test-model");
+        assert_eq!(
+            state.metrics_clone().get_request_counter(
+                metric_model,
+                &Endpoint::Generate,
+                &RequestType::Stream,
+                &Status::Error,
+                &ErrorType::Unavailable,
+            ),
+            1
+        );
     }
 
     #[test]
