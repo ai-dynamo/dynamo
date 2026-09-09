@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from time import monotonic
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -603,9 +604,8 @@ async def run_to_completion(coro: Coroutine[Any, Any, None]) -> bool:
     Never raises ``CancelledError``; the caller decides when to re-raise.
     """
     task = asyncio.ensure_future(coro)
-    loop = asyncio.get_running_loop()
     outer_cancelled = False
-    t0 = loop.time()
+    t0 = monotonic()
     next_warn_at = _TEARDOWN_WARN_INTERVAL_S
     while not task.done():
         try:
@@ -614,9 +614,9 @@ async def run_to_completion(coro: Coroutine[Any, Any, None]) -> bool:
             # No Task.uncancel(); it is 3.11+ and requires-python is >=3.10.
             # Revisit if a caller above starts using TaskGroup or asyncio.timeout.
             outer_cancelled = True
-        # Elapsed wall time, checked unconditionally: repeated cancellation
+        # Elapsed time, checked unconditionally: repeated cancellation
         # would otherwise keep resetting asyncio.wait's timer before it fires.
-        elapsed = loop.time() - t0
+        elapsed = monotonic() - t0
         if not task.done() and elapsed >= next_warn_at:
             logging.warning("Worker teardown still running after %.0fs", elapsed)
             next_warn_at += _TEARDOWN_WARN_INTERVAL_S

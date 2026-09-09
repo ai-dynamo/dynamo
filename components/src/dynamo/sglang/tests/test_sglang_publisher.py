@@ -753,11 +753,14 @@ async def test_cancel_metrics_task_waits_for_a_real_shaped_task():
     unwind with no further awaits after cancel(). Cancelling one must leave it
     done and cancelled, and must not raise at the caller."""
 
+    started = asyncio.Event()
+
     async def metrics_loop():
+        started.set()
         await asyncio.Event().wait()
 
     metrics_task = asyncio.create_task(metrics_loop())
-    await asyncio.sleep(0)
+    await started.wait()
 
     await cancel_metrics_task(metrics_task)
 
@@ -770,14 +773,17 @@ async def test_cancel_metrics_task_waits_for_a_real_shaped_task():
 async def test_cancel_metrics_task_propagates_a_real_failure():
     """A non-cancellation failure inside the metrics task still surfaces."""
 
+    started = asyncio.Event()
+
     async def metrics_loop():
+        started.set()
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
             raise RuntimeError("zmq close blew up") from None
 
     metrics_task = asyncio.create_task(metrics_loop())
-    await asyncio.sleep(0)
+    await started.wait()
 
     with pytest.raises(RuntimeError, match="zmq close blew up"):
         await cancel_metrics_task(metrics_task)
@@ -789,35 +795,32 @@ async def test_cancel_metrics_task_propagates_a_caller_cancellation():
     """A cancellation aimed at the caller while it is suspended inside
     cancel_metrics_task must reach the caller."""
 
+    started = asyncio.Event()
+    unwinding = asyncio.Event()
+    release_unwind = asyncio.Event()
+
     async def metrics_loop():
-        # Takes several event-loop ticks to unwind after cancel(), so the
-        # caller is still suspended inside cancel_metrics_task -- not
-        # already past it -- when the caller's own cancellation lands.
+        started.set()
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
-            for _ in range(3):
-                await asyncio.sleep(0)
+            unwinding.set()
+            await release_unwind.wait()
             raise
 
     metrics_task = asyncio.create_task(metrics_loop())
-    await asyncio.sleep(0)
+    await started.wait()
 
-    async def caller():
-        await cancel_metrics_task(metrics_task)
-
-    outer = asyncio.create_task(caller())
-    await asyncio.sleep(0)  # outer cancels metrics_task, then suspends inside
-    # cancel_metrics_task's await -- genuinely parked there, not finished.
+    outer = asyncio.create_task(cancel_metrics_task(metrics_task))
+    await unwinding.wait()
     outer.cancel()
+    release_unwind.set()
 
     with pytest.raises(asyncio.CancelledError):
         await outer
 
-    try:
+    with pytest.raises(asyncio.CancelledError):
         await metrics_task
-    except asyncio.CancelledError:
-        pass
 
 
 @pytest.mark.timeout(5)
@@ -865,33 +868,35 @@ async def test_run_to_completion_propagates_a_body_failure():
 
 @pytest.mark.timeout(5)
 @pytest.mark.asyncio
-async def test_run_to_completion_warns_under_repeated_cancellation(caplog, monkeypatch):
+async def test_run_to_completion_warns_under_repeated_cancellation(monkeypatch):
     """A caller cancelling faster than the warn interval must still get the
     "teardown is taking a while" warning."""
-    monkeypatch.setattr(publisher_mod, "_TEARDOWN_WARN_INTERVAL_S", 0.1)
-
+    started = asyncio.Event()
     release = asyncio.Event()
+    warned = asyncio.Event()
+    now = [0.0]
+
+    monkeypatch.setattr(publisher_mod, "_TEARDOWN_WARN_INTERVAL_S", 0.1)
+    monkeypatch.setattr(publisher_mod, "monotonic", lambda: now[0])
+
+    def record_warning(*args, **kwargs):
+        warned.set()
+
+    monkeypatch.setattr(publisher_mod.logging, "warning", record_warning)
 
     async def body():
+        started.set()
         await release.wait()
 
-    async def caller():
-        return await run_to_completion(body())
+    outer = asyncio.create_task(run_to_completion(body()))
+    await started.wait()
 
-    outer = asyncio.create_task(caller())
-    await asyncio.sleep(0)
-
-    with caplog.at_level(logging.WARNING):
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + 0.6
-        while loop.time() < deadline:
-            outer.cancel()
-            await asyncio.sleep(0.09)  # faster than the 0.1s interval
-
+    now[0] = 0.11
+    outer.cancel()
+    await warned.wait()
     release.set()
-    await outer
 
-    assert "still running" in caplog.text
+    assert await outer is True
 
 
 @pytest.mark.timeout(5)
@@ -901,14 +906,17 @@ async def test_finish_worker_teardown_continues_after_metrics_task_failure():
     real ZMQ error -- must not skip cleanup() and run_deferred_handlers(), and
     must still surface once they have run."""
 
+    started = asyncio.Event()
+
     async def failing_metrics_loop():
+        started.set()
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
             raise RuntimeError("zmq close blew up") from None
 
     metrics_task = asyncio.create_task(failing_metrics_loop())
-    await asyncio.sleep(0)
+    await started.wait()
 
     steps = []
 
