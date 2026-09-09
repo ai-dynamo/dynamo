@@ -133,10 +133,7 @@ sglang_tests = "dynamo.sglang.tests.conftest"
 [project.entry-points."aisimulate.output_adapters"]
 "dgd" = "dynamo.profiler.sweeper.dgd_output_adapter:DgdOutputAdapter"
 
-# SPECULATIVE: group name and factory-return shape not confirmed against a
-# real aisimulate diff, unlike aisimulate.output_adapters above -- see
-# dynamo.profiler.sweeper.stack_provider's module docstring.
-[project.entry-points."aisimulate.stacks"]
+[project.entry-points."aisimulate.runner_factories"]
 "dynamo" = "dynamo.profiler.sweeper.stack_provider:create_stack"
 
 [dependency-groups]

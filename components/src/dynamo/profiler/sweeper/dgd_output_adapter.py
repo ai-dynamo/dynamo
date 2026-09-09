@@ -1,43 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Dynamo's `dgd` output adapter for `aisimulate recommend --output dgd`.
-
-Implements DEP #14282 (https://github.com/ai-dynamo/dynamo/issues/14282)
-against the confirmed, real AISimulate output-adapter ABI
-(aisimulate/src/aisimulate/output_adapter.py, PR against ai-dynamo/aisimulate):
-
-    class RecommendationOutputAdapter(Protocol):
-        name: str
-        api_version: int
-
-        def write(
-            self,
-            config: Mapping[str, Any],
-            *,
-            result: SweepResult,
-            output_dir: Path,
-        ) -> Sequence[str | Path]: ...
-
-Registered under the entry-point group "aisimulate.output_adapters" --
-confirmed via OUTPUT_ADAPTER_ENTRY_POINT_GROUP in the real module, not
-guessed.
-
-One thing this module cannot fully confirm yet: SweepResult's own fields.
-The public "Sweeper Results" doc
-(docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/ai-simulate/
-sweeper/results) documents Candidate and ReplaySpec in detail but never
-mentions a SweepResult wrapper class, and the real test suite for this ABI
-(tests/test_unified_cli.py) exercises it via a hand-rolled
-`_RecommendationResult` stand-in whose own fake adapter never reads
-`result.candidates` at all -- so nothing publicly available yet proves the
-real attribute names. `result.candidates` and `result.workload` below are
-inferred (the test constructs its stand-in as
-`_RecommendationResult([candidate])`, strongly suggesting `.candidates`
-exists) and are the one thing to verify the moment the real SweepResult
-class is available -- everything else in this module is built against
-confirmed interfaces.
-"""
+"""Dynamo's `dgd` output adapter for `aisimulate recommend --output dgd`
+(DEP #14282). Renders and writes DGDs for the Candidates AISimulate
+selects, reusing Dynamo's existing renderer/output pipeline."""
 
 from __future__ import annotations
 
@@ -83,11 +49,6 @@ def _dgd_names(dgd_config: Mapping[str, Any], candidate_count: int) -> list[str]
 
 
 def _generation_options(dgd_config: Mapping[str, Any]) -> DGDGenerationOptions:
-    """Build DGDGenerationOptions from the resolved `dgd:` config section.
-    Field names (runtime_image, runtime_version_override, num_gpus_per_node,
-    namespace) are confirmed, already-shipped dataclass fields
-    (renderers/base.py).
-    """
     try:
         return DGDGenerationOptions(
             runtime_image=dgd_config["runtime_image"],
@@ -146,8 +107,8 @@ def render_and_write_dgds(
 
 class DgdOutputAdapter:
     """Dynamo's `dgd` output adapter, registered under
-    "aisimulate.output_adapters" (pyproject.toml). Matches the confirmed
-    RecommendationOutputAdapter Protocol exactly: `name`/`api_version` class
+    "aisimulate.output_adapters" (pyproject.toml). Matches the
+    RecommendationOutputAdapter Protocol: `name`/`api_version` class
     attributes, and `write(config, *, result, output_dir)` returning a
     sequence of paths relative to output_dir.
     """
@@ -159,10 +120,12 @@ class DgdOutputAdapter:
         self,
         config: Mapping[str, Any],
         *,
-        result: Any,  # SweepResult -- see module docstring re: unconfirmed shape
+        result: Any,
         output_dir: Path,
     ) -> Sequence[str | Path]:
-        # INFERRED, not confirmed -- see module docstring.
+        # result.candidates/.workload are inferred, not confirmed against a
+        # real SweepResult class -- verify these two attribute names first
+        # if this adapter ever misbehaves against a real aisimulate build.
         candidates = result.candidates
         workload = getattr(result, "workload", None)
         return render_and_write_dgds(candidates, workload, config, output_dir)

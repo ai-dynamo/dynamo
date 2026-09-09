@@ -4,24 +4,22 @@
 """Registers Dynamo Replay as a `--stack dynamo` implementation for
 `aisimulate recommend`/`predict` (DEP #14282).
 
-Confirmed real: the review thread on PR #13765 establishes "dynamo is the
-stack" as the intended shape -- `aisimulate recommend --stack dynamo
---config input.yaml --set dgd.name=qwen` -- and `aisimulate.main`'s real,
-shipped source imports `resolve_runner_factory` from a sibling `.stack`
-module (seen in the same diff that confirmed the output-adapter ABI),
-confirming a stack-resolution extension point genuinely exists.
+Entry-point group name CONFIRMED via review feedback on this PR:
+"aisimulate recommend --stack dynamo resolves stack names from the
+aisimulate.runner_factories entry-point group." Not the earlier guess
+("aisimulate.stacks") -- pyproject.toml registers this factory under
+"aisimulate.runner_factories" accordingly.
 
-SPECULATIVE: the exact entry-point group name and the exact shape
-`resolve_runner_factory` expects to find registered under it are not
-confirmed -- unlike dgd_output_adapter.py, no diff for aisimulate's own
-`stack.py` has been reviewed. `create_stack()` is modeled on the one
-CONFIRMED, already-shipped registration pattern in this codebase
-(dynamo.planner.simulation:create_provider, dynamo.router.simulation:
-create_provider under "aisimulate.sweep_config_providers") since it is the
-most credible analog available -- not because it is confirmed correct for
-this extension point. Expect this module, and its pyproject.toml entry
-point, to need rework once the real interface is confirmed the same way
-dgd_output_adapter.py's was.
+Still not independently confirmed: the exact object create_stack() is
+expected to return. It currently returns an instantiated
+DynamoReplayRunnerFactory (matching what #13765's original run_sweep()
+constructed and passed to Sweeper(runner_factory=...)), which is a
+reasonable reading of "runner_factories" as a group name, but no real
+aisimulate diff analogous to output_adapter.py's has been reviewed to
+confirm whether aisimulate expects the factory class itself, an
+instantiated factory, or something else the entry point should point at
+instead. Worth re-verifying the same way dgd_output_adapter.py's ABI was:
+against a real diff, not just the group name in isolation.
 
 This module owns no new simulation logic: it wraps the same
 DynamoReplayRunnerFactory that `#13765`'s original runner.py already used
@@ -48,8 +46,11 @@ def _load_runner_factory() -> type[Any]:
 
 
 def create_stack() -> Any:
-    """Speculative factory -- see module docstring. Returns a
-    DynamoReplayRunnerFactory instance, the same object #13765's original
-    run_sweep() constructed and passed to Sweeper(runner_factory=...)."""
+    """Registered under aisimulate.runner_factories (confirmed group name,
+    see module docstring). Returns an instantiated DynamoReplayRunnerFactory
+    -- the same object #13765's original run_sweep() constructed and passed
+    to Sweeper(runner_factory=...). Whether aisimulate actually wants an
+    instance vs. the class itself vs. something else is the one remaining
+    unconfirmed detail; see module docstring."""
     factory_cls = _load_runner_factory()
     return factory_cls()

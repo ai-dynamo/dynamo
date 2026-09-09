@@ -73,9 +73,6 @@ _DGD_CONFIG = {
 
 
 def test_adapter_declares_the_confirmed_name_and_api_version() -> None:
-    """Matches AISimulate's real validate_output_adapter() checks exactly:
-    name must equal the requested entry-point name, api_version must be an
-    int equal to OUTPUT_ADAPTER_API_VERSION, write must be callable."""
     adapter = DgdOutputAdapter()
     assert adapter.name == "dgd"
     assert type(adapter.api_version) is int
@@ -84,9 +81,6 @@ def test_adapter_declares_the_confirmed_name_and_api_version() -> None:
 
 
 def test_write_returns_relative_paths_that_exist(tmp_path: Path) -> None:
-    """Matches AISimulate's real write_output_adapters() validation: every
-    returned path must be relative (no leading '/', no '..') and must exist
-    under output_dir immediately after write() returns."""
     adapter = DgdOutputAdapter()
     result = _FakeSweepResult([_FakeCandidate(_CANDIDATE_CONFIG)])
 
@@ -116,7 +110,7 @@ def test_pareto_naming_matches_the_real_name_prefix_convention(tmp_path: Path) -
 def test_missing_dgd_config_field_raises_config_error(tmp_path: Path) -> None:
     adapter = DgdOutputAdapter()
     result = _FakeSweepResult([_FakeCandidate(_CANDIDATE_CONFIG)])
-    incomplete_config = {"name": "qwen"}  # missing runtime_image, num_gpus_per_node
+    incomplete_config = {"name": "qwen"}
 
     with pytest.raises(DgdOutputConfigError, match="missing required field"):
         adapter.write(incomplete_config, result=result, output_dir=tmp_path)
