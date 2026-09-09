@@ -390,6 +390,36 @@ def make_video_payload(
     )
 
 
+def make_mixed_image_video_payload(
+    expected_response: list[str], *, frontend_decoding: bool = False
+) -> ChatPayload:
+    """Mixed image/video payload that requires usable video context."""
+    video_url = MULTIMODAL_VIDEO_URL if frontend_decoding else LOCAL_VIDEO_TEST_URI
+    return chat_payload(
+        [
+            {
+                "type": "text",
+                "text": (
+                    "Ignore the image. What shape appears in the video? "
+                    "Respond with only the shape."
+                ),
+            },
+            {
+                "type": "image_url",
+                "image_url": {"url": MULTIMODAL_IMG_URL},
+            },
+            {
+                "type": "video_url",
+                "video_url": {"url": video_url},
+            },
+        ],
+        repeat_count=1,
+        expected_response=expected_response,
+        temperature=0.0,
+        max_tokens=16,
+    )
+
+
 def _make_http_video_payload(url: str, expected_response: list[str]) -> ChatPayload:
     return chat_payload(
         [
