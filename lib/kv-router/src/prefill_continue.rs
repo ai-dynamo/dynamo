@@ -6,7 +6,10 @@
 use crate::scheduling::config::KvRouterConfig;
 
 /// Why a request was not allowed to keep generating on its prefill worker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `EnumCount` is load-bearing: it is what makes a variant missing from `ALL`
+/// fail a test instead of silently losing its metric series.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumCount)]
 #[non_exhaustive]
 pub enum PrefillContinueSkip {
     /// The feature is off.
@@ -666,7 +669,11 @@ mod tests {
         }
         // `ALL` drives which metric series exist, so a variant missing from it
         // is a series that never appears.
-        assert_eq!(labels.len(), 11, "every reason must appear in ALL");
+        assert_eq!(
+            labels.len(),
+            <PrefillContinueSkip as strum::EnumCount>::COUNT,
+            "every reason must appear in ALL, or its metric series never exists"
+        );
     }
 
     #[test]
