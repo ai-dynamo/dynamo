@@ -69,6 +69,14 @@ def build_gpu_mem_args(
     return shlex.split(_call_gpu_utils_function(function_name, env=env))
 
 
+def build_vllm_gpu_mem_args(default_utilization: str = "0.4") -> list[str]:
+    """Return scheduler-aware vLLM memory args with a local fallback."""
+    return build_gpu_mem_args("build_vllm_gpu_mem_args") or [
+        "--gpu-memory-utilization",
+        default_utilization,
+    ]
+
+
 def build_trtllm_override_args(env: Mapping[str, str] | None = None) -> list[str]:
     """Return TRT-LLM override CLI args from GPU parallel scheduler env vars."""
     override_json = _call_gpu_utils_function("build_trtllm_override_args_with_mem", env)
