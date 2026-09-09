@@ -9,11 +9,10 @@
 # and TestGPUProductPowerRanges in dynamographdeployment_unit_test.go for the
 # derivation and its rounding/exclusion rules.
 #
-# This file ships in a public repository. Every row must name a publicly
-# released product. Do not add internal, pre-release, or bring-up hardware, and
-# do not add power figures for unannounced parts; the admission catalog does not
-# need them, and the derivation test proves its exclusion rules with synthetic
-# rows rather than with real internal data.
+# This file ships in a public repository. Internal pre-release boards and power
+# figures for unannounced parts are out of scope. The admission catalog does not
+# need them, and the derivation test proves its defensive exclusion rules with
+# synthetic rows rather than real internal data.
 #
 # gpu_product is the exact nvidia.com/gpu.product GFD label as reported by
 # reviewed hardware; the bare B300 row is retained here as audit record even

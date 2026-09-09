@@ -125,10 +125,18 @@ components. A component without the annotation is unaffected: it may set
   it is fixed for the life of the DGD. Moving a component to another GPU product
   means deleting and recreating the DGD with a cap valid for that product.
 
-A DGD created before these rules shipped keeps working: as long as its cap and
-its complete placement are unchanged, unrelated updates — including the Planner's
-own replica writes — are still admitted. Any placement change makes the new rules
-apply in full, so such a deployment is repaired by recreation, not by editing.
+Compatibility depends on the stored component shape, not when the DGD was
+created. A power-annotated component without a non-empty exact GPU product
+selector is legacy-shaped. Unrelated updates to that component, including the
+Planner's replica writes, remain admissible only while its power value, complete
+node selector, `nodeName`, and affinity remain unchanged.
+
+A component with a non-empty exact GPU product selector is product-aware. Other
+selector keys and affinity do not affect the selected-product rule, but the exact
+product remains immutable. Admission ratchets an unchanged pre-existing product,
+range, or `nodeName` violation only while every normalized input to that rule
+remains identical. Repair a violation by recreating the DGD rather than editing
+the component in place.
 
 Components may select different products; the budget still sums their projected
 watts. This example uses one product for both workers only for brevity.

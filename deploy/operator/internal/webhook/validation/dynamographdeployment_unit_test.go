@@ -7,8 +7,14 @@ package validation
 
 import (
 	"context"
+	_ "embed"
+	"encoding/csv"
 	"fmt"
+	"io"
+	"math"
 	"slices"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode"
@@ -45,6 +51,9 @@ const (
 // examplePowerAwareCapsW mirrors the prefill and decode caps in
 // examples/power-aware-budget/dgd.yaml.
 var examplePowerAwareCapsW = []int64{350, 300}
+
+//go:embed gpu_power_limits.csv
+var gpuPowerLimitsCSV string
 
 func TestDynamoGraphDeploymentConversionFailureIsFatal(t *testing.T) {
 	dgd := newBetaDGDForValidation()
@@ -269,13 +278,6 @@ func TestDynamoGraphDeploymentRejectsElasticEPWithoutCommand(t *testing.T) {
 // TestGPUProductPowerRanges audits the admission catalog. The admission chain
 // cannot reach an unexported package-level map, so this is the one focused unit
 // test the structural contract allows alongside the DGD admission table.
-//
-// It has two tables by design. Structural invariants run over every shipped
-// entry, because they are what catch a bad edit and they scale for free.
-// Conversion is asserted over a small explicit table covering only the rows
-// where deriving the entry from gpu_power_limits.csv does real work; a table
-// restating all fifty-odd rows would prove only that the map equals a copy of
-// itself.
 func TestGPUProductPowerRanges(t *testing.T) {
 	t.Log("Assert the structural invariants every shipped catalog entry must satisfy")
 	for product, productRange := range powerRanges {
@@ -294,55 +296,77 @@ func TestGPUProductPowerRanges(t *testing.T) {
 		}
 	}
 
-	t.Log("Assert the CSV-to-map conversion on the rows where it does real work")
-	conversions := []struct {
-		name    string
-		product string
-		want    powerRangeW
-	}{
-		{
-			// 48.75 / 62.5 in the source. Truncating instead of rounding inward
-			// would admit 48 W, below the physical floor.
-			name:    "fractional bounds round inward",
-			product: "NVIDIA-A16",
-			want:    powerRangeW{Min: 49, Max: 62},
-		},
-		{
-			// 117.5 / 235 in the source.
-			name:    "fractional minimum rounds up",
-			product: "Quadro-GP100",
-			want:    powerRangeW{Min: 118, Max: 235},
-		},
-		{
-			// Default_W and Curr_W both equal Max_W here, so this row cannot
-			// distinguish which column was read.
-			name:    "default equal to maximum is stored as the maximum",
-			product: "NVIDIA-A10",
-			want:    powerRangeW{Min: 100, Max: 150},
-		},
-		{
-			// Default_W is 650 and Curr_W is 700; storing 650 would prove the
-			// derivation read the default rather than the settable maximum.
-			name:    "default below maximum is ignored",
-			product: "NVIDIA-H100",
-			want:    powerRangeW{Min: 200, Max: 700},
-		},
-		{
-			name:    "the product the shipped power-aware example selects",
-			product: examplePowerAwareGPUProduct,
-			want:    powerRangeW{Min: 200, Max: 700},
-		},
+	t.Log("Derive the complete expected catalog from the reviewed CSV")
+	reader := csv.NewReader(strings.NewReader(gpuPowerLimitsCSV))
+	reader.Comment = '#'
+	header, err := reader.Read()
+	if err != nil {
+		t.Fatalf("read CSV header: %v", err)
 	}
-	for _, tt := range conversions {
-		t.Run(tt.name, func(t *testing.T) {
-			got, found := powerRanges[tt.product]
-			if !found {
-				t.Fatalf("product %q is missing from the catalog", tt.product)
-			}
-			if got != tt.want {
-				t.Fatalf("catalog[%q] = %+v, want %+v", tt.product, got, tt.want)
-			}
-		})
+	wantHeader := []string{"gpu_product", "Min_W", "Default_W", "Max_W", "Curr_W"}
+	if !slices.Equal(header, wantHeader) {
+		t.Fatalf("CSV header = %v, want %v", header, wantHeader)
+	}
+
+	expected := make(map[string]powerRangeW)
+	seen := make(map[string]struct{})
+	for rowNumber := 2; ; rowNumber++ {
+		record, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read CSV row %d: %v", rowNumber, err)
+		}
+		// Run the confidentiality guard before any check that echoes the product
+		// name: this repository is public, so a CI failure message must never
+		// reproduce an internal identifier. Report the matched suffix, not the row.
+		if strings.HasSuffix(record[0], bringUpBoardSuffix) {
+			t.Fatalf(
+				"CSV row %d carries the internal pre-release board suffix %q; internal hardware must not enter this file",
+				rowNumber,
+				bringUpBoardSuffix,
+			)
+		}
+
+		if _, exists := seen[record[0]]; exists {
+			t.Fatalf("CSV row %d duplicates product %q", rowNumber, record[0])
+		}
+		seen[record[0]] = struct{}{}
+
+		product, productRange, include, err := gpuPowerRangeFromCSVRow(record)
+		if err != nil {
+			t.Fatalf("derive CSV row %d: %v", rowNumber, err)
+		}
+		if include {
+			expected[product] = productRange
+		}
+	}
+
+	t.Log("Compare every expected and production catalog key in stable order")
+	keys := make(map[string]struct{}, len(expected)+len(powerRanges))
+	for product := range expected {
+		keys[product] = struct{}{}
+	}
+	for product := range powerRanges {
+		keys[product] = struct{}{}
+	}
+	products := make([]string, 0, len(keys))
+	for product := range keys {
+		products = append(products, product)
+	}
+	sort.Strings(products)
+	for _, product := range products {
+		want, wantExists := expected[product]
+		got, gotExists := powerRanges[product]
+		switch {
+		case !gotExists:
+			t.Errorf("production catalog is missing %q with range %+v", product, want)
+		case !wantExists:
+			t.Errorf("production catalog has unexpected product %q with range %+v", product, got)
+		case got != want:
+			t.Errorf("production catalog[%q] = %+v, want %+v", product, got, want)
+		}
 	}
 
 	t.Log("Tie the shipped example's authored caps to the product it selects")
@@ -356,5 +380,59 @@ func TestGPUProductPowerRanges(t *testing.T) {
 				examplePowerAwareGPUProduct,
 			)
 		}
+	}
+}
+
+// gpuPowerRangeFromCSVRow applies the reviewed import rules. Bounds round
+// inward because admission must never accept a whole-watt value outside a
+// fractional hardware interval, and Max_W rather than Default_W is the
+// settable upper bound.
+func gpuPowerRangeFromCSVRow(record []string) (string, powerRangeW, bool, error) {
+	if len(record) != 5 {
+		return "", powerRangeW{}, false, fmt.Errorf("got %d columns, want 5", len(record))
+	}
+	product := record[0]
+	if product == "B300" || strings.HasSuffix(product, bringUpBoardSuffix) {
+		return product, powerRangeW{}, false, nil
+	}
+
+	minW, err := strconv.ParseFloat(record[1], 64)
+	if err != nil {
+		return product, powerRangeW{}, false, fmt.Errorf("parse Min_W %q: %w", record[1], err)
+	}
+	maxW, err := strconv.ParseFloat(record[3], 64)
+	if err != nil {
+		return product, powerRangeW{}, false, fmt.Errorf("parse Max_W %q: %w", record[3], err)
+	}
+	productRange := powerRangeW{Min: int64(math.Ceil(minW)), Max: int64(math.Floor(maxW))}
+	if productRange.Min <= 0 || productRange.Min > productRange.Max {
+		return product, powerRangeW{}, false, fmt.Errorf("derived malformed range %+v", productRange)
+	}
+	return product, productRange, true, nil
+}
+
+func TestGPUPowerRangeFromCSVRow(t *testing.T) {
+	tests := []struct {
+		name        string
+		record      []string
+		wantProduct string
+		wantRange   powerRangeW
+		wantInclude bool
+	}{
+		{name: "bare product is excluded", record: []string{"B300", "200", "1100", "1100", "1100"}, wantProduct: "B300"},
+		{name: "bring-up board is excluded", record: []string{"example-bring-up-board", "100", "200", "300", "250"}, wantProduct: "example-bring-up-board"},
+		{name: "fractional bounds round inward", record: []string{"example-fractional", "48.75", "60", "62.5", "60"}, wantProduct: "example-fractional", wantRange: powerRangeW{Min: 49, Max: 62}, wantInclude: true},
+		{name: "maximum rather than default feeds catalog", record: []string{"example-distinct-maximum", "100", "200", "300", "250"}, wantProduct: "example-distinct-maximum", wantRange: powerRangeW{Min: 100, Max: 300}, wantInclude: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			product, productRange, include, err := gpuPowerRangeFromCSVRow(tt.record)
+			if err != nil {
+				t.Fatalf("gpuPowerRangeFromCSVRow() error = %v", err)
+			}
+			if product != tt.wantProduct || productRange != tt.wantRange || include != tt.wantInclude {
+				t.Fatalf("gpuPowerRangeFromCSVRow() = (%q, %+v, %t), want (%q, %+v, %t)", product, productRange, include, tt.wantProduct, tt.wantRange, tt.wantInclude)
+			}
+		})
 	}
 }
