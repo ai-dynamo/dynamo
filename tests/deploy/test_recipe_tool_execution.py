@@ -35,9 +35,10 @@ from __future__ import annotations
 
 import logging
 import re
+import sys
 import time
 import uuid
-from typing import Any, NamedTuple, Optional
+from typing import Any, Callable, NamedTuple, Optional
 
 import pytest
 import requests
@@ -54,6 +55,26 @@ openai = pytest.importorskip("openai")
 OpenAI = openai.OpenAI
 
 logger = logging.getLogger(__name__)
+
+# Budgets for everything this test waits on *after* the DGD reports Ready. The
+# outer pytest timeout is the sum of these plus the readiness budget, computed
+# in ``tests/deploy/conftest.py`` -- see ``POST_READY_BUDGET`` below.
+_MODEL_DISCOVERY_BUDGET = 300.0
+# Passed straight to ``wait_for_model_availability``; its own worst case is
+# these timeouts plus its fixed inter-attempt sleeps. Kept as data rather than
+# an attempt count so the budget is checkable -- see
+# ``test_availability_probe_stays_within_its_budget``.
+_AVAILABILITY_ATTEMPT_TIMEOUTS = [20.0] * 10
+_AVAILABILITY_BUDGET = 300.0
+# The two tool scenarios, plus port-forward setup and teardown.
+_SCENARIO_BUDGET = 240.0
+_TIMEOUT_SLACK = 120.0
+
+#: Seconds this module can spend after readiness. ``pytest_collection_modifyitems``
+#: reads this off the module and sets ``timeout = --recipe-deploy-timeout + this``.
+POST_READY_BUDGET = int(
+    _MODEL_DISCOVERY_BUDGET + _AVAILABILITY_BUDGET + _SCENARIO_BUDGET + _TIMEOUT_SLACK
+)
 
 # Flags that make a Dynamo frontend/worker emit OpenAI `tool_calls`. Either the
 # frontend declares the parser directly, or the worker declares it and the
@@ -125,7 +146,9 @@ _UNRESOLVED_VAR = re.compile(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?")
 
 
 def _resolve_model(
-    explicit: Optional[str], endpoint: Optional[str], manifest: Optional[str]
+    explicit: Optional[str],
+    discover: Callable[[], Optional[str]],
+    manifest: Optional[str],
 ) -> Optional[str]:
     """Decide which model id to send, in order of authority.
 
@@ -137,14 +160,37 @@ def _resolve_model(
     The manifest used to come first. A truthy ``"${MODEL_PATH}"`` then
     suppressed the endpoint lookup and every request named a model the frontend
     had never heard of.
+
+    ``discover`` is a callable rather than a value so the authority order is
+    real: passing ``_model_from_endpoint(base_url)`` positionally still *ran*
+    the poll before this function could prefer ``explicit`` over it, spending
+    the whole discovery budget on a result that was then discarded.
     """
     if explicit:
         return explicit
-    if endpoint:
-        return endpoint
+    discovered = discover()
+    if discovered:
+        return discovered
     if manifest and not _UNRESOLVED_VAR.search(manifest):
         return manifest
     return None
+
+
+def _resolve_served_model(
+    model_hint: Optional[str],
+    base_url: str,
+    manifest_model: Optional[str],
+    budget: float = _MODEL_DISCOVERY_BUDGET,
+) -> Optional[str]:
+    """The call site's model resolution, as one callable.
+
+    Named so it can be tested without a cluster: the property that matters --
+    an explicit ``--recipe-model`` never pays for endpoint discovery -- is a
+    property of *this composition*, not of ``_resolve_model`` alone.
+    """
+    return _resolve_model(
+        model_hint, lambda: _model_from_endpoint(base_url, budget), manifest_model
+    )
 
 
 def _served_model(spec: DeploymentSpec) -> Optional[str]:
@@ -167,16 +213,28 @@ def _served_model(spec: DeploymentSpec) -> Optional[str]:
 
 
 def _model_from_endpoint(
-    base_url: str, attempts: int = 30, delay: float = 10.0
+    base_url: str, budget: float = _MODEL_DISCOVERY_BUDGET, delay: float = 10.0
 ) -> Optional[str]:
     """Read the served model id back off a running frontend's /v1/models.
 
     Polls, because the frontend answers before any worker has registered and
     reports an empty list until one has.
+
+    Bounded by wall clock, not by an attempt count. Each attempt costs its
+    request timeout *plus* the sleep, so ``attempts * delay`` understates the
+    real worst case by the entire request budget: the previous 30 attempts of a
+    30s request and a 10s sleep was 1200s, half the outer timeout on its own,
+    while reading as if it were 300.
     """
-    for attempt in range(1, attempts + 1):
+    deadline = time.monotonic() + budget
+    attempt = 0
+    while time.monotonic() < deadline:
+        attempt += 1
         try:
-            response = requests.get(f"{base_url}/v1/models", timeout=30)
+            response = requests.get(
+                f"{base_url}/v1/models",
+                timeout=max(1.0, min(30.0, deadline - time.monotonic())),
+            )
             response.raise_for_status()
             entries = (response.json() or {}).get("data") or []
         except (requests.RequestException, ValueError) as exc:
@@ -187,7 +245,8 @@ def _model_from_endpoint(
             if model_id:
                 logger.info("discovered served model %r from /v1/models", model_id)
                 return model_id
-        time.sleep(delay)
+        time.sleep(max(0.0, min(delay, deadline - time.monotonic())))
+    logger.warning("/v1/models reported no model within %.0fs", budget)
     return None
 
 
@@ -195,7 +254,12 @@ def _model_from_endpoint(
 @pytest.mark.k8s
 @pytest.mark.deploy
 @pytest.mark.e2e
-@pytest.mark.timeout(2400)
+# No @pytest.mark.timeout here on purpose. pytest-timeout resolves a marker
+# ahead of the --timeout command line option, so a static marker is a ceiling
+# nobody can raise: with a hardcoded 2400 the readiness budget alone
+# (--recipe-deploy-timeout, default 1800) plus the post-ready waits could exceed
+# it, and any --recipe-deploy-timeout above 2400 could never finish. The timeout
+# is derived from both budgets in tests/deploy/conftest.py.
 async def test_recipe_executes_tools_end_to_end(
     request: pytest.FixtureRequest,
     image: Optional[str],
@@ -238,8 +302,13 @@ async def test_recipe_executes_tools_end_to_end(
     if image:
         deployment_spec.set_image(image)
 
-    # Unique name so concurrent runs against one cluster do not collide.
-    deployment_spec.name = f"{deployment_spec.name}-tx-{uuid.uuid4().hex[:6]}"
+    # Unique names so concurrent runs against one cluster do not collide. This
+    # has to cover the companions too, not just the DGD: they are applied and
+    # deleted by name, 14 of the names in recipes/ are shared between manifests,
+    # and __aenter__ deletes before it creates -- so a run starting up would
+    # otherwise delete a running one's ConfigMaps and ComputeDomains.
+    renames = deployment_spec.uniquify(f"-tx-{uuid.uuid4().hex[:6]}")
+    logger.info("Per-run resource names: %s", renames)
 
     record_property("recipe", recipe)
     record_property("tool_call_parser", parser)
@@ -279,9 +348,9 @@ async def test_recipe_executes_tools_end_to_end(
         base_url = f"http://localhost:{port_forward.local_port}"
         logger.info("Frontend reachable at %s", base_url)
 
-        model = _resolve_model(
-            model_hint, _model_from_endpoint(base_url), manifest_model
-        )
+        # Resolution is lazy inside: an explicit --recipe-model must not pay
+        # for a poll whose answer it outranks.
+        model = _resolve_served_model(model_hint, base_url, manifest_model)
         assert model, (
             f"could not determine the served model for {recipe}: /v1/models "
             f"never reported one and the manifest says {manifest_model!r}. "
@@ -294,7 +363,8 @@ async def test_recipe_executes_tools_end_to_end(
             endpoint=deployment_spec.endpoint,
             model=model,
             logger=logger,
-            max_attempts=30,
+            max_attempts=len(_AVAILABILITY_ATTEMPT_TIMEOUTS),
+            attempt_timeouts=_AVAILABILITY_ATTEMPT_TIMEOUTS,
         ), f"model {model} never became available at {base_url}"
 
         client = OpenAI(api_key="EMPTY", base_url=f"{base_url}/v1")
@@ -465,7 +535,8 @@ def test_the_endpoint_outranks_the_manifest():
     for a model named `"${MODEL_PATH}"`.
     """
 
-    resolve = _resolve_model
+    def resolve(explicit, endpoint, manifest):
+        return _resolve_model(explicit, lambda: endpoint, manifest)
 
     # The case the reviewer found: Kimi K3 declares ${MODEL_PATH} but advertises
     # its real id through ${SERVED_MODEL_NAME}.
@@ -491,3 +562,141 @@ def test_the_deployment_test_takes_the_shared_restart_fixture():
 
     params = inspect.signature(test_recipe_executes_tools_end_to_end).parameters
     assert "skip_service_restart" in params
+
+
+# ---------------------------------------------------------------------------
+# Unit coverage for the wait budgets (no cluster required)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+def test_an_explicit_model_skips_endpoint_discovery(monkeypatch):
+    """`--recipe-model` must not pay for a poll whose answer it outranks.
+
+    Exercised through `_resolve_served_model`, the composition the deploy test
+    actually calls, because the defect lived in the composition: passing
+    `_model_from_endpoint(base_url)` as a positional argument ran the poll
+    before `_resolve_model` could prefer the explicit value, so an operator who
+    named the model still waited out the whole discovery budget and the result
+    was then discarded.
+    """
+    calls: list[str] = []
+
+    def spy(url, **kwargs):
+        calls.append(url)
+        raise AssertionError("endpoint discovery must not run")
+
+    monkeypatch.setattr(requests, "get", spy)
+
+    assert (
+        _resolve_served_model("override/model", "http://frontend", "${MODEL_PATH}")
+        == "override/model"
+    )
+    assert calls == [], f"discovery ran anyway: {calls}"
+
+
+@pytest.mark.unit
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+def test_model_discovery_stays_within_its_budget(monkeypatch):
+    """Discovery must be bounded by wall clock, not by an attempt count.
+
+    Counting attempts hid the request timeout: 30 attempts of a 30s request plus
+    a 10s sleep reads like 300s and costs 1200s. Simulate the worst case -- every
+    request burning its full timeout, every sleep taken -- on a virtual clock.
+    """
+    now = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(time, "sleep", lambda s: now.__setitem__(0, now[0] + s))
+
+    def timing_out(url, timeout=None, **kwargs):
+        now[0] += timeout  # the request consumed its entire allowance
+        raise requests.ConnectionError("frontend not up")
+
+    monkeypatch.setattr(requests, "get", timing_out)
+
+    budget = 300.0
+    assert _model_from_endpoint("http://frontend", budget=budget) is None
+    assert now[0] <= budget + 1.0, f"discovery overran its budget: {now[0]}s"
+
+
+@pytest.mark.unit
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+def test_availability_probe_stays_within_its_budget(monkeypatch):
+    """The availability probe must fit the budget the outer timeout reserves.
+
+    Measured against the real `wait_for_model_availability` rather than against
+    a restatement of its schedule: its inter-attempt sleeps are internal
+    constants, so a locally computed worst case would silently stop matching it.
+    """
+    import tests.utils.client as client_module
+
+    elapsed = [0.0]
+    monkeypatch.setattr(
+        client_module.time, "sleep", lambda s: elapsed.__setitem__(0, elapsed[0] + s)
+    )
+
+    def timing_out(url, json=None, timeout=None, headers=None, **kwargs):
+        elapsed[0] += timeout
+        raise requests.ConnectionError("no worker yet")
+
+    monkeypatch.setattr(client_module.requests, "post", timing_out)
+
+    assert not wait_for_model_availability(
+        url="http://frontend",
+        endpoint="/v1/chat/completions",
+        model="m",
+        logger=logger,
+        max_attempts=len(_AVAILABILITY_ATTEMPT_TIMEOUTS),
+        attempt_timeouts=_AVAILABILITY_ATTEMPT_TIMEOUTS,
+    )
+    assert elapsed[0] <= _AVAILABILITY_BUDGET, (
+        f"availability probe worst case is {elapsed[0]}s, over its "
+        f"{_AVAILABILITY_BUDGET}s budget"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+def test_the_outer_timeout_covers_every_inner_budget():
+    """The derived outer timeout must exceed readiness plus every post-ready wait.
+
+    The regression: a hardcoded `timeout(2400)` sat under readiness (1800) +
+    discovery (1200) + availability (680) = 3680, so a valid slow recipe was
+    killed mid-wait, and because pytest-timeout prefers a marker over the
+    `--timeout` option, no command line could raise the ceiling.
+    """
+    from tests.deploy.conftest import pytest_collection_modifyitems
+
+    for deploy_timeout in (600, 1800, 5400):
+        markers: list[Any] = []
+        item = type(
+            "Item",
+            (),
+            {
+                "module": sys.modules[__name__],
+                "add_marker": lambda self, m: markers.append(m),
+            },
+        )()
+        config = type(
+            "Config", (), {"getoption": lambda self, name, default=None: deploy_timeout}
+        )()
+
+        pytest_collection_modifyitems(config, [item])
+
+        assert len(markers) == 1, "the recipe test must get a derived timeout"
+        outer = markers[0].args[0]
+        inner = (
+            deploy_timeout
+            + _MODEL_DISCOVERY_BUDGET
+            + _AVAILABILITY_BUDGET
+            + _SCENARIO_BUDGET
+        )
+        assert outer > inner, (
+            f"--recipe-deploy-timeout={deploy_timeout} yields outer={outer}s "
+            f"but the inner waits can reach {inner}s"
+        )
