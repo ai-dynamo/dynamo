@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
