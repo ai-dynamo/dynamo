@@ -43,6 +43,10 @@ tabs:
   recipes:
     display-name: Recipes
     icon: file-code
+  agent-skills:
+    display-name: Agent Skills
+    icon: robot
+    slug: agent-skills
   reference:
     display-name: Reference
     icon: book
@@ -887,6 +891,25 @@ navigation:
             path: ../pages-dev/recipes/feature-benchmarks/kv-router-a-b-testing.md
             slug: kv-router-ab-testing
             hidden: true
+  # The tab slug preserves the published /dynamo/dev/agent-skills URL.
+  - tab: agent-skills
+    layout:
+      - page: Overview
+        icon: robot
+        path: ../pages-dev/agent-skills/overview.mdx
+        slug: overview
+      - page: Deployment and Operations
+        icon: screwdriver-wrench
+        path: ../pages-dev/agent-skills/deployment.mdx
+        slug: deployment
+      - page: Performance Optimization
+        icon: gauge-high
+        path: ../pages-dev/agent-skills/optimization.mdx
+        slug: optimization
+      - page: Development and Documentation
+        icon: code
+        path: ../pages-dev/agent-skills/development.mdx
+        slug: development
   - tab: reference
     layout:
       - page: Compatibility
@@ -937,10 +960,6 @@ navigation:
         icon: microchip
         path: ../pages-dev/reference/general/model-early-access-builds.mdx
         slug: model-early-access-builds
-      - page: Agent Skills
-        icon: robot
-        path: ../pages-dev/reference/general/agent-skills.mdx
-        slug: agent-skills
       - page: Examples
         icon: file-code
         path: ../pages-dev/reference/general/examples.md
