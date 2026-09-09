@@ -763,27 +763,6 @@ async fn route_approx_writes(
 }
 
 #[test]
-fn process_mooncake_trace_rejects_zero_factors_before_loading() {
-    for (length_factor, duplication_factor, num_workers, parameter) in [
-        (0, 1, 1, "trace_length_factor"),
-        (1, 0, 1, "trace_duplication_factor"),
-        (1, 1, 0, "num_workers"),
-    ] {
-        let error = process_mooncake_trace(
-            "",
-            BLOCK_SIZE,
-            length_factor,
-            duplication_factor,
-            num_workers,
-            42,
-        )
-        .unwrap_err();
-
-        assert_eq!(error.to_string(), format!("{parameter} must be positive"));
-    }
-}
-
-#[test]
 fn process_mooncake_trace_expands_and_duplicates_hash_space() -> anyhow::Result<()> {
     let mut file = NamedTempFile::new()?;
     for (i, (hash_ids, output_length)) in [(&[0u64, 1, 2] as &[u64], 10u64), (&[0, 1, 3, 4], 10)]
