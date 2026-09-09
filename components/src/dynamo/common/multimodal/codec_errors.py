@@ -20,8 +20,10 @@ module installs anything.
 
 from __future__ import annotations
 
+import importlib.util
+
 from dynamo.common.multimodal.nvdec_decoder import HW_ROUTED_CODECS, nvdec_available
-from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
+from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS, installer_covers
 
 INSTALLER_CMD = "python -m dynamo.common.utils.install_media_decoders"
 
@@ -35,12 +37,25 @@ class MissingMediaDecoderError(RuntimeError):
     """
 
 
-def _install_hint(backend: str, package: str) -> str:
+def _install_hint(backend: str, package: str, module: str) -> str:
+    """The remedy line: a pip command that works from where the caller is.
+
+    Two things make the naive command wrong. The carrier may already be
+    importable but unusable for this input -- the vLLM images ship an OpenCV
+    built from source with no video backend, at a version that can satisfy the
+    spec below, so a plain install reports "already satisfied" and changes
+    nothing. And the bundled installer does not cover every backend/package
+    pair, so offering it where it installs nothing relevant sends the caller
+    down a command that exits 0 and fixes nothing.
+    """
     spec = VALIDATED_SPECS[package]
-    return (
-        f"install the validated decoder with `pip install --no-deps '{spec}'` "
-        f"(or `{INSTALLER_CMD} {backend}`)"
-    )
+    flags = "--no-deps"
+    if importlib.util.find_spec(module) is not None:
+        flags += f" --force-reinstall --only-binary {package}"
+    hint = f"install the validated decoder with `pip install {flags} '{spec}'`"
+    if installer_covers(backend, package):
+        hint += f" (or `{INSTALLER_CMD} {backend}`)"
+    return hint
 
 
 def _with_cause(message: str, cause: str | None) -> str:
@@ -88,7 +103,10 @@ def video_decoder_missing(
         )
     return MissingMediaDecoderError(
         _with_cause(
-            "Cannot decode video: " + lead + _install_hint(backend, package) + ".",
+            "Cannot decode video: "
+            + lead
+            + _install_hint(backend, package, module)
+            + ".",
             cause,
         )
     )
@@ -106,7 +124,7 @@ def audio_decoder_missing(
         _with_cause(
             "Cannot decode audio: this input needs the PyAV decoder ('av'), which "
             "this image deliberately does not ship, and NVDEC does not decode "
-            "audio. To enable audio input, " + _install_hint(backend, "av") + ".",
+            "audio. To enable audio input, " + _install_hint(backend, "av", "av") + ".",
             cause,
         )
     )

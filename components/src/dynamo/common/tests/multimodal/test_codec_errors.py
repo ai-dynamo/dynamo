@@ -16,7 +16,7 @@ from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
 
 
-def test_video_message_names_codec_spec_and_installer(monkeypatch):
+def test_video_message_names_codec_and_spec(monkeypatch):
     monkeypatch.setattr(codec_errors, "nvdec_available", lambda: True)
     err = video_decoder_missing("vllm", "opencv-python-headless", "cv2", "vp9")
 
@@ -27,9 +27,34 @@ def test_video_message_names_codec_spec_and_installer(monkeypatch):
     # The bounded spec comes verbatim from the installer's constants, so the
     # message and the documented install can never drift apart.
     assert VALIDATED_SPECS["opencv-python-headless"] in msg
-    assert "install_media_decoders vllm" in msg
+    # The installer does not install OpenCV for vLLM, so offering it here would
+    # send the reader to a command that exits 0 and decodes nothing.
+    assert "install_media_decoders vllm" not in msg
     # Non-hardware codec: the hardware alternative is re-encoding.
     assert "H.264/H.265" in msg
+
+
+def test_audio_message_still_offers_the_installer():
+    """PyAV is in the vLLM set, so the installer remains a real remedy there."""
+    err = codec_errors.audio_decoder_missing("vllm")
+    assert "install_media_decoders vllm" in str(err)
+
+
+def test_present_but_unusable_carrier_forces_a_binary_reinstall(monkeypatch):
+    """A carrier already on the path needs more than a plain install.
+
+    The vLLM images ship an OpenCV built from source with no video backend, at
+    a version that satisfies the spec, so `pip install` alone reports the
+    requirement as satisfied and leaves it in place.
+    """
+    monkeypatch.setattr(codec_errors.importlib.util, "find_spec", lambda name: object())
+    msg = str(video_decoder_missing("vllm", "opencv-python-headless", "cv2", "vp9"))
+    assert "--force-reinstall" in msg
+    assert "--only-binary opencv-python-headless" in msg
+
+    monkeypatch.setattr(codec_errors.importlib.util, "find_spec", lambda name: None)
+    msg = str(video_decoder_missing("vllm", "opencv-python-headless", "cv2", "vp9"))
+    assert "--force-reinstall" not in msg
 
 
 def test_hw_codec_without_nvdec_points_at_driver_capability(monkeypatch):

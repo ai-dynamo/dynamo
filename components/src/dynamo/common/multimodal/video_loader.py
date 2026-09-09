@@ -198,7 +198,8 @@ class VideoLoader:
         surfaces either a bare ``No module named 'cv2'`` or a ``SystemError``
         from ``VideoCapture``, neither carrying a codec or a remedy -- both
         become the actionable unsupported-codec error, which can name the codec
-        because the probe already ran here.
+        because the probe already ran here. Both are translated on failure
+        rather than pre-empted, so a configured non-OpenCV backend still runs.
 
         The NVDEC path honors the two ``media_io_kwargs`` that decide *which*
         frames come back -- ``num_frames`` and ``fps`` -- because it samples
@@ -222,19 +223,25 @@ class VideoLoader:
                     codec,
                     exc,
                 )
-        if _cv2_lacks_video_backend():
+        try:
+            return await asyncio.to_thread(media_io.load_bytes, content)
+        except ImportError as exc:
+            raise video_decoder_missing(
+                "vllm", "opencv-python-headless", "cv2", codec, cause=str(exc)
+            ) from exc
+        except SystemError as exc:
+            # A cv2 with no video backend fails inside VideoCapture rather than
+            # on import. Translate only when that is actually the case: the
+            # decode may be running a different backend entirely, and an
+            # unrelated SystemError must keep its own message.
+            if not _cv2_lacks_video_backend():
+                raise
             raise video_decoder_missing(
                 "vllm",
                 "opencv-python-headless",
                 "cv2",
                 codec,
                 cause="the image's OpenCV is built without a video backend",
-            )
-        try:
-            return await asyncio.to_thread(media_io.load_bytes, content)
-        except ImportError as exc:
-            raise video_decoder_missing(
-                "vllm", "opencv-python-headless", "cv2", codec, cause=str(exc)
             ) from exc
 
     def _extract_nvdec_args(self, media_io: Any) -> dict[str, Any]:

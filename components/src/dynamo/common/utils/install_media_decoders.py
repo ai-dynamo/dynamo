@@ -145,6 +145,17 @@ _BACKEND_DECODERS: dict[str, tuple[_Decoder, ...]] = {
 }
 
 
+def installer_covers(backend: str, package: str) -> bool:
+    """Whether ``install_media_decoders <backend>`` installs ``package``.
+
+    The error builders ask before offering this installer as a remedy. A
+    backend whose set omits the package -- vLLM and OpenCV, since those images
+    already ship a source-built cv2 -- would otherwise be told to run a command
+    that exits successfully having installed nothing that helps.
+    """
+    return any(d.package == package for d in _BACKEND_DECODERS.get(backend, ()))
+
+
 def _modules_missing_fresh(modules: Sequence[str]) -> list[str]:
     """Return the subset of `modules` a FRESH interpreter cannot IMPORT.
 

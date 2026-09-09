@@ -305,8 +305,17 @@ async def test_decode_video_bytes_missing_decoder_is_actionable(monkeypatch):
     msg = str(exc_info.value)
     assert "'vp9'" in msg  # names the codec
     assert VALIDATED_SPECS["opencv-python-headless"] in msg  # bounded spec
-    assert "install_media_decoders vllm" in msg  # installer command
+    assert "pip install" in msg  # a remedy the reader can run
     assert "cv2" in msg
+
+
+class _SystemErrorMediaIO:
+    """What a cv2 with no video backend does: fail inside VideoCapture."""
+
+    def load_bytes(self, content: bytes):
+        raise SystemError(
+            "<class 'cv2.VideoCapture'> returned a result with an exception set"
+        )
 
 
 @pytest.mark.asyncio
@@ -316,22 +325,58 @@ async def test_decode_video_bytes_backendless_cv2_is_actionable(monkeypatch):
     The runtime images rebuild OpenCV from source with WITH_FFMPEG=OFF, so cv2
     imports and resizes but opens no video. vLLM raises SystemError from
     VideoCapture rather than ImportError, which would otherwise escape the
-    handler below and reach the client with no codec and no remedy.
+    handler and reach the client with no codec and no remedy.
     """
     loader = VideoLoader()
     monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "vp9")
     monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
     monkeypatch.setattr(video_loader_module, "_cv2_lacks_video_backend", lambda: True)
 
-    media_io = AsyncMock()
     with pytest.raises(MissingMediaDecoderError) as exc_info:
-        await loader._decode_video_bytes(b"vp9-bytes", media_io)
+        await loader._decode_video_bytes(b"vp9-bytes", _SystemErrorMediaIO())
 
     msg = str(exc_info.value)
     assert "'vp9'" in msg
     assert VALIDATED_SPECS["opencv-python-headless"] in msg
     assert "video backend" in msg
-    media_io.load_bytes.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_backendless_cv2_does_not_pre_empt_a_working_decode(monkeypatch):
+    """The check must not short-circuit a decoder that would have succeeded.
+
+    On the shipped image the predicate is always true, so gating the call on it
+    would reject every VideoMediaIO -- including a configured non-OpenCV
+    video_backend, and the stubbed load_bytes the worker tests rely on.
+    """
+    loader = VideoLoader()
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "vp9")
+    monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
+    monkeypatch.setattr(video_loader_module, "_cv2_lacks_video_backend", lambda: True)
+
+    frames = np.zeros((2, 4, 4, 3), dtype=np.uint8)
+
+    class _WorkingMediaIO:
+        def load_bytes(self, content: bytes):
+            return frames, {"frames_indices": [0, 1]}
+
+    decoded, metadata = await loader._decode_video_bytes(
+        b"vp9-bytes", _WorkingMediaIO()
+    )
+    assert decoded is frames
+    assert metadata == {"frames_indices": [0, 1]}
+
+
+@pytest.mark.asyncio
+async def test_unrelated_system_error_keeps_its_own_message(monkeypatch):
+    """A SystemError from anywhere else must not be blamed on the codec."""
+    loader = VideoLoader()
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "vp9")
+    monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
+    monkeypatch.setattr(video_loader_module, "_cv2_lacks_video_backend", lambda: False)
+
+    with pytest.raises(SystemError, match="VideoCapture"):
+        await loader._decode_video_bytes(b"vp9-bytes", _SystemErrorMediaIO())
 
 
 def test_cv2_lacks_video_backend_is_false_when_cv2_absent(monkeypatch):
