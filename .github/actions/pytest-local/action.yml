@@ -115,13 +115,14 @@ runs:
         PYTEST_DD_FLAKY_RETRY_ENABLED: ${{ inputs.dd_flaky_retry_enabled }}
         TRITON_ARTIFACTORY_USER: ${{ inputs.triton_artifactory_user }}
         TRITON_ARTIFACTORY_TOKEN: ${{ inputs.triton_artifactory_token }}
+        VERIFY_GPU: ${{ inputs.verify_gpu }}
       run: |
         # Sanitize test_type for filenames: remove commas and spaces. Exported
         # for the per-stage upload steps' artifact names.
         STR_TEST_TYPE=$(echo "${TEST_TYPE}" | tr ', ' '_')
         echo "STR_TEST_TYPE=${STR_TEST_TYPE}" >> $GITHUB_ENV
 
-        if [[ "${GPU_TESTS}" == "true" && "${PYTEST_MARKS}" != *"triton_qa"* ]]; then
+        if [[ "${GPU_TESTS}" == "true" && "${VERIFY_GPU}" != "false" && "${PYTEST_MARKS}" != *"triton_qa"* ]]; then
           # Only GPU tests require MinIO (LoRA tests). Wait for the job service.
           echo "⏳ Waiting for MinIO to be ready..."
           MAX_ATTEMPTS=30

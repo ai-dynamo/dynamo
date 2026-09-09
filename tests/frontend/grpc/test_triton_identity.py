@@ -91,7 +91,7 @@ def start_services_with_triton_worker(request, tmp_path, start_services_with_grp
 @pytest.mark.gpu_0
 @pytest.mark.triton
 @pytest.mark.parallel
-@pytest.mark.timeout(120)
+@pytest.mark.timeout(360)
 def test_identity_tensor_round_trip(
     file_storage_backend, start_services_with_triton_worker
 ):

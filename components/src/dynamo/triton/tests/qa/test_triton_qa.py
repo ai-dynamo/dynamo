@@ -161,10 +161,12 @@ def test_l0_infer(
     artifacts = artifact_dir(request.node.name)
     log_path = artifacts / "test.sh.log.txt"
 
-    returncode = run_qa_test_sh(
-        l0_infer_dir, env=env, log_path=log_path, args=[triton_version]
-    )
-    collect_artifacts(l0_infer_dir, artifacts)
+    try:
+        returncode = run_qa_test_sh(
+            l0_infer_dir, env=env, log_path=log_path, args=[triton_version]
+        )
+    finally:
+        collect_artifacts(l0_infer_dir, artifacts)
 
     assert (
         returncode == 0
