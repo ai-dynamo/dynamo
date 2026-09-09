@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use anyhow::ensure;
 #[allow(unused_imports)]
 pub use dynamo_kv_router::NoopSequencePublisher;
 use dynamo_kv_router::protocols::KvCacheEventData;
@@ -22,16 +21,6 @@ pub fn process_mooncake_trace(
     num_workers: usize,
     seed: u64,
 ) -> anyhow::Result<Vec<Trace>> {
-    ensure!(
-        trace_length_factor > 0,
-        "trace_length_factor must be positive"
-    );
-    ensure!(
-        trace_duplication_factor > 0,
-        "trace_duplication_factor must be positive"
-    );
-    ensure!(num_workers > 0, "num_workers must be positive");
-
     let trace = Trace::from_mooncake(std::path::Path::new(path), block_size as usize)?
         .expand_hash_prefix_depth(trace_length_factor)
         .duplicate_hash_space(trace_duplication_factor);
