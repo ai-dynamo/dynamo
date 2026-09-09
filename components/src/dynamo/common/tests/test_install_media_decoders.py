@@ -133,22 +133,20 @@ def test_already_present_installs_nothing(sandboxed):
     assert calls == []
 
 
-def test_vllm_installs_bounded_video_and_audio_specs(sandboxed):
+def test_vllm_installs_bounded_audio_spec(sandboxed):
     present: set[str] = set()
     _set_available(sandboxed, present)
-    calls = _record_pip_and_mark(sandboxed, present, "cv2", "av")
+    calls = _record_pip_and_mark(sandboxed, present, "av")
     installed = install_media_decoders.install_media_decoders("vllm")
-    assert installed == [
-        install_media_decoders.VALIDATED_SPECS["opencv-python-headless"],
-        install_media_decoders.VALIDATED_SPECS["av"],
-    ]
+    assert installed == [install_media_decoders.VALIDATED_SPECS["av"]]
     (cmd,) = calls
     assert "--break-system-packages" in cmd
     for spec in installed:
         assert spec in cmd
-    # Never installed: pynvvideocodec because the image already ships it as the
-    # NVDEC path, and the rest because no vLLM decode path imports them.
-    for banned in ("torchcodec", "pynvvideocodec", "decord2", "libx264"):
+    # Never installed: pynvvideocodec and opencv because the images already ship
+    # both -- NVDEC, and a source-built cv2 with no video backend -- and the
+    # rest because no vLLM decode path imports them.
+    for banned in ("torchcodec", "pynvvideocodec", "decord2", "libx264", "opencv"):
         assert not any(banned in part for part in cmd)
 
 
@@ -175,10 +173,20 @@ def test_trtllm_installs_opencv_only(sandboxed):
 
 
 def test_installs_only_missing_modules(sandboxed):
+    """Only carriers a fresh interpreter cannot import are installed.
+
+    Runs against a synthetic two-carrier backend: every shipped backend declares
+    a single carrier, so a real one leaves the subsetting branch unexercised.
+    """
+    sandboxed.setitem(
+        install_media_decoders._BACKEND_DECODERS,
+        "twocarrier",
+        (install_media_decoders._OPENCV, install_media_decoders._PYAV),
+    )
     present = {"cv2"}  # video carrier present, audio missing
     _set_available(sandboxed, present)
     calls = _record_pip_and_mark(sandboxed, present, "av")
-    installed = install_media_decoders.install_media_decoders("vllm")
+    installed = install_media_decoders.install_media_decoders("twocarrier")
     assert installed == [install_media_decoders.VALIDATED_SPECS["av"]]
     (cmd,) = calls
     assert install_media_decoders.VALIDATED_SPECS["opencv-python-headless"] not in cmd
@@ -249,19 +257,18 @@ def test_dry_run_reports_without_installing(sandboxed):
     calls = _record_pip(sandboxed)
     _set_available(sandboxed, set())
     specs = install_media_decoders.install_media_decoders("vllm", dry_run=True)
-    assert specs == [
-        install_media_decoders.VALIDATED_SPECS["opencv-python-headless"],
-        install_media_decoders.VALIDATED_SPECS["av"],
-    ]
+    assert specs == [install_media_decoders.VALIDATED_SPECS["av"]]
     assert calls == []
 
 
 def test_pending_subset_installs_only_still_missing(sandboxed):
     """A racing process may install part of the set while we wait on the lock.
 
-    Probe round 1 (pre-check) sees both vLLM carriers missing; round 2
-    (post-lock re-check) sees cv2 already installed by the racing process, so
-    only the audio carrier installs; round 3 (post-verify) sees everything.
+    Probe round 1 (pre-check) sees both carriers missing; round 2 (post-lock
+    re-check) sees cv2 already installed by the racing process, so only the
+    audio carrier installs; round 3 (post-verify) sees everything. Uses a
+    synthetic two-carrier backend for the reason given in
+    test_installs_only_missing_modules.
     """
     rounds = {"n": 0}
 
@@ -273,9 +280,14 @@ def test_pending_subset_installs_only_still_missing(sandboxed):
             return [m for m in mods if m != "cv2"]
         return []
 
+    sandboxed.setitem(
+        install_media_decoders._BACKEND_DECODERS,
+        "twocarrier",
+        (install_media_decoders._OPENCV, install_media_decoders._PYAV),
+    )
     sandboxed.setattr(install_media_decoders, "_modules_missing_fresh", probe)
     calls = _record_pip(sandboxed)
-    installed = install_media_decoders.install_media_decoders("vllm")
+    installed = install_media_decoders.install_media_decoders("twocarrier")
     assert installed == [install_media_decoders.VALIDATED_SPECS["av"]]
     (cmd,) = calls
     assert install_media_decoders.VALIDATED_SPECS["opencv-python-headless"] not in cmd

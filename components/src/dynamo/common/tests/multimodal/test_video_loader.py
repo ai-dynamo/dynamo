@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import sys
 from unittest.mock import AsyncMock
 
 import numpy as np
@@ -306,6 +307,41 @@ async def test_decode_video_bytes_missing_decoder_is_actionable(monkeypatch):
     assert VALIDATED_SPECS["opencv-python-headless"] in msg  # bounded spec
     assert "install_media_decoders vllm" in msg  # installer command
     assert "cv2" in msg
+
+
+@pytest.mark.asyncio
+async def test_decode_video_bytes_backendless_cv2_is_actionable(monkeypatch):
+    """A cv2 built without a video backend must reach the same error.
+
+    The runtime images rebuild OpenCV from source with WITH_FFMPEG=OFF, so cv2
+    imports and resizes but opens no video. vLLM raises SystemError from
+    VideoCapture rather than ImportError, which would otherwise escape the
+    handler below and reach the client with no codec and no remedy.
+    """
+    loader = VideoLoader()
+    monkeypatch.setattr(video_loader_module, "probe_video_codec", lambda b: "vp9")
+    monkeypatch.setattr(video_loader_module, "should_use_nvdec", lambda c: False)
+    monkeypatch.setattr(video_loader_module, "_cv2_lacks_video_backend", lambda: True)
+
+    media_io = AsyncMock()
+    with pytest.raises(MissingMediaDecoderError) as exc_info:
+        await loader._decode_video_bytes(b"vp9-bytes", media_io)
+
+    msg = str(exc_info.value)
+    assert "'vp9'" in msg
+    assert VALIDATED_SPECS["opencv-python-headless"] in msg
+    assert "video backend" in msg
+    media_io.load_bytes.assert_not_called()
+
+
+def test_cv2_lacks_video_backend_is_false_when_cv2_absent(monkeypatch):
+    """An absent cv2 is not this case: the ImportError path names it better."""
+    video_loader_module._cv2_lacks_video_backend.cache_clear()
+    monkeypatch.setitem(sys.modules, "cv2", None)
+    try:
+        assert video_loader_module._cv2_lacks_video_backend() is False
+    finally:
+        video_loader_module._cv2_lacks_video_backend.cache_clear()
 
 
 @pytest.mark.asyncio

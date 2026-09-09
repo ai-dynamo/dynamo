@@ -26,7 +26,6 @@ Each backend decodes such input through a specific Python package whose wheel bu
 
 | Backend | Input | Package (validated version bounds) | Import |
 |---------|-------|------------------------------------|--------|
-| vLLM | video | `opencv-python-headless>=4.13.0.92,<5` | `cv2` |
 | vLLM | audio | `av>=18.0.0,<19` | `av` |
 | SGLang | video | `decord2>=3.4.0,<4` | `decord` |
 | TensorRT-LLM | video | `opencv-python-headless>=4.13.0.92,<5` | `cv2` |
@@ -38,8 +37,8 @@ The lower bound of each spec is the version validated against Dynamo's multimoda
 The table above is the contract; these commands are its direct translation, and work with the installer of your choice (`pip`, `uv pip`, ...):
 
 ```bash
-# vLLM: video + audio input
-pip install --no-deps 'opencv-python-headless>=4.13.0.92,<5' 'av>=18.0.0,<19'
+# vLLM: audio input
+pip install --no-deps 'av>=18.0.0,<19'
 
 # SGLang: video input
 pip install --no-deps 'decord2>=3.4.0,<4'
@@ -98,4 +97,5 @@ The default pip timeout is 600 seconds (`--timeout-s` overrides it; `0` disables
 - For H.264 and H.265, prefer NVDEC. Granting the container the `video` driver capability decodes those formats on the GPU with no extra package. Install a software decoder when that is not an option, or when the input is audio.
 - Installing a decoder package brings in that wheel's bundled media libraries. The runtime images are scanned for media components at build time; a package installed afterwards is not covered by that scan. Review what your deployment ships — a baked image layer keeps the change visible and reviewable.
 - On TensorRT-LLM, the install puts back `opencv-python-headless`, which those images deliberately do not ship. H.264 and H.265 already decode there through NVDEC, so install it only for a host where NVDEC is unavailable.
+- The vLLM images ship OpenCV already, rebuilt from source with every video backend disabled. It covers still images — which multimodal Mistral models need, because `mistral_common` resizes every image through `cv2` — and decodes no video at all. Video input on vLLM goes through NVDEC. To decode video in software instead, install the PyPI wheel over it with `pip install --no-deps 'opencv-python-headless>=4.13.0.92,<5'`, which restores the bundled FFmpeg and its codecs; the bundled installer will not do this for you.
 - The optional Rust frontend decoder (`--frontend-decoding`) links FFmpeg's compiled-in decoders and always decodes VP8/VP9 regardless of installed Python packages; backend decoding is what an install extends. Re-encoding an input to VP9 (`ffmpeg -i input.mp4 -c:v libvpx-vp9 -an output.webm`) is an alternative that needs no additional packages.

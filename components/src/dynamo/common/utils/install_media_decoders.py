@@ -22,7 +22,6 @@ Each backend decodes such input through a specific Python package whose wheel
 bundles its own FFmpeg, so the support can be added by a plain ``pip install``
 -- no image rebuild:
 
-* vLLM video input    -> OpenCV (``cv2``),    package ``opencv-python-headless``
 * vLLM audio input    -> PyAV (``av``),       package ``av``
 * SGLang video input  -> decord (``decord``), package ``decord2``
 * TRT-LLM video input -> OpenCV (``cv2``),    package ``opencv-python-headless``
@@ -126,8 +125,14 @@ VALIDATED_SPECS: dict[str, str] = {d.package: d.spec for d in (_OPENCV, _PYAV, _
 #     reinstall what is already present.
 #   * torchcodec, PyAV-on-SGLang, opencv-on-SGLang -- no Dynamo decode path
 #     imports them, so installing them would add a carrier nothing calls.
+#   * OpenCV-on-vLLM -- those images already ship a source-built cv2 with no
+#     video backend, for mistral_common's still-image resize. It is importable,
+#     so the skip-if-present check would make listing it a silent no-op that
+#     promises a video decoder this installer cannot deliver. Giving vLLM
+#     software video decode means installing the PyPI wheel directly, which
+#     puts a full FFmpeg back in the image -- see the docs.
 _BACKEND_DECODERS: dict[str, tuple[_Decoder, ...]] = {
-    "vllm": (_OPENCV, _PYAV),
+    "vllm": (_PYAV,),
     "sglang": (_DECORD,),
     # TRT-LLM decodes video_url input via tensorrt_llm.inputs -> _load_video_by_cv2
     # (OpenCV). It has no audio-input decode path today.
