@@ -118,7 +118,7 @@ func (w *SelectedWorkload) PlanNodeLocalMaterialization(pcsName string) (*Materi
 			grovecommon.ResourceNameReplica{Name: pcsName, Replica: 0}, lpxScalingGroupTemplate,
 		),
 		LPXScalingGroupTemplate: lpxScalingGroupTemplate,
-		Replicas:                w.engineReplicas,
+		Replicas:                w.scalingGroupReplicas,
 	}
 	plan = plan.ForReplica(0)
 

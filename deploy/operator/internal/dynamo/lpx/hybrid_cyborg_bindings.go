@@ -84,7 +84,7 @@ func ApplySelectedCyborgContainerDefaults(
 		return err
 	}
 	hostsFile := lpuConfigMountPath + "/lpu_servers"
-	if workload.engineReplicas > 1 {
+	if workload.scalingGroupReplicas > 1 {
 		// Resolve the replica through the downward API before Kubernetes expands
 		// SERVER_HOSTS_FILE. The image entrypoint remains untouched.
 		container.Env = append(container.Env, corev1.EnvVar{

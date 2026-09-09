@@ -172,6 +172,7 @@ func TestResolveSelectedWorkloadSpecDecodeV2AndV3(t *testing.T) {
 			)
 			plan, err := selected.PlanNodeLocalMaterialization("test-pcs")
 			require.NoError(t, err)
+			require.EqualValues(t, 1, plan.Replicas, "draft fanout must not become the shared scaling-group axis")
 			require.Equal(t, "small", projections[0].stage)
 			require.Equal(t, "lpx", projections[2].stage)
 			require.Equal(

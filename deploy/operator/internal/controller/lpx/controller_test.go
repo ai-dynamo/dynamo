@@ -152,7 +152,7 @@ func TestLPXTerminalFailureRetiresUnpublishedWorkload(t *testing.T) {
 	}{
 		{name: "intent", reason: "LPXRejected", message: "providerOverride"},
 		{name: "name budget", reason: "LPXRejected", message: "spec.components[0].name: Invalid value"},
-		{name: "selected workload", reason: "LPXRejected", message: "fixed engine replicas"},
+		{name: "selected workload", reason: "LPXRejected", message: "scaling-group replicas"},
 		{name: "render", reason: "LPXReconciliationFailed", message: "model storage volume mount"},
 		{name: "invalid source", reason: "LPXRejected", message: "source"},
 		{name: "transient snapshot", reason: "LPXReconciliationFailed", message: "temporary snapshot timeout", preserve: true},

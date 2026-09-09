@@ -34,8 +34,8 @@ func TestRenderSelectedCyborgConfigMapServerNames(t *testing.T) {
 	projection := projectionBatch[0]
 	projection.stage = testRenderComponentName
 	workload := &SelectedWorkload{
-		modelProjections: []*ModelProjection{projection},
-		engineReplicas:   1,
+		modelProjections:     []*ModelProjection{projection},
+		scalingGroupReplicas: 1,
 	}
 
 	t.Log("Resolve the projected runtime path")
@@ -47,7 +47,7 @@ func TestRenderSelectedCyborgConfigMapServerNames(t *testing.T) {
 	t.Log("Verify every engine replica addresses only its own Agents")
 	for _, replicas := range []int32{1, 3, 9} {
 		t.Run(strconv.Itoa(int(replicas)), func(t *testing.T) {
-			workload.engineReplicas = replicas
+			workload.scalingGroupReplicas = replicas
 			plan, err := workload.PlanNodeLocalMaterialization("test-dgd-lpx")
 			require.NoError(t, err)
 			configMap, err := renderSelectedCyborgConfigMap("test-namespace", "test-dgd", plan, "/models", &projection.configuredBuild)

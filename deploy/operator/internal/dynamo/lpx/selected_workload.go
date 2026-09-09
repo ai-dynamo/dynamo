@@ -11,9 +11,9 @@ import "strings"
 // LPX scheduling and runtime materialization.
 // Its methods require a successfully resolved, non-nil workload with projections.
 type SelectedWorkload struct {
-	modelProjections []*ModelProjection
-	digest           WorkloadDigest
-	engineReplicas   int32
+	modelProjections     []*ModelProjection
+	digest               WorkloadDigest
+	scalingGroupReplicas int32
 }
 
 // ModelProjections returns a read-only view of the selected projection list.

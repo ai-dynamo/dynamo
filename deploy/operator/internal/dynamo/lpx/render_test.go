@@ -38,9 +38,9 @@ func renderSelectedForTest(pcs *grovev1alpha1.PodCliqueSet, projections []*Model
 		return nil, err
 	}
 	workload := &SelectedWorkload{
-		modelProjections: projections,
-		digest:           digest,
-		engineReplicas:   1,
+		modelProjections:     projections,
+		digest:               digest,
+		scalingGroupReplicas: 1,
 	}
 	plan, err := workload.PlanNodeLocalMaterialization(pcs.Name)
 	if err != nil {

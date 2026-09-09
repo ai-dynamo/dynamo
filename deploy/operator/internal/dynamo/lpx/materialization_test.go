@@ -43,7 +43,7 @@ func TestPlanMaterializationBoundsGeneratedPodHostnames(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			test.projection.stage = "longcomponent"
-			workload := &SelectedWorkload{modelProjections: []*ModelProjection{test.projection}, engineReplicas: 1}
+			workload := &SelectedWorkload{modelProjections: []*ModelProjection{test.projection}, scalingGroupReplicas: 1}
 			pcsName := strings.Repeat("a", test.pcsLength)
 			t.Log("Plan and verify materialization within the DNS hostname budget")
 			plan, err := workload.PlanNodeLocalMaterialization(pcsName)

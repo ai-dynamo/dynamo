@@ -43,7 +43,6 @@ func ResolveSelectedWorkload(
 	if err := allErrs.ToAggregate(); err != nil {
 		return nil, err
 	}
-	component := components[len(components)-1]
 	projections := make([]*ModelProjection, 0, len(components))
 	var snapshot NormalizedBuildSnapshot
 	var pipeline Pipeline
@@ -118,9 +117,13 @@ func ResolveSelectedWorkload(
 		}
 		projections = projected
 	}
-	replicas := ptr.Deref(component.Replicas, 1)
-	if pipeline != PipelineLPX && replicas != 1 {
-		return nil, fmt.Errorf("%w: fixed engine replicas above one currently require a hybrid engine", ErrUnsupportedRuntime)
+	scalingGroupReplicas := int32(1)
+	if len(components) == 1 {
+		// A sole component can flatten its replica axis into the outer scaling group.
+		scalingGroupReplicas = ptr.Deref(components[0].Replicas, 1)
+	}
+	if pipeline != PipelineLPX && scalingGroupReplicas != 1 {
+		return nil, fmt.Errorf("%w: scaling-group replicas above one currently require a hybrid engine", ErrUnsupportedRuntime)
 	}
 
 	// Canonical roles expand into default or draft0..draft7 followed by target.
@@ -129,9 +132,9 @@ func ResolveSelectedWorkload(
 		return nil, err
 	}
 	return &SelectedWorkload{
-		modelProjections: projections,
-		digest:           digest,
-		engineReplicas:   replicas,
+		modelProjections:     projections,
+		digest:               digest,
+		scalingGroupReplicas: scalingGroupReplicas,
 	}, nil
 }
 
