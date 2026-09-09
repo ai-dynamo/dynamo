@@ -35,7 +35,30 @@ use tokio_util::task::AbortOnDropHandle;
 /// share one. `zmq::Context` is reference-counted; clones drive the same context.
 fn shared_zmq_context() -> Context {
     static CONTEXT: OnceLock<Context> = OnceLock::new();
-    CONTEXT.get_or_init(Context::new).clone()
+    CONTEXT
+        .get_or_init(|| {
+            let value = std::env::var_os("DYN_ZMQ_IO_THREADS");
+            let value = value.as_ref().map(|value| {
+                value
+                    .to_str()
+                    .expect("DYN_ZMQ_IO_THREADS must be a positive integer")
+            });
+            configured_zmq_context(value).expect("failed to configure event-plane ZMQ I/O threads")
+        })
+        .clone()
+}
+
+fn configured_zmq_context(value: Option<&str>) -> Result<Context> {
+    let io_threads = value.unwrap_or("4").parse::<i32>()?;
+    anyhow::ensure!(
+        io_threads > 0,
+        "DYN_ZMQ_IO_THREADS must be a positive integer"
+    );
+    let context = Context::new();
+    // Configure the process-wide context before creating any PUB/SUB sockets.
+    context.set_io_threads(io_threads)?;
+    tracing::info!(io_threads, "Configured shared event-plane ZMQ context");
+    Ok(context)
 }
 
 /// High Water Mark (HWM) for ZMQ sockets.
@@ -705,6 +728,17 @@ impl EventTransportRx for ZmqSubTransport {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn configures_zmq_io_threads() {
+        for (value, expected) in [(None, 4), (Some("1"), 1), (Some("4"), 4)] {
+            let context = super::configured_zmq_context(value).unwrap();
+            assert_eq!(context.get_io_threads().unwrap(), expected);
+        }
+        for value in ["0", "-1", "invalid", "", "2147483648"] {
+            assert!(super::configured_zmq_context(Some(value)).is_err());
+        }
+    }
+
     use super::*;
     use crate::transports::event_plane::{EventEnvelope, MsgpackCodec};
     use std::collections::HashSet;
