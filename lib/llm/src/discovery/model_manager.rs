@@ -1225,19 +1225,18 @@ impl ModelManager {
     /// must stay aligned with endpoint retraction: a unit answered wrongly here either
     /// disables an endpoint that still has models or leaves one enabled with none.
     pub fn has_models_of_type(&self, model_type: ModelType) -> bool {
-        (model_type.contains(ModelType::Chat) && !self.list_chat_completions_models().is_empty())
-            || (model_type.contains(ModelType::Completions)
-                && !self.list_completions_models().is_empty())
-            || (model_type.contains(ModelType::Embedding)
-                && !self.list_embeddings_models().is_empty())
-            || (model_type.contains(ModelType::Images) && !self.list_images_models().is_empty())
-            || (model_type.contains(ModelType::Audios) && !self.list_audios_models().is_empty())
-            || (model_type.contains(ModelType::Videos) && !self.list_videos_models().is_empty())
-            || (model_type.contains(ModelType::TensorBased)
-                && !self.list_tensor_models().is_empty())
-            || (model_type.contains(ModelType::Realtime) && !self.list_realtime_models().is_empty())
-            || (model_type.contains(ModelType::Classify) && !self.list_classify_models().is_empty())
-            || (model_type.contains(ModelType::Pooling) && !self.list_pooling_models().is_empty())
+        self.catalog.load().models.values().any(|model| {
+            (model_type.contains(ModelType::Chat) && model.has_chat_engine())
+                || (model_type.contains(ModelType::Completions) && model.has_completions_engine())
+                || (model_type.contains(ModelType::Embedding) && model.has_embeddings_engine())
+                || (model_type.contains(ModelType::Images) && model.has_images_engine())
+                || (model_type.contains(ModelType::Audios) && model.has_audios_engine())
+                || (model_type.contains(ModelType::Videos) && model.has_videos_engine())
+                || (model_type.contains(ModelType::TensorBased) && model.has_tensor_engine())
+                || (model_type.contains(ModelType::Realtime) && model.has_realtime_engine())
+                || (model_type.contains(ModelType::Classify) && model.has_classify_engine())
+                || (model_type.contains(ModelType::Pooling) && model.has_pooling_engine())
+        })
     }
 
     pub fn get_embeddings_engine(
