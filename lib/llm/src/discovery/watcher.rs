@@ -1802,8 +1802,6 @@ mod tests {
         assert!(is_model_type_list_empty(&mm, ModelType::Pooling));
     }
 
-    /// Every endpoint-backed model type must produce a retraction card once its last model is
-    /// gone.
     #[test]
     fn endpoint_backed_model_types_emit_retraction_cards() {
         let manager = ModelManager::new();
