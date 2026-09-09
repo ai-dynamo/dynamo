@@ -876,7 +876,7 @@ async def test_run_to_completion_warns_under_repeated_cancellation(monkeypatch):
     warned = asyncio.Event()
     now = [0.0]
 
-    monkeypatch.setattr(publisher_mod, "_TEARDOWN_WARN_INTERVAL_S", 0.1)
+    monkeypatch.setattr(publisher_mod, "_TEARDOWN_WARN_INTERVAL_S", 10.0)
     monkeypatch.setattr(publisher_mod, "monotonic", lambda: now[0])
 
     def record_warning(*args, **kwargs):
@@ -891,7 +891,7 @@ async def test_run_to_completion_warns_under_repeated_cancellation(monkeypatch):
     outer = asyncio.create_task(run_to_completion(body()))
     await started.wait()
 
-    now[0] = 0.11
+    now[0] = 10.1
     outer.cancel()
     await warned.wait()
     release.set()
