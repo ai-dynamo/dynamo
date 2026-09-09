@@ -6,7 +6,6 @@ kind: DynamoGraphDeployment
 metadata:
   name: hello-world
 spec:
-  backendFramework: vllm
   components:
   - name: Frontend
     podTemplate:

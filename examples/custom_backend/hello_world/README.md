@@ -26,7 +26,7 @@ needs a GPU, a model, or any downloads.
 | [`engine/`](engine/README.md) | The unified backend contract: a complete (toy) engine with a tokenizer, streaming generation, sampling parameters, and synthetic KV events — registered with the frontend and served through the OpenAI-compatible API with KV-aware routing. | You want to bring your own engine or model server to Dynamo. |
 
 Work through them in order: `basic/` is the runtime "hello world" the
-[Runtime Development Guide](../../../docs/fern/pages/developer-guide/additional-resources/runtime-development-guide.md)
+[Runtime Development Guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/additional-resources/runtime-development-guide.md)
 walks through; `engine/` builds on those concepts to implement everything a
 real model backend provides, so the standard frontend, router, and OpenAI API
 work against it unchanged.

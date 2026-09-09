@@ -82,8 +82,8 @@ Low-level runtime examples for developers using Python<>Rust bindings:
 Before running any examples, ensure you have:
 
 - **Docker & Docker Compose** - For containerized services
-- **CUDA-compatible GPU** - For LLM inference (except hello_world and hello_engine, which are non-GPU aware)
-- **Python 3.9+** - For client scripts and utilities
+- **CUDA-compatible GPU** - For LLM inference (except `hello_world/basic` and `hello_world/engine`, which are non-GPU aware)
+- **Python 3.11+** - For client scripts and utilities (the unified-backend examples require 3.11)
 
 ### For Kubernetes Deployments
 

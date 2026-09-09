@@ -15,8 +15,6 @@ dependencies = [
     "tokenizers>=0.20",
 ]
 
-[project.scripts]
-hello-engine = "hello_engine.main:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hello_engine"]

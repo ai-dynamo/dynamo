@@ -11,12 +11,11 @@ FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG}
 
 WORKDIR /opt/hello-engine
 
-COPY pyproject.toml README.md ./
+COPY pyproject.toml ./
 COPY src ./src
 
 # The base image manages its venv with uv (no pip installed).
 RUN uv pip install --python /opt/dynamo/venv/bin/python3 --no-deps . \
-    && uv pip install --python /opt/dynamo/venv/bin/python3 tokenizers \
     && python3 -c "import hello_engine"
 
 ENTRYPOINT ["python3", "-m", "hello_engine.main"]

@@ -69,6 +69,38 @@ only the beginning (same system prompt, new question) still scores
 partial overlap. With no cache knowledge, requests would round-robin
 instead.
 
+## Run without Docker
+
+Same shape as `basic/`: install, then two terminals. Needs Linux and
+Python 3.11+ — the `ai-dynamo` wheels are Linux-only, so on macOS use
+the [Container](#container) path instead.
+
+```bash
+pip install ai-dynamo tokenizers
+cd examples/custom_backend/hello_world/engine
+pip install --no-deps .
+```
+
+Terminal 1 — the engine worker:
+
+```bash
+python3 -m hello_engine.main --discovery-backend file --event-plane zmq
+```
+
+Terminal 2 — the standard frontend with KV routing:
+
+```bash
+DYN_LOG=info,dynamo_llm::kv_router=debug \
+  python3 -m dynamo.frontend --http-port 8000 --discovery-backend file --router-mode kv
+```
+
+Then send a request:
+
+```bash
+curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"hello-engine","messages":[{"role":"user","content":"hi"}],"max_tokens":250}'
+```
+
 ## Container
 
 ```bash
@@ -288,7 +320,8 @@ One line sends one event:
 publisher.publish_stored(
     token_ids=[...],            # the tokens in the cached blocks
     num_block_tokens=[16, 16],  # block sizes
-    block_hashes=[h1, h2],      # our IDs for the blocks
+    block_hashes=[h1, h2],      # our chained IDs for the blocks
+    parent_hash=h0,             # the block these chain under (None = root)
 )
 ```
 
@@ -297,6 +330,13 @@ full 16-token blocks (`_publish_prompt_blocks`). Production engines
 usually publish from a dedicated event thread instead so socket I/O
 never touches the token-streaming path — see `sample_engine.py` for
 that queue-and-thread pattern.
+
+> **Which artifact is canonical?** The
+> [unified-backends guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/advanced-customizations/writing-custom-backends/writing-unified-backends.md)
+> defines the contract; `sample_engine.py` (in `dynamo.common.backend`)
+> is the in-tree reference implementation; this example is the
+> deployable end-to-end walkthrough. When they disagree, the guide and
+> the ABC docstrings win.
 
 **Step 4 — the router listens and remembers.** The router subscribed to
 our event channel when the worker registered. Each event lands in its
@@ -307,15 +347,19 @@ publish is push, delivery is push.
 the router finds our blocks in its tree:
 
 ```text
-request 1:  [ROUTING] Best: worker_…  0/4 blocks overlap   ← cold
-engine:     published 3 KV block(s) for prompt
-request 2:  [ROUTING] Best: worker_…  3/4 blocks overlap   ← pinned to us
+request 1:  [ROUTING] Best: worker_…  0/11 blocks overlap   ← cold
+engine:     published 10 KV block(s) for prompt (0 shared-prefix block(s) skipped)
+request 2:  [ROUTING] Best: worker_…  10/11 blocks overlap  ← pinned to us
+request 3:  [ROUTING] Best: worker_…  9/12 blocks overlap   ← shared prefix + new tail
+engine:     published 2 KV block(s) for prompt (9 shared-prefix block(s) skipped)
 ```
 
-One design choice makes this demo real: block hashes are
-**content-derived** (`blake2b` of each 16-token block), so the same
-prompt always produces the same block identities — identical prompts
-genuinely match in the router's tree instead of being random noise.
+One design choice makes this demo real: block hashes are **chained**
+(`blake2b` of the parent's hash + the block's 16 tokens), so a hash
+uniquely names the whole prefix up to that block. Identical prompts
+produce identical chains and genuinely match in the router's tree, and
+a prompt sharing only a prefix matches exactly the shared part — the
+tail publishes under its `parent_hash` and extends the tree from there.
 
 Not implemented here (deliberately): the sibling **KV metrics** channel
 (`ComponentSnapshot` gauges — "how full is my cache"). See

@@ -119,7 +119,12 @@ class HelloEngine(LLMEngine):
             namespace=args.namespace,
             component=args.component,
             endpoint=args.endpoint,
-            model_name=args.tokenizer_repo,  # where the tokenizer lives
+            # model_name is what the FRONTEND resolves to fetch a tokenizer
+            # (a HF repo id or local path) so it can tokenize requests before
+            # they reach us. It is NOT the name clients use — that's
+            # served_model_name, which appears in /v1/models. Point model_name
+            # anywhere else and the frontend tokenizes with the wrong vocab.
+            model_name=args.tokenizer_repo,
             served_model_name=args.served_model_name,  # what clients call us
             discovery_backend=args.discovery_backend,
             request_plane=args.request_plane,
