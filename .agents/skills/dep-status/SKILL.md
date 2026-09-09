@@ -83,6 +83,6 @@ gh issue list --repo ai-dynamo/dynamo \
 ## Notes
 
 - For a full triage view, include both open and recently closed DEPs.
-- Cross-reference with `dep:lightweight` label to distinguish full vs.
+- Cross-reference with `DEP (light):` title prefix to distinguish full vs.
   lightweight DEPs.
 - Area labels are bare names (e.g., `frontend`, `router`) — no prefix.
