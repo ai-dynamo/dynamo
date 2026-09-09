@@ -189,6 +189,7 @@ def main() -> None:
 async def _run_with_signals(args: argparse.Namespace) -> None:
     loop = asyncio.get_running_loop()
     task = asyncio.current_task()
+    assert task is not None  # This coroutine is always executed inside a Task.
     loop.add_signal_handler(signal.SIGTERM, task.cancel)
     try:
         await run(args)
