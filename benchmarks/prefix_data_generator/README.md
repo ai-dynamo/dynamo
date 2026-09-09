@@ -144,10 +144,13 @@ datagen analyze \
 ```
 I find this to be the most "robust" end-to-end test. It is important to sample a large number of requests (e.g., hundreds of thousands) to ensure the statistics are meaningful, due to the law of large numbers. In particular, the mean statistics (such as mean ISL) should be well preserved in the synthetic data. However, the standard deviation statistics—especially for ISL—are not expected to match exactly, since the synthesizer does not capture the correlation between context length and prompt length present in the original data.
 
-Run the CPU-only regression suite from the repository root, using its Python environment:
+These regression tests remain excluded from automatic collection. Run them explicitly
+from the repository root, using its Python environment:
 
 ```bash
-.venv/bin/python -m pytest -c pyproject.toml benchmarks/prefix_data_generator/tests -q
+PYTHONPATH=benchmarks .venv/bin/python -m pytest -c pyproject.toml \
+  benchmarks/prefix_data_generator/tests/test_sampler.py \
+  benchmarks/prefix_data_generator/tests/test_synthesizer.py -q
 ```
 
 The suite requires the benchmark Python dependencies and pytest. It does not download
