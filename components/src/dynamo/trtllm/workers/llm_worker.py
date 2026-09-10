@@ -8,13 +8,13 @@ LLM workers using TensorRT-LLM.
 """
 
 import asyncio
-import copy
 import json
 import logging
 import os
 import sys
 from typing import Any, Optional
 
+import yaml
 from huggingface_hub import try_to_load_from_cache
 from huggingface_hub.utils import HFValidationError
 from prometheus_client import REGISTRY
@@ -193,35 +193,6 @@ def build_kv_connector_config(config: Config):
             logging.error(f"Invalid connector: {config.connector[0]}")
             sys.exit(1)
     return None
-
-
-def _warn_extra_engine_args_collisions(
-    before: dict, after: dict, path: str = ""
-) -> None:
-    """Log warnings for keys present in *before* whose value changed in *after*.
-
-    ``--extra-engine-args`` is applied via TRT-LLM's own
-    ``update_llm_args_with_extra_options``, which merges a YAML file into
-    ``arg_map`` internally, so unlike ``--override-engine-args`` there is no
-    separately-parsed dict to diff against ``arg_map`` before the merge.
-    Comparing the full before/after snapshots instead catches the same class
-    of silent overwrite that ``warn_override_collisions`` covers for
-    ``--override-engine-args``.
-    """
-    for key, old_val in before.items():
-        full_key = f"{path}.{key}" if path else key
-        if key not in after:
-            continue
-        new_val = after[key]
-        if isinstance(old_val, dict) and isinstance(new_val, dict):
-            _warn_extra_engine_args_collisions(old_val, new_val, full_key)
-        elif old_val != new_val:
-            logging.warning(
-                "extra_engine_args will replace %s: %r -> %r",
-                full_key,
-                old_val,
-                new_val,
-            )
 
 
 def _parse_model_loader_extra_config(raw: object) -> dict[str, object]:
@@ -465,9 +436,16 @@ async def init_llm_worker(
 
     if config.extra_engine_args != "":
         # TODO: Support extra engine args from json file as well.
-        _arg_map_before_extra = copy.deepcopy(arg_map)
+        # Warn on collisions using the parsed YAML *before* the merge, so the
+        # warning only fires on keys the user actually set in the file (arg_map
+        # is pre-populated with non-None defaults that recipes legitimately
+        # override, and a post-merge diff would warn on every normal start).
+        with open(config.extra_engine_args) as f:
+            extra_options = yaml.safe_load(f) or {}
+        warn_override_collisions(
+            arg_map, extra_options, source_name="extra_engine_args"
+        )
         arg_map = update_llm_args_with_extra_options(arg_map, config.extra_engine_args)
-        _warn_extra_engine_args_collisions(_arg_map_before_extra, arg_map)
 
     # Apply override_engine_args if provided
     if config.override_engine_args != "":
@@ -545,24 +523,13 @@ async def init_llm_worker(
         # Only pytorch backend is supported for now to publish events and metrics.
         if "backend" not in arg_map:
             arg_map["backend"] = Backend.PYTORCH
-        else:
-            # User overrides arrive as JSON strings, so coerce to the Backend enum
-            # before validating. Value-membership (`value in SomeEnum`) is only
-            # supported on Python 3.12+, and this project supports >=3.10, so
-            # convert explicitly and treat a failed conversion as the invalid
-            # case instead of relying on `not in Backend`.
-            backend_val = arg_map["backend"]
-            if not isinstance(backend_val, Backend):
-                try:
-                    backend_val = Backend(backend_val)
-                except (ValueError, TypeError):
-                    logging.error(
-                        "Only %s supported for now to publish events and metrics. Got: %s",
-                        [b.value for b in Backend],
-                        arg_map["backend"],
-                    )
-                    sys.exit(1)
-            arg_map["backend"] = backend_val
+        elif arg_map["backend"] not in Backend:
+            logging.error(
+                "Only %s supported for now to publish events and metrics. Got: %s",
+                [b.value for b in Backend],
+                arg_map["backend"],
+            )
+            sys.exit(1)
 
     trtllm_zmq_bind_endpoint = None  # Endpoint for TensorRT-LLM to bind and publish
     consolidator_output_endpoint = (

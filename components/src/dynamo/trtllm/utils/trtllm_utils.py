@@ -40,7 +40,10 @@ def deep_update(target: dict[str, Any], source: Mapping[str, Any]) -> None:
 
 
 def warn_override_collisions(
-    target: Mapping[str, Any], source: Mapping[str, Any], path: str = ""
+    target: Mapping[str, Any],
+    source: Mapping[str, Any],
+    path: str = "",
+    source_name: str = "override_engine_args",
 ) -> None:
     """Log warnings for keys in *source* that will overwrite existing values in *target*."""
     for key, new_val in source.items():
@@ -48,10 +51,13 @@ def warn_override_collisions(
         if key in target:
             old_val = target[key]
             if isinstance(new_val, dict) and isinstance(old_val, dict):
-                warn_override_collisions(old_val, new_val, full_key)
+                warn_override_collisions(
+                    old_val, new_val, full_key, source_name=source_name
+                )
             elif old_val != new_val:
                 logging.warning(
-                    "override_engine_args will replace %s: %r -> %r",
+                    "%s will replace %s: %r -> %r",
+                    source_name,
                     full_key,
                     old_val,
                     new_val,
