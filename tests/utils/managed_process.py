@@ -686,6 +686,7 @@ class ManagedProcess:
             time.sleep(sleep)
             elapsed = time.time() - start_time
         self._logger.error("FAILED: Check Port: %s", port)
+        self._log_tail_on_error()
         raise RuntimeError("FAILED: Check Port: %s" % port)
 
     def _check_urls(self, timeout):
@@ -772,6 +773,13 @@ class ManagedProcess:
             attempt,
             timeout,
         )
+        # The process is still alive (a dead process is caught by
+        # _check_process_alive above and already dumps the log tail there);
+        # a live-but-never-healthy process otherwise leaves no diagnostic
+        # trace at all on timeout. A wider tail than the default: on a
+        # timeout (vs. a fast crash) there is likely much more accumulated
+        # output to sift through.
+        self._log_tail_on_error(lines=100)
         raise RuntimeError(
             "TIMEOUT: Check URL: %s failed after %.1fs (timeout=%.1fs)"
             % (url, elapsed, timeout)
@@ -839,6 +847,13 @@ class ManagedProcess:
             attempt,
             elapsed,
         )
+        # The process is still alive (a dead process is caught by
+        # _check_process_alive above and already dumps the log tail there);
+        # a live-but-never-healthy process otherwise leaves no diagnostic
+        # trace at all on timeout. A wider tail than the default: on a
+        # timeout (vs. a fast crash) there is likely much more accumulated
+        # output to sift through.
+        self._log_tail_on_error(lines=100)
         raise RuntimeError("FAILED: Custom health check")
 
     def _terminate_all_matching_process_names(self):
