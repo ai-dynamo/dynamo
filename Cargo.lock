@@ -2399,6 +2399,7 @@ dependencies = [
  "opentelemetry",
  "parking_lot",
  "prometheus",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "temp-env",

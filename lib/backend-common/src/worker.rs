@@ -3993,6 +3993,34 @@ mod handoff_and_lifecycle_tests {
     /// branch runs instead, which is the shape a failover engine container gets.
     const WORKER_CONTAINER_ENDPOINT_HEALTH: &str = r#"["generate"]"#;
 
+    /// Read the runtime's health route the way an orchestrator probe does, and
+    /// return the two things a probe acts on: the HTTP status and the `status`
+    /// field of the body.
+    async fn probe_health_route(client: &reqwest::Client, url: &str) -> (u16, String) {
+        let response = client
+            .get(url)
+            .send()
+            .await
+            .expect("health route must answer");
+        let status = response.status().as_u16();
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .expect("health route must return a JSON body");
+        let reported = body["status"].as_str().unwrap_or_default().to_string();
+        (status, reported)
+    }
+
+    async fn health_route_reaches(client: &reqwest::Client, url: &str, expected: u16) -> bool {
+        for _ in 0..600 {
+            if probe_health_route(client, url).await.0 == expected {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        false
+    }
+
     /// Run `case` under each health-route shape the operator renders, so a
     /// readiness write that lands on only one layer of the cascade fails here.
     async fn with_each_health_route_shape<F, Fut>(case: F)
@@ -4088,6 +4116,75 @@ mod handoff_and_lifecycle_tests {
         assert!(
             !system_health.lock().get_health_status().0,
             "worker must report not ready again after the shutdown path runs"
+        );
+    }
+
+    /// An orchestrator probes the runtime's `/health` route over HTTP, not
+    /// `SystemHealth::get_health_status`. This drives the same serve path with
+    /// the system status server running and asserts the served route moves from
+    /// `503 notready` to `200 ready` and back, so the wiring between this
+    /// crate's readiness writes and the route a probe reads is covered too.
+    #[tokio::test]
+    async fn the_health_route_follows_the_serving_worker() {
+        use dynamo_runtime::config::environment_names::runtime::system::{
+            DYN_SYSTEM_HOST, DYN_SYSTEM_PORT,
+        };
+
+        with_each_health_route_shape(|| {
+            // Port 0 takes whatever port is free, and loopback keeps the
+            // server off the host's other interfaces.
+            temp_env::async_with_vars(
+                [
+                    (DYN_SYSTEM_HOST, Some("127.0.0.1")),
+                    (DYN_SYSTEM_PORT, Some("0")),
+                ],
+                the_health_route_follows_the_serving_worker_case(),
+            )
+        })
+        .await;
+    }
+
+    async fn the_health_route_follows_the_serving_worker_case() {
+        let (endpoint, _system_health, mut worker, engine_config) =
+            payload_free_serving_worker().await;
+        let health_url = {
+            let server = endpoint
+                .drt()
+                .system_status_server_info()
+                .expect("DYN_SYSTEM_PORT=0 must start the system status server");
+            format!("http://{}/health", server.socket_addr)
+        };
+        let client = reqwest::Client::new();
+
+        assert_eq!(
+            probe_health_route(&client, &health_url).await,
+            (503, "notready".to_string()),
+            "a worker that has not begun serving must fail the readiness probe"
+        );
+
+        let shutdown = CancellationToken::new();
+        let serve = tokio::spawn({
+            let shutdown = shutdown.clone();
+            async move {
+                worker
+                    .serve_with_orchestrator(&engine_config, endpoint, shutdown)
+                    .await
+            }
+        });
+
+        let served_ready = health_route_reaches(&client, &health_url, 200).await;
+        shutdown.cancel();
+        let outcome = tokio::time::timeout(Duration::from_secs(120), serve)
+            .await
+            .expect("serve loop must finish after shutdown");
+        assert!(
+            served_ready,
+            "health route must pass the probe while the worker is serving; serve loop returned {outcome:?}"
+        );
+        assert_eq!(
+            probe_health_route(&client, &health_url).await,
+            (503, "notready".to_string()),
+            "health route must fail the probe again after the shutdown path runs"
         );
     }
 
