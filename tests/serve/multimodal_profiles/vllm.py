@@ -326,6 +326,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 ],
             ),
             "p_d": TopologyConfig(
+                health_check_workers=True,
+                health_check_worker_count=2,
                 marks=[pytest.mark.post_merge],
                 timeout_s=300,
                 single_gpu=True,
