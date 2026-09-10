@@ -357,6 +357,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         if let Some(existing) = self.desired.get(&instance.key) {
             if existing.fingerprint == instance.fingerprint
                 && existing.projection_fingerprint == instance.projection_fingerprint
+                && existing.video_contract == instance.video_contract
             {
                 return false;
             }
@@ -1410,6 +1411,39 @@ mod tests {
             host.members(&group_key()),
             BTreeSet::from([first.key, second.key])
         );
+    }
+
+    /// The contract sits outside the materialization fingerprint, so an
+    /// instance that republishes its card with a different contract looks
+    /// unchanged by fingerprint alone. It is still an update: the group's
+    /// agreement moves with it.
+    #[tokio::test]
+    async fn republishing_only_the_video_contract_updates_the_group() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        let first = instance_with_contract(1, "spec", "contract-a");
+        controller.apply_added(first.clone());
+        controller.start_queued_builds();
+        assert_eq!(
+            starts.recv().await.unwrap().video_contract.as_deref(),
+            Some("contract-a")
+        );
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+
+        assert!(
+            controller.apply_added(instance_with_contract(1, "spec", "contract-b")),
+            "a contract-only change must not be discarded as a duplicate"
+        );
+        controller.start_queued_builds();
+        assert_eq!(
+            starts.recv().await.unwrap().video_contract.as_deref(),
+            Some("contract-b"),
+            "the group must rebuild with the contract the worker now publishes"
+        );
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(host.members(&group_key()), BTreeSet::from([first.key]));
     }
 
     /// The contract only forces a rebuild when the agreement itself changes.
