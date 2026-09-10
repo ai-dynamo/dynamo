@@ -271,20 +271,11 @@ fn responses_error_code(status_code: StatusCode) -> &'static str {
     }
 }
 
-/// Match `InvalidArgument` at top-level OR under `Backend()`.
-/// `py_err_to_dynamo` wraps Python `ValueError`/`TypeError` as
-/// `Backend(InvalidArgument)`, which normalizes to `InvalidRequest` on the wire.
-fn is_legacy_invalid_argument(error: &dynamo_runtime::error::DynamoError) -> bool {
-    use dynamo_runtime::error::{BackendError, ErrorType};
-
+fn is_invalid_argument(error: &dynamo_runtime::error::DynamoError) -> bool {
     matches!(
-        error.error_type(),
-        ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument)
-    ) || (matches!(error.error_type(), ErrorType::InvalidRequest)
-        && matches!(
-            error.reason().as_str(),
-            "backend.invalid_argument" | "request.invalid_argument"
-        ))
+        error.reason().as_str(),
+        "backend.invalid_argument" | "request.invalid_argument"
+    )
 }
 
 pub(crate) fn find_invalid_argument_in_chain<'a>(
@@ -293,7 +284,7 @@ pub(crate) fn find_invalid_argument_in_chain<'a>(
     let mut current = Some(err);
     while let Some(e) = current {
         if let Some(dynamo_err) = e.downcast_ref::<dynamo_runtime::error::DynamoError>()
-            && is_legacy_invalid_argument(dynamo_err)
+            && is_invalid_argument(dynamo_err)
         {
             return Some(dynamo_err);
         }
@@ -2309,7 +2300,7 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
         let invalid_argument = event
             .error
             .as_ref()
-            .filter(|error| is_legacy_invalid_argument(error));
+            .filter(|error| is_invalid_argument(error));
 
         // Extract error string: prefer DynamoError field, fallback to legacy comment.
         // Use message() instead of to_string() for DynamoError to avoid prefixing
