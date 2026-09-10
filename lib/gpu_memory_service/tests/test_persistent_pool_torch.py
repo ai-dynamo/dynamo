@@ -103,7 +103,7 @@ def test_torch_empty_inside_persistent_pool_routes_to_daemon(tmp_path):
         )
 
         size_bytes = 4 * 1024 * 1024
-        n = size_bytes // 4  # float32
+        n = size_bytes // 4
         with gms_use_persistent_pool("kv_pool", device):
             tensor = torch.empty(n, dtype=torch.float32, device=f"cuda:{device}")
 

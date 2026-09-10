@@ -36,7 +36,6 @@ class _TagState:
 
 
 _tag_states: dict[str, _TagState] = {}
-# Tags for which the unsafe ordinal-persistent-tag warning was already emitted.
 _ordinal_persistent_warned: set[str] = set()
 _active_tag: ContextVar[str | None] = ContextVar(
     "gpu_memory_service_active_tag",
