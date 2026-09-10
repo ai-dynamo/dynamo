@@ -178,7 +178,13 @@ pub extern "C" fn dynamo_llm_shutdown() -> DynamoLlmResult {
         }
     };
 
-    wk.runtime().shutdown();
+    // Awaited: `shutdown` alone only spawns the teardown, and a C caller that
+    // returns from here can exit before it runs, skipping the endpoint
+    // inflight drain and leaving transports connected.
+    let runtime = wk.runtime().clone();
+    runtime.secondary().block_on(
+        runtime.shutdown_and_wait(Some(dynamo_runtime::worker::graceful_shutdown_timeout())),
+    );
 
     DynamoLlmResult::OK
 }

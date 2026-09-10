@@ -79,11 +79,11 @@ async def graceful_shutdown_with_discovery(
     Args:
         runtime: The distributed runtime to shut down.
         endpoints: Endpoints to unregister from discovery before shutdown.
-        shutdown_event: Optional event to set before calling runtime.shutdown().
+        shutdown_event: Optional event to set before tearing the runtime down.
         grace_period_s: Seconds to wait after unregistering before drain/shutdown.
             Defaults to DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS env var or 5s.
         drain_callback: Optional async callable awaited after the grace period
-            but *before* runtime.shutdown(). Use this on prefill workers to wait
+            but *before* the runtime teardown. Use this on prefill workers to wait
             for in-flight NIXL KV transfers to complete, preventing decode workers
             from segfaulting due to use-after-free on freed GPU memory (#7319).
             Failures derived from Exception are logged and swallowed so shutdown
@@ -92,7 +92,7 @@ async def graceful_shutdown_with_discovery(
             but before shutdown_event is set. Use it for lease-owned control records
             that must disappear before engine teardown begins.
         cleanup_callback: Optional async callable awaited after drain_callback
-            but *before* runtime.shutdown(). Use this when engine resources must
+            but *before* the runtime teardown. Use this when engine resources must
             be released before the runtime tears down. Failures derived from
             Exception are logged and swallowed so shutdown proceeds.
             asyncio.CancelledError propagates and stops shutdown.
@@ -166,7 +166,10 @@ async def graceful_shutdown_with_discovery(
             )
 
     logger.info("Initiating runtime shutdown")
-    runtime.shutdown()
+    # Awaited: `shutdown()` only spawns the teardown, so returning here lets
+    # the process exit before in-flight requests drain and before the
+    # transports are torn down.
+    await runtime.shutdown_and_wait()
 
 
 def install_signal_handlers(
