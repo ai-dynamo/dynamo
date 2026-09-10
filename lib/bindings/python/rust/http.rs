@@ -24,10 +24,20 @@ pub struct HttpService {
 
 #[pymethods]
 impl HttpService {
+    /// Create the service.
+    ///
+    /// `wait_for_first_item` makes streaming handlers wait for the engine's
+    /// first item before committing the HTTP status, so an error raised by a
+    /// Python generator before its first `yield` maps to the same HTTP response
+    /// as it does for a non-streaming request.
     #[new]
-    #[pyo3(signature = (port=None))]
-    pub fn new(port: Option<u16>) -> PyResult<Self> {
-        let builder = service_v2::HttpService::builder().port(port.unwrap_or(8080));
+    #[pyo3(signature = (port=None, wait_for_first_item=false))]
+    pub fn new(port: Option<u16>, wait_for_first_item: bool) -> PyResult<Self> {
+        let mut builder = service_v2::HttpService::builder().port(port.unwrap_or(8080));
+        if wait_for_first_item {
+            let check = service_v2::BackendErrorCheck::UntilFirstEvent;
+            builder = builder.streaming_backend_error_check(check);
+        }
         let inner = builder.build().map_err(to_pyerr)?;
         Ok(Self {
             inner,
