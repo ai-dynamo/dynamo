@@ -729,6 +729,12 @@ def handle_directory_publish_batch(
     for item in msg.get("items", []) or []:
         try:
             content_hash = bytes.fromhex(str(item["content_hash"]))
+            local_key = None
+            if item.get("local_key") is not None:
+                local_key = bytes.fromhex(str(item["local_key"]))
+                if not 0 < len(local_key) <= 256:
+                    raise ValueError("local_key must contain 1..256 bytes")
+                local_key = local_key.hex()
             engine_id = str(item["engine_id"])
             raw_slots = item.get("slot_ids")
             if raw_slots is None:
@@ -761,6 +767,7 @@ def handle_directory_publish_batch(
                 tier,
                 sealed,
                 active_hbm,
+                local_key,
             )
         )
     if os.environ.get("GMS_KV_DIRECTORY_DIAGNOSTICS"):
@@ -798,6 +805,7 @@ def handle_directory_publish_batch(
             _tier,
             sealed,
             _active_hbm,
+            _local_key,
         ) in parsed:
             key = (manifest_id, content_hash)
             if key in seen_keys:
@@ -848,6 +856,7 @@ def handle_directory_publish_batch(
             tier,
             sealed,
             active_hbm,
+            local_key,
         ) in parsed:
             key = (manifest_id, content_hash)
             if not sealed:
@@ -883,6 +892,8 @@ def handle_directory_publish_batch(
                 entry["_owner_writer"] = writer_id
             if tier:
                 entry["tier"] = tier
+            if local_key is not None:
+                entry["local_key"] = local_key
             # Remove stale reverse mappings before replacement; a later reuse
             # of an old slot could otherwise delete the new entry.
             prior = daemon._content_directory.get(key)
