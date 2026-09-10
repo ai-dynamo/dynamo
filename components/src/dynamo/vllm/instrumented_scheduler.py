@@ -5275,10 +5275,11 @@ class InstrumentedScheduler(AsyncScheduler):
                 vanished.append(req_id)
                 continue
             if req.num_computed_tokens >= len(self._kvwarm_chain_prompts[req_id]):
-                if any(r.request_id == req_id for r in self.running):
-                    self.running = [
-                        r for r in self.running if r.request_id != req_id
-                    ]  # park: leave the scheduler's view; blocks and requests stay resident
+                running = self.running  # type: ignore[has-type]
+                if any(r.request_id == req_id for r in running):
+                    # Park: leave the scheduler's view; blocks and requests
+                    # stay resident.
+                    self.running = [r for r in running if r.request_id != req_id]
                 if getattr(req, "num_output_placeholders", 0) > 0:
                     # Async scheduling advances num_computed_tokens when a step is
                     # scheduled, not when its output lands. Parking stops new steps;
@@ -5355,10 +5356,15 @@ class InstrumentedScheduler(AsyncScheduler):
         is pending. A group fallback zeroes the rung's plan on every rank, so
         a rank whose own build succeeded sheds its chains too and the rung's
         points take fake injection everywhere."""
-        decision = self._bench_synchronizer.stage_poll()
+        synchronizer = self._bench_synchronizer
+        reported = self._kvwarm_stage_reported
+        if synchronizer is None or reported is None:
+            # Nothing is awaiting a verdict (dp=1 settles locally).
+            return False
+        decision = synchronizer.stage_poll()
         if decision is None:
             return True
-        batch, _, detail = self._kvwarm_stage_reported
+        batch, _, detail = reported
         self._kvwarm_stage_reported = None
         if not decision:
             detail = {**detail, "group_fallback": True}
