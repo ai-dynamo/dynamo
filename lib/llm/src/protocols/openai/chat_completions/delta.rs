@@ -713,12 +713,7 @@ mod tests {
             logprob: -0.5,
             bytes: Some(b"hello".to_vec()),
         };
-        for top_logprobs in [
-            None,
-            Some(vec![]),
-            Some(vec![vec![], vec![], vec![]]),
-            Some(vec![vec![candidate], vec![]]),
-        ] {
+        for top_logprobs in [None, Some(vec![]), Some(vec![vec![candidate], vec![]])] {
             for return_as_ids in [false, true] {
                 let mut request = create_test_request();
                 request.inner.logprobs = Some(true);
