@@ -10,6 +10,13 @@ import sys
 
 import pytest
 
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.vllm,
+    pytest.mark.gpu_0,
+]
+
 
 def _disable_failover(monkeypatch) -> None:
     monkeypatch.setenv("GMS_VLLM_SHARED_KV", "0")

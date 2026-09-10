@@ -225,3 +225,29 @@ def test_vllm_shared_snapshot_fails_closed_when_kv_inventory_fails(monkeypatch):
     patches.patch_memory_snapshot()
     with pytest.raises(RuntimeError, match="persistent KV accounting failed"):
         MemorySnapshot.measure(SimpleNamespace(device_=SimpleNamespace(index=0)))
+
+
+def test_vllm_kv_disable_flag_uses_base_worker_paths(monkeypatch):
+    from gpu_memory_service.integrations.vllm import worker as worker_module
+    from vllm.v1.worker.gpu_worker import Worker
+
+    sentinel = object()
+    calls = []
+    monkeypatch.setenv("GMS_VLLM_VMM_IPC_KV", "0")
+    monkeypatch.setattr(
+        Worker,
+        "initialize_from_config",
+        lambda _self, config: calls.append(config) or sentinel,
+    )
+    monkeypatch.setattr(
+        Worker,
+        "_maybe_get_memory_pool_context",
+        lambda _self, tag: calls.append(tag) or sentinel,
+    )
+    instance = object.__new__(worker_module.GMSWorker)
+    config = object()
+
+    assert instance.initialize_from_config(config) is sentinel
+    assert instance._maybe_get_memory_pool_context("kv_cache") is sentinel
+    assert calls == [config, "kv_cache"]
+    assert not hasattr(instance, "_gms_kv_manager")
