@@ -63,6 +63,9 @@ func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNod
 		Value: "1",
 	}
 	container.Env = append(container.Env, envVar)
+	if IsManualFlagsInjection(component) {
+		return nil
+	}
 
 	// Update container command based on role
 	switch role {

@@ -80,6 +80,12 @@ type ComponentRoleSpec struct {
 	// role. It is supported only for components embedded in a DGD.
 	// +optional
 	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
+
+	// PodTemplate defines the complete Pod configuration for this role. When
+	// any role supplies a PodTemplate, the component-level Pod configuration
+	// must be absent and every required Pod-producing role must supply one.
+	// +optional
+	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 }
 
 // +kubebuilder:validation:XValidation:rule="!has(self.create) || self.create == false || (has(self.size) && has(self.storageClass) && has(self.volumeAccessMode))",message="When create is true, size, storageClass, and volumeAccessMode are required"

@@ -267,12 +267,10 @@ func GenerateDynamoComponentsDeployments(
 		// Reject invalid GMS client references before synchronizing any DCDs.
 		gmsSpec := GetGPUMemoryService(component)
 		if gmsSpec != nil && !component.IsInterPodGMSEnabled() {
-			var containers []corev1.Container
-			if component.PodTemplate != nil {
-				containers = component.PodTemplate.Spec.Containers
-			}
-			if err := gmsExtraClientContainersError(gmsSpec, containers); err != nil {
-				return nil, fmt.Errorf("component %q: %w", componentName, err)
+			for _, podTemplate := range ComponentPodTemplates(component) {
+				if err := gmsExtraClientContainersError(gmsSpec, podTemplate.Spec.Containers); err != nil {
+					return nil, fmt.Errorf("component %q: %w", componentName, err)
+				}
 			}
 		}
 
@@ -407,11 +405,14 @@ func generateSingleDCD(
 	// only label worker DCDs with their hash for cleanup during rolling updates
 	if IsWorkerComponent(string(component.ComponentType)) {
 		labels[commonconsts.KubeLabelDynamoWorkerHash] = rollingUpdateCtx.NewWorkerHash
-		podTemplate := ensurePodTemplate(&deployment.Spec.DynamoComponentDeploymentSharedSpec)
-		podTemplate.Labels[commonconsts.KubeLabelDynamoWorkerHash] = rollingUpdateCtx.NewWorkerHash
+		for _, podTemplate := range EnsureComponentPodTemplates(&deployment.Spec.DynamoComponentDeploymentSharedSpec) {
+			podTemplate.Labels[commonconsts.KubeLabelDynamoWorkerHash] = rollingUpdateCtx.NewWorkerHash
+		}
 		if parentDGD.HasEPPComponent() {
 			labels[commonconsts.KubeLabelDynamoComponentClass] = commonconsts.ComponentClassWorker
-			podTemplate.Labels[commonconsts.KubeLabelDynamoComponentClass] = commonconsts.ComponentClassWorker
+			for _, podTemplate := range EnsureComponentPodTemplates(&deployment.Spec.DynamoComponentDeploymentSharedSpec) {
+				podTemplate.Labels[commonconsts.KubeLabelDynamoComponentClass] = commonconsts.ComponentClassWorker
+			}
 		}
 	}
 
@@ -450,12 +451,14 @@ func generateSingleDCD(
 
 	// Apply restart annotation if this component should be restarted.
 	if restartState.ShouldAnnotateComponent(componentName) {
-		podTemplate := ensurePodTemplate(&deployment.Spec.DynamoComponentDeploymentSharedSpec)
-		podTemplate.Annotations[commonconsts.RestartAnnotation] = restartState.Timestamp
+		for _, podTemplate := range EnsureComponentPodTemplates(&deployment.Spec.DynamoComponentDeploymentSharedSpec) {
+			podTemplate.Annotations[commonconsts.RestartAnnotation] = restartState.Timestamp
+		}
 	} else if existingRestartAnnotations != nil {
 		if existingRestartAt, ok := existingRestartAnnotations[componentName]; ok && existingRestartAt != "" {
-			podTemplate := ensurePodTemplate(&deployment.Spec.DynamoComponentDeploymentSharedSpec)
-			podTemplate.Annotations[commonconsts.RestartAnnotation] = existingRestartAt
+			for _, podTemplate := range EnsureComponentPodTemplates(&deployment.Spec.DynamoComponentDeploymentSharedSpec) {
+				podTemplate.Annotations[commonconsts.RestartAnnotation] = existingRestartAt
+			}
 		}
 	}
 
@@ -463,7 +466,7 @@ func generateSingleDCD(
 		ensurePodTemplate(&deployment.Spec.DynamoComponentDeploymentSharedSpec).Spec.ServiceAccountName = commonconsts.PlannerServiceAccountName
 	}
 
-	if err := applyDynDeploymentConfig(deployment, commonconsts.DynamoServicePort); err != nil {
+	if err := applyDynDeploymentConfig(deployment); err != nil {
 		return nil, err
 	}
 
@@ -548,36 +551,48 @@ func GetDGDComponentPreservedIngressSpec(dgd *v1beta1.DynamoGraphDeployment, com
 	return ingressSpec, true
 }
 
-func applyDynDeploymentConfig(dcd *v1beta1.DynamoComponentDeployment, frontendPort int) error {
-	main := GetMainContainer(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
-	if main == nil {
-		return nil
-	}
-	rawConfig := getDynamoDeploymentConfig(main)
-	if rawConfig == nil {
-		return nil
-	}
+func applyDynDeploymentConfig(dcd *v1beta1.DynamoComponentDeployment) error {
 	componentName := GetDCDComponentName(dcd)
-	if dcd.IsFrontendComponent() {
-		updatedConfig, err := updateDynDeploymentConfigBytes(rawConfig, componentName, frontendPort)
-		if err != nil {
-			return err
+	var configuredWorkers *int32
+	for templateIndex, podTemplate := range ComponentPodTemplates(&dcd.Spec.DynamoComponentDeploymentSharedSpec) {
+		main := GetMainContainer(&v1beta1.DynamoComponentDeploymentSharedSpec{PodTemplate: podTemplate})
+		if main == nil {
+			continue
 		}
-		setDynamoDeploymentConfig(main, updatedConfig)
-		rawConfig = updatedConfig
+		rawConfig := getDynamoDeploymentConfig(main)
+		if rawConfig == nil {
+			continue
+		}
+		if dcd.IsFrontendComponent() {
+			updatedConfig, err := updateDynDeploymentConfigBytes(rawConfig, componentName, commonconsts.DynamoServicePort)
+			if err != nil {
+				return err
+			}
+			setDynamoDeploymentConfig(main, updatedConfig)
+			rawConfig = updatedConfig
+		}
+		config, err := ParseDynDeploymentConfig(rawConfig)
+		if err != nil {
+			return fmt.Errorf("parse deployment config from pod template %d: %w", templateIndex, err)
+		}
+		serviceConfig := getDynDeploymentServiceConfig(config, componentName, dcd.IsFrontendComponent())
+		if serviceConfig == nil || serviceConfig.ServiceArgs == nil {
+			continue
+		}
+		if workers := serviceConfig.ServiceArgs.Workers; dcd.Spec.Replicas == nil && workers != nil {
+			if configuredWorkers != nil && *configuredWorkers != *workers {
+				return fmt.Errorf("pod templates configure conflicting worker counts %d and %d", *configuredWorkers, *workers)
+			}
+			configuredWorkers = ptr.To(*workers)
+		}
+		if err := applyDynDeploymentResources(main, serviceConfig.ServiceArgs.Resources); err != nil {
+			return fmt.Errorf("apply deployment config resources to pod template %d: %w", templateIndex, err)
+		}
 	}
-	config, err := ParseDynDeploymentConfig(rawConfig)
-	if err != nil {
-		return err
+	if dcd.Spec.Replicas == nil && configuredWorkers != nil {
+		dcd.Spec.Replicas = configuredWorkers
 	}
-	serviceConfig := getDynDeploymentServiceConfig(config, componentName, dcd.IsFrontendComponent())
-	if serviceConfig == nil || serviceConfig.ServiceArgs == nil {
-		return nil
-	}
-	if dcd.Spec.Replicas == nil && serviceConfig.ServiceArgs.Workers != nil {
-		dcd.Spec.Replicas = serviceConfig.ServiceArgs.Workers
-	}
-	return applyDynDeploymentResources(main, serviceConfig.ServiceArgs.Resources)
+	return nil
 }
 
 func getDynDeploymentServiceConfig(config DynDeploymentConfig, componentName string, isFrontend bool) *DynDeploymentServiceConfig {
@@ -1308,11 +1323,11 @@ func ExplicitMultinodeRolesMatchImplicit(component *v1beta1.DynamoComponentDeplo
 		return false
 	}
 
-	// Require each role exactly once with no role-specific provider behavior.
+	// Require each role exactly once with no role-specific behavior.
 	seen := map[string]bool{}
 	for i := range component.Roles {
 		role := &component.Roles[i]
-		if seen[role.Name] || role.ProviderOverride != nil {
+		if seen[role.Name] || role.ProviderOverride != nil || role.PodTemplate != nil {
 			return false
 		}
 		seen[role.Name] = true
@@ -2156,9 +2171,10 @@ func applyDGDTemplateDefaults(
 		return
 	}
 	if len(dynamoDeployment.Spec.Env) > 0 {
-		podTemplate := ensurePodTemplate(component)
-		main := ensureMainContainer(podTemplate)
-		main.Env = MergeEnvs(dynamoDeployment.Spec.Env, main.Env)
+		for _, podTemplate := range EnsureComponentPodTemplates(component) {
+			main := ensureMainContainer(podTemplate)
+			main.Env = MergeEnvs(dynamoDeployment.Spec.Env, main.Env)
+		}
 	}
 
 	// Bake KV transfer policy env vars and topology projection into worker pod
@@ -2194,11 +2210,12 @@ func applyKvTransferPolicyToWorkerComponent(
 	if component == nil || kvt == nil {
 		return
 	}
-	podTemplate := ensurePodTemplate(component)
-	main := ensureMainContainer(podTemplate)
-	main.Env = MergeEnvs(removeWorkerKvTransferPolicyEnvVars(main.Env), workerKvTransferPolicyEnvVars(kvt))
-	main.VolumeMounts = appendTopologyLabelVolumeMount(main.VolumeMounts, TopologyLabelVolumeMount())
-	podTemplate.Spec.Volumes = appendTopologyLabelVolume(podTemplate.Spec.Volumes, TopologyLabelVolume(kvt, groveClusterTopologyDomains))
+	for _, podTemplate := range EnsureComponentPodTemplates(component) {
+		main := ensureMainContainer(podTemplate)
+		main.Env = MergeEnvs(removeWorkerKvTransferPolicyEnvVars(main.Env), workerKvTransferPolicyEnvVars(kvt))
+		main.VolumeMounts = appendTopologyLabelVolumeMount(main.VolumeMounts, TopologyLabelVolumeMount())
+		podTemplate.Spec.Volumes = appendTopologyLabelVolume(podTemplate.Spec.Volumes, TopologyLabelVolume(kvt, groveClusterTopologyDomains))
+	}
 }
 
 func applyKvTransferPolicyTopologyAnnotations(annotations map[string]string, kvt *v1beta1.KvTransferPolicy) {
@@ -2303,11 +2320,12 @@ var dgdPropagatedAnnotationKeys = []string{
 // annotations so that downstream logic can read them uniformly.
 // Service-level annotations take precedence (are never overwritten).
 func propagateDGDAnnotations(dgdAnnotations map[string]string, component *v1beta1.DynamoComponentDeploymentSharedSpec) {
-	podTemplate := ensurePodTemplate(component)
-	for _, key := range dgdPropagatedAnnotationKeys {
-		if val, exists := dgdAnnotations[key]; exists {
-			if _, serviceHas := podTemplate.Annotations[key]; !serviceHas {
-				podTemplate.Annotations[key] = val
+	for _, podTemplate := range EnsureComponentPodTemplates(component) {
+		for _, key := range dgdPropagatedAnnotationKeys {
+			if val, exists := dgdAnnotations[key]; exists {
+				if _, serviceHas := podTemplate.Annotations[key]; !serviceHas {
+					podTemplate.Annotations[key] = val
+				}
 			}
 		}
 	}
@@ -2316,15 +2334,36 @@ func propagateDGDAnnotations(dgdAnnotations map[string]string, component *v1beta
 // propagateDGDSpecMetadata merges DGD spec-level annotations and labels into
 // the component as a low-priority base. Service-level values take precedence.
 func propagateDGDSpecMetadata(annotations, labels map[string]string, component *v1beta1.DynamoComponentDeploymentSharedSpec) {
-	podTemplate := ensurePodTemplate(component)
-	podTemplate.Annotations = mergeLowPriorityMetadata(podTemplate.Annotations, annotations)
-	podTemplate.Labels = mergeLowPriorityMetadata(podTemplate.Labels, labels)
+	for _, podTemplate := range EnsureComponentPodTemplates(component) {
+		podTemplate.Annotations = mergeLowPriorityMetadata(podTemplate.Annotations, annotations)
+		podTemplate.Labels = mergeLowPriorityMetadata(podTemplate.Labels, labels)
+	}
+}
+
+// EnsureComponentPodTemplates returns the authored complete template sources
+// and allocates the legacy global source only when none exists.
+func EnsureComponentPodTemplates(component *v1beta1.DynamoComponentDeploymentSharedSpec) []*corev1.PodTemplateSpec {
+	templates := ComponentPodTemplates(component)
+	if len(templates) > 0 {
+		for _, podTemplate := range templates {
+			if podTemplate.Labels == nil {
+				podTemplate.Labels = map[string]string{}
+			}
+			if podTemplate.Annotations == nil {
+				podTemplate.Annotations = map[string]string{}
+			}
+		}
+		return templates
+	}
+	return []*corev1.PodTemplateSpec{ensurePodTemplate(component)}
 }
 
 // cliqueParams groups the context needed to build a single PodClique template
 // from a ServiceRole. All fields come from the enclosing Grove render
 // loop iteration and are read-only.
 type cliqueParams struct {
+	ctx                         context.Context
+	reader                      ctrlclient.Reader
 	r                           ServiceRole
 	component                   *v1beta1.DynamoComponentDeploymentSharedSpec
 	backendFramework            BackendFramework
@@ -2353,10 +2392,35 @@ type cliqueParams struct {
 //
 //nolint:gocyclo
 func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, error) {
+	templateRole := p.r.Role
+	if templateRole == RoleGMS && HasRolePodTemplates(p.component) {
+		templateRole = RoleWorker
+		if p.r.Rank == 0 {
+			templateRole = RoleLeader
+		}
+	}
+	effectiveComponent, err := EffectiveComponentForRole(p.component, templateRole)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve component for role %s: %w", p.r.Name, err)
+	}
+	p.component = effectiveComponent
+	propagateDGDAnnotations(p.dynamoDeployment.GetAnnotations(), p.component)
+	podTemplate := ensurePodTemplate(p.component)
+	podTemplate.Labels[commonconsts.KubeLabelDynamoNamespace] = GetDynamoNamespace(p.dynamoDeployment, p.component)
+	if p.discoveryBackend != "" {
+		podTemplate.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] = string(p.discoveryBackend)
+	}
+	containerGPUs := p.containerGPUs
+	if containerGPUs == nil {
+		containerGPUs = sync.OnceValues(func() (int64, error) {
+			return ResolveContainerGPUs(p.ctx, p.reader, p.dynamoDeployment.Namespace, p.component)
+		})
+	}
+
 	podSpec, err := generatePodSpecForRole(
 		p.r, p.component, p.backendFramework, p.secretsRetriever,
 		p.dynamoDeployment, p.numberOfNodes, p.operatorConfig, p.componentName,
-		p.groveClusterTopologyDomains, p.containerGPUs,
+		p.groveClusterTopologyDomains, containerGPUs,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate podSpec for role %s: %w", p.r.Name, err)
@@ -2615,19 +2679,10 @@ func GenerateGrovePodCliqueSet(
 	for i := range dynamoDeployment.Spec.Components {
 		component := dynamoDeployment.Spec.Components[i].DeepCopy()
 		componentName := component.ComponentName
-		dynamoNamespace := GetDynamoNamespace(dynamoDeployment, component)
-
-		propagateDGDAnnotations(dynamoDeployment.GetAnnotations(), component)
-		podTemplate := ensurePodTemplate(component)
-		podTemplate.Labels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
 		// Determine backend framework using hybrid approach
 		backendFramework, err := getBackendFrameworkFromComponent(component, dynamoDeployment)
 		if err != nil {
 			return nil, fmt.Errorf("failed to determine backend framework for component %s: %w", componentName, err)
-		}
-
-		if discoveryBackend != "" {
-			podTemplate.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] = string(discoveryBackend)
 		}
 
 		// Get checkpoint info for this component if available.
@@ -2637,17 +2692,22 @@ func GenerateGrovePodCliqueSet(
 		}
 		numberOfNodes := component.GetNumberOfNodes()
 		isMultinode := numberOfNodes > 1
-		containerGPUs := sync.OnceValues(func() (int64, error) {
-			return ResolveContainerGPUs(ctx, reader, dynamoDeployment.Namespace, component)
-		})
 		isInterPodGMS := component.IsInterPodGMSEnabled()
 		isInterPodFailover := component.IsInterPodFailoverEnabled()
 		usesPCSG := component.UsesPCSG()
 		roles := expandRolesForComponent(componentName, component.Replicas, numberOfNodes, component)
 		var cliqueNames []string
+		var sharedContainerGPUs ContainerGPUCount
+		if !HasRolePodTemplates(component) {
+			sharedContainerGPUs = sync.OnceValues(func() (int64, error) {
+				return ResolveContainerGPUs(ctx, reader, dynamoDeployment.Namespace, component)
+			})
+		}
 
 		for _, r := range roles {
 			clique, err := buildCliqueForRole(cliqueParams{
+				ctx:                         ctx,
+				reader:                      reader,
 				r:                           r,
 				component:                   component,
 				backendFramework:            backendFramework,
@@ -2668,7 +2728,7 @@ func GenerateGrovePodCliqueSet(
 				existingRestartAnnotations:  existingRestartAnnotations,
 				validatedQueueName:          validatedQueueName,
 				groveClusterTopologyDomains: groveClusterTopologyDomains,
-				containerGPUs:               containerGPUs,
+				containerGPUs:               sharedContainerGPUs,
 			})
 			if err != nil {
 				return nil, err
@@ -2680,7 +2740,7 @@ func GenerateGrovePodCliqueSet(
 		applyCliqueStartupDependencies(gangSet, roles, backendFramework, numberOfNodes, isInterPodGMS)
 
 		if isInterPodGMS {
-			configs, err := gmsResourceClaimTemplateConfigs(componentName, GetGPUMemoryService(component), GetMainContainerResources(component), roles)
+			configs, err := gmsResourceClaimTemplateConfigs(componentName, GetGPUMemoryService(component), component, roles)
 			if err != nil {
 				return nil, fmt.Errorf("failed to build GMS ResourceClaimTemplate configs for component %s: %w", componentName, err)
 			}
@@ -3061,6 +3121,56 @@ func determineBackendFramework(
 	return BackendFrameworkNoop, nil
 }
 
+// determineBackendFrameworkForComponent inspects every complete authored
+// PodTemplate source. Role-template mode may omit the component-level template,
+// so backend detection must not depend on that legacy location.
+func determineBackendFrameworkForComponent(
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	explicitBackendFramework string,
+) (BackendFramework, error) {
+	if component == nil {
+		return BackendFrameworkNoop, nil
+	}
+
+	templates := ComponentPodTemplates(component)
+	if len(templates) == 0 {
+		return determineBackendFramework(string(component.ComponentType), nil, nil, explicitBackendFramework)
+	}
+
+	var selected BackendFramework
+	for _, podTemplate := range templates {
+		effective := component.DeepCopy()
+		effective.PodTemplate = podTemplate
+		effective.Roles = nil
+
+		var command, args []string
+		if main := GetMainContainer(effective); main != nil {
+			command = main.Command
+			args = main.Args
+		}
+		framework, err := determineBackendFramework(
+			string(component.ComponentType),
+			command,
+			args,
+			explicitBackendFramework,
+		)
+		if err != nil {
+			return "", err
+		}
+		if framework == "" || framework == BackendFrameworkNoop {
+			continue
+		}
+		if selected != "" && selected != framework {
+			return "", fmt.Errorf("multiple backend frameworks detected across pod templates: %s and %s", selected, framework)
+		}
+		selected = framework
+	}
+	if selected != "" {
+		return selected, nil
+	}
+	return determineBackendFramework(string(component.ComponentType), nil, nil, explicitBackendFramework)
+}
+
 // getBackendFrameworkFromComponent attempts to determine backend framework using hybrid approach:
 // 1. Check if component is a worker - if not, return noop
 // 2. For workers: try to detect from command/args, fall back to explicit config
@@ -3070,22 +3180,7 @@ func getBackendFrameworkFromComponent(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 	dynamoDeployment *v1beta1.DynamoGraphDeployment,
 ) (BackendFramework, error) {
-	// Extract command/args from component
-	var command, args []string
-	if main := GetMainContainer(component); main != nil {
-		command = main.Command
-		args = main.Args
-	}
-
-	// Extract explicit backend framework from deployment
-	explicitBackendFramework := dynamoDeployment.Spec.BackendFramework
-
-	return determineBackendFramework(
-		string(component.ComponentType),
-		command,
-		args,
-		explicitBackendFramework,
-	)
+	return determineBackendFrameworkForComponent(component, dynamoDeployment.Spec.BackendFramework)
 }
 
 // ConvertDynamoComponentDeploymentToSpec converts a DynamoComponentDeployment to our component spec interface
@@ -3096,21 +3191,9 @@ func ConvertDynamoComponentDeploymentToSpec(dynComponent *v1beta1.DynamoComponen
 
 // GetBackendFrameworkFromDynamoComponent determines backend framework for a DynamoComponentDeployment
 func GetBackendFrameworkFromDynamoComponent(dynComponent *v1beta1.DynamoComponentDeployment) (BackendFramework, error) {
-	// Extract command/args from component
-	var command, args []string
-	if main := GetMainContainer(&dynComponent.Spec.DynamoComponentDeploymentSharedSpec); main != nil {
-		command = main.Command
-		args = main.Args
-	}
-
-	// Extract explicit backend framework
-	explicitBackendFramework := dynComponent.Spec.BackendFramework
-
-	return determineBackendFramework(
-		string(dynComponent.Spec.ComponentType),
-		command,
-		args,
-		explicitBackendFramework,
+	return determineBackendFrameworkForComponent(
+		&dynComponent.Spec.DynamoComponentDeploymentSharedSpec,
+		dynComponent.Spec.BackendFramework,
 	)
 }
 
@@ -3131,8 +3214,14 @@ func GenerateBasePodSpecForController(
 	containerGPUs ContainerGPUCount,
 	options GenerateBasePodSpecForControllerOptions,
 ) (*corev1.PodSpec, error) {
-	// Convert to our interface
-	componentSpec := ConvertDynamoComponentDeploymentToSpec(dynComponent)
+	// Select the complete authored template before applying role-independent lowering.
+	componentSpec, err := EffectiveComponentForRole(
+		&dynComponent.Spec.DynamoComponentDeploymentSharedSpec,
+		role,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve component role %q: %w", role, err)
+	}
 	if options.WorkloadComponentType != "" {
 		componentSpec.ComponentType = options.WorkloadComponentType
 	}
@@ -3143,7 +3232,17 @@ func GenerateBasePodSpecForController(
 	numberOfNodes := componentSpec.GetNumberOfNodes()
 
 	// Determine backend framework using hybrid approach
-	backendFramework, err := GetBackendFrameworkFromDynamoComponent(dynComponent)
+	var command, args []string
+	if main := GetMainContainer(componentSpec); main != nil {
+		command = main.Command
+		args = main.Args
+	}
+	backendFramework, err := determineBackendFramework(
+		string(componentSpec.ComponentType),
+		command,
+		args,
+		dynComponent.Spec.BackendFramework,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to determine backend framework: %w", err)
 	}

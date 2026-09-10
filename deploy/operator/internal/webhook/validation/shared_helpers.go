@@ -97,7 +97,7 @@ func runtimeVersionImageAndPath(
 
 	// Resolve the exact container path when the named main container exists.
 	if spec.PodTemplate != nil {
-		if index := containerIndexByName(spec.PodTemplate.Spec.Containers, consts.MainContainerName); index >= 0 {
+		if index := mainContainerIndex(spec.PodTemplate.Spec.Containers); index >= 0 {
 			imagePath = imagePath.Index(index).Child("image")
 			return spec.PodTemplate.Spec.Containers[index].Image, imagePath
 		}
@@ -232,10 +232,10 @@ func hasContainerNamed(containers []corev1.Container, name string) bool {
 	return false
 }
 
-func containerIndexByName(containers []corev1.Container, name string) int {
+func mainContainerIndex(containers []corev1.Container) int {
 	// Return the first exact match so callers can update that container in place.
 	for i := range containers {
-		if containers[i].Name == name {
+		if containers[i].Name == consts.MainContainerName {
 			return i
 		}
 	}
@@ -279,40 +279,61 @@ func inferencePoolAvailabilityError(ctx context.Context, mgr ctrl.Manager) error
 	)
 }
 
-// validateElasticEPRequiresCommand rejects a vLLM component that requests the
-// elastic-EP Ray topology (--enable-elastic-ep with --data-parallel-backend ray,
-// including the -dpb alias and flag=value spellings) but omits the main
-// container command. The operator starts the single-pod Ray head by rewriting
-// the container to run "ray start ... && <command>", which needs an explicit
-// executable; with only the image ENTRYPOINT (empty command) it cannot build
-// that command, so elastic EP would silently never start. Fail closed here with
-// an actionable error rather than admit a request the operator cannot fulfill.
+// validateElasticEPRequiresCommand rejects an automatically managed vLLM
+// leader that requests the elastic-EP Ray topology but omits the main container
+// command. The operator starts the Ray head by rewriting the leader command,
+// which requires an explicit executable. Manual injection preserves the
+// authored command and therefore does not require one here.
 func validateElasticEPRequiresCommand(
 	backendFramework string,
 	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
 ) field.ErrorList {
-	var allErrs field.ErrorList
-	if backendFramework != string(dynamo.BackendFrameworkVLLM) || spec.PodTemplate == nil {
-		return allErrs
+	if backendFramework != string(dynamo.BackendFrameworkVLLM) || dynamo.IsManualFlagsInjection(spec) {
+		return nil
 	}
-	containers := spec.PodTemplate.Spec.Containers
-	index := containerIndexByName(containers, consts.MainContainerName)
+
+	// The global template is also the leader source in legacy template mode.
+	if !dynamo.HasRolePodTemplates(spec) {
+		return validateElasticEPTemplateRequiresCommand(spec.PodTemplate, fldPath.Child("podTemplate"))
+	}
+
+	// Complete role-template mode rewrites only the semantic leader command.
+	for i := range spec.Roles {
+		role := &spec.Roles[i]
+		if role.Name == nvidiacomv1beta1.ComponentRoleLeader {
+			return validateElasticEPTemplateRequiresCommand(
+				role.PodTemplate,
+				fldPath.Child("roles").Index(i).Child("podTemplate"),
+			)
+		}
+	}
+	return nil
+}
+
+func validateElasticEPTemplateRequiresCommand(
+	podTemplate *corev1.PodTemplateSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	if podTemplate == nil {
+		return nil
+	}
+	containers := podTemplate.Spec.Containers
+	index := mainContainerIndex(containers)
 	if index < 0 {
-		return allErrs
+		return nil
 	}
 	mainContainer := &containers[index]
 	if len(mainContainer.Command) > 0 || !dynamo.IsElasticEPRayLaunch(mainContainer) {
-		return allErrs
+		return nil
 	}
-	commandPath := fldPath.Child("podTemplate", "spec", "containers").Index(index).Child("command")
-	allErrs = append(allErrs, field.Required(
+	commandPath := fldPath.Child("spec", "containers").Index(index).Child("command")
+	return field.ErrorList{field.Required(
 		commandPath,
 		"elastic expert parallelism (--enable-elastic-ep with --data-parallel-backend ray) requires an explicit "+
-			"container command; the operator starts the single-pod Ray head by wrapping that command and cannot "+
+			"container command; the operator starts the Ray head by wrapping that command and cannot "+
 			"start it from the image ENTRYPOINT",
-	))
-	return allErrs
+	)}
 }
 
 func gpuMemoryServiceFor(

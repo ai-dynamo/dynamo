@@ -79,11 +79,12 @@ type DynamoComponentDeploymentSharedSpec struct {
 	SubComponentType string `json:"subComponentType,omitempty"`
 
 	// RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's
-	// main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable
-	// semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is
-	// not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".
-	// It does not change the image. Setting or changing an override that resolves to version 1.5.0 or
-	// later may trigger a rollout. Keep it consistent with the image's runtime version.
+	// main image. DGD admission requires it when the main image in extraPodSpec or the selected role
+	// PodTemplates has no parseable semantic-version tag; controller-generated DCDs may omit it. Set
+	// it also when a parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH
+	// value, for example "1.4.0". It does not change the image. Setting or changing an override that
+	// resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with every selected
+	// template's runtime version.
 	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`
 	// +optional
 	RuntimeVersionOverride string `json:"runtimeVersionOverride,omitempty"`
@@ -167,9 +168,16 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// leader and one worker role. Their cardinality is derived from multinode.nodeCount.
 	// Omission preserves the implicit multinode role layout.
 	// +optional
+	// +kubebuilder:validation:MaxItems=2
 	// +listType=map
 	// +listMapKey=name
 	Roles []ComponentRoleSpec `json:"roles,omitempty"`
+
+	// Experimental groups opt-in preview features whose API shape and behavior
+	// may change without notice.
+	// +optional
+	Experimental *ExperimentalSpec `json:"experimental,omitempty"`
+
 	// ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.
 	// When enabled, replicas are managed by the DGDSA and external autoscalers scale the service
 	// via the Scale subresource; when disabled, replicas are set directly. Opt in with
@@ -225,6 +233,28 @@ type MultinodeSpec struct {
 	// +kubebuilder:validation:Minimum=2
 	NodeCount int32 `json:"nodeCount"`
 }
+
+// ExperimentalSpec groups opt-in preview features whose API shape and behavior
+// may change without notice.
+type ExperimentalSpec struct {
+	// FlagsInjection controls backend-specific multinode launch injection.
+	// Automatic preserves operator-generated launch commands and topology flags;
+	// Manual preserves the authored role commands and arguments.
+	// +optional
+	// +kubebuilder:default=Automatic
+	FlagsInjection FlagsInjectionMode `json:"flagsInjection,omitempty"`
+}
+
+// FlagsInjectionMode controls automatic backend-specific multinode launch injection.
+// +kubebuilder:validation:Enum=Automatic;Manual
+type FlagsInjectionMode string
+
+const (
+	// FlagsInjectionModeAutomatic keeps backend-specific multinode launch injection enabled.
+	FlagsInjectionModeAutomatic FlagsInjectionMode = "Automatic"
+	// FlagsInjectionModeManual disables backend-specific multinode launch injection.
+	FlagsInjectionModeManual FlagsInjectionMode = "Manual"
+)
 
 type IngressTLSSpec struct {
 	// SecretName is the name of a Kubernetes Secret containing the TLS certificate and key.

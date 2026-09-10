@@ -1014,6 +1014,35 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
+			name: "complete role pod templates are admitted",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaExplicitMultinodeRoleTemplates(betaWorkerComponent(dgd), 4)
+			}),
+		},
+		{
+			name: "role pod template sidecars require images in CEL",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				setBetaExplicitMultinodeRoleTemplates(worker, 4)
+				worker.Roles[0].PodTemplate.Spec.Containers = append(
+					worker.Roles[0].PodTemplate.Spec.Containers,
+					corev1.Container{Name: "metrics"},
+				)
+			}),
+			wantCELErr: "spec.components[1].roles[0].podTemplate.spec.containers[1]: Invalid value: sidecar containers must specify a non-empty image",
+		},
+		{
+			name: "role pod template backend annotations are validated by CEL",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				setBetaExplicitMultinodeRoleTemplates(worker, 4)
+				worker.Roles[0].PodTemplate.Annotations = map[string]string{
+					consts.KubeAnnotationVLLMDistributedExecutorBackend: "invalid",
+				}
+			}),
+			wantCELErr: "spec.components[1].roles[0].podTemplate.metadata.annotations: Invalid value: podTemplate backend annotation must be mp or ray, case-insensitively",
+		},
+		{
 			name: "v1alpha1 explicit multinode roles convert and are admitted",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
@@ -3087,6 +3116,17 @@ func setBetaExplicitMultinodeRoles(
 		{Name: nvidiacomv1beta1.ComponentRoleLeader},
 		{Name: nvidiacomv1beta1.ComponentRoleWorker},
 	}
+}
+
+func setBetaExplicitMultinodeRoleTemplates(
+	worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	nodeCount int32,
+) {
+	setBetaExplicitMultinodeRoles(worker, nodeCount)
+	for i := range worker.Roles {
+		worker.Roles[i].PodTemplate = worker.PodTemplate.DeepCopy()
+	}
+	worker.PodTemplate = nil
 }
 
 func setBetaWorkerPowerInputs(

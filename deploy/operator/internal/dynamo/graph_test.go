@@ -4602,6 +4602,106 @@ func TestGenerateGrovePodCliqueSet_VLLMMultinodeDRA(t *testing.T) {
 	}
 }
 
+func TestGenerateGrovePodCliqueSet_UsesCompleteRolePodTemplates(t *testing.T) {
+	t.Log("Author distinct complete leader and worker templates with manual launch flags")
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "role-templates", Namespace: "default"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(BackendFrameworkSGLang),
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "decode",
+				ComponentType: v1beta1.ComponentTypeDecode,
+				Multinode:     &v1beta1.MultinodeSpec{NodeCount: 2},
+				Roles: []v1beta1.ComponentRoleSpec{
+					{
+						Name: v1beta1.ComponentRoleLeader,
+						PodTemplate: &corev1.PodTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"template-source": "leader"}},
+							Spec: corev1.PodSpec{
+								NodeSelector:   map[string]string{"node-role": "leader"},
+								ResourceClaims: []corev1.PodResourceClaim{{Name: "devices", ResourceClaimTemplateName: ptr.To("leader-devices")}},
+								Containers: []corev1.Container{{
+									Name:      commonconsts.MainContainerName,
+									Image:     "sglang-leader:1.5.0",
+									Command:   []string{"python3"},
+									Args:      []string{"-m", "dynamo.sglang", "--node-rank", "0"},
+									Resources: corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: "devices"}}},
+								}},
+							},
+						},
+					},
+					{
+						Name: v1beta1.ComponentRoleWorker,
+						PodTemplate: &corev1.PodTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"template-source": "worker"}},
+							Spec: corev1.PodSpec{
+								NodeSelector:   map[string]string{"node-role": "worker"},
+								ResourceClaims: []corev1.PodResourceClaim{{Name: "devices", ResourceClaimTemplateName: ptr.To("worker-devices")}},
+								Containers: []corev1.Container{{
+									Name:      commonconsts.MainContainerName,
+									Image:     "sglang-worker:1.5.0",
+									Command:   []string{"python3"},
+									Args:      []string{"-m", "dynamo.sglang", "--node-rank", "$(GROVE_PCLQ_POD_INDEX)"},
+									Resources: corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: "devices"}}},
+								}},
+							},
+						},
+					},
+				},
+				Experimental: &v1beta1.ExperimentalSpec{FlagsInjection: v1beta1.FlagsInjectionModeManual},
+			}},
+		},
+	}
+
+	got, err := GenerateGrovePodCliqueSet(
+		t.Context(), dgd, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{},
+		nil, nil, nil, nil, nil,
+	)
+	require.NoError(t, err)
+
+	t.Log("Verify each Grove clique comes from its role template without automatic launch flags")
+	cliques := make(map[string]*grovev1alpha1.PodCliqueTemplateSpec, len(got.Spec.Template.Cliques))
+	for _, clique := range got.Spec.Template.Cliques {
+		cliques[clique.Name] = clique
+	}
+	for _, expectation := range []struct {
+		name     string
+		image    string
+		nodeRole string
+		nodeRank string
+	}{
+		{name: "decode-ldr", image: "sglang-leader:1.5.0", nodeRole: "leader", nodeRank: "0"},
+		{name: "decode-wkr", image: "sglang-worker:1.5.0", nodeRole: "worker", nodeRank: "$(GROVE_PCLQ_POD_INDEX)"},
+	} {
+		clique := cliques[expectation.name]
+		require.NotNil(t, clique)
+		assert.Equal(t, expectation.nodeRole, clique.Labels["template-source"])
+		assert.Equal(t, expectation.nodeRole, clique.Spec.PodSpec.NodeSelector["node-role"])
+		assert.Equal(t, expectation.nodeRole+"-devices", *clique.Spec.PodSpec.ResourceClaims[0].ResourceClaimTemplateName)
+		main := clique.Spec.PodSpec.Containers[0]
+		assert.Equal(t, expectation.image, main.Image)
+		assert.Contains(t, main.Args, expectation.nodeRank)
+		assert.NotContains(t, main.Args, "--dist-init-addr")
+	}
+	assert.Nil(t, cliques["decode-wkr"].Spec.PodSpec.Containers[0].LivenessProbe)
+
+	t.Log("Switch injection ownership without changing either complete role template")
+	dgd.Spec.Components[0].Experimental.FlagsInjection = v1beta1.FlagsInjectionModeAutomatic
+	got, err = GenerateGrovePodCliqueSet(
+		t.Context(), dgd, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{},
+		nil, nil, nil, nil, nil,
+	)
+	require.NoError(t, err)
+	for _, clique := range got.Spec.Template.Cliques {
+		main := clique.Spec.PodSpec.Containers[0]
+		if clique.Name == "decode-ldr" {
+			assert.Contains(t, main.Args, "--dist-init-addr")
+		} else if clique.Name == "decode-wkr" {
+			assert.Contains(t, main.Args[0], "--dist-init-addr")
+		}
+	}
+}
+
 func TestGenerateGrovePodCliqueSet_TRTLLMMultinodeDRA(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, resourcev1.AddToScheme(scheme))
@@ -5645,6 +5745,55 @@ func TestGetBackendFrameworkFromComponent(t *testing.T) {
 			deployment:  &v1alpha1.DynamoGraphDeployment{},
 			expected:    BackendFrameworkNoop,
 			expectError: false,
+		},
+		{
+			name: "detect from complete role pod templates",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: "worker",
+				Roles: []v1alpha1.ComponentRoleSpec{
+					{
+						Name: v1alpha1.ComponentRoleLeader,
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+							Name: "main",
+							Args: []string{"python -m dynamo.vllm.worker --model test"},
+						}}}},
+					},
+					{
+						Name: v1alpha1.ComponentRoleWorker,
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+							Name: "main",
+							Args: []string{"vllm serve test"},
+						}}}},
+					},
+				},
+			},
+			deployment: &v1alpha1.DynamoGraphDeployment{},
+			expected:   BackendFrameworkVLLM,
+		},
+		{
+			name: "reject conflicting role pod template backends",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: "worker",
+				Roles: []v1alpha1.ComponentRoleSpec{
+					{
+						Name: v1alpha1.ComponentRoleLeader,
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+							Name: "main",
+							Args: []string{"python -m dynamo.vllm.worker --model test"},
+						}}}},
+					},
+					{
+						Name: v1alpha1.ComponentRoleWorker,
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+							Name: "main",
+							Args: []string{"python -m dynamo.sglang --model test"},
+						}}}},
+					},
+				},
+			},
+			deployment:    &v1alpha1.DynamoGraphDeployment{},
+			expectError:   true,
+			errorContains: "multiple backend frameworks detected across pod templates",
 		},
 	}
 
@@ -9250,13 +9399,51 @@ func TestApplyDynDeploymentConfig_FallsBackToFrontendConfigKeyForRenamedFrontend
 		},
 	}
 
-	require.NoError(t, applyDynDeploymentConfig(dcd, commonconsts.DynamoServicePort))
+	require.NoError(t, applyDynDeploymentConfig(dcd))
 
 	main := GetMainContainer(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
 	require.NotNil(t, main)
 	assert.Equal(t, resource.MustParse("2"), main.Resources.Requests[corev1.ResourceCPU])
 	assert.Equal(t, resource.MustParse("2Gi"), main.Resources.Requests[corev1.ResourceMemory])
 	assert.Equal(t, resource.MustParse("1"), main.Resources.Requests[corev1.ResourceName(commonconsts.KubeResourceGPUNvidia)])
+}
+
+func TestApplyDynDeploymentConfig_RolePodTemplates(t *testing.T) {
+	roleTemplate := func(cpu, workers string) *corev1.PodTemplateSpec {
+		return &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name: commonconsts.MainContainerName,
+			Env: []corev1.EnvVar{{
+				Name:  commonconsts.DynamoDeploymentConfigEnvVar,
+				Value: fmt.Sprintf(`{"decode":{"ServiceArgs":{"Workers":%s,"Resources":{"CPU":"%s"}}}}`, workers, cpu),
+			}},
+		}}}}
+	}
+	dcd := &v1beta1.DynamoComponentDeployment{
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "decode",
+				ComponentType: v1beta1.ComponentTypeDecode,
+				Roles: []v1beta1.ComponentRoleSpec{
+					{Name: v1beta1.ComponentRoleLeader, PodTemplate: roleTemplate("2", "4")},
+					{Name: v1beta1.ComponentRoleWorker, PodTemplate: roleTemplate("3", "4")},
+				},
+			},
+		},
+	}
+
+	require.NoError(t, applyDynDeploymentConfig(dcd))
+	require.NotNil(t, dcd.Spec.Replicas)
+	assert.Equal(t, int32(4), *dcd.Spec.Replicas)
+	for roleIndex, expectedCPU := range []string{"2", "3"} {
+		main := dcd.Spec.Roles[roleIndex].PodTemplate.Spec.Containers[0]
+		assert.Equal(t, resource.MustParse(expectedCPU), main.Resources.Requests[corev1.ResourceCPU])
+		assert.Equal(t, resource.MustParse(expectedCPU), main.Resources.Limits[corev1.ResourceCPU])
+	}
+
+	dcd.Spec.Replicas = nil
+	dcd.Spec.Roles[1].PodTemplate = roleTemplate("3", "5")
+	err := applyDynDeploymentConfig(dcd)
+	require.ErrorContains(t, err, "conflicting worker counts 4 and 5")
 }
 
 func TestGenerateSingleDCD_RollingUpdateContext(t *testing.T) {

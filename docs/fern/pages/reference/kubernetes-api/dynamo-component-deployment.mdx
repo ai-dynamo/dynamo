@@ -62,7 +62,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 </ParamField>
 
 <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
-  Pod template for the component's pods. The operator injects its defaults (image, command, env, ports, probes, resources, volume mounts) into the container named `main`, merging your overrides by name. If no `main` container is present, the operator generates one. Every other container is treated as a user-managed sidecar and receives no injected defaults — sidecars must specify their own required fields such as `image`. Replaces the ten separate per-component fields (`resources`, `envs`, `livenessProbe`, and so on) that existed in `v1alpha1`.
+  Complete Pod template shared by all roles of the component. It is mutually exclusive with `roles[*].podTemplate`. The operator injects its defaults (image, command, env, ports, probes, resources, volume mounts) into the container named `main`, merging your overrides by name. Every other container is treated as a user-managed sidecar and receives no injected defaults — sidecars must specify their own required fields such as `image`. Replaces the ten separate per-component fields (`resources`, `envs`, `livenessProbe`, and so on) that existed in `v1alpha1`.
 
   <a href="https://pkg.go.dev/k8s.io/api/core/v1#PodTemplateSpec" target="_blank">core/v1.PodTemplateSpec</a>
 </ParamField>
@@ -78,7 +78,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 </Indent>
 
 <ParamField path="roles" type="[]ComponentRoleSpec">
-  Optional explicit structure of a compound component. In this release, roles are supported for multinode components and must contain exactly one `leader` and one `worker`. Their cardinality remains derived from `multinode.nodeCount`. Omit the field to retain the implicit leader/worker layout.
+  Optional explicit structure of a compound component. In this release, roles are supported for multinode components and must contain exactly one `leader` and one `worker`. Their cardinality remains derived from `multinode.nodeCount`. Omit the field to retain the implicit leader/worker layout. If any role sets `podTemplate`, every role must set one and the component-level `podTemplate` must be absent.
 </ParamField>
 
 <Indent>
@@ -87,6 +87,11 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
   </ParamField>
   <ParamField path="providerOverride" type="ProviderOverride">
     Provider configuration for the workload unit generated for this role. Available only on components embedded in a DGD; standalone DCD OpenAPI omits this field.
+  </ParamField>
+  <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
+    Complete Pod template for this role. Role templates do not inherit from each other or from the component-level template. The component remains the lifecycle, rollout, scaling, service, and status boundary.
+
+    <a href="https://pkg.go.dev/k8s.io/api/core/v1#PodTemplateSpec" target="_blank">core/v1.PodTemplateSpec</a>
   </ParamField>
 </Indent>
 
@@ -118,7 +123,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 </ParamField>
 
 <ParamField path="frontendSidecar" type="string">
-  Designates a container in `podTemplate.spec.containers` as the frontend sidecar. The value must match a container `name` in that list; the operator merges its frontend-sidecar defaults (Dynamo env vars, ports, health probes) into that container the same way it merges into `main`. The validation webhook rejects values that match no container.
+  Designates a container in each selected complete Pod template as the frontend sidecar. The value must match a container `name` in the component template or every role template; the operator merges its frontend-sidecar defaults (Dynamo env vars, ports, health probes) into that container the same way it merges into `main`.
 </ParamField>
 
 <ParamField path="compilationCache" type="CompilationCacheConfig">
@@ -179,6 +184,12 @@ Groups opt-in preview features for a component. Referenced by `experimental`. Ne
 <Warning>
   These preview features can change or disappear between `v1beta1` releases without a name-preserving graduation path. They are excluded from the `v1beta1` deprecation policy — do not rely on them for production workloads.
 </Warning>
+
+<ParamField path="flagsInjection" type="FlagsInjectionMode" default="Automatic">
+  Controls backend-specific multinode launch generation independently from Pod-template selection. `Automatic` preserves the existing generated commands and topology flags. `Manual` preserves the authored role commands and arguments, except that Dynamo still owns vLLM MP port `29500`, worker probe handling, and required Pod/provider wiring. Manual mode is valid only for multinode engine components and cannot be combined with GMS or failover.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>Automatic</Badge> <Badge intent="note" minimal>Manual</Badge></span>
+</ParamField>
 
 <ParamField path="gpuMemoryService" type="GPUMemoryServiceSpec">
   Configures the GPU Memory Service (GMS). When set, GPU access for GMS clients is managed through Dynamic Resource Allocation (DRA), and the operator replaces the `main` container's GPU resources with a DRA `ResourceClaim`.

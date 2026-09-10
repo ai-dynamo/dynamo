@@ -30,7 +30,6 @@ import (
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -175,13 +174,9 @@ func applyGroveWorkerHashSuffix(
 		if !dynamo.IsWorkerComponent(string(component.ComponentType)) {
 			continue
 		}
-		if component.PodTemplate == nil {
-			component.PodTemplate = &corev1.PodTemplateSpec{}
+		for _, podTemplate := range dynamo.EnsureComponentPodTemplates(component) {
+			podTemplate.Labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
 		}
-		if component.PodTemplate.Labels == nil {
-			component.PodTemplate.Labels = make(map[string]string)
-		}
-		component.PodTemplate.Labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
 	}
 	return nil
 }
@@ -559,13 +554,9 @@ func applyLegacyGroveWorkerComponentType(
 	subComponentType string,
 ) {
 	component.ComponentType = nvidiacomv1beta1.ComponentTypeWorker
-	if component.PodTemplate == nil {
-		component.PodTemplate = &corev1.PodTemplateSpec{}
-	}
-	if component.PodTemplate.Labels == nil {
-		component.PodTemplate.Labels = map[string]string{}
-	}
-	if _, ok := component.PodTemplate.Labels[commonconsts.KubeLabelDynamoSubComponentType]; !ok {
-		component.PodTemplate.Labels[commonconsts.KubeLabelDynamoSubComponentType] = subComponentType
+	for _, podTemplate := range dynamo.EnsureComponentPodTemplates(component) {
+		if _, ok := podTemplate.Labels[commonconsts.KubeLabelDynamoSubComponentType]; !ok {
+			podTemplate.Labels[commonconsts.KubeLabelDynamoSubComponentType] = subComponentType
+		}
 	}
 }
