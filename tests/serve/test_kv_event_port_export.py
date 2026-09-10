@@ -94,3 +94,16 @@ def test_three_workers_each_get_a_distinct_kv_event_port(tmp_path: Path) -> None
 
     system_ports = {env[f"DYN_SYSTEM_PORT{i}"] for i in (1, 2, 3)}
     assert system_ports.isdisjoint(exported)
+
+
+def test_one_worker_still_gets_the_numbered_kv_event_port(tmp_path: Path) -> None:
+    # The launch scripts read only DYN_VLLM_KV_EVENT_PORT{i}, so a one-worker
+    # deployment without PORT1 silently falls back to the script's literal.
+    with reserved_ports(3, DynamoPortRange.SERVE.value) as pool:
+        frontend, kv_event, system = pool
+        env, extra_count = _prepared_env(
+            _service_ports([system], frontend, kv_event), str(tmp_path)
+        )
+
+    assert env["DYN_VLLM_KV_EVENT_PORT1"] == str(kv_event)
+    assert extra_count == 0

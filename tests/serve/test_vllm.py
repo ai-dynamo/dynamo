@@ -851,8 +851,8 @@ def test_serve_deployment(
     Test dynamo serve deployments with different graph configurations.
     """
     assert (
-        num_system_ports >= 2
-    ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
+        num_system_ports >= 3
+    ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2 + SYSTEM_PORT3"
     config = dataclasses.replace(
         vllm_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )

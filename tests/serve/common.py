@@ -226,16 +226,17 @@ def _prepare_deployment(
         # Unique ZMQ port for vLLM KV event publishing (avoids xdist collisions).
         if ports.kv_event_port:
             merged_env["DYN_VLLM_KV_EVENT_PORT"] = str(ports.kv_event_port)
-            # For multi-worker scripts (router and multimodal E/P/D topologies),
-            # allocate a separate KV event port per worker to avoid ZMQ collisions.
-            if len(dynamic_system_ports) >= 2:
-                merged_env["DYN_VLLM_KV_EVENT_PORT1"] = str(ports.kv_event_port)
-                next_start = ports.kv_event_port + 1
-                for idx in range(2, len(dynamic_system_ports) + 1):
-                    kv_port = allocate_port(next_start)
-                    extra_allocated_ports.append(kv_port)
-                    merged_env[f"DYN_VLLM_KV_EVENT_PORT{idx}"] = str(kv_port)
-                    next_start = kv_port + 1
+            # Worker `i` binds DYN_VLLM_KV_EVENT_PORT{i}. The launch scripts read
+            # only the indexed name, so worker 1 needs one even in a one-worker
+            # deployment; workers 2..N get freshly allocated ports so concurrent
+            # runs on the same host cannot collide on ZMQ.
+            merged_env["DYN_VLLM_KV_EVENT_PORT1"] = str(ports.kv_event_port)
+            next_start = ports.kv_event_port + 1
+            for idx in range(2, len(dynamic_system_ports) + 1):
+                kv_port = allocate_port(next_start)
+                extra_allocated_ports.append(kv_port)
+                merged_env[f"DYN_VLLM_KV_EVENT_PORT{idx}"] = str(kv_port)
+                next_start = kv_port + 1
 
         # Per-worker NIXL side-channel ports (avoids xdist collisions on 20097).
         for idx, port in enumerate(ports.nixl_side_channel_ports, start=1):
