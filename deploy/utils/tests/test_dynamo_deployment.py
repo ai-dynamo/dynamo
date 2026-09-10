@@ -62,3 +62,73 @@ async def test_wait_for_deployment_ready_raises_deployment_failed_on_crashloop(
     # Confirm we didn't run out the timeout — there should have been at
     # most one DGD status check before the raise.
     assert client.custom_api.get_namespaced_custom_object.await_count == 1
+
+
+def _mocked_client() -> DynamoDeploymentClient:
+    """A client whose Kubernetes API calls are recorded instead of sent."""
+    client = DynamoDeploymentClient(namespace="ns", deployment_name="dgd-test")
+    client._init_kubernetes = AsyncMock()  # type: ignore[method-assign]
+    client.custom_api = MagicMock()
+    client.custom_api.create_namespaced_custom_object = AsyncMock()
+    client.custom_api.delete_namespaced_custom_object = AsyncMock()
+    return client
+
+
+async def test_create_deployment_reads_v1beta1_components():
+    """A v1beta1 candidate (DYN-4332) must deploy without a KeyError.
+
+    ``materialize_dgd`` has produced ``spec.components`` — a list of objects
+    each carrying a ``name`` — since DGD generation moved to v1beta1, while
+    this client still read the v1alpha1 ``spec.services`` mapping.
+    """
+    client = _mocked_client()
+
+    await client.create_deployment(
+        {
+            "apiVersion": "nvidia.com/v1beta1",
+            "kind": "DynamoGraphDeployment",
+            "metadata": {"name": "candidate", "namespace": "ns"},
+            "spec": {
+                "components": [
+                    {"name": "Frontend"},
+                    {"name": "VllmPrefillWorker"},
+                ]
+            },
+        }
+    )
+
+    # Original case drives the nvidia.com/dynamo-component label selector;
+    # the lowercase projection names the per-component log directory.
+    assert client._original_components == ["Frontend", "VllmPrefillWorker"]
+    assert client.components == ["frontend", "vllmprefillworker"]
+
+    create_kwargs = client.custom_api.create_namespaced_custom_object.await_args.kwargs
+    assert create_kwargs["version"] == "v1beta1"
+
+    await client.delete_deployment()
+    delete_kwargs = client.custom_api.delete_namespaced_custom_object.await_args.kwargs
+    assert delete_kwargs["version"] == "v1beta1"
+
+
+async def test_create_deployment_reads_v1alpha1_services():
+    """Negative control: v1alpha1 manifests still work.
+
+    ``create_deployment`` accepts any DynamoGraphDeployment YAML, and the
+    repository still carries v1alpha1 manifests using ``spec.services``.
+    """
+    client = _mocked_client()
+
+    await client.create_deployment(
+        {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "kind": "DynamoGraphDeployment",
+            "metadata": {"name": "candidate", "namespace": "ns"},
+            "spec": {"services": {"Frontend": {}, "VllmPrefillWorker": {}}},
+        }
+    )
+
+    assert client._original_components == ["Frontend", "VllmPrefillWorker"]
+    assert client.components == ["frontend", "vllmprefillworker"]
+
+    create_kwargs = client.custom_api.create_namespaced_custom_object.await_args.kwargs
+    assert create_kwargs["version"] == "v1alpha1"
