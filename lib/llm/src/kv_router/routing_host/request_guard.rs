@@ -110,6 +110,20 @@ impl CacheLossTracking {
     }
 }
 
+fn cache_loss_stages(
+    route: RouteObservation,
+    outcome: &CacheLossWorkerOutcome,
+) -> Option<[u64; 6]> {
+    let f1 = route.previously_computed_tokens;
+    let f2 = route.best_router_tokens;
+    let f3 = route.selected_router_tokens;
+    let f4 = outcome
+        .gpu_hit_tokens
+        .checked_add(outcome.cpu_lookup_tokens)?;
+    let f5 = outcome.gpu_hit_tokens.checked_add(outcome.cpu_hit_tokens)?;
+    Some([route.prompt_tokens, f1, f2, f3, f4, f5])
+}
+
 pub(crate) fn prompt_private_blocks(
     token_count: usize,
     complete_blocks: usize,
@@ -921,20 +935,13 @@ where
             return;
         }
 
-        let f1 = route.previously_computed_tokens;
-        let f2 = route.best_router_tokens.min(f1);
-        let f3 = route.selected_router_tokens.min(f2);
-        let f4 = outcome
-            .gpu_hit_tokens
-            .saturating_add(outcome.cpu_lookup_tokens)
-            .min(f3);
-        let f5 = outcome
-            .gpu_hit_tokens
-            .saturating_add(outcome.cpu_hit_tokens)
-            .min(f4);
+        let Some(stages) = cache_loss_stages(route, &outcome) else {
+            self.record_cache_loss_incomplete();
+            return;
+        };
         self.observability
             .request_metrics()
-            .observe_cache_loss_funnel([route.prompt_tokens, f1, f2, f3, f4, f5]);
+            .observe_cache_loss_funnel(stages);
         if let Some(history_request) = self.cache_history_request.as_mut() {
             let prompt_hashes = history_request.prompt_hashes();
             let Some(cache_history) = self.cache_history.as_ref() else {
@@ -994,6 +1001,74 @@ where
         self.observability
             .record_metrics(self.record_itl_at_completion);
         // RequestCleanup drops immediately afterward and performs resource cleanup.
+    }
+}
+
+#[cfg(test)]
+mod cache_loss_tests {
+    use super::*;
+
+    #[test]
+    fn worker_outcomes_can_exceed_router_observations() {
+        let route = RouteObservation {
+            prompt_tokens: 100,
+            previously_computed_tokens: 80,
+            best_router_tokens: 75,
+            selected_router_tokens: 60,
+        };
+        let outcome = CacheLossWorkerOutcome {
+            complete: true,
+            prompt_tokens: 100,
+            gpu_hit_tokens: 70,
+            cpu_hit_tokens: 15,
+            cpu_lookup_tokens: 20,
+        };
+
+        assert_eq!(
+            cache_loss_stages(route, &outcome),
+            Some([100, 80, 75, 60, 90, 85])
+        );
+    }
+
+    #[test]
+    fn stages_preserve_values_above_prior_stages_and_prompt_length() {
+        let route = RouteObservation {
+            prompt_tokens: 100,
+            previously_computed_tokens: 120,
+            best_router_tokens: 110,
+            selected_router_tokens: 105,
+        };
+        let outcome = CacheLossWorkerOutcome {
+            complete: true,
+            prompt_tokens: 100,
+            gpu_hit_tokens: 120,
+            cpu_hit_tokens: 15,
+            cpu_lookup_tokens: 20,
+        };
+
+        assert_eq!(
+            cache_loss_stages(route, &outcome),
+            Some([100, 120, 110, 105, 140, 135])
+        );
+    }
+
+    #[test]
+    fn counter_overflow_marks_the_observation_incomplete() {
+        let route = RouteObservation {
+            prompt_tokens: 100,
+            previously_computed_tokens: 80,
+            best_router_tokens: 75,
+            selected_router_tokens: 60,
+        };
+        let outcome = CacheLossWorkerOutcome {
+            complete: true,
+            prompt_tokens: 100,
+            gpu_hit_tokens: u64::MAX,
+            cpu_hit_tokens: 1,
+            cpu_lookup_tokens: 0,
+        };
+
+        assert_eq!(cache_loss_stages(route, &outcome), None);
     }
 }
 

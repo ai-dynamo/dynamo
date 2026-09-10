@@ -346,18 +346,6 @@ pub struct RouteObservation {
     pub selected_router_tokens: u64,
 }
 
-impl RouteObservation {
-    pub fn bounded(self) -> Self {
-        let prompt_tokens = self.prompt_tokens;
-        Self {
-            prompt_tokens,
-            previously_computed_tokens: self.previously_computed_tokens.min(prompt_tokens),
-            best_router_tokens: self.best_router_tokens.min(prompt_tokens),
-            selected_router_tokens: self.selected_router_tokens.min(prompt_tokens),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{CACHE_LOSS_FUNNEL_ENABLED_ENV, CacheHistory, enabled};

@@ -322,8 +322,7 @@ where
                         .previously_computed_tokens(&prompt_hashes),
                     best_router_tokens: selection.max_cached_tokens as u64,
                     selected_router_tokens: selection.cached_tokens as u64,
-                }
-                .bounded();
+                };
                 CacheLossTracking::new(cache_loss, Arc::clone(cache_history), cache_history_request)
             });
         let mut guard = match cleanup {

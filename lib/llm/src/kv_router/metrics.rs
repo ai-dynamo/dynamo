@@ -1012,7 +1012,7 @@ impl RouterRequestMetrics {
                 let cache_loss_funnel_tokens_total = metrics
                     .create_intcountervec(
                         &router_metric("cache_loss_funnel_tokens_total"),
-                        "Prompt tokens remaining at each cache-loss funnel stage",
+                        "Tokens observed at each cache-loss stage; later stages may exceed earlier stages",
                         &["stage"],
                         extra_labels,
                     )
