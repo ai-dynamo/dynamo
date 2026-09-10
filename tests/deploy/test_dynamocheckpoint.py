@@ -400,37 +400,54 @@ class _SnapshotLogDeployment(ManagedDeployment):
 
     async def _collect_source_logs(self) -> None:
         assert self._core_api is not None
+        assert self._custom_api is not None
         streams: dict[tuple[str, str], asyncio.Task[bool]] = {}
         directory = Path(self.log_dir) / "snapshot-sources"
         directory.mkdir(parents=True, exist_ok=True)
         try:
             while True:
                 try:
-                    # Both labels are present on source pods at creation; do not
-                    # wait for the checkpoint name to appear in DGD status.
-                    pods = await self._core_api.list_namespaced_pod(
-                        self.namespace,
+                    # The SnapshotJob CRD prunes labels from podTemplate.metadata.
+                    # Use its top-level DGD label, then the owner label that the
+                    # snapshot operator adds to source pods after reading the job.
+                    jobs = await self._custom_api.list_namespaced_custom_object(
+                        group="nvidia.com",
+                        version="v1alpha1",
+                        namespace=self.namespace,
+                        plural=SNAPSHOT_JOB_PLURAL,
                         label_selector=(
                             "nvidia.com/dynamo-graph-deployment-name="
-                            f"{self.deployment_spec.name},{SNAPSHOT_JOB_OWNER_LABEL}"
+                            f"{self.deployment_spec.name}"
                         ),
                     )
-                    for pod in pods.items:
-                        pod_name = pod.metadata.name
-                        serialized = (
-                            self._core_api.api_client.sanitize_for_serialization(pod)
+                    for job in jobs.get("items", []):
+                        pods = await self._core_api.list_namespaced_pod(
+                            self.namespace,
+                            label_selector=(
+                                f"{SNAPSHOT_JOB_OWNER_LABEL}="
+                                f"{job['metadata']['name']}"
+                            ),
                         )
-                        (directory / f"{pod_name}.json").write_text(
-                            json.dumps(serialized, indent=2) + "\n",
-                            encoding="utf-8",
-                        )
-                        for container in pod.spec.containers:
-                            key = (pod_name, container.name)
-                            task = streams.get(key)
-                            if task is None or (task.done() and not task.result()):
-                                streams[key] = asyncio.create_task(
-                                    self._stream_source_logs(pod_name, container.name)
+                        for pod in pods.items:
+                            pod_name = pod.metadata.name
+                            serialized = (
+                                self._core_api.api_client.sanitize_for_serialization(
+                                    pod
                                 )
+                            )
+                            (directory / f"{pod_name}.json").write_text(
+                                json.dumps(serialized, indent=2) + "\n",
+                                encoding="utf-8",
+                            )
+                            for container in pod.spec.containers:
+                                key = (pod_name, container.name)
+                                task = streams.get(key)
+                                if task is None or (task.done() and not task.result()):
+                                    streams[key] = asyncio.create_task(
+                                        self._stream_source_logs(
+                                            pod_name, container.name
+                                        )
+                                    )
                 except TRANSIENT_K8S_EXCEPTIONS as exc:
                     logger.warning("Could not inspect capture sources: %s", exc)
                 await asyncio.sleep(2)
