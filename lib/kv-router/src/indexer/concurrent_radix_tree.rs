@@ -354,20 +354,7 @@ impl ConcurrentRadixTree {
 
                 // parent_guard is dropped at the end of this block
                 match parent_guard.children.get(&block_data.tokens_hash) {
-                    Some(existing) => {
-                        {
-                            let existing_guard = existing.read();
-                            if existing_guard.block_hash != Some(block_data.block_hash) {
-                                duplicate_store = false;
-                                tracing::warn!(
-                                    expected = ?block_data.block_hash,
-                                    actual = ?existing_guard.block_hash,
-                                    "block_hash mismatch: sequence hashes should be uniform across workers"
-                                );
-                            }
-                        }
-                        existing.clone()
-                    }
+                    Some(existing) => existing.clone(),
                     None => {
                         duplicate_store = false;
                         // Reuse from lookup or create new

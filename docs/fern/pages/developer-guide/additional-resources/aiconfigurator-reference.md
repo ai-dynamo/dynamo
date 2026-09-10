@@ -5,10 +5,13 @@ title: AIConfigurator Reference
 subtitle: Compare aggregated and disaggregated layouts before deployment
 ---
 
-This page is the full AIConfigurator reference: sizing
-[AIConfigurator](https://github.com/ai-dynamo/aiconfigurator/tree/main) for
-aggregated and disaggregated Dynamo deployments, generating deployment
-artifacts, and validating them. If you only need a parallelism layout for a DGD
+This page is the full reference for the `aiconfigurator` compatibility command shipped in the
+[AISimulate](https://pypi.org/project/aisimulate/) Python distribution: sizing aggregated and
+disaggregated Dynamo deployments, generating deployment artifacts, and validating them. Dynamo does
+not depend on the separate `aiconfigurator` or `aiconfigurator-core` distributions. The AISimulate
+wheel preserves the `aiconfigurator` and `aiconfigurator_core` import namespaces for compatibility.
+
+If you only need a parallelism layout for a DGD
 you are already authoring, use the shorter [Sizing with AIConfigurator](../../kubernetes/disaggregated-serving/sizing-with-aiconfigurator.mdx)
 tutorial. For the serving architecture and deployment-path overview, start with
 [Disaggregated Serving](../../kubernetes/disaggregated-serving/overview.md).
@@ -64,9 +67,11 @@ AIConfigurator evaluates two deployment architectures and recommends the best on
 
 ## Quick Start
 
+Use Python 3.11 through 3.13.
+
 ```bash
-# Install
-pip3 install aiconfigurator
+# Install the distribution that provides the compatibility command
+python3 -m pip install "aisimulate==0.1.0.dev2"
 
 # Optional: check whether the model/system/backend is covered
 aiconfigurator cli support \
@@ -533,18 +538,19 @@ Run `aiconfigurator cli default --generator-help` to see all available parameter
 
 ### Prefix Caching Considerations
 
-For workloads with repeated prefixes (e.g., system prompts):
+For workloads with repeated prefixes such as system prompts:
 
-- **Enable prefix caching** when you have high prefix hit rates
-- **Disable prefix caching** (`--no-enable-prefix-caching`) for diverse prompts
+- Leave `--prefix` at its default `0` when the workload has no reusable prefix.
+- Set `--prefix <tokens>` to model a fixed cached prefix, and configure the deployed backend to
+  match that assumption.
 
-AIConfigurator's default predictions assume no prefix caching. Enable it post-deployment if your workload benefits.
+AIConfigurator's default predictions assume no cached prefix.
 
 ## Supported Configurations
 
 ### Backends and Versions
 
-For a comprehensive breakdown of which model/system/backend/version combinations are supported in both aggregated and disaggregated modes, refer to the [**support matrix**](https://ai-dynamo.github.io/aiconfigurator/support-matrix/). The raw data is available as [per-system CSV files](https://github.com/ai-dynamo/aiconfigurator/tree/main/aic-core/src/aiconfigurator_core/systems/support_matrix), which are automatically generated and tested to ensure accuracy across all supported configurations.
+For a comprehensive breakdown of which model/system/backend/version combinations are supported in both aggregated and disaggregated modes, refer to the [**support matrix**](https://ai-dynamo.github.io/aiconfigurator/support-matrix/). The wheel packages its generated and tested per-system CSV data under `aiconfigurator_core/systems/support_matrix`.
 
 You can also check if a system / framework version is supported via the `aiconfigurator cli support` command. For example:
 ```bash
@@ -586,10 +592,6 @@ aiconfigurator cli default \
 ## Additional Options
 
 ```bash
-# Web interface for interactive exploration
-pip3 install aiconfigurator[webapp]
-aiconfigurator webapp  # Visit http://127.0.0.1:7860
-
 # Quick config generation (no parameter sweep)
 aiconfigurator cli generate \
   --model-path Qwen/Qwen3-32B-FP8 \
@@ -670,7 +672,7 @@ For balanced workloads (ISL/OSL ratio between 2:1 and 10:1), aggregated is often
 
 ## Learn More
 
-- [AIConfigurator CLI Guide](https://github.com/ai-dynamo/aiconfigurator/blob/main/docs/cli_user_guide.md)
-- [Dynamo Deployment Guide](https://github.com/ai-dynamo/aiconfigurator/blob/main/docs/dynamo_deployment_guide.md)
+- [AISimulate package](https://pypi.org/project/aisimulate/)
+- [AIConfigurator compatibility support matrix](https://ai-dynamo.github.io/aiconfigurator/support-matrix/)
 - [Dynamo Installation Guide](../../kubernetes/installation/install-dynamo.md)
 - [Benchmarking Guide](../../recipes/feature-benchmarks/benchmarking-guide.md)
