@@ -117,17 +117,16 @@ impl KvEventIngress for ZmqDirectIngress {
         if let Some(previous) = previous {
             let old_endpoints = previous.listener_endpoints();
             for rank in previous.dp_ranks() {
-                // A listener can be missing for a schedulable record when an
-                // earlier update was cancelled mid-deregistration; re-register it.
-                if !registry.has_listener(record.worker_id, rank) {
-                    continue;
-                }
-                if ranks.contains(&rank)
+                // A schedulable record can lack its listener when an earlier
+                // update was cancelled mid-deregistration.
+                let listener_present = registry.has_listener(record.worker_id, rank);
+                if listener_present
+                    && ranks.contains(&rank)
                     && old_endpoints.get(&rank) == endpoints.get(&rank)
                     && previous.replay_endpoint == record.replay_endpoint
                 {
                     retained.insert(rank);
-                } else {
+                } else if listener_present {
                     registry
                         .deregister_dp_rank(
                             record.worker_id,
@@ -137,6 +136,10 @@ impl KvEventIngress for ZmqDirectIngress {
                         )
                         .await
                         .map_err(|error| SelectionError::Internal(error.to_string()))?;
+                } else {
+                    registry
+                        .remove_dp_rank_blocks(record.worker_id, rank, &previous.key())
+                        .await;
                 }
             }
         }

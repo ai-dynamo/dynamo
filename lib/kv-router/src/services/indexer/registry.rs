@@ -696,6 +696,19 @@ impl WorkerRegistry {
             .is_some_and(|entry| entry.listeners.contains_key(&dp_rank))
     }
 
+    /// Drop what a rank's listener fed into the index after the listener itself
+    /// is gone (its deregistration was cancelled before reaching this step).
+    pub async fn remove_dp_rank_blocks(
+        &self,
+        worker_id: WorkerId,
+        dp_rank: u32,
+        key: &RoutingPartitionId,
+    ) {
+        if let Some(ie) = self.indexers.get(key) {
+            ie.indexer.remove_worker_dp_rank(worker_id, dp_rank).await;
+        }
+    }
+
     pub fn list(&self) -> Vec<WorkerInfo> {
         self.list_filtered(None, None)
     }
@@ -811,6 +824,15 @@ impl WorkerRegistry {
                 )
             })
             .collect()
+    }
+
+    /// The state a `deregister_dp_rank` cancelled after removing the listener
+    /// leaves behind: no listener, index entries untouched.
+    #[cfg(test)]
+    pub(crate) fn forget_listener(&self, instance_id: WorkerId, dp_rank: u32) {
+        if let Some(mut entry) = self.workers.get_mut(&instance_id) {
+            entry.listeners.remove(&dp_rank);
+        }
     }
 
     #[cfg(test)]

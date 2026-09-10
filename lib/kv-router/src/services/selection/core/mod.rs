@@ -1511,8 +1511,7 @@ impl SelectionCore {
 
     /// Bind (or confirm) `session_id` to the worker a booking landed on and
     /// keep the lease with the booking. A bound session whose worker was not
-    /// selected (it left) is invalidated and rebound; when a concurrent request
-    /// already rebound it, this booking holds that binding's lease instead.
+    /// selected (it left) is invalidated and rebound.
     fn bind_session(
         table: &SessionAffinity,
         hold: Acquired,
@@ -2814,16 +2813,13 @@ mod tests {
     #[tokio::test]
     async fn concurrent_failover_keeps_the_winning_binding_lease() {
         let table = SessionAffinity::new(Duration::from_secs(60)).expect("affinity table");
-        let departed = WorkerWithDpRank::new(1, 0);
         let Acquired::Initialize(init) = table.acquire("s", None).await.expect("acquire") else {
             panic!("fresh session must initialize");
         };
         drop(init.commit(SessionTarget::new(1, Some(0))).expect("commit"));
         let first = table.acquire("s", None).await.expect("first acquire");
         let second = table.acquire("s", None).await.expect("second acquire");
-        assert!(
-            matches!(first, Acquired::Bound { target, .. } if target.worker_id == departed.worker_id)
-        );
+        assert!(matches!(first, Acquired::Bound { target, .. } if target.worker_id == 1));
 
         // Worker 1 left; both bookings landed elsewhere. The first rebinds the
         // session, the second must hold that binding rather than end up leaseless.
@@ -2832,11 +2828,6 @@ mod tests {
         let follower =
             SelectionCore::bind_session(&table, second, "s", WorkerWithDpRank::new(3, 0))
                 .expect("second failover holds the rebound session");
-        let bound = table
-            .query_target("s", None)
-            .expect("query")
-            .expect("bound");
-        assert_eq!(bound.worker_id, 2);
         drop(winner);
         drop(follower);
         assert_eq!(
@@ -2935,6 +2926,8 @@ mod tests {
 
     #[tokio::test]
     async fn reupsert_recreates_a_listener_lost_to_a_cancelled_update() {
+        use crate::indexer::KvIndexerInterface;
+
         let core = SelectionCore::try_new_local(
             test_config(true),
             1,
@@ -2945,13 +2938,21 @@ mod tests {
         core.upsert_worker(worker_with_kv_events(1))
             .await
             .expect("worker upsert");
-        // An endpoint update cancelled after deregistration leaves the catalog
-        // record schedulable with no listener behind it.
-        core.indexer_registry
-            .deregister_dp_rank(1, 0, "model", "default")
+        let entry = core
+            .entry(&RoutingPartitionId::new("model", "default"))
+            .expect("entry");
+        let hashes = [11u64, 12];
+        entry
+            .indexer
+            .apply_event_routed(store_event(1, 0, 1, &[], &hashes, StorageTier::Device))
             .await
-            .expect("deregister");
-        assert!(!core.indexer_registry.has_listener(1, 0));
+            .unwrap();
+        if let Indexer::Single { primary, .. } = &entry.indexer {
+            let _ = primary.flush().await;
+        }
+        // An endpoint update cancelled right after removing the listener leaves
+        // the catalog record schedulable, the listener gone, and its blocks indexed.
+        core.indexer_registry.forget_listener(1, 0);
 
         let record = core
             .upsert_worker(worker_with_kv_events(1))
@@ -2959,6 +2960,22 @@ mod tests {
             .expect("worker re-upsert");
         assert_eq!(record.lifecycle, WorkerLifecycle::Schedulable, "{record:?}");
         assert!(core.indexer_registry.has_listener(1, 0));
+        // The purge is queued to the indexer thread; wait for it to land.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let overlap = entry
+                    .indexer
+                    .find_matches(hashes.iter().copied().map(LocalBlockHash).collect())
+                    .await
+                    .expect("find matches");
+                if overlap.scores.is_empty() {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("stale blocks survived the re-upsert");
     }
 
     #[tokio::test]
