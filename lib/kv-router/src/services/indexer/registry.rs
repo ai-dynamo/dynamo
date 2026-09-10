@@ -318,6 +318,7 @@ pub struct WorkerRegistry {
     ready_tx: watch::Sender<bool>,
     ready_rx: watch::Receiver<bool>,
     root_cancel_token: CancellationToken,
+    retain_empty_indexers: bool,
 }
 
 impl WorkerRegistry {
@@ -364,7 +365,15 @@ impl WorkerRegistry {
             ready_tx,
             ready_rx,
             root_cancel_token,
+            retain_empty_indexers: false,
         }
+    }
+
+    #[cfg(feature = "standalone-selection")]
+    pub(crate) fn with_retained_indexers(mut self) -> Self {
+        // Selection entries and their schedulers retain these indexers across worker updates.
+        self.retain_empty_indexers = true;
+        self
     }
 
     pub fn signal_ready(&self) {
@@ -815,7 +824,8 @@ impl WorkerRegistry {
     }
 
     fn maybe_remove_indexer(&self, key: &RoutingPartitionId) {
-        if self.workers.iter().any(|entry| entry.value().key == *key) {
+        if self.retain_empty_indexers || self.workers.iter().any(|entry| entry.value().key == *key)
+        {
             return;
         }
 
@@ -940,6 +950,11 @@ mod tests {
         assert!(
             !registry.watermarks.contains_key(&(1, 0)),
             "watermark should be removed after deregister"
+        );
+        assert!(
+            registry
+                .get_indexer(&RoutingPartitionId::new("test-model", "default"))
+                .is_none()
         );
     }
 
