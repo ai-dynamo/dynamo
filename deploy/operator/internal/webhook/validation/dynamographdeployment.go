@@ -820,11 +820,20 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 
 		// Ratchet the product rule for every new component after existing
 		// immutability checks; a missing stored component disables suppression.
-		allErrs = append(allErrs, dgdComponentGPUProductUpdateErrors(
+		// A ratcheted violation stays admissible but must not be silent: the
+		// stored cap keeps feeding Planner's projection, so warn on every write.
+		productErrs, ratcheted := dgdComponentGPUProductUpdateErrors(
 			newComponent,
 			oldComponent,
 			componentsPath.Index(i),
-		)...)
+		)
+		if ratcheted {
+			for _, productErr := range productErrs {
+				v.warnf("Retained pre-existing GPU power violation: %s", productErr.Error())
+			}
+		} else {
+			allErrs = append(allErrs, productErrs...)
+		}
 	}
 
 	if newSpec.BackendFramework != oldSpec.BackendFramework {
@@ -1091,16 +1100,20 @@ func dgdComponentGPUProductErrors(
 }
 
 // dgdComponentGPUProductUpdateErrors applies the GPU-product rule to a component
-// update. newComponent and componentPath must not be nil; oldComponent may be
-// nil when the component was newly added.
+// update. It always returns the new-state errors it computed; ratcheted reports
+// whether the suppression contract holds, in which case the caller must surface
+// them as warnings instead of rejecting the update. Returning both keeps the
+// suppression decision in this one function: the caller routes the result and
+// never re-derives why the contracts matched. newComponent and componentPath
+// must not be nil; oldComponent may be nil when the component was newly added.
 func dgdComponentGPUProductUpdateErrors(
 	newComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	oldComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	componentPath *field.Path,
-) field.ErrorList {
+) (errs field.ErrorList, ratcheted bool) {
 	powerLimitValue, hasPowerLimit := dgdPowerLimit(newComponent)
 	if !hasPowerLimit {
-		return nil
+		return nil, false
 	}
 
 	powerLimitPath := componentPath.Child("podTemplate", "metadata", "annotations").Key(consts.KubeAnnotationGPUPowerLimit)
@@ -1108,7 +1121,7 @@ func dgdComponentGPUProductUpdateErrors(
 	powerLimit, _ := validateDGDPowerLimitValue(powerLimitValue, powerLimitPath)
 	allErrs := dgdComponentGPUProductErrors(newComponent, componentPath, powerLimit, powerLimitPath)
 	if len(allErrs) == 0 {
-		return nil
+		return nil, false
 	}
 
 	// Suppress only an unchanged violation over the complete normalized contract.
@@ -1116,7 +1129,7 @@ func dgdComponentGPUProductUpdateErrors(
 		dgdPowerProductContract(oldComponent),
 		dgdPowerProductContract(newComponent),
 	) {
-		return nil
+		return allErrs, true
 	}
-	return allErrs
+	return allErrs, false
 }
