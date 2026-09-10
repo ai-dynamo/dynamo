@@ -316,6 +316,7 @@ func TestTopologyLabelReconciler_LogsEveryTerminalPath(t *testing.T) {
 		podLabels         map[string]string
 		nodeLabels        map[string]string
 		wantMessages      []string
+		wantCountFields   map[string]map[string]int64
 		absentMessages    []string
 		wantPodLabelValue string
 	}{
@@ -328,16 +329,22 @@ func TestTopologyLabelReconciler_LogsEveryTerminalPath(t *testing.T) {
 			wantPodLabelValue: "us-east-1a",
 		},
 		{
-			name:              "node without the source label records that nothing was copied",
-			nodeLabels:        map[string]string{},
-			wantMessages:      []string{"Node missing topology label, skipping", "No topology labels copied to pod"},
+			name:         "node without the source label records that nothing was copied",
+			nodeLabels:   map[string]string{},
+			wantMessages: []string{"Node missing topology label, skipping", "No topology labels copied to pod"},
+			wantCountFields: map[string]map[string]int64{
+				"No topology labels copied to pod": {"copyTargets": 1},
+			},
 			absentMessages:    []string{"Copied node topology label to pod", "Pod needs no topology label copy"},
 			wantPodLabelValue: "",
 		},
 		{
-			name:              "successful copy still records the unchanged success line",
-			nodeLabels:        map[string]string{labelKey: "us-east-1a"},
-			wantMessages:      []string{"Copied node topology label to pod"},
+			name:         "successful copy still records the unchanged success line",
+			nodeLabels:   map[string]string{labelKey: "us-east-1a"},
+			wantMessages: []string{"Copied node topology label to pod"},
+			wantCountFields: map[string]map[string]int64{
+				"Copied node topology label to pod": {"labels": 1},
+			},
 			absentMessages:    []string{"Pod needs no topology label copy", "No topology labels copied to pod"},
 			wantPodLabelValue: "us-east-1a",
 		},
@@ -373,13 +380,16 @@ func TestTopologyLabelReconciler_LogsEveryTerminalPath(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, ctrl.Result{}, result)
 
-			t.Log("each expected message is recorded exactly once and names the pod and the node")
+			t.Log("each expected message is recorded exactly once, names the pod and the node, and carries its own counts")
 			for _, message := range tt.wantMessages {
 				entries := observed.FilterMessage(message).All()
 				require.Len(t, entries, 1, "message %q", message)
 				fields := entries[0].ContextMap()
 				assert.Contains(t, fmt.Sprintf("%v", fields["pod"]), podName, "message %q", message)
 				assert.Equal(t, nodeName, fields["node"], "message %q", message)
+				for field, want := range tt.wantCountFields[message] {
+					assert.Equal(t, want, fields[field], "message %q field %q", message, field)
+				}
 			}
 
 			t.Log("no message belonging to another terminal path is recorded")
