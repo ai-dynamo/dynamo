@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fcntl
 import os
 import threading
 import time
@@ -47,29 +48,57 @@ class DirectoryDaemon:
         self.state = DirectoryState()
         self._server: Optional[asyncio.AbstractServer] = None
         self._stop_event: Optional[asyncio.Event] = None
+        self._endpoint_lock_fd: Optional[int] = None
+
+    def _acquire_endpoint_lock(self) -> None:
+        lock_path = f"{self.listen_socket}.lock"
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        os.fchmod(lock_fd, 0o600)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            os.close(lock_fd)
+            raise RuntimeError(
+                f"directory endpoint already has a live owner: {self.listen_socket}"
+            ) from exc
+        self._endpoint_lock_fd = lock_fd
+
+    def _release_endpoint_lock(self) -> None:
+        if self._endpoint_lock_fd is None:
+            return
+        os.close(self._endpoint_lock_fd)
+        self._endpoint_lock_fd = None
 
     async def serve(self) -> None:
+        self._acquire_endpoint_lock()
         try:
-            os.unlink(self.listen_socket)
-        except FileNotFoundError:
-            pass
-        self._stop_event = asyncio.Event()
-        self._server = await asyncio.start_unix_server(
-            self._handle,
-            path=self.listen_socket,
-        )
-        # Restrict the directory socket to the owning user: any client on this
-        # socket can promote the directory writer (fencing the real writer), so
-        # do not leave it world-accessible under the process umask.
-        try:
-            os.chmod(self.listen_socket, 0o600)
-        except OSError:
-            pass
-        try:
-            await self._stop_event.wait()
+            try:
+                os.unlink(self.listen_socket)
+            except FileNotFoundError:
+                pass
+            self._stop_event = asyncio.Event()
+            self._server = await asyncio.start_unix_server(
+                self._handle,
+                path=self.listen_socket,
+            )
+            # Restrict the directory socket to the owning user: any client on this
+            # socket can promote the directory writer (fencing the real writer), so
+            # do not leave it world-accessible under the process umask.
+            try:
+                os.chmod(self.listen_socket, 0o600)
+            except OSError:
+                pass
+            try:
+                await self._stop_event.wait()
+            finally:
+                self._server.close()
+                await self._server.wait_closed()
+                try:
+                    os.unlink(self.listen_socket)
+                except FileNotFoundError:
+                    pass
         finally:
-            self._server.close()
-            await self._server.wait_closed()
+            self._release_endpoint_lock()
 
     def stop(self) -> None:
         if self._stop_event is not None:

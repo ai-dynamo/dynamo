@@ -1,15 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The async directory publish worker must not die on a single mutation failure.
-
-A transient daemon error -- or this engine being fenced/demoted mid-drain --
-previously set a fatal error, cleared the queue and stopped the worker thread,
-silently ending ALL future directory publications for the process. That is a
-permanent prefix-cache-publishing cliff. The worker must instead skip the failed
-mutation (a safe cache miss) and keep serving the queue.
-"""
-
 from __future__ import annotations
 
 import threading
