@@ -412,6 +412,14 @@ class GMSClientMemoryManager:
             reattached,
         )
 
+    def unclaim_persistent(self, engine_id: str, tag: str) -> bool:
+        """Drop this session claim without destroying persistent bytes."""
+        if self._client is None:
+            raise RuntimeError(
+                "Memory manager must be connected before unclaim_persistent",
+            )
+        return self._client_rpc.unclaim_persistent(engine_id=engine_id, tag=tag)
+
     def release_persistent(self, engine_id: str, tag: str) -> bool:
         """Explicitly destroy a persistent allocation. Returns True iff
         the allocation existed and was freed."""
@@ -470,7 +478,7 @@ class GMSClientMemoryManager:
         Re-attach path skips fresh allocation and remaps the existing
         physical pages — that's the KV-survival mechanic across engine
         restart."""
-        allocation_id, aligned_size, _reattached = self.claim_persistent(
+        allocation_id, aligned_size, reattached = self.claim_persistent(
             engine_id=engine_id,
             tag=tag,
             size=size,
@@ -481,13 +489,49 @@ class GMSClientMemoryManager:
             mapping = self._mappings.get(cached_va)
             if mapping is not None and mapping.handle != 0:
                 return cached_va
-        fd = self.export_persistent_handle(engine_id, tag)
-        va = self.reserve_va(aligned_size)
-        # map_va consumes the FD and records the mapping under its
-        # canonical allocation_id, so subsequent destroy_mapping calls
-        # work the same as for regular allocations.
-        self.map_va(fd, va, aligned_size, allocation_id, tag, 0)
-        return va
+
+        fd: Optional[int] = None
+        va: Optional[int] = None
+        try:
+            fd = self.export_persistent_handle(engine_id, tag)
+            va = self.reserve_va(aligned_size)
+            # map_va consumes the FD and records the mapping under its
+            # canonical allocation_id.
+            mapping_fd, fd = fd, None
+            self.map_va(mapping_fd, va, aligned_size, allocation_id, tag, 0)
+            return va
+        except BaseException:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            if va is not None:
+                try:
+                    mapping = self._mappings.get(va)
+                    if mapping is not None:
+                        self.free_va(va)
+                    else:
+                        self._vmm.address_free(va, aligned_size)
+                except Exception:  # noqa: BLE001
+                    logger.exception("Failed to release persistent local VA")
+            try:
+                if reattached:
+                    self.unclaim_persistent(engine_id, tag)
+                elif not self.release_persistent(engine_id, tag):
+                    self.unclaim_persistent(engine_id, tag)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Failed to roll back persistent claim %s/%s", engine_id, tag
+                )
+                if not reattached:
+                    try:
+                        self.unclaim_persistent(engine_id, tag)
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "Failed to drop persistent claim %s/%s", engine_id, tag
+                        )
+            raise
 
     def commit(self) -> bool:
         """Synchronize, unmap writer mappings, then commit.
@@ -585,21 +629,37 @@ class GMSClientMemoryManager:
         """
         assert self._granted_lock_type is not None
         aligned_size = align_to_granularity(size, self.granularity)
-        handle = self._vmm.import_shareable_handle_close_fd(fd)
-        self._vmm.map(va, aligned_size, handle)
-        self._vmm.set_access(va, aligned_size, self.device, self._granted_lock_type)
-        self._track_mapping(
-            LocalMapping(
-                allocation_id=allocation_id,
-                va=va,
-                size=size,
-                aligned_size=aligned_size,
-                handle=handle,
-                tag=tag,
-                layout_slot=layout_slot,
+        handle = 0
+        mapped = False
+        try:
+            handle = self._vmm.import_shareable_handle_close_fd(fd)
+            self._vmm.map(va, aligned_size, handle)
+            mapped = True
+            self._vmm.set_access(va, aligned_size, self.device, self._granted_lock_type)
+            self._track_mapping(
+                LocalMapping(
+                    allocation_id=allocation_id,
+                    va=va,
+                    size=size,
+                    aligned_size=aligned_size,
+                    handle=handle,
+                    tag=tag,
+                    layout_slot=layout_slot,
+                )
             )
-        )
-        return handle
+            return handle
+        except BaseException:
+            if mapped:
+                try:
+                    self._vmm.unmap(va, aligned_size)
+                except Exception:  # noqa: BLE001
+                    logger.exception("Failed to roll back local VMM mapping")
+            if handle:
+                try:
+                    self._vmm.release(handle)
+                except Exception:  # noqa: BLE001
+                    logger.exception("Failed to release imported VMM handle")
+            raise
 
     def unmap_va(self, va: int) -> None:
         """Unmap a single VA: cuMemUnmap + release handle.

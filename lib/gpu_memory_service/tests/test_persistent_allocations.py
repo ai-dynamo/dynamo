@@ -98,6 +98,98 @@ def _memory_manager_with_client(client) -> GMSClientMemoryManager:
     return manager
 
 
+def test_map_va_releases_import_when_access_setup_fails(monkeypatch):
+    vmm = FakeVMM()
+    manager = GMSClientMemoryManager.__new__(GMSClientMemoryManager)
+    manager.granularity = 4096
+    manager.device = 0
+    manager._vmm = vmm
+    manager._granted_lock_type = GrantedLockType.RW
+    manager._mappings = {}
+    manager._inverse_mapping = {}
+    _, server_handle = vmm.create_tolerate_oom(4096, 0)
+    fd = vmm.export_to_shareable_handle(server_handle)
+    va = vmm.address_reserve(4096, 4096)
+
+    def fail_access(*_args):
+        raise RuntimeError("set-access failed")
+
+    monkeypatch.setattr(vmm, "set_access", fail_access)
+    with pytest.raises(RuntimeError, match="set-access failed"):
+        manager.map_va(fd, va, 4096, "alloc-1", "kv_pool", 0)
+
+    assert not vmm.imports
+    assert not vmm.mapped
+    assert not manager._mappings
+    vmm.address_free(va, 4096)
+    vmm.release(server_handle)
+
+
+@pytest.mark.parametrize("reattached", [False, True])
+@pytest.mark.parametrize("failure_stage", ["export", "reserve", "map"])
+def test_create_persistent_mapping_rolls_back_failure(
+    monkeypatch, reattached, failure_stage
+):
+    manager = GMSClientMemoryManager.__new__(GMSClientMemoryManager)
+    manager._inverse_mapping = {}
+    manager._mappings = {}
+    events = []
+    exported_fd = None
+
+    monkeypatch.setattr(
+        manager,
+        "claim_persistent",
+        lambda **_kwargs: ("alloc-1", 4096, reattached),
+    )
+
+    def export(*_args):
+        nonlocal exported_fd
+        if failure_stage == "export":
+            raise RuntimeError("export failed")
+        exported_fd, write_fd = os.pipe()
+        os.close(write_fd)
+        return exported_fd
+
+    def reserve(_size):
+        if failure_stage == "reserve":
+            raise RuntimeError("reserve failed")
+        return 0x1000
+
+    def map_va(fd, *_args):
+        os.close(fd)
+        if failure_stage == "map":
+            raise RuntimeError("map failed")
+
+    manager._vmm = SimpleNamespace(
+        address_free=lambda va, size: events.append(("free_va", va, size))
+    )
+    monkeypatch.setattr(manager, "export_persistent_handle", export)
+    monkeypatch.setattr(manager, "reserve_va", reserve)
+    monkeypatch.setattr(manager, "map_va", map_va)
+    monkeypatch.setattr(
+        manager,
+        "release_persistent",
+        lambda engine_id, tag: events.append(("release", engine_id, tag)) or True,
+    )
+    monkeypatch.setattr(
+        manager,
+        "unclaim_persistent",
+        lambda engine_id, tag: events.append(("unclaim", engine_id, tag)) or True,
+    )
+
+    with pytest.raises(RuntimeError, match=f"{failure_stage} failed"):
+        manager.create_persistent_mapping("eng-A", "kv_pool", 4096)
+
+    expected = "unclaim" if reattached else "release"
+    assert (expected, "eng-A", "kv_pool") in events
+    assert not ({"release", "unclaim"} - {expected}) & {event[0] for event in events}
+    if failure_stage == "map":
+        assert ("free_va", 0x1000, 4096) in events
+    if exported_fd is not None:
+        with pytest.raises(OSError):
+            os.fstat(exported_fd)
+
+
 def test_client_allows_shared_reattach_to_larger_existing_allocation():
     manager = _memory_manager_with_client(
         _FakePersistentClient(aligned_size=8192, reattached=True)

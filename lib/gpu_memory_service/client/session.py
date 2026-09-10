@@ -49,6 +49,8 @@ from gpu_memory_service.common.protocol.messages import (
     PersistentAllocationInfo,
     ReleasePersistentAllocationRequest,
     ReleasePersistentAllocationResponse,
+    UnclaimPersistentAllocationRequest,
+    UnclaimPersistentAllocationResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -232,6 +234,13 @@ class _GMSClientSession:
             ),
             ClaimPersistentAllocationResponse,
         )
+
+    def unclaim_persistent(self, engine_id: str, tag: str) -> bool:
+        """Drop this session claim without destroying the allocation."""
+        return self._transport.request(
+            UnclaimPersistentAllocationRequest(engine_id=engine_id, tag=tag),
+            UnclaimPersistentAllocationResponse,
+        ).unclaimed
 
     def release_persistent(self, engine_id: str, tag: str) -> bool:
         """Explicitly destroy a persistent allocation. Returns True iff

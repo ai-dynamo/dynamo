@@ -51,8 +51,7 @@ def _engine_side_adopt(
     device: int,
 ) -> tuple[int, int]:
     """Engine-side: import FD → reserve VA → cuMemMap → cuMemSetAccess.
-    Returns (va_engine, handle_engine) so the test can tear down.
-    Mirrors what the per-engine installer will do in P3-P5."""
+    Returns (va_engine, handle_engine) so the test can tear down."""
     handle_engine = cumem_import_from_shareable_handle_close_fd(fd)
     va_engine = cumem_address_reserve(aligned_size, granularity)
     cumem_map(va_engine, aligned_size, handle_engine)
