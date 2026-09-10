@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from numbers import Real
@@ -42,6 +43,7 @@ _ROUTER_HOOK = HookCapability(
     api_version=1,
 )
 _REPLAY_SPEC_API_VERSION = 1
+_AGENTIC_MODEL_PROJECTION_POLICY = "project_to_configured_target"
 _SUPPORTED_BACKEND_TOPOLOGIES = (
     ("vllm", "agg"),
     ("vllm", "disagg"),
@@ -68,6 +70,20 @@ class DynamoReplayRunnerFactory:
             supported_backend_topologies=_SUPPORTED_BACKEND_TOPOLOGIES,
             supported_hooks=(_PLANNER_HOOK, _ROUTER_HOOK),
             supports_disaggregated_attention_dp=False,
+            supported_execution_modes=("offline",),
+            supported_trace_formats=(
+                "mooncake",
+                "mooncake-delta",
+                "agentic_mooncake",
+                "applied_compute_agentic",
+                "dynamo",
+                "weka",
+            ),
+            supports_agentic_lanes=True,
+            # AIC-1815 remains the first full AgentX runtime checkpoint. Keep
+            # the public runner honest about the narrower integration here.
+            supported_agentic_topologies=("agg",),
+            agentic_qualification="functional_only",
         )
 
     def create(self, worker_id: int) -> DynamoReplayRunner:
@@ -100,6 +116,7 @@ class DynamoReplayRunner:
 
         output_requirements = output_requirements or ReplayOutputRequirements()
         self.capabilities.require_compatible(spec)
+        execution_model = self._execution_target_model(spec)
         (
             planner_config,
             router_mode,
@@ -125,12 +142,39 @@ class DynamoReplayRunner:
         }
 
         if self._is_trace(spec):
-            report = self._run_trace(spec, common)
+            report = self._run_trace(spec, common, execution_model=execution_model)
         else:
             common.update(self._synthetic_kwargs(spec))
             report = self._run_synthetic(spec, common)
 
         metrics, metadata = self._normalize_report(report, output_requirements)
+        trace_format = spec.workload.get("trace_format")
+        agentic_lanes = spec.workload.get("agentic_lanes")
+        if trace_format in {"weka", "agentic_mooncake"} or (
+            trace_format == "dynamo" and agentic_lanes is not None
+        ):
+            metadata.update(
+                agentic_qualification=self.capabilities.agentic_qualification,
+                agentic_input_format=trace_format,
+                agentic_lanes=agentic_lanes,
+            )
+            graph = metadata.get("agentic_graph")
+            if not isinstance(graph, dict):
+                raise RuntimeError("agentic replay did not report graph identity")
+            source_models = graph.get("source_models")
+            if not isinstance(source_models, list) or not all(
+                isinstance(model, str) and model for model in source_models
+            ):
+                raise RuntimeError("agentic graph did not report valid source_models")
+            if execution_model is None:
+                raise RuntimeError(
+                    "agentic execution did not declare its configured target model"
+                )
+            metadata["agentic_model_projection"] = {
+                "policy": _AGENTIC_MODEL_PROJECTION_POLICY,
+                "source_models": source_models,
+                "target_model": execution_model,
+            }
         self._require_goodput_metric(metrics, spec)
         return ReplayReport(metrics=metrics, metadata=metadata)
 
@@ -241,6 +285,35 @@ class DynamoReplayRunner:
         }
 
     @staticmethod
+    def _execution_target_model(spec: ReplaySpec) -> str | None:
+        if not DynamoReplayRunner._is_trace(spec):
+            return None
+        trace_format = spec.workload.get("trace_format", "mooncake")
+        if trace_format not in {"weka", "agentic_mooncake", "dynamo"}:
+            return None
+
+        deployment = spec.backend_deployment
+        if deployment.deployment_mode == "agg":
+            role = "aggregated"
+            raw_engine_args = deployment.agg_engine_args
+        else:
+            role = "decode"
+            raw_engine_args = deployment.decode_engine_args
+
+        metadata = deployment.performance_model_metadata.get(role)
+        if isinstance(metadata, Mapping):
+            config = metadata.get("config")
+            if isinstance(config, Mapping):
+                model = config.get("model_path")
+                if isinstance(model, str) and model.strip():
+                    return model.strip()
+        if isinstance(raw_engine_args, Mapping):
+            model = raw_engine_args.get("aic_model_path")
+            if isinstance(model, str) and model.strip():
+                return model.strip()
+        raise ValueError("agentic execution requires a configured target model")
+
+    @staticmethod
     def _engine_args(payload: dict[str, JSONValue] | None) -> MockEngineArgs:
         if payload is None:
             raise ValueError("ReplaySpec is missing required engine arguments")
@@ -266,7 +339,13 @@ class DynamoReplayRunner:
         lowered.pop("aic_pp_size", None)
         return MockEngineArgs.from_json(json.dumps(lowered))
 
-    def _run_trace(self, spec: ReplaySpec, common: dict[str, Any]):
+    def _run_trace(
+        self,
+        spec: ReplaySpec,
+        common: dict[str, Any],
+        *,
+        execution_model: str | None,
+    ):
         deployment = spec.backend_deployment
         raw_paths = spec.workload.get("trace_paths")
         trace_files: str | list[str]
@@ -285,15 +364,17 @@ class DynamoReplayRunner:
         if not isinstance(trace_format, str):
             raise TypeError("trace workload requires a string trace_format")
         agentic_lanes = spec.workload.get("agentic_lanes")
+        trace_block_size = spec.workload.get("trace_block_size")
+        if trace_format != "weka" and trace_block_size is None:
+            trace_block_size = self.trace_block_size
         if deployment.deployment_mode == "agg":
             return run_trace_replay(
                 trace_files=trace_files,
                 trace_format=trace_format,
-                trace_block_size=spec.workload.get(
-                    "trace_block_size", self.trace_block_size
-                ),
+                trace_block_size=trace_block_size,
                 max_sim_time_ms=spec.workload.get("max_sim_time_ms"),
                 agentic_lanes=agentic_lanes,
+                execution_model=execution_model,
                 extra_engine_args=self._engine_args(deployment.agg_engine_args),
                 num_workers=deployment.num_workers,
                 **common,
@@ -301,11 +382,10 @@ class DynamoReplayRunner:
         return run_trace_replay(
             trace_files=trace_files,
             trace_format=trace_format,
-            trace_block_size=spec.workload.get(
-                "trace_block_size", self.trace_block_size
-            ),
+            trace_block_size=trace_block_size,
             max_sim_time_ms=spec.workload.get("max_sim_time_ms"),
             agentic_lanes=agentic_lanes,
+            execution_model=execution_model,
             prefill_engine_args=self._engine_args(deployment.prefill_engine_args),
             decode_engine_args=self._engine_args(deployment.decode_engine_args),
             num_prefill_workers=deployment.num_prefill_workers,
@@ -424,6 +504,11 @@ class DynamoReplayRunner:
                 metadata["planner_total_ticks"] = int(report.total_ticks)
         else:
             trace_report = dict(report)
+
+        for name in ("agentic_graph", "agentic_model_projection"):
+            value = trace_report.get(name)
+            if isinstance(value, dict):
+                metadata[name] = value
 
         metrics: dict[str, float] = {}
         for name, value in trace_report.items():

@@ -55,6 +55,8 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
         benchmark_project = tomllib.load(handle)["project"]
     with (ROOT / "lib/bindings/python/Cargo.toml").open("rb") as handle:
         bindings_cargo = tomllib.load(handle)
+    with (ROOT / "Cargo.toml").open("rb") as handle:
+        root_cargo = tomllib.load(handle)
     requirement_sets = [
         (
             "pyproject.toml project.dependencies",
@@ -92,11 +94,13 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
             packages = tomllib.load(handle)["package"]
         assert all(package["name"] != "aiconfigurator-core" for package in packages)
     assert features["aic-forward-pass"] == ["dep:aisimulate-core"]
-    assert dependencies["aisimulate-core"] == {
-        "version": "=0.1.0-dev.2",
-        "optional": True,
-        "features": ["python"],
-    }
+    bindings_aisimulate = dict(dependencies["aisimulate-core"])
+    assert bindings_aisimulate.pop("optional") is True
+    assert bindings_aisimulate.pop("features") == ["python"]
+    assert (
+        bindings_aisimulate
+        == root_cargo["workspace"]["dependencies"]["aisimulate-core"]
+    )
 
 
 def test_aisimulate_wheel_preserves_aic_import_namespaces() -> None:

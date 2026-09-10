@@ -366,6 +366,7 @@ def test_online_trace_replay_supports_agentic_mooncake(tmp_path):
         replay_mode="online",
         router_mode="kv_router",
         trace_format="agentic_mooncake",
+        execution_model="target-model",
     )
 
     _assert_basic_report_counts(
@@ -374,6 +375,11 @@ def test_online_trace_replay_supports_agentic_mooncake(tmp_path):
         input_tokens=64,
         output_tokens=2,
     )
+    assert report["agentic_model_projection"] == {
+        "policy": "project_to_configured_target",
+        "source_models": ["test-model"],
+        "target_model": "target-model",
+    }
 
 
 def test_online_synthetic_replay_supports_goodput_sla():
@@ -446,6 +452,7 @@ def test_direct_agentic_dynamo_trace_rejects_replay_concurrency():
             extra_engine_args=_vllm_args(),
             replay_concurrency=2,
             trace_format="dynamo",
+            execution_model="target-model",
         )
 
 
@@ -463,6 +470,7 @@ def test_direct_agentic_dynamo_trace_honors_per_request_capture():
         extra_engine_args=_vllm_args(),
         replay_mode="offline",
         trace_format="dynamo",
+        execution_model="target-model",
         capture_per_request=True,
     )
 
@@ -470,6 +478,7 @@ def test_direct_agentic_dynamo_trace_honors_per_request_capture():
     assert report.coverage["capture_per_request"] is True
     assert report.coverage["per_request_records"] == len(report.per_request)
     assert report.summary["completed_requests"] == len(report.per_request)
+    assert report.summary["agentic_model_projection"]["target_model"] == "target-model"
 
 
 @pytest.mark.planner
