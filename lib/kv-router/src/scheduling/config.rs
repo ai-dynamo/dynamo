@@ -189,6 +189,12 @@ fn log_env_config(config: &KvRouterConfig) {
         conditional_disagg_eff_isl_ratio_threshold = config.conditional_disagg_eff_isl_ratio_threshold,
         conditional_disagg_prefill_busy_threshold = ?config.conditional_disagg_prefill_busy_threshold,
         conditional_disagg_decode_busy_threshold = ?config.conditional_disagg_decode_busy_threshold,
+        prefill_continue_enabled = config.prefill_continue_enabled,
+        prefill_continue_decode_busy_threshold = ?config.prefill_continue_decode_busy_threshold,
+        prefill_continue_prefill_busy_threshold = ?config.prefill_continue_prefill_busy_threshold,
+        prefill_continue_max_budget_tokens = ?config.prefill_continue_max_budget_tokens,
+        prefill_continue_max_concurrent = ?config.prefill_continue_max_concurrent,
+        prefill_continue_force = config.prefill_continue_force,
         router_predicted_ttl_secs = ?config.router_predicted_ttl_secs,
         router_ttl_secs = config.router_ttl_secs,
         router_event_threads = config.router_event_threads,
@@ -325,6 +331,41 @@ fn kv_router_config_from_lookup(
         "DYN_ROUTER_CONDITIONAL_DISAGG_DECODE_BUSY_THRESHOLD",
     ) {
         config.conditional_disagg_decode_busy_threshold = Some(value);
+    }
+    if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_PREFILL_CONTINUE") {
+        config.prefill_continue_enabled = value;
+    }
+    if let Some(value) = parse_f64(
+        &get_env,
+        "DYN_ROUTER_PREFILL_CONTINUE_DECODE_BUSY_THRESHOLD",
+    ) {
+        config.prefill_continue_decode_busy_threshold = Some(value);
+    }
+    // The gate no longer projects the request's output onto the reading, so
+    // this setting is gone. Say so: the JSON form rejects the key outright, but
+    if get_env("DYN_ROUTER_PREFILL_CONTINUE_OUTPUT_RESERVE_TOKENS").is_some() {
+        tracing::warn!(
+            "DYN_ROUTER_PREFILL_CONTINUE_OUTPUT_RESERVE_TOKENS is set and is ignored. The \
+             decode gate now reads what the worker reports it is holding, with nothing \
+             projected onto it, so there is no reserve to set"
+        );
+    }
+    if let Some(value) = parse_f64(
+        &get_env,
+        "DYN_ROUTER_PREFILL_CONTINUE_PREFILL_BUSY_THRESHOLD",
+    ) {
+        config.prefill_continue_prefill_busy_threshold = Some(value);
+    }
+    if let Some(value) = parse_usize(&get_env, "DYN_ROUTER_PREFILL_CONTINUE_MAX_BUDGET_TOKENS")
+        .and_then(|value| u32::try_from(value).ok())
+    {
+        config.prefill_continue_max_budget_tokens = Some(value);
+    }
+    if let Some(value) = parse_usize(&get_env, "DYN_ROUTER_PREFILL_CONTINUE_MAX_CONCURRENT") {
+        config.prefill_continue_max_concurrent = Some(value);
+    }
+    if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_PREFILL_CONTINUE_FORCE") {
+        config.prefill_continue_force = value;
     }
     if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_PREDICTED_TTL_SECS") {
         config.router_predicted_ttl_secs = Some(value);
@@ -691,6 +732,18 @@ struct KvRouterConfigSerde {
     conditional_disagg_eff_isl_ratio_threshold: f64,
     conditional_disagg_prefill_busy_threshold: Option<f64>,
     conditional_disagg_decode_busy_threshold: Option<f64>,
+    #[serde(default)]
+    prefill_continue_enabled: bool,
+    #[serde(default)]
+    prefill_continue_decode_busy_threshold: Option<f64>,
+    #[serde(default)]
+    prefill_continue_prefill_busy_threshold: Option<f64>,
+    #[serde(default)]
+    prefill_continue_max_budget_tokens: Option<u32>,
+    #[serde(default)]
+    prefill_continue_max_concurrent: Option<usize>,
+    #[serde(default)]
+    prefill_continue_force: bool,
 }
 
 impl Default for KvRouterConfigSerde {
@@ -738,6 +791,12 @@ impl Default for KvRouterConfigSerde {
                 .conditional_disagg_prefill_busy_threshold,
             conditional_disagg_decode_busy_threshold: config
                 .conditional_disagg_decode_busy_threshold,
+            prefill_continue_enabled: config.prefill_continue_enabled,
+            prefill_continue_decode_busy_threshold: config.prefill_continue_decode_busy_threshold,
+            prefill_continue_prefill_busy_threshold: config.prefill_continue_prefill_busy_threshold,
+            prefill_continue_max_budget_tokens: config.prefill_continue_max_budget_tokens,
+            prefill_continue_max_concurrent: config.prefill_continue_max_concurrent,
+            prefill_continue_force: config.prefill_continue_force,
         }
     }
 }
@@ -925,6 +984,43 @@ pub struct KvRouterConfig {
     /// the guard is disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conditional_disagg_decode_busy_threshold: Option<f64>,
+
+    /// Enable prefill-continues-decode. When true, the `PrefillRouter` may let the
+    /// prefill worker generate the whole response instead of handing off, for a
+    /// request the decode pool has no room for.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub prefill_continue_enabled: bool,
+
+    /// Continue when the chosen decode worker holds more than this fraction of
+    /// its KV capacity. Unset fails closed. Above 1.0 gives a calibration arm:
+    /// the histogram still fills and every request refuses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_continue_decode_busy_threshold: Option<f64>,
+
+    /// Back off when prefill load exceeds this many batches of token budget.
+    /// Unset falls back to `router_queue_threshold`. Raise it with concurrency:
+    /// one request of ISL n costs n / max_num_batched_tokens batches.
+    /// Sees ordinary prefill only; the cap below bounds continuations.
+    ///
+    /// It deliberately does not read `conditional_disagg_prefill_busy_threshold`:
+    /// that would move this feature's back-off point whenever an unrelated
+    /// feature is configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_continue_prefill_busy_threshold: Option<f64>,
+
+    /// Continue only for a request whose remaining token budget is at or below
+    /// this cap. This is an eligibility gate, not a limit the router imposes: the
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_continue_max_budget_tokens: Option<u32>,
+
+    /// Maximum concurrent continuations per prefill worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_continue_max_concurrent: Option<usize>,
+
+    /// Continue every eligible request, whatever the decode load. Requires
+    /// `prefill_continue_enabled`; the budget cap and the concurrency cap still
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub prefill_continue_force: bool,
 }
 
 fn default_conditional_disagg_eff_isl_threshold() -> usize {
@@ -986,6 +1082,12 @@ impl Default for KvRouterConfig {
                 default_conditional_disagg_eff_isl_ratio_threshold(),
             conditional_disagg_prefill_busy_threshold: None,
             conditional_disagg_decode_busy_threshold: None,
+            prefill_continue_enabled: false,
+            prefill_continue_decode_busy_threshold: None,
+            prefill_continue_prefill_busy_threshold: None,
+            prefill_continue_max_budget_tokens: None,
+            prefill_continue_max_concurrent: None,
+            prefill_continue_force: false,
         }
     }
 }
@@ -1052,6 +1154,12 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
                 .conditional_disagg_prefill_busy_threshold,
             conditional_disagg_decode_busy_threshold: compat
                 .conditional_disagg_decode_busy_threshold,
+            prefill_continue_enabled: compat.prefill_continue_enabled,
+            prefill_continue_decode_busy_threshold: compat.prefill_continue_decode_busy_threshold,
+            prefill_continue_prefill_busy_threshold: compat.prefill_continue_prefill_busy_threshold,
+            prefill_continue_max_budget_tokens: compat.prefill_continue_max_budget_tokens,
+            prefill_continue_max_concurrent: compat.prefill_continue_max_concurrent,
+            prefill_continue_force: compat.prefill_continue_force,
         };
         config.validate()?;
         Ok(config)
@@ -1118,6 +1226,71 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), String> {
                     "conditional_disagg policy={:?} needs prefill_busy_threshold, but neither --router-conditional-disagg-config {{\"prefill_busy_threshold\": ...}} nor --router-queue-threshold is set",
                     config.conditional_disagg_policy
                 ));
+            }
+        }
+    }
+    if config.prefill_continue_force && !config.prefill_continue_enabled {
+        return Err(
+            "prefill_continue_force requires prefill_continue_enabled=true \
+             (--router-prefill-continue)"
+                .to_string(),
+        );
+    }
+    if config.prefill_continue_enabled
+        && config.prefill_continue_decode_busy_threshold.is_none()
+        && !config.prefill_continue_force
+    {
+        return Err(
+            "prefill_continue_enabled needs prefill_continue_decode_busy_threshold \
+             (--router-prefill-continue-config {\"decode_busy_threshold\": 0.9}), or \
+             \"force\": true for bring-up; otherwise it would never trigger"
+                .to_string(),
+        );
+    }
+    if config.prefill_continue_enabled && !config.router_track_output_blocks {
+        tracing::warn!(
+            "prefill_continue_enabled without router_track_output_blocks: a continuing worker's \
+             occupancy freezes at prompt size, so the load this feature reads back is wrong for \
+             exactly the workers it is loading. Enable output-block tracking before trusting a \
+             benchmark of it."
+        );
+    }
+    if config.prefill_continue_max_concurrent == Some(0) {
+        tracing::warn!(
+            "prefill_continue_max_concurrent is 0: the feature is enabled but every request will \
+             hand off as today. This is a valid kill switch; it is not a working configuration."
+        );
+    }
+    if config.prefill_continue_enabled && config.prefill_continue_max_concurrent.is_none() {
+        return Err(
+            "prefill_continue_enabled needs prefill_continue_max_concurrent \
+             (--router-prefill-continue-config {\"max_concurrent\": 2}); the prefill-load \
+             interlock is cleared at a request's first token, so it cannot see continuations \
+             that are already running, and this cap is the only bound that can"
+                .to_string(),
+        );
+    }
+    if config.prefill_continue_enabled {
+        match (
+            config.prefill_continue_prefill_busy_threshold,
+            config.router_queue_threshold,
+        ) {
+            (Some(threshold), _) => tracing::info!(
+                busy_threshold = threshold,
+                "prefill_continue interlock using its own threshold"
+            ),
+            (None, Some(threshold)) => tracing::info!(
+                inherited_threshold = threshold,
+                "prefill_continue interlock inheriting router_queue_threshold"
+            ),
+            (None, None) => {
+                return Err(
+                    "prefill_continue_enabled needs prefill_continue_prefill_busy_threshold \
+                     (--router-prefill-continue-config {\"prefill_busy_threshold\": 0.8}) \
+                     or router_queue_threshold; without it the prefill-load interlock \
+                     cannot run, and the feature would spend prefill capacity unchecked"
+                        .to_string(),
+                );
             }
         }
     }
@@ -1408,6 +1581,12 @@ impl KvRouterConfig {
         if let Some(value) = self.conditional_disagg_decode_busy_threshold {
             validate_min("conditional_disagg_decode_busy_threshold", value, 0.0)?;
         }
+        if let Some(value) = self.prefill_continue_decode_busy_threshold {
+            validate_min("prefill_continue_decode_busy_threshold", value, 0.0)?;
+        }
+        if let Some(value) = self.prefill_continue_prefill_busy_threshold {
+            validate_min("prefill_continue_prefill_busy_threshold", value, 0.0)?;
+        }
         validate_kv_router_config(self)
     }
 
@@ -1668,6 +1847,156 @@ mod tests {
         let predicted = config_from_values(&[("DYN_ROUTER_PREDICTED_TTL_SECS", "60")]);
         assert_eq!(predicted.router_predicted_ttl_secs, Some(60.0));
         assert!(predicted.validate_config().is_ok());
+    }
+
+    #[test]
+    fn dynamo_env_config_parses_prefill_continue_settings() {
+        let config = config_from_values(&[
+            ("DYN_ROUTER_PREFILL_CONTINUE", "true"),
+            ("DYN_ROUTER_PREFILL_CONTINUE_DECODE_BUSY_THRESHOLD", "0.9"),
+            ("DYN_ROUTER_PREFILL_CONTINUE_PREFILL_BUSY_THRESHOLD", "0.4"),
+            ("DYN_ROUTER_PREFILL_CONTINUE_MAX_BUDGET_TOKENS", "2048"),
+            ("DYN_ROUTER_PREFILL_CONTINUE_MAX_CONCURRENT", "8"),
+            ("DYN_ROUTER_PREFILL_CONTINUE_FORCE", "true"),
+        ]);
+
+        assert!(config.prefill_continue_enabled);
+        assert_eq!(config.prefill_continue_decode_busy_threshold, Some(0.9));
+        assert_eq!(config.prefill_continue_prefill_busy_threshold, Some(0.4));
+        assert_eq!(config.prefill_continue_max_budget_tokens, Some(2048));
+        assert_eq!(config.prefill_continue_max_concurrent, Some(8));
+        assert!(config.prefill_continue_force);
+    }
+
+    #[test]
+    fn prefill_continue_defaults_are_off_and_fail_closed() {
+        let config = KvRouterConfig::default();
+
+        assert!(!config.prefill_continue_enabled);
+        assert!(!config.prefill_continue_force);
+        assert_eq!(config.prefill_continue_decode_busy_threshold, None);
+        assert_eq!(config.prefill_continue_prefill_busy_threshold, None);
+        assert_eq!(config.prefill_continue_max_budget_tokens, None);
+        assert_eq!(config.prefill_continue_max_concurrent, None);
+    }
+
+    #[test]
+    fn prefill_continue_rejects_negative_thresholds() {
+        let config = KvRouterConfig {
+            prefill_continue_decode_busy_threshold: Some(-0.1),
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+
+        let config = KvRouterConfig {
+            prefill_continue_prefill_busy_threshold: Some(-1.0),
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn prefill_continue_force_requires_enabled() {
+        let config = KvRouterConfig {
+            prefill_continue_force: true,
+            ..Default::default()
+        };
+        let error = config.validate().unwrap_err();
+        assert!(error.contains("prefill_continue_force"), "{error}");
+    }
+
+    #[test]
+    fn prefill_continue_enabled_without_a_trigger_is_rejected() {
+        let config = KvRouterConfig {
+            prefill_continue_enabled: true,
+            prefill_continue_max_concurrent: Some(2),
+            ..Default::default()
+        };
+        let error = config.validate().unwrap_err();
+        assert!(error.contains("would never trigger"), "{error}");
+
+        // force is the documented bring-up path, so it satisfies the rule.
+        let config = KvRouterConfig {
+            prefill_continue_enabled: true,
+            prefill_continue_max_concurrent: Some(2),
+            prefill_continue_force: true,
+            prefill_continue_prefill_busy_threshold: Some(0.4),
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+
+        // so does a configured trigger.
+        let config = KvRouterConfig {
+            prefill_continue_enabled: true,
+            prefill_continue_max_concurrent: Some(2),
+            prefill_continue_decode_busy_threshold: Some(0.9),
+            prefill_continue_prefill_busy_threshold: Some(0.4),
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn the_e2e_arms_configuration_is_accepted() {
+        // Mirrors tests/serve/test_vllm.py's prefill-continue arm. A GPU job is
+        // an expensive place to discover the config was invalid.
+        let config = KvRouterConfig {
+            prefill_continue_enabled: true,
+            prefill_continue_force: true,
+            prefill_continue_max_concurrent: Some(2),
+            prefill_continue_prefill_busy_threshold: Some(0.9),
+            ..Default::default()
+        };
+
+        assert!(config.validate().is_ok(), "{:?}", config.validate());
+    }
+
+    #[test]
+    fn prefill_continue_requires_a_concurrency_cap() {
+        // The cap is the only bound that can see a continuation after its first
+        // token, so enabling the feature without one is refused rather than
+        // silently running unbounded.
+        let config = KvRouterConfig {
+            prefill_continue_enabled: true,
+            prefill_continue_decode_busy_threshold: Some(0.9),
+            prefill_continue_prefill_busy_threshold: Some(0.4),
+            ..Default::default()
+        };
+
+        let error = config.validate().unwrap_err();
+        assert!(error.contains("prefill_continue_max_concurrent"), "{error}");
+
+        let config = KvRouterConfig {
+            prefill_continue_max_concurrent: Some(2),
+            ..config
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn prefill_continue_requires_an_interlock_threshold() {
+        // The interlock is the safety gate: the feature spends prefill capacity,
+        // so enabling it without a way to tell a busy prefill worker apart is
+        // rejected rather than silently skipped.
+        let config = KvRouterConfig {
+            prefill_continue_enabled: true,
+            prefill_continue_max_concurrent: Some(2),
+            prefill_continue_decode_busy_threshold: Some(0.9),
+            ..Default::default()
+        };
+        let error = config.validate().unwrap_err();
+        assert!(error.contains("interlock"), "{error}");
+
+        // The router-wide queue threshold satisfies it, as it does for the
+        // sibling feature.
+        let config = KvRouterConfig {
+            prefill_continue_enabled: true,
+            prefill_continue_max_concurrent: Some(2),
+            prefill_continue_decode_busy_threshold: Some(0.9),
+            router_queue_threshold: Some(4.0),
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
     }
 
     #[test]
@@ -2225,6 +2554,12 @@ worker_selection:
             "conditional_disagg_eff_isl_ratio_threshold",
             "conditional_disagg_prefill_busy_threshold",
             "conditional_disagg_decode_busy_threshold",
+            "prefill_continue_enabled",
+            "prefill_continue_decode_busy_threshold",
+            "prefill_continue_prefill_busy_threshold",
+            "prefill_continue_max_budget_tokens",
+            "prefill_continue_max_concurrent",
+            "prefill_continue_force",
         ] {
             assert!(value.get(post_v1_3_field).is_none(), "{post_v1_3_field}");
         }

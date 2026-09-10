@@ -83,6 +83,12 @@ class DynamoRouterConfig(KvRouterConfigBase, AicPerfConfigBase):
                 "disaggregated serving; standalone dynamo.router does not run "
                 "conditional disaggregation"
             )
+        if self.prefill_continue_enabled or self.prefill_continue_config is not None:
+            raise ValueError(
+                "--router-prefill-continue is only supported by dynamo.frontend "
+                "disaggregated serving; this router builds only a KvRouter and "
+                "has no prefill router to continue from"
+            )
 
 
 class DynamoRouterArgGroup(ArgGroup):

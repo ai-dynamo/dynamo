@@ -41,6 +41,12 @@ pub enum RequestPhase {
     /// Aggregated mode - same worker handles both prefill and decode
     #[default]
     Aggregated,
+    /// A prefill worker that kept generating instead of handing off.
+    ///
+    /// One worker does both, as in [`Self::Aggregated`], but it is deliberately
+    /// not that: an arm running this feature has to stay tellable apart from a
+    /// genuinely aggregated deployment, or no A/B against one means anything.
+    Continuation,
 }
 
 impl std::fmt::Display for RequestPhase {
@@ -49,6 +55,7 @@ impl std::fmt::Display for RequestPhase {
             RequestPhase::Prefill => write!(f, "prefill"),
             RequestPhase::Decode => write!(f, "decode"),
             RequestPhase::Aggregated => write!(f, "aggregated"),
+            RequestPhase::Continuation => write!(f, "continuation"),
         }
     }
 }
@@ -139,11 +146,16 @@ pub struct RequestTracker {
     /// and looking up MDC by worker_id would require iterating all cards (O(n)).
     prefill_worker_type: OnceLock<&'static str>,
 
-    /// Worker type for the decode worker (always "decode").
-    /// Stored for symmetry with prefill_worker_type, though decode is always "decode".
+    /// Worker type for the decode worker.
+    ///
+    /// Normally `"decode"`, but a continuation records `"prefill"`: one prefill
+    /// worker did both legs, and the per-worker gauges are cleaned up under the
+    /// label the worker actually registered with, so `"decode"` would leak
+    /// stale series when that worker leaves. An A/B on inter-token latency for
+    /// a continuation arm must therefore query `worker_type="prefill"`.
     decode_worker_type: OnceLock<&'static str>,
 
-    /// Request phase (Prefill/Decode/Aggregated)
+    /// Request phase (Prefill/Decode/Aggregated/Continuation)
     phase: Mutex<RequestPhase>,
 
     /// Semaphore for coordinating phase transitions.
@@ -463,7 +475,7 @@ impl RequestTracker {
         match self.phase() {
             RequestPhase::Prefill => self.record_prefill_worker(instance_id, dp_rank, worker_type),
             RequestPhase::Decode => self.record_decode_worker(instance_id, dp_rank, worker_type),
-            RequestPhase::Aggregated => {
+            RequestPhase::Aggregated | RequestPhase::Continuation => {
                 self.record_prefill_worker(instance_id, dp_rank, worker_type);
                 self.record_decode_worker(instance_id, dp_rank, worker_type);
             }
