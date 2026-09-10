@@ -3755,9 +3755,8 @@ class InstrumentedScheduler(AsyncScheduler):
             # the untimed injection window. allocate_slots() above deferred
             # it, and the async scheduler would otherwise do it inside the
             # admission step's update_from_output, whose Python per-block
-            # loop (~0.7 us/block) lands in the steady step's inter-update
-            # wall_time: at 218k blocks that is ~160 ms of CPU booked as GPU
-            # time (measured +180..430% over the real-point trend on B200).
+            # loop would then be booked into the steady step's inter-update
+            # wall time as if it were GPU time.
             self.kv_cache_manager.cache_blocks(req, ctx_len)
 
             self.requests[req_id] = req
@@ -5179,32 +5178,47 @@ class InstrumentedScheduler(AsyncScheduler):
         ``ctx_len`` then read zeros -- measurement-local, timing-neutral).
         Returns the shadow's block table per group and the block ids to zero.
 
+        Registration is all-or-nothing across KV-cache groups. Every group's
+        geometry is checked and its private tail taken from the pool before
+        any chain block is referenced or any table written, so a chain too
+        shallow for a later group or a pool that cannot supply its tail
+        unwinds to a shadow that holds nothing: the tails already taken go
+        back to the pool (``free_blocks`` drops the single reference
+        ``get_new_blocks`` gave them) and no group is left with a
+        half-registered shadow or an over-referenced chain prefix.
+
         Everything here runs in the untimed admission window; the measured
         steady steps allocate nothing.
         """
         manager = self.kv_cache_manager
         block_pool = manager.block_pool
         managers = manager.coordinator.single_type_managers
+        staged: list[tuple[Any, int, list, list, list]] = []
+        try:
+            for mgr in managers:
+                chain_blocks = list(mgr.req_to_blocks[chain_id])
+                bs = int(
+                    getattr(
+                        mgr, "block_size", getattr(self.cache_config, "block_size", 16)
+                    )
+                )
+                n_shared = ctx_len // bs
+                n_total = -(-(ctx_len + 1 + headroom) // bs)
+                if n_total > len(chain_blocks):
+                    raise RuntimeError(
+                        f"KVWARM: chain {chain_id} too shallow for shadow {req_id}: "
+                        f"needs {n_total} blocks, has {len(chain_blocks)}"
+                    )
+                tail_src = chain_blocks[n_shared:n_total]
+                fresh = block_pool.get_new_blocks(len(tail_src))
+                staged.append((mgr, n_shared, chain_blocks[:n_shared], tail_src, fresh))
+        except Exception:
+            for _, _, _, _, fresh in staged:
+                block_pool.free_blocks(fresh)
+            raise
         table: list[list[int]] = []
         zero_ids: list[int] = []
-        for mgr in managers:
-            chain_blocks = list(mgr.req_to_blocks[chain_id])
-            bs = int(
-                getattr(mgr, "block_size", getattr(self.cache_config, "block_size", 16))
-            )
-            n_shared = ctx_len // bs
-            n_total = -(-(ctx_len + 1 + headroom) // bs)
-            if n_total > len(chain_blocks):
-                raise RuntimeError(
-                    f"KVWARM: chain {chain_id} too shallow for shadow {req_id}: "
-                    f"needs {n_total} blocks, has {len(chain_blocks)}"
-                )
-            shared = chain_blocks[:n_shared]
-            tail_src = chain_blocks[n_shared:n_total]
-            # Take the private tail first: if the pool cannot supply it the
-            # shadow holds nothing yet, so nothing leaks (a failed shadow
-            # must not leave the chain prefix over-referenced).
-            fresh = block_pool.get_new_blocks(len(tail_src))
+        for mgr, n_shared, shared, tail_src, fresh in staged:
             block_pool.touch(shared)
             apply_cow = getattr(mgr, "_apply_cow", None)
             if callable(apply_cow):

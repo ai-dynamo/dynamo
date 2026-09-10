@@ -4955,10 +4955,15 @@ class _FakeBlock:
 
 
 class _FakePool:
+    """``BlockPool`` reference semantics: ``touch`` is +1, ``get_new_blocks``
+    hands out blocks at ref 1, ``free_blocks`` is -1 and a block joins the
+    free queue only when it reaches 0 (a free past 0 is a double free)."""
+
     def __init__(self, next_id=1000):
         self.next_id = next_id
         self.touched = []
         self.freed = []
+        self.free_queue = []
 
     def touch(self, blocks):
         self.touched.extend(blocks)
@@ -4972,22 +4977,45 @@ class _FakePool:
             self.next_id += 1
         return out
 
+    def free_blocks(self, ordered_blocks):
+        for b in ordered_blocks:
+            assert b.ref_cnt > 0, f"double free of block {b.block_id}"
+            b.ref_cnt -= 1
+            self.freed.append(b)
+            if b.ref_cnt == 0:
+                self.free_queue.append(b)
+
 
 class _FakeManager:
+    """``SingleTypeKVCacheManager`` surface used by shadow registration.
+    ``_apply_cow`` mirrors vLLM's: the table slot is redirected to the CoW
+    block, which takes the retention ref, and the (source, cow) pair waits
+    for ``take_pending_cow_copies``."""
+
     block_size = 16
 
     def __init__(self, chain_blocks, cow=True):
         self.req_to_blocks = {"chain": chain_blocks}
         self.num_cached_block = {}
         self.cows = []
+        self._pending_cow_copies = []
         if cow:
             self._apply_cow = self._cow
 
     def _cow(self, req_id, idx, src, dst):
         assert self.req_to_blocks[req_id][idx] is src
         self.req_to_blocks[req_id][idx] = dst
+        self._pending_cow_copies.append((src, dst))
         dst.ref_cnt += 1
         self.cows.append((src.block_id, dst.block_id))
+
+    def take_pending_cow_copies(self):
+        pending, self._pending_cow_copies = self._pending_cow_copies, []
+        return pending
+
+    def pop_blocks_for_free(self, req_id):
+        self.num_cached_block.pop(req_id, None)
+        return self.req_to_blocks.pop(req_id, [])
 
 
 def _shadow_stub(cow=True):
@@ -5299,3 +5327,179 @@ def test_schedule_advances_the_deferred_free_fence_for_benchmark_steps():
     )
     InstrumentedScheduler.schedule(stub)
     assert stub.sched_step_seq == 6
+
+
+# ---------------------------------------------------------------------------
+# Shadow registration: all-or-nothing across KV-cache groups, and the full
+# reference lifecycle of one shadow
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("failure", ["pool_exhausted", "too_shallow"])
+def test_kvwarm_shadow_registration_unwinds_earlier_groups_on_failure(failure):
+    """Hybrid layouts register one shadow per KV-cache group. A failure in a
+    later group must leave no trace of the earlier ones: their tails go back
+    to the pool and their chain blocks keep exactly the chain's reference
+    (an over-referenced chain block breaks reset_prefix_cache)."""
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    chain_a = [_FakeBlock(i) for i in range(10)]
+    chain_b = [_FakeBlock(100 + i) for i in range(10)]
+    mgr_a = _FakeManager(chain_a, cow=True)
+    mgr_b = _FakeManager(chain_b, cow=True)
+    pool = _FakePool()
+    stub.kv_cache_manager = SimpleNamespace(
+        block_pool=pool,
+        coordinator=SimpleNamespace(single_type_managers=[mgr_a, mgr_b]),
+    )
+    stub.cache_config = SimpleNamespace(block_size=16)
+    if failure == "pool_exhausted":
+        take = pool.get_new_blocks
+
+        def get_new_blocks(n):
+            if pool.next_id > 1000:  # the first group's tail is already out
+                raise ValueError(f"Cannot get {n} free blocks from the pool")
+            return take(n)
+
+        pool.get_new_blocks = get_new_blocks
+        expected = pytest.raises(ValueError, match="free blocks")
+    else:
+        mgr_b.req_to_blocks["chain"] = chain_b[:2]
+        expected = pytest.raises(RuntimeError, match="too shallow")
+
+    with expected:
+        InstrumentedScheduler._kvwarm_register_shadow(stub, "shadow", "chain", 40, 3)
+
+    # ctx=40, headroom 3: one private tail block per group. The first group's
+    # tail was taken and is back in the pool; the second was never taken.
+    assert [b.block_id for b in pool.freed] == [1000]
+    assert pool.free_queue == pool.freed
+    assert pool.touched == []
+    assert all(b.ref_cnt == 1 for b in chain_a + chain_b)
+    for mgr in (mgr_a, mgr_b):
+        assert "shadow" not in mgr.req_to_blocks
+        assert "shadow" not in mgr.num_cached_block
+        assert mgr.cows == []
+        assert mgr.take_pending_cow_copies() == []
+
+
+@pytest.mark.parametrize("cow", [True, False])
+def test_kvwarm_shadow_lifecycle_returns_every_reference(cow):
+    """Reference accounting of one shadow from registration to chain release,
+    step by step against vLLM 0.28:
+
+    1. ``_kvwarm_register_shadow``: shared prefix +1 (``BlockPool.touch``);
+       fresh tail block at ref 1 (``BlockPool.get_new_blocks``). With CoW the
+       source tail block gets +1 (the hit-ref a partial prefix hit carries in
+       production) and the fresh block +1 retention
+       (``SingleTypeKVCacheManager._apply_cow``).
+    2. Copy completion (CoW only): ``Scheduler.schedule`` drains
+       ``KVCacheManager.take_kv_cache_block_copies`` and hands both endpoints
+       to ``Scheduler._free_cow_retained_blocks`` -> ``BlockPool.free_blocks``
+       (-1 each) once the copying step's output has been processed.
+    3. Shadow release: ``finish_requests`` -> ``_free_request`` ->
+       ``_free_request_blocks`` -> ``KVCacheManager.free`` ->
+       ``SingleTypeKVCacheManager.free`` =
+       ``free_blocks(reversed(pop_blocks_for_free(req_id)))``.
+    4. Chain release: the same path for the chain.
+
+    Afterwards every block sits at ref 0 exactly once: nothing was freed
+    past 0 and nothing stays referenced (which would fail
+    ``reset_prefix_cache``)."""
+    stub, mgr, pool, chain = _shadow_stub(cow=cow)
+    # ctx=40 -> blocks 0,1 shared; the shadow writes 40..43 in block 2 only.
+    ctx, headroom = 40, 3
+
+    # 1. registration
+    table, zero_ids = InstrumentedScheduler._kvwarm_register_shadow(
+        stub, "shadow", "chain", ctx, headroom
+    )
+    shadow_blocks = mgr.req_to_blocks["shadow"]
+    src, fresh = chain[2], shadow_blocks[2]
+    assert shadow_blocks[:2] == chain[:2] and fresh is not src
+    assert table == ([0, 1, fresh.block_id],)
+    assert [b.ref_cnt for b in chain[:2]] == [2, 2]
+    if cow:
+        assert (src.ref_cnt, fresh.ref_cnt) == (2, 2)
+        assert zero_ids == []
+        # 2. copy completion
+        copies = mgr.take_pending_cow_copies()
+        assert copies == [(src, fresh)]
+        pool.free_blocks([block for pair in copies for block in pair])
+        assert (src.ref_cnt, fresh.ref_cnt) == (1, 1)
+        assert pool.free_queue == []
+    else:
+        assert (src.ref_cnt, fresh.ref_cnt) == (1, 1)
+        assert zero_ids == [fresh.block_id]
+
+    # 3. shadow release
+    pool.free_blocks(reversed(mgr.pop_blocks_for_free("shadow")))
+    assert "shadow" not in mgr.num_cached_block
+    assert fresh.ref_cnt == 0 and pool.free_queue == [fresh]
+    assert [b.ref_cnt for b in chain] == [1] * len(chain)
+
+    # 4. chain release
+    pool.free_blocks(reversed(mgr.pop_blocks_for_free("chain")))
+    assert all(b.ref_cnt == 0 for b in chain)
+    assert mgr.req_to_blocks == {}
+    assert sorted(b.block_id for b in pool.free_queue) == sorted(
+        b.block_id for b in [*chain, fresh]
+    )
+    assert len(pool.free_queue) == len(chain) + 1
+
+
+# ---------------------------------------------------------------------------
+# Fake decode injection commits its blocks to the prefix cache in the
+# untimed window
+# ---------------------------------------------------------------------------
+
+
+def test_bench_inject_fake_decode_caches_blocks_before_the_request_runs():
+    """``allocate_slots(..., delay_cache_blocks=True)`` leaves the prefix-cache
+    commit to the caller. The injection must do it right there, after the
+    allocation and before the request joins ``running``: otherwise the async
+    scheduler commits every block inside the admission step's
+    ``update_from_output`` and that CPU loop is booked into the steady step's
+    inter-update wall time."""
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_seq = 0
+    stub._bench_active_req_ids = set()
+    stub.requests = {}
+    stub.finished_req_ids = set()
+    stub._bench_block_hasher = None
+    stub.connector = None
+    stub.ec_connector = None
+    stub.kv_cache_manager = MagicMock()
+    stub.kv_cache_manager.num_kv_cache_groups = 1
+    stub.kv_cache_manager.take_new_block_ids = MagicMock(return_value=None)
+
+    order: list[str] = []
+
+    class _Running(list):
+        def append(self, req):
+            order.append("running")
+            super().append(req)
+
+    stub.running = _Running()
+    blocks = MagicMock()
+    blocks.get_block_ids.return_value = ([0, 1],)
+
+    def allocate_slots(req, num_new_tokens, **kwargs):
+        order.append("allocate")
+        assert kwargs.get("delay_cache_blocks") is True
+        return blocks
+
+    def cache_blocks(req, num_computed_tokens):
+        order.append("cache")
+        # The full context, not the padded prompt, is what the request has
+        # computed and what its block hashes may be committed for.
+        assert num_computed_tokens == req.num_computed_tokens == 16
+
+    stub.kv_cache_manager.allocate_slots = allocate_slots
+    stub.kv_cache_manager.cache_blocks = cache_blocks
+
+    output = InstrumentedScheduler._bench_inject_fake_decode(stub, context_lengths=[16])
+
+    assert order == ["allocate", "cache", "running"]
+    assert output.total_num_scheduled_tokens == 1
+    assert stub._bench_active_req_ids == {"__bench_0"}
+    assert stub.requests["__bench_0"].status == RequestStatus.RUNNING
