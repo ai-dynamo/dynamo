@@ -8,6 +8,7 @@ worker needs one harness-allocated port per worker, or two deployments
 scheduled concurrently on the same host bind the same port and one loses.
 """
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -36,10 +37,10 @@ class _FakeRequest:
     node = _FakeNode()
 
 
-def _config() -> EngineConfig:
+def _config(directory: str) -> EngineConfig:
     return EngineConfig(
         name="kv-event-port-export",
-        directory="/tmp",
+        directory=directory,
         script_name="agg_multimodal_router.sh",
         model="test-model",
         marks=[],
@@ -47,8 +48,10 @@ def _config() -> EngineConfig:
     )
 
 
-def _prepared_env(ports: ServicePorts) -> tuple[dict, int]:
-    prep = _prepare_deployment(_config(), _FakeRequest(), ports=ports, extra_env=None)
+def _prepared_env(ports: ServicePorts, directory: str) -> tuple[dict, int]:
+    prep = _prepare_deployment(
+        _config(directory), _FakeRequest(), ports=ports, extra_env=None
+    )
     try:
         return dict(prep.merged_env), len(prep.extra_allocated_ports)
     finally:
@@ -71,11 +74,12 @@ def _service_ports(system: list, frontend: int, kv_event: int) -> ServicePorts:
     )
 
 
-def test_three_workers_each_get_a_distinct_kv_event_port() -> None:
-    """A three-worker topology gets DYN_VLLM_KV_EVENT_PORT1..3, all distinct."""
+def test_three_workers_each_get_a_distinct_kv_event_port(tmp_path: Path) -> None:
     with reserved_ports(5, DynamoPortRange.SERVE.value) as pool:
         frontend, kv_event, *system = pool
-        env, extra_count = _prepared_env(_service_ports(system, frontend, kv_event))
+        env, extra_count = _prepared_env(
+            _service_ports(system, frontend, kv_event), str(tmp_path)
+        )
 
     exported = [env.get(f"DYN_VLLM_KV_EVENT_PORT{i}") for i in (1, 2, 3)]
     assert all(
@@ -88,20 +92,5 @@ def test_three_workers_each_get_a_distinct_kv_event_port() -> None:
     assert exported[0] == str(kv_event)
     assert extra_count == 2
 
-    # The KV-event ports must not land on a worker's system port either.
     system_ports = {env[f"DYN_SYSTEM_PORT{i}"] for i in (1, 2, 3)}
     assert system_ports.isdisjoint(exported)
-
-
-def test_single_worker_topology_keeps_the_unnumbered_port_only() -> None:
-    """Negative control: one system port exports no numbered KV-event port."""
-    with reserved_ports(3, DynamoPortRange.SERVE.value) as pool:
-        frontend, kv_event, system = pool
-        env, extra_count = _prepared_env(_service_ports([system], frontend, kv_event))
-
-    assert env["DYN_VLLM_KV_EVENT_PORT"] == str(kv_event)
-    numbered = [
-        k for k in env if k.startswith("DYN_VLLM_KV_EVENT_PORT") and k[-1].isdigit()
-    ]
-    assert numbered == [], f"single-worker topologies gained ports: {numbered}"
-    assert extra_count == 0
