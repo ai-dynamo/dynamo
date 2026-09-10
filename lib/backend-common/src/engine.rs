@@ -27,8 +27,8 @@ pub use dynamo_llm::protocols::common::llm_backend::{
     LLMEngineOutput, LogProbs, TopLogprob, TopLogprobs,
 };
 pub use dynamo_llm::protocols::common::preprocessor::{
-    BootstrapInfo, MultimodalData, MultimodalDataMap, PrefillResult, PreprocessedRequest,
-    RoutingHints,
+    BootstrapInfo, KV_HINT_TRANSFER_CAPABILITY_KEY, KvHint, KvHintAction, KvSourceLocationsPayload,
+    MultimodalData, MultimodalDataMap, PrefillResult, PreprocessedRequest, RoutingHints,
 };
 pub use dynamo_llm::protocols::common::{
     FinishReason, GuidedDecodingOptions, OutputOptions, SamplingOptions, StopConditions,
@@ -152,6 +152,10 @@ pub struct LlmRegistration {
     /// owns a sub-range; the router enumerates
     /// `[start, start + data_parallel_size)`.
     pub data_parallel_start_rank: Option<u32>,
+    /// Engine emits bigram-keyed KV events (Eagle speculative decoding).
+    /// Published as `ModelRuntimeConfig::enable_eagle` so the router hashes
+    /// prompts the same way.
+    pub enable_eagle: bool,
     /// Bootstrap host advertised to decode peers. Backends with an internal
     /// KV-transport handshake leave it `None`. When host+port are set, `Worker`
     /// publishes them for the frontend's `PrefillRouter` bootstrap path.

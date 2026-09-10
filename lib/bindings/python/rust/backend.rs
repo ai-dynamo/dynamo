@@ -215,6 +215,9 @@ pub struct LlmRegistration {
 
 #[pymethods]
 impl LlmRegistration {
+    // TODO(rank-aware-kv-capacity): append any rank-capacity arguments so existing positional
+    // callers do not shift, and update the Python dataclass, duck-typed extraction, stub, and
+    // Rust-to-MDC copy as one compatibility boundary.
     #[new]
     #[pyo3(signature = (
         context_length = None,
@@ -226,8 +229,7 @@ impl LlmRegistration {
         data_parallel_start_rank = None,
         bootstrap_host = None,
         bootstrap_port = None,
-        // Appended rather than grouped with the other capacity fields: inserting
-        // mid-signature would silently rebind every existing positional caller.
+        enable_eagle = false,
         max_gpu_lora_count = None,
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -241,6 +243,7 @@ impl LlmRegistration {
         data_parallel_start_rank: Option<u32>,
         bootstrap_host: Option<String>,
         bootstrap_port: Option<u16>,
+        enable_eagle: bool,
         max_gpu_lora_count: Option<u32>,
     ) -> Self {
         Self {
@@ -253,6 +256,7 @@ impl LlmRegistration {
                 max_gpu_lora_count,
                 data_parallel_size,
                 data_parallel_start_rank,
+                enable_eagle,
                 bootstrap_host,
                 bootstrap_port,
             },
@@ -298,6 +302,11 @@ impl LlmRegistration {
     #[getter]
     fn bootstrap_port(&self) -> Option<u16> {
         self.inner.bootstrap_port
+    }
+
+    #[getter]
+    fn enable_eagle(&self) -> bool {
+        self.inner.enable_eagle
     }
 }
 
@@ -935,6 +944,7 @@ impl PyEngineCore {
                     max_gpu_lora_count: opt_attr::<u32>(&v, "max_gpu_lora_count")?,
                     data_parallel_size: opt_attr::<u32>(&v, "data_parallel_size")?,
                     data_parallel_start_rank: opt_attr::<u32>(&v, "data_parallel_start_rank")?,
+                    enable_eagle: opt_attr::<bool>(&v, "enable_eagle")?.unwrap_or(false),
                     bootstrap_host: opt_attr::<String>(&v, "bootstrap_host")?,
                     bootstrap_port: opt_attr::<u16>(&v, "bootstrap_port")?,
                 }),

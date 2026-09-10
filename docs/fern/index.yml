@@ -43,6 +43,10 @@ tabs:
   recipes:
     display-name: Recipes
     icon: file-code
+  agent-skills:
+    display-name: Agent Skills
+    icon: robot
+    slug: agent-skills
   reference:
     display-name: Reference
     icon: book
@@ -300,6 +304,13 @@ navigation:
 
   - tab: developer-guide
     layout:
+      - section: Security
+        icon: shield-halved
+        collapsed: true
+        contents:
+          - page: Secure Deployment Guidelines
+            path: pages/developer-guide/security/secure-deployment-guidelines.md
+
       # ==================== Knowledge Base ====================
       - section: Knowledge Base
         icon: book-open
@@ -343,7 +354,7 @@ navigation:
                   - page: Benchmark Planner Decisions
                     slug: planner-replay
                     path: pages/kubernetes/operations/simulation-with-dynosim/dynosim-planner-replay.mdx
-                  - section: AI Simulate (Experimental)
+                  - section: AISimulate (Experimental)
                     slug: ai-simulate
                     collapsed: true
                     contents:
@@ -484,6 +495,8 @@ navigation:
                 contents:
                   - page: Overview
                     path: pages/developer-guide/knowledge-base/modular-components/planner/overview.md
+                  - page: Choose a Planner Mode
+                    path: pages/developer-guide/knowledge-base/modular-components/planner/choose-planner-mode.md
                   - page: Planner Guide
                     path: pages/developer-guide/knowledge-base/modular-components/planner/planner-guide.md
                   - page: Global Planner Guide
@@ -763,12 +776,18 @@ navigation:
           - page: Overview
             path: pages/recipes/model-recipes/overview.mdx
             slug: browse
+          - page: Gemma-4-31B
+            path: pages/recipes/model-recipes/gemma-4-31b.mdx
+            slug: gemma-4-31b
           - page: GLM-5.3-Flash
             path: pages/recipes/model-recipes/glm-5-3-flash.mdx
             slug: glm-5-3-flash
           - page: Kimi-K3
             path: pages/recipes/model-recipes/kimi-k3.mdx
             slug: kimi-k3
+          - page: Qwen3.8-Flash-Next
+            path: pages/recipes/model-recipes/qwen-3-8-flash-next.mdx
+            slug: qwen-3-8-flash-next
           - page: Qwen3.8-2.4T-A95B
             path: pages/recipes/model-recipes/qwen-3-8-2-4t-a95b-fp8.mdx
             slug: qwen-3-8-2-4t-a95b-fp8
@@ -796,6 +815,9 @@ navigation:
           - page: DeepSeek-V4-Pro
             path: pages/recipes/model-recipes/deepseek-v4-pro.mdx
             slug: deepseek-v4-pro
+          - page: DeepSeek-V4-Pro-0813
+            path: pages/recipes/model-recipes/deepseek-v4-pro-0813.mdx
+            slug: deepseek-v4-pro-0813
           - page: DeepSeek-V4-Flash
             path: pages/recipes/model-recipes/deepseek-v4-flash.mdx
             slug: deepseek-v4-flash
@@ -814,6 +836,9 @@ navigation:
           - page: Qwen3-32B FP8
             path: pages/recipes/model-recipes/qwen3-32b-fp8.mdx
             slug: qwen3-32b-fp8
+          - page: Qwen3.6-35B-A3B
+            path: pages/recipes/model-recipes/qwen3-6-35b-a3b.mdx
+            slug: qwen3-6-35b-a3b
 
       # ==================== Kubernetes Templates ====================
       - section: Kubernetes Templates
@@ -893,6 +918,29 @@ navigation:
             slug: kv-router-ab-testing
             hidden: true
 
+  # The tab slug preserves the published /dynamo/dev/agent-skills URL.
+  - tab: agent-skills
+    layout:
+      - page: Overview
+        icon: robot
+        path: pages/agent-skills/overview.mdx
+        slug: overview
+
+      - page: Deployment and Operations
+        icon: screwdriver-wrench
+        path: pages/agent-skills/deployment.mdx
+        slug: deployment
+
+      - page: Performance Optimization
+        icon: gauge-high
+        path: pages/agent-skills/optimization.mdx
+        slug: optimization
+
+      - page: Development and Documentation
+        icon: code
+        path: pages/agent-skills/development.mdx
+        slug: development
+
   - tab: reference
     layout:
       - page: Compatibility
@@ -948,11 +996,6 @@ navigation:
         icon: microchip
         path: pages/reference/general/model-early-access-builds.mdx
         slug: model-early-access-builds
-
-      - page: Agent Skills
-        icon: robot
-        path: pages/reference/general/agent-skills.mdx
-        slug: agent-skills
 
       - page: Examples
         icon: file-code
