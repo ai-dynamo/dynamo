@@ -439,19 +439,42 @@ async def run_gms_failover_post_lock_fence(
                 _promote_content_directory_after_fence, backend_name, role
             )
         )
-        try:
-            protected_blocks = await asyncio.shield(promotion)
-        except asyncio.CancelledError:
+        cancelled: asyncio.CancelledError | None = None
+        while True:
             try:
-                await promotion
+                protected_blocks = await asyncio.shield(promotion)
+                break
+            except asyncio.CancelledError as exc:
+                if promotion.cancelled():
+                    raise
+                cancelled = exc
+                current = asyncio.current_task()
+                if current is not None:
+                    current.uncancel()
+                if not promotion.done():
+                    continue
+                try:
+                    protected_blocks = promotion.result()
+                except Exception:
+                    logger.exception(
+                        "[GMS failover] %s %s directory promotion failed while "
+                        "draining cancellation",
+                        backend_name,
+                        role,
+                    )
+                break
             except Exception:
+                if cancelled is None:
+                    raise
                 logger.exception(
                     "[GMS failover] %s %s directory promotion failed while "
                     "draining cancellation",
                     backend_name,
                     role,
                 )
-            raise
+                break
+        if cancelled is not None:
+            raise cancelled
     _reclaim_foreign_kv_leases_after_fence(
         backend_name, role, protected_blocks=protected_blocks
     )

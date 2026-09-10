@@ -554,6 +554,9 @@ async def test_cancelled_fence_drains_directory_promotion(monkeypatch):
     fence.cancel()
     await asyncio.sleep(0)
     assert not fence.done()
+    fence.cancel()
+    await asyncio.sleep(0)
+    assert not fence.done()
 
     allow_promotion.set()
     with pytest.raises(asyncio.CancelledError):
