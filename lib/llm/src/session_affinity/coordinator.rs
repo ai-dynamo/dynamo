@@ -910,10 +910,7 @@ pub fn explicit_target(
         return Ok(None);
     };
     let (worker_id, dp_rank) = match phase {
-        RequestPhase::Prefill => (
-            routing.prefill_worker_id.or(routing.backend_instance_id),
-            routing.prefill_dp_rank.or(routing.dp_rank),
-        ),
+        RequestPhase::Prefill => (routing.prefill_worker_id, routing.prefill_dp_rank),
         RequestPhase::Decode | RequestPhase::Aggregated => (
             routing.decode_worker_id.or(routing.backend_instance_id),
             routing.dp_rank,

@@ -131,6 +131,28 @@ fn session_affinity_explicit_targets_are_phase_local_and_preserve_rank_zero() {
 }
 
 #[test]
+fn session_affinity_prefill_target_ignores_backend_instance_id() {
+    let request = request_with_routing(RoutingHints {
+        backend_instance_id: Some(1),
+        dp_rank: Some(0),
+        ..Default::default()
+    });
+
+    assert_eq!(
+        explicit_target(&request, RequestPhase::Prefill).unwrap(),
+        None
+    );
+    assert_eq!(
+        explicit_target(&request, RequestPhase::Decode).unwrap(),
+        Some(target(1, Some(0)))
+    );
+    assert_eq!(
+        explicit_target(&request, RequestPhase::Aggregated).unwrap(),
+        Some(target(1, Some(0)))
+    );
+}
+
+#[test]
 fn session_affinity_context_type_errors_are_preserved() {
     let mut request = Context::new(request_with_routing(RoutingHints::default()));
     request.insert(SESSION_AFFINITY_CONTEXT_KEY, "wrong type".to_string());
