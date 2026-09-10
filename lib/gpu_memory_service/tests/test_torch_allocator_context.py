@@ -66,6 +66,17 @@ def test_persistent_pool_context_is_reentrant_for_same_tag_and_device(monkeypatc
     assert allocator._active_pool.get() is None
 
 
+def test_persistent_pool_rejects_mismatched_registered_device(monkeypatch):
+    fake_cuda = _install_fake_torch(monkeypatch)
+    _register_tag("kv_pool")
+
+    with pytest.raises(RuntimeError, match="registered for CUDA device 0"):
+        with allocator.gms_use_persistent_pool("kv_pool", 1):
+            pass
+
+    assert fake_cuda.calls == []
+
+
 def test_nested_pool_context_rejects_mismatched_tag(monkeypatch):
     fake_cuda = _install_fake_torch(monkeypatch)
     mem_pool = _register_tag("kv_pool")

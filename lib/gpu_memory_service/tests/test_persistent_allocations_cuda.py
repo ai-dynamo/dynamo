@@ -94,9 +94,7 @@ def test_daemon_write_visible_to_engine_via_same_physical_pages():
 
     try:
         pattern = bytes((i * 7 + 13) & 0xFF for i in range(256))
-        # Daemon writes via daemon VA.
         m.write_block("eng-test", "kv_pool", offset=0, data=pattern)
-        # Engine reads via its own VA.
         from cuda.bindings import driver as drv
 
         host_buf = (ctypes.c_ubyte * 256)()
@@ -108,8 +106,6 @@ def test_daemon_write_visible_to_engine_via_same_physical_pages():
             "proves same physical pages"
         )
 
-        # Reverse direction: engine writes via its VA, daemon reads via
-        # its VA.
         new_pattern = bytes(((255 - i) * 11) & 0xFF for i in range(256))
         host_src = (ctypes.c_ubyte * 256).from_buffer_copy(new_pattern)
         (err,) = drv.cuMemcpyHtoD(
@@ -138,20 +134,16 @@ def test_reattach_returns_same_physical_pages():
     m = PersistentAllocationManager(device=device)
     size = 2 * 1024 * 1024
     alloc1, _ = m.claim("eng-restart", "kv_pool", size)
-    # Stamp a known pattern via the daemon's VA.
     pattern = bytes((i * 17 + 5) & 0xFF for i in range(512))
     m.write_block("eng-restart", "kv_pool", offset=0, data=pattern)
 
-    # Simulate engine disconnect (claim released; allocation persists).
     m.unclaim("eng-restart", "kv_pool")
 
-    # Reattach with same key.
     alloc2, reattached = m.claim("eng-restart", "kv_pool", size)
     try:
         assert reattached is True
         assert alloc2.allocation_id == alloc1.allocation_id
         assert alloc2.va_daemon == alloc1.va_daemon  # unchanged VA
-        # Bytes still there.
         got = m.read_block("eng-restart", "kv_pool", offset=0, size=512)
         assert got == pattern, (
             "reattached persistent allocation must contain the bytes "

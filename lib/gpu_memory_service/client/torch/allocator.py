@@ -28,15 +28,8 @@ class _TagState:
     mem_pool: "MemPool | None"
     socket_path: str
     device: int
-    # Persistent-namespace routing: when True, _gms_malloc routes
-    # through create_persistent_mapping (KV-pool flow) keyed by
-    # (persistent_engine_id, per-allocation auto tag) instead of
-    # create_mapping (weights flow).
     is_persistent: bool = False
     persistent_engine_id: str = ""
-    # Counter for auto-generated per-allocation tags so multiple
-    # torch.empty() calls inside the same `with` block produce
-    # distinct persistent allocations.
     persistent_alloc_seq: int = 0
     persistent_tag_plan: list[str] | None = None
     persistent_shared: bool = False
@@ -96,9 +89,6 @@ def _use_gms_pool_context(
 
 
 def _gms_malloc(size: int, device: int, stream: int) -> int:
-    # Tag-context dispatch: the active tag (set by gms_use_mem_pool /
-    # gms_use_persistent_pool) selects the registry; the state's
-    # is_persistent flag decides routing.
     tag = _active_tag.get()
     if tag is None:
         raise RuntimeError("No active GMS allocation tag")
@@ -108,9 +98,6 @@ def _gms_malloc(size: int, device: int, stream: int) -> int:
         raise RuntimeError(f"Unknown GMS allocation tag: {tag}")
 
     if state.is_persistent:
-        # Auto-generate a per-allocation sub-tag so successive
-        # torch.empty() calls inside the same persistent scope get
-        # distinct persistent allocations (one per layer / per buffer).
         # Private-bootstrap shadows allocate VA-only scratch first and later
         # remap those VAs onto the shared namespace. Their tags must therefore
         # match the shared pool tags exactly.
@@ -482,6 +469,15 @@ def gms_use_persistent_pool(
         )
     if state.mem_pool is None:
         raise RuntimeError(f"GMS persistent allocator tag={tag} has no mempool")
+
+    import torch
+
+    device_index = _device_index(torch, device)
+    if device_index != state.device:
+        raise RuntimeError(
+            f"GMS persistent allocator tag={tag} is registered for CUDA device "
+            f"{state.device}, not requested device {device_index}"
+        )
 
     with _use_gms_pool_context(tag, device, state.mem_pool):
         yield

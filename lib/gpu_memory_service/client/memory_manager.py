@@ -176,8 +176,6 @@ class GMSClientMemoryManager:
         self._va_preserved = False
         self._last_memory_layout_hash: str = ""
 
-        # Upstream VMM abstraction (adopted during the rebase; the merged
-        # memory-manager drives all CUDA VMM ops through self._vmm).
         self._vmm = get_vmm()
         self._vmm.ensure_initialized()
         self.granularity = self._vmm.get_allocation_granularity(device)
