@@ -1399,6 +1399,82 @@ class ManagedDeployment:
                 )
                 raise
 
+    async def update_component_images(
+        self, images: dict[str, str], runtime_version: str
+    ):
+        """Patch real component images, preserving unrelated live DGD fields.
+
+        JSON Patch avoids replacing the entire v1beta1 components list.
+        Identity/image tests reject conflicting edits instead of losing them.
+        Callers must observe new Pod UIDs/readiness after this returns: accepting
+        a patch does not mean the rollout has finished.
+        """
+        if not images:
+            raise ValueError("images cannot be empty")
+        assert self._custom_api is not None, "Kubernetes API not initialized"
+        resource = dict(
+            group="nvidia.com",
+            version=self.deployment_spec.api_version,
+            namespace=self.namespace,
+            plural="dynamographdeployments",
+            name=self._deployment_name,
+        )
+        live = await self._custom_api.get_namespaced_custom_object(**resource)
+        patch = []
+        if not re.fullmatch(r"\d+\.\d+\.\d+", runtime_version):
+            raise ValueError("runtime_version must be MAJOR.MINOR.PATCH")
+        for name, image in images.items():
+            if self.deployment_spec.api_version != SCHEMA_V1BETA1:
+                raise ValueError("Image rollout helper requires a v1beta1 DGD")
+            index = next(
+                i for i, c in enumerate(live["spec"]["components"]) if c["name"] == name
+            )
+            component = live["spec"]["components"][index]
+            container = next(
+                i
+                for i, c in enumerate(component["podTemplate"]["spec"]["containers"])
+                if c["name"] == "main"
+            )
+            prefix = f"/spec/components/{index}"
+            patch.extend(
+                [
+                    {"op": "test", "path": prefix + "/name", "value": name},
+                    {
+                        "op": "test",
+                        "path": prefix
+                        + f"/podTemplate/spec/containers/{container}/name",
+                        "value": "main",
+                    },
+                    {
+                        "op": "test",
+                        "path": prefix
+                        + f"/podTemplate/spec/containers/{container}/image",
+                        "value": component["podTemplate"]["spec"]["containers"][
+                            container
+                        ]["image"],
+                    },
+                ]
+            )
+            patch.append(
+                {
+                    "op": "add",
+                    "path": f"/spec/components/{index}/runtimeVersionOverride",
+                    "value": runtime_version,
+                }
+            )
+            patch.append(
+                {
+                    "op": "replace",
+                    "path": f"/spec/components/{index}/podTemplate/spec/containers/{container}/image",
+                    "value": image,
+                }
+            )
+        await self._custom_api.patch_namespaced_custom_object(
+            **resource, body=patch, _content_type="application/json-patch+json"
+        )
+        for name, image in images.items():
+            self.deployment_spec.set_image(image, name)
+
     async def trigger_rolling_upgrade(self, service_names: list[str]):
         """
         Triggers a rolling update for a list of services

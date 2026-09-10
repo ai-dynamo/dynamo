@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: Compatibility harness unit tests
+on:
+  pull_request:
+    paths:
+      - 'scripts/compatibility/**'
+      - '.github/workflows/*compatibility*.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/compatibility/**'
+      - '.github/workflows/*compatibility*.yml'
+permissions:
+  contents: read
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Validate the harness without GPUs or registry credentials
+        run: |
+          python3 -m venv "$RUNNER_TEMP/n2-client"
+          "$RUNNER_TEMP/n2-client/bin/pip" install requests==2.32.5
+          "$RUNNER_TEMP/n2-client/bin/python" -m unittest discover -s scripts/compatibility -v
+          "$RUNNER_TEMP/n2-client/bin/python" -O -m unittest discover -s scripts/compatibility -v
+          "$RUNNER_TEMP/n2-client/bin/python" scripts/compatibility/runner.py \
+            --frontend-image candidate-frontend --worker-image candidate-worker \
+            --output "$RUNNER_TEMP/unused" --plan

@@ -1,0 +1,101 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: Rolling upgrade compatibility
+on:
+  workflow_dispatch:
+    inputs:
+      frontend_tag:
+        description: Candidate frontend image tag in ACR
+        type: string
+        required: true
+      worker_tag:
+        description: Candidate SGLang image tag in ACR
+        type: string
+        required: true
+      operator_tag:
+        description: Candidate operator tag in ACR
+        type: string
+        required: true
+  workflow_call:
+    inputs:
+      frontend_tag:
+        type: string
+        required: true
+      worker_tag:
+        type: string
+        required: true
+      operator_tag:
+        type: string
+        required: true
+      source_ref:
+        type: string
+        default: ''
+    secrets:
+      AZURE_ACR_HOSTNAME:
+        required: true
+      HF_TOKEN:
+        required: true
+      DOCKERHUB_LOGIN_USER:
+        required: false
+      DOCKERHUB_ACCESS_TOKEN:
+        required: false
+permissions:
+  contents: read
+jobs:
+  upgrade:
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
+      - name: Create isolated vCluster with candidate operator
+        uses: $/.github/actions/setup-dynamo-operator
+        with:
+          reset_existing: 'true'
+          vcluster_name: ci-${{ github.run_id }}-${{ github.run_attempt }}-n2
+          vcluster_namespace: gh-id-${{ github.run_id }}-${{ github.run_attempt }}-n2-dt
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          repository: ${{ vars.ACR_REPOSITORY }}
+          operator_tag: ${{ inputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+      - name: Allow the bounded upgrade suite to finish before namespace expiry
+        env:
+          HOST_NAMESPACE: gh-id-${{ github.run_id }}-${{ github.run_attempt }}-n2-dt
+        run: kubectl label namespace "$HOST_NAMESPACE" nscleanup/ttl=21600 --overwrite
+      - name: Connect to vCluster
+        id: connect
+        uses: $/.github/actions/connect-vcluster
+        with:
+          vcluster_name: ci-${{ github.run_id }}-${{ github.run_attempt }}-n2
+          vcluster_namespace: gh-id-${{ github.run_id }}-${{ github.run_attempt }}-n2-dt
+      - name: Upgrade both historical releases under continuous traffic
+        uses: $/.github/actions/dynamo-deploy-test
+        with:
+          kubeconfig_base64: ${{ steps.connect.outputs.kubeconfig_base64 }}
+          namespace: default
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ inputs.operator_tag }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ inputs.worker_tag }}
+          test_name: n2-rolling-upgrade
+          test_file: tests/deploy/test_n2_rolling_upgrade.py
+          extra_pytest_args: --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ inputs.frontend_tag }} -m k8s -n 0
+          # Each parameter owns a DGD, client Pod and quota; the outer vCluster
+          # cleanup also runs on a job timeout or interrupted pytest process.
+          cleanup_deployment: 'false'
+  cleanup:
+    needs: upgrade
+    if: always()
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: $/.github/actions/teardown-dynamo-operator
+        with:
+          vcluster_name: ci-${{ github.run_id }}-${{ github.run_attempt }}-n2
+          vcluster_namespace: gh-id-${{ github.run_id }}-${{ github.run_attempt }}-n2-dt
