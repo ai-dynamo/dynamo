@@ -8,16 +8,15 @@ import logging
 import random
 import time
 import uuid
+from contextlib import AsyncExitStack
 from typing import Any, AsyncGenerator, Optional
 
 import torch
 from PIL import Image
 
 from dynamo._core import Context
-from dynamo.common.http.url_validator import (
-    UrlValidationPolicy,
-    validate_media_reference,
-)
+from dynamo.common.http.media_reference import local_media_reference
+from dynamo.common.http.url_validator import UrlValidationPolicy
 from dynamo.common.protocols.image_protocol import ImageNvExt
 from dynamo.common.storage import upload_to_fs
 from dynamo.sglang.args import Config
@@ -179,18 +178,24 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             "seed": seed if seed is not None else random.randint(0, 1000000),
         }
 
-        # Add image_path for I2I/TI2I if provided
-        if input_reference is not None:
-            if not input_reference.strip():
-                raise ValueError("input_reference must be a non-empty string")
-            args["image_path"] = await validate_media_reference(
-                input_reference, UrlValidationPolicy.from_env()
-            )
+        # Add image_path for I2I/TI2I if provided. A URL is fetched through the
+        # SSRF-safe client (revalidating each redirect hop) into a temp file, so
+        # the generator only ever opens a trusted local path — never a URL it
+        # would fetch and redirect itself.
+        async with AsyncExitStack() as stack:
+            if input_reference is not None:
+                if not input_reference.strip():
+                    raise ValueError("input_reference must be a non-empty string")
+                args["image_path"] = await stack.enter_async_context(
+                    local_media_reference(
+                        input_reference, UrlValidationPolicy.from_env()
+                    )
+                )
 
-        result = await asyncio.to_thread(
-            self.generator.generate,
-            sampling_params_kwargs=args,
-        )
+            result = await asyncio.to_thread(
+                self.generator.generate,
+                sampling_params_kwargs=args,
+            )
 
         # DiffGenerator.generate() returns GenerationResult | list[GenerationResult] | None
         if result is None:
