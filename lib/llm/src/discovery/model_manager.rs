@@ -146,16 +146,12 @@ struct PendingLoraProjection {
 type EndpointLoraProjection = HashMap<EndpointId, HashMap<WorkerWithDpRank, LoraWorkerProjection>>;
 
 /// The sender is weak so accounting does not keep the discovery task alive.
+/// Dropping the registry must preserve external receivers; the discovery tasks
+/// stop when their last receiver closes. Only idle eviction cancels the lifecycle.
 struct EndpointRuntimeConfigs {
     watch: RuntimeConfigWatch,
     sender: Weak<RuntimeConfigSender>,
     lifecycle: CancellationToken,
-}
-
-impl Drop for EndpointRuntimeConfigs {
-    fn drop(&mut self) {
-        self.lifecycle.cancel();
-    }
 }
 
 pub(crate) struct RemovedDiscoveryGroup {
@@ -2497,10 +2493,14 @@ impl ModelManager {
         // Check and remove under the same entry lock used when cloning a cached
         // receiver, so an acquiring router cannot race cancellation.
         runtime_configs.remove_if(endpoint_id, |_, entry| {
-            entry
+            let unused = entry
                 .sender
                 .upgrade()
-                .is_none_or(|sender| sender.receiver_count() == 1)
+                .is_none_or(|sender| sender.receiver_count() == 1);
+            if unused {
+                entry.lifecycle.cancel();
+            }
+            unused
         });
     }
 
@@ -3025,6 +3025,79 @@ mod tests {
 
         // Model should still exist (ns1 still there)
         assert!(mm.get_model("llama").is_some());
+    }
+
+    #[tokio::test]
+    async fn endpoint_watch_outlives_manager_until_last_consumer_drops() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let manager = ModelManager::new();
+        let component = distributed
+            .namespace("manager-drop".to_string())
+            .unwrap()
+            .component("worker".to_string())
+            .unwrap();
+        let endpoint = component.endpoint("generate".to_string());
+        let mut watch = manager
+            .get_or_create_runtime_config_watcher(&endpoint)
+            .await
+            .unwrap();
+        let (sender, lifecycle) = {
+            let entry = manager.runtime_configs.get(&endpoint.id()).unwrap();
+            (entry.sender.clone(), entry.lifecycle.clone())
+        };
+
+        // Standalone Python KvRouter construction drops its temporary manager
+        // after returning the router, which still consumes this watch.
+        drop(manager);
+        assert!(!lifecycle.is_cancelled());
+
+        let discovery = distributed.discovery();
+        let endpoint_id = endpoint.id();
+        // Only discovery metadata is consumed; this test sends no TCP requests.
+        discovery
+            .register(DiscoverySpec::Endpoint {
+                namespace: endpoint_id.namespace.clone(),
+                component: endpoint_id.component.clone(),
+                endpoint: endpoint_id.name.clone(),
+                transport: dynamo_runtime::component::TransportType::Tcp("127.0.0.1:0".to_string()),
+                device_type: None,
+                request_plane_codec: None,
+            })
+            .await
+            .unwrap();
+        let card = ModelDeploymentCard::default();
+        discovery
+            .register(DiscoverySpec::Model {
+                namespace: endpoint_id.namespace,
+                component: endpoint_id.component,
+                endpoint: endpoint_id.name,
+                card_json: serde_json::to_value(&card).unwrap(),
+                model_suffix: None,
+            })
+            .await
+            .unwrap();
+        let worker_id = discovery.instance_id();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            watch.wait_for(|configs| configs.get(&worker_id) == Some(&card.runtime_config)),
+        )
+        .await
+        .expect("the surviving consumer must receive discovery updates")
+        .expect("dropping the manager must not close the consumer's watch");
+
+        drop(watch);
+        tokio::time::timeout(std::time::Duration::from_secs(4), async {
+            while sender.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the discovery task must exit after its last consumer drops");
+        runtime.shutdown();
     }
 
     #[tokio::test]
