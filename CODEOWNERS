@@ -365,6 +365,7 @@
 /deploy/operator/internal/controller_common/                                                            @ai-dynamo/dynamo-operator-codeowners
 
 # === gms  (@ai-dynamo/dynamo-gms-codeowners) ===
+/lib/gms_kv_ring/                                                                                       @ai-dynamo/dynamo-gms-codeowners
 /lib/gpu_memory_service/                                                                                @ai-dynamo/dynamo-gms-codeowners
 /lib/gpu_memory_service/cli/                                                                            @ai-dynamo/dynamo-gms-codeowners
 /lib/gpu_memory_service/tests/                                                                          @ai-dynamo/dynamo-gms-codeowners
