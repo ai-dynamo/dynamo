@@ -161,18 +161,29 @@ def _install_kv_leases() -> bool:
         raise
 
 
-def _kv_layout_fingerprint(kv_cache_config) -> str:
-    """Stable digest of KV-layout-relevant parameters.
-
-    The persistent identity is otherwise gated only by aligned-size equality on
-    reattach, so a config change that preserves size but changes meaning -- most
-    dangerously a KV dtype change (bf16 -> fp8 halves element size but a shared
-    attacher may still map the larger old allocation) -- would silently reuse
-    incompatible bytes as a different layout. Folding this fingerprint into the
-    tag forces a distinct identity so reattach fails cleanly instead. The KV
-    spec's per-rank head counts / page sizes already encode the TP degree.
-    """
+def _model_identity(model_config) -> str:
+    """Return a stable identity for the model that produced KV bytes."""
     parts: list[str] = []
+    for attr in ("model", "revision", "code_revision", "quantization"):
+        value = getattr(model_config, attr, None)
+        if value is not None:
+            parts.append(f"{attr}={value}")
+
+    hf_config = getattr(model_config, "hf_config", None)
+    commit = getattr(hf_config, "_commit_hash", None)
+    if commit:
+        parts.append(f"hf_commit={commit}")
+
+    if not parts:
+        raise RuntimeError(
+            "Cannot derive a stable model identity for persistent GMS KV"
+        )
+    return "\0".join(parts)
+
+
+def _kv_layout_fingerprint(kv_cache_config, model_identity: str) -> str:
+    """Stable digest of model and KV-layout-relevant parameters."""
+    parts = [f"model={model_identity}"]
     for group in getattr(kv_cache_config, "kv_cache_groups", ()) or ():
         spec = getattr(group, "kv_cache_spec", None)
         if spec is None:
@@ -185,11 +196,9 @@ def _kv_layout_fingerprint(kv_cache_config) -> str:
             "use_mla",
             "page_size_bytes",
         ):
-            val = getattr(spec, attr, None)
-            if val is not None:
-                parts.append(f"{attr}={val}")
-    if not parts:
-        return "unknown"
+            value = getattr(spec, attr, None)
+            if value is not None:
+                parts.append(f"{attr}={value}")
     return hashlib.sha1("\0".join(parts).encode("utf-8")).hexdigest()[:12]
 
 
@@ -197,16 +206,19 @@ def _semantic_kv_tensor_tag(index: int, kv_cache_tensor, layout_fp: str) -> str:
     shared_by = tuple(
         sorted(str(layer) for layer in getattr(kv_cache_tensor, "shared_by", ()) or ())
     )
-    if shared_by:
-        key = "\0".join(shared_by)
-    else:
-        key = f"anonymous:{index}:{getattr(kv_cache_tensor, 'size', '')}"
+    layers = "\0".join(shared_by) if shared_by else f"anonymous:{index}"
+    size = getattr(kv_cache_tensor, "size", None)
+    if size is None:
+        raise RuntimeError(
+            f"KV cache tensor {index} has no size for persistent identity"
+        )
+    key = f"size={size}\0{layers}"
     digest = hashlib.sha1((layout_fp + "\0" + key).encode("utf-8")).hexdigest()[:16]
-    return f"kv_pool:v2:{digest}"
+    return f"kv_pool:v3:{digest}"
 
 
-def _semantic_kv_tensor_tag_plan(kv_cache_config) -> list[str]:
-    layout_fp = _kv_layout_fingerprint(kv_cache_config)
+def _semantic_kv_tensor_tag_plan(kv_cache_config, model_identity: str) -> list[str]:
+    layout_fp = _kv_layout_fingerprint(kv_cache_config, model_identity)
     base_tags = [
         _semantic_kv_tensor_tag(index, kv_cache_tensor, layout_fp)
         for index, kv_cache_tensor in enumerate(

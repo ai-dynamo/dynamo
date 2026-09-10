@@ -10,11 +10,6 @@ Daemon retains the physical pages. Engine B starts fresh, registers
 under the SAME engine_id, calls gms_use_persistent_pool, gets
 tensors that wrap the SAME PHYSICAL PAGES, and reads the patterns
 back byte-identically.
-
-This is the equivalent of test_failover_at_scale but for the new
-VMM-IPC ownership model — proves that the layer that the per-engine
-installers (P3-P5) sit on top of correctly preserves KV across
-engine restart.
 """
 
 from __future__ import annotations
@@ -34,9 +29,13 @@ if not torch.cuda.is_available():  # pragma: no cover
 # The async daemon thread raises CancelledError on teardown — that's
 # the expected shutdown path. Silence pytest's strict thread-exception
 # warning for this file.
-pytestmark = pytest.mark.filterwarnings(
-    "ignore::pytest.PytestUnhandledThreadExceptionWarning",
-)
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.integration,
+    pytest.mark.none,
+    pytest.mark.gpu_1,
+    pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning"),
+]
 
 
 def _start_daemon(socket_path: str, device: int):
@@ -125,7 +124,6 @@ def test_vmm_ipc_engine_restart_preserves_kv_bytes(tmp_path):
         # size is much larger. To keep this test fast we use a
         # modest per-layer size and let Torch coalesce.
 
-        # === Engine A: allocate + write known patterns ===
         get_or_create_persistent_allocator(
             sock,
             device,
@@ -161,10 +159,8 @@ def test_vmm_ipc_engine_restart_preserves_kv_bytes(tmp_path):
         for alloc in engine_a_allocs:
             assert persistent.is_claimed(alloc.engine_id, alloc.tag)
 
-        # Snapshot what's in HBM via the engine tensors (for ground truth).
         ground_truth = [t_.clone().cpu() for t_ in tensors_a]
 
-        # === Engine A "dies" ===
         del tensors_a
         _simulate_engine_restart()
 
@@ -183,7 +179,6 @@ def test_vmm_ipc_engine_restart_preserves_kv_bytes(tmp_path):
                 f"{alloc.engine_id}/{alloc.tag}"
             )
 
-        # === Engine B: same engine_id, fresh client ===
         get_or_create_persistent_allocator(
             sock,
             device,
