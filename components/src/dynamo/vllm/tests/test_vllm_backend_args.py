@@ -15,8 +15,10 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from dynamo.vllm.args import parse_args
-from dynamo.vllm.backend_args import (
+pytest.importorskip("vllm.distributed.kv_events")
+
+from dynamo.vllm.args import parse_args  # noqa: E402
+from dynamo.vllm.backend_args import (  # noqa: E402
     DisaggregationMode,
     DynamoVllmArgGroup,
     DynamoVllmConfig,
