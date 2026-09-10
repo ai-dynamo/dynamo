@@ -702,6 +702,10 @@ impl ModelManager {
         }
         self.validate_adapter_claims(&primary, adapters.iter().map(|(_, card)| card))?;
 
+        let role = representative
+            .worker_type
+            .map_or("unspecified", |worker_type| worker_type.as_str());
+
         let worker_set = Arc::new(worker_set);
         self.get_or_create_model(&primary)
             .add_worker_set(worker_set_key.to_string(), worker_set.clone());
@@ -709,6 +713,15 @@ impl ModelManager {
             self.alias_to_primary.insert(alias.clone(), primary.clone());
             self.get_or_create_model(alias)
                 .add_worker_set(worker_set_key.to_string(), worker_set.clone());
+            // Emitted from the claim itself so the event cannot report an alias
+            // that was not registered, and once per role so a disaggregated
+            // deployment shows which roles claimed the name.
+            tracing::info!(
+                model_name = %primary,
+                alias = %alias,
+                role = %role,
+                "Registering model alias"
+            );
         }
         for (_, adapter) in &adapters {
             let adapter_view = Arc::new(worker_set.adapter_view(adapter.clone()));
@@ -3327,6 +3340,152 @@ mod tests {
         assert!(manager.get_model("committed").is_none());
         assert!(manager.get_model("alias").is_none());
         assert_eq!(manager.resolve_canonical_name("alias"), "alias");
+    }
+
+    #[derive(Debug, Clone)]
+    struct CapturedEvent {
+        message: String,
+        fields: HashMap<String, String>,
+    }
+
+    impl CapturedEvent {
+        fn field(&self, name: &str) -> &str {
+            self.fields
+                .get(name)
+                .map(String::as_str)
+                .unwrap_or_default()
+        }
+    }
+
+    struct CaptureLayer(Arc<std::sync::Mutex<Vec<CapturedEvent>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::layer::Layer<S> for CaptureLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct Visitor(CapturedEvent);
+
+            impl Visitor {
+                fn put(&mut self, name: &str, value: String) {
+                    if name == "message" {
+                        self.0.message = value;
+                    } else {
+                        self.0.fields.insert(name.to_string(), value);
+                    }
+                }
+            }
+
+            impl tracing::field::Visit for Visitor {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    self.put(field.name(), format!("{value:?}"));
+                }
+
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    self.put(field.name(), value.to_string());
+                }
+            }
+
+            let mut visitor = Visitor(CapturedEvent {
+                message: String::new(),
+                fields: HashMap::new(),
+            });
+            event.record(&mut visitor);
+            self.0.lock().unwrap().push(visitor.0);
+        }
+    }
+
+    fn capture_events<T>(body: impl FnOnce() -> T) -> (T, Vec<CapturedEvent>) {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer(Arc::clone(&captured)));
+        let out = tracing::subscriber::with_default(subscriber, body);
+        let events = captured.lock().unwrap().clone();
+        (out, events)
+    }
+
+    fn alias_claim_events(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
+        events
+            .iter()
+            .filter(|event| event.message == "Registering model alias")
+            .collect()
+    }
+
+    /// A card for one role of a two-role prefill/decode topology. `needs` names the
+    /// peer role, so neither role is ready on its own.
+    fn alias_role_card(role: WorkerType, aliases: &[&str]) -> ModelDeploymentCard {
+        let mut card = ModelDeploymentCard::with_name_only("alias-topology-model");
+        card.worker_type = Some(role);
+        card.model_type = match role {
+            WorkerType::Prefill => crate::model_type::ModelType::empty(),
+            _ => crate::model_type::ModelType::Chat,
+        };
+        card.needs = match role {
+            WorkerType::Prefill => vec![vec![WorkerType::Decode]],
+            WorkerType::Decode => vec![vec![WorkerType::Prefill]],
+            _ => Vec::new(),
+        };
+        card.aliases = aliases.iter().map(|alias| alias.to_string()).collect();
+        card
+    }
+
+    fn commit_alias_role(manager: &ModelManager, role: WorkerType, aliases: &[&str]) {
+        let namespace = "alias-deployment";
+        let card = alias_role_card(role, aliases);
+        let worker_set = WorkerSet::new(
+            namespace.to_string(),
+            card.mdcsum().to_string(),
+            card.clone(),
+        );
+        manager
+            .commit_discovery_group(
+                &format!("alias-group-{namespace}-{role}"),
+                &format!("{namespace}-{role}"),
+                worker_set,
+                vec![(format!("alias-instance-{namespace}-{role}"), card)],
+                Vec::new(),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn disaggregated_pair_sharing_an_alias_reports_one_claim_per_role() {
+        let manager = ModelManager::new();
+
+        let (_, events) = capture_events(|| {
+            commit_alias_role(&manager, WorkerType::Prefill, &["shared-alias"]);
+            commit_alias_role(&manager, WorkerType::Decode, &["shared-alias"]);
+        });
+
+        let claims = alias_claim_events(&events);
+        assert_eq!(claims.len(), 2, "expected one claim per role: {events:#?}");
+        let mut roles = claims
+            .iter()
+            .map(|event| event.field("role"))
+            .collect::<Vec<_>>();
+        roles.sort_unstable();
+        assert_eq!(roles, ["decode", "prefill"]);
+        for claim in &claims {
+            assert_eq!(claim.field("model_name"), "alias-topology-model");
+            assert_eq!(claim.field("alias"), "shared-alias");
+        }
+
+        assert_eq!(
+            manager.resolve_canonical_name("shared-alias"),
+            "alias-topology-model"
+        );
+        assert!(
+            manager
+                .get_model("shared-alias")
+                .unwrap()
+                .has_ready_workers()
+        );
     }
 
     #[test]
