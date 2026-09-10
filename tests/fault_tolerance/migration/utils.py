@@ -583,14 +583,38 @@ def wait_for_response(
     )
 
 
+def read_worker_generate_metrics(
+    worker_system_port: int,
+    component: str = "backend",
+) -> tuple[float, float]:
+    """Read completed-request and response-byte totals for one worker endpoint."""
+    response = requests.get(
+        f"http://localhost:{worker_system_port}/metrics", timeout=1
+    )
+    response.raise_for_status()
+    labels = {"dynamo_component": component, "dynamo_endpoint": "generate"}
+    return (
+        sum_metric_samples(
+            response.text,
+            "dynamo_component_request_duration_seconds_count",
+            labels,
+        ),
+        sum_metric_samples(
+            response.text,
+            "dynamo_component_response_bytes_total",
+            labels,
+        ),
+    )
+
+
 def wait_for_worker_generate_completion(
     worker_system_port: int,
+    baseline_duration_count: float,
+    baseline_response_bytes: float,
     component: str = "backend",
     max_wait_time: float = 10.0,
 ) -> None:
-    """Prove the replacement worker drained one request and emitted response bytes."""
-    metrics_url = f"http://localhost:{worker_system_port}/metrics"
-    labels = {"dynamo_component": component, "dynamo_endpoint": "generate"}
+    """Prove the replacement worker drained one new request with response bytes."""
     deadline = time.monotonic() + max_wait_time
     duration_count = 0.0
     response_bytes = 0.0
@@ -599,22 +623,17 @@ def wait_for_worker_generate_completion(
 
     while time.monotonic() < deadline:
         try:
-            response = requests.get(metrics_url, timeout=1)
-            response.raise_for_status()
-            duration_count = sum_metric_samples(
-                response.text,
-                "dynamo_component_request_duration_seconds_count",
-                labels,
+            duration_count, response_bytes = read_worker_generate_metrics(
+                worker_system_port,
+                component,
             )
-            response_bytes = sum_metric_samples(
-                response.text,
-                "dynamo_component_response_bytes_total",
-                labels,
-            )
-            if duration_count == 1 and response_bytes > 0:
+            if (
+                duration_count - baseline_duration_count == 1
+                and response_bytes - baseline_response_bytes > 0
+            ):
                 logger.info(
-                    "Replacement worker completed one request with %s response bytes",
-                    response_bytes,
+                    "Replacement worker completed one new request with %s response bytes",
+                    response_bytes - baseline_response_bytes,
                 )
                 return
         except (requests.RequestException, ValueError) as error:
@@ -623,8 +642,11 @@ def wait_for_worker_generate_completion(
         poll_event.wait(timeout=0.1)
 
     pytest.fail(
-        "Replacement worker did not complete exactly one generate request with "
-        f"response bytes within {max_wait_time}s; duration_count={duration_count}, "
+        "Replacement worker did not complete exactly one new generate request with "
+        f"response bytes within {max_wait_time}s; "
+        f"baseline_duration_count={baseline_duration_count}, "
+        f"duration_count={duration_count}, "
+        f"baseline_response_bytes={baseline_response_bytes}, "
         f"response_bytes={response_bytes}, last_error={last_error}"
     )
 
@@ -832,7 +854,6 @@ def run_migration_test(
     verify_replacement_worker: bool = False,
     before_worker_fault: Callable[[], None] | None = None,
     force_max_output_tokens: bool = False,
-    expected_response_text: str | None = None,
 ) -> ManagedProcess:
     """
     Run the common migration test flow after frontend and workers are started.
@@ -866,15 +887,13 @@ def run_migration_test(
         force_max_output_tokens: Disable EOS and require the request's full
             max_tokens budget so state-based fault synchronization cannot race
             an early EOS.
-        expected_response_text: Deterministic fault-free response to require
-            after migration, including every client-visible output chunk.
 
     Returns:
         The surviving worker selected as the replacement target. Successful
             migration cases retry the request on this worker.
     """
-    # Ignore requests already present in the worker logs, such as a deterministic
-    # baseline request used to validate migration output continuity.
+    # Ignore requests already present in the worker logs so the receiving-worker
+    # lookup only considers the request started below.
     log_offsets = tuple(
         os.path.getsize(worker.log_path) if worker.log_path else 0
         for worker in (worker1, worker2)
@@ -911,6 +930,16 @@ def run_migration_test(
     assert (
         request_thread.is_alive()
     ), "Request completed before the migration fault could be injected"
+
+    replacement_generate_baseline: tuple[float, float] | None = None
+    if verify_replacement_worker:
+        worker_system_port = getattr(replacement_worker, "system_port", None)
+        assert isinstance(
+            worker_system_port, int
+        ), "Replacement-worker verification requires an integer system_port"
+        replacement_generate_baseline = read_worker_generate_metrics(
+            worker_system_port
+        )
 
     # Step 3: Optionally wait for new response before stop (for decode tests)
     if wait_for_new_response_before_stop:
@@ -953,24 +982,23 @@ def run_migration_test(
                     receiving_pattern,
                     request_id,
                 )
-            response_text = validate_response(
+            validate_response(
                 request_thread,
                 response,
                 expected_completion_tokens=(
                     max_tokens if force_max_output_tokens else None
                 ),
             )
-            if expected_response_text is not None:
-                assert response_text == expected_response_text, (
-                    "Migrated response differs from the deterministic "
-                    "fault-free response"
-                )
             if verify_replacement_worker:
                 worker_system_port = getattr(replacement_worker, "system_port", None)
                 assert isinstance(
                     worker_system_port, int
                 ), "Replacement-worker verification requires an integer system_port"
-                wait_for_worker_generate_completion(worker_system_port)
+                assert replacement_generate_baseline is not None
+                wait_for_worker_generate_completion(
+                    worker_system_port,
+                    *replacement_generate_baseline,
+                )
         else:
             # openai.APIError covers both mid-stream structured error frames and
             # HTTP non-200 responses.

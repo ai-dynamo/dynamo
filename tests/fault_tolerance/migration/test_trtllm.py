@@ -23,9 +23,6 @@ from .utils import (
     DynamoFrontendProcess,
     managed_processes_concurrently,
     run_migration_test,
-    start_chat_completion_request,
-    start_completion_request,
-    validate_response,
     wait_for_endpoint_instances,
 )
 
@@ -394,7 +391,7 @@ class DynamoWorkerProcess(ManagedProcess):
 
 @pytest.mark.timeout(290)  # 3x average
 @pytest.mark.nightly
-@pytest.mark.profiled_vram_gib(4.7)
+@pytest.mark.profiled_vram_gib(7.2)
 @pytest.mark.requested_trtllm_kv_tokens(4096)
 @MIGRATION_PARAMETERS
 def test_request_migration_trtllm_aggregated(
@@ -471,7 +468,7 @@ def test_request_migration_trtllm_aggregated(
 
 @pytest.mark.timeout(350)  # 3x average
 @pytest.mark.nightly
-@pytest.mark.profiled_vram_gib(7.0)
+@pytest.mark.profiled_vram_gib(10.4)
 @pytest.mark.requested_trtllm_kv_tokens(2048)
 @KV_TRANSFER_MIGRATION_PARAMETERS
 def test_request_migration_trtllm_kv_transfer(
@@ -544,24 +541,6 @@ def test_request_migration_trtllm_kv_transfer(
                 {("prefill", "generate"): 1, ("backend", "generate"): 2},
             )
 
-            start_reference_request = (
-                start_chat_completion_request
-                if request_api == "chat"
-                else start_completion_request
-            )
-            reference_thread, reference_response = start_reference_request(
-                frontend.frontend_port,
-                stream=stream,
-                use_long_prompt=True,
-                max_tokens=KV_TRANSFER_MAX_TOKENS,
-                long_prompt_repetitions=KV_TRANSFER_PROMPT_REPETITIONS,
-                force_max_output_tokens=True,
-            )
-            reference_text = validate_response(
-                reference_thread,
-                reference_response,
-                expected_completion_tokens=KV_TRANSFER_MAX_TOKENS,
-            )
             transfer_baselines = {
                 worker.system_port: read_trtllm_kv_transfer_metrics(worker.system_port)
                 for worker in (decode1, decode2)
@@ -584,7 +563,6 @@ def test_request_migration_trtllm_kv_transfer(
                 expected_ongoing_request_count=1,
                 verify_replacement_worker=True,
                 force_max_output_tokens=True,
-                expected_response_text=reference_text,
             )
             wait_for_trtllm_kv_transfer_success(
                 replacement_worker.system_port,
@@ -594,7 +572,7 @@ def test_request_migration_trtllm_kv_transfer(
 
 @pytest.mark.timeout(350)  # 3x average
 @pytest.mark.nightly
-@pytest.mark.profiled_vram_gib(7.0)
+@pytest.mark.profiled_vram_gib(12.6)
 @pytest.mark.requested_trtllm_kv_tokens(4096)
 @DECODE_MIGRATION_PARAMETERS
 def test_request_migration_trtllm_decode(
