@@ -1,21 +1,40 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Custom worker-selection policy that co-locates the subagents of one parent session.
+//! Co-locates the subagents of one parent session.
 //!
-//! Dynamo binds session affinity to each request's own session id, so the subagents of one
-//! parent scatter across the worker pool even though they share the parent's prompt prefix.
-//! This picker keeps a policy-local binding keyed by the parent session id instead, so
-//! sibling subagents land on the same worker and reuse that shared prefix.
+//! Dynamo binds session affinity to each request's own session id. A subagent carries its own
+//! session id, so the subagents of one parent receive independent bindings and scatter across the
+//! worker pool even though they all replay the parent's system prompt, tool definitions, and
+//! context. This policy keeps a second binding keyed on the *parent* session id and steers any
+//! request that carries one by it, so siblings share a worker and reuse that prefix.
 //!
-//! The group is placed on the least-loaded eligible worker when it is first seen, not on the
-//! parent's worker, and it moves once its worker exceeds the configured active-request
-//! threshold and a strictly less loaded worker exists. Requests without a parent session are
-//! selected from Dynamo's advisory session target under the same threshold.
+//! A new group is placed on the least-loaded eligible worker, not on the parent's own worker: a
+//! parent typically holds its worker for the whole session, so sending its fan-out there adds a
+//! burst of siblings to a worker that is already busy. A bound group moves only when its worker
+//! exceeds `max_active_requests` *and* a strictly less loaded worker exists. The strict comparison
+//! is load-bearing: moving to an equally loaded worker would relocate the group on every sibling
+//! once the threshold is crossed, so it would oscillate across the pool and lose the prefix it
+//! exists to reuse.
 //!
-//! Run this policy with `--router-session-affinity-mode soft`. The default `hard` mode passes a
-//! bound session as a pinned target, which narrows the candidate set to one worker before the
-//! policy runs, so a returning subagent can never join its parent's group.
+//! Requests without a parent session id keep Dynamo's own session target under the same threshold.
+//!
+//! # Operating requirements
+//!
+//! Run with `--router-session-affinity-mode soft`. The default `hard` mode passes a bound session
+//! as a pinned target, which narrows the candidate set to one worker before any policy runs, so a
+//! returning subagent could never be free to join its parent's group.
+//!
+//! # Known limits
+//!
+//! The group binding is recorded during selection, because a picker has no post-dispatch callback.
+//! A request that is later cancelled, fails scheduler booking, or fails to dispatch can therefore
+//! leave the group pointing at a worker that never received the prefix, until the idle TTL clears
+//! it. A request whose candidate set holds a single worker does not rebind the group at all, since
+//! the host rather than this policy narrowed that choice.
+//!
+//! Bindings live in the policy instance, so they are per frontend process and do not survive a
+//! restart or coordinate across router replicas.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -33,29 +52,76 @@ use dynamo_kv_router::{
     WorkerSelectionPolicyError,
 };
 
-/// Mirrors Dynamo's own session-affinity bounds so a client cannot grow this map without limit
-/// by varying the parent session header.
+/// Policy type selected by `worker_selection.instances[].type`.
+pub const POLICY_TYPE: &str = "dynamo-subagent-group-affinity";
+
+/// `active_requests` counts everything a worker is serving, not just this group, so the threshold
+/// has to sit above ordinary per-worker concurrency or a group moves on nearly every sibling. This
+/// default is chosen to clear typical steady-state concurrency rather than derived from a model or
+/// topology; a deployment that runs hotter should raise it.
+const DEFAULT_MAX_ACTIVE_REQUESTS: usize = 32;
+const DEFAULT_GROUP_IDLE_TTL_SECS: u64 = 300;
+
+/// Mirrors Dynamo's own session-affinity bounds, so a client cannot grow this map without limit by
+/// varying the parent session header, and a TTL cannot be set so long that the map never reclaims.
 const MAX_GROUPS: usize = 65_536;
 const MAX_GROUP_ID_BYTES: usize = 256;
+const MAX_GROUP_IDLE_TTL_SECS: u64 = 31_536_000;
 
-/// The worker most recently dispatched for one parent session's subagents.
+/// Tunables for [`POLICY_TYPE`].
+///
+/// Every field is optional. Unknown keys are rejected at startup rather than ignored, so a
+/// misremembered name fails loudly.
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct Parameters {
+    /// Active requests the group's worker may already hold before the group becomes eligible to
+    /// move. Counts every request that worker is serving, not just this group's, so it must sit
+    /// above ordinary per-worker concurrency for grouping to hold. Compared inclusively. `0` moves
+    /// the group as soon as its worker has any in-flight request and a strictly less loaded worker
+    /// exists, which effectively disables grouping under concurrency.
+    max_active_requests: usize,
+    /// Seconds a group binding survives without being used.
+    group_idle_ttl_secs: u64,
+}
+
+impl Default for Parameters {
+    fn default() -> Self {
+        Self {
+            max_active_requests: DEFAULT_MAX_ACTIVE_REQUESTS,
+            group_idle_ttl_secs: DEFAULT_GROUP_IDLE_TTL_SECS,
+        }
+    }
+}
+
+impl Parameters {
+    fn validate(&self) -> Result<(), WorkerSelectionPolicyProviderError> {
+        if !(1..=MAX_GROUP_IDLE_TTL_SECS).contains(&self.group_idle_ttl_secs) {
+            return Err(WorkerSelectionPolicyProviderError::new(format!(
+                "group_idle_ttl_secs must be between 1 and {MAX_GROUP_IDLE_TTL_SECS}"
+            )));
+        }
+        Ok(())
+    }
+}
+
 struct GroupBinding {
     worker: WorkerWithDpRank,
     last_used: Instant,
 }
 
 struct SubagentGroupAffinityPicker {
-    max_active_requests: usize,
+    parameters: Parameters,
     group_idle_ttl: Duration,
     groups: HashMap<String, GroupBinding>,
     last_sweep: Instant,
 }
 
 impl SubagentGroupAffinityPicker {
-    fn new(max_active_requests: usize, group_idle_ttl: Duration) -> Self {
+    fn new(parameters: Parameters) -> Self {
         Self {
-            max_active_requests,
-            group_idle_ttl,
+            parameters,
+            group_idle_ttl: Duration::from_secs(parameters.group_idle_ttl_secs),
             groups: HashMap::new(),
             last_sweep: Instant::now(),
         }
@@ -97,12 +163,6 @@ impl SubagentGroupAffinityPicker {
             .map(|(row, _)| row)
     }
 
-    /// Retains an eligible target until it exceeds the active-request threshold and a strictly
-    /// less loaded worker exists.
-    ///
-    /// The strict comparison is what keeps a group together. Moving to an equally loaded worker
-    /// would relocate the whole group on every sibling once the threshold is crossed, so the
-    /// group would oscillate across the pool and lose the shared prefix it exists to reuse.
     fn select_row(
         &self,
         candidates: &[ScoredWorkerCandidate],
@@ -113,7 +173,7 @@ impl SubagentGroupAffinityPicker {
             && let Some(target_row) = Self::target_row(candidates, loads, target)
         {
             let target_load = loads[target_row].active_requests();
-            if target_load <= self.max_active_requests {
+            if target_load <= self.parameters.max_active_requests {
                 return Ok(target_row);
             }
             return Ok(Self::least_loaded_row(candidates, loads, Some(target))
@@ -125,7 +185,6 @@ impl SubagentGroupAffinityPicker {
             .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"))
     }
 
-    /// Drops bindings idle for longer than the configured TTL, at most once per TTL.
     fn sweep_expired(&mut self, now: Instant) {
         if now.duration_since(self.last_sweep) < self.group_idle_ttl {
             return;
@@ -136,7 +195,6 @@ impl SubagentGroupAffinityPicker {
         self.last_sweep = now;
     }
 
-    /// Marks a bound group as still in use without changing its worker.
     fn touch_group(&mut self, group_id: &str, now: Instant) {
         if let Some(binding) = self.groups.get_mut(group_id) {
             binding.last_used = now;
@@ -173,9 +231,9 @@ impl WorkerPicker for SubagentGroupAffinityPicker {
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         let candidates = input.candidates();
-        let loads = input.load().ok_or_else(|| {
-            WorkerSelectionPolicyError::failed("active load input is unavailable")
-        })?;
+        let loads = input
+            .load()
+            .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
 
         let group_id = context
             .session_context()
@@ -213,31 +271,11 @@ impl WorkerPicker for SubagentGroupAffinityPicker {
     }
 }
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Parameters {
-    max_active_requests: usize,
-    group_idle_ttl_secs: u64,
-}
-
-fn validate_group_idle_ttl_secs(
-    group_idle_ttl_secs: u64,
-) -> Result<(), WorkerSelectionPolicyProviderError> {
-    if group_idle_ttl_secs == 0 {
-        return Err(WorkerSelectionPolicyProviderError::new(
-            "group_idle_ttl_secs must be greater than zero",
-        ));
-    }
-    Ok(())
-}
-
 fn provider(
     parameters: &WorkerSelectionPolicyParameters,
 ) -> Result<WorkerSelectionPolicyFactory, WorkerSelectionPolicyProviderError> {
     let parameters: Parameters = parameters.deserialize()?;
-    validate_group_idle_ttl_secs(parameters.group_idle_ttl_secs)?;
-    let max_active_requests = parameters.max_active_requests;
-    let group_idle_ttl = Duration::from_secs(parameters.group_idle_ttl_secs);
+    parameters.validate()?;
 
     Ok(Arc::new(
         move |config: &KvRouterConfig, worker_type, _partition| {
@@ -245,20 +283,16 @@ fn provider(
                 config.clone(),
                 worker_type.as_str(),
                 Vec::new(),
-                Box::new(SubagentGroupAffinityPicker::new(
-                    max_active_requests,
-                    group_idle_ttl,
-                )),
+                Box::new(SubagentGroupAffinityPicker::new(parameters)),
             )
         },
     ))
 }
 
-/// Register the `subagent-group-affinity` policy type.
 pub fn register(
     registry: &mut WorkerSelectionPolicyRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
-    registry.register("subagent-group-affinity", Arc::new(provider))
+    registry.register(POLICY_TYPE, Arc::new(provider))
 }
 
 #[cfg(test)]
@@ -272,8 +306,6 @@ mod tests {
     };
 
     use super::*;
-
-    const TTL: Duration = Duration::from_secs(300);
 
     struct TestWorker;
 
@@ -349,7 +381,10 @@ mod tests {
             KvRouterConfig::default(),
             "test",
             Vec::new(),
-            Box::new(SubagentGroupAffinityPicker::new(max_active_requests, TTL)),
+            Box::new(SubagentGroupAffinityPicker::new(Parameters {
+                max_active_requests,
+                group_idle_ttl_secs: DEFAULT_GROUP_IDLE_TTL_SECS,
+            })),
         )
     }
 
@@ -369,8 +404,8 @@ mod tests {
             .worker
     }
 
-    // Worker 29 wins every load tie because `least_loaded_row` breaks ties on the lower
-    // worker id, so a selection of worker 41 under a tie proves the group binding was used.
+    // Worker 29 wins every load tie because selection breaks ties on the lower worker id, so a
+    // selection of worker 41 under a tie proves the group binding was used.
     fn workers() -> HashMap<u64, TestWorker> {
         HashMap::from([(29, TestWorker), (41, TestWorker)])
     }
@@ -425,6 +460,65 @@ mod tests {
     }
 
     #[test]
+    fn an_unbound_group_ignores_the_subagents_own_affinity_target() {
+        let worker_a = WorkerWithDpRank::from_worker_id(29);
+        let worker_b = WorkerWithDpRank::from_worker_id(41);
+
+        // This subagent's own session is bound to the busy worker 41. Honoring that would place
+        // the whole new group on a loaded worker instead of by load.
+        let mut first = request("child-1", Some("parent-1"), Some(worker_b.into()));
+        set_active_requests(&mut first, worker_a, 0);
+        set_active_requests(&mut first, worker_b, 3);
+
+        assert_eq!(select(&policy(0), &workers(), &first), worker_a);
+    }
+
+    #[test]
+    fn keeps_a_group_together_below_a_nonzero_threshold() {
+        let worker_a = WorkerWithDpRank::from_worker_id(29);
+        let worker_b = WorkerWithDpRank::from_worker_id(41);
+        let policy = policy(4);
+        let workers = workers();
+
+        let mut first = request("child-1", Some("parent-1"), None);
+        set_active_requests(&mut first, worker_a, 2);
+        set_active_requests(&mut first, worker_b, 0);
+        assert_eq!(select(&policy, &workers, &first), worker_b);
+
+        // Four in-flight siblings are at the inclusive threshold, so the group holds worker 41
+        // even though worker 29 is idle.
+        let mut sibling = request("child-2", Some("parent-1"), None);
+        set_active_requests(&mut sibling, worker_a, 0);
+        set_active_requests(&mut sibling, worker_b, 4);
+        assert_eq!(select(&policy, &workers, &sibling), worker_b);
+
+        let mut over = request("child-3", Some("parent-1"), None);
+        set_active_requests(&mut over, worker_a, 0);
+        set_active_requests(&mut over, worker_b, 5);
+        assert_eq!(select(&policy, &workers, &over), worker_a);
+    }
+
+    #[test]
+    fn does_not_move_a_group_to_an_equally_loaded_worker() {
+        let worker_a = WorkerWithDpRank::from_worker_id(29);
+        let worker_b = WorkerWithDpRank::from_worker_id(41);
+        let policy = policy(0);
+        let workers = workers();
+
+        let mut first = request("child-1", Some("parent-1"), None);
+        set_active_requests(&mut first, worker_a, 2);
+        set_active_requests(&mut first, worker_b, 0);
+        assert_eq!(select(&policy, &workers, &first), worker_b);
+
+        // Worker 41 is over the threshold, but worker 29 is no better. Moving here would make the
+        // group oscillate between the two workers on every sibling.
+        let mut sibling = request("child-2", Some("parent-1"), None);
+        set_active_requests(&mut sibling, worker_a, 1);
+        set_active_requests(&mut sibling, worker_b, 1);
+        assert_eq!(select(&policy, &workers, &sibling), worker_b);
+    }
+
+    #[test]
     fn moves_a_group_off_a_worker_that_exceeds_the_threshold() {
         let worker_a = WorkerWithDpRank::from_worker_id(29);
         let worker_b = WorkerWithDpRank::from_worker_id(41);
@@ -441,8 +535,8 @@ mod tests {
         set_active_requests(&mut overloaded, worker_b, 1);
         assert_eq!(select(&policy, &workers, &overloaded), worker_a);
 
-        // The group followed the move, so a later sibling joins worker 29 rather than the
-        // worker the group started on.
+        // The group followed the move, so a later sibling joins worker 29 rather than the worker
+        // the group started on.
         let mut later = request("child-3", Some("parent-1"), None);
         set_active_requests(&mut later, worker_a, 0);
         set_active_requests(&mut later, worker_b, 0);
@@ -486,53 +580,6 @@ mod tests {
     }
 
     #[test]
-    fn keeps_a_group_together_below_a_nonzero_threshold() {
-        let worker_a = WorkerWithDpRank::from_worker_id(29);
-        let worker_b = WorkerWithDpRank::from_worker_id(41);
-        let policy = policy(4);
-        let workers = workers();
-
-        let mut first = request("child-1", Some("parent-1"), None);
-        set_active_requests(&mut first, worker_a, 2);
-        set_active_requests(&mut first, worker_b, 0);
-        assert_eq!(select(&policy, &workers, &first), worker_b);
-
-        // Four in-flight siblings are at the inclusive threshold, so the group holds worker 41
-        // even though worker 29 is idle.
-        let mut sibling = request("child-2", Some("parent-1"), None);
-        set_active_requests(&mut sibling, worker_a, 0);
-        set_active_requests(&mut sibling, worker_b, 4);
-        assert_eq!(select(&policy, &workers, &sibling), worker_b);
-
-        let mut over = request("child-3", Some("parent-1"), None);
-        set_active_requests(&mut over, worker_a, 0);
-        set_active_requests(&mut over, worker_b, 5);
-        assert_eq!(select(&policy, &workers, &over), worker_a);
-    }
-
-    #[test]
-    fn does_not_move_a_group_to_an_equally_loaded_worker() {
-        let worker_a = WorkerWithDpRank::from_worker_id(29);
-        let worker_b = WorkerWithDpRank::from_worker_id(41);
-        let policy = policy(0);
-        let workers = workers();
-
-        let mut first = request("child-1", Some("parent-1"), None);
-        set_active_requests(&mut first, worker_a, 2);
-        set_active_requests(&mut first, worker_b, 0);
-        assert_eq!(select(&policy, &workers, &first), worker_b);
-
-        // Worker 41 is over the threshold, but worker 29 is no better. Moving here would make
-        // the group oscillate between the two workers on every sibling.
-        for _ in 0..3 {
-            let mut sibling = request("child-2", Some("parent-1"), None);
-            set_active_requests(&mut sibling, worker_a, 1);
-            set_active_requests(&mut sibling, worker_b, 1);
-            assert_eq!(select(&policy, &workers, &sibling), worker_b);
-        }
-    }
-
-    #[test]
     fn rebinds_when_the_group_worker_is_not_eligible() {
         let worker_a = WorkerWithDpRank::from_worker_id(29);
         let worker_b = WorkerWithDpRank::from_worker_id(41);
@@ -563,8 +610,8 @@ mod tests {
         set_active_requests(&mut first, worker_b, 0);
         assert_eq!(select(&policy, &workers(), &first), worker_b);
 
-        // A sibling the host pinned elsewhere sees one candidate. It must not drag the group
-        // onto a worker this policy never chose.
+        // A sibling the host pinned elsewhere sees one candidate. It must not drag the group onto
+        // a worker this policy never chose.
         let only_worker_a = HashMap::from([(29, TestWorker)]);
         let mut pinned = request("child-2", Some("parent-1"), None);
         set_active_requests(&mut pinned, worker_a, 0);
@@ -577,24 +624,13 @@ mod tests {
     }
 
     #[test]
-    fn an_unbound_group_ignores_the_subagents_own_affinity_target() {
-        let worker_a = WorkerWithDpRank::from_worker_id(29);
-        let worker_b = WorkerWithDpRank::from_worker_id(41);
-
-        // This subagent's own session is bound to the busy worker 41. Honoring that would place
-        // the whole new group on a loaded worker instead of by load.
-        let mut first = request("child-1", Some("parent-1"), Some(worker_b.into()));
-        set_active_requests(&mut first, worker_a, 0);
-        set_active_requests(&mut first, worker_b, 3);
-
-        assert_eq!(select(&policy(0), &workers(), &first), worker_a);
-    }
-
-    #[test]
     fn a_used_group_survives_the_idle_sweep() {
         let worker = WorkerWithDpRank::from_worker_id(29);
         let ttl = Duration::from_secs(60);
-        let mut picker = SubagentGroupAffinityPicker::new(0, ttl);
+        let mut picker = SubagentGroupAffinityPicker::new(Parameters {
+            max_active_requests: 0,
+            group_idle_ttl_secs: ttl.as_secs(),
+        });
         let start = Instant::now();
         picker.bind_group("busy", worker, start);
         picker.bind_group("idle", worker, start);
@@ -611,7 +647,7 @@ mod tests {
     #[test]
     fn group_bindings_are_capped() {
         let worker = WorkerWithDpRank::from_worker_id(29);
-        let mut picker = SubagentGroupAffinityPicker::new(0, TTL);
+        let mut picker = SubagentGroupAffinityPicker::new(Parameters::default());
         let oversized = "x".repeat(MAX_GROUP_ID_BYTES + 1);
 
         picker.bind_group(&oversized, worker, Instant::now());
@@ -627,22 +663,17 @@ mod tests {
     }
 
     #[test]
-    fn expired_group_bindings_are_dropped() {
-        let worker_a = WorkerWithDpRank::from_worker_id(29);
-        let worker_b = WorkerWithDpRank::from_worker_id(41);
-        let mut picker = SubagentGroupAffinityPicker::new(0, Duration::from_secs(0));
-        picker.bind_group("parent-1", worker_b, Instant::now());
-        picker.bind_group("parent-2", worker_a, Instant::now());
-
-        picker.sweep_expired(Instant::now());
-
-        assert!(picker.groups.is_empty());
-    }
-
-    #[test]
     fn validates_group_idle_ttl_secs() {
-        assert!(validate_group_idle_ttl_secs(1).is_ok());
-        assert!(validate_group_idle_ttl_secs(300).is_ok());
-        assert!(validate_group_idle_ttl_secs(0).is_err());
+        assert!(Parameters::default().validate().is_ok());
+        for group_idle_ttl_secs in [0, MAX_GROUP_IDLE_TTL_SECS + 1] {
+            assert!(
+                Parameters {
+                    group_idle_ttl_secs,
+                    ..Parameters::default()
+                }
+                .validate()
+                .is_err()
+            );
+        }
     }
 }

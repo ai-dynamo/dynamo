@@ -64,6 +64,7 @@ link no catalog and reject a configured policy type at startup.
 |---|---|
 | `default` | Dynamo's built-in selector and cost model. Reserved; always available. |
 | `dynamo-two-tier-cost-fn` | Ranks on two tiers instead of one additive cost: active-request load first, then device-KV prefix overlap. Prefers the worker holding the largest prefix overlap unless load is badly imbalanced. Thresholds and selection order ported from the experimental SGLang router's `cache_aware_zmq` policy. Thresholds are tunable; the defaults reproduce it exactly. |
+| `dynamo-subagent-group-affinity` | Co-locates the subagents of one parent session so they reuse the prefix they share with their parent. Keys a binding on the parent session id rather than each subagent's own, places a new group on the least-loaded worker, and moves it only when its worker exceeds a threshold and a strictly less loaded worker exists. Requires `--router-session-affinity-mode soft`. |
 
 Write the instance into the same YAML file that `--router-policy-config` already points at:
 
@@ -111,6 +112,33 @@ startup, so an out-of-range value or an unknown key fails the process immediatel
 rather than being silently ignored. It selects the least-loaded worker once the active-request spread is greater than 32 and the
 largest count is more than 1.1 times the smallest; otherwise it prefers the worker holding the
 largest device-KV overlap when that overlap covers more than 50% of the request's blocks.
+
+`dynamo-subagent-group-affinity` takes its own two parameters, both optional:
+
+```yaml
+    - name: dynamo-subagent-group-affinity
+      type: dynamo-subagent-group-affinity
+      parameters:
+        max_active_requests: 32
+        group_idle_ttl_secs: 300
+```
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `max_active_requests` | `32` | Active requests the group's worker may already hold before the group becomes eligible to move. Counts every request that worker is serving, not just this group's, so it must sit above ordinary per-worker concurrency or a group moves on nearly every sibling and loses the prefix it exists to reuse. Compared inclusively. |
+| `group_idle_ttl_secs` | `300` | Seconds a group binding survives without being used. Must be between `1` and `31536000`. |
+
+> [!IMPORTANT]
+> Run `dynamo-subagent-group-affinity` with `--router-session-affinity-mode soft`. The default
+> `hard` mode passes a bound session as a pinned target, which narrows the candidate set to one
+> worker before any policy runs, so a returning subagent could never be free to join its parent's
+> group.
+
+Group bindings live in the frontend process, so they do not survive a restart or coordinate across
+router replicas. On a backend that routes again internally, the group can still split across ranks:
+with TensorRT-LLM's `attention_dp_config.kv_cache_routing_conversation_affinity` enabled, set
+`--conversation-affinity-dp-rank-source dynamo` so the attention-DP rank this policy selects is the
+one the engine records.
 
 #### Override the Selection
 

@@ -15,7 +15,6 @@ members = [
     "lib/router-plugins/catalog",
     "lib/router-plugins/builtin",
     "examples/router/custom-policy-example/soft-pin-repin",
-    "examples/router/custom-policy-example/subagent-group-affinity",
     "examples/router/custom-policy-example/simple-filter-score-pick",
     "examples/router/custom-policy-example/catalog",
     "examples/router/custom-policy-example/disagg-filter-score-pick",

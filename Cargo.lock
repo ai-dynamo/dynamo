@@ -2467,7 +2467,6 @@ dependencies = [
  "dynamo-custom-policy-example-simple-filter-score-pick",
  "dynamo-custom-policy-example-simple-stacked-score-pick",
  "dynamo-custom-policy-example-soft-pin-repin",
- "dynamo-custom-policy-example-subagent-group-affinity",
  "dynamo-kv-router",
 ]
 
@@ -2508,14 +2507,6 @@ dependencies = [
 
 [[package]]
 name = "dynamo-custom-policy-example-soft-pin-repin"
-version = "1.5.0"
-dependencies = [
- "dynamo-kv-router",
- "serde",
-]
-
-[[package]]
-name = "dynamo-custom-policy-example-subagent-group-affinity"
 version = "1.5.0"
 dependencies = [
  "dynamo-kv-router",
