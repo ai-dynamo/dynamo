@@ -219,6 +219,7 @@ areas:
 - label: runtime
   github_team: '@ai-dynamo/dynamo-runtime-codeowners'
   path_globs:
+  - components/src/dynamo/artifacts/
   - components/src/dynamo/common/
   - components/src/dynamo/common/backend/
   - components/src/dynamo/common/config_dump/

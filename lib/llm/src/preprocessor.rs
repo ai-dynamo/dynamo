@@ -1746,6 +1746,12 @@ impl OpenAIPreprocessor {
                     serde_json::json!(metadata_upload),
                 );
             }
+            if let Some(ref generation_artifact) = nvext.generation_artifact {
+                nvext_passthrough.insert(
+                    "generation_artifact".to_string(),
+                    serde_json::json!(generation_artifact),
+                );
+            }
             if nvext.token_data.is_some() {
                 nvext_passthrough.insert("token_in".to_string(), serde_json::Value::Bool(true));
             }
@@ -6995,7 +7001,14 @@ impl
             tool_processing_route.uses_legacy_jail(),
         )?;
 
-        tracing::trace!(request = ?common_request, prompt_injected_reasoning, "Pre-processed request");
+        if tracing::enabled!(tracing::Level::TRACE) {
+            let mut observable_request = serde_json::to_value(&common_request)
+                .unwrap_or_else(|_| serde_json::Value::String("<unavailable>".to_string()));
+            crate::protocols::common::extensions::redact_generation_artifact_json(
+                &mut observable_request,
+            );
+            tracing::trace!(request = ?observable_request, prompt_injected_reasoning, "Pre-processed request");
+        }
         let trace_state = crate::request_trace::build_request_end_trace_state(
             &common_request,
             &tracker,
@@ -8946,6 +8959,18 @@ mod tests {
                 "extra_fields": ["completion_token_ids"],
                 "metadata_upload": {
                     "url": "s3://bucket/root/rollouts"
+                },
+                "generation_artifact": {
+                    "format": "generation_artifact_v1",
+                    "contents": ["moe_routes"],
+                    "delivery": {
+                        "mode": "object_store",
+                        "target": {
+                            "kind": "managed_fsspec",
+                            "profile": "training",
+                            "object_key": "run/request.dynexp"
+                        }
+                    }
                 }
             }
         }))
@@ -8962,6 +8987,21 @@ mod tests {
             extra_args["nvext"]["metadata_upload"],
             serde_json::json!({
                 "url": "s3://bucket/root/rollouts"
+            })
+        );
+        assert_eq!(
+            extra_args["nvext"]["generation_artifact"],
+            serde_json::json!({
+                "format": "generation_artifact_v1",
+                "contents": ["moe_routes"],
+                "delivery": {
+                    "mode": "object_store",
+                    "target": {
+                        "kind": "managed_fsspec",
+                        "profile": "training",
+                        "object_key": "run/request.dynexp"
+                    }
+                }
             })
         );
         assert_eq!(extra_args["sampling_options"]["detokenize"], false);

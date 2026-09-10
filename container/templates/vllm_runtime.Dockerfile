@@ -386,6 +386,17 @@ RUN set -eu; \
     fi
 {% endif %}
 
+# s3fs is the managed generation-artifact backend. Resolve its aiobotocore,
+# botocore, and matching fsspec dependencies instead of relying on whichever
+# versions the upstream vLLM image happens to contain. The broader requirements
+# layer below remains --no-deps to preserve the framework's CUDA dependency set.
+RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
+    --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    uv pip install {{ pip_target }} "$(grep '^s3fs' /tmp/requirements.vllm.txt)" && \
+    {{ python_executable }} -c "import aiobotocore, fsspec, s3fs; \
+from fsspec.registry import get_filesystem_class; get_filesystem_class('s3')"
+
 # Replace the upstream vllm/vllm-openai image's imageio-ffmpeg (which ships a
 # GPL-encumbered prebuilt ffmpeg binary in <site-packages>/imageio_ffmpeg/binaries/)
 # with a source install that leaves no binary on disk. On cuda, IMAGEIO_FFMPEG_EXE

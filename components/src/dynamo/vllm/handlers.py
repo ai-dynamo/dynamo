@@ -83,6 +83,11 @@ from dynamo.llm import (
 from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
 from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.vllm.generation_artifact import (
+    VllmGenerationArtifactSession,
+    generation_artifact_contents,
+    generation_artifact_settings,
+)
 from dynamo.vllm.kv_connector_protocols import (
     KvConnectorProtocol,
     make_kv_connector_protocol,
@@ -836,12 +841,21 @@ def build_sampling_params(
     # in this case and let `num_logprobs` derive the width from the id list; mirror
     # that here, otherwise `SamplingParams.verify()` rejects the pair unless the
     # caller happens to set `top_logprobs == len(logprob_token_ids)`.
+    artifact_contents = generation_artifact_contents(request)
+    if "selected_logprobs" in artifact_contents and getattr(
+        sampling_params, "logprob_token_ids", None
+    ):
+        raise ValueError(
+            "generation artifact selected_logprobs cannot be combined with logprob_token_ids"
+        )
     if getattr(sampling_params, "logprob_token_ids", None):
         sampling_params.logprobs = None
     elif logprobs is not None:
         sampling_params.logprobs = logprobs
     if prompt_logprobs is not None:
         sampling_params.prompt_logprobs = prompt_logprobs
+    if "selected_logprobs" in artifact_contents and sampling_params.logprobs is None:
+        sampling_params.logprobs = 0
 
     # skip_special_tokens is intentionally NOT forwarded to vLLM here: this path
     # forces detokenize=False (below), so vLLM never detokenizes and ignores it.
@@ -3221,6 +3235,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         priority=0,
         reasoning_ended=None,
         reasoning_parser_kwargs=None,
+        generation_artifact_session=None,
+        include_routed_experts_response=True,
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
@@ -3249,6 +3265,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
             total_output_tokens_by_index: dict[int, int] = {}
             raw_routed_experts_by_output: dict[int, Any] = {}
+            artifact_prompt_captured: set[int] = set()
             # vLLM surfaces prompt_logprobs once (at end-of-prefill) and clears
             # them on subsequent chunks, so the generation-finish chunk often
             # carries None. Capture the first non-None payload and attach it to
@@ -3323,8 +3340,27 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     if top_logprobs is not None:
                         out["top_logprobs"] = top_logprobs
 
+                    if generation_artifact_session is not None:
+                        artifact_prompt_token_ids = []
+                        if output_idx not in artifact_prompt_captured:
+                            artifact_prompt_token_ids = list(
+                                getattr(res, "prompt_token_ids", None) or []
+                            )
+                        generation_artifact_session.record_chunk(
+                            choice_index=output_idx,
+                            prompt_token_ids=artifact_prompt_token_ids,
+                            completion_token_ids=token_ids,
+                            selected_logprobs=log_probs,
+                            routed_experts=raw_routed_experts,
+                        )
+                        if artifact_prompt_token_ids:
+                            artifact_prompt_captured.add(output_idx)
+
                     if finish_reason:
-                        out["finish_reason"] = normalize_finish_reason(finish_reason)
+                        normalized_finish_reason = normalize_finish_reason(
+                            finish_reason
+                        )
+                        out["finish_reason"] = normalized_finish_reason
                         out[
                             "completion_usage"
                         ] = BaseWorkerHandler._build_completion_usage(
@@ -3347,12 +3383,47 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         )
                         prompt_len = len(getattr(res, "prompt_token_ids", None) or [])
                         effective_start = min(raw_start, prompt_len)
-                        routed_experts = _serialize_routed_experts(
-                            raw_routed_experts_by_output.get(output_idx),
-                            start=effective_start,
-                        )
-                        if routed_experts is not None:
-                            _attach_routed_experts_engine_data(out, routed_experts)
+                        if include_routed_experts_response:
+                            routed_experts = _serialize_routed_experts(
+                                raw_routed_experts_by_output.get(output_idx),
+                                start=effective_start,
+                            )
+                            if routed_experts is not None:
+                                _attach_routed_experts_engine_data(out, routed_experts)
+                        if generation_artifact_session is not None and not (
+                            normalized_finish_reason == "cancelled"
+                            or normalized_finish_reason.startswith("error")
+                        ):
+                            try:
+                                receipt = (
+                                    await generation_artifact_session.finalize_choice(
+                                        choice_index=output_idx,
+                                        token_start=effective_start,
+                                    )
+                                )
+                            except (
+                                Exception
+                            ):  # noqa: BLE001 - emit a safe terminal receipt
+                                logger.warning(
+                                    "Generation artifact delivery failed for request %s",
+                                    request_id,
+                                )
+                                receipt = {
+                                    "format": "generation_artifact_v1",
+                                    "contents": sorted(
+                                        getattr(
+                                            generation_artifact_session,
+                                            "contents",
+                                            (),
+                                        )
+                                    ),
+                                    "state": "failed",
+                                    "error_code": "artifact_delivery_failed",
+                                    "error": "generation artifact delivery failed",
+                                }
+                            engine_data = out.setdefault("engine_data", {})
+                            if isinstance(engine_data, dict):
+                                engine_data["generation_artifact"] = receipt
                         # Log completion with LoRA info (debug level to avoid log spam)
                         self._log_with_lora_context(
                             "Completed token generation for request {request_id}{lora_info}: "
@@ -3412,6 +3483,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # Use context ID for request tracking and correlation
         request_id = context.id()
         logger.debug(f"Decode Request ID: {request_id}")
+        if self.use_vllm_tokenizer and generation_artifact_settings(request):
+            raise InvalidArgument(
+                "generation artifacts require Dynamo frontend tokenization"
+            )
         routing = request.get("routing") or {}
         if self._first_token_source is not None:
             self._first_token_source.bind(context, routing.get("dp_rank"))
@@ -3642,6 +3717,25 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             self.model_max_len,
             enable_rl=self.config.enable_rl,
         )
+        generation_artifact_session = (
+            VllmGenerationArtifactSession.from_backend_request(
+                request,
+                model_config=self.model_config,
+                enable_rl=self.config.enable_rl,
+                route_capture_enabled=bool(
+                    getattr(
+                        getattr(self, "engine_args", None),
+                        "enable_return_routed_experts",
+                        False,
+                    )
+                ),
+                choice_count=int(getattr(sampling_params, "n", 1) or 1),
+            )
+        )
+        if generation_artifact_session is not None:
+            generation_artifact_session.validate_route_start(
+                int(getattr(sampling_params, "routed_experts_prompt_start", 0) or 0)
+            )
 
         if kv_params is not None:
             _update_kv_transfer_params(sampling_params, kv_params)
@@ -3694,6 +3788,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # `NvExtResponseFieldSelection.engine_data` so this payload
                 # only reaches clients that asked for it.
                 want_engine_data = _nvext_extra_field_requested(request, "engine_data")
+                include_routed_experts_response = want_engine_data or (
+                    _nvext_extra_field_requested(request, "routed_experts")
+                )
                 # Prompt token IDs the engine actually saw. Either the
                 # pre-tokenized `nvext.token_data` (TITO) or whatever the
                 # preprocessor produced from messages (MITO). We echo them
@@ -3706,6 +3803,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 )
                 accumulated_token_ids: dict[int, list[int]] = {}
                 accumulated_log_probs: dict[int, list[float]] = {}
+                if generation_artifact_session is not None:
+                    await generation_artifact_session.admit(
+                        prompt_token_count=len(
+                            _prompt_token_ids_for_engine_data(request, prompt)
+                        ),
+                        max_tokens=int(getattr(sampling_params, "max_tokens", 0) or 0),
+                    )
                 try:
                     async for tok in self.generate_tokens(
                         prompt,
@@ -3717,6 +3821,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         priority=priority,
                         reasoning_ended=reasoning_ended,
                         reasoning_parser_kwargs=reasoning_parser_kwargs,
+                        generation_artifact_session=generation_artifact_session,
+                        include_routed_experts_response=include_routed_experts_response,
                     ):
                         if abort_guard is not None:
                             abort_guard.signal_first_token()
@@ -3738,6 +3844,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     logger.warning("Initiating Dynamo Runtime shutdown.")
                     self.runtime.shutdown()
                     os._exit(1)
+                finally:
+                    if generation_artifact_session is not None:
+                        generation_artifact_session.release()
 
     async def _generate_text_mode(self, request, context, request_id):
         """Generate text using OpenAI-compatible format (text-in-text-out)."""
