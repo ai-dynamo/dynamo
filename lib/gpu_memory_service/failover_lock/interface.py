@@ -22,6 +22,10 @@ class FailoverLockError(Exception):
     """Raised when a failover lock operation fails unexpectedly."""
 
 
+class FailoverLockContended(FailoverLockError):
+    """Raised when a bounded lock attempt finds another active owner."""
+
+
 class FailoverLock(ABC):
     @abstractmethod
     async def acquire(self, engine_id: str, timeout: float | None = None) -> None:
