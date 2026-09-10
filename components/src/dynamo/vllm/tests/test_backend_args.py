@@ -14,7 +14,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from dynamo.vllm.args import parse_args
 from dynamo.vllm.backend_args import (
     DisaggregationMode,
     DynamoVllmArgGroup,
@@ -479,6 +478,11 @@ class TestParseArgsLoraExclusivity:
 
     @staticmethod
     def _parse(extra_argv):
+        # Imported here, not at module top: dynamo.vllm.args pulls in vllm at
+        # import time and the release/1.5.0 dynamo-runtime image has no vllm,
+        # which broke collection of this module in the runtime-only CI jobs.
+        from dynamo.vllm.args import parse_args
+
         return parse_args(["--model", "Qwen/Qwen3-0.6B", *extra_argv])
 
     def test_realtime_with_enable_lora_is_rejected(self):
