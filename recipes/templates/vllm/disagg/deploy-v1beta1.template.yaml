@@ -1,0 +1,223 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Offline model access: HF_HUB_OFFLINE and TRANSFORMERS_OFFLINE are set to
+# "1", so the runtime uses the pre-populated shared-model-cache.
+# Contract:
+# - Use the native nvidia.com/v1beta1 spec.components shape; each component
+#   podTemplate contains a runtime container named main.
+# - Keep backendFramework vllm aligned with the runtime image and
+#   python3 -m dynamo.vllm command.
+# - Keep components ordered as Frontend (frontend), PrefillWorker (prefill),
+#   then DecodeWorker (decode).
+# - Keep MODEL_NAME and SERVED_MODEL_NAME synchronized with their command
+#   arguments, and keep the prefill/decode transfer settings compatible.
+# - KV_TRANSFER_CONFIG remains the first worker environment entry; change its
+#   value on both workers without removing the hook.
+# - shared-model-cache is the canonical default Kubernetes object name and patch
+#   anchor. The namespace-local PVC must exist unless a cluster Kustomization
+#   replaces the reference; change all coupled references together.
+# Derived from: recipes/gpt-oss-120b/vllm/disagg-b200-agentic/deploy.yaml.
+# Validation status: static catalog validation only; verify admission,
+# readiness, and runtime behavior on the target cluster.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: gpt-oss-120b-vllm-disaggregated
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              command: [python3]
+              args: [-m, dynamo.frontend, --router-mode, kv, --no-router-kv-events, --kv-cache-block-size, "64", --trust-remote-code]
+              env:
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              resources:
+                requests:
+                  cpu: "8"
+                  memory: 16Gi
+
+    - name: PrefillWorker
+      type: prefill
+      replicas: 2
+      sharedMemorySize: 64Gi
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              workingDir: /workspace
+              securityContext:
+                runAsUser: 0
+                runAsGroup: 0
+                capabilities:
+                  add: [IPC_LOCK, SYS_PTRACE, SYS_RESOURCE]
+              command: [python3]
+              args:
+                - -m
+                - dynamo.vllm
+                - --model
+                - $(MODEL_NAME)
+                - --served-model-name
+                - $(SERVED_MODEL_NAME)
+                - --trust-remote-code
+                - --quantization=mxfp4
+                - --kv-cache-dtype=fp8
+                - --max-model-len=131072
+                - --gpu-memory-utilization=0.9
+                - --block-size=64
+                - --tensor-parallel-size=1
+                - --max-num-batched-tokens=32768
+                - --enable-chunked-prefill
+                - --enable-prefix-caching
+                - --async-scheduling
+                - --no-disable-hybrid-kv-cache-manager
+                - --enable-flashinfer-autotune
+                - '--speculative-config={"method":"eagle3","model":"nvidia/gpt-oss-120b-Eagle3-v3","num_speculative_tokens":3}'
+                - --kv-transfer-config
+                - $(KV_TRANSFER_CONFIG)
+                - --disaggregation-mode=prefill
+                - --dyn-reasoning-parser
+                - gpt_oss
+                - --dyn-tool-call-parser
+                - harmony
+              env:
+                - name: KV_TRANSFER_CONFIG
+                  value: '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cuda"}'
+                - name: MODEL_NAME
+                  value: openai/gpt-oss-120b
+                - name: SERVED_MODEL_NAME
+                  value: openai/gpt-oss-120b
+                - name: HF_HOME
+                  value: /shared-model-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+                - name: VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE
+                  value: "1"
+                - name: TRITON_CACHE_DIR
+                  value: /tmp/.triton-cache
+                - name: VLLM_CACHE_ROOT
+                  value: /tmp/vllm-cache
+                - name: HF_MODULES_CACHE
+                  value: /tmp/hf_modules
+              resources:
+                requests:
+                  nvidia.com/gpu: "1"
+                  memory: 200Gi
+                limits:
+                  nvidia.com/gpu: "1"
+              volumeMounts:
+                - name: shared-model-cache
+                  mountPath: /shared-model-cache
+                  readOnly: true
+          volumes:
+            - name: shared-model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache
+    - name: DecodeWorker
+      type: decode
+      replicas: 6
+      sharedMemorySize: 64Gi
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+              imagePullPolicy: IfNotPresent
+              workingDir: /workspace
+              securityContext:
+                runAsUser: 0
+                runAsGroup: 0
+                capabilities:
+                  add: [IPC_LOCK, SYS_PTRACE, SYS_RESOURCE]
+              command: [python3]
+              args:
+                - -m
+                - dynamo.vllm
+                - --model
+                - $(MODEL_NAME)
+                - --served-model-name
+                - $(SERVED_MODEL_NAME)
+                - --trust-remote-code
+                - --quantization=mxfp4
+                - --kv-cache-dtype=fp8
+                - --max-model-len=131072
+                - --gpu-memory-utilization=0.9
+                - --block-size=64
+                - --tensor-parallel-size=1
+                - --max-num-batched-tokens=32768
+                - --enable-chunked-prefill
+                - --enable-prefix-caching
+                - --async-scheduling
+                - --no-disable-hybrid-kv-cache-manager
+                - --enable-flashinfer-autotune
+                - '--speculative-config={"method":"eagle3","model":"nvidia/gpt-oss-120b-Eagle3-v3","num_speculative_tokens":3}'
+                - --kv-transfer-config
+                - $(KV_TRANSFER_CONFIG)
+                - --disaggregation-mode=decode
+                - --dyn-reasoning-parser
+                - gpt_oss
+                - --dyn-tool-call-parser
+                - harmony
+              env:
+                - name: KV_TRANSFER_CONFIG
+                  value: '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cuda"}'
+                - name: MODEL_NAME
+                  value: openai/gpt-oss-120b
+                - name: SERVED_MODEL_NAME
+                  value: openai/gpt-oss-120b
+                - name: HF_HOME
+                  value: /shared-model-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+                - name: VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE
+                  value: "1"
+                - name: TRITON_CACHE_DIR
+                  value: /tmp/.triton-cache
+                - name: VLLM_CACHE_ROOT
+                  value: /tmp/vllm-cache
+                - name: HF_MODULES_CACHE
+                  value: /tmp/hf_modules
+              resources:
+                requests:
+                  nvidia.com/gpu: "1"
+                  memory: 200Gi
+                limits:
+                  nvidia.com/gpu: "1"
+              volumeMounts:
+                - name: shared-model-cache
+                  mountPath: /shared-model-cache
+                  readOnly: true
+          volumes:
+            - name: shared-model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache
+    # Optional components (type: planner, type: epp) go below this line, after the canonical components above.

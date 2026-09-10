@@ -57,7 +57,8 @@ repos:
     exclude: .devcontainer
   - id: check-toml
   - id: check-yaml
-    exclude: ^.*/templates/.*\.yaml$ #ignore all yaml files in helm chart templates
+    exclude: >-
+      ^(?:deploy/helm/charts/(?:platform/templates|platform/components/operator/templates|power-agent/templates)/.*\.yaml|benchmarks/frontend/dgd/templates/(?:mocker|vllm-gpt-oss-20b|vllm)\.yaml|examples/deployments/EKS/templates/eksctl\.yaml)$
     args: ['--allow-multiple-documents']
   - id: check-shebang-scripts-are-executable
   - id: end-of-file-fixer
@@ -203,6 +204,12 @@ repos:
       language: system
       files: ^scripts/check_action_pins\.py$
       pass_filenames: false
+    - id: validate-agent-instructions
+      name: Validate AGENTS.md and CLAUDE.md pairs
+      entry: python3 scripts/validate_agent_instructions.py
+      language: python
+      pass_filenames: false
+      always_run: true
     - id: DCO check
       name: Checks the commit message for a developer certificate of origin signature
       entry: python3 scripts/dco_check.py

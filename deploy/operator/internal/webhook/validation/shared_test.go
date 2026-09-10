@@ -127,8 +127,7 @@ func admissionSourceVersion(t *testing.T, object runtime.Object) string {
 	case *nvidiacomv1alpha1.DynamoGraphDeployment,
 		*nvidiacomv1alpha1.DynamoComponentDeployment,
 		*nvidiacomv1alpha1.DynamoGraphDeploymentRequest,
-		*nvidiacomv1alpha1.DynamoModel,
-		*nvidiacomv1alpha1.DynamoCheckpoint:
+		*nvidiacomv1alpha1.DynamoModel:
 		return nvidiacomv1alpha1.GroupVersion.Version
 	case *nvidiacomv1beta1.DynamoGraphDeployment,
 		*nvidiacomv1beta1.DynamoComponentDeployment,
@@ -270,8 +269,9 @@ func TestValidateProviderOverrideOutsideDGD(t *testing.T) {
 		},
 	}
 	validation := &sharedValidation{
-		ctx:                  context.Background(),
-		runtimeVersionSource: runtimeVersionSourceDisabled,
+		ctx:                   context.Background(),
+		runtimeVersionSource:  runtimeVersionSourceV1Beta1,
+		ratchetRuntimeVersion: true,
 	}
 
 	t.Log("Validate the standalone component as defense in depth behind OpenAPI pruning")
@@ -284,6 +284,32 @@ func TestValidateProviderOverrideOutsideDGD(t *testing.T) {
 	if len(errs) != 1 || errs[0].Field != "spec.providerOverride" {
 		t.Fatalf("validation errors = %v, want one error for spec.providerOverride", errs)
 	}
+}
+
+func TestValidateComponentRolesRejectsDuplicateMultinodeRole(t *testing.T) {
+	t.Log("Build an explicit multinode role list with the leader declared twice")
+	component := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+		Multinode: &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
+		Roles: []nvidiacomv1beta1.ComponentRoleSpec{
+			{Name: nvidiacomv1beta1.ComponentRoleLeader},
+			{Name: nvidiacomv1beta1.ComponentRoleLeader},
+		},
+	}
+	validation := &sharedValidation{ctx: context.Background()}
+
+	t.Log("Validate the closed multinode role schema independently of OpenAPI list-map checks")
+	errs := validation.validateComponentRoles(
+		component,
+		field.NewPath("spec", "components").Index(0).Child("roles"),
+		false,
+		"",
+	)
+
+	t.Log("Report both the duplicate entry and the missing mandatory worker role")
+	assertFieldPaths(t, errs, []string{
+		"spec.components[0].roles[1].name",
+		"spec.components[0].roles",
+	})
 }
 
 func TestValidateDynamoComponentDeploymentSharedSpecFrontendSidecar(t *testing.T) {

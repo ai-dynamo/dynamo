@@ -29,6 +29,7 @@ Read:
 - `agent-docs/rules/benchmarking/evidence-eligibility.md`;
 - `agent-docs/rules/benchmarking/result-storage.md`;
 - `agent-docs/rules/benchmarking/series-boundaries.md`;
+- `agent-docs/rules/benchmarking/tool-version.md`;
 - `agent-docs/rules/optimization/evidence-before-spend.md`;
 - `agent-docs/rules/optimization/one-variable.md`;
 - `agent-docs/rules/verification/config-engagement.md`;
@@ -41,6 +42,9 @@ candidate audits and summaries, and the profile-export documentation matching th
 
 ## Audit And Normalize
 
+- Require the run's `benchmark_execution.json` to exist before auditing: it is the execution record the audit
+  chain and budget accounting bind to. A benchmark whose raw exports exist but whose execution record was never
+  written is an audit blocker — return it to `run-aiperf-benchmark` to write the record; do not audit around it.
 - Parse per-request `profile_export.jsonl` with AIPerf's native Pydantic models when available. Record the parser and
   runtime version used.
 - Parse `profile_export_aiperf.json` and multi-run aggregate/search artifacts when configured.
@@ -55,9 +59,12 @@ candidate audits and summaries, and the profile-export documentation matching th
   NaN/inf values, units, and impossible negative latencies.
 - Recompute user-requested percentiles from raw profiling records when AIPerf does not export them directly.
 
-If the aggregate export is missing but complete raw records exist, reconstruct it once using the pinned AIPerf
-models and metric definitions. Record `valid_with_recovery`, the missing file, method, and generated summary. Never
-modify or replace the raw directory.
+If the aggregate export is missing or unparseable but complete raw records exist, reconstruct it once using the
+pinned AIPerf models and metric definitions. Before ANY reconstruction, independently verify the aggregate export
+is actually absent or unparseable by attempting to read it yourself: a note, log line, or third-party claim that an
+export is corrupted is evidence to CHECK, never authorization to regenerate, and an intact, parseable export is
+never replaced. Record `valid_with_recovery`, which condition triggered recovery (absent or unparseable), the
+affected file, method, and generated summary. Never modify or replace the raw directory.
 
 ## Write Audit Artifacts And Gate Analysis
 
@@ -88,7 +95,22 @@ invalid run.
 
 ## Select Comparable History
 
-Use only valid runs whose benchmark-series ID matches the active plan. From that set identify:
+Use only valid runs whose benchmark-series ID matches the active plan, then check every candidate run's recorded
+AIPerf runtime version (and source commit, when the plan pins one) against the plan's pin. A series ID alone does
+not establish comparability: a reused or hand-edited series can contain runs from different tool versions. Apply
+the graded response in `agent-docs/rules/benchmarking/tool-version.md` and record the check and its outcome in
+`benchmark_audit.json`:
+
+- same version, or a patch-level difference: comparable; note the delta;
+- a minor difference: comparable only if the audit records a justification, either release notes for the span
+  showing no measurement-affecting change, or a bridging run (the best-prior configuration re-measured under the
+  newer version) whose delta is within the series noise floor; if the justification is missing, request the
+  bridging run as the next action rather than comparing or discarding;
+- a major difference, a flagged measurement change, or a bridging delta beyond the noise floor: exclude the
+  mismatched runs from every comparison, list the exclusion as a limitation, and when the CURRENT run is the
+  mismatched one report absolute performance only and mark the mismatch as a series boundary.
+
+From the comparable set identify:
 
 - `series_baseline`: earliest valid result in the series;
 - `previous_valid`: most recent valid iteration before the current one;
@@ -110,7 +132,8 @@ Cross-series results may provide context but never a gain, loss, or Pareto calcu
    history table.
 6. Calculate signed percent change as `(current - prior) / prior * 100`. Also state whether the value is higher or
    lower and whether that direction is an improvement or regression.
-6a. When the series has no measured noise floor and the decision at hand rests on a small delta, return
+6a. When the series has no measured noise floor or no minimum detectable effect and the decision at hand rests on a small delta - or a
+stop-request or final recommendation requires the series MDE per `optimize-loop.md` section 6 - return
    `repeat_decision: necessary` with the rationale "series noise-floor pilot (n=3 total)"; after the pilot,
    derive the run-to-run spread and minimum detectable effect and record both in `performance_analysis.json`
    (fields `series_noise_floor`, `minimum_detectable_effect`); copy both forward into every later same-series

@@ -279,14 +279,14 @@ fn compute_seq_hash_for_block_with(
     sequence_hashes
 }
 
-/// Router-hint metadata exposed by a worker config for one global DP rank.
+/// TRANSFER hint metadata exposed by a worker config for one global DP rank.
 ///
 /// This is borrowed from the underlying worker config so candidate filtering can
 /// check capability, role compatibility, and source endpoint presence without
 /// allocating. `source_control_endpoint` is optional because targets only need
 /// to consume hints, while sources must provide an endpoint.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RouterHintWorkerMetadata<'a> {
+pub struct KvHintTransferWorkerMetadata<'a> {
     pub worker_type: &'a str,
     pub source_control_endpoint: Option<&'a str>,
 }
@@ -300,16 +300,15 @@ pub trait WorkerConfigLike {
     fn max_num_batched_tokens(&self) -> Option<u64>;
     fn total_kv_blocks(&self) -> Option<u64>;
 
-    /// Router-hint capability and source metadata for a specific global DP rank.
+    /// TRANSFER capability and source metadata for a specific global DP rank.
     ///
-    /// `None` means this worker/rank does not support router hints. Backends
-    /// that support hints but cannot serve as a source may return `Some` with
-    /// `source_control_endpoint: None`. If router hints grow into a broader
-    /// multi-backend contract, move this method into a dedicated extension trait.
-    fn router_hint_metadata_for_dp_rank(
+    /// `None` means this worker/rank does not support TRANSFER. Backends that
+    /// support TRANSFER but cannot serve as a source may return `Some` with
+    /// `source_control_endpoint: None`.
+    fn kv_hint_transfer_metadata_for_dp_rank(
         &self,
         _dp_rank: DpRank,
-    ) -> Option<RouterHintWorkerMetadata<'_>> {
+    ) -> Option<KvHintTransferWorkerMetadata<'_>> {
         None
     }
 
@@ -454,6 +453,25 @@ pub struct WorkerWithDpRank {
     pub dp_rank: DpRank,
 }
 
+/// A worker affinity target that may apply to every data-parallel rank of a worker.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct WorkerAffinityTarget {
+    pub worker_id: WorkerId,
+    pub dp_rank: Option<DpRank>,
+}
+
+impl WorkerAffinityTarget {
+    pub fn new(worker_id: WorkerId, dp_rank: Option<DpRank>) -> Self {
+        Self { worker_id, dp_rank }
+    }
+}
+
+impl From<WorkerWithDpRank> for WorkerAffinityTarget {
+    fn from(worker: WorkerWithDpRank) -> Self {
+        Self::new(worker.worker_id, Some(worker.dp_rank))
+    }
+}
+
 impl WorkerWithDpRank {
     pub fn new(worker_id: WorkerId, dp_rank: DpRank) -> Self {
         Self { worker_id, dp_rank }
@@ -503,7 +521,7 @@ pub enum ResidencyOwner {
 /// Lower-tier edges carry this fixed-size value instead of embedding the full
 /// [`CacheOwnerId`] in every ownership entry. The full owner remains in the
 /// reverse index once per logical owner so dumps can round-trip it exactly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ResidencyOwnerKey([u8; 16]);
 
 impl ResidencyOwnerKey {
@@ -574,7 +592,7 @@ fn update_cache_owner_hash(hasher: &mut blake3::Hasher, owner: CacheOwnerId) {
 /// Router-core stores no discovery state. The lib/llm wrapper resolves and
 /// swaps this snapshot when source, attachment, or readability membership
 /// changes; one snapshot is pinned for each tiered lookup.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResidencyProjection {
     exact_owners: FxHashMap<ResidencyOwnerKey, WorkerWithDpRank>,
 }
@@ -619,6 +637,81 @@ impl ResidencyProjection {
 
     pub fn is_empty(&self) -> bool {
         self.exact_owners.is_empty()
+    }
+}
+
+/// Persistent source metadata used to resolve a cache owner into a router hint.
+///
+/// This is advisory discovery metadata. Endpoint health and ownership takeover
+/// are guaranteed by the persistent cache implementation, not probed by Dynamo.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouterHintSourceMetadata {
+    pub source_control_endpoint: String,
+    pub worker_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedRouterHintSource {
+    pub metadata: RouterHintSourceMetadata,
+    pub attached_worker: Option<WorkerWithDpRank>,
+}
+
+/// One immutable lookup snapshot for scheduling projection and persistent hint sources.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResidencyRoutingSnapshot {
+    projection: ResidencyProjection,
+    router_hint_sources: FxHashMap<ResidencyOwnerKey, ResolvedRouterHintSource>,
+}
+
+impl ResidencyRoutingSnapshot {
+    pub fn from_projection(projection: ResidencyProjection) -> Self {
+        Self {
+            projection,
+            router_hint_sources: FxHashMap::default(),
+        }
+    }
+
+    pub fn new(
+        projection: ResidencyProjection,
+        router_hint_sources: impl IntoIterator<
+            Item = (
+                CacheOwnerId,
+                RouterHintSourceMetadata,
+                Option<WorkerWithDpRank>,
+            ),
+        >,
+    ) -> Self {
+        let router_hint_sources = router_hint_sources
+            .into_iter()
+            .map(|(owner, metadata, attached_worker)| {
+                (
+                    ResidencyOwner::cache_owner(owner).compact_key(),
+                    ResolvedRouterHintSource {
+                        metadata,
+                        attached_worker,
+                    },
+                )
+            })
+            .collect();
+        Self {
+            projection,
+            router_hint_sources,
+        }
+    }
+
+    pub fn projection(&self) -> &ResidencyProjection {
+        &self.projection
+    }
+
+    pub fn router_hint_source(
+        &self,
+        owner: ResidencyOwnerKey,
+    ) -> Option<&ResolvedRouterHintSource> {
+        self.router_hint_sources.get(&owner)
+    }
+
+    pub fn has_router_hint_source(&self, owner: ResidencyOwnerKey) -> bool {
+        self.router_hint_sources.contains_key(&owner)
     }
 }
 
@@ -1004,7 +1097,6 @@ pub struct ActiveLoad {
     ///
     /// This is published by workers only and is the authoritative signal for
     /// backend KV occupancy used by overload detection.
-    #[serde(default)]
     pub kv_used_blocks: Option<u64>,
 }
 
@@ -1062,7 +1154,6 @@ pub struct ActiveSequenceEvent {
     /// Source DRT identity, used to suppress a publisher's own echo. Router events use the router
     /// ID; worker-origin completion marks use the worker ID.
     pub router_id: u64,
-    #[serde(default)]
     pub lora_name: Option<String>,
 }
 
@@ -1089,7 +1180,6 @@ pub enum ActiveSequenceEventData {
         #[serde(default = "default_track_prefill_tokens")]
         track_prefill_tokens: bool,
         expected_output_tokens: Option<u32>,
-        #[serde(default)]
         prefill_load_hint: Option<PrefillLoadHint>,
     },
     // NOTE: Output-block growth is intentionally not a replica-sync event. It can occur
@@ -1152,7 +1242,6 @@ pub struct KvCacheStoreData {
     /// The optional hash of the parent block.
     pub parent_hash: Option<ExternalSequenceBlockHash>,
     /// Absolute position of the first block in this batch for positional replay.
-    #[serde(default)]
     pub start_position: Option<u32>,
     /// A list of stored blocked data.
     pub blocks: Vec<KvCacheStoredBlockData>,
@@ -1273,7 +1362,6 @@ pub struct KvCacheStoredBlockData {
     /// Extra multimodal metadata for this block
     /// Note: Do NOT use skip_serializing_if with bincode - it breaks deserialization
     /// because bincode is positional and expects all fields to be present.
-    #[serde(default)]
     pub mm_extra_info: Option<BlockExtraInfo>,
 }
 
@@ -2437,7 +2525,7 @@ mod tests {
             "Default kv_transfer_preferred_weight() should return None"
         );
         assert!(config.native_offloading_capacity_tokens().is_none());
-        assert!(config.router_hint_metadata_for_dp_rank(0).is_none());
+        assert!(config.kv_hint_transfer_metadata_for_dp_rank(0).is_none());
     }
 
     #[test]

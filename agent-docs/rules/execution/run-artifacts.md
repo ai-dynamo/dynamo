@@ -34,7 +34,8 @@ runs/<EXP_ID>/
 |   |-- challenger-reviews.jsonl
 |   |-- performance_findings.jsonl
 |   |-- asks.jsonl
-|   `-- search-calibration.md
+|   |-- search-calibration.md
+|   `-- recipe-dossier/                # find-serving-recipe snapshots + index.md
 |-- final/
 |   |-- recommended_config.md
 |   |-- reproduced_commands.sh
@@ -87,7 +88,12 @@ runs/<EXP_ID>/
   stop-request validations (the latter bound to the submitted ledger SHA256).
 - `performance_findings.jsonl`: append-only performance findings produced from valid benchmark analyses.
 - `deployment_ledger.json`: assigned source DGD path and SHA256, manifests applied, readiness status, endpoint,
-  smoke-test result, concise diagnostics, blockers, and cleanup commands.
+  smoke-test result, concise diagnostics, blockers, cleanup commands, and the budget-accounting fields:
+  `gpus_requested` (GPUs the manifest requests), `allocated_at` (first GPU pod scheduled), `torn_down_at`
+  (null while live; the retiring role also writes it here, in the retired iteration's own ledger), and
+  `failed_attempts` (append-only list of scheduling-impossible or crashed deploy attempts within this
+  iteration, each with its scheduler-event or crash diagnosis — these count against the failed-deploy budget
+  even when a later attempt in the same iteration succeeds).
 - `smoke_test_artifact.json`: required `recipe-deployer` result containing the full smoke-test API request, full
   `api_response`, and success flag.
 - `benchmark_execution.json`: active plan path and SHA256, exact Kubernetes/AIPerf execution, status, retries, artifact
@@ -96,7 +102,10 @@ runs/<EXP_ID>/
   comparability validity checks.
 - `benchmark_summary.json`: normalized AIPerf metrics, units, benchmark inputs, and error counts without interpretation.
 - `performance_analysis.json`: target-SLO evaluation, absolute results, and applicable comparisons to the series
-  baseline, previous and best valid same-series results, and same-series history.
+  baseline, previous and best valid same-series results, and same-series history. Also carries
+  `series_noise_floor` and `minimum_detectable_effect` once a repetition pilot has produced them,
+  copied forward into every later same-series analysis; these fields are the authoritative source for
+  every MDE-gated judgment (any copy elsewhere, such as a ledger header, is a convenience mirror).
 - `performance_analysis.md`: concise human-readable findings and limitations.
 - `applied_manifests/`: one final run-scoped copy of each manifest type used. After success, these are the exact files
   that produced the successful smoke test.
@@ -113,6 +122,10 @@ runs/<EXP_ID>/
   (`EXP_ROOT/analysis/search-calibration.md`) in a terminal state, plus its challenger validation. The ledger is
   the authoritative family table; the submitting iteration's `knowledge-consult.md` records only the stop-request
   delta and cites the ledger path and the SHA256 of the ledger state submitted for validation.
+- `recipe-dossier/` (under `EXP_ROOT/analysis/`): immutable per-invocation snapshots written by
+  `find-serving-recipe` (`<NNN>-<UTC timestamp>.md`, never modified after writing) plus an `index.md` listing every
+  snapshot with its SHA256. Callers (the interviewer's baseline evidence record, `consult-perf-knowledge`) cite a
+  snapshot path and SHA256, never the directory.
 
 ## Deployment Directories
 
@@ -131,7 +144,8 @@ runs/<EXP_ID>/
 - Keep retries and compatibility patches for the same candidate in the same `DEPLOY_ROOT`.
 - Create the next deployment directory only when the optimization loop assigns a new candidate.
 - Before iteration > 0, remove only the previous iteration's DGD. Keep its deployment directory and successful YAML
-  unchanged, and preserve shared PVCs, model-cache jobs, namespaces, and secrets.
+  unchanged (sole exception: the retiring role writes `torn_down_at` into that iteration's
+  `deployment_ledger.json`), and preserve shared PVCs, model-cache jobs, namespaces, and secrets.
 
 ## Final Manifest Set
 

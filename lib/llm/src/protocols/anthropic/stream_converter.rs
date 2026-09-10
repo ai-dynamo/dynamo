@@ -178,11 +178,39 @@ impl AnthropicStreamConverter {
         let mut events = Vec::new();
         let mut block_index = self.next_block_index;
 
-        for tool_call in &self.tool_call_states {
+        // Only the token limit cuts a call short, and it does so once, in the last
+        // call. This mirrors `chat_completion_to_anthropic_response`.
+        let truncated = self.stop_reason == Some(AnthropicStopReason::MaxTokens);
+        // Use the highest observed call index before filtering out calls whose identity
+        // never completed. An argument-only later call is still the terminal observed
+        // call and must not make an earlier ready call look like the truncation target.
+        let last_call = self.tool_call_states.len().checked_sub(1);
+
+        for (call_index, tool_call) in self.tool_call_states.iter().enumerate() {
             if !tool_call.is_emit_ready() {
                 continue;
             }
 
+            let raw: String = tool_call
+                .argument_fragments
+                .iter()
+                .map(|(arguments, _)| arguments.as_str())
+                .collect();
+            let arguments_are_valid = if raw.is_empty() {
+                // An empty argument string is valid for a completed call, but at a
+                // token-limit finish it means generation stopped immediately after
+                // the name. Keep the terminal rule aligned with the unary converter.
+                !(truncated && Some(call_index) == last_call)
+            } else {
+                serde_json::from_str::<serde_json::Value>(&raw).is_ok()
+            };
+            let repair = truncated && Some(call_index) == last_call && !arguments_are_valid;
+            let repaired_input = repair
+                .then(|| super::types::tool_use_input(&tool_call.name, &raw, true))
+                .flatten();
+            if !arguments_are_valid && repaired_input.is_none() {
+                continue;
+            }
             let emitted_id = new_tool_use_id();
             tracing::debug!(
                 backend_id = %tool_call.backend_id,
@@ -202,17 +230,33 @@ impl AnthropicStreamConverter {
                 None,
             ));
 
-            for (arguments, usage_snapshot) in &tool_call.argument_fragments {
+            if let Some(input) = repaired_input {
                 events.push((
                     "content_block_delta",
                     AnthropicStreamEvent::ContentBlockDelta {
                         index: block_index,
                         delta: AnthropicDelta::InputJsonDelta {
-                            partial_json: arguments.clone(),
+                            partial_json: input.to_string(),
                         },
                     },
-                    Some(usage_snapshot.clone()),
+                    tool_call
+                        .argument_fragments
+                        .last()
+                        .map(|(_, usage)| usage.clone()),
                 ));
+            } else {
+                for (arguments, usage_snapshot) in &tool_call.argument_fragments {
+                    events.push((
+                        "content_block_delta",
+                        AnthropicStreamEvent::ContentBlockDelta {
+                            index: block_index,
+                            delta: AnthropicDelta::InputJsonDelta {
+                                partial_json: arguments.clone(),
+                            },
+                        },
+                        Some(usage_snapshot.clone()),
+                    ));
+                }
             }
 
             events.push((
@@ -221,6 +265,17 @@ impl AnthropicStreamConverter {
                 None,
             ));
             block_index += 1;
+        }
+
+        // Mirrors `chat_completion_to_anthropic_response`: telling the client to run a
+        // tool while emitting no `tool_use` block leaves a turn it cannot send back.
+        if block_index == self.next_block_index
+            && self.stop_reason == Some(AnthropicStopReason::ToolUse)
+        {
+            tracing::warn!(
+                "every tool_use block was suppressed; reporting end_turn instead of tool_use"
+            );
+            self.stop_reason = Some(AnthropicStopReason::EndTurn);
         }
 
         self.next_block_index = block_index;
@@ -386,7 +441,7 @@ impl AnthropicStreamConverter {
                         AnthropicStopReason::ToolUse
                     }
                     dynamo_protocols::types::FinishReason::ContentFilter => {
-                        AnthropicStopReason::EndTurn
+                        AnthropicStopReason::Refusal
                     }
                     dynamo_protocols::types::FinishReason::FunctionCall => {
                         AnthropicStopReason::ToolUse
@@ -693,7 +748,7 @@ impl AnthropicStreamConverter {
                         AnthropicStopReason::ToolUse
                     }
                     dynamo_protocols::types::FinishReason::ContentFilter => {
-                        AnthropicStopReason::EndTurn
+                        AnthropicStopReason::Refusal
                     }
                     dynamo_protocols::types::FinishReason::FunctionCall => {
                         AnthropicStopReason::ToolUse
@@ -959,6 +1014,19 @@ mod tests {
 
     fn event_types(events: &[TaggedEvent]) -> Vec<&str> {
         events.iter().map(|e| e.event_type.as_str()).collect()
+    }
+
+    fn streamed_tool_input(events: &[TaggedEvent]) -> String {
+        events
+            .iter()
+            .filter_map(|event| match &event.data {
+                AnthropicStreamEvent::ContentBlockDelta {
+                    delta: AnthropicDelta::InputJsonDelta { partial_json },
+                    ..
+                } => Some(partial_json.as_str()),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]
@@ -1355,6 +1423,33 @@ mod tests {
     }
 
     #[test]
+    fn test_length_drops_tool_call_with_empty_arguments() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+        conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("get_weather"),
+            Some(""),
+        ));
+
+        let mut events = conv.process_chunk_tagged(&finish_chunk(FinishReason::Length));
+        events.extend(conv.emit_end_events_tagged());
+
+        assert!(events.iter().all(|event| !matches!(
+            &event.data,
+            AnthropicStreamEvent::ContentBlockStart {
+                content_block: AnthropicResponseContentBlock::ToolUse { .. },
+                ..
+            }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            &event.data,
+            AnthropicStreamEvent::MessageDelta { delta, .. }
+                if delta.stop_reason == Some(AnthropicStopReason::MaxTokens)
+        )));
+    }
+
+    #[test]
     fn test_terminal_chunk_records_arguments_before_flushing() {
         let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
         let mut chunk = tool_call_chunk(0, Some("call-1"), Some("Read"), Some("{}"));
@@ -1376,6 +1471,181 @@ mod tests {
                 ..
             } if partial_json == "{}"
         ));
+    }
+
+    #[test]
+    fn test_truncated_tool_arguments_repair_at_stream_terminal() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+        conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("record_literal"),
+            Some(r#"{"label": "customer-eof", "literal_text": "cust"#),
+        ));
+
+        let mut events = conv.process_chunk_tagged(&finish_chunk(FinishReason::Length));
+        events.extend(conv.emit_end_events_tagged());
+        let input = streamed_tool_input(&events);
+
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&input).unwrap(),
+            serde_json::json!({"label": "customer-eof"})
+        );
+        assert!(events.iter().any(|event| matches!(
+            &event.data,
+            AnthropicStreamEvent::MessageDelta { delta, .. }
+                if delta.stop_reason == Some(AnthropicStopReason::MaxTokens)
+        )));
+    }
+
+    #[test]
+    fn test_stream_repairs_only_the_final_truncated_tool_call() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+        conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("first"),
+            Some(r#"{"done": "yes"}"#),
+        ));
+        conv.process_chunk_tagged(&tool_call_chunk(
+            1,
+            Some("call-2"),
+            Some("second"),
+            Some(r#"{"done": "no", "tail": "cut"#),
+        ));
+
+        let mut events = conv.process_chunk_tagged(&finish_chunk(FinishReason::Length));
+        events.extend(conv.emit_end_events_tagged());
+        let inputs: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.data {
+                AnthropicStreamEvent::ContentBlockDelta {
+                    index,
+                    delta: AnthropicDelta::InputJsonDelta { partial_json },
+                } => Some((*index, partial_json.clone())),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].1, r#"{"done": "yes"}"#);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&inputs[1].1).unwrap(),
+            serde_json::json!({"done": "no"})
+        );
+    }
+
+    #[test]
+    fn test_later_incomplete_identity_does_not_emit_an_earlier_malformed_call() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+        conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("first"),
+            Some(r#"{"done": "cut""#),
+        ));
+        conv.process_chunk_tagged(&tool_call_chunk(1, None, None, Some(r#"{"later": "args""#)));
+
+        let mut events = conv.process_chunk_tagged(&finish_chunk(FinishReason::Length));
+        events.extend(conv.emit_end_events_tagged());
+
+        assert!(events.iter().all(|event| !matches!(
+            &event.data,
+            AnthropicStreamEvent::ContentBlockStart {
+                content_block: AnthropicResponseContentBlock::ToolUse { .. },
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn test_stream_suppresses_malformed_non_length_tool_calls() {
+        for reason in [
+            FinishReason::Stop,
+            FinishReason::ToolCalls,
+            FinishReason::FunctionCall,
+            FinishReason::ContentFilter,
+        ] {
+            let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+            conv.process_chunk_tagged(&tool_call_chunk(
+                0,
+                Some("call-1"),
+                Some("record_literal"),
+                Some(r#"{"label": "cut""#),
+            ));
+            let mut events = conv.process_chunk_tagged(&finish_chunk(reason));
+            events.extend(conv.emit_end_events_tagged());
+
+            assert!(
+                events.iter().all(|event| !matches!(
+                    &event.data,
+                    AnthropicStreamEvent::ContentBlockStart {
+                        content_block: AnthropicResponseContentBlock::ToolUse { .. },
+                        ..
+                    }
+                )),
+                "malformed {reason:?} arguments must not create an executable tool block"
+            );
+        }
+    }
+
+    /// `tool_use` is an instruction to run a tool. With every call suppressed the
+    /// client has nothing to run, and Anthropic rejects the turn when it is sent back.
+    #[test]
+    fn test_stream_reports_end_turn_when_every_tool_block_is_suppressed() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+        conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("record_literal"),
+            Some(r#"{"label": "cut""#),
+        ));
+
+        let mut events = conv.process_chunk_tagged(&finish_chunk(FinishReason::ToolCalls));
+        events.extend(conv.emit_end_events_tagged());
+
+        assert!(events.iter().all(|event| !matches!(
+            &event.data,
+            AnthropicStreamEvent::ContentBlockStart {
+                content_block: AnthropicResponseContentBlock::ToolUse { .. },
+                ..
+            }
+        )));
+        assert!(
+            events.iter().any(|event| matches!(
+                &event.data,
+                AnthropicStreamEvent::MessageDelta { delta, .. }
+                    if delta.stop_reason == Some(AnthropicStopReason::EndTurn)
+            )),
+            "a turn with no tool_use block must not report tool_use"
+        );
+    }
+
+    #[test]
+    fn test_stream_suppresses_length_tool_call_without_recoverable_input() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+        conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("record_literal"),
+            Some(r#"{"label": "cut"#),
+        ));
+
+        let mut events = conv.process_chunk_tagged(&finish_chunk(FinishReason::Length));
+        events.extend(conv.emit_end_events_tagged());
+
+        assert!(events.iter().all(|event| !matches!(
+            &event.data,
+            AnthropicStreamEvent::ContentBlockStart {
+                content_block: AnthropicResponseContentBlock::ToolUse { .. },
+                ..
+            }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            &event.data,
+            AnthropicStreamEvent::MessageDelta { delta, .. }
+                if delta.stop_reason == Some(AnthropicStopReason::MaxTokens)
+        )));
     }
 
     /// Buffered tool-argument fragments must carry the usage snapshot from their
