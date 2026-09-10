@@ -17,7 +17,9 @@ entry.
 from __future__ import annotations
 
 import copy
+import ipaddress
 import os
+import re
 import uuid
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional, Tuple, Type
@@ -102,11 +104,12 @@ class MooncakeConnectorProtocol(KvConnectorProtocol):
         self, prefill_response: Any
     ) -> Optional[Dict[str, Any]]:
         host, port = self._get_bootstrap_addr(self._vllm_config)
-        # vLLM may return loopback for local registration under external/hybrid
+        # vLLM may return loopback for local registration in DP1 or external/hybrid
         # load balancing. Only the address advertised to remote decoders changes.
         advertised_host = os.environ.get("DYN_VLLM_MOONCAKE_BOOTSTRAP_ADVERTISE_HOST")
         if advertised_host:
             host = advertised_host
+        host = _bootstrap_url_host(host)
         return {
             "do_remote_decode": False,
             "do_remote_prefill": True,
@@ -134,6 +137,24 @@ class LMCacheMPConnectorProtocol(KvConnectorProtocol):
         # Empty, not None: the prefill router requires the
         # disaggregated_params envelope in the prefill response.
         return {}
+
+
+def _bootstrap_url_host(host: str) -> str:
+    """Validate a bare bootstrap host and bracket IPv6 URL literals."""
+    if ":" in host:
+        # Accept raw pod IPs and already bracketed literals, but never a URL
+        # or host:port override: vLLM's helper owns the bootstrap port.
+        literal = host[1:-1] if host.startswith("[") and host.endswith("]") else host
+        try:
+            if "%" in literal:
+                raise ValueError("Scoped IPv6 hosts are not supported")
+            ipaddress.IPv6Address(literal)
+        except ValueError as exc:
+            raise ValueError(f"Invalid Mooncake bootstrap host: {host!r}") from exc
+        return f"[{literal}]"
+    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", host):
+        raise ValueError(f"Invalid Mooncake bootstrap host: {host!r}")
+    return host
 
 
 # Keyed by ``KVTransferConfig.kv_connector``. One entry per connector.

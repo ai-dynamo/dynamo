@@ -1366,7 +1366,7 @@ func TestVLLMBackend_UpdateContainer_NoInterPodGMS(t *testing.T) {
 }
 
 func TestVLLMBackend_MooncakeAdvertiseHost(t *testing.T) {
-	t.Log("Define prefill defaults, user overrides, and components that must not receive the default")
+	t.Log("Define explicit prefill overrides and components that must remain unchanged")
 	const envName = "DYN_VLLM_MOONCAKE_BOOTSTRAP_ADVERTISE_HOST"
 	podIP := corev1.EnvVar{Name: envName, ValueFrom: &corev1.EnvVarSource{
 		FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"},
@@ -1382,7 +1382,8 @@ func TestVLLMBackend_MooncakeAdvertiseHost(t *testing.T) {
 		initial       *corev1.EnvVar
 		want          *corev1.EnvVar
 	}{
-		{"prefill pod IP", v1beta1.ComponentTypePrefill, nil, &podIP},
+		{"prefill unchanged without opt in", v1beta1.ComponentTypePrefill, nil, nil},
+		{"prefill explicit pod IP", v1beta1.ComponentTypePrefill, &podIP, &podIP},
 		{"prefill user literal", v1beta1.ComponentTypePrefill, &literal, &literal},
 		{"prefill user empty", v1beta1.ComponentTypePrefill, &empty, &empty},
 		{"prefill user reference", v1beta1.ComponentTypePrefill, &customRef, &customRef},
@@ -1401,7 +1402,7 @@ func TestVLLMBackend_MooncakeAdvertiseHost(t *testing.T) {
 			component := &v1beta1.DynamoComponentDeploymentSharedSpec{ComponentType: tt.componentType}
 			backend := &VLLMBackend{}
 
-			t.Log("Render twice to verify the default is idempotent and user values win")
+			t.Log("Render twice to verify no default is added and explicit values are preserved")
 			for range 2 {
 				require.NoError(t, backend.UpdateContainer(container, 1, RoleMain, component, "prefill", &GroveMultinodeDeployer{}, staticContainerGPUCount(0)))
 				require.Equal(t, tt.want, findEnvVar(container.Env, envName))
@@ -1413,5 +1414,33 @@ func TestVLLMBackend_MooncakeAdvertiseHost(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestVLLMBackend_MooncakeOperatorUpgradePreservesOldRender(t *testing.T) {
+	for _, connector := range []string{"MooncakeConnector", "NixlConnector"} {
+		for _, origin := range []string{"", "1.4.0", "1.5.0"} {
+			t.Run(connector+"/"+origin, func(t *testing.T) {
+				t.Log("Use the pre-change single-node prefill container render, without an advertised-host env")
+				oldRender := &corev1.Container{
+					Name: "main", Image: "vllm:unchanged",
+					Command: []string{"python3"},
+					Args:    []string{"-m", "dynamo.vllm", "--kv-transfer-config", fmt.Sprintf(`{"kv_connector":%q,"kv_role":"kv_producer"}`, connector)},
+					Env:     []corev1.EnvVar{{Name: "EXISTING", Value: "keep"}},
+				}
+				component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: "prefill",
+					Annotations:   map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: origin},
+				})
+
+				require.Equal(t, v1beta1.ComponentTypePrefill, component.ComponentType)
+
+				t.Log("Reconcile the old render through the updated backend and require exact container preservation")
+				current := oldRender.DeepCopy()
+				backend := &VLLMBackend{}
+				require.NoError(t, backend.UpdateContainer(current, 1, RoleMain, component, "prefill", &GroveMultinodeDeployer{}, staticContainerGPUCount(0)))
+				require.Equal(t, oldRender, current)
+			})
+		}
 	}
 }
