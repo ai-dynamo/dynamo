@@ -204,12 +204,8 @@ class GMSWorker(Worker):
             return super().determine_available_memory()
 
         if self.cache_config.kv_cache_memory_bytes:
-            # An explicitly sized KV cache is a constant, not a measurement:
-            # vLLM still runs profile_run() to compile the model, then returns
-            # the configured bytes verbatim. Delegating keeps this engine's
-            # answer independent of whether it wrote GMS weights or imported
-            # them, so a writer and an importer derive the same block count
-            # and the same persisted layout.
+            # An explicit KV size is a constant, not a measurement: delegating
+            # keeps a GMS writer and a GMS importer on the same layout.
             return super().determine_available_memory()
 
         import vllm.envs as envs

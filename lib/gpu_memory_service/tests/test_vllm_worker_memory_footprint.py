@@ -44,10 +44,8 @@ EXPLICIT_KV_CACHE_MEMORY_BYTES = 68719476736
 REQUESTED_MEMORY = 72 * (1 << 30)
 IMPORTED_WEIGHTS_BYTES = 16 * (1 << 30)
 WRITER_TORCH_PEAK = 20 * (1 << 30)
-# The importer does not see its GMS-mapped weights in the torch peak, and its
-# own private profiling footprint is a little smaller than the writer's. The
-# two roles therefore do not cancel out exactly — that residue is what made the
-# derived block counts differ in the report (13 blocks at ~32 KiB per block).
+# Writer and importer footprints do not cancel exactly; this residue is the
+# block-count gap the two measured capacities produced.
 FOOTPRINT_RESIDUE = 13 * 32 * 1024
 IMPORTER_TORCH_PEAK = WRITER_TORCH_PEAK - IMPORTED_WEIGHTS_BYTES - FOOTPRINT_RESIDUE
 
