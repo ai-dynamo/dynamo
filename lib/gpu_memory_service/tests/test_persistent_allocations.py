@@ -32,6 +32,8 @@ from gpu_memory_service.common.protocol.messages import (
     ListPersistentAllocationsResponse,
     ReleasePersistentAllocationRequest,
     ReleasePersistentAllocationResponse,
+    UnclaimPersistentAllocationRequest,
+    UnclaimPersistentAllocationResponse,
 )
 from gpu_memory_service.common.vmm import VMMDeviceType
 from gpu_memory_service.server.fsm import Connection
@@ -363,6 +365,39 @@ def test_repeated_shared_claim_from_one_session_is_idempotent(gms):
 
     asyncio.run(gms.cleanup_connection(conn))
     assert not gms._persistent.is_claimed("eng-X", "kv_pool")
+
+
+def test_unclaim_drops_only_calling_session_claim(gms):
+    first = _make_dummy_conn()
+    second = _make_dummy_conn()
+    request = ClaimPersistentAllocationRequest(
+        engine_id="eng-X", tag="kv_pool", size=8192, shared=True
+    )
+    asyncio.run(gms.handle_request(first, request, lambda: True))
+    asyncio.run(gms.handle_request(second, request, lambda: True))
+
+    response, _, _ = asyncio.run(
+        gms.handle_request(
+            first,
+            UnclaimPersistentAllocationRequest("eng-X", "kv_pool"),
+            lambda: True,
+        )
+    )
+
+    assert isinstance(response, UnclaimPersistentAllocationResponse)
+    assert response.unclaimed is True
+    assert gms._persistent.get("eng-X", "kv_pool") is not None
+    assert gms._persistent.shared_claim_count("eng-X", "kv_pool") == 1
+
+    response, _, _ = asyncio.run(
+        gms.handle_request(
+            first,
+            UnclaimPersistentAllocationRequest("eng-X", "kv_pool"),
+            lambda: True,
+        )
+    )
+    assert isinstance(response, UnclaimPersistentAllocationResponse)
+    assert response.unclaimed is False
 
 
 def test_repeated_shared_claim_rejects_larger_size(gms):
