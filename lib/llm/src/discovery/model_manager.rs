@@ -3582,8 +3582,6 @@ mod tests {
                         Vec::new(),
                     )
                     .unwrap();
-                // A second prefill endpoint makes the role ambiguous: the router
-                // drops its target, but decode is live so the namespace stays ready.
                 assert!(
                     manager
                         .get_committed_model("topology-model")

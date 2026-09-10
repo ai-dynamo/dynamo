@@ -695,8 +695,6 @@ mod tests {
         let snapshot = publisher.snapshot();
         let topology = entry(&snapshot, "llama");
 
-        // Parity with the core evaluation: the duplicated role is reported as a
-        // fact and the namespace keeps serving.
         assert_eq!(topology.state, TopologyReadinessState::Ready);
         assert_eq!(topology.duplicate_role_endpoints, [WorkerRole::Decode]);
     }
@@ -1014,8 +1012,6 @@ mod tests {
         let snapshot = publisher.snapshot();
         let topology = entry(&snapshot, "llama");
 
-        // Parity with the core evaluation: every role has a live endpoint, so the
-        // topology stays ready and both duplicated roles are reported.
         assert_eq!(topology.state, TopologyReadinessState::Ready);
         assert_eq!(
             topology.duplicate_role_endpoints,
@@ -1199,8 +1195,6 @@ mod tests {
         let snapshot = publisher.snapshot();
         let topology = entry(&snapshot, "llama");
 
-        // Parity with the core evaluation: a duplicated Encode role is reported
-        // like any other, and does not withdraw the namespace from serving.
         assert_eq!(topology.state, TopologyReadinessState::Ready);
         assert_eq!(topology.duplicate_role_endpoints, [WorkerRole::Encode]);
     }
