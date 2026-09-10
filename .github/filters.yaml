@@ -207,6 +207,7 @@ vllm:
   - 'lib/sidecar/common/**'
   - 'lib/sidecar/vllm/**'
   - 'container/templates/vllm_*'
+  - 'container/patches/vllm/**'
   - '!**/*.md'
   - '!**/*.rst'
 
