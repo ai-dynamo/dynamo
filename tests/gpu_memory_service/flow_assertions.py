@@ -24,13 +24,18 @@ def assert_completion_ok(
     success_message: str,
     retry_timeout: float = 0.0,
     retry_interval: float = 1.0,
-):
+    body_overrides: dict | None = None,
+    min_cached_tokens: int | None = None,
+) -> str:
+    body = {
+        "model": FAULT_TOLERANCE_MODEL_NAME,
+        "prompt": prompt,
+        "max_tokens": 20,
+    }
+    if body_overrides:
+        body.update(body_overrides)
     completion = CompletionPayload(
-        body={
-            "model": FAULT_TOLERANCE_MODEL_NAME,
-            "prompt": prompt,
-            "max_tokens": 20,
-        },
+        body=body,
         expected_response=[],
         expected_log=[],
         timeout=120,
@@ -49,12 +54,27 @@ def assert_completion_ok(
             result = response.json()
             if not isinstance(result, dict) or not result.get("choices"):
                 raise AssertionError(failure_message)
+            output = result["choices"][0].get("text")
+            if not isinstance(output, str):
+                raise AssertionError(failure_message)
             logger.info("%s: %s", success_message, result)
-            return
         except (AssertionError, KeyError, requests.RequestException, ValueError):
             if time.monotonic() >= deadline:
                 raise
             time.sleep(retry_interval)
+            continue
+
+        if min_cached_tokens is not None:
+            usage = result.get("usage") or {}
+            details = usage.get("prompt_tokens_details") or {}
+            cached_tokens = details.get("cached_tokens", 0) or 0
+            assert (
+                isinstance(cached_tokens, int) and cached_tokens >= min_cached_tokens
+            ), (
+                f"{failure_message}: expected at least {min_cached_tokens} cached "
+                f"tokens in the first successful response, got {cached_tokens!r}"
+            )
+        return output
 
 
 def pause_engine(
