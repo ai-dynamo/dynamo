@@ -1,15 +1,29 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! vLLM-compatible image token accounting for Nemotron 3 Nano Omni.
+//! vLLM-compatible image and video prompt accounting for Nemotron 3 Nano Omni.
+
+use std::{path::Path, sync::Arc};
 
 use anyhow::{Result, anyhow, bail, ensure};
 use llm_multimodal::vision::PreProcessorConfig;
+
+use super::{
+    NemotronVideoProcessorContract, VideoRoutingInput, VideoRoutingReplacement,
+    config::read_model_config,
+};
+use crate::{protocols::TokenIdType, tokenizers::traits::Tokenizer};
 
 pub(in crate::preprocessor) const MODEL_TYPE: &str = "NemotronH_Nano_Omni_Reasoning_V3";
 pub(in crate::preprocessor) const IMAGE_START: &str = "<img>";
 pub(in crate::preprocessor) const IMAGE_END: &str = "</img>";
 pub(in crate::preprocessor) const IMAGE_CONTEXT: &str = "<image>";
+const VIDEO_CONTEXT: &str = "<video>";
+// Transformers' multimodal chat normalization emits each media marker followed
+// by a newline. `<video>` is not an atomic Nemotron token, so that boundary
+// changes its final token ID and must be part of the replacement target.
+const VIDEO_CONTEXT_WITH_SEPARATOR: &str = "<video>\n";
+const VIDEO_TRAILING_SEPARATOR: &str = "\n";
 
 /// Routing-only implementation of vLLM's `DynamicResolutionImageTiler`.
 ///
@@ -217,6 +231,326 @@ impl NemotronImageTokenCounter {
     }
 }
 
+/// Routing-only implementation of vLLM's Nemotron video prompt expansion.
+///
+/// Pixel resize and EVS embedding selection remain worker-owned. This adapter
+/// reproduces only the model-visible placeholder sequence used for KV hashing.
+pub(super) struct NemotronVideoRoutingSpec {
+    patch_size: usize,
+    video_target_num_patches: usize,
+    video_maintain_aspect_ratio: bool,
+    video_temporal_patch_size: usize,
+    video_pruning_rate: f64,
+    image_start_token_id: TokenIdType,
+    image_end_token_id: TokenIdType,
+    image_context_token_id: TokenIdType,
+    video_target_tokens: Vec<TokenIdType>,
+    video_trailing_tokens: Vec<TokenIdType>,
+    tokenizer: Arc<dyn Tokenizer>,
+}
+
+impl NemotronVideoRoutingSpec {
+    pub(super) fn from_model_dir(
+        model_id: &str,
+        expected_model_type: &str,
+        model_dir: &Path,
+        tokenizer: Arc<dyn Tokenizer>,
+        processor_contract: NemotronVideoProcessorContract,
+    ) -> Result<Self> {
+        let config = read_model_config(
+            model_id,
+            expected_model_type,
+            MODEL_TYPE,
+            "Nemotron",
+            model_dir,
+        )?;
+        let vision_config = config
+            .get("vision_config")
+            .ok_or_else(|| anyhow!("mm-routing: Nemotron vision_config is missing"))?;
+
+        let patch_size = json_usize(&config, &["patch_size"])
+            .ok_or_else(|| anyhow!("mm-routing: Nemotron patch_size is missing"))?;
+        let downsample_ratio = config
+            .get("downsample_ratio")
+            .and_then(serde_json::Value::as_f64)
+            .ok_or_else(|| anyhow!("mm-routing: Nemotron downsample_ratio is missing"))?;
+        let video_target_num_patches =
+            json_usize(&config, &["vision_config", "video_target_num_patches"]).ok_or_else(
+                || anyhow!("mm-routing: Nemotron video_target_num_patches is missing"),
+            )?;
+        let video_maintain_aspect_ratio = vision_config
+            .get("video_maintain_aspect_ratio")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| {
+                anyhow!("mm-routing: Nemotron video_maintain_aspect_ratio is missing")
+            })?;
+        let video_temporal_patch_size =
+            json_usize(&config, &["vision_config", "video_temporal_patch_size"]).ok_or_else(
+                || anyhow!("mm-routing: Nemotron video_temporal_patch_size is missing"),
+            )?;
+
+        ensure!(
+            patch_size > 0,
+            "mm-routing: Nemotron patch_size must be positive"
+        );
+        ensure!(
+            (downsample_ratio - 0.5).abs() < f64::EPSILON,
+            "mm-routing: Nemotron video routing requires downsample_ratio=0.5"
+        );
+        ensure!(
+            video_target_num_patches > 0,
+            "mm-routing: Nemotron video_target_num_patches must be positive"
+        );
+        ensure!(
+            video_temporal_patch_size > 0,
+            "mm-routing: Nemotron video_temporal_patch_size must be positive"
+        );
+        ensure!(
+            vision_config
+                .get("video_target_img_size")
+                .is_none_or(serde_json::Value::is_null),
+            "mm-routing: Nemotron video_target_img_size is unsupported"
+        );
+        ensure!(
+            processor_contract.video_pruning_rate.is_finite()
+                && (0.0..1.0).contains(&processor_contract.video_pruning_rate),
+            "mm-routing: Nemotron video_pruning_rate must be in [0, 1)"
+        );
+
+        ensure_config_string(&config, "img_start_token", IMAGE_START)?;
+        ensure_config_string(&config, "img_end_token", IMAGE_END)?;
+        ensure_config_string(&config, "img_context_token", IMAGE_CONTEXT)?;
+        ensure_config_string(&config, "video_context_token", VIDEO_CONTEXT)?;
+
+        let expected_image_context_id = image_context_token_id(&config)?;
+        let image_start_token_id = atomic_token_id(tokenizer.as_ref(), IMAGE_START, "image-start")?;
+        let image_end_token_id = atomic_token_id(tokenizer.as_ref(), IMAGE_END, "image-end")?;
+        let resolved_image_context_id =
+            atomic_token_id(tokenizer.as_ref(), IMAGE_CONTEXT, "image-context")?;
+        ensure!(
+            resolved_image_context_id == expected_image_context_id,
+            "mm-routing: Nemotron tokenizer image-context id {resolved_image_context_id} does not match config id {expected_image_context_id}"
+        );
+        let video_target_tokens = tokenizer
+            .encode(VIDEO_CONTEXT_WITH_SEPARATOR)?
+            .token_ids()
+            .to_vec();
+        ensure!(
+            !video_target_tokens.is_empty(),
+            "mm-routing: Nemotron video target tokenized to an empty sequence"
+        );
+        let video_trailing_tokens = tokenizer
+            .encode(VIDEO_TRAILING_SEPARATOR)?
+            .token_ids()
+            .to_vec();
+        ensure!(
+            !video_trailing_tokens.is_empty(),
+            "mm-routing: Nemotron video separator tokenized to an empty sequence"
+        );
+
+        Ok(Self {
+            patch_size,
+            video_target_num_patches,
+            video_maintain_aspect_ratio,
+            video_temporal_patch_size,
+            video_pruning_rate: processor_contract.video_pruning_rate,
+            image_start_token_id,
+            image_end_token_id,
+            image_context_token_id: resolved_image_context_id,
+            video_target_tokens,
+            video_trailing_tokens,
+            tokenizer,
+        })
+    }
+
+    pub(super) fn build_replacement(
+        &self,
+        input: &VideoRoutingInput<'_>,
+    ) -> Result<VideoRoutingReplacement> {
+        self.validate_input(input)?;
+        let tokens_per_tubelet = self.tokens_per_tubelet(input)?;
+        let frame_duration_ms = (1000.0 / input.source_fps) as usize;
+        let frame_indices = input
+            .sampled_timestamps
+            .iter()
+            .map(|timestamp| {
+                let index = (timestamp * input.source_fps).round_ties_even();
+                ensure!(
+                    index.is_finite() && index >= 0.0 && index <= usize::MAX as f64,
+                    "mm-routing: Nemotron sampled frame index is out of range"
+                );
+                Ok(index as usize)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let context_tokens = tokens_per_tubelet.iter().try_fold(0usize, |sum, count| {
+            sum.checked_add(*count)
+                .ok_or_else(|| anyhow!("mm-routing: Nemotron video token count overflow"))
+        })?;
+        let mut replacement_tokens = Vec::with_capacity(
+            context_tokens
+                .checked_add(tokens_per_tubelet.len().saturating_mul(32))
+                .ok_or_else(|| anyhow!("mm-routing: Nemotron replacement capacity overflow"))?,
+        );
+        for (group_index, (frame_group, &num_tokens)) in frame_indices
+            .chunks(self.video_temporal_patch_size)
+            .zip(&tokens_per_tubelet)
+            .enumerate()
+        {
+            let separator = frame_separator(
+                frame_group,
+                group_index,
+                self.video_temporal_patch_size,
+                frame_duration_ms,
+            );
+            let encoded = self.tokenizer.encode(&separator).map_err(|error| {
+                anyhow!(
+                    "mm-routing: failed to tokenize Nemotron video separator {separator:?}: {error}"
+                )
+            })?;
+            replacement_tokens.extend_from_slice(encoded.token_ids());
+            replacement_tokens.push(self.image_start_token_id);
+            replacement_tokens.extend(std::iter::repeat_n(self.image_context_token_id, num_tokens));
+            replacement_tokens.push(self.image_end_token_id);
+        }
+        replacement_tokens.extend_from_slice(&self.video_trailing_tokens);
+
+        Ok(VideoRoutingReplacement {
+            placeholder_token_id: self.image_context_token_id,
+            // vLLM expands both Nemotron images and videos with <image>. Keep
+            // the existing image-run event normalizer for mixed-version safety.
+            event_video_token_id: None,
+            target_tokens: self.video_target_tokens.clone(),
+            replacement_tokens,
+        })
+    }
+
+    fn validate_input(&self, input: &VideoRoutingInput<'_>) -> Result<()> {
+        ensure!(input.frame_count > 0, "mm-routing: Nemotron video is empty");
+        ensure!(
+            input.width > 0 && input.height > 0,
+            "mm-routing: Nemotron video dimensions must be positive"
+        );
+        ensure!(
+            input.sampled_timestamps.len() == input.frame_count,
+            "mm-routing: Nemotron sampled timestamp count does not match frame count"
+        );
+        ensure!(
+            input.source_fps.is_finite() && input.source_fps > 0.0,
+            "mm-routing: Nemotron source fps must be finite and positive"
+        );
+        ensure!(
+            input
+                .sampled_timestamps
+                .iter()
+                .all(|timestamp| timestamp.is_finite() && *timestamp >= 0.0),
+            "mm-routing: Nemotron sampled timestamps must be finite and non-negative"
+        );
+        ensure!(
+            input
+                .sampled_timestamps
+                .windows(2)
+                .all(|pair| pair[0] <= pair[1]),
+            "mm-routing: Nemotron sampled timestamps must be non-decreasing"
+        );
+        Ok(())
+    }
+
+    fn tokens_per_tubelet(&self, input: &VideoRoutingInput<'_>) -> Result<Vec<usize>> {
+        let (patch_width, patch_height) = self.target_patch_grid(input.width, input.height)?;
+        let feature_size = (patch_height / 2)
+            .checked_mul(patch_width / 2)
+            .ok_or_else(|| anyhow!("mm-routing: Nemotron video feature size overflow"))?;
+        let tubelets = input.frame_count.div_ceil(self.video_temporal_patch_size);
+        if self.video_pruning_rate > 0.0 {
+            let total = feature_size
+                .checked_mul(tubelets)
+                .ok_or_else(|| anyhow!("mm-routing: Nemotron video token count overflow"))?;
+            let retained = ((total as f64) * (1.0 - self.video_pruning_rate)) as usize;
+            let mut counts = vec![0; tubelets];
+            counts[0] = feature_size.max(retained);
+            Ok(counts)
+        } else {
+            Ok(vec![feature_size; tubelets])
+        }
+    }
+
+    /// Match vLLM's `_compute_aspect_preserving_size` in patch-grid space.
+    fn target_patch_grid(&self, width: u32, height: u32) -> Result<(usize, usize)> {
+        let target = self.video_target_num_patches;
+        let (mut patch_width, mut patch_height) = if self.video_maintain_aspect_ratio {
+            let aspect = f64::from(width) / f64::from(height.max(1));
+            let patch_height = ((target as f64 / aspect).sqrt()).round_ties_even() as usize;
+            let patch_width = ((target as f64 * aspect).sqrt()).round_ties_even() as usize;
+            (patch_width.max(1), patch_height.max(1))
+        } else {
+            let side = (target as f64).sqrt() as usize;
+            let side = 2.max(side / 2 * 2);
+            (side, side)
+        };
+
+        if self.video_maintain_aspect_ratio {
+            let up = |value: usize| value + ((2 - value % 2) % 2);
+            let down = |value: usize| value - value % 2;
+            let width_up = up(patch_width);
+            let height_up = up(patch_height);
+            if width_up
+                .checked_mul(height_up)
+                .is_some_and(|area| area <= target)
+            {
+                patch_width = width_up;
+                patch_height = height_up;
+            } else {
+                patch_width = 2.max(down(patch_width));
+                patch_height = 2.max(down(patch_height));
+            }
+        }
+
+        // Preserve the pixel-space overflow checks made by the worker path.
+        patch_width
+            .checked_mul(self.patch_size)
+            .and_then(|_| patch_height.checked_mul(self.patch_size))
+            .ok_or_else(|| anyhow!("mm-routing: Nemotron video target size overflow"))?;
+        Ok((patch_width, patch_height))
+    }
+}
+
+fn atomic_token_id(tokenizer: &dyn Tokenizer, token: &str, label: &str) -> Result<TokenIdType> {
+    let ids = tokenizer.encode(token)?.token_ids().to_vec();
+    ensure!(
+        ids.len() == 1,
+        "mm-routing: Nemotron {label} token {token:?} encoded to {} ids ({ids:?})",
+        ids.len()
+    );
+    Ok(ids[0])
+}
+
+fn frame_separator(
+    frame_indices: &[usize],
+    group_index: usize,
+    temporal_patch_size: usize,
+    frame_duration_ms: usize,
+) -> String {
+    let mut parts = Vec::with_capacity(frame_indices.len());
+    for (index_in_group, frame_index) in frame_indices.iter().enumerate() {
+        let label = if index_in_group == 0 {
+            "Frame"
+        } else {
+            "frame"
+        };
+        let ordinal = group_index
+            .saturating_mul(temporal_patch_size)
+            .saturating_add(index_in_group)
+            .saturating_add(1);
+        let timestamp = *frame_index as f64 * frame_duration_ms as f64 / 1000.0;
+        parts.push(format!(
+            "{label} {ordinal} sampled at {timestamp:.2} seconds"
+        ));
+    }
+    let prefix = if group_index == 0 { "" } else { "\n" };
+    format!("{prefix}{}: ", parts.join(" and "))
+}
+
 pub(in crate::preprocessor) fn supports_model_type(model_type: Option<&str>) -> bool {
     model_type.is_some_and(|value| value.eq_ignore_ascii_case(MODEL_TYPE))
 }
@@ -294,7 +628,61 @@ fn json_usize(config: &serde_json::Value, path: &[&str]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    use crate::tokenizers::{Encoding, traits::DecodeResult};
+
     use super::*;
+
+    struct VideoTokenizer;
+
+    impl crate::tokenizers::traits::Encoder for VideoTokenizer {
+        fn encode(&self, input: &str) -> anyhow::Result<Encoding> {
+            let ids = match input {
+                VIDEO_CONTEXT_WITH_SEPARATOR => vec![1060, 24073, 1561],
+                VIDEO_TRAILING_SEPARATOR => vec![102],
+                IMAGE_START => vec![19],
+                IMAGE_END => vec![20],
+                IMAGE_CONTEXT => vec![18],
+                "Frame 1 sampled at 0.00 seconds and frame 2 sampled at 0.03 seconds: " => {
+                    vec![100]
+                }
+                "\nFrame 3 sampled at 0.07 seconds: " => vec![101],
+                _ => anyhow::bail!("unexpected tokenization input {input:?}"),
+            };
+            Ok(Encoding::Sp(ids))
+        }
+
+        fn encode_batch(&self, inputs: &[&str]) -> anyhow::Result<Vec<Encoding>> {
+            inputs.iter().map(|input| self.encode(input)).collect()
+        }
+    }
+
+    impl crate::tokenizers::traits::Decoder for VideoTokenizer {
+        fn decode(
+            &self,
+            _token_ids: &[TokenIdType],
+            _skip_special_tokens: bool,
+        ) -> anyhow::Result<DecodeResult> {
+            Ok(DecodeResult::Complete(String::new()))
+        }
+    }
+
+    impl Tokenizer for VideoTokenizer {}
+
+    fn video_spec(pruning_rate: f64) -> NemotronVideoRoutingSpec {
+        NemotronVideoRoutingSpec {
+            patch_size: 16,
+            video_target_num_patches: 1024,
+            video_maintain_aspect_ratio: true,
+            video_temporal_patch_size: 2,
+            video_pruning_rate: pruning_rate,
+            image_start_token_id: 19,
+            image_end_token_id: 20,
+            image_context_token_id: 18,
+            video_target_tokens: vec![1060, 24073, 1561],
+            video_trailing_tokens: vec![102],
+            tokenizer: Arc::new(VideoTokenizer),
+        }
+    }
 
     fn model_config() -> serde_json::Value {
         serde_json::json!({
@@ -307,7 +695,11 @@ mod tests {
             "img_context_token_id": 18,
             "img_start_token": IMAGE_START,
             "img_end_token": IMAGE_END,
+            "video_context_token": VIDEO_CONTEXT,
             "vision_config": {
+                "video_target_num_patches": 1024,
+                "video_maintain_aspect_ratio": true,
+                "video_temporal_patch_size": 2,
                 "args": {
                     "min_num_patches": 1024,
                     "max_num_patches": 13312
@@ -365,5 +757,105 @@ mod tests {
         let mut config = model_config();
         config["img_end_token"] = serde_json::json!("<different>");
         assert!(image_context_token_id(&config).is_err());
+    }
+
+    #[test]
+    fn video_geometry_matches_vllm_0_28_goldens() {
+        let spec = video_spec(0.0);
+        assert_eq!(spec.target_patch_grid(512, 512).unwrap(), (32, 32));
+        assert_eq!(spec.target_patch_grid(640, 360).unwrap(), (42, 24));
+        assert_eq!(spec.target_patch_grid(3760, 1120).unwrap(), (58, 16));
+    }
+
+    #[test]
+    fn video_replacement_matches_vllm_0_28_evs_layout() {
+        let input = VideoRoutingInput {
+            frame_count: 3,
+            width: 512,
+            height: 512,
+            source_fps: 30.0,
+            sampled_timestamps: &[0.0, 1.0 / 30.0, 2.0 / 30.0],
+        };
+        let replacement = video_spec(0.5).build_replacement(&input).unwrap();
+
+        assert_eq!(replacement.placeholder_token_id, 18);
+        assert_eq!(replacement.event_video_token_id, None);
+        assert_eq!(replacement.target_tokens, [1060, 24073, 1561]);
+        assert_eq!(replacement.replacement_tokens.len(), 263);
+        assert_eq!(replacement.replacement_tokens[0], 100);
+        assert_eq!(replacement.replacement_tokens[1], 19);
+        assert!(
+            replacement.replacement_tokens[2..258]
+                .iter()
+                .all(|id| *id == 18)
+        );
+        assert_eq!(
+            &replacement.replacement_tokens[258..],
+            &[20, 101, 19, 20, 102]
+        );
+    }
+
+    #[test]
+    fn video_replacement_without_pruning_keeps_each_tubelet() {
+        let input = VideoRoutingInput {
+            frame_count: 3,
+            width: 512,
+            height: 512,
+            source_fps: 30.0,
+            sampled_timestamps: &[0.0, 1.0 / 30.0, 2.0 / 30.0],
+        };
+        let replacement = video_spec(0.0).build_replacement(&input).unwrap();
+
+        assert_eq!(replacement.replacement_tokens.len(), 519);
+        assert_eq!(
+            replacement
+                .replacement_tokens
+                .iter()
+                .filter(|id| **id == 18)
+                .count(),
+            512
+        );
+    }
+
+    #[test]
+    fn loads_video_contract_from_checkpoint_config() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.json"), model_config().to_string()).unwrap();
+
+        let spec = NemotronVideoRoutingSpec::from_model_dir(
+            "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-FP8",
+            MODEL_TYPE,
+            dir.path(),
+            Arc::new(VideoTokenizer),
+            NemotronVideoProcessorContract {
+                video_pruning_rate: 0.5,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(spec.video_target_num_patches, 1024);
+        assert_eq!(spec.video_temporal_patch_size, 2);
+        assert_eq!(spec.video_target_tokens, [1060, 24073, 1561]);
+    }
+
+    #[test]
+    fn rejects_unsupported_video_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = model_config();
+        config["vision_config"]["video_target_img_size"] = serde_json::json!(512);
+        std::fs::write(dir.path().join("config.json"), config.to_string()).unwrap();
+
+        assert!(
+            NemotronVideoRoutingSpec::from_model_dir(
+                "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-FP8",
+                MODEL_TYPE,
+                dir.path(),
+                Arc::new(VideoTokenizer),
+                NemotronVideoProcessorContract {
+                    video_pruning_rate: 0.5,
+                },
+            )
+            .is_err()
+        );
     }
 }
