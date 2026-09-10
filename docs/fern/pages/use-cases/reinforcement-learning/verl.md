@@ -24,7 +24,7 @@ The native router and ThunderAgent are different scheduling paths. Choose one be
 
 - A Linux GPU environment that satisfies the selected verl, Dynamo, vLLM, CUDA, and PyTorch versions
 - `git`, Python, `etcd`, and `nats-server`
-- `flash-attn`, installed explicitly. The selected verl core reaches `flash_attn.bert_padding` through `verl/utils/attention_utils.py` on the CUDA path with no fallback, but declares the dependency in neither `requirements.txt` nor `pyproject.toml`, and the installer does not add it. Without it the training iteration stops at `ModuleNotFoundError: No module named 'flash_attn'`
+- `flash-attn`, installed explicitly as its own step under Prepare the Source. The selected verl core reaches `flash_attn.bert_padding` through `verl/utils/attention_utils.py` on the CUDA path with no fallback, but declares the dependency in neither `requirements.txt` nor `pyproject.toml`, and the installer does not add it. Without it the training iteration stops at `ModuleNotFoundError: No module named 'flash_attn'`
 - Model and dataset paths visible on every participating node
 - Enough GPUs for the trainer and rollout layout; the validation smoke is not a full training run
 
@@ -48,6 +48,19 @@ The recipe does not pin a complete Dynamo/vLLM image for the native-router path.
 
 > [!IMPORTANT]
 > Build that environment on vLLM `0.26.0`, which is what `ai-dynamo[vllm]==1.4.x` pins. The verl commit selected by this snapshot imports `FusedMoE` from `vllm.model_executor.layers.fused_moe.layer` at import time in `verl/utils/vllm/vllm_fp8_utils.py`. vLLM exports that name up to and including `0.26.0` and renamed it to `FusedMoEFactory` in `0.27.0`, so the import fails from `0.27.0` onward. On `ai-dynamo[vllm]==1.5.0`, which pins `vllm[flashinfer,runai,otel]==0.28.0`, loading the Dynamo rollout backend raises `ImportError: FP8 quantization not available` and the Dynamo stack never starts.
+
+### Install flash-attn
+
+`install_verl.sh` does not install `flash-attn`, so add it to the same environment before running anything below:
+
+```bash
+pip install packaging psutil ninja
+MAX_JOBS=4 pip install flash-attn --no-build-isolation
+```
+
+Run this after PyTorch is installed. `--no-build-isolation` is what lets the build compile against the PyTorch already in the environment; upstream requires PyTorch `2.2` or newer and CUDA `12.0` or newer. Confirm `ninja --version` exits `0` first — a broken `ninja` leaves the build single-threaded and it can then take hours instead of minutes. Lower `MAX_JOBS` if the machine runs out of RAM during the build. See the [FlashAttention project](https://github.com/Dao-AILab/flash-attention) for platform notes and prebuilt wheels.
+
+The selected verl also lists `flash-attn` in the `gpu` extra of its `setup.py` (`GPU_REQUIRES`), so `pip install -e '.[gpu]'` from the verl checkout is an equivalent route that additionally installs `liger-kernel`. Neither installer path the recipe uses requests that extra.
 
 ## Run the Validation Smoke
 
