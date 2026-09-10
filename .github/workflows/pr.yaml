@@ -847,7 +847,9 @@ jobs:
       run_sanity_check: false
       gpu_test_platforms: '["arm64"]'
       gpu_test_markers: vllm and (gpu_1 or gpu_2)
-      gpu_test_timeout_minutes: 240
+      # Both GPU stages get this budget, so keep 2x it under GitHub's
+      # 360-minute default job timeout; overrunning cancels the job with no results.
+      gpu_test_timeout_minutes: 120
       run_gpu_parallel_tests: true
       # Admit large-memory profiles while retaining headroom below GB300 capacity.
       gpu_parallel_max_vram_gib: '280'
@@ -916,7 +918,9 @@ jobs:
       run_sanity_check: false
       gpu_test_platforms: '["arm64"]'
       gpu_test_markers: sglang and (gpu_1 or gpu_2)
-      gpu_test_timeout_minutes: 240
+      # Both GPU stages get this budget, so keep 2x it under GitHub's
+      # 360-minute default job timeout; overrunning cancels the job with no results.
+      gpu_test_timeout_minutes: 120
       run_gpu_parallel_tests: true
       # Admit large-memory profiles while retaining headroom below GB300 capacity.
       gpu_parallel_max_vram_gib: '280'
@@ -985,7 +989,9 @@ jobs:
       run_sanity_check: false
       gpu_test_platforms: '["arm64"]'
       gpu_test_markers: trtllm and (gpu_1 or gpu_2)
-      gpu_test_timeout_minutes: 240
+      # Both GPU stages get this budget, so keep 2x it under GitHub's
+      # 360-minute default job timeout; overrunning cancels the job with no results.
+      gpu_test_timeout_minutes: 120
       run_gpu_parallel_tests: true
       # Admit large-memory profiles while retaining headroom below GB300 capacity.
       gpu_parallel_max_vram_gib: '280'
