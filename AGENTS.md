@@ -82,12 +82,15 @@ a maintainer comments `/nvskills-ci` on the PR.
 
 ## Improving These Instructions
 
-If these skills or instructions misled you, blocked you, contradicted what you verified live, or left a component
-or situation uncovered, do not route around it silently: invoke the `report-skillpack-issue` skill
-(`.agents/skills/report-skillpack-issue/`). It owns the procedure (defect classes, version and identity capture,
-sanitization for a public repository, duplicate search across titles and bodies, one issue per session, operator
-approval before filing, and the append-only fallback when filing is not possible); this section is only the pointer,
-so the two cannot drift apart.
+If these skills, instructions, role contracts, or this file misled you, blocked you, contradicted what you verified
+live, or left a component or situation uncovered, do not route around it silently: invoke the
+`report-skillpack-issue` skill (`.agents/skills/report-skillpack-issue/`), which every role contract declares and
+which owns the full procedure. If your harness cannot surface that skill, follow this minimum, which the skill
+also enforces: search existing reports by title and body first and comment on a duplicate rather than filing;
+prepare at most one issue per session with findings batched; identify yourself as an AI agent with your driver
+model and the skills commit; sanitize completely (no workload details, traffic numbers, cluster or namespace
+names, company names, or credentials); and show the operator the full draft and file only on their approval,
+using the `[AGENT]: ` title prefix.
 
 ## Optimization Role Dispatch
 

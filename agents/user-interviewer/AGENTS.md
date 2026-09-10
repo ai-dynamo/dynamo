@@ -9,6 +9,7 @@ intent: >-
 skills:
   - synthesize-user-workload
   - author-baseline-dgd
+  - report-skillpack-issue
 "Required Readings: Docs":
   - agent-docs/references/definitions.md
 "Required Reading: Rules":

@@ -1,6 +1,6 @@
 ---
 name: report-skillpack-issue
-description: Reports a defect in the optimization skillpack itself (the skills under .agents/skills/ and the documents under agent-docs/) as a GitHub issue on ai-dynamo/dynamo, using the repository's agent-reported issue conventions. Use when a pack rule contradicts another pack rule, a cross-reference points at a file or section that does not exist, an instruction cannot be executed as written, a factual claim about a tool or flag is wrong, or a rule repeatedly fights the observed environment. Do not use for bugs in Dynamo itself, for engagement-specific problems, or to request new features.
+description: Reports a defect in the optimization skillpack itself (the skills under .agents/skills/, the documents under agent-docs/, the role contracts under agents/, and the repository AGENTS.md files) as a GitHub issue on ai-dynamo/dynamo, using the repository's agent-reported issue conventions. Use when a pack rule contradicts another pack rule, a cross-reference points at a file or section that does not exist, an instruction cannot be executed as written, a factual claim about a tool or flag is wrong, or a rule repeatedly fights the observed environment. Do not use for bugs in Dynamo itself, for engagement-specific problems, or to request new features.
 license: Apache-2.0
 user-invocable: true
 metadata:
@@ -65,8 +65,8 @@ version, and defect class are usually enough to reproduce.
 
 ## Step 4: Check for an existing report
 
-Search titles AND bodies, with and without the label, because step 6 permits filing without the
-label when the reporter lacks permissions and step 4 places secondary defects in the body:
+Search titles AND bodies, with and without the label, because labels can be silently dropped at
+filing time (step 6) and secondary defects live in issue bodies:
 
 ```bash
 gh issue list --repo ai-dynamo/dynamo --state all --search "<rule-or-skill filename> in:title,body"
@@ -74,8 +74,14 @@ gh issue list --repo ai-dynamo/dynamo --state all --label agent-reported --searc
 ```
 
 Review every hit whose title starts with `[AGENT]: ` or whose body mentions the same file and
-defect class. If a matching issue exists, add a comment confirming the defect at your pack version
-instead of filing a duplicate. Comments require the same operator approval as filing (step 6).
+defect class. If a matching issue exists, do not file a duplicate: draft the same body (step 5),
+show it to the operator (step 6), and on approval add it as a comment confirming the defect at
+your pack version:
+
+```bash
+gh issue comment <issue number> --repo ai-dynamo/dynamo --body-file /tmp/skillpack-issue-body.md
+```
+
 File at most one new issue per session; if the session surfaced several defects, put the most
 impactful one in the issue and list the rest briefly in its body.
 
@@ -83,8 +89,8 @@ impactful one in the issue and list the rest briefly in its body.
 
 Title: `[AGENT]: <file path relative to repo root>: <one-line defect>`.
 
-Write the body to a scratch file (never inline in a shell command), following the agent-reported template's
-structure:
+Write the body to `/tmp/skillpack-issue-body.md` with a file-writing tool, never by echoing it
+through a shell, following the agent-reported template's structure:
 
 ```markdown
 ### Agent identity
@@ -109,15 +115,31 @@ did wrong, or had to route around>
 ## Step 6: Get operator approval, then file
 
 Filing a public issue is an external side effect. Show the operator the complete drafted title and body and file
-only on their approval. Pass the body as a file and the title as a quoted variable so that Markdown containing
-backticks or `$()` is never interpreted by the shell:
+only on their approval. Quoting `"$ISSUE_TITLE"` at the call site protects nothing on its own: backticks and
+`$()` in a drafted title are interpreted when the variable is *assigned*, and the pack's own style backticks
+every flag and filename. Assign the title from a quoted heredoc in the same shell invocation as the filing
+command (harness shells do not persist variables between calls), and pass the body as the scratch file from
+step 5:
 
 ```bash
-gh issue create --repo ai-dynamo/dynamo --title "$ISSUE_TITLE" --body-file <draft file> --label agent-reported
+ISSUE_TITLE=$(cat <<'EOF'
+[AGENT]: <file path relative to repo root>: <one-line defect>
+EOF
+)
+gh issue create --repo ai-dynamo/dynamo --title "$ISSUE_TITLE" \
+  --body-file /tmp/skillpack-issue-body.md --label agent-reported
 ```
 
-If label assignment is rejected for lack of permissions, file without the label; maintainers also triage by the
-`[AGENT]: ` title prefix.
+GitHub does not raise an error when the reporter may not set labels: "Only users with push access can set
+labels for new issues. Labels are silently dropped otherwise." Check after filing instead of branching on an
+error:
+
+```bash
+gh issue view <issue number> --repo ai-dynamo/dynamo --json labels --jq '[.labels[].name]'
+```
+
+If `agent-reported` is absent, tell the operator so a maintainer can add it; maintainers also triage by the
+`[AGENT]: ` title prefix, and the step 4 search covers unlabeled reports.
 
 ## Fallback: no GitHub access or no approval
 
