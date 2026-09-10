@@ -1570,8 +1570,8 @@ pub struct OpenAIPreprocessor {
     token_budget: Option<TokenBudget>,
     /// Model context limit used by the embedding truncation contract.
     context_length: u32,
-    /// Optional shutdown signal for detached speculative-prefill tasks.
-    speculative_prefill_cancel: Option<CancellationToken>,
+    /// Tracks warmups and cancels them when this preprocessor is retired.
+    speculative_prefill_tasks: speculative_prefill::PrefillTasks,
     /// Per-image token-count engine. `None` when the feature is disabled, the
     /// model isn't covered by the registry, or `preprocessor_config.json` is
     /// unreadable.
@@ -2576,7 +2576,9 @@ impl OpenAIPreprocessor {
             media_loader,
             token_budget,
             context_length,
-            speculative_prefill_cancel,
+            speculative_prefill_tasks: speculative_prefill::PrefillTasks::new(
+                speculative_prefill_cancel.as_ref(),
+            ),
             #[cfg(feature = "mm-routing")]
             image_token_counter,
             #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
@@ -7114,7 +7116,7 @@ impl
             &next,
             &self.formatter,
             &self.tokenizer,
-            self.speculative_prefill_cancel.as_ref(),
+            &self.speculative_prefill_tasks,
         );
 
         let final_stream = crate::request_trace::wrap_chat_request_end_stream(

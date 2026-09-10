@@ -22,6 +22,7 @@ use futures::stream::StreamExt;
 use minijinja::value::Value;
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider};
 use dynamo_runtime::pipeline::{Context as PipelineContext, Error, ManyOut, SingleIn};
@@ -43,6 +44,31 @@ const PREFILL_WIND_DOWN_GRACE: Duration = Duration::from_secs(5);
 
 /// Makes the downstream context reachable from timeout and cancellation paths.
 type PrefillContextSlot = Mutex<Option<Arc<dyn AsyncEngineContext>>>;
+
+/// Owns a preprocessor's warmups, including tasks waiting for a client turn.
+/// Dropping the preprocessor requests cooperative, bounded cleanup of every task.
+pub(super) struct PrefillTasks {
+    cancel: CancellationToken,
+    tracker: TaskTracker,
+}
+
+impl PrefillTasks {
+    pub(super) fn new(parent: Option<&CancellationToken>) -> Self {
+        Self {
+            cancel: parent
+                .map(CancellationToken::child_token)
+                .unwrap_or_default(),
+            tracker: TaskTracker::new(),
+        }
+    }
+}
+
+impl Drop for PrefillTasks {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        self.tracker.close();
+    }
+}
 
 /// A minimal `OAIChatLikeRequest` for speculative next-turn prefill.
 /// Holds the full conversation (including a new assistant message) and
@@ -86,7 +112,7 @@ impl OAIChatLikeRequest for SpeculativePrefillRequest {
 /// Warmups stop on timeout or cancellation and allow bounded downstream cleanup.
 ///
 /// When the flag is not set, returns the stream unmodified with zero overhead.
-pub fn maybe_wrap_stream(
+pub(super) fn maybe_wrap_stream(
     stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
     request: &NvCreateChatCompletionRequest,
     request_id: &str,
@@ -95,7 +121,7 @@ pub fn maybe_wrap_stream(
     >,
     formatter: &Arc<dyn OAIPromptFormatter>,
     tokenizer: &Arc<dyn Tokenizer>,
-    cancel: Option<&CancellationToken>,
+    tasks: &PrefillTasks,
 ) -> Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>> {
     let enabled = request
         .nvext
@@ -114,16 +140,16 @@ pub fn maybe_wrap_stream(
     let formatter = formatter.clone();
     let tokenizer = tokenizer.clone();
     let messages = request.inner.messages.clone();
-    let cancel = cancel.cloned();
+    let cancel = tasks.cancel.clone();
     let request_id = request_id.to_string();
     let model = request.inner.model.clone();
-    tokio::spawn(async move {
+    tasks.tracker.spawn(async move {
         // The warmup timeout begins after the client turn completes.
         let response_text = tokio::select! {
             biased;
 
             // Biased selects must check cancellation before ready work.
-            () = cancelled(cancel.clone()) => {
+            () = cancel.cancelled() => {
                 tracing::debug!(
                     request_id = %request_id,
                     model = %model,
@@ -154,7 +180,7 @@ pub fn maybe_wrap_stream(
         let wind_down = tokio::select! {
             biased;
 
-            () = cancelled(cancel) => {
+            () = cancel.cancelled() => {
                 tracing::debug!(
                     request_id = %request_id,
                     model = %model,
@@ -238,14 +264,6 @@ pub fn maybe_wrap_stream(
     }))
 }
 
-/// Waits forever when no cancellation token is supplied.
-async fn cancelled(token: Option<CancellationToken>) {
-    match token {
-        Some(token) => token.cancelled().await,
-        None => std::future::pending().await,
-    }
-}
-
 /// Signals downstream; the caller must keep polling for cleanup to run.
 fn stop_downstream(slot: &PrefillContextSlot) {
     if let Some(context) = slot.lock().take() {
@@ -253,7 +271,7 @@ fn stop_downstream(slot: &PrefillContextSlot) {
     }
 }
 
-/// Fire-and-forget task that renders the next-turn prefix and sends it
+/// Tracked task that renders the next-turn prefix and sends it
 /// through the pipeline as a `max_tokens=1` request to warm the KV cache.
 async fn prefill_task(
     next: Arc<
@@ -353,6 +371,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct StallingBackend {
         generate_calls: AtomicUsize,
+        dispatched: tokio::sync::Notify,
         stream_dropped: Arc<AtomicBool>,
         context: Mutex<Option<Arc<dyn AsyncEngineContext>>>,
     }
@@ -387,6 +406,7 @@ mod tests {
             let (_request, context) = request.transfer(());
             let ctx = context.context();
             *self.context.lock() = Some(ctx.clone());
+            self.dispatched.notify_one();
 
             let probe = DropProbe(self.stream_dropped.clone());
             let stalled = futures::stream::poll_fn(move |_cx| {
@@ -608,12 +628,80 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn dropping_owner_stops_and_drains_a_permanently_pending_warmup() {
+        let (formatter, tokenizer) = sample_model_parts();
+        let backend = Arc::new(StallingBackend::default());
+        let engine: Arc<BackendEngine> = backend.clone();
+        let tasks = PrefillTasks::new(None);
+        let tracker = tasks.tracker.clone();
+        let request = chat_request(true);
+        let wrapped = maybe_wrap_stream(
+            upstream(),
+            &request,
+            "req-owner-drop",
+            &engine,
+            &formatter,
+            &tokenizer,
+            &tasks,
+        );
+        drop(engine);
+        let items: Vec<_> = wrapped.collect().await;
+        assert_eq!(items.len(), 2);
+        backend.dispatched.notified().await;
+        assert_eq!(tracker.len(), 1);
+
+        let stopped = backend.context.lock().as_ref().unwrap().clone();
+        let started = Instant::now();
+        drop(tasks);
+        stopped.stopped().await;
+        assert!(
+            !backend.stream_dropped(),
+            "cleanup must get its grace period"
+        );
+        assert!(!tracker.is_empty(), "the draining task must remain tracked");
+        tracker.wait().await;
+
+        assert_eq!(started.elapsed(), PREFILL_WIND_DOWN_GRACE);
+        assert!(backend.stream_dropped());
+        assert_eq!(Arc::strong_count(&backend), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropping_owner_cancels_tasks_waiting_for_client_completion() {
+        let (formatter, tokenizer) = sample_model_parts();
+        let backend = Arc::new(StallingBackend::default());
+        let engine: Arc<BackendEngine> = backend.clone();
+        let tasks = PrefillTasks::new(None);
+        let tracker = tasks.tracker.clone();
+        let request = chat_request(true);
+        let wrapped = maybe_wrap_stream(
+            upstream(),
+            &request,
+            "req-owner-before-dispatch",
+            &engine,
+            &formatter,
+            &tokenizer,
+            &tasks,
+        );
+        drop(engine);
+        assert_eq!(tracker.len(), 1);
+        drop(tasks);
+        tracker.wait().await;
+
+        let items: Vec<_> = wrapped.collect().await;
+        assert_eq!(items.len(), 2);
+        assert_eq!(backend.generate_calls(), 0);
+        assert_eq!(Arc::strong_count(&backend), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn stalled_warmup_is_released_when_the_lifetime_bound_elapses() {
         let (formatter, tokenizer) = sample_model_parts();
         let backend = Arc::new(StallingBackend::default());
         let engine: Arc<BackendEngine> = backend.clone();
 
         let request = chat_request(true);
+        let tasks = PrefillTasks::new(None);
         let wrapped = maybe_wrap_stream(
             upstream(),
             &request,
@@ -621,7 +709,7 @@ mod tests {
             &engine,
             &formatter,
             &tokenizer,
-            None,
+            &tasks,
         );
         drop(engine);
 
@@ -656,7 +744,7 @@ mod tests {
         assert_eq!(
             Arc::strong_count(&backend),
             1,
-            "detached task should have released the engine it captured"
+            "tracked task should have released the engine it captured"
         );
     }
 
@@ -667,6 +755,7 @@ mod tests {
         let engine: Arc<BackendEngine> = backend.clone();
 
         let request = chat_request(true);
+        let tasks = PrefillTasks::new(None);
         let wrapped = maybe_wrap_stream(
             slow_upstream(PREFILL_TASK_TIMEOUT * 2),
             &request,
@@ -674,7 +763,7 @@ mod tests {
             &engine,
             &formatter,
             &tokenizer,
-            None,
+            &tasks,
         );
         drop(engine);
 
@@ -720,6 +809,7 @@ mod tests {
         let cancel = CancellationToken::new();
 
         let request = chat_request(true);
+        let tasks = PrefillTasks::new(Some(&cancel));
         let wrapped = maybe_wrap_stream(
             upstream(),
             &request,
@@ -727,7 +817,7 @@ mod tests {
             &engine,
             &formatter,
             &tokenizer,
-            Some(&cancel),
+            &tasks,
         );
         drop(engine);
 
@@ -766,6 +856,7 @@ mod tests {
         let cancel = CancellationToken::new();
 
         let request = chat_request(true);
+        let tasks = PrefillTasks::new(Some(&cancel));
         let wrapped = maybe_wrap_stream(
             upstream(),
             &request,
@@ -773,7 +864,7 @@ mod tests {
             &engine,
             &formatter,
             &tokenizer,
-            Some(&cancel),
+            &tasks,
         );
         drop(engine);
 
@@ -814,6 +905,7 @@ mod tests {
         cancel.cancel();
 
         let request = chat_request(true);
+        let tasks = PrefillTasks::new(Some(&cancel));
         let wrapped = maybe_wrap_stream(
             upstream(),
             &request,
@@ -821,7 +913,7 @@ mod tests {
             &engine,
             &formatter,
             &tokenizer,
-            Some(&cancel),
+            &tasks,
         );
         drop(engine);
 
@@ -856,6 +948,7 @@ mod tests {
 
         let cancel = CancellationToken::new();
         let request = chat_request(true);
+        let tasks = PrefillTasks::new(Some(&cancel));
         let wrapped = maybe_wrap_stream(
             upstream(),
             &request,
@@ -863,7 +956,7 @@ mod tests {
             &engine,
             &formatter,
             &tokenizer,
-            Some(&cancel),
+            &tasks,
         );
         drop(engine);
 
@@ -900,6 +993,7 @@ mod tests {
         let engine: Arc<BackendEngine> = backend.clone();
 
         let request = chat_request(false);
+        let tasks = PrefillTasks::new(None);
         let wrapped = maybe_wrap_stream(
             upstream(),
             &request,
@@ -907,7 +1001,7 @@ mod tests {
             &engine,
             &formatter,
             &tokenizer,
-            None,
+            &tasks,
         );
         drop(engine);
 
