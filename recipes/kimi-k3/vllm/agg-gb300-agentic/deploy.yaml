@@ -135,6 +135,8 @@ spec:
             value: "1"
           - name: TRANSFORMERS_OFFLINE
             value: "1"
+          - name: DYN_SELF_HOST_METADATA
+            value: "1"
           - name: VLLM_USE_NCCL_SYMM_MEM
             value: "0"
           - name: DYN_REQUEST_PLANE
