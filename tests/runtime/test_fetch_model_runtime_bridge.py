@@ -54,7 +54,6 @@ CHILD = textwrap.dedent(
             )
 
     async def trigger_context_bridge():
-        '''Initialize PyO3's bridge through Context before any Dynamo runtime.'''
         context = core.Context("runtime-bridge-test")
         waiter = context.async_killed_or_stopped()
         context.stop_generating()
@@ -72,7 +71,6 @@ CHILD = textwrap.dedent(
         )
 
     async def exercise_backend_startup_and_cleanup():
-        '''Verify transport overrides and cleanup after an engine startup error.'''
         class FailingEngine:
             cleanup_count = 0
 
