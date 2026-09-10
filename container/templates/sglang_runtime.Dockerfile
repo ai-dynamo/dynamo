@@ -274,6 +274,22 @@ RUN set -eux; \
         /usr/local/src/ffmpeg \
         /root/.cache/pip; \
     ldconfig
+
+# The dev-dsv41 Ubuntu 24.04 base also carries distro libx264/libx265 shared
+# libraries.  They are outside the Python-wheel and /usr/local cleanup above,
+# so purge precisely those packages after the wheel cleanup.  Querying dpkg
+# keeps this valid across the base image's architecture/version suffixes and
+# intentionally avoids autoremove: its dependency graph includes the runtime
+# JIT toolchain and CUDA math libraries.
+RUN set -eux; \
+    purge="$(dpkg-query -W -f='${Package}\n' 2>/dev/null \
+        | grep -E '^(libx264|libx265)(-[0-9]+)?(:[a-z0-9-]+)?$' \
+        || true)"; \
+    if [ -n "$purge" ]; then \
+        DEBIAN_FRONTEND=noninteractive apt-get purge -y $purge; \
+    fi; \
+    rm -rf /var/lib/apt/lists/*; \
+    ldconfig
 {% endif %}
 
 # Drop the Nsight efa_metrics plugin the CUDA floor carries: a Go NIC sampler
