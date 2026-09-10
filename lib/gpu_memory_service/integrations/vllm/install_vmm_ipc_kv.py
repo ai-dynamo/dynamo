@@ -55,6 +55,9 @@ _GEOMETRY_PATCH_INSTALLED = False
 _KV_CACHE_PROFILING: ContextVar[bool] = ContextVar(
     "gms_vllm_kv_cache_profiling", default=False
 )
+_KV_CACHE_MODEL_IDENTITY: ContextVar[str | None] = ContextVar(
+    "gms_vllm_kv_cache_model_identity", default=None
+)
 
 
 @contextmanager
@@ -179,6 +182,17 @@ def _model_identity(model_config) -> str:
             "Cannot derive a stable model identity for persistent GMS KV"
         )
     return "\0".join(parts)
+
+
+def _model_identity_from_runner(runner) -> str:
+    model_config = getattr(runner, "model_config", None)
+    if model_config is None:
+        model_config = getattr(
+            getattr(runner, "vllm_config", None),
+            "model_config",
+            None,
+        )
+    return _model_identity(model_config)
 
 
 def _kv_layout_fingerprint(kv_cache_config, model_identity: str) -> str:
@@ -487,9 +501,25 @@ def install() -> bool:
         set_persistent_allocator_tag_plan,
     )
 
-    # ---- V2 patch: module-level _allocate_kv_cache ----
     try:
         from vllm.v1.worker.gpu import attn_utils as _gpu_attn_utils
+        from vllm.v1.worker.gpu.model_runner import (
+            GPUModelRunner as V2ModelRunner,
+        )
+
+        original_v2_initialize = V2ModelRunner.initialize_kv_cache
+        if not getattr(original_v2_initialize, "_gms_model_identity_context", False):
+
+            def _patched_v2_initialize(self, *args, **kwargs):
+                token = _KV_CACHE_MODEL_IDENTITY.set(_model_identity_from_runner(self))
+                try:
+                    return original_v2_initialize(self, *args, **kwargs)
+                finally:
+                    _KV_CACHE_MODEL_IDENTITY.reset(token)
+
+            _patched_v2_initialize._gms_model_identity_context = True
+            _patched_v2_initialize._gms_original = original_v2_initialize
+            V2ModelRunner.initialize_kv_cache = _patched_v2_initialize
 
         if hasattr(_gpu_attn_utils, "_allocate_kv_cache"):
             _orig_v2_alloc = _gpu_attn_utils._allocate_kv_cache
@@ -539,7 +569,10 @@ def install() -> bool:
                     raise RuntimeError(
                         "GMS vLLM persistent KV allocator registration failed"
                     ) from exc
-                tag_plan = _semantic_kv_tensor_tag_plan(kv_cache_config)
+                tag_plan = _semantic_kv_tensor_tag_plan(
+                    kv_cache_config,
+                    _KV_CACHE_MODEL_IDENTITY.get(),
+                )
                 reattaching = _persistent_tag_plan_reattaches(
                     manager, engine_id, tag_plan
                 )
@@ -571,7 +604,6 @@ def install() -> bool:
     except ImportError:
         pass
 
-    # ---- V1 patch: GPUModelRunner.initialize_kv_cache_tensors ----
     try:
         from vllm.v1.worker.gpu_model_runner import GPUModelRunner
     except ImportError:
@@ -646,7 +678,10 @@ def install() -> bool:
             device,
         )
         kv_cache_config = args[0] if args else kwargs.get("kv_cache_config")
-        tag_plan = _semantic_kv_tensor_tag_plan(kv_cache_config)
+        tag_plan = _semantic_kv_tensor_tag_plan(
+            kv_cache_config,
+            _model_identity_from_runner(self),
+        )
         reattaching = _persistent_tag_plan_reattaches(manager, engine_id, tag_plan)
         if tag_plan:
             set_persistent_allocator_tag_plan("kv_pool", tag_plan)
