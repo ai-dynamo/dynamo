@@ -17,6 +17,7 @@ That image is the build's `RUNTIME_IMAGE`, so the result is a single "Dynamo + T
 | Feature                                        | Status  | Notes                                                           |
 | :--------------------------------------------- | :-----: | :-------------------------------------------------------------- |
 | Tensor (KServe gRPC) Serving                   |  Ready  | Multiple models per worker                                      |
+| Classification (`class_count` / top-K)         |  Ready  | Top-K `"<score>:<index>[:<label>]"` class strings               |
 | Service Discovery / Routing                    |  Ready  | Via the Dynamo Frontend                                         |
 | Triton backends (TensorRT, ONNX, PyTorch, ...) |  Ready  | Whatever the Triton release image ships                         |
 | TensorRT Plugins                               |  Ready  | Via `--backend-config='tensorrt,plugins=...'`                   |
@@ -31,7 +32,6 @@ The Triton and KServe features below are not yet supported end-to-end through th
 | Limitation                             | Effect                                                                                                                                                                                                                                              |
 | :------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | FP16 / BFloat16 tensors                | Requests with half-precision input/output tensors are rejected (`unknown variant 'Float16'` / `Invalid data type`). The Dynamo tensor `DataType` enum has no `Float16`/`BFloat16` variant.                                                          |
-| Classification (`class_count` / top-K) | The KServe requested-output `classification` parameter is dropped, so models return raw output logits instead of the top-K `"<score>:<index>:<label>"` class strings. `NvCreateTensorRequest` does not carry requested outputs or their parameters. |
 | Model version selection                | Dynamo routes by model name only (`triton.tritonserver.<model_name>`) with no version concept, so version-specific requests are served by the model's default version.                                                                              |
 | Shared-memory tensor I/O               | System / CUDA shared-memory inputs and outputs are unsupported — the frontend does not expose the KServe shared-memory region control RPCs. Send tensors inline.                                                                                    |
 
