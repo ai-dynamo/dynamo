@@ -127,6 +127,9 @@ pub enum ErrorClass {
     /// other workers may. Distinct from [`Self::Unavailable`] so the request
     /// can migrate; both surface as HTTP 503.
     WorkerUnavailable,
+    /// The selected worker is intentionally draining and cannot admit this request.
+    /// Frontends may reselect another worker without consuming the user migration budget.
+    WorkerDraining,
     /// Error originating from a backend engine.
     Backend(BackendError),
     /// The client request is malformed or fails request-level validation.
@@ -180,6 +183,7 @@ impl ErrorClass {
             "WorkerOverloaded" => Self::WorkerOverloaded,
             "Unavailable" => Self::Unavailable,
             "WorkerUnavailable" => Self::WorkerUnavailable,
+            "WorkerDraining" => Self::WorkerDraining,
             "InvalidRequest" => Self::InvalidRequest,
             "Unauthenticated" => Self::Unauthenticated,
             "PermissionDenied" => Self::PermissionDenied,
@@ -224,6 +228,7 @@ impl fmt::Display for ErrorClass {
             ErrorClass::WorkerOverloaded => write!(f, "WorkerOverloaded"),
             ErrorClass::Unavailable => write!(f, "Unavailable"),
             ErrorClass::WorkerUnavailable => write!(f, "WorkerUnavailable"),
+            ErrorClass::WorkerDraining => write!(f, "WorkerDraining"),
             ErrorClass::Backend(sub) => write!(f, "Backend{sub}"),
             ErrorClass::InvalidRequest => write!(f, "InvalidRequest"),
             ErrorClass::Unauthenticated => write!(f, "Unauthenticated"),
@@ -257,6 +262,7 @@ impl ErrorClass {
             Self::WorkerOverloaded => "WorkerOverloaded",
             Self::Unavailable => "Unavailable",
             Self::WorkerUnavailable => "WorkerUnavailable",
+            Self::WorkerDraining => "WorkerDraining",
             Self::Backend(BackendError::Unknown) => "BackendUnknown",
             Self::Backend(BackendError::InvalidArgument) => "BackendInvalidArgument",
             Self::Backend(BackendError::CannotConnect) => "BackendCannotConnect",
@@ -289,7 +295,10 @@ impl ErrorClass {
         match self {
             Self::Unknown => Self::Internal,
             Self::InvalidArgument => Self::InvalidRequest,
-            Self::CannotConnect | Self::Disconnected | Self::WorkerUnavailable => Self::Unavailable,
+            Self::CannotConnect
+            | Self::Disconnected
+            | Self::WorkerUnavailable
+            | Self::WorkerDraining => Self::Unavailable,
             Self::ConnectionTimeout | Self::ResponseTimeout => Self::DeadlineExceeded,
             Self::ResourceExhausted | Self::WorkerOverloaded => Self::CapacityExhausted,
             Self::Backend(error) => match error {
@@ -411,6 +420,7 @@ impl ErrorReason {
             | "transport.disconnected"
             | "backend.unavailable"
             | "backend.worker_unavailable"
+            | "backend.worker_draining"
             | "backend.cannot_connect"
             | "backend.disconnected"
             | "backend.engine_shutdown"
@@ -460,6 +470,7 @@ impl ErrorReason {
             ErrorClass::WorkerOverloaded => "capacity.worker_overloaded",
             ErrorClass::Unavailable => "backend.unavailable",
             ErrorClass::WorkerUnavailable => "backend.worker_unavailable",
+            ErrorClass::WorkerDraining => "backend.worker_draining",
             ErrorClass::Backend(error) => match error {
                 BackendError::Unknown => "backend.unknown",
                 BackendError::InvalidArgument => "backend.invalid_argument",
@@ -854,6 +865,7 @@ impl DynamoError {
             | ErrorClass::RateLimited => ErrorClass::ResourceExhausted,
             ErrorClass::Unavailable => ErrorClass::Unavailable,
             ErrorClass::WorkerUnavailable => ErrorClass::WorkerUnavailable,
+            ErrorClass::WorkerDraining => ErrorClass::WorkerDraining,
             ErrorClass::Backend(error) => ErrorClass::Backend(error),
         }
     }
