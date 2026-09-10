@@ -136,10 +136,8 @@ pub async fn run_input_with_frontend_route_extensions(
         Input::Endpoint(path) => endpoint::run(drt, path, engine_config).await,
     };
 
-    // The input is done, but its trace records may not be. Wait for the sinks
-    // here, before returning, because nothing above this frame waits for them:
-    // the caller's next step is process exit. The result is carried across so
-    // that a failing input still drains what it captured.
+    // Nothing above this frame waits for the sinks; the caller's next step is
+    // process exit. The result is carried across so a failing input still drains.
     crate::request_trace::shutdown_workers().await;
 
     result
