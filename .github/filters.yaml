@@ -137,8 +137,6 @@ ignore:
   - 'container/run.sh'
   - 'container/use-sccache.sh'
   - 'container/dev/**'
-  - 'container/templates/local_dev.Dockerfile'
-  - 'container/templates/dev.Dockerfile'
   # Removed by trtllm upstream-base migration; claim here so changed-files
   # validation passes on the deletion diff without triggering trtllm CI.
   - 'container/build_trtllm_wheel.sh'
