@@ -3,4 +3,4 @@
 
 # Triton
 
-See [docs/backends/triton/](../../../../docs/backends/triton/README.md) for documentation.
+See [docs/backends/triton/](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/triton/overview.md) for documentation.
