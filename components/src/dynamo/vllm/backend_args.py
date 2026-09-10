@@ -37,6 +37,11 @@ MAX_PORT = 65535
 # Restated here because NIXL exposes no predicate Dynamo could ask instead.
 _NIXL_TELEMETRY_ENABLED_VALUES = frozenset({"y", "1", "yes", "on", "true", "enable"})
 
+# Port NIXL's Prometheus exporter binds when NIXL_TELEMETRY_PROMETHEUS_PORT is
+# unset. Distinct from Dynamo's 19090 convention, and equal to the operator's
+# DYN_SYSTEM_PORT preset, so leaving the variable unset is a real collision.
+_NIXL_DEFAULT_PROMETHEUS_PORT = 9090
+
 
 def _configured_fixed_port(env_name: str, *, default: int | None = None) -> int | None:
     """Return a configured fixed TCP port, ignoring disabled/invalid values."""
@@ -54,22 +59,25 @@ def _nixl_prometheus_port() -> int | None:
     """Return the NIXL Prometheus listener port when it is enabled.
 
     Only return a port when NIXL will actually bind one, and only the port NIXL
-    will bind. NIXL does not default the exporter to Prometheus, and its
-    Prometheus exporter does not default to Dynamo's 19090, so an unset exporter
-    or an unset port means Dynamo cannot name a listener at all.
+    will bind. NIXL does not default the exporter to Prometheus, so an unset
+    exporter means no listener. With the exporter selected, an unset port falls
+    back to the exporter's own default rather than Dynamo's 19090, while a value
+    NIXL cannot parse as a port leaves it exporting nothing at all.
     """
     enabled = os.environ.get("NIXL_TELEMETRY_ENABLE", "").strip().lower()
     exporter = os.environ.get("NIXL_TELEMETRY_EXPORTER", "").strip().lower()
     if enabled not in _NIXL_TELEMETRY_ENABLED_VALUES or exporter != "prometheus":
         return None
-    port = _configured_fixed_port("NIXL_TELEMETRY_PROMETHEUS_PORT")
+    port = _configured_fixed_port(
+        "NIXL_TELEMETRY_PROMETHEUS_PORT", default=_NIXL_DEFAULT_PROMETHEUS_PORT
+    )
     if port is None:
         logger.warning(
             "NIXL telemetry is enabled with the Prometheus exporter, but "
-            "NIXL_TELEMETRY_PROMETHEUS_PORT is not set to a usable port. NIXL "
-            "then picks the exporter's own default port, which Dynamo does not "
-            "know, so this listener is left out of the port collision check. "
-            "Set NIXL_TELEMETRY_PROMETHEUS_PORT explicitly."
+            "NIXL_TELEMETRY_PROMETHEUS_PORT is not a usable port. NIXL then "
+            "binds no exporter, so no listener is reserved for it. Set "
+            "NIXL_TELEMETRY_PROMETHEUS_PORT to a port in 1-%d.",
+            MAX_PORT,
         )
     return port
 
