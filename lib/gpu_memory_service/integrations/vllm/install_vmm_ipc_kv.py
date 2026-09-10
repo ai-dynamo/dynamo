@@ -280,7 +280,7 @@ def _semantic_kv_allocation_tag(
         )
     key = "\0descriptor=".join(sorted(descriptors))
     digest = hashlib.sha1((layout_fp + "\0" + key).encode("utf-8")).hexdigest()[:16]
-    return f"kv_pool:v3:{digest}"
+    return f"kv_pool:v4:{digest}"
 
 
 def _kv_allocation_units(kv_cache_config) -> list[tuple[object, ...]]:
@@ -377,11 +377,11 @@ def _persistent_tag_plan_reattaches(
     initialization. A partial plan is unsafe: mixing preserved and new tensors
     would create a layout whose metadata cannot describe its contents.
     """
-    if not tag_plan:
-        return False
-    allocations = manager.list_persistent(engine_id=engine_id, include_unclaimed=True)
     planned = set(tag_plan)
+    allocations = manager.list_persistent(engine_id=engine_id, include_unclaimed=True)
     _release_stale_kv_allocations(manager, engine_id, allocations, planned)
+    if not planned:
+        return False
     existing = {str(getattr(allocation, "tag", "")) for allocation in allocations}
     present = planned & existing
     if os.environ.get("GMS_KV_DIRECTORY_DIAGNOSTICS"):
