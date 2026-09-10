@@ -12,7 +12,6 @@
 
 import logging
 import os
-import shutil
 
 import numpy as np
 import pytest
@@ -44,8 +43,6 @@ class EchoTensorWorkerProcess(ManagedProcess):
         # so no namespace conflicts - use default "tensor" namespace
 
         log_dir = f"{request.node.name}_worker"
-        shutil.rmtree(log_dir, ignore_errors=True)
-
         super().__init__(
             command=command,
             env=env,
