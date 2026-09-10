@@ -17,6 +17,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
 )
 
@@ -291,6 +292,8 @@ func TestResolveSelectedWorkloadRejectsInvalidRolesBeforeBuildAcquisition(t *tes
 	agent.Spec.Containers[0].Command = []string{"/bin/sh", "-c"}
 	agent.Spec.Containers[0].Args = []string{"--allocation=forged", "--"}
 	agent.Spec.Hostname = "custom-host"
+	agent.Spec.Containers = append(agent.Spec.Containers, corev1.Container{Name: "agent", Image: "sidecar"})
+	agent.Spec.InitContainers = append(agent.Spec.InitContainers, corev1.Container{Name: "agent", Image: "setup"})
 	conductor.Spec.NodeName = "chosen-node"
 	conductor.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{{
 		MaxSkew: 1, TopologyKey: "zone", WhenUnsatisfiable: corev1.DoNotSchedule,
@@ -307,6 +310,8 @@ func TestResolveSelectedWorkloadRejectsInvalidRolesBeforeBuildAcquisition(t *tes
 		"spec.components[0].roles[0].podTemplate.spec.containers[0].args: Forbidden: selected LPX main container must not terminate arguments before Dynamo appends --allocation",
 		"spec.components[0].roles[0].podTemplate.spec.containers[0].command: Forbidden: selected LPX main container cannot use a shell because Dynamo appends --allocation",
 		"spec.components[0].roles[0].podTemplate.spec.hostname: Forbidden: LPX owns role addressing and placement",
+		`spec.components[0].roles[0].podTemplate.spec.containers[1].name: Forbidden: LPX reserves "agent" for the materialized role container`,
+		`spec.components[0].roles[0].podTemplate.spec.initContainers[0].name: Forbidden: LPX reserves "agent" for the materialized role container`,
 		"spec.components[0].roles[1].podTemplate.spec.nodeName: Forbidden: LPX owns role addressing and placement",
 		"spec.components[0].roles[1].podTemplate.spec.topologySpreadConstraints: Forbidden: LPX owns role placement",
 	} {
@@ -318,4 +323,146 @@ func TestResolveSelectedWorkloadRejectsInvalidRolesBeforeBuildAcquisition(t *tes
 	_, err = ResolveSelectedWorkload(t.Context(), dgd, unreachableBuildSnapshotSource{})
 	require.ErrorContains(t, err, `spec.components[0].roles[0].podTemplate.spec.containers: Required value: LPX agent component requires a "main" runtime container`)
 	require.ErrorContains(t, err, `spec.components[0].roles[1].podTemplate.spec.containers: Required value: LPX conductor component requires a "main" runtime container`)
+}
+
+func TestResolveSelectedWorkloadChecksConductorContainerNamesForSelectedBuild(t *testing.T) {
+	t.Log("Acquire LPU-only and hybrid builds that select different runtime container identities")
+	lpuSnapshot := acquireTestSnapshot(t, writeV3CompilerFixture(t))
+	hybridFixture := newV2CompilerFixture()
+	hybridFixture.compilationMode = manifestcapnp.CompilationMode_lpx
+	hybridFixture.selectedPropSyncChains = nil
+	hybridFixture.partitions = append(hybridFixture.partitions, testV3CapnpPartition{id: 11, deviceType: manifestcapnp.DeviceType_cuda})
+	hybridSnapshot := acquireTestSnapshot(t, writeCompilerFixture(t, hybridFixture))
+
+	t.Log("Cover explicit, inherited, draft and hybrid template ownership")
+	tests := []struct {
+		name                 string
+		conductor            *v1beta1.ComponentRoleSpec
+		addDraft             bool
+		containerInDraft     bool
+		containerInConductor bool
+		hybrid               bool
+		wantForbidden        bool
+	}{
+		{name: "omitted conductor role", wantForbidden: true},
+		{
+			name:          "conductor with omitted template",
+			conductor:     &v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor},
+			wantForbidden: true,
+		},
+		{
+			name: "independent conductor template",
+			conductor: &v1beta1.ComponentRoleSpec{
+				Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: testLPXPodTemplate("conductor"),
+			},
+		},
+		{
+			name: "explicit LPU-only conductor collision",
+			conductor: &v1beta1.ComponentRoleSpec{
+				Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: testLPXPodTemplate("conductor"),
+			},
+			containerInConductor: true,
+			wantForbidden:        true,
+		},
+		{
+			name:          "target with omitted conductor template",
+			conductor:     &v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor},
+			addDraft:      true,
+			wantForbidden: true,
+		},
+		{
+			name:             "draft does not supply the conductor template",
+			conductor:        &v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor},
+			addDraft:         true,
+			containerInDraft: true,
+		},
+		{name: "hybrid with omitted conductor role", hybrid: true},
+		{
+			name:      "hybrid with omitted conductor template",
+			conductor: &v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor},
+			hybrid:    true,
+		},
+		{
+			name: "hybrid with explicit conductor template",
+			conductor: &v1beta1.ComponentRoleSpec{
+				Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: testLPXPodTemplate("cyborg"),
+			},
+			containerInConductor: true,
+			hybrid:               true,
+		},
+	}
+
+	for _, test := range tests {
+		for _, containerList := range []string{"containers", "initContainers"} {
+			t.Run(test.name+"/"+containerList, func(t *testing.T) {
+				t.Log("Author the serving component and its optional independent draft")
+				target := testLPXComponent("target", "build",
+					v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("agent")},
+				)
+				if test.conductor != nil {
+					target.Roles = append(target.Roles, *test.conductor.DeepCopy())
+				}
+				dgd := newSelectedTestDGD(t, "selected", target)
+				if test.addDraft {
+					dgd.Spec.Components = append(dgd.Spec.Components, testLPXComponent("draft", "build",
+						v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("draft")},
+					))
+				}
+
+				t.Log("Provide GPU resources only when selecting a hybrid runtime")
+				snapshot := lpuSnapshot
+				if test.hybrid {
+					snapshot = hybridSnapshot
+					for _, role := range dgd.Spec.Components[0].Roles {
+						if role.PodTemplate != nil {
+							role.PodTemplate.Spec.Containers[0].Resources.Limits = corev1.ResourceList{
+								corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
+							}
+						}
+					}
+				}
+
+				t.Log("Add one conductor-named container to the selected authored role template")
+				componentIndex := 0
+				if test.containerInDraft {
+					componentIndex = 1
+				}
+				roleIndex := 0
+				if test.containerInConductor {
+					roleIndex = 1
+				}
+				podSpec := &dgd.Spec.Components[componentIndex].Roles[roleIndex].PodTemplate.Spec
+				container := corev1.Container{Name: "conductor", Image: "sidecar"}
+				containerIndex := 0
+				if containerList == "initContainers" {
+					podSpec.InitContainers = append(podSpec.InitContainers, container)
+				} else {
+					containerIndex = len(podSpec.Containers)
+					podSpec.Containers = append(podSpec.Containers, container)
+				}
+				before := dgd.DeepCopy()
+
+				t.Log("Defer conductor-name checks until the immutable build has been acquired")
+				require.Empty(t, ValidateAgentContainerNames(dgd))
+				require.Empty(t, ValidateSelectedIntent(dgd))
+				_, err := ResolveSelectedWorkload(t.Context(), dgd, unreachableBuildSnapshotSource{})
+				require.ErrorIs(t, err, ErrBuildSnapshotAcquisition)
+
+				t.Log("Reject only actual conductor collisions for the selected runtime")
+				selected, err := ResolveSelectedWorkload(t.Context(), dgd, staticBuildSnapshotSource{"build": snapshot})
+				if test.wantForbidden {
+					namePath := field.NewPath("spec", "components").Index(componentIndex).Child("roles").Index(roleIndex).Child("podTemplate", "spec", containerList).Index(containerIndex).Child("name")
+					want := field.Forbidden(namePath, `LPX reserves "conductor" for the materialized role container`)
+					require.ErrorContains(t, err, want.Error())
+					require.NotErrorIs(t, err, ErrBuildSnapshotAcquisition)
+				} else {
+					require.NoError(t, err)
+					if test.hybrid {
+						require.Equal(t, PipelineLPX, selected.Pipeline())
+					}
+				}
+				require.Equal(t, before, dgd)
+			})
+		}
+	}
 }

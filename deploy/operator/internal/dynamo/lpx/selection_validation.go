@@ -49,6 +49,8 @@ func validateSelectedIntent(dgd *dynamov1beta1.DynamoGraphDeployment) ([]*dynamo
 	}
 	components := Components(dgd)
 	allErrs = append(allErrs, validateLPXComposition(dgd, len(components))...)
+	allErrs = append(allErrs, ValidateAgentContainerNames(dgd)...)
+
 	// Keep errors tied to authored component and role indices rather than runtime order.
 	for index := range dgd.Spec.Components {
 		component := &dgd.Spec.Components[index]
@@ -135,6 +137,54 @@ func validateSelectedLPXComponent(component *dynamov1beta1.DynamoComponentDeploy
 			allErrs = append(allErrs, validateAllocationInjectionTargetFields(main, mainPath)...)
 		}
 		allErrs = append(allErrs, validateLPXRolePlacement(&role.PodTemplate.Spec, rolePath.Child("podTemplate", "spec"), role.Name == dynamov1beta1.ComponentRoleLPXAgent)...)
+	}
+	return allErrs
+}
+
+// ValidateAgentContainerNames reserves the Agent identity in authored LPX agent
+// templates. Conductor identities depend on the immutable build's execution mode.
+// dgd must be non-nil and is not mutated.
+func ValidateAgentContainerNames(dgd *dynamov1beta1.DynamoGraphDeployment) field.ErrorList {
+	// Every LPX agent template renames main independently of the selected build.
+	allErrs := field.ErrorList{}
+	for componentIndex := range dgd.Spec.Components {
+		component := &dgd.Spec.Components[componentIndex]
+		if !component.IsLPX() {
+			continue
+		}
+
+		// Keep collision errors on each authored agent template.
+		for roleIndex, role := range component.Roles {
+			if role.Name != dynamov1beta1.ComponentRoleLPXAgent || role.PodTemplate == nil {
+				continue
+			}
+			podSpecPath := field.NewPath("spec", "components").Index(componentIndex).Child("roles").Index(roleIndex).Child("podTemplate", "spec")
+			allErrs = append(allErrs, validateRolePodSpecContainerNames(&role.PodTemplate.Spec, podSpecPath, lpuAgentContainerName)...)
+		}
+	}
+	return allErrs
+}
+
+// validateRolePodSpecContainerNames checks both lists that share the Pod's name space.
+// spec and fldPath must be non-nil.
+func validateRolePodSpecContainerNames(spec *corev1.PodSpec, fldPath *field.Path, reservedName string) field.ErrorList {
+	// Regular and init containers must not collide with the renamed main container.
+	allErrs := field.ErrorList{}
+	for _, group := range []struct {
+		name       string
+		containers []corev1.Container
+	}{
+		{"containers", spec.Containers},
+		{"initContainers", spec.InitContainers},
+	} {
+		for containerIndex, container := range group.containers {
+			if container.Name == reservedName {
+				allErrs = append(allErrs, field.Forbidden(
+					fldPath.Child(group.name).Index(containerIndex).Child("name"),
+					fmt.Sprintf("LPX reserves %q for the materialized role container", container.Name),
+				))
+			}
+		}
 	}
 	return allErrs
 }

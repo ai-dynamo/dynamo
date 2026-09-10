@@ -170,6 +170,65 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			wantSchemaErr: `spec.components[0].roles[1]: Duplicate value: map[string]interface {}{"name":"agent"}`,
 		},
 		{
+			name: "LPX reserves materialized agent container names",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				role := &dgd.Spec.Components[0].Roles[0]
+				role.PodTemplate.Spec.Containers = append(role.PodTemplate.Spec.Containers, corev1.Container{Name: "agent", Image: "sidecar"})
+				role.PodTemplate.Spec.InitContainers = []corev1.Container{{Name: "agent", Image: "setup"}}
+			}),
+			wantWebhookErrs: []string{
+				`spec.components[0].roles[0].podTemplate.spec.containers[1].name: Forbidden: LPX reserves "agent" for the materialized role container`,
+				`spec.components[0].roles[0].podTemplate.spec.initContainers[0].name: Forbidden: LPX reserves "agent" for the materialized role container`,
+			},
+		},
+		{
+			name: "LPX defers implicit conductor name checks until build mode is known",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := &dgd.Spec.Components[0]
+				component.Roles = component.Roles[:1]
+				component.Roles[0].PodTemplate.Spec.Containers = append(
+					component.Roles[0].PodTemplate.Spec.Containers,
+					corev1.Container{Name: "conductor", Image: "sidecar"},
+				)
+			}),
+		},
+		{
+			name: "v1alpha1 LPX defers inherited conductor init names until build mode is known",
+			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				component := dgd.Spec.Services["lpx"]
+				component.Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{{Name: "conductor", Image: "setup"}}
+			}),
+		},
+		{
+			name: "LPX defers explicit conductor name checks until build mode is known",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := &dgd.Spec.Components[0]
+				component.Roles[1].PodTemplate = component.Roles[0].PodTemplate.DeepCopy()
+				component.Roles[1].PodTemplate.Spec.Containers = append(
+					component.Roles[1].PodTemplate.Spec.Containers,
+					corev1.Container{Name: "conductor", Image: "sidecar"},
+				)
+			}),
+		},
+		{
+			name: "LPX allows an agent sidecar named conductor with a separate conductor template",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := &dgd.Spec.Components[0]
+				component.Roles[1].PodTemplate = component.Roles[0].PodTemplate.DeepCopy()
+				component.Roles[0].PodTemplate.Spec.Containers = append(
+					component.Roles[0].PodTemplate.Spec.Containers,
+					corev1.Container{Name: "conductor", Image: "sidecar"},
+				)
+			}),
+		},
+		{
+			name: "LPX allows a draft init container named conductor",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaLPXSpecDec(dgd, k8sptr.To[int32](1))
+				dgd.Spec.Components[0].Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{{Name: "conductor", Image: "setup"}}
+			}),
+		},
+		{
 			name: "physical LPU rejects Grove opt out",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Annotations = map[string]string{consts.KubeAnnotationEnableGrove: consts.KubeLabelValueFalse}

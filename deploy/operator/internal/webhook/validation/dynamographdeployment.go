@@ -27,6 +27,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	dynamolpx "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
@@ -216,6 +217,9 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 		oldComponents:           oldComponents,
 	}
 	allErrs = append(allErrs, v.validateDynamoGraphDeploymentSpec(&dgd.Spec, field.NewPath("spec"), specOpts)...)
+
+	// Reserve the Agent name before build-dependent conductor validation runs in the LPX controller.
+	allErrs = append(allErrs, dynamolpx.ValidateAgentContainerNames(dgd)...)
 
 	// LPX children require the durable Grove route before runtime validation can be deferred.
 	if dgd.HasLPXComponent() && !grovePathway {

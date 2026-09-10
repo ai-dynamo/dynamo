@@ -165,6 +165,33 @@ func validateSelectedConductor(
 		}
 		return nil
 	}
+
+	// Only the LPU-only serving template materializes a renamed conductor container.
+	if component != ServingComponent(dgd) {
+		return nil
+	}
+
+	// An omitted conductor role or template inherits the serving agent's template.
+	role := conductor
+	if role == nil || role.PodTemplate == nil {
+		role = component.ComponentRole(dynamov1beta1.ComponentRoleLPXAgent)
+	}
+
+	// Preserve the authored component and role path when reporting inherited collisions.
+	componentIndex := slices.IndexFunc(dgd.Spec.Components, func(candidate dynamov1beta1.DynamoComponentDeploymentSharedSpec) bool {
+		return candidate.ComponentName == component.ComponentName
+	})
+	roleIndex := slices.IndexFunc(component.Roles, func(candidate dynamov1beta1.ComponentRoleSpec) bool {
+		return candidate.Name == role.Name
+	})
+	podSpecPath := field.NewPath("spec", "components").Index(componentIndex).Child("roles").Index(roleIndex).Child("podTemplate", "spec")
+
+	// Check both container lists before a selected workload can be published.
+	if err := validateRolePodSpecContainerNames(&role.PodTemplate.Spec, podSpecPath, "conductor").ToAggregate(); err != nil {
+		return err
+	}
+
+	// Preserve explicit conductor replica and launch validation after checking inherited names.
 	if conductor == nil {
 		return nil
 	}
@@ -174,19 +201,14 @@ func validateSelectedConductor(
 	if conductor.PodTemplate == nil {
 		return nil
 	}
+
 	// Explicit LPU conductors receive the same appended launch arguments as inherited templates.
-	componentIndex := slices.IndexFunc(dgd.Spec.Components, func(candidate dynamov1beta1.DynamoComponentDeploymentSharedSpec) bool {
-		return candidate.ComponentName == component.ComponentName
-	})
-	roleIndex := slices.IndexFunc(component.Roles, func(role dynamov1beta1.ComponentRoleSpec) bool {
-		return role.Name == dynamov1beta1.ComponentRoleLPXConductor
-	})
 	for containerIndex := range conductor.PodTemplate.Spec.Containers {
 		container := &conductor.PodTemplate.Spec.Containers[containerIndex]
 		if container.Name != commonconsts.MainContainerName {
 			continue
 		}
-		containerPath := field.NewPath("spec", "components").Index(componentIndex).Child("roles").Index(roleIndex).Child("podTemplate", "spec", "containers").Index(containerIndex)
+		containerPath := podSpecPath.Child("containers").Index(containerIndex)
 		if err := validateAllocationInjectionTargetFields(container, containerPath).ToAggregate(); err != nil {
 			return err
 		}
