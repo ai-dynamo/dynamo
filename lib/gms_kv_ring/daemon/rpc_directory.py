@@ -14,6 +14,15 @@ from gms_kv_ring.daemon.rpc_types import Handler, Message, Response
 
 logger = logging.getLogger(__name__)
 
+SERVER_CONNECTION_ID = "__gms_server_connection_id"
+
+
+def _directory_connection_id(msg: Message) -> str:
+    # Direct handler calls are used by focused unit tests. Socket servers always
+    # replace this private field with an unforgeable per-connection identity.
+    return str(msg.get(SERVER_CONNECTION_ID) or "direct")
+
+
 if TYPE_CHECKING:
     from gms_kv_ring.daemon.kv_cache_manager import GmsKvCacheManager
 
@@ -121,6 +130,22 @@ def _directory_release_writer_claims_locked(
     for token in tokens:
         _directory_release_claim_locked(daemon, token)
     return len(tokens)
+
+
+def release_directory_connection_claims(
+    daemon: "GmsKvCacheManager",
+    connection_id: str,
+) -> int:
+    """Release eviction pins abandoned by a disconnected RPC client."""
+    with daemon._content_hash_lock:
+        tokens = [
+            token
+            for token, claim in daemon._content_directory_claims.items()
+            if claim.get("connection_id") == connection_id
+        ]
+        for token in tokens:
+            _directory_release_claim_locked(daemon, token)
+        return len(tokens)
 
 
 def _directory_entry_ready(daemon: "GmsKvCacheManager", entry: dict) -> bool:
@@ -374,6 +399,7 @@ def handle_directory_lookup_claim(
     """Lookup READY entries and pin every hit under one opaque claim."""
     manifest_id = str(msg.get("manifest_id", "")).strip()
     writer_id = str(msg.get("writer_id", "")).strip()
+    connection_id = _directory_connection_id(msg)
     try:
         expected_epoch = int(msg["expected_epoch"])
         content_hashes = [bytes.fromhex(str(h)) for h in msg.get("hashes", [])]
@@ -427,6 +453,7 @@ def handle_directory_lookup_claim(
             daemon._content_directory_claims[claim_token] = {
                 "writer_id": writer_id,
                 "epoch": expected_epoch,
+                "connection_id": connection_id,
                 "entries": claimed,
             }
         if os.environ.get("GMS_KV_DIRECTORY_DIAGNOSTICS"):
@@ -456,7 +483,11 @@ def handle_directory_release_claim(
     token = str(msg.get("claim_token", "")).strip()
     if not token:
         return {"ok": False, "error": "claim_token is required"}
+    connection_id = _directory_connection_id(msg)
     with daemon._content_hash_lock:
+        claim = daemon._content_directory_claims.get(token)
+        if claim is not None and claim.get("connection_id") != connection_id:
+            return {"ok": False, "error": "claim token belongs to another connection"}
         released = _directory_release_claim_locked(daemon, token)
     return {"ok": True, "released": released}
 
@@ -469,6 +500,7 @@ def handle_directory_adopt_claim(daemon: "GmsKvCacheManager", msg: Message) -> R
     becomes public only when the engine seals the adopted block and marks it
     dormant; a crash before then leaves an ACTIVE entry that promotion drops.
     """
+    connection_id = _directory_connection_id(msg)
     token = str(msg.get("claim_token", "")).strip()
     writer_id = str(msg.get("writer_id", "")).strip()
     manifest_id = str(msg.get("manifest_id", "")).strip()
@@ -485,6 +517,8 @@ def handle_directory_adopt_claim(daemon: "GmsKvCacheManager", msg: Message) -> R
         return {"ok": False, "error": f"malformed adopt: {exc}"}
     with daemon._content_hash_lock:
         claim = daemon._content_directory_claims.get(token)
+        if claim is not None and claim.get("connection_id") != connection_id:
+            return {"ok": False, "error": "claim token belongs to another connection"}
         if (
             claim is None
             or claim.get("writer_id") != writer_id

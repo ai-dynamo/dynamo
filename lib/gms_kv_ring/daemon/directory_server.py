@@ -16,11 +16,16 @@ import fcntl
 import os
 import threading
 import time
+import uuid
 from collections import deque
 from typing import Optional
 
 from gms_kv_ring.daemon.framing import FrameProtocolError, read_frame, write_frame
-from gms_kv_ring.daemon.rpc_directory import DIRECTORY_HANDLERS
+from gms_kv_ring.daemon.rpc_directory import (
+    DIRECTORY_HANDLERS,
+    SERVER_CONNECTION_ID,
+    release_directory_connection_claims,
+)
 from gms_kv_ring.daemon.rpc_types import error_response
 
 
@@ -117,21 +122,25 @@ class DirectoryDaemon:
             return error_response(exc)
 
     async def _handle(self, reader, writer) -> None:
+        connection_id = uuid.uuid4().hex
         try:
             while True:
                 msg = await read_frame(reader, allow_eof=True)
                 if msg is None:
                     return
+                request = dict(msg)
+                request[SERVER_CONNECTION_ID] = connection_id
                 response = await asyncio.get_running_loop().run_in_executor(
                     None,
                     self._dispatch,
-                    msg,
+                    request,
                 )
                 response["daemon_epoch"] = self.state.epoch
                 await write_frame(writer, response)
         except (ConnectionResetError, FrameProtocolError):
             return
         finally:
+            release_directory_connection_claims(self.state, connection_id)
             writer.close()
             try:
                 await writer.wait_closed()
