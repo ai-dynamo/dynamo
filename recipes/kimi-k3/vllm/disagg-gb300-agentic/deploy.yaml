@@ -126,6 +126,8 @@ spec:
             value: "1"
           - name: TRANSFORMERS_OFFLINE
             value: "1"
+          - name: DYN_SELF_HOST_METADATA
+            value: "1"
           - name: DYN_REQUEST_PLANE
             value: tcp
           - name: PYTORCH_CUDA_ALLOC_CONF
@@ -259,6 +261,8 @@ spec:
           - name: HF_HUB_OFFLINE
             value: "1"
           - name: TRANSFORMERS_OFFLINE
+            value: "1"
+          - name: DYN_SELF_HOST_METADATA
             value: "1"
           - name: DYN_REQUEST_PLANE
             value: tcp
