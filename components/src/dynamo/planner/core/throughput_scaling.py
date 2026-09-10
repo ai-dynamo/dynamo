@@ -240,7 +240,9 @@ class ThroughputScalingMixin:
                 or actual_itl > self._config.itl_ms
             ):
                 logger.warning(
-                    f"Agg SLA not fully met: TTFT={actual_ttft:.1f}ms, ITL={actual_itl:.1f}ms"
+                    "Agg SLA not fully met: TTFT=%.1fms, ITL=%.1fms",
+                    actual_ttft,
+                    actual_itl,
                 )
 
             self._diag_engine_rps_prefill = engine_rps
@@ -251,7 +253,10 @@ class ThroughputScalingMixin:
                 resolve_min_endpoint(self._config, "decode"),
             )
             logger.info(
-                f"Agg: {demand_rps:.2f} rps / {engine_rps:.2f} engine_rps = {desired} replicas"
+                "Agg: %.2f rps / %.2f engine_rps = %s replicas",
+                demand_rps,
+                engine_rps,
+                desired,
             )
         desired = self._cap_throughput_replicas(
             desired, self._num_d_workers, "aggregated"
