@@ -569,7 +569,7 @@ def test_post_fence_reclaim_uses_allocator_namespace(monkeypatch):
 
     from dynamo.common import gms_failover
 
-    monkeypatch.setenv("GMS_KV_LEASES", "1")
+    monkeypatch.setenv("GMS_KV_LEASES", "on")
     calls = []
 
     monkeypatch.setattr(kv_lease_client, "resolve_lease_device", lambda _env: 0)
@@ -589,6 +589,25 @@ def test_post_fence_reclaim_uses_allocator_namespace(monkeypatch):
     assert calls[0][0:2] == ("sglang", 0)
     assert calls[0][2]["namespace_suffix"] == "page-pool"
     assert calls[0][2]["protected_blocks"] == {7}
+
+
+def test_post_fence_reclaim_honors_disabled_engine_override(monkeypatch):
+    from gpu_memory_service.integrations.common import kv_lease_client
+
+    from dynamo.common import gms_failover
+
+    monkeypatch.setenv("GMS_KV_LEASES", "1")
+    monkeypatch.setenv("GMS_SGLANG_KV_LEASES", "0")
+    calls = []
+    monkeypatch.setattr(
+        kv_lease_client,
+        "reclaim_foreign_kv_leases_in_shm_dir",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    gms_failover._reclaim_foreign_kv_leases_after_fence("sglang", "shadow")
+
+    assert calls == []
 
 
 @pytest.mark.asyncio

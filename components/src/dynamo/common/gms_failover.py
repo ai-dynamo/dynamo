@@ -363,18 +363,17 @@ def _reclaim_foreign_kv_leases_after_fence(
 
     if not _failover_reclaim_foreign_leases_enabled():
         return
-    if not _truthy_env("GMS_KV_LEASES") and not _truthy_env(
-        f"GMS_{_normalize_lease_engine_name(backend_name).upper()}_KV_LEASES"
-    ):
-        return
     try:
         from gpu_memory_service.integrations.common.kv_lease_client import (
             default_kv_lease_namespace_suffix,
+            kv_leases_enabled,
             reclaim_foreign_kv_leases_in_shm_dir,
             resolve_lease_device,
         )
 
         engine = _normalize_lease_engine_name(backend_name)
+        if not kv_leases_enabled(engine):
+            return
         device = resolve_lease_device(f"GMS_{engine.upper()}_KV_LEASE_DEVICE")
         started = time.monotonic()
         result = reclaim_foreign_kv_leases_in_shm_dir(
