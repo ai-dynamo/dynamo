@@ -3457,7 +3457,7 @@ from dynamo._core import PyRuntimeMetrics
 
 Provides utilities for integrating external metrics (e.g., from vLLM, SGLang, TensorRT-LLM).
 
-[`lib/bindings/python/src/dynamo/prometheus_metrics.pyi#L12`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/prometheus_metrics.pyi#L12)
+[`lib/bindings/python/src/dynamo/prometheus_metrics.pyi#L13`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/prometheus_metrics.pyi#L13)
 
 **Public methods**
 
@@ -3479,7 +3479,30 @@ A callable that takes no arguments and returns a string
 in Prometheus text exposition format
 </ParamField>
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/prometheus_metrics.pyi#L19)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/prometheus_metrics.pyi#L20)
+
+<h4 id="api-dynamo-prometheus-metrics-runtimemetrics-register-prometheus-typed-callback">register_prometheus_typed_callback</h4>
+
+```python
+register_prometheus_typed_callback(callback: Callable[[], list[tuple[str, str, str, str, list[tuple[str, list[tuple[str, str]], float, float | None]]]]]) -> None
+```
+
+Register a Python callback that returns metric families as a structure.
+
+These feed the OTLP export, which needs the families typed rather than
+rendered to text. Independent of the exposition callback above: a
+registry that should reach both surfaces registers both.
+
+**Parameters**
+
+<ParamField path="callback" type="Callable[[], list[tuple[str, str, str, str, list[tuple[str, list[tuple[str, str]], float, float | None]]]]]">
+A callable taking no arguments and returning
+``[(name, help, type, [(sample_name, [(label, value)], value)])]``.
+``dynamo.common.utils.prometheus.get_prometheus_typed``
+builds this from a ``CollectorRegistry``.
+</ParamField>
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/prometheus_metrics.pyi#L34)
 </Accordion>
 
 <Accordion id="api-dynamo-core-pythonasyncengine" title="PythonAsyncEngine (class)">
