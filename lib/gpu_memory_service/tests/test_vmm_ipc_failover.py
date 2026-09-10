@@ -198,8 +198,6 @@ def test_vmm_ipc_engine_restart_preserves_kv_bytes(tmp_path):
                     torch.empty(N_ELEMS, dtype=torch.int32, device=f"cuda:{device}")
                 )
 
-        # Verify Engine B's tensors contain Engine A's data — proves
-        # the same physical pages.
         for layer, t_ in enumerate(tensors_b):
             got = t_.cpu()
             want = ground_truth[layer]
