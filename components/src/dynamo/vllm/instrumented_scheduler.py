@@ -3979,9 +3979,8 @@ class InstrumentedScheduler(AsyncScheduler):
         """Whether blocks the benchmark released still wait behind the
         scheduler's deferred-free fence: a step that may write them is in
         flight, and their return to the pool follows its output (the parent
-        drains ``deferred_frees`` in ``update_from_output``). Schedulers
-        without the fence free immediately and never report pending frees."""
-        return bool(getattr(self, "deferred_frees", None))
+        drains ``deferred_frees`` in ``update_from_output``)."""
+        return bool(self.deferred_frees)
 
     def _bench_finish_requests(self, req_ids: Sequence[str]) -> None:
         """Retire benchmark-owned requests through the scheduler's own abort
@@ -4688,7 +4687,8 @@ class InstrumentedScheduler(AsyncScheduler):
         )
 
     def _kvwarm_giant_threshold(self) -> int:
-        """Total-KV threshold above which points get repeated measurement."""
+        """Total-KV threshold above which a fake-injected point is measured with
+        repeated steady steps; real-KV points always repeat."""
         return int(os.environ.get("DYN_BENCH_GIANT_KV_THRESHOLD", "1000000"))
 
     def _kvwarm_giant_repeats(self) -> int:
@@ -5170,7 +5170,7 @@ class InstrumentedScheduler(AsyncScheduler):
         ctxs = self._bench_decode_context_lengths(
             point.total_kv_read_tokens, point.batch_size
         )
-        need = self._kvwarm_point_need(point)
+        need = self._kvwarm_point_need()
         return max(max(1, c - 1) for c in ctxs) + need <= depth
 
     def _kvwarm_step_busy(self) -> bool:
@@ -5185,7 +5185,15 @@ class InstrumentedScheduler(AsyncScheduler):
         blocks behind the deferred-free fence; every shed branch then yields
         the step (an idle pass for the real scheduler) until the in-flight
         output has drained them, so nothing draws from a pool that is still
-        owed those blocks."""
+        owed those blocks.
+
+        The soft timeout is read from the local clock, so two ranks can
+        evaluate the same step on opposite sides of the deadline: one starts
+        the next build while the other heads for the timeout boundary and
+        waits there for a peer that is building, and the group aborts on the
+        protocol timeout. The window is the ranks' skew on that one step;
+        closing it takes a group decision before every build, which this
+        code does not make."""
         if not getattr(self, "_kvwarm_plan", None):
             return False
         if self._bench_active_req_ids or self._bench_current_point is not None:
@@ -5381,7 +5389,7 @@ class InstrumentedScheduler(AsyncScheduler):
             detail,
         )
 
-    def _kvwarm_stage_sync_timeout(self, synchronizer) -> float:
+    def _kvwarm_stage_sync_timeout(self, synchronizer: _BenchmarkSynchronizer) -> float:
         """Wait budget for the stage exchange, counted from this rank's
         report. Peers may still be building: a build runs to completion or,
         at the latest, to the soft deadline, where the soft-timeout branch of
@@ -5431,7 +5439,7 @@ class InstrumentedScheduler(AsyncScheduler):
 
     # ------- Shadow injection: borrow chain blocks, original two-step flow -------
 
-    def _kvwarm_point_need(self, point) -> int:
+    def _kvwarm_point_need(self) -> int:
         """Chain depth a real-KV decode point needs beyond its injected
         context: the admission write at ``injected`` plus one steady write per
         repeated step, i.e. ``1 + repeats``. Every real-KV point runs the
@@ -5450,7 +5458,7 @@ class InstrumentedScheduler(AsyncScheduler):
         chains = self._kvwarm_chain_ids
         if len(chains) < point.batch_size:
             return False
-        need = self._kvwarm_point_need(point)
+        need = self._kvwarm_point_need()
         return all(
             injected + need <= len(self._kvwarm_chain_prompts[chains[i]])
             for i, injected in enumerate(injected_lengths)

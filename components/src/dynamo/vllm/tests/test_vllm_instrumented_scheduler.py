@@ -3510,6 +3510,7 @@ def test_benchmark_clear_prefix_cache_is_required_and_idempotent():
     stub.kv_cache_manager = SimpleNamespace(
         reset_prefix_cache=MagicMock(return_value=True)
     )
+    stub.deferred_frees = deque()  # nothing fenced
 
     assert InstrumentedScheduler._bench_clear_prefix_cache(stub) is True
     assert InstrumentedScheduler._bench_clear_prefix_cache(stub) is True
@@ -3519,6 +3520,7 @@ def test_benchmark_clear_prefix_cache_is_required_and_idempotent():
 
     failed = InstrumentedScheduler.__new__(InstrumentedScheduler)
     failed._bench_prefix_cache_cleared = False
+    failed.deferred_frees = deque()  # nothing fenced
     failed.kv_cache_manager = SimpleNamespace(
         reset_prefix_cache=MagicMock(return_value=False)
     )
@@ -4086,6 +4088,7 @@ def test_zero_request_decode_injection_is_skipped_immediately():
     stub._bench_current_point = None
     stub._bench_current_fpms = []
     stub._bench_skipped_points = []
+    stub.deferred_frees = deque()  # nothing fenced
     stub._bench_cleanup_requests = MagicMock()
     stub._bench_inject_fake_decode = MagicMock(
         return_value=SimpleNamespace(total_num_scheduled_tokens=0)
@@ -4119,6 +4122,7 @@ def _steady_injection_stub(point: BenchmarkPoint):
     stub._bench_grid = deque([point])
     stub._bench_current_point = None
     stub._bench_current_fpms = []
+    stub.deferred_frees = deque()  # nothing fenced
     stub._bench_stop_at_timeout_boundary = MagicMock(return_value=False)
     stub._bench_inject_fake_decode = MagicMock(
         return_value=SimpleNamespace(total_num_scheduled_tokens=point.batch_size)
@@ -4512,20 +4516,17 @@ def test_seed_and_measuring_request_share_block_hashes():
     assert measuring_hashes[: len(seed_hashes)] == seed_hashes
 
 
-def test_kvwarm_point_need_is_one_plus_repeats_for_every_point(monkeypatch):
+def test_kvwarm_point_need_is_one_plus_repeats(monkeypatch):
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
-    small = SimpleNamespace(total_kv_read_tokens=999_999)
-    giant = SimpleNamespace(total_kv_read_tokens=1_000_000)
     # Admission writes at the injected length, then one steady write per
-    # repeated step: default repeats 3 -> need 4 on both sides of the
-    # giant threshold, because every real-KV point runs the repeats.
-    assert InstrumentedScheduler._kvwarm_point_need(stub, small) == 4
-    assert InstrumentedScheduler._kvwarm_point_need(stub, giant) == 4
+    # repeated step: default repeats 3 -> need 4. The figure does not depend
+    # on the point, because every real-KV point runs the repeats.
+    assert InstrumentedScheduler._kvwarm_point_need(stub) == 4
     monkeypatch.setenv("DYN_BENCH_GIANT_KV_REPEATS", "5")
-    assert InstrumentedScheduler._kvwarm_point_need(stub, small) == 6
+    assert InstrumentedScheduler._kvwarm_point_need(stub) == 6
     # Repeats floor at one steady step: two positions at minimum.
     monkeypatch.setenv("DYN_BENCH_GIANT_KV_REPEATS", "0")
-    assert InstrumentedScheduler._kvwarm_point_need(stub, small) == 2
+    assert InstrumentedScheduler._kvwarm_point_need(stub) == 2
 
 
 def test_kvwarm_covers_requires_ready_chains_deep_enough():
@@ -4752,6 +4753,7 @@ def test_warmup_replica_injection_failure_is_discarded_not_skipped():
     stub._bench_current_point = None
     stub._bench_current_fpms = []
     stub._bench_skipped_points = []
+    stub.deferred_frees = deque()  # nothing fenced
     stub._bench_cleanup_requests = MagicMock()
     stub._bench_inject_fake_decode = MagicMock(
         return_value=SimpleNamespace(total_num_scheduled_tokens=0)
