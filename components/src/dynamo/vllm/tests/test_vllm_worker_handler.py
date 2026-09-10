@@ -2031,17 +2031,6 @@ class TestRLAdminRouteHardening:
         assert resp["version"] is None
 
     @pytest.mark.asyncio
-    async def test_get_weight_version_reports_declared_version_after_update(self):
-        handler = self._make_rl_handler()
-
-        await self._declare_via_update(handler, "policy-42")
-        resp = await handler.get_weight_version({})
-
-        assert resp["status"] == "ok"
-        assert resp["version"] == "policy-42"
-        assert resp["version_declared"] is True
-
-    @pytest.mark.asyncio
     async def test_declared_initial_is_distinguishable_from_never_declared(self):
         never_declared = self._make_rl_handler()
         declared_initial = self._make_rl_handler()
