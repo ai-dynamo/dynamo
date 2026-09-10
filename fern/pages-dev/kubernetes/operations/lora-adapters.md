@@ -90,8 +90,8 @@ Keep `DYN_SYSTEM_PORT` on a trusted administrative network. The system API retri
             containers:
             - name: main
               image: ${RUNTIME_IMAGE}
-      - name: VllmDecodeWorker
-        type: decode
+      - name: worker
+        type: worker
         replicas: 1
         podTemplate:
           spec:
@@ -228,7 +228,7 @@ Keep `DYN_SYSTEM_PORT` on a trusted administrative network. The system API retri
         Port-forward the worker system port and POST to `/v1/loras`:
 
         ```bash
-        kubectl port-forward svc/vllm-agg-lora-vllmdecodeworker 9090:9090 -n ${NAMESPACE}
+        kubectl port-forward svc/vllm-agg-lora-worker 9090:9090 -n ${NAMESPACE}
         ```
 
         ```bash

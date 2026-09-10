@@ -130,7 +130,7 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.uid
-    VllmDecodeWorker:
+    worker:
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 8
@@ -222,7 +222,7 @@ spec:
       envs:
         - name: DYN_ROUTER_MODE
           value: kv  # KEY DIFFERENCE: Enable KV Smart Router
-    VllmDecodeWorker:
+    worker:
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 8
@@ -322,7 +322,7 @@ spec:
 
 Apply it: `kubectl apply -f pvc-model-cache.yaml`
 
-Then reference the existing PVC in your DynamoGraphDeployment by adding the following under `spec` (and under `VllmDecodeWorker`, add `volumeMounts`):
+Then reference the existing PVC in your DynamoGraphDeployment by adding the following under `spec` (and under `worker`, add `volumeMounts`):
 
 ```yaml
 spec:
@@ -331,7 +331,7 @@ spec:
       name: model-cache
       size: "0"
   services:
-    VllmDecodeWorker:
+    worker:
       volumeMounts:
         - mountPoint: /root/.cache/huggingface
           name: model-cache
@@ -745,7 +745,7 @@ The deployment YAMLs in this guide set `failureThreshold: 60`, allowing up to 32
 
 ```bash
 kubectl patch dynamographdeployment <deployment-name> -n dynamo-bench --type='json' \
-  -p='[{"op": "replace", "path": "/spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/startupProbe/failureThreshold", "value": 80}]'
+  -p='[{"op": "replace", "path": "/spec/services/worker/extraPodSpec/mainContainer/startupProbe/failureThreshold", "value": 80}]'
 ```
 
 The relevant startup probe fields:
@@ -804,7 +804,7 @@ Replace the Mooncake trace with your own JSONL file:
 For advanced testing, add separate prefill workers:
 
 ```yaml
-VllmPrefillWorker:
+prefill:
   componentType: worker
   replicas: 2
   # ... configuration
