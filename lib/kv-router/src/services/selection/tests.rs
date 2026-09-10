@@ -129,15 +129,16 @@ fn normalize_prompt(request: &PromptRequest) -> super::input::NormalizedPrompt {
     request
         .view()
         .normalize_for_selection(
+            4,
             false,
-            TrackingHashInput {
+            Some(TrackingHashInput {
                 context: &context,
                 scope: TrackingHashScope {
                     partition: RoutingPartitionRef::new("model", "default"),
                     block_size: 4,
                 },
                 assume_kv_reuse: true,
-            },
+            }),
         )
         .expect("normalize prompt")
 }
@@ -569,15 +570,16 @@ fn keyed_prompt_tracking_leaves_indexer_hashes_public() {
     let normalized = request
         .view()
         .normalize_for_selection(
+            4,
             false,
-            TrackingHashInput {
+            Some(TrackingHashInput {
                 context: &context,
                 scope: TrackingHashScope {
                     partition: RoutingPartitionRef::new("model", "default"),
                     block_size: 4,
                 },
                 assume_kv_reuse: true,
-            },
+            }),
         )
         .unwrap();
     let public_blocks = compute_block_hash_for_seq(
@@ -608,15 +610,16 @@ fn disabled_kv_reuse_keeps_public_indexer_hashes_and_randomizes_tracking() {
         request
             .view()
             .normalize_for_selection(
+                4,
                 false,
-                TrackingHashInput {
+                Some(TrackingHashInput {
                     context: &context,
                     scope: TrackingHashScope {
                         partition: RoutingPartitionRef::new("model", "default"),
                         block_size: 4,
                     },
                     assume_kv_reuse: false,
-                },
+                }),
             )
             .unwrap()
     };
@@ -703,12 +706,13 @@ fn keyed_hash_only_inputs_remain_trusted_for_selection_and_reservation() {
     let selection = request
         .view()
         .normalize_for_selection(
+            4,
             false,
-            TrackingHashInput {
+            Some(TrackingHashInput {
                 context: &context,
                 scope,
                 assume_kv_reuse: true,
-            },
+            }),
         )
         .unwrap();
     let reservation = request

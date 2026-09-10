@@ -70,15 +70,6 @@ impl WorkerCatalog {
             .any(|record| schedulable_in(record, key))
     }
 
-    pub(super) fn schedulable_worker_ids_for_key(&self, key: &RoutingPartitionId) -> Vec<WorkerId> {
-        self.workers
-            .read()
-            .values()
-            .filter(|record| schedulable_in(record, key))
-            .map(|record| record.worker_id)
-            .collect()
-    }
-
     /// `total_kv_blocks` published by a schedulable worker in `key`'s partition.
     pub(super) fn total_kv_blocks(
         &self,

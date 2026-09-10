@@ -10,8 +10,11 @@ use dynamo_tokens::SequenceHash;
 
 use crate::identity::RoutingPartitionId;
 use crate::kv_hints::KvHint;
-use crate::protocols::{RoutingConstraints, WorkerAffinityTarget, WorkerId, WorkerWithDpRank};
+use crate::protocols::{
+    LocalBlockHash, RoutingConstraints, WorkerAffinityTarget, WorkerId, WorkerWithDpRank,
+};
 use crate::scheduling::config::RouterConfigOverride;
+use crate::scheduling::queue::RequestLifecycleLease;
 use crate::scheduling::{AdvisoryWorkerLoad, QueueRejection, SchedulingResponse, SessionContext};
 
 use super::super::input::PromptView;
@@ -34,16 +37,26 @@ pub struct SelectionOperation<'a> {
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
     pub routing_constraints: RoutingConstraints,
     pub admission: SelectionAdmission,
+    /// Send the prompt's tracking hashes to the scheduler so the booking's
+    /// blocks count as active on its worker.
+    pub track_active_blocks: bool,
+    /// Return the prompt's public block hashes for the host to record.
+    pub return_routing_hashes: bool,
+    /// Cache the inputs under this id for a later `create_reservation` replay
+    /// (unbooked admissions only).
+    pub replay_id: Option<String>,
 }
 
 pub enum SelectionAdmission {
-    /// Queue admission without a booking; a `request_id` caches the inputs for
-    /// a later `create_reservation` replay.
+    /// Queue admission without a booking.
     Query { request_id: Option<String> },
-    /// Queue admission with a booking recorded under `selection_id`.
+    /// Queue admission with a booking the core records as a reservation under
+    /// `selection_id` and releases through its lifecycle calls.
     Book { selection_id: String },
-    /// Skip queue admission and report the chosen worker's load; a
-    /// `request_id` caches the inputs like `Query`.
+    /// Queue admission with a booking the caller owns: its lifecycle lease is
+    /// returned armed in [`Selected::lease`].
+    Lease { request_id: String },
+    /// Skip queue admission and report the chosen worker's load.
     Advisory { request_id: Option<String> },
 }
 
@@ -51,12 +64,15 @@ impl SelectionAdmission {
     pub fn request_id(&self) -> Option<&str> {
         match self {
             Self::Query { request_id } | Self::Advisory { request_id } => request_id.as_deref(),
-            Self::Book { selection_id } => Some(selection_id),
+            Self::Book { selection_id }
+            | Self::Lease {
+                request_id: selection_id,
+            } => Some(selection_id),
         }
     }
 
     pub fn is_booking(&self) -> bool {
-        matches!(self, Self::Book { .. })
+        matches!(self, Self::Book { .. } | Self::Lease { .. })
     }
 }
 
@@ -97,4 +113,8 @@ pub struct Selected {
     pub track_prefill_tokens: bool,
     pub effective_prefill_tokens: usize,
     pub kv_hint: Option<KvHint>,
+    pub routing_hashes: Option<Vec<LocalBlockHash>>,
+    /// The booking's lifecycle lease; `Lease` admission only. Dropping it frees
+    /// the booking, `commit` hands it to the caller's own cleanup.
+    pub lease: Option<Box<RequestLifecycleLease>>,
 }

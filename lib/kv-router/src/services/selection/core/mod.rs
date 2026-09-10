@@ -70,7 +70,6 @@ use super::types::{
 };
 use crate::WorkerSelectionPolicyFactory;
 use crate::WorkerType;
-use crate::indexer::KvRouterError;
 use crate::services::common::replica_sync::AffinityBindingEvent;
 
 /// The scheduler type every partition runs.
@@ -1031,6 +1030,9 @@ impl SelectionCore {
                 allowed_worker_ids: req.allowed_worker_ids,
                 routing_constraints: req.routing_constraints,
                 admission,
+                track_active_blocks: true,
+                return_routing_hashes: false,
+                replay_id: req.selection_id.clone(),
             })
             .await?;
         Ok(self.select_response(selected, req.selection_id))
@@ -1072,6 +1074,9 @@ impl SelectionCore {
                 admission: SelectionAdmission::Book {
                     selection_id: selection_id.clone(),
                 },
+                track_active_blocks: true,
+                return_routing_hashes: false,
+                replay_id: None,
             })
             .await?;
         Ok(self.select_response(selected, Some(selection_id)))
@@ -1103,6 +1108,8 @@ impl SelectionCore {
             track_prefill_tokens,
             effective_prefill_tokens,
             kv_hint,
+            routing_hashes: _,
+            lease: _,
         } = selected;
         let booked = sequence_hashes.is_some();
         let potential_decode_blocks = response.potential_decode_blocks as u64;
@@ -1168,6 +1175,9 @@ impl SelectionCore {
             allowed_worker_ids,
             routing_constraints,
             admission,
+            track_active_blocks,
+            return_routing_hashes,
+            replay_id,
         } = operation;
         self.ensure_running()?;
 
@@ -1185,6 +1195,11 @@ impl SelectionCore {
         let table = entry.affinity.get();
         let mut affinity_hold = None;
         let managed_session = match (&session, table) {
+            (SessionBinding::Managed { .. }, _) if claim.is_none() => {
+                return Err(SelectionError::Internal(
+                    "a managed session binding requires Book admission".to_string(),
+                ));
+            }
             (SessionBinding::Managed { session_id }, Some(table)) => Some((table, session_id)),
             _ => None,
         };
@@ -1216,8 +1231,10 @@ impl SelectionCore {
             .prepare_selection_inputs(
                 &entry,
                 &prompt,
-                self.kv_router_config
-                    .assume_kv_reuse(router_config_override.as_ref()),
+                track_active_blocks.then(|| {
+                    self.kv_router_config
+                        .assume_kv_reuse(router_config_override.as_ref())
+                }),
                 true,
                 retain_kv_transfer_chain,
             )
@@ -1225,7 +1242,10 @@ impl SelectionCore {
         // The queue lease frees a booking whose response is never consumed
         // (the caller dropped this future after the actor booked).
         let mode = match &admission {
-            SelectionAdmission::Book { selection_id } => ScheduleMode::TrackedWithLifecycle {
+            SelectionAdmission::Book { selection_id }
+            | SelectionAdmission::Lease {
+                request_id: selection_id,
+            } => ScheduleMode::TrackedWithLifecycle {
                 request_id: selection_id.clone(),
             },
             SelectionAdmission::Query { request_id } => ScheduleMode::QueryOnly {
@@ -1241,14 +1261,9 @@ impl SelectionCore {
             .unwrap_or(self.kv_router_config.router_track_prefill_tokens);
         // An unbooked selection with an id caches the booking inputs so a
         // follow-up `create_reservation` can replay them by that id.
-        let cached_inputs = match &admission {
-            SelectionAdmission::Query {
-                request_id: Some(id),
-            }
-            | SelectionAdmission::Advisory {
-                request_id: Some(id),
-            } => Some((
-                id.clone(),
+        let cached_inputs = replay_id.filter(|_| !book).map(|id| {
+            (
+                id,
                 sequence_hashes.clone(),
                 prompt.lora_name.map(str::to_string),
                 track_prefill_tokens,
@@ -1256,28 +1271,28 @@ impl SelectionCore {
                     SessionBinding::Query { session_id } => Some(session_id.clone()),
                     _ => None,
                 },
-            )),
-            _ => None,
-        };
+            )
+        });
         let allowed_worker_ids = match self.host.eligibility.lora_worker_filter.as_deref() {
             Some(filter) => narrow_allowed_worker_ids_by_lora(
                 filter,
                 prompt.lora_name,
                 allowed_worker_ids,
                 pinned_worker.as_ref(),
-                || self.catalog.schedulable_worker_ids_for_key(&key),
+                || entry.workers_tx.borrow().keys().copied().collect(),
             ),
             None => allowed_worker_ids,
         };
         // Bookings (now, or later via the pending-selection cache) are recorded
         // into an approximate indexer; keep the public hashes for that.
         let routing_hashes = (entry.indexer.records_routing_decisions()
-            && (book || cached_inputs.is_some()))
+            && (claim.is_some() || cached_inputs.is_some()))
         .then(|| block_hashes.clone());
         let booked_sequence_hashes = book.then(|| sequence_hashes.clone());
+        let returned_routing_hashes = return_routing_hashes.then(|| block_hashes.clone());
         let schedule_request = ScheduleRequest {
             mode,
-            token_seq: Some(sequence_hashes),
+            token_seq: track_active_blocks.then_some(sequence_hashes),
             block_hashes: Some(block_hashes),
             isl_tokens,
             overlap,
@@ -1363,8 +1378,10 @@ impl SelectionCore {
 
         // The routing hashes go to exactly one of: the booking recorded now, or
         // the cached inputs a later replay records.
+        // The routing hashes go to exactly one of: the reservation recorded
+        // now, or the replay cache a later reservation records from.
         let mut routing_hashes = routing_hashes;
-        if let Some(claim) = claim {
+        let lease = if let Some(claim) = claim {
             let Some(lease) = lease else {
                 return Err(SelectionError::Internal(
                     "booked selection has no lifecycle lease".to_string(),
@@ -1387,7 +1404,10 @@ impl SelectionCore {
                 booking: Some(lease.commit().ok_or_else(missing_booking)?),
                 _affinity_lease: affinity_lease,
             });
-        }
+            None
+        } else {
+            lease
+        };
 
         if let Some((cache_id, sequence_hashes, lora_name, track_prefill_tokens, session_id)) =
             cached_inputs
@@ -1421,6 +1441,8 @@ impl SelectionCore {
             track_prefill_tokens,
             effective_prefill_tokens: effective_prefill,
             kv_hint,
+            routing_hashes: returned_routing_hashes,
+            lease,
         }))
     }
 
@@ -1965,8 +1987,10 @@ impl SelectionCore {
             .prepare_selection_inputs(
                 &entry,
                 &req.prompt.view(),
-                self.kv_router_config
-                    .assume_kv_reuse(req.router_config_override.as_ref()),
+                Some(
+                    self.kv_router_config
+                        .assume_kv_reuse(req.router_config_override.as_ref()),
+                ),
                 false,
                 false,
             )
@@ -2018,21 +2042,24 @@ impl SelectionCore {
     /// the optional shared-cache lookup run concurrently; the shared cache is
     /// consulted only when `query_shared_cache` is set, a shared cache is
     /// attached, and the prompt carries raw `token_ids`.
+    /// `tracking_assume_kv_reuse` is `None` when the caller does not track
+    /// active blocks.
     async fn prepare_selection_inputs(
         &self,
         entry: &SelectionEntry,
         prompt: &PromptView<'_>,
-        assume_kv_reuse: bool,
+        tracking_assume_kv_reuse: Option<bool>,
         query_shared_cache: bool,
         retain_kv_transfer_chain: bool,
     ) -> Result<PreparedSelectionInputs, SelectionError> {
         let normalized = prompt.normalize_for_selection(
+            entry.block_size,
             entry.is_eagle,
-            TrackingHashInput {
+            tracking_assume_kv_reuse.map(|assume_kv_reuse| TrackingHashInput {
                 context: &self.tracking_hash,
                 scope: tracking_scope(entry),
                 assume_kv_reuse,
-            },
+            }),
         )?;
         let indexer_lookup = async {
             if normalized.block_hashes.is_empty() {
@@ -2047,12 +2074,7 @@ impl SelectionCore {
                         },
                     )
                     .await
-                    .map_err(|error| match error {
-                        KvRouterError::IndexerOffline => {
-                            SelectionError::NotReady(error.to_string())
-                        }
-                        other => SelectionError::Internal(other.to_string()),
-                    })
+                    .map_err(SelectionError::Indexer)
             }
         };
         let shared_cache = query_shared_cache
@@ -2604,7 +2626,9 @@ mod tests {
         core.upsert_worker(worker(1)).await.expect("worker upsert");
         assert!(matches!(
             core.select(select_request()).await,
-            Err(SelectionError::NotReady(_))
+            Err(SelectionError::Indexer(
+                crate::indexer::KvRouterError::IndexerOffline
+            ))
         ));
     }
 

@@ -75,14 +75,18 @@ pub struct PromptView<'a> {
 }
 
 impl PromptView<'_> {
+    /// `tracking` is `None` when the caller does not track active blocks; the
+    /// tracking hashes are then left empty instead of computed and discarded.
     pub(super) fn normalize_for_selection(
         &self,
+        block_size: u32,
         default_is_eagle: bool,
-        tracking: TrackingHashInput<'_>,
+        tracking: Option<TrackingHashInput<'_>>,
     ) -> Result<NormalizedPrompt, SelectionError> {
         if let Some((token_ids, block_mm_infos)) = self.routing_tokens_and_mm_infos() {
             return Ok(normalize_tokens_for_selection(
                 token_ids,
+                block_size,
                 self.lora_name,
                 self.cache_namespace,
                 block_mm_infos,
@@ -180,11 +184,12 @@ impl PromptView<'_> {
 
 fn normalize_tokens_for_selection(
     token_ids: &[u32],
+    block_size: u32,
     lora_name: Option<&str>,
     cache_namespace: Option<&str>,
     block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
     is_eagle: bool,
-    tracking: TrackingHashInput<'_>,
+    tracking: Option<TrackingHashInput<'_>>,
 ) -> NormalizedPrompt {
     let hash_options = BlockHashOptions {
         block_mm_infos,
@@ -192,15 +197,16 @@ fn normalize_tokens_for_selection(
         cache_namespace,
         is_eagle: Some(is_eagle),
     };
-    let block_hashes =
-        compute_block_hash_for_seq(token_ids, tracking.scope.block_size, hash_options);
-    let sequence_hashes = tracking.context.compute_sequence_hashes_for_tracking(
-        tracking.scope,
-        token_ids,
-        hash_options,
-        tracking.assume_kv_reuse,
-        Some(&block_hashes),
-    );
+    let block_hashes = compute_block_hash_for_seq(token_ids, block_size, hash_options);
+    let sequence_hashes = tracking.map_or_else(Vec::new, |tracking| {
+        tracking.context.compute_sequence_hashes_for_tracking(
+            tracking.scope,
+            token_ids,
+            hash_options,
+            tracking.assume_kv_reuse,
+            Some(&block_hashes),
+        )
+    });
     NormalizedPrompt {
         block_hashes,
         sequence_hashes,

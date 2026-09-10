@@ -33,6 +33,10 @@ use dynamo_kv_router::{
         overlap::cache_hit_estimates_from_tiered_matches,
     },
     selector::WorkerInputs,
+    services::selection::{
+        PromptView, Selected, SelectionAdmission, SelectionError, SelectionOperation,
+        SelectionOutcome, SessionBinding,
+    },
 };
 use dynamo_runtime::{
     CancellationToken,
@@ -600,7 +604,7 @@ pub struct KvRouter {
     request_leases: request_lease::RequestLeaseManager,
     /// Optional external shared KV cache pool. When present, `find_best_match`
     /// queries it in parallel with the indexer and factors shared hits into scoring.
-    shared_cache: Option<Box<dyn SharedKvCache>>,
+    shared_cache: Option<Arc<dyn SharedKvCache>>,
     /// Optional LoRA filter. When present (LoRA serving enabled), candidate workers are
     /// narrowed to the LoRA's allocated/loaded replicas inside `find_best_match_details`,
     /// covering both the decode and prefill routers (both built via `kv_chooser_for`).
@@ -638,7 +642,7 @@ impl KvRouter {
         metric_worker_type: &'static str,
         model_name: Option<String>,
         is_eagle: bool,
-        shared_cache: Option<Box<dyn SharedKvCache>>,
+        shared_cache: Option<Arc<dyn SharedKvCache>>,
         lora_filter: Option<Arc<crate::lora::LoraFilter>>,
     ) -> Result<Self> {
         Self::new_with_worker_role(
@@ -674,7 +678,7 @@ impl KvRouter {
         metric_worker_type: &'static str,
         model_name: Option<String>,
         is_eagle: bool,
-        shared_cache: Option<Box<dyn SharedKvCache>>,
+        shared_cache: Option<Arc<dyn SharedKvCache>>,
         lora_filter: Option<Arc<crate::lora::LoraFilter>>,
     ) -> Result<Self> {
         let parent_token = endpoint.component().drt().child_token();
@@ -715,7 +719,7 @@ impl KvRouter {
         metric_worker_type: &'static str,
         model_name: Option<String>,
         is_eagle: bool,
-        shared_cache: Option<Box<dyn SharedKvCache>>,
+        shared_cache: Option<Arc<dyn SharedKvCache>>,
         lora_filter: Option<Arc<crate::lora::LoraFilter>>,
         scheduler_load: SchedulerLoadSender,
         parent_token: CancellationToken,
@@ -832,6 +836,10 @@ impl KvRouter {
                 prefill_load_estimator: prefill_load_estimator.clone(),
                 overloaded_worker_provider,
                 available_worker_provider,
+                shared_cache: shared_cache.clone(),
+                lora_worker_filter: lora_filter.clone().map(|filter| {
+                    filter as Arc<dyn dynamo_kv_router::scheduling::LoraWorkerFilter>
+                }),
                 ingress: Arc::clone(&ingress)
                     as Arc<dyn dynamo_kv_router::services::selection::KvEventIngress>,
                 scheduler_load,
@@ -1501,6 +1509,154 @@ impl KvRouter {
                 unreachable!("without-admission routing returned admitted outcome")
             }
         }
+    }
+
+    /// The shared core's selection for the same inputs as
+    /// `find_best_match_details_with_policy_class_inner`.
+    #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(not(test), expect(dead_code))]
+    async fn select_core(
+        &self,
+        context_id: Option<&str>,
+        tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        router_config_override: Option<&RouterConfigOverride>,
+        update_states: bool,
+        return_routing_hashes: bool,
+        lora_name: Option<&str>,
+        cache_namespace: Option<&str>,
+        priority_jump: f64,
+        strict_priority: u32,
+        policy_class: Option<String>,
+        session_context: Option<dynamo_kv_router::SessionContext>,
+        expected_output_tokens: Option<u32>,
+        affinity_target: Option<dynamo_kv_router::protocols::WorkerAffinityTarget>,
+        pinned_worker: Option<WorkerWithDpRank>,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
+        admission: FindBestMatchAdmission,
+    ) -> anyhow::Result<FindBestMatchInnerOutcome> {
+        if update_states && context_id.is_none() {
+            anyhow::bail!("context_id must be provided if update_states is true");
+        }
+        let core_admission = match admission {
+            FindBestMatchAdmission::WithAdmission { .. } if update_states => {
+                SelectionAdmission::Lease {
+                    request_id: context_id.expect("validated above").to_string(),
+                }
+            }
+            FindBestMatchAdmission::WithAdmission { .. } => SelectionAdmission::Query {
+                request_id: context_id.map(str::to_string),
+            },
+            FindBestMatchAdmission::WithoutAdmission => SelectionAdmission::Advisory {
+                request_id: context_id.map(str::to_string),
+            },
+        };
+        let outcome = self
+            .scheduler
+            .run_selection(SelectionOperation {
+                key: self.scheduler.partition_key().clone(),
+                prompt: PromptView {
+                    token_ids: Some(tokens),
+                    mm_routing_info: None,
+                    block_mm_infos,
+                    block_hashes: None,
+                    sequence_hashes: None,
+                    isl_tokens: None,
+                    lora_name,
+                    cache_namespace,
+                    is_eagle: Some(self.is_eagle),
+                },
+                router_config_override: router_config_override.cloned(),
+                expected_output_tokens,
+                priority_jump,
+                strict_priority,
+                policy_class,
+                session_context,
+                session: SessionBinding::None,
+                affinity_target,
+                pinned_worker,
+                allowed_worker_ids,
+                routing_constraints,
+                admission: core_admission,
+                track_active_blocks: self.kv_router_config.router_track_active_blocks,
+                return_routing_hashes,
+                replay_id: None,
+            })
+            .await;
+        let selected = match outcome {
+            Ok(SelectionOutcome::Selected(selected)) => selected,
+            Ok(SelectionOutcome::QueueRejected { rejection }) => {
+                return Ok(match admission {
+                    FindBestMatchAdmission::WithAdmission { .. } => {
+                        FindBestMatchInnerOutcome::WithAdmission(AdmittedFindBestMatchOutcome {
+                            outcome: FindBestMatchOutcome::QueueRejected { rejection },
+                            attempt: AdmissionAttempt::Untracked,
+                        })
+                    }
+                    FindBestMatchAdmission::WithoutAdmission => {
+                        FindBestMatchInnerOutcome::WithoutAdmission(
+                            FindBestMatchAdvisoryOutcome::QueueRejected { rejection },
+                        )
+                    }
+                });
+            }
+            Err(SelectionError::Scheduler(error)) => return Err(map_scheduler_error(error)),
+            Err(SelectionError::Indexer(error)) => return Err(error.into()),
+            // The partition has no schedulable worker: the scheduler's own answer.
+            Err(SelectionError::NotReady(_)) => {
+                return Err(map_scheduler_error(KvSchedulerError::NoEndpoints));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let Selected {
+            response,
+            advisory_load,
+            kv_hint,
+            routing_hashes,
+            lease,
+            ..
+        } = selected;
+        let routing_hashes = routing_hashes.map(RoutingDecisionHashes::from_local_hashes);
+        let overlap_blocks = response.effective_overlap_blocks.round() as u32;
+        Ok(match admission {
+            FindBestMatchAdmission::WithAdmission { .. } => {
+                // The caller owns cleanup through the attempt identity.
+                let attempt = match lease {
+                    Some(lease) => {
+                        let booking = lease
+                            .commit()
+                            .ok_or_else(|| anyhow::anyhow!("booking lease holds no booking"))?;
+                        AdmissionAttempt::Tracked(booking.attempt_id)
+                    }
+                    None => AdmissionAttempt::Untracked,
+                };
+                FindBestMatchInnerOutcome::WithAdmission(AdmittedFindBestMatchOutcome {
+                    outcome: FindBestMatchOutcome::Routed {
+                        worker: response.best_worker,
+                        overlap_blocks,
+                        effective_overlap_blocks: response.effective_overlap_blocks,
+                        cached_tokens: response.cached_tokens,
+                        potential_decode_blocks: response.potential_decode_blocks as u64,
+                        routing_hashes,
+                        kv_hint,
+                    },
+                    attempt,
+                })
+            }
+            FindBestMatchAdmission::WithoutAdmission => {
+                FindBestMatchInnerOutcome::WithoutAdmission(FindBestMatchAdvisoryOutcome::Routed {
+                    worker: response.best_worker,
+                    overlap_blocks,
+                    effective_overlap_blocks: response.effective_overlap_blocks,
+                    cached_tokens: response.cached_tokens,
+                    potential_decode_blocks: response.potential_decode_blocks as u64,
+                    selected_worker_load: advisory_load
+                        .expect("without-admission selection returns advisory load"),
+                    routing_hashes,
+                })
+            }
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2761,7 +2917,7 @@ mod tests {
             "prefill",
             None,
             false,
-            Some(Box::new(FakeSharedCache {
+            Some(Arc::new(FakeSharedCache {
                 hits: None,
                 should_error: false,
             })),
@@ -2780,9 +2936,353 @@ mod tests {
         ));
     }
 
+    /// Three default-config workers under the registry policy, with
+    /// `router_track_active_blocks` on so bookings send tracking hashes.
+    async fn differential_router(name: &str) -> KvRouter {
+        let component = make_test_component(name).await;
+        let endpoint = component.endpoint("backend");
+        let client = endpoint.client().await.unwrap();
+        let workers = (0..3)
+            .map(|worker_id| (worker_id, ModelRuntimeConfig::default()))
+            .collect();
+        let (_tx, rx) = watch::channel(workers);
+        // Prefill load decays with wall time and would let near-ties flip
+        // between two procedures run microseconds apart.
+        let config = KvRouterConfig {
+            use_kv_events: false,
+            router_track_prefill_tokens: false,
+            skip_initial_worker_wait: true,
+            ..Default::default()
+        };
+        let router = KvRouter::new_with_worker_role(
+            endpoint,
+            client,
+            rx,
+            None,
+            2,
+            SelectionPolicySource::Registry,
+            Some(config),
+            None,
+            None,
+            "decode",
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        // Worker 1 has served prefix A and worker 2 prefix B, so every corpus
+        // prompt has one unambiguous best worker.
+        for (worker_id, tokens) in [(1u64, golden_prefix(1)), (2, golden_prefix(2))] {
+            router
+                .record_routing_decision(
+                    TokensWithHashes::new(tokens.clone(), 2),
+                    WorkerWithDpRank::from_worker_id(worker_id),
+                )
+                .await
+                .unwrap();
+            // The approximate index applies recordings asynchronously; wait
+            // until a query sees the whole prefix.
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let (worker, overlap) = router
+                        .find_best_match(
+                            None,
+                            &tokens,
+                            None,
+                            None,
+                            false,
+                            None,
+                            None,
+                            0.0,
+                            0,
+                            None,
+                            None,
+                            RoutingConstraints::default(),
+                        )
+                        .await
+                        .unwrap();
+                    if worker.worker_id == worker_id && overlap == 8 {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("seeded prefix became visible");
+        }
+        router
+    }
+
+    fn golden_prefix(seed: u32) -> Vec<u32> {
+        (0..16).map(|i| seed * 100 + i).collect()
+    }
+
+    /// Prompts sharing 4, 2, 8 (then continuing past it), 8, and 8 blocks
+    /// with a seeded prefix. Partial matches come first so they are scored
+    /// against the seeded index alone, before bookings add decode load.
+    fn golden_corpus() -> Vec<Vec<u32>> {
+        let a = golden_prefix(1);
+        let b = golden_prefix(2);
+        vec![
+            a[..8].to_vec(),
+            b[..4].iter().copied().chain(900..912).collect(),
+            a.iter().copied().chain(1_000..1_008).collect(),
+            a,
+            b,
+        ]
+    }
+
+    #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+    struct GoldenDecision {
+        worker_id: WorkerId,
+        dp_rank: u32,
+        overlap_blocks: u32,
+        cached_tokens: usize,
+        potential_decode_blocks: u64,
+    }
+
+    impl GoldenDecision {
+        fn from_outcome(outcome: &FindBestMatchOutcome) -> Self {
+            match outcome {
+                FindBestMatchOutcome::Routed {
+                    worker,
+                    overlap_blocks,
+                    cached_tokens,
+                    potential_decode_blocks,
+                    ..
+                } => Self {
+                    worker_id: worker.worker_id,
+                    dp_rank: worker.dp_rank,
+                    overlap_blocks: *overlap_blocks,
+                    cached_tokens: *cached_tokens,
+                    potential_decode_blocks: *potential_decode_blocks,
+                },
+                FindBestMatchOutcome::QueueRejected { rejection } => {
+                    panic!("golden corpus must not be queue rejected: {rejection:?}")
+                }
+            }
+        }
+    }
+
+    const GOLDEN_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/data/selection_golden/aggregated_tracked.json"
+    );
+
+    /// Both selection procedures, run on independent routers over the same
+    /// corpus with tracked bookings, must agree with each other and with the
+    /// frozen trace recorded from the frontend procedure. Regenerate the trace
+    /// with `SELECTION_GOLDEN_UPDATE=1` only for an intended behavior change.
+    #[tokio::test]
+    async fn core_selection_matches_frontend_golden_trace() {
+        let frontend = differential_router("golden-frontend").await;
+        let core = differential_router("golden-core").await;
+        let mut frontend_trace = Vec::new();
+        let mut core_trace = Vec::new();
+        for (index, tokens) in golden_corpus().iter().enumerate() {
+            let context_id = format!("golden-{index}");
+            let admission = FindBestMatchAdmission::WithAdmission {
+                track_lifecycle: true,
+            };
+            let old = frontend
+                .find_best_match_details_with_policy_class_inner(
+                    Some(&context_id),
+                    tokens,
+                    None,
+                    None,
+                    true,
+                    true,
+                    None,
+                    None,
+                    0.0,
+                    0,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    RoutingConstraints::default(),
+                    admission,
+                )
+                .await
+                .unwrap();
+            let new = core
+                .select_core(
+                    Some(&context_id),
+                    tokens,
+                    None,
+                    None,
+                    true,
+                    true,
+                    None,
+                    None,
+                    0.0,
+                    0,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    RoutingConstraints::default(),
+                    admission,
+                )
+                .await
+                .unwrap();
+            let (
+                FindBestMatchInnerOutcome::WithAdmission(old),
+                FindBestMatchInnerOutcome::WithAdmission(new),
+            ) = (old, new)
+            else {
+                panic!("admitted routing returned advisory outcome");
+            };
+            assert!(matches!(old.attempt, AdmissionAttempt::Tracked(_)));
+            assert!(matches!(new.attempt, AdmissionAttempt::Tracked(_)));
+            match (&old.outcome, &new.outcome) {
+                (
+                    FindBestMatchOutcome::Routed {
+                        routing_hashes: old_hashes,
+                        ..
+                    },
+                    FindBestMatchOutcome::Routed {
+                        routing_hashes: new_hashes,
+                        ..
+                    },
+                ) => assert_eq!(
+                    old_hashes.as_ref().map(|h| h.local_hashes.clone()),
+                    new_hashes.as_ref().map(|h| h.local_hashes.clone())
+                ),
+                _ => panic!("golden corpus must route"),
+            }
+            frontend_trace.push(GoldenDecision::from_outcome(&old.outcome));
+            core_trace.push(GoldenDecision::from_outcome(&new.outcome));
+        }
+        assert_eq!(
+            core_trace, frontend_trace,
+            "core and frontend procedures diverged"
+        );
+
+        if std::env::var_os("SELECTION_GOLDEN_UPDATE").is_some() {
+            std::fs::write(
+                GOLDEN_PATH,
+                serde_json::to_string_pretty(&frontend_trace).unwrap() + "\n",
+            )
+            .unwrap();
+        }
+        let golden: Vec<GoldenDecision> =
+            serde_json::from_str(&std::fs::read_to_string(GOLDEN_PATH).unwrap()).unwrap();
+        assert_eq!(
+            frontend_trace, golden,
+            "frontend procedure drifted from its frozen trace"
+        );
+    }
+
+    /// Query-only and advisory selections mutate nothing, so one router serves
+    /// both procedures.
+    #[tokio::test]
+    async fn core_selection_matches_frontend_for_unbooked_requests() {
+        let router = differential_router("golden-unbooked").await;
+        for tokens in golden_corpus() {
+            for admission in [
+                FindBestMatchAdmission::WithAdmission {
+                    track_lifecycle: false,
+                },
+                FindBestMatchAdmission::WithoutAdmission,
+            ] {
+                let old = router
+                    .find_best_match_details_with_policy_class_inner(
+                        None,
+                        &tokens,
+                        None,
+                        None,
+                        false,
+                        false,
+                        None,
+                        None,
+                        0.0,
+                        0,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        RoutingConstraints::default(),
+                        admission,
+                    )
+                    .await
+                    .unwrap();
+                let new = router
+                    .select_core(
+                        None,
+                        &tokens,
+                        None,
+                        None,
+                        false,
+                        false,
+                        None,
+                        None,
+                        0.0,
+                        0,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        RoutingConstraints::default(),
+                        admission,
+                    )
+                    .await
+                    .unwrap();
+                match (old, new) {
+                    (
+                        FindBestMatchInnerOutcome::WithAdmission(old),
+                        FindBestMatchInnerOutcome::WithAdmission(new),
+                    ) => {
+                        assert!(matches!(old.attempt, AdmissionAttempt::Untracked));
+                        assert!(matches!(new.attempt, AdmissionAttempt::Untracked));
+                        assert_eq!(
+                            GoldenDecision::from_outcome(&new.outcome),
+                            GoldenDecision::from_outcome(&old.outcome)
+                        );
+                    }
+                    (
+                        FindBestMatchInnerOutcome::WithoutAdmission(
+                            FindBestMatchAdvisoryOutcome::Routed {
+                                worker: old_worker,
+                                overlap_blocks: old_overlap,
+                                selected_worker_load: old_load,
+                                ..
+                            },
+                        ),
+                        FindBestMatchInnerOutcome::WithoutAdmission(
+                            FindBestMatchAdvisoryOutcome::Routed {
+                                worker: new_worker,
+                                overlap_blocks: new_overlap,
+                                selected_worker_load: new_load,
+                                ..
+                            },
+                        ),
+                    ) => {
+                        assert_eq!((new_worker, new_overlap), (old_worker, old_overlap));
+                        assert_eq!(
+                            new_load.active_prefill_tokens,
+                            old_load.active_prefill_tokens
+                        );
+                    }
+                    _ => panic!("procedures returned different outcome shapes"),
+                }
+            }
+        }
+    }
+
     async fn make_test_router_with_workers(
         policy: SelectionPolicySource,
-        shared_cache: Option<Box<dyn SharedKvCache>>,
+        shared_cache: Option<Arc<dyn SharedKvCache>>,
         workers: HashMap<WorkerId, ModelRuntimeConfig>,
     ) -> KvRouter {
         let component = make_test_component("shared-cache-router").await;
@@ -2822,7 +3322,7 @@ mod tests {
 
     async fn make_test_router(
         policy: SelectionPolicySource,
-        shared_cache: Option<Box<dyn SharedKvCache>>,
+        shared_cache: Option<Arc<dyn SharedKvCache>>,
     ) -> KvRouter {
         let mut workers = HashMap::new();
         workers.insert(0, ModelRuntimeConfig::default());
@@ -3130,7 +3630,7 @@ mod tests {
     async fn test_find_best_match_passes_shared_cache_hits_to_scheduler() {
         let router = make_test_router(
             fixed_policy(Some(2), WorkerWithDpRank::from_worker_id(1)),
-            Some(Box::new(FakeSharedCache {
+            Some(Arc::new(FakeSharedCache {
                 #[allow(clippy::single_range_in_vec_init)]
                 hits: Some(dynamo_kv_router::protocols::SharedCacheHits::from_ranges(
                     vec![0..2],
@@ -3166,7 +3666,7 @@ mod tests {
     async fn test_find_best_match_ignores_shared_cache_errors() {
         let router = make_test_router(
             fixed_policy(None, WorkerWithDpRank::from_worker_id(0)),
-            Some(Box::new(FakeSharedCache {
+            Some(Arc::new(FakeSharedCache {
                 hits: None,
                 should_error: true,
             })),
@@ -3323,7 +3823,7 @@ mod tests {
     async fn test_get_overlap_scores_returns_tiered_rows_and_shared_hits() {
         let router = make_test_router(
             fixed_policy(None, WorkerWithDpRank::from_worker_id(0)),
-            Some(Box::new(FakeSharedCache {
+            Some(Arc::new(FakeSharedCache {
                 #[allow(clippy::single_range_in_vec_init)]
                 hits: Some(dynamo_kv_router::protocols::SharedCacheHits::from_ranges(
                     vec![0..2],

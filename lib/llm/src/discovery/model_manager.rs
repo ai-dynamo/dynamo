@@ -2119,7 +2119,7 @@ impl ModelManager {
         );
         // A policy that does not consume cache input must not create a shared-cache client or
         // subscribe to its updates.
-        let shared_cache: Option<Box<dyn dynamo_kv_router::SharedKvCache>> =
+        let shared_cache: Option<Arc<dyn dynamo_kv_router::SharedKvCache>> =
             if required_worker_inputs.contains(WorkerInputs::CACHE) {
                 match kv_router_config
                     .as_ref()
@@ -2133,7 +2133,7 @@ impl ModelManager {
                             worker_component = worker_component_name,
                             "Using HiCache shared KV cache"
                         );
-                        Some(Box::new(
+                        Some(Arc::new(
                             self.hicache_cache_for(&endpoint, workers_with_configs.clone()),
                         ))
                     }

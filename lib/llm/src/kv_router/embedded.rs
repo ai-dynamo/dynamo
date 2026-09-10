@@ -28,9 +28,10 @@ use dynamo_kv_router::scheduling::{
 use dynamo_kv_router::sequences::{SequenceError, SequenceRequest};
 use dynamo_kv_router::services::selection::{
     CatalogObserver, CatalogReconciler, HostCache, HostEligibility, HostLoad, HostReplication,
-    HostTelemetry, KvEventIngress, KvIndexSource, SelectionHost, SelectionPartition,
-    SelectionService, SelectionServiceBuilder, WorkerCatalogRecord, WorkerCatalogSource,
-    WorkerRequest, WorkerSelectionPolicyRegistry,
+    HostTelemetry, KvEventIngress, KvIndexSource, SelectionError, SelectionHost,
+    SelectionOperation, SelectionOutcome, SelectionPartition, SelectionService,
+    SelectionServiceBuilder, WorkerCatalogRecord, WorkerCatalogSource, WorkerRequest,
+    WorkerSelectionPolicyRegistry,
 };
 use dynamo_kv_router::{DEFAULT_ROUTING_GROUP, PrefillLoadEstimator, WorkerSelectionPolicyFactory};
 use dynamo_tokens::SequenceHash;
@@ -53,6 +54,8 @@ pub(crate) struct EmbeddedSelectionArgs {
     pub prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     pub overloaded_worker_provider: OverloadedWorkerProvider,
     pub available_worker_provider: WorkerAvailabilityProvider,
+    pub shared_cache: Option<Arc<dyn dynamo_kv_router::SharedKvCache>>,
+    pub lora_worker_filter: Option<Arc<dyn dynamo_kv_router::scheduling::LoraWorkerFilter>>,
     /// Builds and feeds the router's index from the runtime; the partition
     /// takes its index from it.
     pub ingress: Arc<dyn KvEventIngress>,
@@ -165,7 +168,7 @@ pub(crate) const DEFAULT_MODEL_NAME: &str = "default";
 pub(crate) struct EmbeddedSelection {
     /// Keeps the service (listeners, sweep, replica sync) alive for as long as
     /// the router holds the partition.
-    _service: Arc<SelectionService>,
+    service: Arc<SelectionService>,
     partition: SelectionPartition,
     affinity: std::sync::OnceLock<crate::session_affinity::AffinityCoordinator>,
     worker_type: &'static str,
@@ -263,10 +266,12 @@ impl EmbeddedSelection {
                 available_workers: Some(args.available_worker_provider),
             },
             cache: HostCache {
-                shared: None,
+                shared: args.shared_cache,
                 index: KvIndexSource::Owned(args.ingress),
             },
-            eligibility: HostEligibility::default(),
+            eligibility: HostEligibility {
+                lora_worker_filter: args.lora_worker_filter,
+            },
             telemetry: HostTelemetry {
                 scheduler_load: Some(Arc::new(SenderLoadSink {
                     sender: args.scheduler_load,
@@ -347,7 +352,7 @@ impl EmbeddedSelection {
             "KvRouter scheduling on embedded selection partition"
         );
         Ok(Self {
-            _service: service,
+            service,
             partition,
             affinity: std::sync::OnceLock::new(),
             worker_type: args.metric_worker_type,
@@ -359,7 +364,14 @@ impl EmbeddedSelection {
     /// Queue changes are not observable through the scheduler's update watch,
     /// so every schedule result refreshes the gauges.
     fn observe_schedule_result<T>(&self, result: &Result<T, KvSchedulerError>) {
-        if let Err(KvSchedulerError::QueueRejected(rejection)) = result {
+        self.observe_queue(match result {
+            Err(KvSchedulerError::QueueRejected(rejection)) => Some(rejection),
+            _ => None,
+        });
+    }
+
+    fn observe_queue(&self, rejection: Option<&QueueRejection>) {
+        if let Some(rejection) = rejection {
             record_queue_rejection(&self.queue_metrics, &self.queue_metric_indices, rejection);
         }
         update_queue_metrics(&self.queue_metrics, |index| {
@@ -383,6 +395,23 @@ impl EmbeddedSelection {
     /// Membership is catalog-driven (runtime-config watch); explicit worker
     /// registration is a no-op here.
     pub(crate) fn register_workers(&self, _worker_ids: &HashSet<WorkerId>) {}
+
+    pub(crate) fn partition_key(&self) -> &RoutingPartitionId {
+        self.partition.key()
+    }
+
+    /// Run one selection through the shared core.
+    pub(crate) async fn run_selection(
+        &self,
+        operation: SelectionOperation<'_>,
+    ) -> Result<SelectionOutcome, SelectionError> {
+        let outcome = self.service.core().run_selection(operation).await;
+        self.observe_queue(match &outcome {
+            Ok(SelectionOutcome::QueueRejected { rejection }) => Some(rejection),
+            _ => None,
+        });
+        outcome
+    }
 
     pub(crate) async fn schedule_request_admitted(
         &self,

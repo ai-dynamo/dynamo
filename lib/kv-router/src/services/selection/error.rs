@@ -5,6 +5,7 @@ use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
+use crate::indexer::KvRouterError;
 use crate::scheduling::KvSchedulerError;
 use crate::sequences::SequenceError;
 
@@ -24,6 +25,10 @@ pub enum SelectionError {
     Scheduler(#[from] KvSchedulerError),
     #[error(transparent)]
     Sequence(#[from] SequenceError),
+    /// The KV index lookup failed; an offline remote index is not ready,
+    /// anything else is internal.
+    #[error(transparent)]
+    Indexer(#[from] KvRouterError),
 }
 
 impl SelectionError {
@@ -36,6 +41,8 @@ impl SelectionError {
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Scheduler(error) => scheduler_error_status(error),
             Self::Sequence(error) => sequence_error_status(error),
+            Self::Indexer(KvRouterError::IndexerOffline) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Indexer(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
@@ -55,6 +62,8 @@ impl SelectionError {
             Self::Internal(_) => "internal",
             Self::Scheduler(_) => "scheduler",
             Self::Sequence(_) => "sequence",
+            Self::Indexer(KvRouterError::IndexerOffline) => "not_ready",
+            Self::Indexer(_) => "internal",
         }
     }
 }
