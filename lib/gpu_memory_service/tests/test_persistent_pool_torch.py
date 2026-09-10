@@ -4,13 +4,6 @@
 """End-to-end: torch.empty() inside gms_use_persistent_pool routes
 through the persistent namespace, daemon owns the bytes, engine
 restart re-attaches to the same physical pages.
-
-This is the foundation real-engine installers (P3-P5) will use.
-Engine code wrapping its KV-pool allocation in
-``with gms_use_persistent_pool("kv_pool", device): ...`` gets
-GMS-owned VMM-IPC KV pools transparently.
-
-Run inside one of the engine dev shells with real CUDA.
 """
 
 from __future__ import annotations
