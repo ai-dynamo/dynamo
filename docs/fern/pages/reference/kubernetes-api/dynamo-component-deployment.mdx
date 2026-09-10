@@ -140,7 +140,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 
 <Indent>
   <ParamField path="packDomain" type="string" required={true}>
-    Topology domain to pack pods within. Must match a domain defined in the referenced `ClusterTopology`. When the parent DGD also sets `spec.topologyConstraint.packDomain`, this value must be narrower than or equal to it. The domain constrains each gang-scheduled replica group independently: this component's replicas are not packed into one shared domain with each other, and replicas added by a later replica-count change are placed independently of where the existing replicas already run. The number of replicas gang-scheduled together is `minAvailable`, which is immutable after creation and so must be set when the deployment is created.
+    Topology domain to pack pods within. Must match a domain defined in the referenced `ClusterTopology`. When the parent DGD also sets `spec.topologyConstraint.packDomain`, this value must be narrower than or equal to it. The operator renders this as the Grove `topologyConstraint.pack.required` domain, which Grove documents as applying to each replica of the resource it is set on. Whether replicas added by a later replica-count change land in the domain the existing replicas already occupy is determined by Grove and the backend scheduler, not by this operator.
   </ParamField>
 </Indent>
 

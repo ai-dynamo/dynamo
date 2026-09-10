@@ -2917,7 +2917,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `clusterTopologyName` _string_ | clusterTopologyName is the name of the ClusterTopology resource that<br />defines the topology hierarchy for this deployment. |  | MinLength: 1 <br /> |
-| `packDomain` _[TopologyDomain](#topologydomain)_ | packDomain is the default topology domain to pack pods within.<br />Optional; omit when only components carry constraints.<br />The domain constrains each gang-scheduled replica group independently. A<br />component's replicas are not packed into one shared domain with each<br />other, and replicas added by a later replica-count change are placed<br />independently of where the existing replicas already run. The number of<br />replicas gang-scheduled together is `minAvailable`, which is immutable<br />after creation and so must be set when the deployment is created. |  | Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
+| `packDomain` _[TopologyDomain](#topologydomain)_ | packDomain is the default topology domain to pack pods within.<br />Optional; omit when only components carry constraints.<br />The operator renders this as the Grove `topologyConstraint.pack.required`<br />domain, which Grove documents as applying to each replica of the resource<br />it is set on. Whether replicas added by a later replica-count change land<br />in the domain the existing replicas already occupy is determined by Grove<br />and the backend scheduler, not by this operator. |  | Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
 
 
 #### TopologyConstraint
@@ -2936,7 +2936,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `packDomain` _[TopologyDomain](#topologydomain)_ | packDomain is the topology domain to pack pods within. Must match a<br />domain defined in the referenced ClusterTopology CR.<br />The domain constrains each gang-scheduled replica group independently.<br />This component's replicas are not packed into one shared domain with each<br />other, and replicas added by a later replica-count change are placed<br />independently of where the existing replicas already run. The number of<br />replicas gang-scheduled together is `minAvailable`, which is immutable<br />after creation and so must be set when the deployment is created. |  | Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` <br /> |
+| `packDomain` _[TopologyDomain](#topologydomain)_ | packDomain is the topology domain to pack pods within. Must match a<br />domain defined in the referenced ClusterTopology CR.<br />The operator renders this as the Grove `topologyConstraint.pack.required`<br />domain, which Grove documents as applying to each replica of the resource<br />it is set on. Whether replicas added by a later replica-count change land<br />in the domain the existing replicas already occupy is determined by Grove<br />and the backend scheduler, not by this operator. |  | Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` <br /> |
 
 
 #### TopologyDomain

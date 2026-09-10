@@ -545,12 +545,11 @@ type SpecTopologyConstraint struct {
 	// packDomain is the default topology domain to pack pods within.
 	// Optional; omit when only components carry constraints.
 	//
-	// The domain constrains each gang-scheduled replica group independently. A
-	// component's replicas are not packed into one shared domain with each
-	// other, and replicas added by a later replica-count change are placed
-	// independently of where the existing replicas already run. The number of
-	// replicas gang-scheduled together is `minAvailable`, which is immutable
-	// after creation and so must be set when the deployment is created.
+	// The operator renders this as the Grove `topologyConstraint.pack.required`
+	// domain, which Grove documents as applying to each replica of the resource
+	// it is set on. Whether replicas added by a later replica-count change land
+	// in the domain the existing replicas already occupy is determined by Grove
+	// and the backend scheduler, not by this operator.
 	// +optional
 	PackDomain TopologyDomain `json:"packDomain,omitempty"`
 }
@@ -562,12 +561,11 @@ type TopologyConstraint struct {
 	// packDomain is the topology domain to pack pods within. Must match a
 	// domain defined in the referenced ClusterTopology CR.
 	//
-	// The domain constrains each gang-scheduled replica group independently.
-	// This component's replicas are not packed into one shared domain with each
-	// other, and replicas added by a later replica-count change are placed
-	// independently of where the existing replicas already run. The number of
-	// replicas gang-scheduled together is `minAvailable`, which is immutable
-	// after creation and so must be set when the deployment is created.
+	// The operator renders this as the Grove `topologyConstraint.pack.required`
+	// domain, which Grove documents as applying to each replica of the resource
+	// it is set on. Whether replicas added by a later replica-count change land
+	// in the domain the existing replicas already occupy is determined by Grove
+	// and the backend scheduler, not by this operator.
 	PackDomain TopologyDomain `json:"packDomain"`
 }
 
