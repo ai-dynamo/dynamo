@@ -311,13 +311,15 @@ fn released_text_is_withheld_exactly_until_prefix_is_ruled_out() {
     assert!(second.stop_trigger.is_none());
 }
 
-/// Regression test for a long, self-similar (periodic) run of withheld candidate bytes --
-/// the case that made the previous byte-by-byte prefix scan quadratic. Correctness, not
-/// timing, is what a unit test can pin down: every prefix length up to the stop
-/// sequence's own length must still be tracked precisely, or either a real stop is missed
-/// or content is dropped/leaked.
+/// Regression test for a self-similar (periodic) run of withheld candidate bytes -- the
+/// shape of input that made the previous byte-by-byte prefix scan quadratic (each
+/// candidate length re-scans from scratch instead of reusing prior work). This asserts
+/// correctness, which a unit test can pin down, not the algorithm's complexity, which it
+/// cannot: a sliding match window must still land on the right byte offset when an extra
+/// repeated character precedes the real match, or either a real stop is missed or content
+/// is dropped/leaked.
 #[test]
-fn hidden_stop_sequence_survives_long_self_similar_prefix_run() {
+fn hidden_stop_sequence_survives_self_similar_prefix_run() {
     let mut decoder = make_decoder(None, None, None, Some(vec!["aaaab"]), false);
     // "aaaaa" (five 'a's) grows the withheld tail beyond the stop sequence's own prefix
     // length one byte at a time, forcing the matcher to keep re-deriving the longest

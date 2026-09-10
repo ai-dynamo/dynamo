@@ -249,6 +249,16 @@ impl
 
                     // events are pass thru
                     if output.is_event() || output.data.is_none() {
+                        // A genuine stream-level error ends generation for every choice at
+                        // once -- `Annotated::from_err` carries no per-choice `index` the
+                        // way `LLMEngineOutput` does, so there is no narrower target than
+                        // "all of them". Mark them finished so the bare-EOF flush loop below
+                        // does not synthesize a spurious successful `Stop` for any choice
+                        // after a real error, the same hardening already applied to decode
+                        // errors and the decoded-text bypass path.
+                        if output.is_error() {
+                            state.finished_choices.extend(state.decoders.keys().copied());
+                        }
                         return Some((output, state));
                     }
 
@@ -288,16 +298,32 @@ impl
                         let has_finish = data.finish_reason.is_some();
                         if has_finish {
                             state.finished_choices.insert(choice_idx);
-                            // Defensive: this choice's decoder should not normally hold any
-                            // jailed backlog on this path (the engine pre-decoded its own
-                            // text), but flush it into this terminal chunk rather than
-                            // silently dropping it if it ever does, mirroring the
-                            // decoder-driven path below.
-                            if let Some(decoder) = state.decoders.get_mut(&choice_idx)
+                        }
+                        // This path bypasses the decoder entirely (the engine pre-decoded
+                        // its own text for this chunk), but the decoder for this choice is
+                        // still alive across chunks and may be holding text withheld by a
+                        // *previous* chunk that did go through it. Losing track of that here
+                        // would either drop it silently (on a terminal chunk) or make a
+                        // migration checkpoint captured from this chunk (see `jail_seed`)
+                        // look falsely resolved, so:
+                        if let Some(decoder) = state.decoders.get_mut(&choice_idx) {
+                            // On a terminal chunk, flush it and put it *before* this chunk's
+                            // own text -- it is strictly older -- rather than appending,
+                            // which would reorder output (e.g. "there" + withheld "o" must
+                            // come out as "othere", not "thereo").
+                            if has_finish
                                 && let Some(flushed) = decoder.flush_jailed()
                                 && let Some(data) = &mut output.data
                             {
-                                data.text.get_or_insert_with(String::new).push_str(&flushed);
+                                let newer = data.text.take().unwrap_or_default();
+                                data.text = Some(flushed + &newer);
+                            }
+                            // Mirror the decoder's current withheld state on every chunk
+                            // (terminal or not), even though this chunk didn't change it, so
+                            // a checkpoint captured here reflects reality instead of always
+                            // reading as resolved.
+                            if let Some(data) = &mut output.data {
+                                data.jailed_text = decoder.peek_jailed();
                             }
                         }
                         return Some((output, state));
@@ -901,9 +927,8 @@ impl Decoder {
         for seq in hidden_stop_sequences {
             let seq_bytes = seq.as_bytes();
             // A full-length match would already have been caught as a complete stop;
-            // only strictly shorter prefixes are candidates here. Also skip sequences that
-            // cannot possibly beat the current best -- matches the pruning the previous
-            // implementation did via its `best + 1..=max_k` range.
+            // only strictly shorter prefixes are candidates here. Sequences that cannot
+            // possibly beat the current best are skipped outright.
             let max_k = seq_bytes.len().saturating_sub(1).min(jail_bytes.len());
             if max_k <= best {
                 continue;
@@ -913,14 +938,12 @@ impl Decoder {
             let tail = &jail_bytes[jail_bytes.len() - tail_len..];
 
             // Longest suffix of `tail` that is also a prefix of `pattern`, found in
-            // O(pattern.len() + tail.len()) via the standard KMP-border trick, rather than
-            // the previous byte-by-byte scan over every candidate length (quadratic on
-            // long, self-similar sequences, e.g. a periodic stop string): build the prefix
-            // (failure) function of `pattern + sep + tail` (`sep` = 0xFF, which cannot occur
-            // in valid UTF-8, so no border can bridge across it) and read the border length
-            // back from its last entry. Borders of `pattern + sep + tail` strictly decrease
-            // along the classic `pi[k - 1]` chain, which is walked here only as far as
-            // needed to find one that also lands on a `jail` char boundary.
+            // O(pattern.len() + tail.len()) via the standard KMP-border trick: build the
+            // prefix (failure) function of `pattern + sep + tail` (`sep` = 0xFF, which
+            // cannot occur in valid UTF-8, so no border can bridge across it) and read the
+            // border length back from its last entry. Borders of `pattern + sep + tail`
+            // strictly decrease along the classic `pi[k - 1]` chain, which is walked here
+            // only as far as needed to find one that also lands on a `jail` char boundary.
             let mut combined = Vec::with_capacity(pattern.len() + 1 + tail.len());
             combined.extend_from_slice(pattern);
             combined.push(0xFF);
@@ -1407,19 +1430,31 @@ mod tests {
     }
 
     impl traits::Decoder for JailingTokenizer {
+        // `DecodeStream::step` (the real, pinned `dynamo-tokenizers` implementation) does
+        // not call `decode` with a single fresh id at a time: it calls it once with the
+        // previously-read slice and once with that slice plus the newest id, then diffs the
+        // two to find the newly emitted text. Both calls must therefore accept *any*
+        // contextual slice of already-seen ids, not just a single one, so this decodes
+        // compositionally (concatenating each id's own fragment) instead of matching whole
+        // slices -- except token 99, which fails deliberately wherever it appears, to give
+        // tests a controlled decode-error boundary.
         fn decode(
             &self,
             token_ids: &[TokenIdType],
             _skip_special_tokens: bool,
         ) -> anyhow::Result<traits::DecodeResult> {
-            let token = match token_ids {
-                [] => "",
-                [1] => "abc",
-                [2] => "STOP",
-                [99] => anyhow::bail!("simulated decode failure"),
-                _ => anyhow::bail!("unexpected token IDs: {token_ids:?}"),
-            };
-            Ok(traits::DecodeResult::Complete(token.to_string()))
+            if token_ids.contains(&99) {
+                anyhow::bail!("simulated decode failure");
+            }
+            let mut text = String::new();
+            for &id in token_ids {
+                match id {
+                    1 => text.push_str("abc"),
+                    2 => text.push_str("STOP"),
+                    other => anyhow::bail!("unexpected token id: {other}"),
+                }
+            }
+            Ok(traits::DecodeResult::Complete(text))
         }
     }
 
@@ -1655,6 +1690,215 @@ mod tests {
             choice1_flush.and_then(|d| d.text.as_deref()),
             Some("STOP"),
             "choice 1's withheld text must still be flushed on the same bare EOF"
+        );
+    }
+
+    /// A tokenizer whose only token (`1`) decodes to `"o"` -- paired with hidden stop `"ozzy"`,
+    /// this lets a single decoder-driven chunk withhold "o" before later chunks switch to the
+    /// engine-pre-decoded-text fast path, which never calls back into this tokenizer.
+    struct SingleOTokenizer;
+
+    impl traits::Encoder for SingleOTokenizer {
+        fn encode(&self, _input: &str) -> anyhow::Result<crate::tokenizers::Encoding> {
+            Ok(crate::tokenizers::Encoding::Sp(vec![]))
+        }
+        fn encode_batch(
+            &self,
+            _inputs: &[&str],
+        ) -> anyhow::Result<Vec<crate::tokenizers::Encoding>> {
+            Ok(vec![])
+        }
+    }
+
+    impl traits::Decoder for SingleOTokenizer {
+        fn decode(
+            &self,
+            token_ids: &[TokenIdType],
+            _skip_special_tokens: bool,
+        ) -> anyhow::Result<traits::DecodeResult> {
+            Ok(traits::DecodeResult::Complete(
+                token_ids.iter().map(|_| "o").collect(),
+            ))
+        }
+    }
+
+    impl traits::Tokenizer for SingleOTokenizer {}
+
+    struct MixedBypassEngine;
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for MixedBypassEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let chunks = vec![
+                // Token-only: goes through the decoder, which withholds "o" as a viable
+                // prefix of the hidden stop "ozzy".
+                Annotated::from_data(LLMEngineOutput {
+                    token_ids: vec![1],
+                    index: Some(0),
+                    ..Default::default()
+                }),
+                // Engine-pre-decoded, non-terminal: takes the fast bypass path entirely
+                // (never touches the decoder to produce this text), but must not make the
+                // withheld "o" look resolved.
+                Annotated::from_data(LLMEngineOutput {
+                    token_ids: vec![],
+                    index: Some(0),
+                    text: Some(String::new()),
+                    ..Default::default()
+                }),
+                // Engine-pre-decoded, terminal: the withheld "o" must be flushed ahead of
+                // this chunk's own (newer) text, not appended after it.
+                Annotated::from_data(LLMEngineOutput {
+                    token_ids: vec![],
+                    index: Some(0),
+                    text: Some("there".to_string()),
+                    finish_reason: Some(FinishReason::Length),
+                    ..Default::default()
+                }),
+            ];
+            Ok(ResponseStream::new(
+                Box::pin(futures::stream::iter(chunks)),
+                request.context(),
+            ))
+        }
+    }
+
+    /// Regression test for two related bugs in the engine-pre-decoded-text fast path: it
+    /// must not silently erase a checkpoint of the decoder's still-withheld text just
+    /// because a given chunk skipped the decoder (P2, `jailed_text` erasure), and when it
+    /// does flush withheld text into a terminal chunk, that older text must come first, not
+    /// be appended after the chunk's own (newer) text (P2, terminal ordering).
+    #[tokio::test]
+    async fn backend_bypass_path_preserves_and_orders_withheld_text() {
+        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(SingleOTokenizer);
+        let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
+        let request = PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(vec![])
+            .stop_conditions(StopConditions {
+                stop: Some(vec!["ozzy".to_string()]),
+                ..Default::default()
+            })
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .build()
+            .expect("valid preprocessed request");
+        let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            Arc::new(MixedBypassEngine);
+
+        let stream = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+            .await
+            .expect("backend generation succeeds");
+        let outputs: Vec<_> = stream.collect().await;
+        assert_eq!(outputs.len(), 3, "unexpected output count: {outputs:?}");
+
+        let data: Vec<_> = outputs
+            .iter()
+            .map(|o| o.data.as_ref().expect("every chunk carries data"))
+            .collect();
+
+        assert_eq!(
+            data[0].jailed_text.as_deref(),
+            Some("o"),
+            "the decoder-driven chunk must publish what it withheld"
+        );
+
+        // The non-terminal bypass chunk did not touch the decoder, so the checkpoint must
+        // still reflect the still-withheld "o" -- not look resolved just because this
+        // particular chunk skipped the decoder.
+        assert_eq!(
+            data[1].jailed_text.as_deref(),
+            Some("o"),
+            "a non-terminal bypass chunk must not erase the withheld-text checkpoint"
+        );
+        assert_eq!(data[1].text.as_deref(), Some(""));
+
+        // The terminal bypass chunk flushes the withheld "o" ahead of its own "there",
+        // producing "othere" -- not "thereo" -- and resolves the checkpoint.
+        assert_eq!(
+            data[2].text.as_deref(),
+            Some("othere"),
+            "withheld text must be flushed before, not after, this chunk's own newer text"
+        );
+        assert_eq!(data[2].finish_reason, Some(FinishReason::Length));
+        assert_eq!(data[2].jailed_text, None);
+    }
+
+    struct AnnotatedErrorThenBareEofEngine;
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for AnnotatedErrorThenBareEofEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            // Withholds "STOP" (same jailing setup as the other Backend-level tests), then
+            // the stream reports a request-level error via `Annotated::from_error` --
+            // unlike a decode failure, this carries no `data` and so no per-choice
+            // `index` -- before ending.
+            let chunks = vec![
+                Annotated::from_data(LLMEngineOutput {
+                    token_ids: vec![1],
+                    index: Some(0),
+                    ..Default::default()
+                }),
+                Annotated::from_data(LLMEngineOutput {
+                    token_ids: vec![2],
+                    index: Some(0),
+                    ..Default::default()
+                }),
+                Annotated::from_error("engine reported a fatal error"),
+            ];
+            Ok(ResponseStream::new(
+                Box::pin(futures::stream::iter(chunks)),
+                request.context(),
+            ))
+        }
+    }
+
+    /// Regression test for the `Annotated`-error counterpart of
+    /// `backend_does_not_synthesize_stop_after_choice_decode_error`: a request-level error
+    /// annotation (no `data`, hence no per-choice `index`) must also mark every choice
+    /// finished, not just choices that fail through a decode error, so the bare-EOF flush
+    /// loop does not turn it into a spurious successful `Stop` afterward.
+    #[tokio::test]
+    async fn backend_does_not_synthesize_stop_after_annotated_error() {
+        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(JailingTokenizer);
+        let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
+        let request = jailing_request(1);
+        let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            Arc::new(AnnotatedErrorThenBareEofEngine);
+
+        let stream = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+            .await
+            .expect("backend generation succeeds");
+        let outputs: Vec<_> = stream.collect().await;
+
+        let finishes: Vec<_> = outputs.iter().filter(|o| o.is_error()).collect();
+        assert_eq!(
+            finishes.len(),
+            1,
+            "the error must be reported exactly once, not again via EOF flush: {outputs:?}"
+        );
+
+        let synthetic_stops: Vec<_> = outputs
+            .iter()
+            .filter(|o| {
+                o.data
+                    .as_ref()
+                    .is_some_and(|d| d.finish_reason == Some(FinishReason::Stop))
+            })
+            .collect();
+        assert!(
+            synthetic_stops.is_empty(),
+            "no choice may receive a synthetic successful Stop after a request-level error: {outputs:?}"
         );
     }
 }
