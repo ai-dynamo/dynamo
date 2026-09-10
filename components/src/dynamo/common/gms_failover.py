@@ -592,30 +592,56 @@ async def _requiesce_after_activation_error(
     *,
     backend_name: str,
 ) -> tuple[bool, asyncio.CancelledError | None]:
-    """Finish re-quiescing despite repeated cancellation."""
+    """Re-quiesce within a hard deadline despite repeated cancellation."""
     timeout = max(
         0.1,
         _float_env("DYN_GMS_FAILOVER_REQUIESCE_TIMEOUT_SECS", 30.0),
     )
-    task = asyncio.create_task(
-        asyncio.wait_for(controller.quiesce(tags), timeout=timeout)
-    )
+    task = asyncio.create_task(controller.quiesce(tags))
+    deadline = asyncio.get_running_loop().time() + timeout
     cancelled: asyncio.CancelledError | None = None
-    while True:
+
+    def consume_detached_result(completed: asyncio.Task[Any]) -> None:
         try:
-            await asyncio.shield(task)
-            return True, cancelled
+            completed.result()
+        except asyncio.CancelledError:
+            pass
+        except BaseException:
+            logger.debug(
+                "[GMS failover] %s detached re-quiesce task failed",
+                backend_name,
+                exc_info=True,
+            )
+
+    while True:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            task.cancel()
+            task.add_done_callback(consume_detached_result)
+            logger.critical(
+                "[GMS failover] %s re-quiesce exceeded %.1fs hard deadline",
+                backend_name,
+                timeout,
+            )
+            return False, cancelled
+        try:
+            done, _ = await asyncio.wait({task}, timeout=remaining)
         except asyncio.CancelledError as exc:
-            if task.cancelled():
-                logger.critical(
-                    "[GMS failover] %s re-quiesce task was cancelled",
-                    backend_name,
-                )
-                return False, cancelled or exc
             cancelled = cancelled or exc
             current = asyncio.current_task()
             if current is not None:
                 current.uncancel()
+            continue
+        if not done:
+            continue
+        try:
+            task.result()
+        except asyncio.CancelledError as exc:
+            logger.critical(
+                "[GMS failover] %s re-quiesce task was cancelled",
+                backend_name,
+            )
+            return False, cancelled or exc
         except BaseException:
             logger.critical(
                 "[GMS failover] %s failed to re-quiesce after activation error",
@@ -623,6 +649,7 @@ async def _requiesce_after_activation_error(
                 exc_info=True,
             )
             return False, cancelled
+        return True, cancelled
 
 
 async def acquire_gms_failover_lock_before_init(

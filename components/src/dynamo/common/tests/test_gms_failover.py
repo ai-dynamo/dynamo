@@ -8,6 +8,7 @@ import signal
 import pytest
 
 from dynamo.common.gms_failover import (
+    _requiesce_after_activation_error,
     acquire_gms_failover_lock_before_init,
     prepare_gms_failover,
     release_attached_gms_failover_lock,
@@ -708,6 +709,35 @@ async def test_activation_cancellation_drains_requiesce_and_lock_release(monkeyp
         ["kv_cache"],
         ["kv_cache"],
     ]
+
+
+@pytest.mark.asyncio
+async def test_requiesce_timeout_is_hard_when_cancellation_is_suppressed(monkeypatch):
+    monkeypatch.setenv("DYN_GMS_FAILOVER_REQUIESCE_TIMEOUT_SECS", "0.1")
+    cancellation_seen = asyncio.Event()
+    finish = asyncio.Event()
+
+    class CancellationResistantController:
+        async def quiesce(self, tags):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancellation_seen.set()
+                await finish.wait()
+
+    result = await asyncio.wait_for(
+        _requiesce_after_activation_error(
+            CancellationResistantController(),
+            ["kv_cache"],
+            backend_name="test",
+        ),
+        timeout=0.5,
+    )
+
+    assert result == (False, None)
+    await asyncio.wait_for(cancellation_seen.wait(), timeout=0.1)
+    finish.set()
+    await asyncio.sleep(0)
 
 
 @pytest.mark.asyncio
