@@ -2046,15 +2046,18 @@ class TestRLAdminRouteHardening:
         assert declared_resp["version"] == "initial"
 
     @pytest.mark.asyncio
-    async def test_set_weight_version_declares_without_touching_the_engine(self):
+    @pytest.mark.parametrize("version", [None, 7, "policy-43"])
+    async def test_set_weight_version_declares_without_touching_the_engine(
+        self, version
+    ):
         handler = self._make_rl_handler()
 
-        resp = await handler.set_weight_version({"weight_version": "policy-43"})
+        resp = await handler.set_weight_version({"weight_version": version})
 
-        assert resp == {"status": "ok", "version": "policy-43"}
+        assert resp == {"status": "ok", "version": version}
         assert await handler.get_weight_version({}) == {
             "status": "ok",
-            "version": "policy-43",
+            "version": version,
             "version_declared": True,
         }
         handler.engine_client.collective_rpc.assert_not_awaited()
@@ -2074,7 +2077,6 @@ class TestRLAdminRouteHardening:
     @pytest.mark.parametrize(
         ("route", "body"),
         [
-            ("set_weight_version", {}),
             ("update_weights_from_disk", {"model_path": "/models/checkpoint-42"}),
             ("update_weights_from_distributed", {"engine_rpc": "update_weights"}),
         ],
