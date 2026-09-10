@@ -115,6 +115,36 @@ Volcano:
 ` }}
 {{- end }}
 
+{{- $groveInstalled := and
+  .Values.global
+  .Values.global.grove
+  .Values.global.grove.install
+}}
+{{- $kaiInstalled := and
+  .Values.global
+  (index .Values.global "kai-scheduler")
+  (index .Values.global "kai-scheduler").install
+}}
+{{- if and $groveInstalled $kaiInstalled }}
+  {{- $kaiValues := default (dict) (index .Values "kai-scheduler") }}
+  {{- $schedulerValues := default (dict) (index $kaiValues "scheduler") }}
+  {{- $schedulerArgs := default (dict) (index $schedulerValues "args") }}
+  {{- $stalenessGracePeriod := default "" (index $schedulerArgs "default-staleness-grace-period") | toString }}
+  {{- if ne $stalenessGracePeriod "-1" }}
+    {{- fail `
+CONFIGURATION ERROR: bundled KAI Scheduler must disable stale PodGroup eviction when Grove integration is enabled.
+Grove owns PodGroup termination timing, so KAI must not independently delete stale PodGroups.
+
+Add this value:
+
+kai-scheduler:
+  scheduler:
+    args:
+      default-staleness-grace-period: "-1"
+` }}
+  {{- end }}
+{{- end }}
+
 {{/*
   NOTE: dynamo-operator subchart values (e.g. dynamo-operator.nats.enabled,
   dynamo-operator.webhook.enabled) are validated in the operator subchart's

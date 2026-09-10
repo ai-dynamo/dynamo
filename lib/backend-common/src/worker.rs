@@ -65,14 +65,8 @@ const HEALTH_CHECK_PAYLOAD_ENV: &str = "DYN_HEALTH_CHECK_PAYLOAD";
 const MODEL_TAINT_UPDATE_NAME: &str = "model_taints";
 const MODEL_TAINT_UPDATE_ROUTE: &str = "update/model_taints";
 
-/// Runtime / transport configuration applied to the process before the
-/// distributed runtime is constructed.
-///
-/// `dynamo-runtime` reads these from environment variables in
-/// `DistributedConfig::from_settings`. We mirror that by setting them
-/// here before [`Runtime::from_settings`] runs, so a programmatic caller
-/// can override per-process values without poking `std::env::set_var`
-/// from user code.
+/// Per-worker transport configuration. Explicit values take precedence over
+/// environment defaults when the worker constructs its distributed runtime.
 #[derive(Clone, Debug, Default)]
 pub struct RuntimeConfig {
     /// Discovery backend selector — e.g. `"etcd"`, `"kubernetes"`, `"file"`,
@@ -86,9 +80,6 @@ pub struct RuntimeConfig {
 }
 
 impl RuntimeConfig {
-    /// `true` if any field is set. Used by the PyO3 binding to decide
-    /// whether to warn that overrides will be dropped when reusing a
-    /// runtime constructed by another caller.
     pub fn has_overrides(&self) -> bool {
         self.discovery_backend.is_some()
             || self.request_plane.is_some()
@@ -579,6 +570,8 @@ impl Worker {
         outcome
     }
 
+    /// Connect with per-worker transport settings, start the engine, and serve
+    /// requests until shutdown. The caller owns signal handling and cleanup.
     async fn run_inner(
         &mut self,
         runtime: Runtime,
@@ -586,7 +579,18 @@ impl Worker {
     ) -> Result<(), DynamoError> {
         // model_input was already validated at the top of `run`; re-checking
         // here would double-error on misconfig.
-        let drt = DistributedRuntime::from_settings(runtime)
+        let config = dynamo_runtime::distributed::DistributedConfig::from_settings_with_overrides(
+            self.config.runtime.discovery_backend.as_deref(),
+            self.config.runtime.request_plane.as_deref(),
+            self.config.runtime.event_plane.as_deref(),
+        )
+        .map_err(|e| {
+            err(
+                ErrorType::Backend(BackendError::InvalidArgument),
+                format!("distributed runtime config: {e}"),
+            )
+        })?;
+        let drt = DistributedRuntime::new(runtime, config)
             .await
             .map_err(|e| {
                 err(
@@ -2033,6 +2037,12 @@ async fn build_local_model(
     };
 
     let mut runtime_data = engine_config.runtime_data.clone();
+    if config.route_to_encoder {
+        runtime_data.insert(
+            "encoder_result_handoff".to_string(),
+            serde_json::Value::Bool(true),
+        );
+    }
     if let Some(default_thinking_mode) = config.default_thinking_mode.as_deref() {
         runtime_data.insert(
             "default_thinking_mode".to_string(),
@@ -2047,6 +2057,7 @@ async fn build_local_model(
         max_num_batched_tokens: llm.max_num_batched_tokens,
         data_parallel_size: llm.data_parallel_size.unwrap_or(1),
         data_parallel_start_rank: llm.data_parallel_start_rank.unwrap_or(0),
+        enable_eagle: llm.enable_eagle,
         tool_call_parser: config.tool_call_parser.clone(),
         reasoning_parser: config.reasoning_parser.clone(),
         exclude_tools_when_tool_choice_none: config.exclude_tools_when_tool_choice_none,
@@ -2386,6 +2397,7 @@ mod tests {
             exclude_tools_when_tool_choice_none: false,
             enable_local_indexer: false,
             kv_state_endpoint: Some(EndpointId::from("dynamo/kv-state/events")),
+            route_to_encoder: true,
             ..WorkerConfig::default()
         };
         let engine_config = EngineConfig {
@@ -2400,6 +2412,7 @@ mod tests {
                 total_kv_blocks: Some(100),
                 max_num_seqs: Some(16),
                 max_num_batched_tokens: Some(8192),
+                enable_eagle: true,
                 ..Default::default()
             }),
             ..EngineConfig::default()
@@ -2414,6 +2427,7 @@ mod tests {
         assert_eq!(runtime_config.total_kv_blocks, Some(100));
         assert_eq!(runtime_config.max_num_seqs, Some(16));
         assert_eq!(runtime_config.max_num_batched_tokens, Some(8192));
+        assert!(runtime_config.enable_eagle);
         assert_eq!(runtime_config.tool_call_parser.as_deref(), Some("kimi_k2"));
         assert_eq!(runtime_config.reasoning_parser.as_deref(), Some("kimi_k25"));
         assert_eq!(
@@ -2422,6 +2436,13 @@ mod tests {
                 .get("default_thinking_mode")
                 .and_then(|value| value.as_str()),
             Some("disabled")
+        );
+        assert_eq!(
+            runtime_config
+                .runtime_data
+                .get("encoder_result_handoff")
+                .and_then(|value| value.as_bool()),
+            Some(true)
         );
         assert!(!runtime_config.exclude_tools_when_tool_choice_none);
         assert!(!runtime_config.enable_local_indexer);
