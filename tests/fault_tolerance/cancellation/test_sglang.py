@@ -30,6 +30,13 @@ from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.payloads import check_health_generate, check_models_api
 from tests.utils.port_utils import allocate_port, deallocate_port
 
+# A stranded KV transfer does not fail loudly: the deployment keeps answering,
+# just late, and TRT-LLM only reclaims at kv_transfer_timeout_ms (60s default).
+# Bounding the follow-up below that turns "eventually returned 200" into a
+# failure, which is the symptom a wedge actually produces.
+FOLLOWUP_TIMEOUT_S = 30.0
+
+
 logger = logging.getLogger(__name__)
 
 # Small enough that the request stays inside prefill for the whole test:
@@ -496,6 +503,8 @@ def test_request_cancellation_sglang_prefill_cancel(
                     process=prefill_worker,
                     pattern="New Request ID: ",
                     match_type="contains",
+                    max_wait_ms=10000,
+                    poll_interval_ms=50,
                     cancellable_request=cancellable_req,
                 )
 
@@ -544,6 +553,7 @@ def test_request_cancellation_sglang_prefill_cancel(
                         prompt="hello",
                         max_tokens=4,
                         frontend_port=frontend.frontend_port,
+                        timeout_s=FOLLOWUP_TIMEOUT_S,
                     )
                     followup.wait()
                     response = followup.get_response()
