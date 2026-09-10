@@ -1,0 +1,105 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Aggregated Intel XPU deployment for Qwen3 with dynamic LoRA adapters.
+# Complete the MinIO setup and adapter upload in ../lora/README.md before
+# applying this manifest, then register the adapter with ../lora/lora-model.yaml.
+
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: gpu-template
+spec:
+  spec:
+    devices:
+      requests:
+        - name: gpu
+          exactly:
+            deviceClassName: gpu.intel.com
+            count: 1
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-agg-lora-xpu-dra
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
+    replicas: 1
+    type: frontend
+  - modelRef:
+      name: Qwen/Qwen3-0.6B
+    name: VllmDecodeWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --max-model-len
+          - "4096"
+          - --enable-lora
+          - --max-lora-rank
+          - "64"
+          - --enforce-eager
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          env:
+          - name: VLLM_TARGET_DEVICE
+            value: xpu
+          - name: DYN_LORA_ENABLED
+            value: "true"
+          - name: DYN_LORA_PATH
+            value: /tmp/dynamo_loras_minio
+          - name: DYN_SYSTEM_ENABLED
+            value: "true"
+          - name: DYN_SYSTEM_PORT
+            value: "9090"
+          - name: AWS_ENDPOINT
+            value: http://minio:9000
+          - name: AWS_ACCESS_KEY_ID
+            valueFrom:
+              secretKeyRef:
+                key: AWS_ACCESS_KEY_ID
+                name: minio-secret
+          - name: AWS_SECRET_ACCESS_KEY
+            valueFrom:
+              secretKeyRef:
+                key: AWS_SECRET_ACCESS_KEY
+                name: minio-secret
+          - name: AWS_REGION
+            value: us-east-1
+          - name: AWS_ALLOW_HTTP
+            value: "true"
+          - name: BUCKET_NAME
+            value: my-loras
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:my-tag
+          name: main
+          resources:
+            claims:
+            - name: gpu
+            requests:
+              ephemeral-storage: 2Gi
+          workingDir: /workspace/examples/backends/vllm
+        resourceClaims:
+        - name: gpu
+          resourceClaimTemplateName: gpu-template
+        # Uncomment if the XPU device nodes require group access.
+        # securityContext:
+        #   runAsUser: 1000
+        #   runAsGroup: 1000
+        #   supplementalGroups:
+        #     - 44
+        #     - 991
+    replicas: 1
+    type: worker
