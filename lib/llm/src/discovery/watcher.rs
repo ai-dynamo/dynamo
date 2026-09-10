@@ -1808,22 +1808,23 @@ mod tests {
         assert!(is_model_type_list_empty(&mm, ModelType::Pooling));
     }
 
-    /// `ALL_MODEL_TYPES` is the second hand-maintained list of the same `ModelType` units
-    /// that `ModelManager::has_models_of_type` enumerates, and it is what
-    /// `removed_model_cards` iterates. A unit missing from it is never considered for a
-    /// retraction card, so that unit's endpoint is never retracted even when its last model
-    /// is gone. `ModelType` is a `bitflags!` type, so nothing else catches the omission.
     #[test]
-    fn all_model_types_covers_every_endpoint_backed_unit() {
+    fn endpoint_backed_model_types_emit_retraction_cards() {
+        let manager = ModelManager::new();
         for unit in ModelType::all().units() {
-            // Units that serve no HTTP endpoint need no retraction card.
             if unit.as_endpoint_types_with_anthropic(true).is_empty() {
                 continue;
             }
+
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.model_type = unit;
+            let removed_cards = removed_model_cards(&manager, &card);
+
             assert!(
-                ALL_MODEL_TYPES.contains(&unit),
-                "{unit:?} maps onto an HTTP endpoint but is missing from ALL_MODEL_TYPES, so \
-                 removed_model_cards would never emit a retraction card for it"
+                removed_cards
+                    .iter()
+                    .any(|removed| removed.model_type == unit),
+                "{unit:?} maps onto an HTTP endpoint but does not produce a retraction card"
             );
         }
     }

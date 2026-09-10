@@ -1016,9 +1016,8 @@ impl HttpService {
         Ok(())
     }
 
-    /// Reports whether requests to `endpoint_type` are currently served. A disabled
-    /// endpoint answers `404` for every model.
-    pub fn model_endpoint_enabled(&self, endpoint_type: EndpointType) -> bool {
+    #[cfg(test)]
+    pub(crate) fn model_endpoint_enabled(&self, endpoint_type: EndpointType) -> bool {
         self.state.flags.get(&endpoint_type)
     }
 }
