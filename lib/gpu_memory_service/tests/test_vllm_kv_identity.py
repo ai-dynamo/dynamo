@@ -66,7 +66,7 @@ def test_v3_semantic_kv_tags_include_model_layers_and_size():
         config(tensor_a), "model=org/model\0revision=def"
     )[0]
 
-    assert tag_a.startswith("kv_pool:v3:")
+    assert tag_a.startswith("kv_pool:v4:")
     assert tag_a == same_tag
     assert tag_a != resized_tag
     assert tag_a != different_model_tag
@@ -177,8 +177,8 @@ def test_semantic_kv_tags_disambiguate_duplicate_layer_identity():
         SimpleNamespace(kv_cache_tensors=[tensor_a, tensor_b]), "model=org/model"
     )
 
-    assert tag_a.startswith("kv_pool:v3:")
-    assert tag_b.startswith("kv_pool:v3:")
+    assert tag_a.startswith("kv_pool:v4:")
+    assert tag_b.startswith("kv_pool:v4:")
     assert tag_a != tag_b
     assert tag_a.endswith(":dup0")
     assert tag_b.endswith(":dup1")
@@ -210,7 +210,7 @@ def test_persistent_tag_plan_distinguishes_new_and_complete_reattach(
 
 def test_persistent_tag_plan_releases_only_stale_unclaimed_kv():
     allocations = [
-        SimpleNamespace(tag="kv_pool:v3:planned", claimed=False),
+        SimpleNamespace(tag="kv_pool:v4:planned", claimed=False),
         SimpleNamespace(tag="kv_pool:v3:stale", claimed=False),
         SimpleNamespace(tag="kv_pool:v3:live", claimed=True),
         SimpleNamespace(tag="weights:v1:unrelated", claimed=False),
@@ -229,7 +229,7 @@ def test_persistent_tag_plan_releases_only_stale_unclaimed_kv():
 
     released = []
     assert install_vmm_ipc_kv._persistent_tag_plan_reattaches(
-        Manager(), "engine", ["kv_pool:v3:planned"]
+        Manager(), "engine", ["kv_pool:v4:planned"]
     )
     assert released == ["kv_pool:v3:stale"]
 
@@ -247,7 +247,7 @@ def test_stale_cleanup_preserves_allocation_claimed_during_release():
             raise RuntimeError("persistent allocation claimed by another session")
 
     assert not install_vmm_ipc_kv._persistent_tag_plan_reattaches(
-        Manager(), "engine", ["kv_pool:v3:new"]
+        Manager(), "engine", ["kv_pool:v4:new"]
     )
 
 
@@ -264,7 +264,7 @@ def test_fresh_layout_reclaims_obsolete_unclaimed_kv():
             return True
 
     assert not install_vmm_ipc_kv._persistent_tag_plan_reattaches(
-        Manager(), "engine", ["kv_pool:v3:new"]
+        Manager(), "engine", ["kv_pool:v4:new"]
     )
     assert released == [("engine", "kv_pool:v3:old")]
 
