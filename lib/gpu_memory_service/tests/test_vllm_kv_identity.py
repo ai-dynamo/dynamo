@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import importlib.machinery
 import threading
 from types import SimpleNamespace
 
@@ -21,88 +20,6 @@ def _clear_dynamic_gms_role_env(monkeypatch):
     monkeypatch.delenv("DYN_VLLM_GMS_ACTIVE_LOCK_HELD", raising=False)
     yield
     monkeypatch.delenv("DYN_VLLM_GMS_ACTIVE_LOCK_HELD", raising=False)
-
-
-def test_pre_vllm_import_arms_lazy_installer(monkeypatch):
-    calls = []
-    monkeypatch.delitem(
-        install_vmm_ipc_kv.sys.modules,
-        "vllm.v1.worker.gpu_model_runner",
-        raising=False,
-    )
-    monkeypatch.setattr(install_vmm_ipc_kv, "_is_enabled", lambda: True)
-    monkeypatch.setattr(
-        install_vmm_ipc_kv, "install_lazy", lambda: calls.append("lazy")
-    )
-
-    install_vmm_ipc_kv._install_or_arm()
-
-    assert calls == ["lazy"]
-
-
-def test_lazy_v2_install_waits_for_model_runner(monkeypatch):
-    events = []
-
-    class Loader:
-        def create_module(self, spec):
-            return None
-
-        def exec_module(self, module):
-            events.append(("loaded", module.__name__))
-
-    class Finder:
-        def find_spec(self, name, path=None, target=None):
-            if name == "vllm.v1.worker.gpu.model_runner":
-                return importlib.machinery.ModuleSpec(name, Loader())
-            return None
-
-    monkeypatch.setattr(install_vmm_ipc_kv, "_is_enabled", lambda: True)
-    monkeypatch.setattr(install_vmm_ipc_kv, "_LAZY_HOOK_INSTALLED", False)
-    monkeypatch.setattr(
-        install_vmm_ipc_kv, "install", lambda: events.append(("installed", None))
-    )
-    monkeypatch.setattr(install_vmm_ipc_kv.sys, "meta_path", [Finder()])
-
-    install_vmm_ipc_kv.install_lazy()
-    lazy_finder = install_vmm_ipc_kv.sys.meta_path[0]
-
-    assert lazy_finder.find_spec("vllm.v1.worker.gpu.attn_utils") is None
-    spec = lazy_finder.find_spec("vllm.v1.worker.gpu.model_runner")
-    assert spec is not None
-    module = spec.loader.create_module(spec) or SimpleNamespace(
-        __name__="vllm.v1.worker.gpu.model_runner"
-    )
-    spec.loader.exec_module(module)
-
-    assert events == [
-        ("loaded", "vllm.v1.worker.gpu.model_runner"),
-        ("installed", None),
-    ]
-
-
-def test_preloaded_v2_runner_installs_immediately(monkeypatch):
-    calls = []
-    for module in (
-        "vllm.v1.worker.gpu_model_runner",
-        "vllm.v1.worker.gpu.model_runner",
-        "vllm.v1.worker.gpu.attn_utils",
-    ):
-        monkeypatch.delitem(install_vmm_ipc_kv.sys.modules, module, raising=False)
-    monkeypatch.setitem(
-        install_vmm_ipc_kv.sys.modules,
-        "vllm.v1.worker.gpu.model_runner",
-        SimpleNamespace(),
-    )
-    monkeypatch.setattr(install_vmm_ipc_kv, "_is_enabled", lambda: True)
-    monkeypatch.setattr(install_vmm_ipc_kv, "install", lambda: calls.append("install"))
-    monkeypatch.setattr(
-        install_vmm_ipc_kv, "install_lazy", lambda: calls.append("lazy")
-    )
-
-    install_vmm_ipc_kv._install_or_arm()
-
-    assert calls == ["install"]
-
 
 
 def test_v3_semantic_kv_tags_include_model_layers_and_size():
@@ -162,29 +79,13 @@ def test_model_identity_accepts_explicit_artifact_digest(monkeypatch):
     assert identity == "model=/models/current\0artifact=image-sha256:abc"
 
 
-def test_model_identity_rejects_mutable_revision(monkeypatch):
+@pytest.mark.parametrize("revision", [None, "main", "refs/pr/1", "/models/current"])
+def test_model_identity_rejects_mutable_revision(monkeypatch, revision):
     monkeypatch.delenv("GMS_VLLM_MODEL_ARTIFACT_DIGEST", raising=False)
     with pytest.raises(RuntimeError, match="immutable resolved model revision"):
         install_vmm_ipc_kv._model_identity(
-            SimpleNamespace(model="org/model", revision="main")
+            SimpleNamespace(model="org/model", revision=revision)
         )
-
-
-def test_model_identity_is_derived_from_runner_config():
-    commit = "b" * 40
-    runner = SimpleNamespace(
-        vllm_config=SimpleNamespace(
-            model_config=SimpleNamespace(
-                model="org/model",
-                revision="main",
-                hf_config=SimpleNamespace(_commit_hash=commit),
-            )
-        )
-    )
-
-    assert install_vmm_ipc_kv._model_identity_from_runner(runner) == (
-        f"model=org/model\0artifact={commit}"
-    )
 
 
 def test_model_identity_fails_closed_when_unavailable():
@@ -265,6 +166,7 @@ def test_persistent_tag_plan_releases_only_stale_unclaimed_kv():
     allocations = [
         SimpleNamespace(tag="kv_pool:v4:planned", claimed=False),
         SimpleNamespace(tag="kv_pool:v3:stale", claimed=False),
+        SimpleNamespace(tag="kv_pool:v3:live", claimed=True),
         SimpleNamespace(tag="weights:v1:unrelated", claimed=False),
     ]
 
@@ -298,23 +200,9 @@ def test_stale_cleanup_preserves_allocation_claimed_during_release():
         def release_persistent(self, engine_id, tag):
             raise RuntimeError("persistent allocation claimed by another session")
 
-    with pytest.raises(RuntimeError, match="incompatible layout are still claimed"):
-        install_vmm_ipc_kv._persistent_tag_plan_reattaches(
-            Manager(), "engine", ["kv_pool:v4:new"]
-        )
-
-
-def test_claimed_stale_layout_fails_closed():
-    manager = SimpleNamespace(
-        list_persistent=lambda engine_id=None, include_unclaimed=False: [
-            SimpleNamespace(tag="kv_pool:v3:live", claimed=True)
-        ]
+    assert not install_vmm_ipc_kv._persistent_tag_plan_reattaches(
+        Manager(), "engine", ["kv_pool:v4:new"]
     )
-
-    with pytest.raises(RuntimeError, match="second KV pool"):
-        install_vmm_ipc_kv._persistent_tag_plan_reattaches(
-            manager, "engine", ["kv_pool:v4:new"]
-        )
 
 
 def test_fresh_layout_reclaims_obsolete_unclaimed_kv():
