@@ -203,7 +203,7 @@ pub enum PrefillCancelUntil {
     Anytime,
     /// Cancellation is safe only until the worker returns its handoff
     /// parameters. After that the KV is committed and aborting orphans it.
-    PreCommit,
+    PreHandoff,
     /// The worker does not support prefill cancellation.
     #[default]
     Never,

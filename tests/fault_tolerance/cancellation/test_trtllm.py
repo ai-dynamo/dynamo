@@ -365,7 +365,7 @@ def test_request_cancellation_trtllm_prefill_cancel(
     the system properly handles the cancellation and cleans up resources on the prefill worker.
     Since the request is cancelled before prefill completes, the decode worker never receives it.
 
-    TRT-LLM declares ``prefill_cancel_until="pre_commit"``: a context request is
+    TRT-LLM declares ``prefill_cancel_until="pre_handoff"``: a context request is
     only cancellable until it returns its handoff parameters. Past that point
     the KV is committed for the generation server and aborting would orphan it
     until kv_transfer_timeout_ms (60s by default) reclaims it, which is why this
