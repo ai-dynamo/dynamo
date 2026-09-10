@@ -65,7 +65,6 @@ async def test_wait_for_deployment_ready_raises_deployment_failed_on_crashloop(
 
 
 def _mocked_client() -> DynamoDeploymentClient:
-    """A client whose Kubernetes API calls are recorded instead of sent."""
     client = DynamoDeploymentClient(namespace="ns", deployment_name="dgd-test")
     client._init_kubernetes = AsyncMock()  # type: ignore[method-assign]
     client.custom_api = MagicMock()
@@ -75,7 +74,7 @@ def _mocked_client() -> DynamoDeploymentClient:
 
 
 async def test_create_deployment_reads_v1beta1_components():
-    """A v1beta1 candidate (DYN-4332) must deploy without a KeyError.
+    """A v1beta1 candidate must deploy without a KeyError.
 
     ``materialize_dgd`` has produced ``spec.components`` — a list of objects
     each carrying a ``name`` — since DGD generation moved to v1beta1, while
