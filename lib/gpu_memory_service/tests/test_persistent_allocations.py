@@ -649,6 +649,8 @@ def test_cleanup_releases_claims_keeps_allocation(gms):
     assert (
         gms._persistent.get("eng-X", "kv_pool") is not None
     ), "allocation must persist across disconnect"
+    assert gms.allocation_count == 1
+    assert gms.get_runtime_state().allocation_count == 1
 
     conn2 = _make_dummy_conn()
     resp, _, _ = asyncio.run(

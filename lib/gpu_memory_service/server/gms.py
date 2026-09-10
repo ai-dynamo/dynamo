@@ -122,7 +122,7 @@ class GMS:
 
     @property
     def allocation_count(self) -> int:
-        return self._allocations.allocation_count
+        return self._allocations.allocation_count + self._persistent.allocation_count
 
     def is_ready(self) -> bool:
         return self._sessions.snapshot().is_ready
@@ -152,13 +152,12 @@ class GMS:
     def get_runtime_state(self) -> GetRuntimeStateResponse:
         session = self._sessions.snapshot()
         state = session.state
-        allocation_count = self._allocations.allocation_count
+        allocation_count = self.allocation_count
         # Project the persistent KV layout onto the reported state when the
         # FSM itself is idle (the kv_cache daemon never drives the weights FSM).
         persistent_claims = self._persistent.active_claim_count
         if persistent_claims > 0 and state == ServerState.EMPTY:
             state = ServerState.RW
-            allocation_count = persistent_claims
         return GetRuntimeStateResponse(
             state=state.name,
             has_rw_session=session.has_rw_session,
