@@ -1,31 +1,99 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Dynamo Error System
+//! Dynamo's shared semantic error contract.
 //!
-//! This module provides a standardized, serializable error type for Dynamo.
+//! A [`DynamoError`] describes **what failed**. It deliberately does not prescribe an HTTP status, retry action, stream action, or worker-health decision. Those decisions belong to the consumer that owns the relevant local state, such as response commitment, retry budget, replayability, deadline, and worker observations.
 //!
-//! # DynamoError
+//! The component closest to the cause classifies a failure once. Callers should propagate an existing [`DynamoError`] directly; internal transports preserve its semantic identity, and protocol boundaries render it for their clients. Generic conversion from an error chain recovers a typed non-internal semantic source, but it intentionally treats an unclassified or internal source as `Internal/runtime.unclassified`. See [DEP #14354](https://github.com/ai-dynamo/dynamo/issues/14354) for the architecture and rollout rationale.
 //!
-//! [`DynamoError`] is the standardized error type for Dynamo. It can be created
-//! directly or converted from any [`std::error::Error`]:
+//! # Error identity
 //!
-//! ```rust,ignore
-//! use dynamo_runtime::error::{DynamoError, ErrorClass};
+//! Every error has two identity fields:
 //!
-//! // Simple error
-//! let err = DynamoError::msg("something failed");
+//! - [`ErrorClass`] is the coarse, closed category used for exhaustive consumer policy. New producers should select a canonical class such as [`ErrorClass::InvalidRequest`] or [`ErrorClass::Unavailable`]. The older transport-specific variants are retained for compatibility and normalize through [`DynamoError::class`].
+//! - [`ErrorReason`] is a stable, bounded catalog key that identifies the specific cause. A reason belongs to exactly one normalized class. It is safe for low-cardinality policy and metric dimensions; arbitrary exception text and user input are not.
 //!
-//! // Typed error with a private diagnostic
-//! let err = DynamoError::builder()
-//!     .class(ErrorClass::Internal)
-//!     .diagnostic("operation failed")
+//! The builder and deserializer validate the class/reason pair. An unknown, malformed, or mismatched identity fails closed to `Internal/runtime.invalid_error`, and its public details are discarded. Consumers should therefore use [`DynamoError::class`], [`DynamoError::reason`], and [`DynamoError::public_details`] instead of reading the public fields directly. [`DynamoError::error_type`] exists for legacy policy only.
+//!
+//! ## Choosing a canonical class
+//!
+//! | Class | Use when |
+//! |---|---|
+//! | [`ErrorClass::InvalidRequest`] | The caller supplied malformed input or failed request-level validation. |
+//! | [`ErrorClass::Unauthenticated`] | Authentication credentials are missing or invalid. |
+//! | [`ErrorClass::PermissionDenied`] | The authenticated caller is not allowed to perform the operation. |
+//! | [`ErrorClass::NotFound`] | A caller-visible resource does not exist. |
+//! | [`ErrorClass::Conflict`] | The request conflicts with current resource state. |
+//! | [`ErrorClass::PayloadTooLarge`] | The request exceeds an advertised size limit. |
+//! | [`ErrorClass::UnsupportedMedia`] | The request uses an unsupported media type. |
+//! | [`ErrorClass::RateLimited`] | A caller-specific admission or rate limit was exceeded. |
+//! | [`ErrorClass::CapacityExhausted`] | Dynamo, a selected worker, or the eligible worker pool lacks capacity; the reason distinguishes worker overload from pool exhaustion. |
+//! | [`ErrorClass::Cancelled`] | The request was cancelled, usually because the client disconnected. |
+//! | [`ErrorClass::Unavailable`] | A service, worker, pool, or Dynamo-owned dependency is unavailable. |
+//! | [`ErrorClass::BackendProtocol`] | A backend response violates the expected protocol. |
+//! | [`ErrorClass::DeadlineExceeded`] | A request or attempt deadline expired. |
+//! | [`ErrorClass::NotImplemented`] | A valid requested capability is unsupported. |
+//! | [`ErrorClass::Internal`] | A defect, invalid classification, or otherwise unclassified failure occurred. |
+//!
+//! Similar symptoms do not necessarily have the same class. For example, malformed client input is [`ErrorClass::InvalidRequest`], invalid operator configuration is [`ErrorClass::Internal`], caller-specific throttling is [`ErrorClass::RateLimited`], and pool-wide capacity pressure is [`ErrorClass::CapacityExhausted`].
+//!
+//! # Data visibility
+//!
+//! [`Diagnostic`] contains bounded operator-facing context. It may be used in logs and traces, but it must never be copied into a client response or metric label. Do not place secrets, credentials, prompts, generated text, or raw upstream response bodies in a diagnostic.
+//!
+//! [`PublicDetails`] is the only occurrence-specific channel available for client rendering, but the type does not sanitize its values. Producers must populate it only at a boundary that knows the value is safe. A [`PublicDetails::Message`] must contain fixed, cataloged, or explicitly allowlisted text; it must not contain user input, prompts, generated content, secrets, URLs, diagnostics, or raw upstream responses. Never derive public details from a diagnostic or arbitrary backend exception text.
+//!
+//! # Producer guidance
+//!
+//! 1. Classify at the boundary that understands the cause instead of relying on message parsing farther downstream.
+//! 2. Select the canonical class for the failure's meaning, independent of the current transport.
+//! 3. Use a registered reason that belongs to that class. Add new reasons to the catalog with class-consistency tests rather than emitting dynamic strings.
+//! 4. Add a diagnostic only when it improves operator debugging, and add public details only when they are explicitly client-safe.
+//! 5. Propagate an existing [`DynamoError`] directly whenever possible. If a generic wrapper is unavoidable, retain the typed error as its source and remember that generic conversion recovers only non-internal semantic classifications.
+//!
+//! [`DynamoError::msg`], conversion from an unclassified [`std::error::Error`], and conversion from a generic wrapper whose typed source is internal intentionally produce `Internal/runtime.unclassified`; use them as a fallback, not for failures whose meaning is known.
+//!
+//! ```rust,no_run
+//! use dynamo_runtime::error::{DynamoError, ErrorClass, ErrorReason};
+//!
+//! let error = DynamoError::builder()
+//!     .class(ErrorClass::InvalidRequest)
+//!     .reason(ErrorReason::new("request.invalid").expect("registered reason"))
+//!     .diagnostic("messages[2].role failed validation")
+//!     .public_message("The message role is invalid")
 //!     .build();
 //!
-//! // Convert from any std::error::Error
-//! let std_err = std::io::Error::other("io error");
-//! let dynamo_err = DynamoError::from(Box::new(std_err) as Box<dyn std::error::Error>);
+//! assert_eq!(error.class(), ErrorClass::InvalidRequest);
+//! assert_eq!(error.reason().as_str(), "request.invalid");
+//! assert_eq!(error.public_message(), Some("The message role is invalid"));
 //! ```
+//!
+//! Structured details are preferable when the protocol renderer needs machine-readable values:
+//!
+//! ```rust,no_run
+//! use dynamo_runtime::error::{DynamoError, ErrorClass, ErrorReason, PublicDetails};
+//!
+//! let error = DynamoError::builder()
+//!     .class(ErrorClass::PayloadTooLarge)
+//!     .reason(ErrorReason::new("request.payload_too_large").expect("registered reason"))
+//!     .public_details(PublicDetails::SizeLimit {
+//!         limit: 1_048_576,
+//!         actual: Some(1_250_000),
+//!     })
+//!     .build();
+//! ```
+//!
+//! # Consumer guidance
+//!
+//! Consumers apply their own policy to the validated semantic identity:
+//!
+//! - Protocol renderers map [`DynamoError::class`] to a status or legal terminal stream event and expose only approved [`PublicDetails`].
+//! - Retry and migration code combines the reason with locally owned budget, deadline, routing, replay, and continuation state. [`ErrorReason::is_migration_eligible`] indicates semantic eligibility, not permission to retry.
+//! - Worker-health code combines the reason with local worker and pool observations rather than inferring health from an HTTP status.
+//! - Metrics use the normalized class and registered reason. Diagnostics, request identifiers, exception types, URLs, and user-controlled values must not become labels.
+//!
+//! A recovered internal attempt is not a final client failure. Terminal failure accounting belongs at the frontend rendering boundary so one propagated error is not counted by every subsystem it crosses.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
