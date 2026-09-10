@@ -473,6 +473,37 @@ class TestDeferredAbortGuard:
         generation_result.abort.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_cancellation_monitor_cleans_up_waiters_on_normal_completion(
+        self, monkeypatch
+    ):
+        handler = self._make_handler()
+        handler.shutdown_event = asyncio.Event()
+        generation_result = MagicMock()
+        context = MagicMock()
+        killed_future = asyncio.get_event_loop().create_future()
+        context.async_killed_or_stopped.return_value = killed_future
+        context.id.return_value = "test-waiter-cleanup"
+
+        original_create_task = asyncio.create_task
+        shutdown_tasks = []
+
+        def track_shutdown_task(coro):
+            task = original_create_task(coro)
+            shutdown_tasks.append(task)
+            return task
+
+        monkeypatch.setattr(asyncio, "create_task", track_shutdown_task)
+        monitor_task = original_create_task(
+            handler._handle_cancellation(generation_result, context)
+        )
+        await asyncio.sleep(0)
+        monitor_task.cancel()
+        await monitor_task
+
+        assert killed_future.cancelled()
+        assert shutdown_tasks[0].cancelled()
+
+    @pytest.mark.asyncio
     @pytest.mark.timeout(5)
     async def test_shutdown_calls_abort_directly(self):
         """Shutdown calls abort on whatever is passed (wrapper or real), immediately."""
@@ -861,6 +892,148 @@ class TestGenerateLocally:
         handler.engine.llm.generate_async.assert_called_once()
         _, kwargs = handler.engine.llm.generate_async.call_args
         assert kwargs["priority"] == DEFAULT_REQUEST_PRIORITY
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "error",
+        [
+            ValueError("invalid sampling bounds"),
+            NotImplementedError("unsupported input path"),
+        ],
+        ids=["value-error", "not-implemented-error"],
+    )
+    async def test_presubmit_validation_error_is_request_local(self, error):
+        handler = self._make_handler()
+        handler.engine.llm.generate_async = MagicMock(side_effect=error)
+        handler._initiate_shutdown = mock.AsyncMock()
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+
+        assert chunks == [
+            {
+                "finish_reason": {"error": str(error)},
+                "token_ids": [],
+            }
+        ]
+        handler._initiate_shutdown.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_bind_compatible_presubmit_type_error_is_request_local(self):
+        handler = self._make_handler()
+        error = TypeError("malformed inputs")
+
+        def reject_inputs(
+            *,
+            inputs,
+            sampling_params,
+            disaggregated_params,
+            streaming,
+            trace_headers,
+            scheduling_params,
+            priority,
+            cache_salt,
+        ):
+            raise error
+
+        handler.engine.llm.generate_async = reject_inputs
+        handler._initiate_shutdown = mock.AsyncMock()
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+
+        assert chunks == [
+            {
+                "finish_reason": {"error": str(error)},
+                "token_ids": [],
+            }
+        ]
+        handler._initiate_shutdown.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_presubmit_signature_type_error_is_fatal(self):
+        handler = self._make_handler()
+
+        def legacy_generate_async(
+            *,
+            inputs,
+            sampling_params,
+            disaggregated_params,
+            streaming,
+            trace_headers,
+            scheduling_params,
+            priority,
+        ):
+            raise AssertionError("the incompatible call must not enter the function")
+
+        handler.engine.llm.generate_async = legacy_generate_async
+        handler._initiate_shutdown = mock.AsyncMock()
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+
+        assert len(chunks) == 1
+        error_message = chunks[0]["finish_reason"]["error"]
+        assert "unexpected keyword argument 'cache_salt'" in error_message
+        assert chunks[0]["token_ids"] == []
+        handler._initiate_shutdown.assert_awaited_once()
+        shutdown_error = handler._initiate_shutdown.await_args.args[0]
+        assert isinstance(shutdown_error, TypeError)
+        assert str(shutdown_error) == error_message
+
+    @pytest.mark.asyncio
+    async def test_validation_error_during_iteration_remains_fatal(self):
+        handler = self._make_handler()
+        error = ValueError("invalid executor result")
+        generation_result = MagicMock()
+        generation_result.abort = MagicMock()
+
+        async def raise_during_iteration(self_mock):
+            raise error
+            yield
+
+        generation_result.__aiter__ = raise_during_iteration
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+        handler._initiate_shutdown = mock.AsyncMock()
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+
+        assert chunks == [
+            {
+                "finish_reason": {"error": str(error)},
+                "token_ids": [],
+            }
+        ]
+        handler._initiate_shutdown.assert_awaited_once_with(error)
 
     @pytest.mark.asyncio
     async def test_zero_prompt_logprobs_is_forwarded_and_returned(self):
