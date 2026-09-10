@@ -21,7 +21,9 @@ use serde_json::{Map, Value};
 
 use super::{convert_backend_top_logprobs, token_to_utf8_bytes};
 use crate::protocols::Annotated;
-use crate::protocols::common::extensions::{GenerationArtifactResponseExpectation, NvExt};
+use crate::protocols::common::extensions::{
+    GenerationArtifactRequest, GenerationArtifactResponseExpectation,
+};
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PromptLogprobs};
 
 /// Token-in/token-out generation request.
@@ -66,7 +68,7 @@ pub struct GenerateRequest {
     pub kv_transfer_params: Option<Map<String, Value>>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub nvext: Option<NvExt>,
+    pub nvext: Option<GenerateNvExt>,
 
     /// Future top-level fields, including Python-frontend-only fields such as
     /// `features`, are retained and forwarded to the worker.
@@ -74,6 +76,16 @@ pub struct GenerateRequest {
     pub passthrough: Map<String, Value>,
 }
 
+/// Generate-specific extension view with typed artifact validation and opaque
+/// passthrough for extension fields owned by other Dynamo components.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct GenerateNvExt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_artifact: Option<GenerationArtifactRequest>,
+
+    #[serde(flatten)]
+    pub passthrough: Map<String, Value>,
+}
 impl GenerateRequest {
     pub(crate) fn response_options(&self) -> GenerateResponseOptions {
         let generation_artifact = self
@@ -723,6 +735,39 @@ mod tests {
         let back = serde_json::to_value(&req).expect("serialize");
         assert_eq!(back.get("priority"), Some(&json!(7)));
         assert_eq!(back.get("future_field"), Some(&json!("kept")));
+    }
+
+    #[test]
+    fn generate_request_preserves_unknown_nvext_siblings() {
+        let raw = json!({
+            "token_ids": [5, 6],
+            "sampling_params": {},
+            "nvext": {
+                "generation_artifact": {
+                    "format": "generation_artifact_v1",
+                    "codec": "zstd",
+                    "contents": ["moe_routes"],
+                    "delivery": {
+                        "mode": "object_store",
+                        "target": {
+                            "kind": "managed_fsspec",
+                            "profile": "p",
+                            "object_key": "run/object"
+                        }
+                    }
+                },
+                "future_extension": {"opaque": [1, 2, 3]}
+            }
+        });
+
+        let req: GenerateRequest = serde_json::from_value(raw).expect("deserialize");
+        let back = serde_json::to_value(&req).expect("serialize");
+
+        assert_eq!(
+            back["nvext"]["future_extension"],
+            json!({"opaque": [1, 2, 3]})
+        );
+        assert_eq!(back["nvext"]["generation_artifact"]["codec"], "zstd");
     }
 
     #[test]

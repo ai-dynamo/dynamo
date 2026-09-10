@@ -1043,6 +1043,31 @@ class VllmProcessor:
                     }
                     if usage := engine_response.get("completion_usage"):
                         dynamo_out["usage"] = reasoning_usage.annotate(usage)
+                    engine_data = engine_response.get("engine_data")
+                    request_nvext = request.get("nvext")
+                    artifact_request = (
+                        request_nvext.get("generation_artifact")
+                        if isinstance(request_nvext, dict)
+                        else None
+                    )
+                    if isinstance(artifact_request, dict) and raw_finish_reason:
+                        receipt = (
+                            engine_data.get("generation_artifact")
+                            if isinstance(engine_data, dict)
+                            else None
+                        )
+                        if receipt is None:
+                            receipt = {
+                                "format": artifact_request.get("format"),
+                                "contents": artifact_request.get("contents"),
+                                "state": "failed",
+                                "error_code": "artifact_receipt_missing",
+                                "error": (
+                                    "generation worker did not return the requested "
+                                    "artifact receipt"
+                                ),
+                            }
+                        dynamo_out["nvext"] = {"generation_artifact": receipt}
                     envelope["data"] = dynamo_out
 
                 metrics = {

@@ -1434,7 +1434,9 @@ def _base_preproc():
     }
 
 
-async def _run_generate(processor, preproc, *, mm_routing_info=None, context=None):
+async def _run_generate(
+    processor, preproc, *, request=None, mm_routing_info=None, context=None
+):
     vllm_preproc = SimpleNamespace(
         sampling_params=SimpleNamespace(n=1),
         request_id="vllm-request",
@@ -1446,7 +1448,7 @@ async def _run_generate(processor, preproc, *, mm_routing_info=None, context=Non
         item
         async for item in processor._generate_and_stream(
             "request-id",
-            {"model": MODEL},
+            request or {"model": MODEL},
             preproc,
             preproc["token_ids"],
             vllm_preproc,
@@ -1458,6 +1460,80 @@ async def _run_generate(processor, preproc, *, mm_routing_info=None, context=Non
 
 
 class TestRoutedEnginePath:
+    @pytest.mark.asyncio
+    async def test_generation_artifact_receipt_is_projected_from_engine_data(
+        self, vllm_processor_module
+    ):
+        receipt = {
+            "format": "generation_artifact_v1",
+            "contents": ["moe_routes"],
+            "state": "ready",
+            "actual_bytes": 42,
+            "sha256": "abcd",
+            "object_id": "opaque-object",
+        }
+        routed_engine = _FakeRoutedEngine(
+            [
+                {
+                    "token_ids": [101],
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "engine_data": {
+                        "generation_artifact": receipt,
+                        "backend_private": "must-not-leak",
+                    },
+                }
+            ]
+        )
+        processor = _make_processor(vllm_processor_module, routed_engine)
+        request = {
+            "model": MODEL,
+            "nvext": {
+                "generation_artifact": {
+                    "format": "generation_artifact_v1",
+                    "codec": "zstd",
+                    "contents": ["moe_routes"],
+                }
+            },
+        }
+
+        chunks = await _run_generate(processor, _base_preproc(), request=request)
+
+        assert chunks[-1]["data"]["nvext"] == {"generation_artifact": receipt}
+        assert "backend_private" not in json.dumps(chunks[-1])
+
+    @pytest.mark.asyncio
+    async def test_missing_terminal_generation_artifact_receipt_fails_closed(
+        self, vllm_processor_module
+    ):
+        routed_engine = _FakeRoutedEngine(
+            [{"token_ids": [101], "index": 0, "finish_reason": "stop"}]
+        )
+        processor = _make_processor(vllm_processor_module, routed_engine)
+        request = {
+            "model": MODEL,
+            "nvext": {
+                "generation_artifact": {
+                    "format": "generation_artifact_v1",
+                    "codec": "zstd",
+                    "contents": ["moe_routes"],
+                }
+            },
+        }
+
+        chunks = await _run_generate(processor, _base_preproc(), request=request)
+
+        artifact = chunks[-1]["data"]["nvext"]["generation_artifact"]
+        assert artifact == {
+            "format": "generation_artifact_v1",
+            "contents": ["moe_routes"],
+            "state": "failed",
+            "error_code": "artifact_receipt_missing",
+            "error": (
+                "generation worker did not return the requested artifact receipt"
+            ),
+        }
+
     @pytest.mark.asyncio
     async def test_backend_rejection_keeps_the_backend_status(
         self, vllm_processor_module

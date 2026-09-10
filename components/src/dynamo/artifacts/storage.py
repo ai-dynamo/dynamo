@@ -20,11 +20,11 @@ from typing import Any, cast
 from urllib.parse import urlsplit
 
 import aiohttp
-from fsspec.asyn import sync_wrapper
 from fsspec.core import url_to_fs
 from fsspec.implementations.http import HTTPFileSystem
 
-_DEFAULT_MAX_BYTES = 64 * 1024 * 1024
+_S3_SINGLE_PUT_CHUNK_BYTES = 64 * 1024 * 1024
+_DEFAULT_MAX_BYTES = _S3_SINGLE_PUT_CHUNK_BYTES
 _HTTP_CONNECT_TIMEOUT_SECONDS = 10
 _HTTP_TOTAL_TIMEOUT_SECONDS = 60
 _DEFAULT_MAX_PRESIGNED_TTL_SECONDS = 3600
@@ -69,8 +69,6 @@ class _ExactHttpPutFileSystem(HTTPFileSystem):
         self._session = None
         if session is not None:
             await session.close()
-
-    pipe_file = sync_wrapper(_pipe_file)
 
 
 @dataclass(frozen=True)
@@ -204,17 +202,30 @@ class ArtifactReceipt:
 
 def _insecure_http_allowed(parsed) -> bool:
     enabled = os.environ.get("DYN_GENERATION_ARTIFACT_ALLOW_INSECURE_HTTP", "").lower()
-    allowed_hosts = {
-        value.strip()
+    allowed_authorities = {
+        value.strip().lower()
         for value in os.environ.get(
             "DYN_GENERATION_ARTIFACT_INSECURE_HTTP_HOSTS", ""
         ).split(",")
         if value.strip()
     }
+    host = (parsed.hostname or "").lower()
+    try:
+        port = parsed.port
+    except ValueError:
+        return False
+    authority = host if port in (None, 80) else f"{host}:{port}"
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        loopback = host == "localhost"
+    else:
+        loopback = address.is_loopback
     return (
         enabled in {"1", "true", "yes"}
         and parsed.scheme == "http"
-        and parsed.hostname in allowed_hosts
+        and loopback
+        and authority in allowed_authorities
     )
 
 
@@ -408,6 +419,10 @@ async def _put_managed(data: bytes, target: ManagedFsspecTarget) -> None:
         )
     except ValueError as exc:
         raise ArtifactStorageError("generation artifact byte limit is invalid") from exc
+    if max_bytes <= 0 or max_bytes > _DEFAULT_MAX_BYTES:
+        raise ArtifactStorageError(
+            "generation artifact byte limit is outside the supported single-PUT range"
+        )
     if len(data) > max_bytes:
         raise ArtifactStorageError("artifact exceeds managed storage byte limit")
     profile = _profiles().get(target.profile)
@@ -458,7 +473,12 @@ async def _put_managed(data: bytes, target: ManagedFsspecTarget) -> None:
         try:
             async with asyncio.timeout(timeout):
                 session = await filesystem.set_session()
-                await filesystem._pipe_file(path, data, mode="create")
+                await filesystem._pipe_file(
+                    path,
+                    data,
+                    mode="create",
+                    chunksize=_S3_SINGLE_PUT_CHUNK_BYTES,
+                )
         except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001
             operation_error = exc
         if session is not None:

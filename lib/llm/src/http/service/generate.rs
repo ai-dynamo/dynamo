@@ -225,7 +225,7 @@ struct VllmTitoEnvelope<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     kv_transfer_params: Option<&'a serde_json::Map<String, serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    nvext: Option<&'a crate::protocols::common::extensions::NvExt>,
+    nvext: Option<&'a crate::protocols::openai::generate::GenerateNvExt>,
     #[serde(flatten)]
     passthrough: &'a serde_json::Map<String, serde_json::Value>,
 }
@@ -1789,6 +1789,7 @@ pub(crate) mod tests {
             "nvext": {
                 "generation_artifact": {
                     "format": "generation_artifact_v1",
+                    "codec": "zstd",
                     "contents": ["selected_logprobs"],
                     "delivery": {
                         "mode": "object_store",
@@ -1801,7 +1802,8 @@ pub(crate) mod tests {
                             "object_id": "opaque"
                         }
                     }
-                }
+                },
+                "future_extension": {"opaque": [1, 2, 3]}
             },
             "future_top_level_field": {"anything": "works"}
         });

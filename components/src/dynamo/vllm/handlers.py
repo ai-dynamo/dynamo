@@ -3265,6 +3265,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
             total_output_tokens_by_index: dict[int, int] = {}
             raw_routed_experts_by_output: dict[int, Any] = {}
+            artifact_prompt_captured: set[int] = set()
             # vLLM surfaces prompt_logprobs once (at end-of-prefill) and clears
             # them on subsequent chunks, so the generation-finish chunk often
             # carries None. Capture the first non-None payload and attach it to
@@ -3340,15 +3341,20 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         out["top_logprobs"] = top_logprobs
 
                     if generation_artifact_session is not None:
+                        artifact_prompt_token_ids = []
+                        if output_idx not in artifact_prompt_captured:
+                            artifact_prompt_token_ids = list(
+                                getattr(res, "prompt_token_ids", None) or []
+                            )
                         generation_artifact_session.record_chunk(
                             choice_index=output_idx,
-                            prompt_token_ids=list(
-                                getattr(res, "prompt_token_ids", None) or []
-                            ),
+                            prompt_token_ids=artifact_prompt_token_ids,
                             completion_token_ids=token_ids,
                             selected_logprobs=log_probs,
                             routed_experts=raw_routed_experts,
                         )
+                        if artifact_prompt_token_ids:
+                            artifact_prompt_captured.add(output_idx)
 
                     if finish_reason:
                         normalized_finish_reason = normalize_finish_reason(

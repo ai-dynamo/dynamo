@@ -48,7 +48,7 @@ def minio_client(monkeypatch):
     monkeypatch.setenv("DYN_GENERATION_ARTIFACT_ALLOW_INSECURE_HTTP", "true")
     monkeypatch.setenv(
         "DYN_GENERATION_ARTIFACT_INSECURE_HTTP_HOSTS",
-        urlsplit(endpoint).hostname or "",
+        urlsplit(endpoint).netloc,
     )
     try:
         yield client, bucket, endpoint, access_key, secret_key

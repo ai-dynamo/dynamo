@@ -325,7 +325,10 @@ async def test_generation_artifact_receives_raw_routes_and_terminal_receipt() ->
     chunks, _ = await _collect_handler_chunks(responses, session)
 
     assert session.records[-1]["routed_experts"] is routes
-    assert session.records[-1]["prompt_token_ids"] == [101]
+    assert [record["prompt_token_ids"] for record in session.records] == [
+        [101],
+        [],
+    ]
     assert [record["completion_token_ids"] for record in session.records] == [[7], [8]]
     assert [record["selected_logprobs"] for record in session.records] == [
         [-0.7],

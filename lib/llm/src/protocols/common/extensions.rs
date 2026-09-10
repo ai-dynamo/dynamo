@@ -155,6 +155,13 @@ pub struct GenerationArtifactDelivery {
     pub target: GenerationArtifactTarget,
 }
 
+#[derive(Serialize, Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GenerationArtifactCodec {
+    #[default]
+    Zstd,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct GenerationArtifactRequest {
@@ -162,6 +169,8 @@ pub struct GenerationArtifactRequest {
     pub format: String,
     #[serde(deserialize_with = "deserialize_artifact_contents")]
     pub contents: Vec<String>,
+    #[serde(default)]
+    pub codec: GenerationArtifactCodec,
     pub delivery: GenerationArtifactDelivery,
 }
 
@@ -1273,6 +1282,7 @@ mod tests {
         let nvext: NvExt = serde_json::from_value(serde_json::json!({
             "generation_artifact": {
                 "format": "generation_artifact_v1",
+                "codec": "zstd",
                 "contents": ["moe_routes", "selected_logprobs"],
                 "delivery": {
                     "mode": "object_store",
@@ -1344,6 +1354,12 @@ mod tests {
         );
 
         for invalid in [
+            serde_json::json!({
+                "format": "generation_artifact_v1",
+                "codec": "none",
+                "contents": [],
+                "delivery": {"mode": "object_store", "target": {"kind": "managed_fsspec", "profile": "p", "object_key": "x"}}
+            }),
             serde_json::json!({
                 "format": "",
                 "contents": [],

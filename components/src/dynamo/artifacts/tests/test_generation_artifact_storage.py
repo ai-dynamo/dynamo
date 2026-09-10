@@ -40,8 +40,9 @@ async def test_managed_fsspec_writes_exact_profile_object(monkeypatch) -> None:
     stored = {}
     session = SimpleNamespace(close=AsyncMock())
 
-    async def pipe_file(path, data, mode):
+    async def pipe_file(path, data, mode, chunksize):
         assert mode == "create"
+        assert chunksize == 64 * 1024 * 1024
         if path in stored:
             raise FileExistsError(path)
         stored[path] = data
@@ -77,6 +78,30 @@ async def test_managed_fsspec_writes_exact_profile_object(monkeypatch) -> None:
     assert receipt.sha256 == hashlib.sha256(payload).hexdigest()
     assert receipt.object_id == "training:request-1/output.dynexp"
     assert session.close.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_s3fs_create_mode_maps_to_atomic_conditional_put() -> None:
+    s3fs = pytest.importorskip("s3fs")
+    payload = b"artifact-bytes"
+    filesystem = s3fs.S3FileSystem(asynchronous=True, skip_instance_cache=True)
+    filesystem._call_s3 = AsyncMock(return_value={})
+    filesystem.invalidate_cache = MagicMock()
+
+    await filesystem._pipe_file(
+        "artifacts/run/output.dynexp",
+        payload,
+        mode="create",
+        chunksize=64 * 1024 * 1024,
+    )
+
+    filesystem._call_s3.assert_awaited_once_with(
+        "put_object",
+        Bucket="artifacts",
+        Key="run/output.dynexp",
+        Body=payload,
+        IfNoneMatch="*",
+    )
 
 
 @pytest.mark.asyncio
@@ -263,7 +288,7 @@ async def test_presigned_put_rejects_oversize_before_network() -> None:
         pytest.raises(ArtifactStorageError, match="max_bytes"),
     ):
         await put_artifact(b"four", target)
-    fs.pipe_file.assert_not_called()
+    fs._pipe_file.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -286,7 +311,7 @@ async def test_presigned_put_rechecks_expiry_immediately_before_network() -> Non
         pytest.raises(ArtifactStorageError, match="expired"),
     ):
         await put_artifact(b"data", target)
-    fs.pipe_file.assert_not_called()
+    fs._pipe_file.assert_not_called()
 
 
 def test_presigned_put_rejects_insecure_url_and_unapproved_headers() -> None:
@@ -301,6 +326,41 @@ def test_presigned_put_rejects_insecure_url_and_unapproved_headers() -> None:
             expires_at=(datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
             required_headers={"authorization": "secret", "if-none-match": "*"},
             object_id="opaque",
+        )
+
+
+def test_insecure_http_test_target_requires_exact_authority(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_GENERATION_ARTIFACT_ALLOW_INSECURE_HTTP", "true")
+    monkeypatch.setenv("DYN_GENERATION_ARTIFACT_INSECURE_HTTP_HOSTS", "127.0.0.1:9000")
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+
+    target = PresignedHttpPutTarget(
+        url="http://127.0.0.1:9000/bucket/key",
+        max_bytes=1024,
+        expires_at=expires_at,
+        required_headers={"if-none-match": "*"},
+        object_id="local-test",
+    )
+    assert target.object_id == "local-test"
+
+    with pytest.raises(ArtifactStorageError, match="HTTPS"):
+        PresignedHttpPutTarget(
+            url="http://127.0.0.1:9001/bucket/key",
+            max_bytes=1024,
+            expires_at=expires_at,
+            required_headers={"if-none-match": "*"},
+            object_id="wrong-port",
+        )
+    monkeypatch.setenv(
+        "DYN_GENERATION_ARTIFACT_INSECURE_HTTP_HOSTS", "example.test:9000"
+    )
+    with pytest.raises(ArtifactStorageError, match="HTTPS"):
+        PresignedHttpPutTarget(
+            url="http://example.test:9000/bucket/key",
+            max_bytes=1024,
+            expires_at=expires_at,
+            required_headers={"if-none-match": "*"},
+            object_id="non-loopback",
         )
 
 
@@ -411,6 +471,25 @@ async def test_managed_profile_and_limit_failures_are_explicit(monkeypatch) -> N
         await put_artifact(b"four", target)
 
 
+@pytest.mark.asyncio
+async def test_managed_max_bytes_cannot_enable_multipart_upload(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "DYN_GENERATION_ARTIFACT_STORAGE_PROFILES",
+        '{"training":{"url":"s3://artifacts/run","allowed_prefixes":["request-1"],"create_only":true}}',
+    )
+    monkeypatch.setenv("DYN_GENERATION_ARTIFACT_MAX_BYTES", str(64 * 1024 * 1024 + 1))
+    target = ManagedFsspecTarget(
+        profile="training", object_key="request-1/output.dynexp"
+    )
+
+    with (
+        patch("dynamo.artifacts.storage.url_to_fs") as url_to_fs,
+        pytest.raises(ArtifactStorageError, match="byte limit"),
+    ):
+        await put_artifact(b"data", target)
+    url_to_fs.assert_not_called()
+
+
 async def _start_http_server(handler):
     application = web.Application()
     application.router.add_route("*", "/{path:.*}", handler)
@@ -435,7 +514,9 @@ async def test_real_http_put_preserves_exact_target_and_body(monkeypatch) -> Non
 
     server = await _start_http_server(receive)
     monkeypatch.setenv("DYN_GENERATION_ARTIFACT_ALLOW_INSECURE_HTTP", "true")
-    monkeypatch.setenv("DYN_GENERATION_ARTIFACT_INSECURE_HTTP_HOSTS", "127.0.0.1")
+    monkeypatch.setenv(
+        "DYN_GENERATION_ARTIFACT_INSECURE_HTTP_HOSTS", f"127.0.0.1:{server.port}"
+    )
     try:
         url = (
             f"http://127.0.0.1:{server.port}/object%2Fpart"
@@ -489,7 +570,9 @@ async def test_real_http_put_rejects_redirect_without_following(monkeypatch) -> 
     await site.start()
     port = site._server.sockets[0].getsockname()[1]
     monkeypatch.setenv("DYN_GENERATION_ARTIFACT_ALLOW_INSECURE_HTTP", "true")
-    monkeypatch.setenv("DYN_GENERATION_ARTIFACT_INSECURE_HTTP_HOSTS", "127.0.0.1")
+    monkeypatch.setenv(
+        "DYN_GENERATION_ARTIFACT_INSECURE_HTTP_HOSTS", f"127.0.0.1:{port}"
+    )
     try:
         target = PresignedHttpPutTarget(
             url=f"http://127.0.0.1:{port}/source",
