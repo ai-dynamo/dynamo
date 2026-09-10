@@ -146,7 +146,7 @@ def test_block_pool_hbm_directory_survives_engine_replacement(monkeypatch):
         def lookup_and_claim(self, hashes):
             return [
                 self.entries.get(value)
-                if self.entries.get(value, {}).get("state") == "ready"
+                if self.entries.get(value, {}).get("state") in {"ready", "active"}
                 else None
                 for value in hashes
             ], "claim"
@@ -364,6 +364,7 @@ def test_bulk_hydration_invalidates_directory_if_native_install_fails():
         "generations": [7],
         "local_key": b"n" * 36,
     }
+    adoption_order = []
 
     class Directory:
         enabled = True
@@ -381,6 +382,7 @@ def test_bulk_hydration_invalidates_directory_if_native_install_fails():
             return [old_entry], "claim"
 
         def adopt_claim(self, _token, items):
+            adoption_order.append("directory")
             assert items == [{"content_hash": content_hash, "generations": [8]}]
             old_entry["state"] = "active"
             old_entry["generations"] = [8]
@@ -397,6 +399,8 @@ def test_bulk_hydration_invalidates_directory_if_native_install_fails():
             self.released = []
 
         def adopt(self, leases):
+            adoption_order.append("ring")
+            assert adoption_order == ["directory", "ring"]
             assert leases == [KVLease(1, 7)]
             return [KVLease(1, 8)]
 
@@ -423,6 +427,7 @@ def test_bulk_hydration_invalidates_directory_if_native_install_fails():
     )
 
     assert leases_mod._hydrate_hbm_directory(pool, set()) == 0
+    assert adoption_order == ["directory", "ring"]
     assert client.released == [KVLease(1, 8)]
     assert directory.invalidated == [
         {
