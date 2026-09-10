@@ -8,6 +8,11 @@ subtitle: Core fields and optional adapter-owned search spaces
 > [!WARNING]
 > **Experimental.** Sweeper's configuration schema may change without a standard deprecation period.
 
+> [!NOTE]
+> **Retained Python SDK schema.** These fields belong to `SmartSearchConfig`, not the public
+> `aisimulate recommend` YAML. See [SDK and CLI configuration](overview.md#sdk-and-cli-configuration)
+> for migration guidance and the public recommendation reference.
+
 `SmartSearchConfig.search_space` contains backend and deployment fields. Optional feature-specific
 search spaces are mappings under `SmartSearchConfig.adapters`.
 

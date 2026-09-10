@@ -10,6 +10,13 @@ subtitle: Experimental backend-neutral configuration search
 > planning. Its API, configuration schema, search behavior, and output may change without a
 > standard deprecation period.
 
+> [!NOTE]
+> **Retained Python SDK.** This section documents `SmartSearchConfig` and `Sweeper.run` for
+> applications that inject a replay runtime. For new command-line workflows, start with
+> [Sweep DynoSim Configurations](../../../../../cli/operations/simulation-with-dynosim/dynosim-sweeps.mdx)
+> and `aisimulate recommend --stack dynamo`. See [SDK and CLI
+> configuration](#sdk-and-cli-configuration) before reusing an SDK YAML file with the unified CLI.
+
 Sweeper searches deployment configurations with a black-box optimizer. It turns every suggestion
 into a versioned `ReplaySpec`, sends that specification to an injected `RunnerFactory`, and returns
 ranked candidates or a Pareto front.
@@ -31,7 +38,7 @@ of a replay. Sweeper imports a provider only when its adapter name appears in th
 
 ## Python Entry Point
 
-`Sweeper` is the only public execution interface. Supply a replay runtime explicitly:
+`Sweeper.run` executes the retained Python SDK configuration. Supply a replay runtime explicitly:
 
 ```python
 from aisimulate.sweeper import SmartSearchConfig, Sweeper
@@ -43,6 +50,19 @@ candidates = Sweeper(runner_factory=my_runner_factory).run(config)
 For the public YAML contract and stack discovery, use `aisimulate recommend --config
 recommendation.yaml`. The `Sweeper` class remains available for callers that need the legacy Python
 SDK configuration and an explicitly injected runtime.
+
+## SDK and CLI Configuration
+
+| Interface | Configuration and execution |
+|---|---|
+| Retained Python SDK | `SmartSearchConfig` with `search_space`, `workload`, `goal`, `sweep`, and optional `adapters`; the application supplies a `RunnerFactory` |
+| Unified CLI | Public recommendation YAML with `engine`, `optimization`, and optional `traffic`, `evaluation`, and `optimizer`; `--stack dynamo` loads Dynamo's runner and top-level `router` and `planner` adapters |
+
+The SDK YAML examples in this section are not input files for `aisimulate recommend --config`.
+Re-express the workload, search domains, and objectives using the [recommendation
+reference](../../../../../reference/components/dynosim-sweep-reference.mdx), then validate the
+result with the unified CLI. The SDK remains available for existing integrations and explicit
+runner injection; this guidance does not deprecate Dynamo's Router or Planner providers.
 
 ## Compatibility
 
