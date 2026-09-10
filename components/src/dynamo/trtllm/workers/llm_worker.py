@@ -759,7 +759,7 @@ async def init_llm_worker(
         # transfer with no receiver until kv_transfer_timeout_ms expires, which
         # blocks the context server for far longer than finishing the prefill
         # would have. Before that point the abort is clean.
-        runtime_config.prefill_cancel_until = "pre_commit"
+        runtime_config.prefill_cancel_until = "pre_handoff"
         publish_trtllm_token_budget(runtime_config, config.max_seq_len)
 
         kv_cache_block_size = config.kv_block_size

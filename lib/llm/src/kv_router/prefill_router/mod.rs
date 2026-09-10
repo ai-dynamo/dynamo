@@ -543,7 +543,7 @@ impl
 
         // The prefill request has now returned its handoff parameters, so the
         // worker has committed KV for the decode leg to collect. Workers that
-        // declare PreCommit stop being cancellable here: aborting past this
+        // declare PreHandoff stop being cancellable here: aborting past this
         // point orphans that KV until a transfer timeout reclaims it, which
         // costs far more than letting the prefill finish. Revoking works even
         // though a drain task may hold the same link, which is why it is shared
