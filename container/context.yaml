@@ -137,12 +137,10 @@ sglang:
     # ffmpeg is copied in (CUDA, for the video-generation encode path) and the
     # Dynamo Rust wheel is built without media-ffmpeg.
     baseline_sbom: cuda@0230b7f2
-    # Temporary day-0 exception for the upstream DeepSeek V4.1 preview. Its
-    # dev image carries a broad build/debug Debian package set that is outside
-    # Dynamo's current CUDA baseline and fails the license policy. Keep SBOM /
-    # NOTICES generation and the codec gate enabled; remove this when the final
-    # runtime image and its compliance boundary are delivered.
-    temporary_skip_license_policy_validation: "true"
+    # dev-dsv41 is an upstream development image. Trim its measured
+    # build/debug/desktop payload before compliance runs so the day-0 runtime
+    # remains subject to the standard license policy.
+    prune_dev_dsv41_packages: "true"
   xpu:
     base_image: intel/deep-learning-essentials
     base_image_tag: 2025.3.2-0-devel-ubuntu24.04
