@@ -367,6 +367,22 @@ impl WorkerSet {
         }
     }
 
+    /// Current instance membership, excluding canceled and closed lifecycle views.
+    pub(crate) fn available_worker_ids(&self) -> Option<std::collections::HashSet<u64>> {
+        if self
+            .lifecycle_cancellation
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            return None;
+        }
+        let rx = self.instance_count_rx.as_ref()?;
+        if rx.has_changed().is_err() {
+            return None;
+        }
+        Some(rx.borrow().iter().copied().collect())
+    }
+
     /// Number of active workers in this set, derived from the Client's discovery watcher.
     /// Returns 1 for in-process models (no watcher) since they always have one local worker.
     pub fn worker_count(&self) -> usize {
@@ -503,6 +519,28 @@ mod tests {
             mdcsum.to_string(),
             ModelDeploymentCard::default(),
         )
+    }
+
+    #[test]
+    fn available_worker_ids_excludes_closed_and_canceled_views() {
+        let mut workers = make_worker_set("ns", "model");
+        let (tx, rx) = watch::channel(vec![1, 2]);
+        workers.set_instance_watcher(rx);
+        assert_eq!(workers.available_worker_ids().unwrap().len(), 2);
+        tx.send_replace(vec![2]);
+        assert_eq!(
+            workers.available_worker_ids().unwrap(),
+            [2].into_iter().collect()
+        );
+        drop(tx);
+        assert!(workers.available_worker_ids().is_none());
+
+        let (_tx, rx) = watch::channel(vec![3]);
+        workers.set_instance_watcher(rx);
+        let cancellation = CancellationToken::new();
+        workers.set_lifecycle_cancellation(cancellation.clone());
+        cancellation.cancel();
+        assert!(workers.available_worker_ids().is_none());
     }
 
     /// Generic stub satisfying any `ServerStreamingEngine<Req, Annotated<Resp>>` trait

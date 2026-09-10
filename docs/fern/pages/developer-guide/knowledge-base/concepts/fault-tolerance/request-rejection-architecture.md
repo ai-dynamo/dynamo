@@ -96,8 +96,19 @@ When a request arrives:
 
 The Frontend also exports the latest observed worker values through
 `dynamo_frontend_worker_active_decode_blocks` and
-`dynamo_frontend_worker_active_prefill_tokens`, which help distinguish missing telemetry from a
-threshold that is simply too high.
+`dynamo_frontend_worker_active_prefill_tokens`. These gauges include only currently committed,
+available workers. A missing sample can mean that the worker was removed or excluded, not only
+that load telemetry is missing.
+
+Use `dynamo_frontend_router_worker_state` on the same Frontend to check the worker's current state
+and exclusion reason before diagnosing its load feed. For example, `state="excluded"` with
+`reason="config_conflict"` identifies conflicting Model Deployment Cards. A worker removed from
+discovery has no per-worker state sample; `dynamo_frontend_router_workers` retains zero counts for
+previously observed empty groups. If the worker is available but its load sample is missing,
+investigate load publication and subscriptions. Transient overload is separate from this availability
+check, so busy workers can still expose load samples for comparison with the configured threshold.
+See [Router Worker Inventory](../../../../reference/observability/metrics-catalog.mdx#router-worker-inventory)
+for state, label, and lifetime semantics.
 
 ## Worker-Side Request Admission
 

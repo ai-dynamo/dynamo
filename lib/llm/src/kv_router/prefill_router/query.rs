@@ -569,6 +569,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn binding_availability_tracks_local_inhibition_and_cancellation() {
+        use crate::kv_router::prefill_router::PrefillRouterLifecycle;
+
+        let (router, chooser) = tracked_prefill_router().await;
+        let endpoint = chooser.client().endpoint.id();
+        chooser.client().override_discovered_instances(vec![7, 8]);
+        assert_eq!(
+            router.available_worker_ids_for(&endpoint),
+            Some(HashSet::from([7, 8]))
+        );
+        chooser.client().report_instance_down(7);
+        assert_eq!(
+            router.available_worker_ids_for(&endpoint),
+            Some(HashSet::from([8]))
+        );
+        let mut other = endpoint.clone();
+        other.name = "other".into();
+        assert!(router.available_worker_ids_for(&other).is_none());
+        router.lifecycle.store(
+            PrefillLifecycleState::Unavailable as u8,
+            std::sync::atomic::Ordering::Release,
+        );
+        assert_eq!(
+            router.available_worker_ids_for(&endpoint),
+            Some(HashSet::new())
+        );
+        router.lifecycle.store(
+            PrefillLifecycleState::Active as u8,
+            std::sync::atomic::Ordering::Release,
+        );
+        router.cancel_token.cancel();
+        assert_eq!(
+            router.available_worker_ids_for(&endpoint),
+            Some(HashSet::new())
+        );
+    }
+
+    #[tokio::test]
     async fn prefill_reservation_cleans_exact_bookings_after_rebind() {
         let (router, original_chooser) = tracked_prefill_router().await;
         let reservation = router

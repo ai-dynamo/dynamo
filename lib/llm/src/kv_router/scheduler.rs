@@ -18,7 +18,10 @@ pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 use dynamo_kv_router::selector::WorkerSelector as WorkerSelectorTrait;
 
 use super::SchedulerLoadSender;
-use super::metrics::{ROUTER_QUEUE_METRICS, RouterQueueMetricHandles, RouterRequestMetrics};
+use super::metrics::{
+    ROUTER_QUEUE_METRICS, RouterQueueMetricHandles, RouterRequestMetrics, RouterWorkerRegistration,
+    RouterWorkerStatusMetrics,
+};
 use super::sequence::{
     DeferredReplicaRequestLeaseObserver, RuntimeSequencePublisher, SequenceError, SequenceRequest,
     create_multi_worker_sequences_with_observer,
@@ -50,6 +53,7 @@ where
     replica_request_lease_observer: Option<Arc<DeferredReplicaRequestLeaseObserver>>,
     queue_metrics: Vec<RouterQueueMetricHandles>,
     queue_metric_indices: HashMap<String, usize>,
+    _worker_registration: Arc<RouterWorkerRegistration>,
 }
 
 impl<Sel, RF> KvScheduler<Sel, RF>
@@ -152,6 +156,13 @@ where
             workers_with_configs.borrow().clone();
 
         let router_id = endpoint.drt().discovery().instance_id();
+        let worker_registration = RouterWorkerStatusMetrics::from_component(endpoint.component())
+            .watch_workers(
+                workers_with_configs.clone(),
+                worker_type,
+                cancellation_token.clone(),
+                available_worker_provider.clone(),
+            );
         let replica_request_lease_observer = use_shared_request_leases
             .then(|| Arc::new(DeferredReplicaRequestLeaseObserver::default()));
         let observer = replica_request_lease_observer
@@ -269,6 +280,7 @@ where
             replica_request_lease_observer,
             queue_metrics,
             queue_metric_indices,
+            _worker_registration: worker_registration,
         })
     }
 

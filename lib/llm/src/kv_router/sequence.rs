@@ -35,7 +35,7 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::metrics::{RouterWorkerStatusMetrics, WORKER_LOAD_METRICS};
+use super::metrics::WORKER_LOAD_METRICS;
 use crate::kv_router::{ACTIVE_SEQUENCES_SUBJECT, SchedulerLoadSender};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 #[cfg(test)]
@@ -269,7 +269,6 @@ fn active_sequence_event_channel(
 pub struct RuntimeSequencePublisher {
     event_sender: Option<ActiveSequenceEventPublisher>,
     scheduler_load: SchedulerLoadSender,
-    worker_status_metrics: Arc<RouterWorkerStatusMetrics>,
 }
 
 impl SequencePublisher for RuntimeSequencePublisher {
@@ -302,16 +301,6 @@ impl SequencePublisher for RuntimeSequencePublisher {
             blocks,
             tokens,
         );
-    }
-
-    fn observe_worker_registered(&self, worker: &WorkerWithDpRank, worker_type: &str) {
-        self.worker_status_metrics
-            .set_registered(worker.worker_id, worker.dp_rank, worker_type);
-    }
-
-    fn observe_worker_removed(&self, worker: &WorkerWithDpRank, worker_type: &str) {
-        self.worker_status_metrics
-            .remove_worker(worker.worker_id, worker.dp_rank, worker_type);
     }
 }
 
@@ -585,12 +574,9 @@ pub(crate) async fn create_multi_worker_sequences_with_observer(
     } else {
         None
     };
-    let worker_status_metrics = RouterWorkerStatusMetrics::from_component(endpoint.component());
-
     let publisher = RuntimeSequencePublisher {
         event_sender,
         scheduler_load,
-        worker_status_metrics,
     };
 
     let dp_range: HashMap<u64, (u32, u32)> = workers_with_configs

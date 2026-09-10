@@ -211,20 +211,6 @@ pub static WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE: LazyLock<GaugeVec> = LazyLock:
     .expect("Failed to create worker_last_inter_token_latency gauge")
 });
 
-/// Register the global per-worker TTFT/ITL/input-tokens Prometheus metrics with the given registry.
-///
-/// This should be called once during HTTP service setup to expose the metrics
-/// via the `/metrics` endpoint.
-///
-/// # Errors
-/// Returns an error if the metrics are already registered with the registry.
-pub fn register_worker_timing_metrics(registry: &Registry) -> Result<(), prometheus::Error> {
-    registry.register(Box::new(WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE.clone()))?;
-    registry.register(Box::new(WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE.clone()))?;
-    registry.register(Box::new(WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.clone()))?;
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // LoRA allocation metrics (updated by LoraController each tick)
 // ---------------------------------------------------------------------------
