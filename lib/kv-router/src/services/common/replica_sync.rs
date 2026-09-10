@@ -204,6 +204,11 @@ pub(crate) struct ScopedReplicaSync {
 pub trait SchedulerLoadSink: Send + Sync {
     fn publish(&self, snapshot: crate::sequences::SchedulerLoadSnapshot);
 
+    /// Per-worker load after any local mutation, including output blocks,
+    /// which are never published as shared scheduler load. The sink owns the
+    /// metric label so it matches the host's cleanup path.
+    fn observe_local_load(&self, _worker: &WorkerWithDpRank, _blocks: usize, _tokens: usize) {}
+
     fn publish_batch(&self, snapshots: Vec<crate::sequences::SchedulerLoadSnapshot>) {
         for snapshot in snapshots {
             self.publish(snapshot);
@@ -352,11 +357,14 @@ impl SequencePublisher for ScopedSequencePublisher {
 
     fn observe_load(
         &self,
-        _worker: &WorkerWithDpRank,
+        worker: &WorkerWithDpRank,
         _worker_type: &str,
-        _blocks: usize,
-        _tokens: usize,
+        blocks: usize,
+        tokens: usize,
     ) {
+        if let Some(sink) = &self.load_sink {
+            sink.observe_local_load(worker, blocks, tokens);
+        }
     }
 }
 

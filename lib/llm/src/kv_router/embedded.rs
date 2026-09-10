@@ -35,6 +35,7 @@ use dynamo_tokens::SequenceHash;
 use tokio_util::sync::CancellationToken;
 
 use crate::discovery::RuntimeConfigWatch;
+use crate::kv_router::metrics::WORKER_LOAD_METRICS;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 
 /// Inputs the embedded backend needs from the router at construction.
@@ -94,16 +95,30 @@ pub fn worker_selection_policy_registry() -> WorkerSelectionPolicyRegistry {
 }
 
 /// Bridges the partition's scheduler load snapshots to the router's
-/// `SchedulerLoadSender`, which feeds `KvWorkerMonitor`.
-struct SenderLoadSink(crate::kv_router::routing_load::SchedulerLoadSender);
+/// `SchedulerLoadSender`, which feeds `KvWorkerMonitor`, and its per-worker
+/// load to the frontend gauges.
+struct SenderLoadSink {
+    sender: crate::kv_router::routing_load::SchedulerLoadSender,
+    worker_type: &'static str,
+}
 
 impl dynamo_kv_router::services::selection::SchedulerLoadSink for SenderLoadSink {
     fn publish(&self, snapshot: dynamo_kv_router::sequences::SchedulerLoadSnapshot) {
-        self.0.publish(snapshot);
+        self.sender.publish(snapshot);
     }
 
     fn publish_batch(&self, snapshots: Vec<dynamo_kv_router::sequences::SchedulerLoadSnapshot>) {
-        self.0.publish_batch(snapshots);
+        self.sender.publish_batch(snapshots);
+    }
+
+    fn observe_local_load(&self, worker: &WorkerWithDpRank, blocks: usize, tokens: usize) {
+        WORKER_LOAD_METRICS.observe(
+            worker.worker_id,
+            worker.dp_rank,
+            self.worker_type,
+            blocks,
+            tokens,
+        );
     }
 }
 
@@ -157,7 +172,10 @@ impl EmbeddedSelection {
             },
             eligibility: HostEligibility::default(),
             telemetry: HostTelemetry {
-                scheduler_load: Some(Arc::new(SenderLoadSink(args.scheduler_load))),
+                scheduler_load: Some(Arc::new(SenderLoadSink {
+                    sender: args.scheduler_load,
+                    worker_type: args.metric_worker_type,
+                })),
             },
             replication: HostReplication {
                 channels: replica_sync,
@@ -456,6 +474,7 @@ pub(crate) fn worker_request_from_runtime_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_kv_router::services::selection::SchedulerLoadSink;
 
     #[test]
     fn worker_request_mirrors_runtime_config() {
@@ -512,5 +531,37 @@ mod tests {
             request.max_num_batched_tokens,
             Some(DEFAULT_MAX_BATCHED_TOKENS)
         );
+    }
+
+    #[test]
+    fn local_load_observation_sets_worker_gauges() {
+        let sink = SenderLoadSink {
+            sender: crate::kv_router::routing_load::SchedulerLoadSender::disabled(
+                CancellationToken::new(),
+            ),
+            worker_type: "decode",
+        };
+        sink.observe_local_load(&WorkerWithDpRank::new(3, 1), 5, 7);
+        let labels = ["3", "1", "decode"];
+        assert_eq!(
+            WORKER_LOAD_METRICS
+                .active_decode_blocks
+                .with_label_values(&labels)
+                .get(),
+            5
+        );
+        assert_eq!(
+            WORKER_LOAD_METRICS
+                .active_prefill_tokens
+                .with_label_values(&labels)
+                .get(),
+            7
+        );
+        let _ = WORKER_LOAD_METRICS
+            .active_decode_blocks
+            .remove_label_values(&labels);
+        let _ = WORKER_LOAD_METRICS
+            .active_prefill_tokens
+            .remove_label_values(&labels);
     }
 }
