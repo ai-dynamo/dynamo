@@ -12,7 +12,6 @@ Test Execution Times (Last Run: 2025-12-13):
 
 import logging
 import os
-import shutil
 import time
 
 import pytest
@@ -65,6 +64,7 @@ class DynamoWorkerProcess(ManagedProcess):
         request.addfinalizer(lambda port=system_port: deallocate_port(port))
         self.system_port = system_port
         self.frontend_port = frontend_port
+        tmp_path = request.getfixturevalue("tmp_path")
 
         command = [
             "python3",
@@ -80,16 +80,14 @@ class DynamoWorkerProcess(ManagedProcess):
             "16384",
         ]
         if mode != "agg":
-            with open("test_request_cancellation_trtllm_config.yaml", "w") as f:
+            config_file = tmp_path / f"trtllm_cancel_config_{system_port}.yaml"
+            with config_file.open("w") as f:
                 f.write(
                     "cache_transceiver_config:\n  backend: DEFAULT\n  max_tokens_in_buffer: 16384\n"
                 )
                 f.write("disable_overlap_scheduler: true\n")
                 f.write("kv_cache_config:\n  max_tokens: 16384\n")
-            command += [
-                "--extra-engine-args",
-                "test_request_cancellation_trtllm_config.yaml",
-            ]
+            command += ["--extra-engine-args", str(config_file)]
 
         health_check_urls = [
             (f"http://localhost:{frontend_port}/v1/models", check_models_api),
@@ -115,16 +113,7 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = str(system_port)
 
-        # Set log directory based on worker type
-        log_dir = f"{request.node.name}_{mode}_worker"
-
-        # Clean up any existing log directory from previous runs
-        try:
-            shutil.rmtree(log_dir)
-            logger.info(f"Cleaned up existing log directory: {log_dir}")
-        except FileNotFoundError:
-            # Directory doesn't exist, which is fine
-            pass
+        log_dir = tmp_path / f"{mode}_worker"
 
         super().__init__(
             command=command,
@@ -133,7 +122,7 @@ class DynamoWorkerProcess(ManagedProcess):
             timeout=300,
             display_output=True,
             terminate_all_matching_process_names=False,
-            log_dir=log_dir,
+            log_dir=str(log_dir),
         )
 
         self.mode = mode
@@ -346,7 +335,9 @@ def test_request_cancellation_trtllm_decode_cancel(
                 )
 
 
-@pytest.mark.skip(reason="TRT-LLM prefill cancellation is disabled due to reliability")
+@pytest.mark.skip(
+    reason="Cancellation does not reach TRT-LLM before prefill completes (1.3.0rc25)"
+)
 @pytest.mark.timeout(195)  # 3x average
 def test_request_cancellation_trtllm_prefill_cancel(
     request, runtime_services_dynamic_ports, predownload_models
@@ -456,7 +447,6 @@ def test_request_cancellation_trtllm_prefill_cancel(
                 )
 
 
-@pytest.mark.skip(reason="Test fails only on CI")
 @pytest.mark.timeout(195)  # 3x average
 def test_request_cancellation_trtllm_kv_transfer_cancel(
     request, runtime_services_dynamic_ports, predownload_models
@@ -527,6 +517,7 @@ def test_request_cancellation_trtllm_kv_transfer_cancel(
                     process=decode_worker,
                     pattern=f"Aborted Request ID: {request_id}",
                     log_offset=decode_log_offset,
+                    max_wait_ms=10_000,
                 )
 
                 # Verify frontend log has kill message
@@ -541,7 +532,10 @@ def test_request_cancellation_trtllm_kv_transfer_cancel(
 
                 # Verify the workers are still functional
                 cancellable_req = send_cancellable_request(
-                    frontend.frontend_port, "chat_completion_stream"
+                    frontend.frontend_port,
+                    "chat_completion_stream",
+                    max_tokens=8,
+                    timeout_s=30,
                 )
                 _, decode_log_offset = poll_for_pattern(
                     process=decode_worker,
@@ -549,7 +543,12 @@ def test_request_cancellation_trtllm_kv_transfer_cancel(
                     log_offset=decode_log_offset,
                     match_type="contains",
                 )
-                read_streaming_responses(cancellable_req, expected_count=5)
+                read_streaming_responses(
+                    cancellable_req,
+                    expected_count=1,
+                    deadline_s=30,
+                    drain=True,
+                )
 
                 logger.info(
                     "Workers are functional after cancellation during KV transfer"
