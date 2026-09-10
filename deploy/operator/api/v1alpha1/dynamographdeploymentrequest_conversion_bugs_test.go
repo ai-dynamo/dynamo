@@ -648,9 +648,8 @@ func TestBugDGDRLegacyUnnamedKeptDistinctWhenProfilerExists(t *testing.T) {
 	}
 }
 
-// The reported symptom was that a hub DGDR whose only hub-only content is
-// features.kvRouter reaches the v1alpha1 view with no nvidia.com/dgdr-spec
-// annotation at all, so the value has no carrier.
+// Pins the bug where a hub DGDR whose only hub-only content is features.kvRouter
+// reached the v1alpha1 view with no nvidia.com/dgdr-spec annotation.
 func TestBugDGDRHubSpecAnnotationCarriesHubOnlyFields(t *testing.T) {
 	tests := []struct {
 		name string
