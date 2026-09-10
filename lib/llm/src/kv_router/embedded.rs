@@ -17,11 +17,13 @@ use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::identity::RoutingPartitionId;
 use dynamo_kv_router::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use dynamo_kv_router::scheduling::queue::{
-    DEFAULT_MAX_BATCHED_TOKENS, SchedulerBookingCleanup, SchedulerBookingDescriptor,
+    ClassQueueStats, DEFAULT_MAX_BATCHED_TOKENS, SchedulerBookingCleanup,
+    SchedulerBookingDescriptor,
 };
 use dynamo_kv_router::scheduling::{
     AdmittedSchedulingResponse, AdvisorySchedulingResponse, AttemptId, KvSchedulerError,
-    OverloadedWorkerProvider, PotentialLoad, ScheduleRequest, WorkerAvailabilityProvider,
+    NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, PotentialLoad, QueueLimitKind,
+    QueueRejection, ScheduleRequest, WorkerAvailabilityProvider,
 };
 use dynamo_kv_router::sequences::{SequenceError, SequenceRequest};
 use dynamo_kv_router::services::selection::{
@@ -35,7 +37,9 @@ use dynamo_tokens::SequenceHash;
 use tokio_util::sync::CancellationToken;
 
 use crate::discovery::RuntimeConfigWatch;
-use crate::kv_router::metrics::WORKER_LOAD_METRICS;
+use crate::kv_router::metrics::{
+    ROUTER_QUEUE_METRICS, RouterQueueMetricHandles, RouterRequestMetrics, WORKER_LOAD_METRICS,
+};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 
 /// Inputs the embedded backend needs from the router at construction.
@@ -66,6 +70,94 @@ pub(crate) struct EmbeddedSelectionArgs {
     pub request_leases: Arc<dyn dynamo_kv_router::sequences::ReplicaRequestLeaseObserver>,
 }
 
+fn record_queue_rejection(
+    per_class: &[RouterQueueMetricHandles],
+    indices: &HashMap<String, usize>,
+    rejection: &QueueRejection,
+) {
+    let Some(handles) = indices
+        .get(&rejection.policy_class)
+        .and_then(|index| per_class.get(*index))
+    else {
+        return;
+    };
+    match rejection.limit_kind {
+        QueueLimitKind::Requests => handles.request_limit_rejections.inc(),
+        QueueLimitKind::RawIslTokens => handles.raw_isl_limit_rejections.inc(),
+        QueueLimitKind::CachedTokens => handles.cached_token_limit_rejections.inc(),
+    }
+}
+
+fn update_queue_metrics(
+    per_class: &[RouterQueueMetricHandles],
+    mut stats_for: impl FnMut(usize) -> Option<ClassQueueStats>,
+) {
+    for (class_index, handles) in per_class.iter().enumerate() {
+        let Some(stats) = stats_for(class_index) else {
+            debug_assert!(
+                false,
+                "missing queue counters for policy class {class_index}"
+            );
+            continue;
+        };
+        handles.pending_requests.set(stats.pending_count as i64);
+        handles
+            .pending_isl_tokens
+            .set(stats.pending_isl_tokens as i64);
+        handles
+            .pending_cached_tokens
+            .set(stats.pending_cached_tokens as i64);
+    }
+}
+
+/// Refresh queue gauges on worker-config changes and at least once a minute.
+fn spawn_queue_metrics_updater(
+    partition: SelectionPartition,
+    handles: Vec<RouterQueueMetricHandles>,
+    cancellation_token: CancellationToken,
+) {
+    let mut queue_updates = partition.scheduler().subscribe_queue_updates();
+    tokio::spawn(async move {
+        let period = std::time::Duration::from_secs(60);
+        let mut recheck = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        loop {
+            update_queue_metrics(&handles, |index| {
+                partition.scheduler().class_queue_stats(index)
+            });
+            tokio::select! {
+                _ = cancellation_token.cancelled() => break,
+                changed = queue_updates.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                }
+                _ = recheck.tick() => {}
+            }
+        }
+    });
+}
+
+fn non_max_overlap_observer(worker_type: &'static str) -> NonMaxOverlapSelectionObserver {
+    Arc::new(move |request_id, selection| {
+        let overlap_blocks_lost = selection.overlap_blocks_lost();
+        if let Some(metrics) = RouterRequestMetrics::get() {
+            metrics.observe_non_max_overlap_selection(worker_type, overlap_blocks_lost);
+        }
+        tracing::debug!(
+            request_id,
+            worker_type,
+            selected_worker_id = selection.selected_worker.worker_id,
+            selected_dp_rank = selection.selected_worker.dp_rank,
+            selected_overlap_blocks = selection.selected_overlap_blocks,
+            highest_overlap_worker_id = selection.highest_overlap_worker.worker_id,
+            highest_overlap_dp_rank = selection.highest_overlap_worker.dp_rank,
+            highest_overlap_blocks = selection.highest_overlap_blocks,
+            overlap_blocks_lost,
+            "Router selected a worker with lower KV cache overlap"
+        );
+    })
+}
+
 /// Partition model name when the router has none.
 pub(crate) const DEFAULT_MODEL_NAME: &str = "default";
 
@@ -77,6 +169,10 @@ pub(crate) struct EmbeddedSelection {
     partition: SelectionPartition,
     affinity: std::sync::OnceLock<crate::session_affinity::AffinityCoordinator>,
     worker_type: &'static str,
+    /// Queue gauges and rejection counters per policy class, index-aligned with
+    /// the scheduler's `class_queue_stats`.
+    queue_metrics: Vec<RouterQueueMetricHandles>,
+    queue_metric_indices: HashMap<String, usize>,
 }
 
 static INSTALLED_POLICY_REGISTRY: std::sync::OnceLock<WorkerSelectionPolicyRegistry> =
@@ -190,6 +286,39 @@ impl EmbeddedSelection {
             .ensure_partition(key.clone(), args.block_size, args.is_eagle)
             .context("failed to create embedded selection partition")?;
 
+        // Same profile the partition scheduler resolved, so class indices align.
+        let profile = args
+            .kv_router_config
+            .policy_profile(Some(&key.model_name))
+            .context("failed to resolve the embedded selection policy profile")?;
+        let queue_metrics: Vec<_> = profile
+            .classes()
+            .iter()
+            .map(|class| {
+                ROUTER_QUEUE_METRICS.handles(&key.model_name, args.metric_worker_type, &class.name)
+            })
+            .collect();
+        let queue_metric_indices = profile
+            .classes()
+            .iter()
+            .enumerate()
+            .map(|(index, class)| (class.name.clone(), index))
+            .collect();
+        spawn_queue_metrics_updater(
+            partition.clone(),
+            queue_metrics.clone(),
+            cancellation_token.child_token(),
+        );
+        if worker_type == WorkerType::Prefill
+            && !partition
+                .scheduler()
+                .set_non_max_overlap_selection_observer(non_max_overlap_observer(
+                    args.metric_worker_type,
+                ))
+        {
+            anyhow::bail!("non-max-overlap observer is already installed");
+        }
+
         let mut source = RuntimeDiscoverySource {
             watch: workers_with_configs,
             key,
@@ -222,7 +351,20 @@ impl EmbeddedSelection {
             partition,
             affinity: std::sync::OnceLock::new(),
             worker_type: args.metric_worker_type,
+            queue_metrics,
+            queue_metric_indices,
         })
+    }
+
+    /// Queue changes are not observable through the scheduler's update watch,
+    /// so every schedule result refreshes the gauges.
+    fn observe_schedule_result<T>(&self, result: &Result<T, KvSchedulerError>) {
+        if let Err(KvSchedulerError::QueueRejected(rejection)) = result {
+            record_queue_rejection(&self.queue_metrics, &self.queue_metric_indices, rejection);
+        }
+        update_queue_metrics(&self.queue_metrics, |index| {
+            self.partition.scheduler().class_queue_stats(index)
+        });
     }
 
     pub(crate) fn affinity_coordinator(
@@ -244,20 +386,26 @@ impl EmbeddedSelection {
         &self,
         request: ScheduleRequest,
     ) -> Result<AdmittedSchedulingResponse, KvSchedulerError> {
-        self.partition
+        let result = self
+            .partition
             .scheduler()
             .schedule_request_admitted(request)
-            .await
+            .await;
+        self.observe_schedule_result(&result);
+        result
     }
 
     pub(crate) async fn select_without_admission(
         &self,
         request: ScheduleRequest,
     ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
-        self.partition
+        let result = self
+            .partition
             .scheduler()
             .select_without_admission(request)
-            .await
+            .await;
+        self.observe_schedule_result(&result);
+        result
     }
 
     pub(crate) async fn add_request_admitted(
@@ -563,5 +711,27 @@ mod tests {
         let _ = WORKER_LOAD_METRICS
             .active_prefill_tokens
             .remove_label_values(&labels);
+    }
+
+    #[test]
+    fn queue_rejections_count_against_their_policy_class() {
+        let per_class = vec![
+            ROUTER_QUEUE_METRICS.handles("m-reject", "decode", "interactive"),
+            ROUTER_QUEUE_METRICS.handles("m-reject", "decode", "batch"),
+        ];
+        let indices = HashMap::from([("interactive".to_string(), 0), ("batch".to_string(), 1)]);
+        record_queue_rejection(
+            &per_class,
+            &indices,
+            &QueueRejection {
+                policy_class: "batch".to_string(),
+                limit_kind: QueueLimitKind::RawIslTokens,
+                current: 9,
+                limit: 8,
+            },
+        );
+        assert_eq!(per_class[1].raw_isl_limit_rejections.get(), 1);
+        assert_eq!(per_class[0].raw_isl_limit_rejections.get(), 0);
+        assert_eq!(per_class[1].request_limit_rejections.get(), 0);
     }
 }
