@@ -430,6 +430,7 @@ where
 
         card.download_config(self.local_model_path.as_deref())
             .await?;
+        card.runtime_config = card.frontend_runtime_config()?;
 
         validate_selector_worker_role(card, self.require_typed_worker_role)?;
 

@@ -138,3 +138,6 @@ tracing-subscriber = { version = "0.3", features = ["registry"] }
 inherits = "release"
 debug = true
 strip = false
+
+[patch.crates-io]
+dynamo-protocols = { git = "https://github.com/abatilo/frontend-crates.git", rev = "7b440444c9a296032386642bf6109bb700128632" }

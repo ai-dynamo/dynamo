@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Opt-in ordered reasoning, text, and tool-call parsing through one state machine.
+//! Ordered reasoning, text, and tool-call parsing through one state machine.
 //!
-//! Gated behind
+//! Qwen3 is gated behind
 //! [`DYN_ENABLE_EXPERIMENTAL_PARSERS_V2`](dynamo_runtime::config::environment_names::llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2).
 //!
 //! # What this replaces
@@ -67,6 +67,7 @@ use dynamo_protocols::types::ChatCompletionToolChoiceOption;
 /// the same XML grammar; `qwen3` is the canonical registry name and the one the
 /// conformance corpus uses, so it is what this module passes and logs.
 pub(crate) const QWEN3_UNIFIED_FAMILY: &str = "qwen3";
+pub(crate) const DEEPSEEK_V41_UNIFIED_FAMILY: &str = "deepseek_v41";
 
 /// Dynamo's `--dyn-tool-call-parser` name that pairs into [`QWEN3_UNIFIED_FAMILY`].
 const QWEN3_TOOL_CALL_PARSER: &str = "qwen3_coder";
@@ -91,19 +92,16 @@ fn experimental_parsers_v2_enabled() -> bool {
     *ENABLED
 }
 
-/// The unified family this parser pair names, ignoring whether it is switched on.
-///
-/// Both halves must be set and must agree: a unified parser owns reasoning AND tool
-/// calls, so taking over a request configured with only one of them, or with a
-/// reasoning parser from a different family, would silently change what the operator
-/// asked for. Split out from [`selected_family`] so the pairing rule can be tested
-/// without the process-wide env flag.
+/// Both parser names must agree because a unified parser owns reasoning and tool calls.
 pub(crate) fn configured_family(
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
 ) -> Option<&'static str> {
     match (tool_call_parser, reasoning_parser) {
         (Some(QWEN3_TOOL_CALL_PARSER), Some(QWEN3_REASONING_PARSER)) => Some(QWEN3_UNIFIED_FAMILY),
+        (Some(DEEPSEEK_V41_UNIFIED_FAMILY), Some(DEEPSEEK_V41_UNIFIED_FAMILY)) => {
+            Some(DEEPSEEK_V41_UNIFIED_FAMILY)
+        }
         _ => None,
     }
 }
@@ -130,7 +128,7 @@ pub(crate) fn selected_family(
     );
     configured.filter(|family| match *family {
         QWEN3_UNIFIED_FAMILY => experimental_parsers_v2_enabled(),
-        // A family with no opt-in flag stays off; adding one here is what turns it on.
+        DEEPSEEK_V41_UNIFIED_FAMILY => true,
         _ => false,
     })
 }
@@ -154,6 +152,7 @@ pub(crate) fn selected_batch_family(
 ) -> Option<&'static str> {
     configured_batch_family(tool_call_parser, reasoning_parser).filter(|family| match *family {
         QWEN3_UNIFIED_FAMILY => experimental_parsers_v2_enabled(),
+        DEEPSEEK_V41_UNIFIED_FAMILY => true,
         _ => false,
     })
 }
@@ -175,9 +174,7 @@ pub(crate) fn stream_prefill(
         // Qwen3's generation prompt ends at the assistant header with no channel open,
         // so the model emits `<think>` itself when it thinks.
         QWEN3_UNIFIED_FAMILY => UnifiedParserStartingState::None,
-        // A family whose non-thinking prompt ends INSIDE the visible response channel
-        // would return `Response` here. None exists yet; an unknown family gets the
-        // conservative answer, which is to assume the model opens its own channels.
+        DEEPSEEK_V41_UNIFIED_FAMILY => UnifiedParserStartingState::Response,
         _ => UnifiedParserStartingState::None,
     }
 }
@@ -231,7 +228,7 @@ fn bare_guided_json_prefill(
 /// neither marker means reasoning never ran for this turn.
 fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserStartingState> {
     match family {
-        QWEN3_UNIFIED_FAMILY => {
+        QWEN3_UNIFIED_FAMILY | DEEPSEEK_V41_UNIFIED_FAMILY => {
             // Compare FIRST-occurrence positions, not mere presence: a prompt that
             // pre-opened reasoning produces a leading `</think>` with no opener before
             // it, but a later `<think>...</think>` pair from the model can still follow
@@ -497,8 +494,7 @@ pub(crate) struct ChoiceState {
     opened_calls: HashSet<usize>,
     /// Whether any tool-call chunk was emitted; flips a terminal `Stop` to `ToolCalls`.
     tool_emitted: bool,
-    /// The parser errored. Later chunks pass through as plain text instead of failing
-    /// the request — a parser bug must not turn a served answer into a 500.
+    /// Parsing failed; the stream adapter selects recovery or a terminal error.
     failed: bool,
 }
 
@@ -560,7 +556,7 @@ impl ChoiceState {
                 tracing::warn!(
                     error = %error,
                     family = self.family,
-                    "unified parser push failed; falling back to plain text for this choice"
+                    "unified parser push failed"
                 );
                 output.events.extend(self.give_up(text));
                 output.events
@@ -581,7 +577,7 @@ impl ChoiceState {
                 tracing::warn!(
                     error = %error,
                     family = self.family,
-                    "unified parser finish failed; recovering buffered text"
+                    "unified parser finish failed"
                 );
                 self.give_up("")
             }
@@ -1054,7 +1050,12 @@ where
                 // A usage-only chunk. OpenAI stream ordering requires every choice's
                 // terminal finish_reason to precede it, so flush first.
                 if let Some(template) = &template {
-                    for choice in finish_unterminated_choices(&mut states, &mut records) {
+                    let choices = finish_unterminated_choices(&mut states, &mut records);
+                    if family == DEEPSEEK_V41_UNIFIED_FAMILY && states.values().any(|state| state.failed) {
+                        yield Annotated::from_error("DeepSeek V4.1 output parsing failed");
+                        return;
+                    }
+                    for choice in choices {
                         yield response_with_choice(template, choice);
                     }
                 }
@@ -1107,6 +1108,10 @@ where
                                 original.finish_reason
                             };
                         let deltas = state.finish();
+                        if family == DEEPSEEK_V41_UNIFIED_FAMILY && state.failed {
+                            yield Annotated::from_error("DeepSeek V4.1 output parsing failed");
+                            return;
+                        }
                         emitted.extend(state.choices_for(
                             &empty_choice(original.index),
                             deltas,
@@ -1193,6 +1198,10 @@ where
                     records.entry(original.index).or_default().finished = true;
                 }
 
+                if family == DEEPSEEK_V41_UNIFIED_FAMILY && state.failed {
+                    yield Annotated::from_error("DeepSeek V4.1 output parsing failed");
+                    return;
+                }
                 let mut parsed = state.choices_for(&original, deltas, true, terminal);
                 if parsed.is_empty() {
                     // A marker-only chunk produced no deltas. Keep it as an empty
@@ -1238,7 +1247,12 @@ where
 
         // Backstop: the stream ended without a terminating chunk for some choice.
         if let Some(template) = &template {
-            for choice in finish_unterminated_choices(&mut states, &mut records) {
+            let choices = finish_unterminated_choices(&mut states, &mut records);
+            if family == DEEPSEEK_V41_UNIFIED_FAMILY && states.values().any(|state| state.failed) {
+                yield Annotated::from_error("DeepSeek V4.1 output parsing failed");
+                return;
+            }
+            for choice in choices {
                 yield response_with_choice(template, choice);
             }
         }
@@ -1417,6 +1431,163 @@ mod tests {
     }
 
     // --- selected_family / configured_family -------------------------------------
+
+    #[test]
+    fn deepseek_v41_uses_native_parsing_without_an_experimental_flag() {
+        let pair = (Some("deepseek_v41"), Some("deepseek_v41"));
+        assert_eq!(configured_family(pair.0, pair.1), Some("deepseek_v41"));
+        assert_eq!(selected_family(pair.0, pair.1), Some("deepseek_v41"));
+        assert_eq!(selected_batch_family(pair.0, pair.1), Some("deepseek_v41"));
+        assert_eq!(configured_family(Some("deepseek_v41"), Some("qwen3")), None);
+        assert_eq!(configured_family(Some("deepseek_v41"), None), None);
+        assert_eq!(configured_family(None, Some("deepseek_v41")), None);
+    }
+
+    #[tokio::test]
+    async fn deepseek_v41_preserves_calls_across_utf8_chunk_boundaries() {
+        let call = concat!(
+            "<｜DSML｜ calls><｜DSML｜ invoke name=\"get_weather\">",
+            "<｜DSML｜ parameter name=\"city\" string=\"true\">東京</｜DSML｜ parameter>",
+            "</｜DSML｜ invoke></｜DSML｜ calls>"
+        );
+        for (prefix, prefill, reasoning) in [
+            ("", UnifiedParserStartingState::Response, ""),
+            (
+                "plan</think>",
+                UnifiedParserStartingState::Reasoning,
+                "plan",
+            ),
+            (
+                "<think>plan</think>",
+                UnifiedParserStartingState::None,
+                "plan",
+            ),
+        ] {
+            let input = format!("{prefix}{call}");
+            let batch = parse_complete(
+                DEEPSEEK_V41_UNIFIED_FAMILY,
+                &input,
+                &GuidedToolConstraint::None,
+                &[],
+            )
+            .unwrap();
+            assert_eq!(batch.reasoning, reasoning);
+            assert_eq!(batch.tool_calls.len(), 1);
+            assert_eq!(batch.tool_calls[0].function.arguments, r#"{"city":"東京"}"#);
+            for split in input.char_indices().map(|(index, _)| index) {
+                let (first, second) = input.split_at(split);
+                let responses = apply_stream(
+                    stream::iter([chunk(first, false), chunk(second, true)]),
+                    Some(weather_tools()),
+                    None,
+                    false,
+                    prefill,
+                    DEEPSEEK_V41_UNIFIED_FAMILY,
+                )
+                .collect::<Vec<_>>()
+                .await;
+                let mut expected = Vec::new();
+                if !reasoning.is_empty() {
+                    expected.push(LogicalEvent::Reasoning(reasoning.to_string()));
+                }
+                expected.push(LogicalEvent::Tool {
+                    index: 0,
+                    name: Some("get_weather".to_string()),
+                    arguments: r#"{"city":"東京"}"#.to_string(),
+                });
+                let mut actual = logical_events(&responses);
+                for event in &mut actual {
+                    if let LogicalEvent::Tool { arguments, .. } = event {
+                        *arguments = serde_json::from_str::<serde_json::Value>(arguments)
+                            .unwrap()
+                            .to_string();
+                    }
+                }
+                assert_eq!(actual, expected, "split={split}");
+                assert_eq!(
+                    collect_choices(&responses).last().unwrap().finish_reason,
+                    Some(FinishReason::ToolCalls)
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn deepseek_v41_rejects_malformed_closed_arguments() {
+        let text = concat!(
+            "<｜DSML｜ calls><｜DSML｜ invoke name=\"get_weather\">",
+            "<｜DSML｜ parameter name=\"count\" string=\"false\">not-json</｜DSML｜ parameter>",
+            "</｜DSML｜ invoke></｜DSML｜ calls>"
+        );
+        let responses = apply_stream(
+            stream::iter([chunk(text, true)]),
+            Some(weather_tools()),
+            None,
+            false,
+            UnifiedParserStartingState::Response,
+            DEEPSEEK_V41_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        assert!(responses.iter().any(Annotated::is_error));
+        assert!(logical_events(&responses).is_empty());
+        assert!(collect_choices(&responses).is_empty());
+    }
+
+    #[tokio::test]
+    async fn deepseek_v41_preserves_length_for_incomplete_calls() {
+        let text = concat!(
+            "<｜DSML｜ calls><｜DSML｜ invoke name=\"get_weather\">",
+            "<｜DSML｜ parameter name=\"count\" string=\"false\">1"
+        );
+        let mut terminal = chunk(text, true);
+        terminal.data.as_mut().unwrap().inner.choices[0].finish_reason = Some(FinishReason::Length);
+        let responses = apply_stream(
+            stream::iter([terminal]),
+            Some(weather_tools()),
+            None,
+            false,
+            UnifiedParserStartingState::Response,
+            DEEPSEEK_V41_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        assert!(!responses.iter().any(Annotated::is_error));
+        assert_eq!(
+            collect_choices(&responses).last().unwrap().finish_reason,
+            Some(FinishReason::Length)
+        );
+    }
+
+    #[test]
+    fn deepseek_v41_plain_text_and_guided_calls_use_the_same_decoder() {
+        for text in ["Hello.", "2 < 3", "partial <｜DSML", "Visible café 東京"] {
+            let parsed = parse_complete(
+                DEEPSEEK_V41_UNIFIED_FAMILY,
+                text,
+                &GuidedToolConstraint::None,
+                &[],
+            )
+            .unwrap();
+            assert_eq!(parsed.text, text);
+            assert!(parsed.reasoning.is_empty());
+            assert!(parsed.tool_calls.is_empty());
+        }
+        let parsed = parse_complete(
+            DEEPSEEK_V41_UNIFIED_FAMILY,
+            r#"{"city":"Tokyo"}"#,
+            &GuidedToolConstraint::GuidedJsonNamed {
+                tool_name: "get_weather".to_string(),
+            },
+            &weather_tools(),
+        )
+        .unwrap();
+        assert_eq!(parsed.tool_calls.len(), 1);
+        assert_eq!(
+            parsed.tool_calls[0].function.arguments,
+            r#"{"city":"Tokyo"}"#
+        );
+    }
 
     #[test]
     fn pairs_only_qwen3_coder_with_qwen3() {
@@ -1685,6 +1856,7 @@ mod tests {
             tool_index,
             name: name.map(str::to_string),
             arguments: arguments.to_string(),
+            complete: true,
         })
     }
 
