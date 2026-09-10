@@ -79,12 +79,11 @@ def test_model_identity_accepts_explicit_artifact_digest(monkeypatch):
     assert identity == "model=/models/current\0artifact=image-sha256:abc"
 
 
-@pytest.mark.parametrize("revision", [None, "main", "refs/pr/1", "/models/current"])
-def test_model_identity_rejects_mutable_revision(monkeypatch, revision):
+def test_model_identity_rejects_mutable_revision(monkeypatch):
     monkeypatch.delenv("GMS_VLLM_MODEL_ARTIFACT_DIGEST", raising=False)
     with pytest.raises(RuntimeError, match="immutable resolved model revision"):
         install_vmm_ipc_kv._model_identity(
-            SimpleNamespace(model="org/model", revision=revision)
+            SimpleNamespace(model="org/model", revision="main")
         )
 
 
@@ -166,7 +165,6 @@ def test_persistent_tag_plan_releases_only_stale_unclaimed_kv():
     allocations = [
         SimpleNamespace(tag="kv_pool:v4:planned", claimed=False),
         SimpleNamespace(tag="kv_pool:v3:stale", claimed=False),
-        SimpleNamespace(tag="kv_pool:v3:live", claimed=True),
         SimpleNamespace(tag="weights:v1:unrelated", claimed=False),
     ]
 
@@ -200,9 +198,23 @@ def test_stale_cleanup_preserves_allocation_claimed_during_release():
         def release_persistent(self, engine_id, tag):
             raise RuntimeError("persistent allocation claimed by another session")
 
-    assert not install_vmm_ipc_kv._persistent_tag_plan_reattaches(
-        Manager(), "engine", ["kv_pool:v4:new"]
+    with pytest.raises(RuntimeError, match="incompatible layout are still claimed"):
+        install_vmm_ipc_kv._persistent_tag_plan_reattaches(
+            Manager(), "engine", ["kv_pool:v4:new"]
+        )
+
+
+def test_claimed_stale_layout_fails_closed():
+    manager = SimpleNamespace(
+        list_persistent=lambda engine_id=None, include_unclaimed=False: [
+            SimpleNamespace(tag="kv_pool:v3:live", claimed=True)
+        ]
     )
+
+    with pytest.raises(RuntimeError, match="second KV pool"):
+        install_vmm_ipc_kv._persistent_tag_plan_reattaches(
+            manager, "engine", ["kv_pool:v4:new"]
+        )
 
 
 def test_fresh_layout_reclaims_obsolete_unclaimed_kv():

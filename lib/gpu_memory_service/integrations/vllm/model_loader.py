@@ -568,7 +568,6 @@ def _process_fused_moe_kernels_after_gms_materialization(
     model_config,
     target_device: torch.device,
 ) -> None:
-    """Rebuild vLLM MoE runtime kernels around imported GMS weights."""
     from vllm.utils.torch_utils import set_default_torch_dtype
 
     rebuilt: list[str] = []
