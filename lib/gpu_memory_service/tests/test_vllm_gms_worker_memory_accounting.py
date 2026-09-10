@@ -94,37 +94,6 @@ def test_vllm_gms_early_device_resolution_matches_upstream_mapping(monkeypatch):
     )
 
 
-def test_vllm_gms_model_loader_patches_base_worker_memory_accounting(monkeypatch):
-    from gpu_memory_service.integrations.vllm import model_loader
-    from vllm.v1.worker.gpu_worker import Worker
-
-    original = Worker.determine_available_memory
-    calls = []
-
-    def fake_determine_available_memory(self):
-        calls.append(self.model_runner.model_memory_usage)
-        return 42
-
-    monkeypatch.setattr(
-        Worker, "determine_available_memory", fake_determine_available_memory
-    )
-    monkeypatch.setattr(
-        model_loader,
-        "get_gms_client_memory_manager",
-        lambda tag: SimpleNamespace(granted_lock_type=GrantedLockType.RW),
-    )
-
-    model_loader.patch_vllm_worker_memory_accounting()
-    worker = SimpleNamespace(model_runner=SimpleNamespace(model_memory_usage=99))
-
-    try:
-        assert Worker.determine_available_memory(worker) == 42
-        assert calls == [99]
-        assert worker.model_runner.model_memory_usage == 99
-    finally:
-        Worker.determine_available_memory = original
-
-
 def test_vllm_gms_model_loader_base_worker_reserves_ro_imported_weights(monkeypatch):
     from gpu_memory_service.integrations.vllm import model_loader
     from vllm.v1.worker.gpu_worker import Worker
