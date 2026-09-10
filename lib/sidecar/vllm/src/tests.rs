@@ -259,6 +259,27 @@ impl pb::control_server::Control for FakeVllm {
         Ok(Response::new(pb::AbortResponse {}))
     }
 
+    async fn load_lora(
+        &self,
+        _request: Request<pb::LoadLoraRequest>,
+    ) -> Result<Response<pb::LoadLoraResponse>, Status> {
+        Err(Status::unimplemented("LoRA is not supported"))
+    }
+
+    async fn unload_lora(
+        &self,
+        _request: Request<pb::UnloadLoraRequest>,
+    ) -> Result<Response<pb::UnloadLoraResponse>, Status> {
+        Err(Status::unimplemented("LoRA is not supported"))
+    }
+
+    async fn list_loras(
+        &self,
+        _request: Request<pb::ListLorasRequest>,
+    ) -> Result<Response<pb::ListLorasResponse>, Status> {
+        Err(Status::unimplemented("LoRA is not supported"))
+    }
+
     async fn get_kv_event_sources(
         &self,
         _request: Request<pb::GetKvEventSourcesRequest>,
@@ -438,6 +459,7 @@ fn model_info() -> pb::ModelInfo {
         served_model_aliases: vec!["model-alias".to_string()],
         supports_text_input: true,
         supports_token_ids_input: true,
+        supports_lora: false,
         supports_multimodal: false,
         reasoning_parser: "deepseek_r1".to_string(),
         tool_call_parser: "hermes".to_string(),
@@ -459,6 +481,15 @@ fn server_info() -> pb::ServerInfo {
         }),
         max_model_len: 8192,
         kv_block_size: 16,
+        max_loras: 0,
+        kv_cache_metadata: Some(pb::KvCacheMetadata {
+            groups: vec![pb::KvCacheGroupMetadata {
+                group_id: 0,
+                kind: "full_attention".to_string(),
+                block_size: 16,
+                logical_block_size: 16,
+            }],
+        }),
         total_kv_blocks: 4096,
         max_running_requests: 128,
         max_batched_tokens: 2048,
@@ -981,6 +1012,121 @@ fn discovery_rejects_incompatible_model_metadata() {
 }
 
 #[test]
+fn engine_config_uses_effective_main_attention_block_size() {
+    let group = |group_id, kind: &str, block_size, logical_block_size| pb::KvCacheGroupMetadata {
+        group_id,
+        kind: kind.to_string(),
+        block_size,
+        logical_block_size,
+    };
+    let full = |logical| group(0, "full_attention", 16, logical);
+    for (case, dcp, groups, expected) in [
+        ("DCP=1", 1, Some(vec![full(16)]), Ok(16)),
+        ("DCP=2", 2, Some(vec![full(32)]), Ok(32)),
+        ("engine is authoritative", 1, Some(vec![full(64)]), Ok(64)),
+        (
+            "MLA",
+            2,
+            Some(vec![group(1, "mla_attention", 16, 32)]),
+            Ok(32),
+        ),
+        (
+            "sink",
+            1,
+            Some(vec![group(2, "sink_full_attention", 16, 16)]),
+            Ok(16),
+        ),
+        (
+            "mixed",
+            2,
+            Some(vec![
+                group(0, "sliding_window", 16, 16),
+                group(1, "full_attention", 16, 32),
+            ]),
+            Ok(32),
+        ),
+        ("missing", 1, None, Err("kv_cache_metadata")),
+        ("empty", 1, Some(vec![]), Err("main-attention")),
+        (
+            "non-main",
+            1,
+            Some(vec![group(0, "mamba", 16, 16)]),
+            Err("main-attention"),
+        ),
+        (
+            "unknown",
+            1,
+            Some(vec![group(0, "unknown", 16, 16)]),
+            Err("main-attention"),
+        ),
+        (
+            "zero physical",
+            1,
+            Some(vec![group(0, "full_attention", 0, 16)]),
+            Err("invalid block sizes"),
+        ),
+        (
+            "zero logical",
+            1,
+            Some(vec![full(0)]),
+            Err("invalid block sizes"),
+        ),
+        (
+            "overflow",
+            1,
+            Some(vec![full(u64::from(u32::MAX) + 1)]),
+            Err("invalid block sizes"),
+        ),
+        (
+            "conflicting sizes",
+            2,
+            Some(vec![full(32), group(1, "full_attention", 16, 16)]),
+            Err("multiple groups"),
+        ),
+        (
+            "multiple main groups",
+            2,
+            Some(vec![full(32), group(1, "mla_attention", 16, 32)]),
+            Err("multiple groups"),
+        ),
+        (
+            "duplicate ID",
+            1,
+            Some(vec![group(0, "sliding_window", 16, 16), full(16)]),
+            Err("duplicate group"),
+        ),
+    ] {
+        let mut server = server_info();
+        server
+            .parallelism
+            .as_mut()
+            .unwrap()
+            .decode_context_parallel_size = dcp;
+        server.kv_cache_metadata = groups.map(|groups| pb::KvCacheMetadata { groups });
+        let model = DiscoveredModel::from_proto(model_info(), server).unwrap();
+        let result = model.engine_config(true);
+        match expected {
+            Ok(size) => {
+                let registration = result.unwrap().llm.unwrap();
+                assert_eq!(registration.kv_cache_block_size, Some(size), "{case}");
+                assert_eq!(registration.total_kv_blocks, Some(2048), "{case}");
+            }
+            Err(message) => assert!(result.unwrap_err().to_string().contains(message), "{case}"),
+        }
+        assert_eq!(
+            model
+                .engine_config(false)
+                .unwrap()
+                .llm
+                .unwrap()
+                .kv_cache_block_size,
+            None,
+            "{case}: KV routing disabled"
+        );
+    }
+}
+
+#[test]
 fn engine_config_normalizes_total_kv_blocks_per_dp_rank() {
     let mut server = server_info();
     server
@@ -992,7 +1138,11 @@ fn engine_config_normalizes_total_kv_blocks_per_dp_rank() {
 
     let model =
         DiscoveredModel::from_proto(model_info(), server).expect("valid discovery metadata");
-    let registration = model.engine_config().llm.expect("LLM registration");
+    let registration = model
+        .engine_config(true)
+        .expect("valid KV metadata")
+        .llm
+        .expect("LLM registration");
 
     assert_eq!(registration.total_kv_blocks, Some(2048));
 }
@@ -1005,7 +1155,11 @@ fn engine_config_handles_zero_and_inexact_aggregate_kv_capacity() {
 
         let model =
             DiscoveredModel::from_proto(model_info(), server).expect("valid discovery metadata");
-        let registration = model.engine_config().llm.expect("LLM registration");
+        let registration = model
+            .engine_config(true)
+            .expect("valid KV metadata")
+            .llm
+            .expect("LLM registration");
 
         assert_eq!(
             registration.total_kv_blocks, expected_per_rank_blocks,

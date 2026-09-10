@@ -92,6 +92,7 @@ impl VllmMockerService {
             served_model_aliases: Vec::new(),
             supports_text_input: false,
             supports_token_ids_input: true,
+            supports_lora: false,
             supports_multimodal: false,
             reasoning_parser: String::new(),
             tool_call_parser: String::new(),
@@ -132,6 +133,15 @@ impl VllmMockerService {
                     anyhow::anyhow!("max_num_batched_tokens exceeds the Control API range")
                 })?
                 .unwrap_or_default(),
+            max_loras: 0,
+            kv_cache_metadata: Some(pb::KvCacheMetadata {
+                groups: vec![pb::KvCacheGroupMetadata {
+                    group_id: 0,
+                    kind: "full_attention".to_string(),
+                    block_size: engine_args.block_size as u64,
+                    logical_block_size: engine_args.block_size as u64,
+                }],
+            }),
             rl_capabilities: None,
         };
         Ok(Self {
@@ -312,6 +322,27 @@ impl pb::control_server::Control for VllmMockerService {
                 .map_err(|error| Status::internal(format!("Mocker abort failed: {error}")))?;
         }
         Ok(Response::new(pb::AbortResponse {}))
+    }
+
+    async fn load_lora(
+        &self,
+        _request: Request<pb::LoadLoraRequest>,
+    ) -> Result<Response<pb::LoadLoraResponse>, Status> {
+        Err(Status::unimplemented("LoRA is not supported"))
+    }
+
+    async fn unload_lora(
+        &self,
+        _request: Request<pb::UnloadLoraRequest>,
+    ) -> Result<Response<pb::UnloadLoraResponse>, Status> {
+        Err(Status::unimplemented("LoRA is not supported"))
+    }
+
+    async fn list_loras(
+        &self,
+        _request: Request<pb::ListLorasRequest>,
+    ) -> Result<Response<pb::ListLorasResponse>, Status> {
+        Err(Status::unimplemented("LoRA is not supported"))
     }
 
     async fn get_kv_event_sources(

@@ -35,7 +35,7 @@ It is a standalone Rust executable and is also compiled into
 
 Audio and video gRPC inputs are not available in vLLM `0.28.0`. They require a later vLLM release.
 
-The protocol does not support LoRA, beam search, `n > 1`, or Dynamo tool-call and reasoning parsers. The sidecar does not support `input_audio`, `file://` media, `use_audio_in_video` or other `mm_processor_kwargs`, preprocessed multimodal features, decoded RDMA media, UUID-only media, or audio/video cache UUIDs. Encoder disaggregation is image-only in this release. Direct vLLM gRPC callers can send raw media bytes, but Dynamo's current `MultimodalData` representation cannot. Parser defaults returned by Control are intentionally not advertised to the Dynamo frontend because the current inference protocol does not preserve all parser-related request semantics.
+The sidecar does not support LoRA, beam search, `n > 1`, or Dynamo tool-call and reasoning parsers. It also does not support `input_audio`, `file://` media, `use_audio_in_video` or other `mm_processor_kwargs`, preprocessed multimodal features, decoded RDMA media, UUID-only media, or audio/video cache UUIDs. Encoder disaggregation is image-only in this release. Direct vLLM gRPC callers can send raw media bytes, but Dynamo's current `MultimodalData` representation cannot. Parser defaults returned by Control are intentionally not advertised to the Dynamo frontend because the current inference protocol does not preserve all parser-related request semantics.
 
 In prefill/decode deployments, both engines independently prepare the original media. Reusing only the prefill-expanded prompt IDs is insufficient because KV transfer does not carry model-specific multimodal position metadata.
 
@@ -46,6 +46,24 @@ The official `Qwen/Qwen3-ASR-1.7B` repository currently needs Rust-frontend-comp
 ### Runtime compatibility
 
 The Python `vllm` package and `vllm-rs` must expose compatible EngineCore and gRPC contracts. Prefer artifacts built from the same vLLM source revision; do not combine a Python wheel from one nightly with a `vllm-rs` binary from another. The sidecar's vendored gRPC source revisions are recorded in [`proto/README.md`](proto/README.md).
+
+KV routing requires `Control.GetServerInfo.kv_cache_metadata.groups`, including
+each group's `group_id`, `kind`, physical `block_size`, and effective
+`logical_block_size`. The development contract is provided by
+[vLLM fork PR #3](https://github.com/JulienDarve/vllm/pull/3) at
+`20905fbeda0eb9760e1782d6ea5a0f96d4fe2457`; build both Python vLLM and the Rust
+frontend from that revision. This consumer must wait for compatible upstream
+Python and Rust frontend artifacts before merging.
+
+The sidecar registers the reported logical size of the main-attention group
+(`full_attention`, `mla_attention`, or `sink_full_attention`), even when it is
+not group zero. For physical size 16 with DCP=2, that size is 32 tokens. The
+same value configures KV-event publishing; block capacity remains the reported
+aggregate divided by the number of data-parallel ranks. Missing metadata,
+missing or multiple main-attention groups, duplicate group IDs, zero sizes,
+and logical sizes outside the supported `u32` range fail startup. Encoder-only
+workers do not enable KV routing and do not require cache metadata. Partial-block
+and general hybrid/Mamba routing remain unsupported.
 
 Start vLLM with its gRPC listener:
 

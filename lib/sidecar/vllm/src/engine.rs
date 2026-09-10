@@ -134,7 +134,7 @@ impl VllmSidecarEngine {
                 .sidecar
                 .common
                 .exclude_tools_when_tool_choice_none,
-            enable_kv_routing: true,
+            enable_kv_routing: !mode.is_encode(),
             disaggregation_mode: mode,
             route_to_encoder: args.sidecar.common.route_to_encoder,
             enable_rl,
@@ -178,6 +178,7 @@ impl LLMEngine for VllmSidecarEngine {
         let (model, server) = client.discover(startup_deadline).await?;
         let observed = DiscoveredModel::from_proto(model, server)?;
         self.model.ensure_startup_compatible(&observed)?;
+        let engine_config = observed.engine_config(!self.mode.is_encode())?;
         let connection_count = client.connection_count();
         self.client
             .set(client)
@@ -190,7 +191,7 @@ impl LLMEngine for VllmSidecarEngine {
             mode = %self.mode,
             "vLLM gRPC services are ready"
         );
-        Ok(observed.engine_config())
+        Ok(engine_config)
     }
 
     async fn generate(

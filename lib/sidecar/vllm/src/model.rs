@@ -4,6 +4,7 @@
 use dynamo_backend_common::{
     DynamoError, EngineConfig, LlmRegistration, RlAdminBaseUrl, RlWorkerMetadata,
 };
+use dynamo_kv_router::zmq_wire::KvCacheSpecKind;
 
 use crate::client;
 use crate::proto as pb;
@@ -135,16 +136,22 @@ impl DiscoveredModel {
             .map_err(|error| client::protocol_error(error.to_string()))
     }
 
-    pub(crate) fn engine_config(&self) -> EngineConfig {
+    pub(crate) fn engine_config(
+        &self,
+        enable_kv_routing: bool,
+    ) -> Result<EngineConfig, DynamoError> {
         let parallelism = self.server.parallelism.as_ref();
-        EngineConfig {
+        let kv_cache_block_size = enable_kv_routing
+            .then(|| self.kv_cache_block_size())
+            .transpose()?;
+        Ok(EngineConfig {
             model: self.source.clone(),
             served_model_name: Some(self.served_name.clone()),
             model_aliases: self.identity.aliases.clone(),
             runtime_data: Default::default(),
             llm: Some(LlmRegistration {
                 context_length: nonzero(self.server.max_model_len),
-                kv_cache_block_size: nonzero(self.server.kv_block_size),
+                kv_cache_block_size,
                 total_kv_blocks: self.total_kv_blocks_per_rank(),
                 max_num_seqs: nonzero(self.server.max_running_requests),
                 max_num_batched_tokens: nonzero(self.server.max_batched_tokens),
@@ -153,7 +160,50 @@ impl DiscoveredModel {
                 data_parallel_start_rank: parallelism.map(|_| 0),
                 ..Default::default()
             }),
+        })
+    }
+
+    fn kv_cache_block_size(&self) -> Result<u32, DynamoError> {
+        let metadata = self.server.kv_cache_metadata.as_ref().ok_or_else(|| {
+            client::protocol_error(
+                "KV routing requires Control.ServerInfo.kv_cache_metadata; use compatible Python vLLM and vllm-rs builds that report effective KV cache group sizes",
+            )
+        })?;
+        let mut main_group = None;
+        for (index, group) in metadata.groups.iter().enumerate() {
+            if metadata.groups[..index]
+                .iter()
+                .any(|previous| previous.group_id == group.group_id)
+            {
+                return Err(client::protocol_error(format!(
+                    "KV routing requires unique KV cache group IDs; duplicate group {}",
+                    group.group_id
+                )));
+            }
+            if KvCacheSpecKind::from_wire(&group.kind).is_main_attention()
+                && main_group.replace(group).is_some()
+            {
+                return Err(client::protocol_error(
+                    "KV routing requires exactly one main-attention KV cache group; multiple groups are unsupported",
+                ));
+            }
         }
+        let group = main_group.ok_or_else(|| {
+            client::protocol_error(
+                "KV routing requires a main-attention KV cache group (full_attention, mla_attention, or sink_full_attention)",
+            )
+        })?;
+        let block_size = u32::try_from(group.logical_block_size)
+            .ok()
+            .and_then(nonzero)
+            .filter(|_| group.block_size > 0)
+            .ok_or_else(|| {
+                client::protocol_error(format!(
+                    "KV cache group {} has invalid block sizes: physical={}, logical={}; KV routing requires nonzero sizes and a logical size that fits u32",
+                    group.group_id, group.block_size, group.logical_block_size
+                ))
+            })?;
+        Ok(block_size)
     }
 
     pub(crate) fn data_parallel_size(&self) -> u32 {
