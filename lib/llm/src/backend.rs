@@ -83,6 +83,10 @@ struct DecoderUnfoldState {
     /// Set once `stream` has yielded `None`, so it is never polled again -- a `Stream` is
     /// not guaranteed to be safely pollable past its first `None`.
     stream_ended: bool,
+    /// Whether this request could still be migrated (see `DecoderParams::migration_possible`).
+    /// When `false`, `jailed_text` is left unset on every chunk rather than snapshotting the
+    /// decoder's withheld state for a checkpoint nothing can ever consume.
+    migration_possible: bool,
 }
 
 fn fill_missing_top_logprob_text(
@@ -115,6 +119,11 @@ struct DecoderParams {
     // Withheld hidden-stop-sequence prefix carried over from a migrated attempt's last
     // known-good chunk (see `PreprocessedRequest::jail_seed`). `None` on a first attempt.
     jail_seed: Option<String>,
+    // Whether this request could still be migrated to another worker (i.e. a `RetryManager`
+    // sits in front of this `Backend` and has retries configured). When `false`, no chunk
+    // this Backend emits can ever be reseeded into a retry, so there is no point snapshotting
+    // the decoder's withheld state onto every chunk via `jailed_text`.
+    migration_possible: bool,
 }
 
 impl DecoderParams {
@@ -135,6 +144,7 @@ impl DecoderParams {
             tracker: request.tracker.clone(),
             n: request.sampling_options.n.unwrap_or(1) as u32,
             jail_seed: request.jail_seed.clone(),
+            migration_possible: request.migration_state.is_some(),
         }
     }
 }
@@ -197,6 +207,7 @@ impl Backend {
             skip_special_tokens: params.skip_special_tokens,
             pending_flush: Vec::new(),
             stream_ended: false,
+            migration_possible: params.migration_possible,
         })
     }
 }
@@ -321,8 +332,12 @@ impl
                             // Mirror the decoder's current withheld state on every chunk
                             // (terminal or not), even though this chunk didn't change it, so
                             // a checkpoint captured here reflects reality instead of always
-                            // reading as resolved.
-                            if let Some(data) = &mut output.data {
+                            // reading as resolved. Skipped entirely when migration can't
+                            // happen -- nothing will ever read this checkpoint, so there is
+                            // no reason to allocate a snapshot of it.
+                            if state.migration_possible
+                                && let Some(data) = &mut output.data
+                            {
                                 data.jailed_text = decoder.peek_jailed();
                             }
                         }
@@ -477,7 +492,11 @@ impl
                     // resolved (matched, ruled out, or flushed). Carried so a migration
                     // retry's fresh decoder can be reseeded from the last known-good chunk
                     // instead of silently losing it (see `PreprocessedRequest::jail_seed`).
-                    data.jailed_text = decoder.peek_jailed();
+                    // Skipped when migration can't happen: nothing will ever read this
+                    // checkpoint, so there is no reason to allocate a snapshot of it.
+                    if state.migration_possible {
+                        data.jailed_text = decoder.peek_jailed();
+                    }
 
                     output.data = Some(data);
 
@@ -619,6 +638,11 @@ pub struct Decoder {
 
     // the number of bytes currently jailed
     jailed_bytes: usize,
+
+    // Scratch buffers reused across `longest_hidden_prefix_suffix` calls (one per decoded
+    // token, for the lifetime of the request) instead of allocating fresh ones every step.
+    kmp_scratch: Vec<u8>,
+    kmp_pi_scratch: Vec<usize>,
 }
 
 #[allow(dead_code)]
@@ -756,6 +780,8 @@ impl Decoder {
             jail,
             jail_max_bytes,
             jailed_bytes,
+            kmp_scratch: Vec::new(),
+            kmp_pi_scratch: Vec::new(),
         }
     }
 
@@ -850,8 +876,10 @@ impl Decoder {
                     // `token` (this step's own raw decoded text) is reported unchanged so
                     // that SeqResult.tokens[i] keeps describing token_ids[i] for logprobs;
                     // only the caller-visible `released_text` excludes the matched sequence.
+                    // `token_text`'s last use was the `push_str` above, so `token` itself
+                    // (not yet borrowed at this point) can move here instead of cloning.
                     return Ok(StepResult::with_stop_trigger(
-                        token.clone(),
+                        token,
                         partial_token,
                         StopTrigger::HiddenStopSequenceDetected(seq.to_string()),
                     ));
@@ -869,8 +897,10 @@ impl Decoder {
                         .then(|| self.jail[release_start..stop_end].to_string())
                         .filter(|s| !s.is_empty());
                     self.jailed_bytes = 0;
+                    // Same reasoning as the hidden-sequence branch above: `token` can move
+                    // here instead of cloning.
                     return Ok(StepResult::with_stop_trigger(
-                        token.clone(),
+                        token,
                         token_with_stop,
                         StopTrigger::VisibleStopSequenceDetected(seq.to_string()),
                     ));
@@ -881,8 +911,7 @@ impl Decoder {
             // prefix of some hidden stop sequence -- a later token could complete it into a
             // full match. Everything else since the last release is now safe to hand back:
             // it cannot be part of a hidden stop sequence, complete or partial.
-            self.jailed_bytes =
-                Self::longest_hidden_prefix_suffix(&self.jail, &self.hidden_stop_sequences);
+            self.jailed_bytes = self.longest_hidden_prefix_suffix();
             let release_end = self.jail.len() - self.jailed_bytes;
             let released = (release_end > release_start)
                 .then(|| self.jail[release_start..release_end].to_string());
@@ -916,15 +945,16 @@ impl Decoder {
         self.jailed_string()
     }
 
-    /// Returns the length, in bytes, of the longest suffix of `jail` that is also a strict
-    /// prefix of some hidden stop sequence -- text that might still grow into a complete
-    /// hidden stop sequence and so must not be released to the caller yet. Only considers
-    /// byte offsets that land on a `jail` char boundary, so the result is always safe to
-    /// slice with.
-    fn longest_hidden_prefix_suffix(jail: &str, hidden_stop_sequences: &[String]) -> usize {
-        let jail_bytes = jail.as_bytes();
+    /// Returns the length, in bytes, of the longest suffix of `self.jail` that is also a
+    /// strict prefix of some hidden stop sequence -- text that might still grow into a
+    /// complete hidden stop sequence and so must not be released to the caller yet. Only
+    /// considers byte offsets that land on a `jail` char boundary, so the result is always
+    /// safe to slice with. Reuses `self.kmp_scratch`/`self.kmp_pi_scratch` across calls
+    /// (one per decoded token) instead of allocating fresh buffers every step.
+    fn longest_hidden_prefix_suffix(&mut self) -> usize {
+        let jail_bytes = self.jail.as_bytes();
         let mut best = 0;
-        for seq in hidden_stop_sequences {
+        for seq in &self.hidden_stop_sequences {
             let seq_bytes = seq.as_bytes();
             // A full-length match would already have been caught as a complete stop;
             // only strictly shorter prefixes are candidates here. Sequences that cannot
@@ -944,28 +974,30 @@ impl Decoder {
             // border length back from its last entry. Borders of `pattern + sep + tail`
             // strictly decrease along the classic `pi[k - 1]` chain, which is walked here
             // only as far as needed to find one that also lands on a `jail` char boundary.
-            let mut combined = Vec::with_capacity(pattern.len() + 1 + tail.len());
-            combined.extend_from_slice(pattern);
-            combined.push(0xFF);
-            combined.extend_from_slice(tail);
-            let pi = Self::kmp_prefix_function(&combined);
+            self.kmp_scratch.clear();
+            self.kmp_scratch.extend_from_slice(pattern);
+            self.kmp_scratch.push(0xFF);
+            self.kmp_scratch.extend_from_slice(tail);
+            Self::kmp_prefix_function_into(&self.kmp_scratch, &mut self.kmp_pi_scratch);
 
-            let mut k = *pi.last().unwrap_or(&0);
+            let mut k = *self.kmp_pi_scratch.last().unwrap_or(&0);
             while k > best {
-                if jail.is_char_boundary(jail_bytes.len() - k) {
+                if self.jail.is_char_boundary(jail_bytes.len() - k) {
                     best = k;
                     break;
                 }
-                k = pi[k - 1];
+                k = self.kmp_pi_scratch[k - 1];
             }
         }
         best
     }
 
-    /// Standard KMP prefix (failure) function: `pi[i]` is the length of the longest proper
-    /// prefix of `s[..=i]` that is also a suffix of it.
-    fn kmp_prefix_function(s: &[u8]) -> Vec<usize> {
-        let mut pi = vec![0usize; s.len()];
+    /// Standard KMP prefix (failure) function, written into `pi` (cleared and reused
+    /// rather than allocated fresh every call): `pi[i]` is the length of the longest
+    /// proper prefix of `s[..=i]` that is also a suffix of it.
+    fn kmp_prefix_function_into(s: &[u8], pi: &mut Vec<usize>) {
+        pi.clear();
+        pi.resize(s.len(), 0);
         let mut k = 0usize;
         for i in 1..s.len() {
             while k > 0 && s[i] != s[k] {
@@ -976,7 +1008,6 @@ impl Decoder {
             }
             pi[i] = k;
         }
-        pi
     }
 
     pub fn process_token_ids(&mut self, token_ids: &[TokenIdType]) -> Result<SeqResult> {
@@ -1786,6 +1817,11 @@ mod tests {
             })
             .sampling_options(SamplingOptions::default())
             .output_options(OutputOptions::default())
+            // `jailed_text` is only populated when migration is possible (see
+            // `DecoderParams::migration_possible`); this test asserts on it.
+            .migration_state(Some(
+                crate::protocols::common::preprocessor::MigrationState::default(),
+            ))
             .build()
             .expect("valid preprocessed request");
         let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
