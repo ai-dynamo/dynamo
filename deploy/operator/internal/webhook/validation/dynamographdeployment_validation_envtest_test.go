@@ -73,6 +73,13 @@ const (
 	powerNodeNameForbiddenMessage = `Forbidden: cannot be combined with ` +
 		`annotation "dynamo.nvidia.com/gpu-power-limit": bypassing the scheduler invalidates the GPU product ` +
 		`selected by "nvidia.com/gpu.product"`
+
+	// A ratcheted violation is admitted but warned about on every write, so the
+	// stale cap still feeding Planner's projection is not silent.
+	powerRetainedWarningPrefix   = "Retained pre-existing GPU power violation: "
+	powerRetainedSelectorWarning = powerRetainedWarningPrefix + powerProductPath + ": " + powerSelectorRequiredMessage
+	powerRetainedNodeNameWarning = powerRetainedWarningPrefix + powerNodeNamePath + ": " + powerNodeNameForbiddenMessage
+	powerRetainedRangeWarning    = powerRetainedWarningPrefix + powerWattsPath + `: Invalid value: "900": ` + powerRangeDetail
 )
 
 func webhookCause(causeType metav1.CauseType, field, message string) metav1.StatusCause {
@@ -1130,6 +1137,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaLegacyPowerDGD(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).Replicas = k8sptr.To(int32(3))
 			}),
+			wantWarnings: []string{powerRetainedSelectorWarning},
 		},
 		{
 			name:               "unchanged legacy power component with an unrelated selector key is accepted",
@@ -1146,6 +1154,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				}
 				worker.Replicas = k8sptr.To(int32(3))
 			}),
+			wantWarnings: []string{powerRetainedSelectorWarning},
 		},
 		{
 			name:               "unchanged out-of-range power cap is ratcheted for a product-aware component",
@@ -1157,6 +1166,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				setBetaWorkerPowerInputs(dgd, "900", "1", 2)
 				betaWorkerComponent(dgd).Replicas = k8sptr.To(int32(3))
 			}),
+			wantWarnings: []string{powerRetainedRangeWarning},
 		},
 		{
 			name:               "unchanged legacy power component with a pinned nodeName is accepted",
@@ -1169,6 +1179,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.PodTemplate.Spec.NodeName = dgdAdmissionNodeName
 				worker.Replicas = k8sptr.To(int32(3))
 			}),
+			wantWarnings: []string{powerRetainedSelectorWarning, powerRetainedNodeNameWarning},
 		},
 		{
 			// nodeName is the one pre-existing violation repairable in place: clearing
@@ -1257,6 +1268,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.PodTemplate.Spec.Affinity = &corev1.Affinity{}
 				worker.Replicas = k8sptr.To(int32(3))
 			}),
+			wantWarnings: []string{powerRetainedSelectorWarning},
 		},
 		{
 			name:               "legacy power component losing an empty affinity keeps the ratchet",
@@ -1267,6 +1279,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaLegacyPowerDGD(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).Replicas = k8sptr.To(int32(3))
 			}),
+			wantWarnings: []string{powerRetainedSelectorWarning},
 		},
 		{
 			name:               "legacy power component gaining an empty product selector key breaks the ratchet",
@@ -1304,6 +1317,9 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookCauses: []metav1.StatusCause{
 				webhookCause(metav1.CauseTypeFieldValueInvalid, powerWattsPath, `Invalid value: "300W": must be a decimal integer`),
 			},
+			// Suppression is scoped to the rules this ratchet adds, so the unchanged
+			// selector violation is warned about while the malformed cap still rejects.
+			wantWarnings: []string{powerRetainedSelectorWarning},
 		},
 		{
 			name:               "the ratchet does not suppress an unchanged DRA claim",
@@ -1324,6 +1340,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookCauses: []metav1.StatusCause{
 				webhookCause(causeTypeFieldValueForbidden, `spec.components[1].podTemplate.spec.containers[0].resources.claims`, `Forbidden: cannot be combined with annotation "dynamo.nvidia.com/gpu-power-limit": power-aware planning does not support DRA-backed device allocation`),
 			},
+			wantWarnings: []string{powerRetainedSelectorWarning},
 		},
 		{
 			name:               "a watt change on a legacy power component aggregates both errors",

@@ -143,6 +143,14 @@ reject. A pre-existing product or range violation cannot be repaired that way,
 because the exact product selector and the cap are both immutable — recreate the
 DGD instead.
 
+A ratcheted violation is admitted but not silent: admission returns a
+`Retained pre-existing GPU power violation` warning on every write to that
+component, so `kubectl apply` and `kubectl edit` surface it. Treat it as a
+standing defect rather than a notice, because the Planner keeps projecting the
+stored cap. Note the warning reaches only clients that surface warning headers —
+the Planner's own replica writes do not report it — so it is a best-effort
+signal, not an alerting mechanism.
+
 Components may select different products; the budget still sums their projected
 watts. This example uses one product for both workers only for brevity.
 
