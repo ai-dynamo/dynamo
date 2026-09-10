@@ -307,6 +307,62 @@ async def test_gms_failover_pre_init_lock_acquires_without_quiesce(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_pre_init_releases_lock_when_post_lock_fence_fails(monkeypatch):
+    monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "true")
+    monkeypatch.setenv("DYN_GMS_FAILOVER_POST_LOCK_FENCE_MS", "0")
+    locks = []
+
+    def lock_factory(path):
+        lock = _Lock(path)
+        locks.append(lock)
+        return lock
+
+    async def fail_fence(*, backend_name, role):
+        raise RuntimeError(f"{backend_name} {role} fence failed")
+
+    monkeypatch.setattr(
+        "dynamo.common.gms_failover.run_gms_failover_post_lock_fence",
+        fail_fence,
+    )
+
+    with pytest.raises(RuntimeError, match="fence failed"):
+        await acquire_gms_failover_lock_before_init(
+            backend_name="test",
+            lock_factory=lock_factory,
+        )
+
+    assert locks[0].released == 1
+
+
+@pytest.mark.asyncio
+async def test_immediate_active_releases_lock_when_activation_barrier_fails(
+    monkeypatch,
+):
+    monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "true")
+    monkeypatch.setenv("DYN_GMS_FAILOVER_POST_LOCK_FENCE_MS", "0")
+    locks = []
+
+    def lock_factory(path):
+        lock = _Lock(path)
+        locks.append(lock)
+        return lock
+
+    async def fail_barrier():
+        raise RuntimeError("activation barrier failed")
+
+    with pytest.raises(RuntimeError, match="activation barrier failed"):
+        await prepare_gms_failover(
+            _Owner(),
+            _Runtime(),
+            backend_name="test",
+            lock_factory=lock_factory,
+            activation_barrier=fail_barrier,
+        )
+
+    assert locks[0].released == 1
+
+
+@pytest.mark.asyncio
 async def test_gms_failover_promotion_warmup_drains_non_error_stream(monkeypatch):
     monkeypatch.delenv("DYN_GMS_FAILOVER_PROMOTION_WARMUP", raising=False)
     seen = []
