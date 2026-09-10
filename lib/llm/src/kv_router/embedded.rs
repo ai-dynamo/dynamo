@@ -452,6 +452,7 @@ impl EmbeddedSelection {
             .scheduler()
             .mark_prefill_completed_if_booking(booking)
             .await
+            .map(|_| ())
     }
 
     pub(crate) fn pending_count(&self) -> usize {

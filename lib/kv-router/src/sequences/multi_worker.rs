@@ -787,7 +787,16 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         req: SequenceRequest,
         decay_now: Instant,
     ) -> Result<(), SequenceError> {
-        self.add_request_impl(req, decay_now, false).map(|_| ())
+        self.add_request_if_registered_admitted(req, decay_now)
+            .map(|_| ())
+    }
+
+    pub fn add_request_if_registered_admitted(
+        &self,
+        req: SequenceRequest,
+        decay_now: Instant,
+    ) -> Result<AttemptId, SequenceError> {
+        self.add_request_impl(req, decay_now, false)
     }
 
     fn add_request_impl(
@@ -817,6 +826,39 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
     pub(crate) fn request_worker(&self, request_id: &RequestId) -> Option<WorkerWithDpRank> {
         self.request_index.worker_for(request_id)
+    }
+
+    pub(crate) fn has_booking(&self, booking: &SchedulerBookingDescriptor) -> bool {
+        self.request_index.booking_for(&booking.request_id)
+            == Some(RequestBooking {
+                worker: booking.worker,
+                attempt_id: booking.attempt_id,
+            })
+    }
+
+    /// Republish the ordered completion event for `booking` while it is still
+    /// the live booking; serialized with free/rebook through the worker's
+    /// sequence lock.
+    pub(crate) fn publish_prefill_completed_if_booking(
+        &self,
+        booking: &SchedulerBookingDescriptor,
+    ) -> bool {
+        let table = self.workers.read();
+        let Some(&idx) = table.index.get(&booking.worker) else {
+            return false;
+        };
+        let _seq = table.slots[idx].sequences.write();
+        if !self.has_booking(booking) {
+            return false;
+        }
+        self.enqueue_publish_event(ActiveSequenceEvent {
+            request_id: booking.request_id.clone(),
+            worker: booking.worker,
+            data: ActiveSequenceEventData::MarkPrefillCompleted,
+            router_id: self.router_id,
+            lora_name: self.request_index.lora_for(&booking.request_id),
+        });
+        true
     }
 
     /// Free all blocks associated with a request.

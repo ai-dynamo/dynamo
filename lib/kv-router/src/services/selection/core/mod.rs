@@ -18,6 +18,8 @@ use crate::indexer::{
 use crate::kv_hints::{
     KvHint, KvHintAction, KvSourceLocationsPayload, KvTransferCandidateSource, KvTransferCandidates,
 };
+#[cfg(test)]
+use crate::protocols::ActiveSequenceEventData;
 use crate::protocols::{
     ActiveSequenceEvent, LocalBlockHash, PrefillLoadHint, RoutingConstraints, SharedCacheHits,
     WorkerAffinityTarget, WorkerConfigLike, WorkerId, WorkerWithDpRank,
@@ -26,16 +28,17 @@ use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::queue::SchedulerBookingDescriptor;
 use crate::scheduling::selector::WorkerSelectionPolicy;
 use crate::scheduling::{
-    AdmissionAttempt, KvSchedulerError, LocalScheduler, LoraWorkerFilter, OverlapAnalysis,
-    OverlapSignals, OverloadedWorkerProvider, PotentialLoad, PrefillLoadEstimator, ScheduleMode,
-    ScheduleRequest, SessionContext, TieredOverlapRefresher, WorkerAvailabilityProvider,
-    effective_prefill_tokens, narrow_allowed_worker_ids_by_lora,
-    prefill_load_hint_from_effective_tokens,
+    KvSchedulerError, LocalScheduler, LoraWorkerFilter, OverlapAnalysis, OverlapSignals,
+    OverloadedWorkerProvider, PotentialLoad, PrefillLoadEstimator, ScheduleMode, ScheduleRequest,
+    SessionContext, TieredOverlapRefresher, WorkerAvailabilityProvider, effective_prefill_tokens,
+    narrow_allowed_worker_ids_by_lora, prefill_load_hint_from_effective_tokens,
 };
 use crate::sequences::{
-    ActiveSequencesMultiWorker, ReplicaRequestLeaseObserver, ReplicaWorkerPolicy, SequenceError,
-    SequenceRequest, SequenceTrackerOptions, active_request_expiry_duration,
+    ActiveSequencesMultiWorker, LifecycleMutationOutcome, ReplicaRequestLeaseObserver,
+    ReplicaWorkerPolicy, SequenceRequest, SequenceTrackerOptions, active_request_expiry_duration,
 };
+#[cfg(test)]
+use crate::services::common::replica_sync::HostReplicaChannels;
 use crate::services::common::replica_sync::{
     HostReplicaSyncFactory, ReplicaSyncConfig, SchedulerLoadSink, ScopedReplicaEvent,
     ScopedSequencePublisher, setup_scoped_replica_sync,
@@ -304,19 +307,118 @@ pub struct SelectionServiceConfig {
 
 type SelectionEntries = RwLock<HashMap<RoutingPartitionId, Arc<OnceCell<Arc<SelectionEntry>>>>>;
 
-/// `selection_id` -> partition that holds its booking.
+/// `selection_id` -> the booking it holds.
 ///
 /// Lifecycle calls (`prefill_complete`, `free`, `add_output_block`) arrive with
-/// only a selection id, so without this index every call scans every partition
-/// scheduler. Selection ids are caller-controlled strings, so this stays on the
-/// standard hasher. Entries are removed on `free`, on a `RequestNotFound` from
-/// the indexed scheduler, and by a periodic sweep that drops ids whose booking
-/// expired underneath them.
+/// only a selection id; the index resolves them to one partition and one
+/// scheduler booking, so they never touch a booking made by a later request
+/// that reused the id. An id is claimed here before its booking is made and
+/// installed once the booking is final; a claim (`booking == None`) rejects a
+/// concurrent booking of the same id and is invisible to lifecycle calls.
+/// Bookings mirrored from replica peers are indexed by
+/// [`ReservationIndexObserver`].
 type ReservationIndex = RwLock<HashMap<String, Reservation>>;
 
 struct Reservation {
     partition: RoutingPartitionId,
+    booking: Option<SchedulerBookingDescriptor>,
     _affinity_lease: Option<AffinityLease>,
+}
+
+/// Exclusive ownership of a selection id while its booking is in flight.
+/// Dropping the claim without `install` releases the id.
+struct ReservationClaim<'a> {
+    index: &'a ReservationIndex,
+    selection_id: String,
+    armed: bool,
+}
+
+impl ReservationClaim<'_> {
+    fn install(mut self, reservation: Reservation) {
+        self.armed = false;
+        self.index
+            .write()
+            .insert(std::mem::take(&mut self.selection_id), reservation);
+    }
+}
+
+impl Drop for ReservationClaim<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut index = self.index.write();
+        if index
+            .get(&self.selection_id)
+            .is_some_and(|reservation| reservation.booking.is_none())
+        {
+            index.remove(&self.selection_id);
+        }
+    }
+}
+
+/// Keeps the reservation index exact for bookings replicated from peers, which
+/// never pass through this core's booking paths, and forwards to the host's
+/// own observer.
+struct ReservationIndexObserver {
+    index: Arc<ReservationIndex>,
+    partition: RoutingPartitionId,
+    host: Option<Arc<dyn ReplicaRequestLeaseObserver>>,
+}
+
+impl ReplicaRequestLeaseObserver for ReservationIndexObserver {
+    fn admitted(&self, booking: SchedulerBookingDescriptor) {
+        {
+            let mut index = self.index.write();
+            // A peer only admits an id this partition's scheduler does not hold,
+            // so an existing row for it is a stale booking (expired, not yet
+            // swept) or a claim whose local booking will now fail; the mirror
+            // replaces both. A row from another partition is left alone.
+            let own_row = index
+                .get(&booking.request_id)
+                .is_none_or(|reservation| reservation.partition == self.partition);
+            if own_row {
+                index.insert(
+                    booking.request_id.clone(),
+                    Reservation {
+                        partition: self.partition.clone(),
+                        booking: Some(booking.clone()),
+                        _affinity_lease: None,
+                    },
+                );
+            }
+        }
+        if let Some(host) = &self.host {
+            host.admitted(booking);
+        }
+    }
+
+    fn progressed(&self, booking: &SchedulerBookingDescriptor) {
+        if let Some(host) = &self.host {
+            host.progressed(booking);
+        }
+    }
+
+    fn completed(&self, booking: &SchedulerBookingDescriptor) {
+        forget_reservation_if(&self.index, &self.partition, booking);
+        if let Some(host) = &self.host {
+            host.completed(booking);
+        }
+    }
+}
+
+/// Remove the index entry for `booking` only if it still describes it.
+fn forget_reservation_if(
+    index: &ReservationIndex,
+    partition: &RoutingPartitionId,
+    booking: &SchedulerBookingDescriptor,
+) {
+    let mut index = index.write();
+    if index.get(&booking.request_id).is_some_and(|reservation| {
+        reservation.partition == *partition && reservation.booking.as_ref() == Some(booking)
+    }) {
+        index.remove(&booking.request_id);
+    }
 }
 
 pub struct SelectionCore {
@@ -750,9 +852,11 @@ impl SelectionCore {
                             .then(active_request_expiry_duration),
                     },
                 ));
-                if let Some(observer) = &self.host.replication.request_leases {
-                    slots.set_replica_request_lease_observer(Arc::clone(observer));
-                }
+                slots.set_replica_request_lease_observer(Arc::new(ReservationIndexObserver {
+                    index: Arc::clone(&self.reservation_index),
+                    partition: key.clone(),
+                    host: self.host.replication.request_leases.clone(),
+                }));
                 let replica_tx = scoped_replica_sync.channel.map(|(replica_tx, subscriber)| {
                     slots.start_replica_sync(subscriber, self.cancel_token.child_token());
                     replica_tx
@@ -991,6 +1095,10 @@ impl SelectionCore {
         self.ensure_running()?;
 
         let entry = self.ready_entry(&key)?;
+        let claim = match selection_id.as_deref() {
+            Some(selection_id) if book => Some(self.claim_reservation(selection_id, &key)?),
+            _ => None,
+        };
 
         // Session stickiness: a bound session steers selection (exclusive for
         // the default selector); a new session is bound to the worker chosen.
@@ -1126,7 +1234,9 @@ impl SelectionCore {
             routing_constraints,
             shared_cache_hits,
         };
-        let (response, advisory_load, attempt) = tokio::select! {
+        // `lease` guards the booking until it is installed below: any early
+        // return or drop before then frees it.
+        let (response, advisory_load, lease) = tokio::select! {
             biased;
             _ = self.cancel_token.cancelled() => {
                 return Err(SelectionError::Scheduler(KvSchedulerError::SubscriberShutdown));
@@ -1138,18 +1248,14 @@ impl SelectionCore {
                         .select_without_admission(schedule_request)
                         .await
                         .map(|advisory| {
-                            (
-                                advisory.response,
-                                Some(advisory.selected_worker_load),
-                                AdmissionAttempt::Untracked,
-                            )
+                            (advisory.response, Some(advisory.selected_worker_load), None)
                         })
                 } else {
                     entry
                         .scheduler
-                        .schedule_request_admitted(schedule_request)
+                        .schedule_request_with_lease(schedule_request)
                         .await
-                        .map(|admitted| (admitted.response, None, admitted.attempt))
+                        .map(|(admitted, lease)| (admitted.response, None, lease))
                 }
             } => result?,
         };
@@ -1157,20 +1263,6 @@ impl SelectionCore {
             .catalog
             .schedulable_endpoint(response.best_worker.worker_id, &key)
         else {
-            // The worker drained while this request was queued; release the
-            // booking the actor just made for it.
-            if let (AdmissionAttempt::Tracked(attempt_id), Some(request_id)) =
-                (attempt, selection_id.as_deref())
-            {
-                entry
-                    .scheduler
-                    .booking_cleanup()
-                    .enqueue(SchedulerBookingDescriptor {
-                        request_id: request_id.to_string(),
-                        worker: response.best_worker,
-                        attempt_id,
-                    });
-            }
             return Err(SelectionError::Internal(format!(
                 "selected worker {} is no longer schedulable",
                 response.best_worker.worker_id
@@ -1222,18 +1314,30 @@ impl SelectionCore {
                 .map(|threshold| load.prefill_load_exceeds(threshold)),
         });
 
-        if book && let Some(selection_id) = selection_id.as_deref() {
-            let lease = match (affinity_hold, session_id.as_deref(), table) {
+        if let Some(claim) = claim {
+            let Some(lease) = lease else {
+                return Err(SelectionError::Internal(
+                    "booked selection has no lifecycle lease".to_string(),
+                ));
+            };
+            if let Some(hashes) = routing_hashes.clone() {
+                self.record_routing_decision(&entry, response.best_worker, hashes)
+                    .await;
+            }
+            // Nothing awaits from here to `install`: the binding, the booking
+            // handover and the index entry land together.
+            let booking = lease.commit().ok_or_else(missing_booking)?;
+            let affinity_lease = match (affinity_hold, session_id.as_deref(), table) {
                 (Some(hold), Some(session_id), Some(table)) => {
                     Self::bind_session(table, hold, session_id, response.best_worker)
                 }
                 _ => None,
             };
-            self.record_reservation(selection_id, &key, lease);
-            if let Some(hashes) = routing_hashes.clone() {
-                self.record_routing_decision(&entry, response.best_worker, hashes)
-                    .await;
-            }
+            claim.install(Reservation {
+                partition: key.clone(),
+                booking: Some(booking),
+                _affinity_lease: affinity_lease,
+            });
         }
 
         if let Some((cache_id, sequence_hashes, lora_name, track_prefill_tokens)) = cached_inputs {
@@ -1461,11 +1565,13 @@ impl SelectionCore {
             routing_hashes,
         } = booking;
 
+        let claim = self.claim_reservation(&selection_id, &key)?;
         // Strict booking: never lazily recreate a worker/rank removed since the
-        // reservation was resolved.
-        entry
+        // reservation was resolved. The lease frees the booking if this future
+        // is dropped before `install`.
+        let lease = entry
             .scheduler
-            .add_request_if_registered(SequenceRequest {
+            .add_request_if_registered_guarded(SequenceRequest {
                 request_id: selection_id.clone(),
                 token_sequence: Some(sequence_hashes),
                 track_prefill_tokens,
@@ -1473,12 +1579,15 @@ impl SelectionCore {
                 prefill_load_hint,
                 worker,
                 lora_name,
-            })
-            .await?;
-        self.record_reservation(&selection_id, &key, None);
+            })?;
         if let Some(hashes) = routing_hashes {
             self.record_routing_decision(&entry, worker, hashes).await;
         }
+        claim.install(Reservation {
+            partition: key.clone(),
+            booking: Some(lease.commit().ok_or_else(missing_booking)?),
+            _affinity_lease: None,
+        });
 
         Ok(ReservationResponse {
             selection_id,
@@ -1490,23 +1599,31 @@ impl SelectionCore {
         })
     }
 
-    fn record_reservation(
+    /// Take `selection_id` for a booking about to be made in `key`.
+    fn claim_reservation(
         &self,
         selection_id: &str,
         key: &RoutingPartitionId,
-        lease: Option<AffinityLease>,
-    ) {
-        self.reservation_index.write().insert(
+    ) -> Result<ReservationClaim<'_>, SelectionError> {
+        let mut index = self.reservation_index.write();
+        if index.contains_key(selection_id) {
+            return Err(SelectionError::Conflict(format!(
+                "selection {selection_id} is already reserved or being reserved"
+            )));
+        }
+        index.insert(
             selection_id.to_string(),
             Reservation {
                 partition: key.clone(),
-                _affinity_lease: lease,
+                booking: None,
+                _affinity_lease: None,
             },
         );
-    }
-
-    fn forget_reservation(&self, selection_id: &str) {
-        self.reservation_index.write().remove(selection_id);
+        Ok(ReservationClaim {
+            index: &self.reservation_index,
+            selection_id: selection_id.to_string(),
+            armed: true,
+        })
     }
 
     /// Bind (or confirm) `session_id` to the worker a booking landed on and
@@ -1605,58 +1722,63 @@ impl SelectionCore {
         }
     }
 
-    /// Entries to try for a lifecycle call on `selection_id`: the indexed
-    /// partition first, then every other initialized partition. The fallback
-    /// covers bookings mirrored from replica peers, which never pass through
-    /// this core's booking paths.
-    fn lifecycle_entries(&self, selection_id: &str) -> Vec<Arc<SelectionEntry>> {
+    /// The partition and booking a lifecycle call on `selection_id` may touch.
+    /// `None` for unknown ids and for ids whose booking is still in flight.
+    fn indexed_booking(
+        &self,
+        selection_id: &str,
+    ) -> Option<(Arc<SelectionEntry>, SchedulerBookingDescriptor)> {
         // Release the index guard before taking `entries`: the sweep takes
         // `entries` then `reservation_index`, so nesting here would invert the
         // lock order.
-        let indexed_partition = self
-            .reservation_index
-            .read()
-            .get(selection_id)
-            .map(|reservation| reservation.partition.clone());
-        let indexed = indexed_partition.and_then(|key| self.entry(&key));
-        let mut entries = self.initialized_entries();
-        if let Some(indexed) = indexed {
-            entries.retain(|entry| !Arc::ptr_eq(entry, &indexed));
-            entries.insert(0, indexed);
-        }
-        entries
+        let (partition, booking) = {
+            let index = self.reservation_index.read();
+            let reservation = index.get(selection_id)?;
+            (reservation.partition.clone(), reservation.booking.clone()?)
+        };
+        Some((self.entry(&partition)?, booking))
+    }
+
+    fn reservation_not_found(selection_id: &str) -> SelectionError {
+        SelectionError::NotFound(format!("reservation {selection_id} not found"))
     }
 
     pub async fn prefill_complete(&self, selection_id: &str) -> Result<(), SelectionError> {
-        for entry in self.lifecycle_entries(selection_id) {
-            match entry.scheduler.mark_prefill_completed(selection_id).await {
-                Ok(()) => return Ok(()),
-                Err(SequenceError::RequestNotFound { .. }) => continue,
-                Err(error) => return Err(error.into()),
+        let Some((entry, booking)) = self.indexed_booking(selection_id) else {
+            return Err(Self::reservation_not_found(selection_id));
+        };
+        match entry
+            .scheduler
+            .mark_prefill_completed_if_booking(&booking)
+            .await?
+        {
+            LifecycleMutationOutcome::Applied => Ok(()),
+            // Already marked: still publish the ordered completion so peers
+            // that missed the first event converge.
+            LifecycleMutationOutcome::NoChange
+                if entry
+                    .scheduler
+                    .publish_prefill_completed_if_booking(&booking) =>
+            {
+                Ok(())
+            }
+            LifecycleMutationOutcome::NoChange => {
+                forget_reservation_if(&self.reservation_index, &entry.key, &booking);
+                Err(Self::reservation_not_found(selection_id))
             }
         }
-        self.forget_reservation(selection_id);
-        Err(SelectionError::NotFound(format!(
-            "reservation {selection_id} not found"
-        )))
     }
 
     pub async fn free_reservation(&self, selection_id: &str) -> Result<(), SelectionError> {
-        let result = async {
-            for entry in self.lifecycle_entries(selection_id) {
-                match entry.scheduler.free(selection_id).await {
-                    Ok(()) => return Ok(()),
-                    Err(SequenceError::RequestNotFound { .. }) => continue,
-                    Err(error) => return Err(error.into()),
-                }
-            }
-            Err(SelectionError::NotFound(format!(
-                "reservation {selection_id} not found"
-            )))
+        let Some((entry, booking)) = self.indexed_booking(selection_id) else {
+            return Err(Self::reservation_not_found(selection_id));
+        };
+        let outcome = entry.scheduler.free_if_booking(&booking).await?;
+        forget_reservation_if(&self.reservation_index, &entry.key, &booking);
+        match outcome {
+            LifecycleMutationOutcome::Applied => Ok(()),
+            LifecycleMutationOutcome::NoChange => Err(Self::reservation_not_found(selection_id)),
         }
-        .await;
-        self.forget_reservation(selection_id);
-        result
     }
 
     pub fn add_output_block(
@@ -1672,20 +1794,19 @@ impl SelectionCore {
             ));
         }
 
-        for entry in self.lifecycle_entries(selection_id) {
-            match entry
-                .scheduler
-                .add_output_block(selection_id, decay_fraction)
-            {
-                Ok(()) => return Ok(()),
-                Err(SequenceError::RequestNotFound { .. }) => continue,
-                Err(error) => return Err(error.into()),
+        let Some((entry, booking)) = self.indexed_booking(selection_id) else {
+            return Err(Self::reservation_not_found(selection_id));
+        };
+        match entry
+            .scheduler
+            .add_output_block_if_booking_sync(&booking, decay_fraction)?
+        {
+            LifecycleMutationOutcome::Applied => Ok(()),
+            LifecycleMutationOutcome::NoChange => {
+                forget_reservation_if(&self.reservation_index, &entry.key, &booking);
+                Err(Self::reservation_not_found(selection_id))
             }
         }
-        self.forget_reservation(selection_id);
-        Err(SelectionError::NotFound(format!(
-            "reservation {selection_id} not found"
-        )))
     }
 
     pub fn loads(
@@ -1868,18 +1989,26 @@ impl SelectionCore {
 
 /// Drop index entries whose booking no longer exists in its partition
 /// scheduler (expired by the periodic force-expiry, or freed through a path
-/// that bypassed this core). Returns the number of entries removed.
+/// that bypassed this core). Claims are left for their owner. Returns the
+/// number of entries removed.
 fn sweep_reservation_index(entries: &SelectionEntries, index: &ReservationIndex) -> usize {
     let entries = entries.read();
     let mut index = index.write();
     let before = index.len();
-    index.retain(|id, reservation| {
+    index.retain(|_, reservation| {
+        let Some(booking) = &reservation.booking else {
+            return true;
+        };
         entries
             .get(&reservation.partition)
             .and_then(|cell| cell.get())
-            .is_some_and(|entry| entry.scheduler.has_request(id))
+            .is_some_and(|entry| entry.scheduler.has_booking(booking))
     });
     before - index.len()
+}
+
+fn missing_booking() -> SelectionError {
+    SelectionError::Internal("booking lease holds no booking".to_string())
 }
 
 fn spawn_reservation_index_sweep(
@@ -3230,6 +3359,13 @@ mod tests {
             false
         })
         .await;
+        assert!(
+            core.reservation_index
+                .read()
+                .get("dropped")
+                .is_some_and(|reservation| reservation.booking.is_none()),
+            "the id is claimed while its booking is in flight"
+        );
         drop(selection);
 
         wait_until("booking release", || {
@@ -3240,7 +3376,274 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lifecycle_operations_find_reservation_in_later_entry() {
+    async fn same_selection_id_in_two_partitions_is_a_conflict() {
+        let core = SelectionCore::try_new_local(
+            test_config(false),
+            1,
+            CancellationToken::new(),
+            SelectionCacheConfig::default(),
+        )
+        .expect("valid test config");
+        for (worker_id, routing_group) in [(1, "group-a"), (2, "group-b")] {
+            let mut request = worker(worker_id);
+            request.routing_group = routing_group.to_string();
+            core.upsert_worker(request).await.expect("worker upsert");
+        }
+        let mut first = reserve_request("shared");
+        first.routing_group = "group-a".to_string();
+        core.select_and_reserve(first).await.expect("first booking");
+
+        let mut second = reserve_request("shared");
+        second.routing_group = "group-b".to_string();
+        let err = core
+            .select_and_reserve(second)
+            .await
+            .expect_err("a live id cannot be booked again");
+        assert!(matches!(err, SelectionError::Conflict(_)), "{err:?}");
+
+        let (entry, _) = core
+            .indexed_booking("shared")
+            .expect("first booking indexed");
+        assert_eq!(entry.key.routing_group, "group-a");
+        assert!(entry.scheduler.has_request("shared"));
+        assert!(
+            !core
+                .entry(&RoutingPartitionId::new("model", "group-b"))
+                .expect("entry")
+                .scheduler
+                .has_request("shared")
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_reservation_of_a_live_id_is_a_conflict() {
+        let core = SelectionCore::try_new_local(
+            test_config(false),
+            1,
+            CancellationToken::new(),
+            SelectionCacheConfig::default(),
+        )
+        .expect("valid test config");
+        core.upsert_worker(worker(1)).await.expect("worker upsert");
+        core.select_and_reserve(reserve_request("taken"))
+            .await
+            .expect("booking");
+        let err = core
+            .create_reservation(ReservationRequest {
+                model_name: "model".to_string(),
+                routing_group: "default".to_string(),
+                selection_id: "taken".to_string(),
+                worker_id: Some(1),
+                dp_rank: None,
+                prompt: prompt(),
+                router_config_override: None,
+                expected_output_tokens: None,
+                effective_prefill_tokens: None,
+                track_prefill_tokens: None,
+            })
+            .await
+            .expect_err("explicit booking of a live id");
+        assert!(matches!(err, SelectionError::Conflict(_)), "{err:?}");
+    }
+
+    #[test]
+    fn index_observer_replaces_stale_and_claimed_rows_of_its_partition() {
+        use crate::scheduling::AttemptId;
+        let index = Arc::new(RwLock::new(HashMap::new()));
+        let partition = RoutingPartitionId::new("model", "default");
+        let observer = ReservationIndexObserver {
+            index: Arc::clone(&index),
+            partition: partition.clone(),
+            host: None,
+        };
+        let booking = |attempt: u64| SchedulerBookingDescriptor {
+            request_id: "shared".to_string(),
+            worker: WorkerWithDpRank::new(1, 0),
+            attempt_id: AttemptId::new(attempt),
+        };
+        let row = |partition: &RoutingPartitionId, booking| Reservation {
+            partition: partition.clone(),
+            booking,
+            _affinity_lease: None,
+        };
+
+        // A stale row (its booking expired before the sweep ran) yields to the mirror.
+        index
+            .write()
+            .insert("shared".to_string(), row(&partition, Some(booking(1))));
+        observer.admitted(booking(2));
+        assert_eq!(index.read()["shared"].booking, Some(booking(2)));
+
+        // A completion for the replaced booking leaves the live mirror alone.
+        observer.completed(&booking(1));
+        assert!(index.read().contains_key("shared"));
+        observer.completed(&booking(2));
+        assert!(!index.read().contains_key("shared"));
+
+        // A claim whose local booking is about to fail also yields, and dropping
+        // that claim keeps the mirror.
+        let claim = ReservationClaim {
+            index: &index,
+            selection_id: "shared".to_string(),
+            armed: true,
+        };
+        index
+            .write()
+            .insert("shared".to_string(), row(&partition, None));
+        observer.admitted(booking(3));
+        drop(claim);
+        assert_eq!(index.read()["shared"].booking, Some(booking(3)));
+
+        // Another partition's row is never replaced.
+        let other = RoutingPartitionId::new("model", "other");
+        index
+            .write()
+            .insert("shared".to_string(), row(&other, Some(booking(4))));
+        observer.admitted(booking(5));
+        assert_eq!(index.read()["shared"].booking, Some(booking(4)));
+    }
+
+    #[tokio::test]
+    async fn free_of_an_in_flight_reservation_is_not_found() {
+        let mut config = test_config(false);
+        config.router_queue_threshold = Some(0.0);
+        let core = Arc::new(
+            SelectionCore::try_new_local(
+                config,
+                1,
+                CancellationToken::new(),
+                SelectionCacheConfig::default(),
+            )
+            .expect("valid test config"),
+        );
+        core.upsert_worker(worker(1)).await.expect("worker upsert");
+        core.select_and_reserve(reserve_request("res-a"))
+            .await
+            .expect("initial reservation");
+        let queued_core = core.clone();
+        let queued = tokio::spawn(async move {
+            queued_core
+                .select_and_reserve(reserve_request("queued"))
+                .await
+        });
+        wait_for_pending_selection(&core).await;
+
+        // A free racing the in-flight booking neither frees nor evicts it.
+        let err = core
+            .free_reservation("queued")
+            .await
+            .expect_err("in-flight id is not a reservation yet");
+        assert!(matches!(err, SelectionError::NotFound(_)), "{err:?}");
+        assert!(core.reservation_index.read().contains_key("queued"));
+
+        core.free_reservation("res-a").await.expect("free res-a");
+        tokio::time::timeout(Duration::from_secs(2), queued)
+            .await
+            .expect("queued selection timed out")
+            .expect("task panicked")
+            .expect("queued selection books");
+        core.free_reservation("queued").await.expect("free queued");
+        assert!(core.reservation_index.read().is_empty());
+    }
+
+    #[tokio::test]
+    async fn prefill_complete_is_idempotent_for_a_live_booking() {
+        let mut config = test_config(false);
+        config.router_track_prefill_tokens = true;
+        let core = SelectionCore::try_new_local(
+            config,
+            1,
+            CancellationToken::new(),
+            SelectionCacheConfig::default(),
+        )
+        .expect("valid test config");
+        core.upsert_worker(worker(1)).await.expect("worker upsert");
+        core.select_and_reserve(reserve_request("live"))
+            .await
+            .expect("booking");
+        core.prefill_complete("live").await.expect("first mark");
+        core.prefill_complete("live")
+            .await
+            .expect("a repeated mark on a live booking is not an error");
+        let (entry, _) = core.indexed_booking("live").expect("still indexed");
+        assert!(entry.scheduler.has_request("live"));
+        core.free_reservation("live").await.expect("free");
+    }
+
+    #[tokio::test]
+    async fn mirrored_replica_bookings_are_indexed_until_freed() {
+        let (outbound_tx, _outbound_rx) = mpsc::channel(16);
+        let (inbound_tx, inbound_rx) = mpsc::channel(16);
+        let channels = parking_lot::Mutex::new(Some(HostReplicaChannels {
+            outbound: Some(outbound_tx),
+            inbound_tx: inbound_tx.clone(),
+            inbound_rx,
+            process_id: 7,
+        }));
+        let core = core_with_host(SelectionHost {
+            replication: HostReplication {
+                channels: Some(Arc::new(move |_| channels.lock().take())),
+                ..HostReplication::default()
+            },
+            ..SelectionHost::default()
+        });
+        core.upsert_worker(worker(1)).await.expect("worker upsert");
+        // Replica events for a worker the scheduler has not registered yet are
+        // dropped; the first local booking registers it.
+        core.select_and_reserve(reserve_request("warm"))
+            .await
+            .expect("warm booking");
+        core.free_reservation("warm").await.expect("free warm");
+        let entry = core
+            .entry(&RoutingPartitionId::new("model", "default"))
+            .expect("entry");
+        let peer_event = |request_id: &str, data| ActiveSequenceEvent {
+            request_id: request_id.to_string(),
+            worker: WorkerWithDpRank::new(1, 0),
+            data,
+            router_id: 99,
+            lora_name: None,
+        };
+        let add = |request_id: &str| {
+            peer_event(
+                request_id,
+                ActiveSequenceEventData::AddRequest {
+                    token_sequence: Some(vec![1, 2]),
+                    track_prefill_tokens: false,
+                    expected_output_tokens: None,
+                    prefill_load_hint: None,
+                },
+            )
+        };
+
+        inbound_tx.send(add("peer-a")).await.expect("send");
+        inbound_tx.send(add("peer-b")).await.expect("send");
+        wait_until("mirrored bookings indexed", || {
+            core.indexed_booking("peer-a").is_some() && core.indexed_booking("peer-b").is_some()
+        })
+        .await;
+
+        // A lifecycle call on a mirrored booking resolves through the index.
+        core.free_reservation("peer-a")
+            .await
+            .expect("free mirrored");
+        assert!(!entry.scheduler.has_request("peer-a"));
+        assert!(core.indexed_booking("peer-a").is_none());
+
+        // The peer freeing its own booking removes the mirror.
+        inbound_tx
+            .send(peer_event("peer-b", ActiveSequenceEventData::Free))
+            .await
+            .expect("send");
+        wait_until("mirror removed", || {
+            core.indexed_booking("peer-b").is_none()
+        })
+        .await;
+        assert!(!entry.scheduler.has_request("peer-b"));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_operations_resolve_through_the_index() {
         let mut config = test_config(false);
         config.router_track_prefill_tokens = true;
         let core = SelectionCore::try_new_local(
@@ -3392,9 +3795,11 @@ mod tests {
             Some(&key_b)
         );
         assert_eq!(
-            core.lifecycle_entries("booked")[0].key,
-            key_b,
-            "indexed partition is tried first"
+            core.indexed_booking("booked")
+                .expect("indexed booking")
+                .0
+                .key,
+            key_b
         );
 
         // The explicit reservation path records too.
@@ -3518,7 +3923,7 @@ mod tests {
             let started = Arc::clone(&lifecycle_started);
             std::thread::spawn(move || {
                 started.store(true, Ordering::Release);
-                core.lifecycle_entries("live").len()
+                core.indexed_booking("live").is_some()
             })
         };
         while !lifecycle_started.load(Ordering::Acquire) {
@@ -3535,7 +3940,7 @@ mod tests {
         );
         drop(sweep_entries);
         writer.join().expect("partition writer");
-        assert_eq!(lifecycle.join().expect("lifecycle lookup"), 1);
+        assert!(lifecycle.join().expect("lifecycle lookup"));
     }
 
     #[tokio::test(flavor = "current_thread")]

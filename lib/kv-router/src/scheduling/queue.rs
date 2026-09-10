@@ -363,7 +363,8 @@ impl SchedulerBookingCleanup {
 }
 
 /// Single-owner cleanup lease for one scheduler-tracked request.
-pub(crate) struct RequestLifecycleLease {
+#[doc(hidden)]
+pub struct RequestLifecycleLease {
     cleanup: Arc<AdmissionCleanup>,
     actor_tx: mpsc::Sender<AdmissionCommand>,
     transfer: Option<Arc<AdmissionLifecycleTransfer>>,
@@ -383,6 +384,20 @@ impl RequestLifecycleLease {
         if let Some(transfer) = self.transfer.take() {
             transfer.disarm();
         }
+    }
+
+    /// Hand the booking to its long-term owner: the lease stops guarding it.
+    #[must_use]
+    pub fn commit(mut self) -> Option<SchedulerBookingDescriptor> {
+        let booking = match self.transfer.as_ref().map(|transfer| transfer.state.lock()) {
+            Some(state) => match &*state {
+                AdmissionLifecycleState::Booking(booking) => Some(booking.clone()),
+                _ => None,
+            },
+            None => None,
+        };
+        self.disarm();
+        booking
     }
 }
 
@@ -723,6 +738,20 @@ impl<
         }
     }
 
+    /// An armed lease for a booking made outside the admission actor.
+    pub(crate) fn lease_for_booking(
+        &self,
+        booking: SchedulerBookingDescriptor,
+    ) -> Box<RequestLifecycleLease> {
+        let transfer = AdmissionLifecycleTransfer::new(booking.request_id.clone());
+        transfer.arm_booking(booking);
+        Box::new(RequestLifecycleLease {
+            cleanup: Arc::clone(&self.cleanup),
+            actor_tx: self.admission_tx.clone(),
+            transfer: Some(Arc::new(transfer)),
+        })
+    }
+
     /// Select a worker from current scheduler state without entering admission.
     ///
     /// This is for advisory policy probes that must not wait in the router
@@ -758,7 +787,7 @@ impl<
     pub(crate) async fn mark_prefill_completed_if_booking(
         &self,
         booking: SchedulerBookingDescriptor,
-    ) -> Result<(), KvSchedulerError> {
+    ) -> Result<LifecycleMutationOutcome, KvSchedulerError> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.admission_tx
             .send(AdmissionCommand::MarkPrefillCompleted { booking, ack_tx })
@@ -767,7 +796,6 @@ impl<
         ack_rx
             .await
             .map_err(|_| KvSchedulerError::SubscriberShutdown)?
-            .map(|_| ())
             .map_err(|error| KvSchedulerError::BookingFailed(error.to_string()))
     }
 

@@ -17,7 +17,8 @@ use super::overlap_refresh::{NoopOverlapScoresRefresh, OverlapScoresRefresh};
 use super::policy_config::PolicyProfile;
 use super::prefill_load::PrefillLoadEstimator;
 use super::queue::{
-    ClassQueueStats, SchedulerBookingCleanup, SchedulerBookingDescriptor, SchedulerQueue,
+    ClassQueueStats, RequestLifecycleLease, SchedulerBookingCleanup, SchedulerBookingDescriptor,
+    SchedulerQueue,
 };
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
@@ -30,8 +31,8 @@ use crate::protocols::RoutingConstraints;
 use crate::protocols::{LocalBlockHash, WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use crate::sequences::topology::WorkerDpRange;
 use crate::sequences::{
-    ActiveSequencesMultiWorker, PrefillTokenDeltas, SequenceError, SequencePublisher,
-    SequenceRequest,
+    ActiveSequencesMultiWorker, LifecycleMutationOutcome, PrefillTokenDeltas, SequenceError,
+    SequencePublisher, SequenceRequest,
 };
 use dynamo_tokens::SequenceHash;
 
@@ -290,6 +291,27 @@ where
         &self,
         request: ScheduleRequest,
     ) -> Result<AdmittedSchedulingResponse, KvSchedulerError> {
+        let (admitted, lease) = self.schedule_request_with_lease(request).await?;
+        if let Some(lease) = lease {
+            let _ = lease.commit();
+        }
+        Ok(admitted)
+    }
+
+    /// Schedule a request and keep its lifecycle lease armed: dropping the
+    /// lease frees the booking, `commit` hands it to a longer-lived owner.
+    /// The lease is `None` unless the mode is `TrackedWithLifecycle`.
+    #[doc(hidden)]
+    pub async fn schedule_request_with_lease(
+        &self,
+        request: ScheduleRequest,
+    ) -> Result<
+        (
+            AdmittedSchedulingResponse,
+            Option<Box<RequestLifecycleLease>>,
+        ),
+        KvSchedulerError,
+    > {
         let tracked = request.mode.is_tracked();
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let (attempt_tx, attempt_rx) = tokio::sync::oneshot::channel();
@@ -298,7 +320,7 @@ where
             .new_request_lifecycle_lease(request.mode.lifecycle_request_id());
         let (request, block_hashes) = self.make_scheduling_request(request, Some(resp_tx));
 
-        let mut lifecycle_lease = self
+        let lifecycle_lease = self
             .queue
             .enqueue_admitted_with_block_hashes_and_lease(
                 request,
@@ -320,10 +342,10 @@ where
         } else {
             AdmissionAttempt::Untracked
         };
-        if let Some(lease) = lifecycle_lease.as_mut() {
-            lease.disarm();
-        }
-        Ok(AdmittedSchedulingResponse { response, attempt })
+        Ok((
+            AdmittedSchedulingResponse { response, attempt },
+            lifecycle_lease,
+        ))
     }
 
     /// Select a worker from current scheduler state without queue admission or booking.
@@ -505,11 +527,23 @@ where
 
     /// Book a request only when its worker is already registered, so a request
     /// racing worker removal cannot lazily recreate the removed worker/rank.
-    pub async fn add_request_if_registered(
+    /// The returned lease guards the booking: dropping it frees the booking,
+    /// `commit` hands it over.
+    #[doc(hidden)]
+    pub fn add_request_if_registered_guarded(
         &self,
         req: SequenceRequest,
-    ) -> Result<(), SequenceError> {
-        self.slots.add_request_if_registered(req, Instant::now())
+    ) -> Result<Box<RequestLifecycleLease>, SequenceError> {
+        let request_id = req.request_id.clone();
+        let worker = req.worker;
+        let attempt_id = self
+            .slots
+            .add_request_if_registered_admitted(req, Instant::now())?;
+        Ok(self.queue.lease_for_booking(SchedulerBookingDescriptor {
+            request_id,
+            worker,
+            attempt_id,
+        }))
     }
 
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
@@ -572,18 +606,53 @@ where
     }
 
     #[doc(hidden)]
+    pub fn has_booking(&self, booking: &SchedulerBookingDescriptor) -> bool {
+        self.slots.has_booking(booking)
+    }
+
+    /// Release a booking only if `booking` still describes it; `NoChange` when
+    /// the id was freed or rebooked since the descriptor was taken.
+    #[doc(hidden)]
+    pub async fn free_if_booking(
+        &self,
+        booking: &SchedulerBookingDescriptor,
+    ) -> Result<LifecycleMutationOutcome, SequenceError> {
+        let outcome = self.slots.free_if_booking(
+            &booking.request_id,
+            booking.worker,
+            booking.attempt_id,
+            Instant::now(),
+        )?;
+        if outcome.is_applied() {
+            self.queue.update_worker(booking.worker).await;
+        }
+        Ok(outcome)
+    }
+
+    #[doc(hidden)]
     pub fn booking_cleanup(&self) -> SchedulerBookingCleanup {
         self.queue.booking_cleanup()
     }
 
+    /// `NoChange` when the booking no longer matches or its prefill was
+    /// already marked complete.
     #[doc(hidden)]
     pub async fn mark_prefill_completed_if_booking(
         &self,
         booking: &SchedulerBookingDescriptor,
-    ) -> Result<(), KvSchedulerError> {
+    ) -> Result<LifecycleMutationOutcome, KvSchedulerError> {
         self.queue
             .mark_prefill_completed_if_booking(booking.clone())
             .await
+    }
+
+    /// Republish the ordered prefill-completion event while `booking` is live.
+    #[doc(hidden)]
+    pub fn publish_prefill_completed_if_booking(
+        &self,
+        booking: &SchedulerBookingDescriptor,
+    ) -> bool {
+        self.slots.publish_prefill_completed_if_booking(booking)
     }
 
     pub fn pending_count(&self) -> usize {
@@ -628,6 +697,22 @@ where
         self.queue
             .add_output_block_if_booking(booking.clone(), decay_fraction)
             .await
+    }
+
+    /// `add_output_block_if_booking` applied inline, like `add_output_block`,
+    /// for callers that cannot await.
+    #[doc(hidden)]
+    pub fn add_output_block_if_booking_sync(
+        &self,
+        booking: &SchedulerBookingDescriptor,
+        decay_fraction: Option<f64>,
+    ) -> Result<LifecycleMutationOutcome, SequenceError> {
+        self.slots.add_output_block_if_booking(
+            &booking.request_id,
+            booking.worker,
+            booking.attempt_id,
+            decay_fraction,
+        )
     }
 
     #[doc(hidden)]

@@ -1951,6 +1951,7 @@ impl KvRouter {
         self.scheduler
             .mark_prefill_completed_if_booking(booking)
             .await
+            .map(|_| ())
     }
 
     /// Number of requests currently parked in the scheduler queue.
