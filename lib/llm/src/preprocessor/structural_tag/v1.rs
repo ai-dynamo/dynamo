@@ -5,7 +5,7 @@ use dynamo_parsers::tool_calling::{
     StructuralTagBuilder as InnerBuilder, ToolCallFormatBuildContext,
 };
 
-use super::{StructuralTagBuildRequest, StructuralTagReasoningBoundary};
+use super::{ResolvedReasoningBoundary, StructuralTagBuildRequest};
 
 #[derive(Clone, Copy)]
 pub(crate) struct StructuralTagBuilder(&'static InnerBuilder);
@@ -40,7 +40,7 @@ impl StructuralTagBuilder {
             parallel_tool_calls: request.parallel_tool_calls,
             schema_mode: request.schema_mode,
             starts_in_reasoning: request.starts_in_reasoning
-                && request.reasoning_boundary == StructuralTagReasoningBoundary::StructuralTag,
+                && request.reasoning_boundary == ResolvedReasoningBoundary::StructuralTag,
         })
     }
 }

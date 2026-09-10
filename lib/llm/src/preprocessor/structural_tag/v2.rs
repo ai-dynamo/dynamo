@@ -45,12 +45,8 @@ impl StructuralTagBuilder {
             }
         };
         let reasoning_boundary = match request.reasoning_boundary {
-            crate::local_model::runtime_config::StructuralTagReasoningBoundary::StructuralTag => {
-                ReasoningBoundaryV2::StructuralTag
-            }
-            crate::local_model::runtime_config::StructuralTagReasoningBoundary::Backend => {
-                ReasoningBoundaryV2::External
-            }
+            super::ResolvedReasoningBoundary::StructuralTag => ReasoningBoundaryV2::StructuralTag,
+            super::ResolvedReasoningBoundary::Backend => ReasoningBoundaryV2::External,
         };
 
         self.0.build_with_options(

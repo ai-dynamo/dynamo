@@ -101,8 +101,13 @@ The flag without a value uses the defaults below. Every field is optional:
 | `schema` | `auto`, `strict` | `auto` | Selects which tool argument schemas are enforced. |
 | `allow_tool_calls_with_structured_output` | boolean | `false` | Lets `tool_choice="auto"` choose between tool calls and a schema-constrained final response. Requires parsers v2. |
 | `exclude_special_tokens` | boolean, `null` | `null` | Controls reasoning and tool-call marker exclusions. `null` preserves the model-family default. Requires parsers v2. |
-| `reasoning_boundary` | `structural_tag`, `backend` | `structural_tag` | Selects whether the structural tag closes prompt-opened reasoning or the inference engine activates the post-reasoning grammar. `backend` requires parsers v2 and backend support. |
+| `reasoning_boundary` | `auto`, `structural_tag`, `backend` | `auto` | Selects whether the structural tag closes prompt-opened reasoning or the inference engine activates the post-reasoning grammar. `auto` follows the backend's advertised policy. `backend` requires parsers v2. |
 | `tool_arguments_any_order` | boolean | `false` | Allows tool argument properties in any order. This weakens required-property and duplicate-key validation and requires parsers v2. Structured-output schemas are unaffected. |
+
+If the backend advertises that it owns reasoning-aware grammar activation,
+explicitly selecting `structural_tag` is rejected to avoid applying both
+reasoning gates. Explicit `backend` selection assumes the inference engine is
+configured accordingly.
 
 `DYN_STRUCTURAL_TAG` accepts `true`, `false`, or the same JSON object. Unknown
 fields and invalid values are rejected during worker startup.
