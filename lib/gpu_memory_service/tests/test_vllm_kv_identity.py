@@ -136,6 +136,39 @@ def test_semantic_kv_tags_fail_closed_without_model_identity():
         install_vmm_ipc_kv._semantic_kv_tensor_tag_plan(config)
 
 
+def test_semantic_kv_tags_follow_physical_packed_allocations():
+    packed_a = SimpleNamespace(
+        shared_by=["layer.0"], size=1024, offset=0, block_stride=128
+    )
+    packed_b = SimpleNamespace(
+        shared_by=["layer.1"], size=1024, offset=64, block_stride=128
+    )
+    unpacked = SimpleNamespace(shared_by=["mamba"], size=256, block_stride=0)
+    config = SimpleNamespace(kv_cache_tensors=[packed_a, packed_b, unpacked])
+
+    packed_tag, unpacked_tag = install_vmm_ipc_kv._semantic_kv_tensor_tag_plan(
+        config, "model=org/model"
+    )
+    changed_packed_tag = install_vmm_ipc_kv._semantic_kv_tensor_tag_plan(
+        SimpleNamespace(
+            kv_cache_tensors=[
+                packed_a,
+                SimpleNamespace(
+                    shared_by=["layer.changed"],
+                    size=1024,
+                    offset=64,
+                    block_stride=128,
+                ),
+                unpacked,
+            ]
+        ),
+        "model=org/model",
+    )[0]
+
+    assert packed_tag != unpacked_tag
+    assert packed_tag != changed_packed_tag
+
+
 def test_semantic_kv_tags_disambiguate_duplicate_layer_identity():
     tensor_a = SimpleNamespace(shared_by=["model.layers.0.self_attn"], size=123)
     tensor_b = SimpleNamespace(shared_by=["model.layers.0.self_attn"], size=123)
@@ -173,6 +206,67 @@ def test_persistent_tag_plan_distinguishes_new_and_complete_reattach(
         )
         is expected
     )
+
+
+def test_persistent_tag_plan_releases_only_stale_unclaimed_kv():
+    allocations = [
+        SimpleNamespace(tag="kv_pool:v3:planned", claimed=False),
+        SimpleNamespace(tag="kv_pool:v3:stale", claimed=False),
+        SimpleNamespace(tag="kv_pool:v3:live", claimed=True),
+        SimpleNamespace(tag="weights:v1:unrelated", claimed=False),
+    ]
+
+    class Manager:
+        def list_persistent(self, engine_id=None, *, include_unclaimed=False):
+            assert engine_id == "engine"
+            assert include_unclaimed is True
+            return allocations
+
+        def release_persistent(self, engine_id, tag):
+            assert engine_id == "engine"
+            released.append(tag)
+            return True
+
+    released = []
+    assert install_vmm_ipc_kv._persistent_tag_plan_reattaches(
+        Manager(), "engine", ["kv_pool:v3:planned"]
+    )
+    assert released == ["kv_pool:v3:stale"]
+
+
+def test_stale_cleanup_preserves_allocation_claimed_during_release():
+    stale = SimpleNamespace(tag="kv_pool:v3:old", claimed=False)
+    claimed = SimpleNamespace(tag="kv_pool:v3:old", claimed=True)
+    listings = [[stale], [claimed]]
+
+    class Manager:
+        def list_persistent(self, engine_id=None, *, include_unclaimed=False):
+            return listings.pop(0)
+
+        def release_persistent(self, engine_id, tag):
+            raise RuntimeError("persistent allocation claimed by another session")
+
+    assert not install_vmm_ipc_kv._persistent_tag_plan_reattaches(
+        Manager(), "engine", ["kv_pool:v3:new"]
+    )
+
+
+def test_fresh_layout_reclaims_obsolete_unclaimed_kv():
+    allocations = [SimpleNamespace(tag="kv_pool:v3:old", claimed=False)]
+    released = []
+
+    class Manager:
+        def list_persistent(self, engine_id=None, *, include_unclaimed=False):
+            return allocations
+
+        def release_persistent(self, engine_id, tag):
+            released.append((engine_id, tag))
+            return True
+
+    assert not install_vmm_ipc_kv._persistent_tag_plan_reattaches(
+        Manager(), "engine", ["kv_pool:v3:new"]
+    )
+    assert released == [("engine", "kv_pool:v3:old")]
 
 
 def test_persistent_tag_plan_rejects_partial_reattach():

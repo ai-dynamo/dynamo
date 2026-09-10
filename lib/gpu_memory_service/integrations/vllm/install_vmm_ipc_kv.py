@@ -255,19 +255,50 @@ def _kv_layout_fingerprint(kv_cache_config, model_identity: str) -> str:
     return hashlib.sha1("\0".join(parts).encode("utf-8")).hexdigest()[:12]
 
 
-def _semantic_kv_tensor_tag(index: int, kv_cache_tensor, layout_fp: str) -> str:
-    shared_by = tuple(
-        sorted(str(layer) for layer in getattr(kv_cache_tensor, "shared_by", ()) or ())
-    )
-    layers = "\0".join(shared_by) if shared_by else f"anonymous:{index}"
-    size = getattr(kv_cache_tensor, "size", None)
-    if size is None:
-        raise RuntimeError(
-            f"KV cache tensor {index} has no size for persistent identity"
+def _semantic_kv_allocation_tag(
+    index: int, tensors: tuple[object, ...], layout_fp: str
+) -> str:
+    descriptors = []
+    for tensor in tensors:
+        size = getattr(tensor, "size", None)
+        if size is None:
+            raise RuntimeError(
+                f"KV cache allocation {index} has no size for persistent identity"
+            )
+        layers = ",".join(
+            sorted(str(layer) for layer in getattr(tensor, "shared_by", ()) or ())
         )
-    key = f"size={size}\0{layers}"
+        descriptors.append(
+            "\0".join(
+                (
+                    f"size={size}",
+                    f"offset={getattr(tensor, 'offset', 0)}",
+                    f"block_stride={getattr(tensor, 'block_stride', 0)}",
+                    f"layers={layers}",
+                )
+            )
+        )
+    key = "\0descriptor=".join(sorted(descriptors))
     digest = hashlib.sha1((layout_fp + "\0" + key).encode("utf-8")).hexdigest()[:16]
     return f"kv_pool:v3:{digest}"
+
+
+def _kv_allocation_units(kv_cache_config) -> list[tuple[object, ...]]:
+    tensors = list(getattr(kv_cache_config, "kv_cache_tensors", ()) or ())
+    packed = tuple(
+        tensor for tensor in tensors if int(getattr(tensor, "block_stride", 0)) > 0
+    )
+    packed_emitted = False
+    units: list[tuple[object, ...]] = []
+    for tensor in tensors:
+        if int(getattr(tensor, "block_stride", 0)) > 0:
+            if packed_emitted:
+                continue
+            units.append(packed)
+            packed_emitted = True
+        else:
+            units.append((tensor,))
+    return units
 
 
 def _semantic_kv_tensor_tag_plan(
@@ -279,10 +310,8 @@ def _semantic_kv_tensor_tag_plan(
         )
     layout_fp = _kv_layout_fingerprint(kv_cache_config, model_identity)
     base_tags = [
-        _semantic_kv_tensor_tag(index, kv_cache_tensor, layout_fp)
-        for index, kv_cache_tensor in enumerate(
-            getattr(kv_cache_config, "kv_cache_tensors", ()) or ()
-        )
+        _semantic_kv_allocation_tag(index, unit, layout_fp)
+        for index, unit in enumerate(_kv_allocation_units(kv_cache_config))
     ]
     counts = Counter(base_tags)
     seen: dict[str, int] = {}
@@ -297,6 +326,47 @@ def _semantic_kv_tensor_tag_plan(
     return planned_tags
 
 
+def _is_managed_kv_tag(tag: str) -> bool:
+    return tag.startswith(("kv_pool:v", "kv_pool#"))
+
+
+def _release_stale_kv_allocations(
+    manager, engine_id: str, allocations, planned
+) -> None:
+    for allocation in allocations:
+        tag = str(getattr(allocation, "tag", ""))
+        if (
+            tag in planned
+            or not _is_managed_kv_tag(tag)
+            or bool(getattr(allocation, "claimed", False))
+        ):
+            continue
+        try:
+            released = manager.release_persistent(engine_id, tag)
+        except Exception:
+            current = {
+                str(getattr(item, "tag", "")): item
+                for item in manager.list_persistent(
+                    engine_id=engine_id, include_unclaimed=True
+                )
+            }.get(tag)
+            if current is not None and bool(getattr(current, "claimed", False)):
+                logger.info(
+                    "[GMS-VMM-IPC] preserving stale KV allocation claimed "
+                    "during cleanup: engine_id=%s tag=%s",
+                    engine_id,
+                    tag,
+                )
+                continue
+            raise
+        if released:
+            logger.info(
+                "[GMS-VMM-IPC] released stale KV allocation: engine_id=%s tag=%s",
+                engine_id,
+                tag,
+            )
+
+
 def _persistent_tag_plan_reattaches(
     manager, engine_id: str, tag_plan: list[str]
 ) -> bool:
@@ -309,13 +379,10 @@ def _persistent_tag_plan_reattaches(
     """
     if not tag_plan:
         return False
-    existing = {
-        str(getattr(allocation, "tag", ""))
-        for allocation in manager.list_persistent(
-            engine_id=engine_id, include_unclaimed=True
-        )
-    }
+    allocations = manager.list_persistent(engine_id=engine_id, include_unclaimed=True)
     planned = set(tag_plan)
+    _release_stale_kv_allocations(manager, engine_id, allocations, planned)
+    existing = {str(getattr(allocation, "tag", "")) for allocation in allocations}
     present = planned & existing
     if os.environ.get("GMS_KV_DIRECTORY_DIAGNOSTICS"):
         logger.warning(
