@@ -13,6 +13,7 @@ import pytest
 from gpu_memory_service.integrations.common.kv_lease_client import (
     KVLease,
     SharedMemoryKVLeaseClient,
+    kv_leases_enabled,
     read_any_kv_lease_namespace_total_blocks,
     read_kv_lease_namespace_total_blocks,
     read_kv_lease_reservation,
@@ -410,6 +411,62 @@ def test_shared_memory_lease_client_keeps_strict_geometry_check(tmp_path):
         SharedMemoryKVLeaseClient(
             str(path), namespace="strict-geometry", owner_id="reader", total_blocks=7
         )
+
+
+def test_shared_memory_lease_client_rejects_truncated_valid_map(tmp_path, monkeypatch):
+    path = tmp_path / "truncated.shm"
+    client = SharedMemoryKVLeaseClient(
+        str(path), namespace="truncated", owner_id="writer", total_blocks=8
+    )
+    client.close()
+    os.truncate(path, _LEASE_RECORD_OFFSET + 7 * _LEASE_RECORD_SIZE)
+
+    with pytest.raises(RuntimeError, match="file size mismatch"):
+        SharedMemoryKVLeaseClient(
+            str(path), namespace="truncated", owner_id="reader", total_blocks=8
+        )
+
+    monkeypatch.setenv("GMS_VLLM_KV_LEASE_NAMESPACE", "truncated")
+    monkeypatch.setenv("GMS_VLLM_KV_LEASE_SHM_PATH", str(path))
+    with pytest.raises(RuntimeError, match="file size mismatch"):
+        resolve_kv_lease_namespace_total_blocks("vllm", 0, total_blocks=8)
+
+
+def test_shared_memory_lease_client_requires_explicit_reset_for_invalid_map(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "invalid.shm"
+    path.write_bytes(b"not a lease map")
+
+    with pytest.raises(RuntimeError, match="invalid .* header"):
+        SharedMemoryKVLeaseClient(
+            str(path), namespace="invalid", owner_id="reader", total_blocks=8
+        )
+
+    monkeypatch.setenv("GMS_KV_LEASE_SHM_RESET", "true")
+    client = SharedMemoryKVLeaseClient(
+        str(path), namespace="invalid", owner_id="resetter", total_blocks=8
+    )
+    assert client.free_count() == 8
+    client.close()
+
+
+def test_kv_lease_opt_in_flags_accept_only_recognized_truthy_values(monkeypatch):
+    monkeypatch.setenv("GMS_KV_LEASES", "true")
+    monkeypatch.setenv("GMS_VLLM_KV_LEASES", "surprise")
+    assert not kv_leases_enabled("vllm")
+
+    monkeypatch.setenv("GMS_VLLM_KV_LEASES", "yes")
+    assert kv_leases_enabled("vllm")
+
+    monkeypatch.delenv("GMS_VLLM_KV_LEASES")
+    monkeypatch.setenv("GMS_KV_LEASES", "unexpected")
+    assert not kv_leases_enabled("vllm")
+
+    monkeypatch.setenv("GMS_KV_LEASE_SHM_RESET", "unexpected")
+    assert not SharedMemoryKVLeaseClient._reset_requested()
+    monkeypatch.setenv("GMS_KV_LEASE_SHM_RESET", "1")
+    assert SharedMemoryKVLeaseClient._reset_requested()
 
 
 def test_resolve_lease_device_uses_engine_env_before_rank(monkeypatch):
