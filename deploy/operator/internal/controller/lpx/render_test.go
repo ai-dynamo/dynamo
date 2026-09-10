@@ -1230,7 +1230,7 @@ func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *test
 	require.Contains(t, main.VolumeMounts, corev1.VolumeMount{Name: "config", MountPath: "/custom", ReadOnly: true})
 	require.Contains(t, main.VolumeMounts, corev1.VolumeMount{Name: "config", MountPath: "/configs"})
 	require.Contains(t, agent.Spec.PodSpec.Volumes, customConfigVolume)
-	require.Equal(t, resource.MustParse("62"), main.Resources.Requests[corev1.ResourceCPU])
+	require.True(t, main.Resources.Requests.Cpu().Equal(resource.MustParse("62")))
 	require.Equal(t, resource.MustParse("4096Mi"), main.Resources.Requests[corev1.ResourceHugePagesPrefix+"2Mi"])
 
 	t.Log("Verify Cyborg receives its generated config and InfiniBand bindings instead of fallback PVCs")

@@ -13,7 +13,10 @@ import (
 	"k8s.io/utils/ptr"
 )
 
-const lpuAgentContainerName = "agent"
+const (
+	lpuAgentContainerName       = "agent"
+	defaultLPUAgentCPUs   int64 = 62
+)
 
 func applyLPUHostDeviceVolumes(podSpec *corev1.PodSpec, replaceExisting bool) {
 	apply := appendVolumeIfMissing
@@ -69,7 +72,11 @@ func applyLPUWorkerContainerBase(container *corev1.Container, preserveCommand bo
 	})
 
 	// Agent scheduling already initialized device resources; add runtime CPU and hugepage requirements.
-	container.Resources.Requests[corev1.ResourceCPU] = resource.MustParse("62")
+	cpuRequest := *resource.NewQuantity(defaultLPUAgentCPUs, resource.DecimalSI)
+	if cpuLimit, ok := container.Resources.Limits[corev1.ResourceCPU]; ok && cpuLimit.Cmp(cpuRequest) < 0 {
+		cpuRequest = cpuLimit.DeepCopy()
+	}
+	container.Resources.Requests[corev1.ResourceCPU] = cpuRequest
 	container.Resources.Requests[corev1.ResourceHugePagesPrefix+"2Mi"] = resource.MustParse("4096Mi")
 	container.Resources.Limits[corev1.ResourceHugePagesPrefix+"2Mi"] = resource.MustParse("4096Mi")
 }

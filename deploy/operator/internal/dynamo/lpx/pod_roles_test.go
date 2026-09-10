@@ -111,6 +111,35 @@ func TestSelectedRolePodSpecsMaterializeFamilyResourceOnlyOnAgentMainContainer(t
 	}
 }
 
+func TestApplyLPUWorkerContainerBaseClampsCPURequestToLimit(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		limit string
+		want  string
+	}{
+		{name: "lower limit", limit: "16", want: "16"},
+		{name: "higher limit", limit: "64", want: "62"},
+		{name: "no limit", want: "62"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Configure the worker CPU limit")
+			container := corev1.Container{Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{},
+				Limits:   corev1.ResourceList{},
+			}}
+			if test.limit != "" {
+				container.Resources.Limits = corev1.ResourceList{corev1.ResourceCPU: resource.MustParse(test.limit)}
+			}
+
+			t.Log("Apply the LPX worker runtime defaults")
+			applyLPUWorkerContainerBase(&container, false)
+
+			t.Log("Clamp the default request to the configured limit")
+			require.True(t, container.Resources.Requests.Cpu().Equal(resource.MustParse(test.want)))
+		})
+	}
+}
+
 func lpuResourceLists(spec *corev1.PodSpec) []corev1.ResourceList {
 	lists := []corev1.ResourceList{
 		spec.InitContainers[0].Resources.Limits,
