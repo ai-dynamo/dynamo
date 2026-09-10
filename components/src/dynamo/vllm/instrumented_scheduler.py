@@ -4654,7 +4654,13 @@ class InstrumentedScheduler(AsyncScheduler):
 
     def _kvwarm_warm_eligible(self) -> bool:
         """Warmup only matters to first order for EP-sharded MoE; dense and
-        moe_tp topologies are physically immune -- skip."""
+        moe_tp topologies are physically immune -- skip.
+
+        The verdict travels in the capacity envelope (see
+        ``_bench_make_local_capacity``), so every host-local input the stage
+        builds depend on -- dataset, tokenizer, content depth -- is proven
+        here, before negotiation, rather than discovered mid-sweep on one
+        rank."""
         cached = getattr(self, "_kvwarm_eligible_cache", None)
         if cached is not None:
             return cached
@@ -4702,20 +4708,69 @@ class InstrumentedScheduler(AsyncScheduler):
             elif self._kvwarm_state_layer_groups():
                 reason = "hybrid_state_layers_unsupported"
             else:
-                try:
-                    # Resolve (and, on first use, download) the seeding dataset
-                    # up front: an unreachable or corrupt dataset must disable
-                    # the warm-up cleanly instead of failing mid-collection.
-                    self._kvwarm_resolve_dataset()
-                    eligible = True
-                except Exception as exc:
-                    reason = f"dataset_unavailable: {exc}"
+                reason = self._kvwarm_probe_content()
+                eligible = reason is None
         meta["warm_eligible"] = eligible
         meta["skip_reason"] = reason
         self._kvwarm_eligible_cache = eligible
         if not eligible:
             logger.info("KVWARM: warm-up skipped (%s)", reason)
         return eligible
+
+    def _kvwarm_probe_content(self) -> str | None:
+        """Prove the host-local inputs of the warm-up; return the skip reason
+        or None when every stage can be built.
+
+        Resolves (downloading and verifying on first use) and parses the
+        seeding dataset, builds the tokenizer, then counts tokens until the
+        pool is shown to hold one chain at the depth cap. A chain draws each
+        conversation at most once (``_kvwarm_chain_token_ids``), so the pool
+        must hold at least the deepest chain any stage may ask for; the
+        count stops as soon as that bound is reached, so the probe costs at
+        most one chain's worth of tokenization. The texts and tokenizer stay
+        cached for the stage builds (``_kvwarm_release_heavy_state`` drops
+        them afterwards).
+        """
+        t0 = time.monotonic()
+        try:
+            texts = self._kvwarm_load_texts()
+        except Exception as exc:
+            return f"dataset_unavailable: {exc}"
+        if not texts:
+            return "dataset_empty"
+        try:
+            tokenizer = self._kvwarm_tokenizer()
+        except Exception as exc:
+            return f"tokenizer_unavailable: {exc}"
+        need = self._kvwarm_depth_cap()
+        have = 0
+        probed = 0
+        for text in texts:
+            if have >= need:
+                break
+            have += len(tokenizer.encode(text, add_special_tokens=False))
+            probed += 1
+        if have < need:
+            return f"content_too_shallow: {have} tokens < {need}"
+        logger.info(
+            "KVWARM: content probe ok: %d conversations; the first %d hold %d "
+            "tokens against a %d-token chain cap (%.1fs)",
+            len(texts),
+            probed,
+            have,
+            need,
+            time.monotonic() - t0,
+        )
+        return None
+
+    def _kvwarm_depth_cap(self) -> int:
+        """Deepest chain any stage may build. A chain whose prompt reaches
+        ``max_model_len - 1`` is reclaimed by the length stop right at its
+        prefill completion step (that step already carries the first sampled
+        token), so the cap keeps drift headroom below the model length. The
+        negotiated length applies once it exists; before negotiation the
+        local length stands in, an upper bound of the group's."""
+        return self._bench_capacity_limit("max_model_len") - 4
 
     # ------- Dataset: three-tier resolution + even-half pool + lazy tokenize -------
 
@@ -4780,7 +4835,8 @@ class InstrumentedScheduler(AsyncScheduler):
 
     def _kvwarm_load_texts(self) -> list:
         """ShareGPT conversations -> texts; the even hash half feeds collection
-        (the odd half is reserved for held-out evaluation)."""
+        (the odd half is reserved for held-out evaluation). An empty result
+        is a verdict for the gate (``dataset_empty``), not an error."""
         texts = getattr(self, "_kvwarm_texts", None)
         if texts is not None:
             return texts
@@ -4797,8 +4853,6 @@ class InstrumentedScheduler(AsyncScheduler):
             digest = hashlib.sha256(body.encode("utf-8", "ignore")).digest()
             if digest[0] % 2 == 0:  # even pool = collection; odd pool = eval
                 texts.append(body)
-        if not texts:
-            raise RuntimeError("KVWARM: dataset yielded no usable conversations")
         meta = self._kvwarm_meta_init()
         meta["dataset"] = {
             "path": path,
@@ -4917,10 +4971,7 @@ class InstrumentedScheduler(AsyncScheduler):
             ctxs = self._bench_decode_context_lengths(
                 p.total_kv_read_tokens, p.batch_size
             )
-            # Cap at -4: a chain with prompt = max_len-1 is reclaimed by the
-            # length stop right at its prefill completion step (that step
-            # already carries the first sampled token); keep drift headroom.
-            want = min(max(ctxs) + margin, self.max_model_len - 4)
+            want = min(max(ctxs) + margin, self._kvwarm_depth_cap())
             plan[p.batch_size] = max(plan.get(p.batch_size, 0), want)
         # Shadows own private tail blocks (the admission write plus the steady
         # headroom) on top of the shared chain prefix, drawn from the same pool

@@ -12,6 +12,7 @@ spinning up vLLM engine internals.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import uuid
@@ -4620,6 +4621,10 @@ def test_skip_point_exempts_warmup_replicas_on_every_path():
 # ---------------------------------------------------------------------------
 
 
+def _kvwarm_no_dataset_resolution():
+    raise AssertionError("the gate test must not resolve the real dataset")
+
+
 def _kvwarm_gate_stub(*, state_groups=(), experts=8, ep=True, prefix=True):
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub.vllm_config = SimpleNamespace(
@@ -4635,8 +4640,41 @@ def _kvwarm_gate_stub(*, state_groups=(), experts=8, ep=True, prefix=True):
     stub.kv_cache_manager = SimpleNamespace(
         kv_cache_config=SimpleNamespace(kv_cache_groups=groups)
     )
-    stub._kvwarm_resolve_dataset = lambda: "/dev/null"
+    # Host-local inputs the gate proves: a pool that holds one chain at the
+    # depth cap (max_model_len - 4 = 60 tokens) and a tokenizer. The dataset
+    # itself is never resolved here (that would download it); tests that
+    # exercise the real loader point it at a temporary dump.
+    stub.max_model_len = 64
+    stub._kvwarm_resolve_dataset = _kvwarm_no_dataset_resolution
+    stub._kvwarm_load_texts = lambda: ["alpha " * 20, "bravo " * 20]
+    stub._kvwarm_tokenizer = lambda: SimpleNamespace(
+        encode=lambda text, add_special_tokens=False: [ord(c) for c in text]
+    )
     return stub
+
+
+def _kvwarm_sharegpt_file(tmp_path, bodies):
+    """Write a ShareGPT-shaped dump whose conversations all land in the
+    collection half of the hash split (``_kvwarm_load_texts`` keeps only
+    bodies whose sha256 first byte is even)."""
+    items = []
+    for body in bodies:
+        assert hashlib.sha256(body.encode()).digest()[0] % 2 == 0, body
+        items.append({"conversations": [{"from": "human", "value": body}]})
+    path = tmp_path / "sharegpt.json"
+    path.write_text(json.dumps(items), encoding="utf-8")
+    return str(path)
+
+
+def _kvwarm_collection_bodies(count, length=80):
+    bodies = []
+    seed = 0
+    while len(bodies) < count:
+        body = (f"conversation {seed} " * length)[:length]
+        seed += 1
+        if hashlib.sha256(body.encode()).digest()[0] % 2 == 0:
+            bodies.append(body)
+    return bodies
 
 
 def test_kvwarm_gate_rejects_recurrent_state_layers(monkeypatch):
@@ -4659,9 +4697,85 @@ def test_kvwarm_gate_disables_warmup_when_dataset_unavailable(monkeypatch):
     def _boom():
         raise RuntimeError("no egress")
 
-    stub._kvwarm_resolve_dataset = _boom
+    stub._kvwarm_load_texts = _boom
     assert InstrumentedScheduler._kvwarm_warm_eligible(stub) is False
-    assert stub._kvwarm_meta["skip_reason"].startswith("dataset_unavailable")
+    assert stub._kvwarm_meta["skip_reason"] == "dataset_unavailable: no egress"
+
+
+def test_kvwarm_gate_proves_every_host_local_input_up_front(monkeypatch):
+    """Dataset content, tokenizer construction and pool depth are decided at
+    eligibility time, where the verdict still travels in the capacity
+    envelope, instead of surfacing as an exception from the first stage
+    build on one rank."""
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
+    empty = _kvwarm_gate_stub()
+    empty._kvwarm_load_texts = lambda: []
+    assert InstrumentedScheduler._kvwarm_warm_eligible(empty) is False
+    assert empty._kvwarm_meta["skip_reason"] == "dataset_empty"
+
+    no_tokenizer = _kvwarm_gate_stub()
+
+    def _missing():
+        raise OSError("tokenizer files missing")
+
+    no_tokenizer._kvwarm_tokenizer = _missing
+    assert InstrumentedScheduler._kvwarm_warm_eligible(no_tokenizer) is False
+    assert no_tokenizer._kvwarm_meta["skip_reason"] == (
+        "tokenizer_unavailable: tokenizer files missing"
+    )
+
+    # A chain draws every conversation at most once, so the pool must hold
+    # one chain at the depth cap: 240 tokens cannot reach 1024 - 4.
+    shallow = _kvwarm_gate_stub()
+    shallow.max_model_len = 1024
+    assert InstrumentedScheduler._kvwarm_warm_eligible(shallow) is False
+    assert shallow._kvwarm_meta["skip_reason"] == (
+        "content_too_shallow: 240 tokens < 1020"
+    )
+
+
+def test_kvwarm_gate_probe_parses_once_and_stops_at_the_depth_cap(
+    monkeypatch, tmp_path
+):
+    """The gate parses the dataset through the real loader (cached for the
+    stage builds, never parsed twice) and tokenizes only until the pool is
+    shown to hold one chain at the cap."""
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
+    bodies = _kvwarm_collection_bodies(6)
+    path = _kvwarm_sharegpt_file(tmp_path, bodies)
+    stub = _kvwarm_gate_stub()
+    stub.max_model_len = 4 + 2 * len(bodies[0]) + 1  # cap needs three bodies
+    stub._kvwarm_resolve_dataset = lambda: path
+    del stub._kvwarm_load_texts
+    encoded = []
+
+    def _encode(text, add_special_tokens=False):
+        encoded.append(text)
+        return [1] * len(text)
+
+    stub._kvwarm_tokenizer = lambda: SimpleNamespace(encode=_encode)
+    assert InstrumentedScheduler._kvwarm_warm_eligible(stub) is True
+    assert encoded == bodies[:3]
+    meta = stub._kvwarm_meta
+    assert meta["skip_reason"] is None
+    assert meta["dataset"]["conversations"] == len(bodies)
+    assert meta["dataset"]["path"] == path
+    # Cached: the stage builds reuse the parsed pool without touching the
+    # file again.
+    (tmp_path / "sharegpt.json").unlink()
+    assert InstrumentedScheduler._kvwarm_load_texts(stub) == bodies
+    assert stub._kvwarm_texts == bodies
+
+
+def test_kvwarm_gate_reads_an_empty_dump_as_dataset_empty(monkeypatch, tmp_path):
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
+    path = tmp_path / "empty.json"
+    path.write_text("[]", encoding="utf-8")
+    stub = _kvwarm_gate_stub()
+    stub._kvwarm_resolve_dataset = lambda: str(path)
+    del stub._kvwarm_load_texts
+    assert InstrumentedScheduler._kvwarm_warm_eligible(stub) is False
+    assert stub._kvwarm_meta["skip_reason"] == "dataset_empty"
 
 
 def test_kvwarm_seed_regime_vocabulary(monkeypatch):
@@ -4815,6 +4929,25 @@ def test_kvwarm_prepare_reserves_shadow_tail_blocks(monkeypatch):
     # injection instead of crashing the run.
     point = stub._bench_grid[-1]
     assert not InstrumentedScheduler._kvwarm_plan_covers(stub, point)
+
+
+def test_kvwarm_plan_depth_cap_follows_the_negotiated_model_length(monkeypatch):
+    """The plan caps chain depth by the group's model length, not this
+    rank's, so every rank plans the same rungs; the gate's content probe
+    uses the same cap (``_kvwarm_depth_cap``)."""
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
+    stub = _kvwarm_planner_stub(usable_blocks=10**6)
+    stub.max_model_len = 8192
+    stub._bench_negotiated_capacity = _benchmark_capacity(max_model_len=128)
+    point = BenchmarkPoint(
+        point_type="decode", total_kv_read_tokens=1_000, batch_size=1
+    )
+    stub._bench_grid = deque([point])
+    assert InstrumentedScheduler._kvwarm_depth_cap(stub) == 124
+    InstrumentedScheduler._kvwarm_prepare(stub, "decode")
+    assert stub._kvwarm_plan[1] == 124
+    stub._bench_negotiated_capacity = None
+    assert InstrumentedScheduler._kvwarm_depth_cap(stub) == 8188
 
 
 @pytest.mark.parametrize("ctx", [12, 13, 14, 15])
