@@ -20,9 +20,10 @@ logger = logging.getLogger(__name__)
 
 # Per-GPU threshold: absorbs small driver baseline residue, catches any real
 # leak (the bug that motivated the subprocess refactor was ~2.4 GiB).
-_LEAK_THRESHOLD_MIB = int(
-    __import__("os").environ.get("GMS_TEST_LEAK_THRESHOLD_MIB", "100")
-)
+_LEAK_THRESHOLD_MIB = int(os.environ.get("GMS_TEST_LEAK_THRESHOLD_MIB", "100"))
+_REQUIRE_GPU_MEMORY_CHECK = os.environ.get(
+    "GMS_TEST_REQUIRE_GPU_MEMORY_CHECK", "0"
+).lower() in ("1", "true", "yes", "on")
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -58,8 +59,18 @@ def _gpu_memory_usage() -> list[int] | None:
         out = subprocess.check_output(
             ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
             text=True,
+            stderr=subprocess.STDOUT,
             timeout=5,
         )
-        return [int(line) for line in out.strip().splitlines()]
-    except (FileNotFoundError, subprocess.SubprocessError, ValueError):
+        usage = [int(line) for line in out.strip().splitlines()]
+        if not usage:
+            raise ValueError("nvidia-smi returned no GPU rows")
+        return usage
+    except (FileNotFoundError, subprocess.SubprocessError, ValueError) as exc:
+        if _REQUIRE_GPU_MEMORY_CHECK:
+            detail = getattr(exc, "output", None) or str(exc)
+            raise AssertionError(
+                f"required GPU leak measurement failed: {detail}"
+            ) from exc
+        logger.warning("Skipping unavailable GPU leak measurement: %s", exc)
         return None

@@ -91,12 +91,23 @@ def wait_for_active_layout(
     *,
     expected_weights_hash: str | None = None,
     min_weight_ro_sessions: int = 0,
-    timeout: float = 30.0,
+    timeout: float = float(
+        __import__("os").environ.get("GMS_TEST_ACTIVE_LAYOUT_TIMEOUT", "30")
+    ),
 ):
     deadline = time.monotonic() + timeout
     while True:
         weights_state = weights_gms.get_runtime_state()
         kv_state = kv_cache_gms.get_runtime_state()
+        logger.warning(
+            "[DBG active-layout] weights=%s ro_sess=%s w_alloc=%s w_hash=%s | kv=%s kv_alloc=%s",
+            getattr(weights_state, "state", None),
+            getattr(weights_state, "ro_session_count", None),
+            getattr(weights_state, "allocation_count", None),
+            bool(getattr(weights_state, "memory_layout_hash", None)),
+            getattr(kv_state, "state", None),
+            getattr(kv_state, "allocation_count", None),
+        )
         if (
             weights_state.state == ServerState.RO
             and weights_state.ro_session_count >= min_weight_ro_sessions
@@ -121,7 +132,9 @@ def wait_for_paused_layout(
     weights_state_before_pause,
     *,
     require_no_ro_sessions: bool = False,
-    timeout: float = 30.0,
+    timeout: float = float(
+        __import__("os").environ.get("GMS_TEST_ACTIVE_LAYOUT_TIMEOUT", "30")
+    ),
 ):
     deadline = time.monotonic() + timeout
     while True:
@@ -149,7 +162,9 @@ def wait_for_resumed_layout(
     weights_state_before_pause,
     *,
     min_weight_ro_sessions: int = 0,
-    timeout: float = 30.0,
+    timeout: float = float(
+        __import__("os").environ.get("GMS_TEST_ACTIVE_LAYOUT_TIMEOUT", "30")
+    ),
 ):
     deadline = time.monotonic() + timeout
     while True:
@@ -189,7 +204,8 @@ def assert_kv_history(
     if suffix is not None:
         expected_kinds.extend(suffix)
 
-    assert [event.kind for event in events] == expected_kinds
+    actual_kinds = [event.kind for event in events]
+    assert actual_kinds == expected_kinds, (actual_kinds, expected_kinds)
     clear_counts = [
         event.allocation_count
         for event in events
@@ -205,7 +221,9 @@ def wait_for_weights_state(
     *,
     min_ro_sessions: int = 0,
     expected_hash: str | None = None,
-    timeout: float = 30.0,
+    timeout: float = float(
+        __import__("os").environ.get("GMS_TEST_ACTIVE_LAYOUT_TIMEOUT", "30")
+    ),
 ):
     """Poll until the weights GMS daemon reaches *expected_state*."""
     deadline = time.monotonic() + timeout
