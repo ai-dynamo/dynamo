@@ -313,16 +313,28 @@ fn enqueue_cleanup_entry(
 pub struct SchedulerBookingCleanup {
     cleanup: Arc<AdmissionCleanup>,
     actor_tx: mpsc::Sender<AdmissionCommand>,
+    direct_release: Option<DirectBookingRelease>,
 }
+
+type DirectBookingRelease =
+    Arc<dyn Fn(&SchedulerBookingDescriptor) -> Result<(), SequenceError> + Send + Sync>;
 
 #[doc(hidden)]
 pub struct SchedulerCleanupAck {
-    response: oneshot::Receiver<Result<(), SequenceError>>,
+    response: CleanupCompletion,
+}
+
+enum CleanupCompletion {
+    Ready(Result<(), SequenceError>),
+    Actor(oneshot::Receiver<Result<(), SequenceError>>),
 }
 
 impl SchedulerCleanupAck {
     pub async fn wait(self) -> Result<(), SequenceError> {
-        self.response.await.unwrap_or(Ok(()))
+        match self.response {
+            CleanupCompletion::Ready(result) => result,
+            CleanupCompletion::Actor(response) => response.await.unwrap_or(Ok(())),
+        }
     }
 }
 
@@ -346,12 +358,21 @@ impl SchedulerBookingCleanup {
     }
 
     pub fn enqueue_acknowledged(&self, booking: SchedulerBookingDescriptor) -> SchedulerCleanupAck {
+        // Explicit finish/abort may perform the mutation inline. Drop-only and
+        // expiry callers use enqueue/enqueue_expired and remain non-blocking.
+        if let Some(release) = &self.direct_release {
+            return SchedulerCleanupAck {
+                response: CleanupCompletion::Ready(release(&booking)),
+            };
+        }
         let (response, receiver) = oneshot::channel();
         self.enqueue_entry(AdmissionCleanupEntry {
             target: SchedulerCleanupTarget::Booking(booking),
             response: Some(response),
         });
-        SchedulerCleanupAck { response: receiver }
+        SchedulerCleanupAck {
+            response: CleanupCompletion::Actor(receiver),
+        }
     }
 
     pub async fn enqueue_and_wait(
@@ -452,6 +473,7 @@ pub struct SchedulerQueue<
     slots: Arc<ActiveSequencesMultiWorker<P>>,
     workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
     queueing_enabled: bool,
+    direct_release: Option<DirectBookingRelease>,
     supports_overlap_refresh: bool,
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
     _marker: PhantomData<fn() -> (Sel, RF)>,
@@ -508,6 +530,19 @@ impl<
             .classes()
             .iter()
             .any(PolicyClassConfig::queueing_enabled);
+        let direct_release: Option<DirectBookingRelease> = (!queueing_enabled).then(|| {
+            let slots = Arc::clone(&slots);
+            Arc::new(move |booking: &SchedulerBookingDescriptor| {
+                slots
+                    .free_if_booking(
+                        &booking.request_id,
+                        booking.worker,
+                        booking.attempt_id,
+                        Instant::now(),
+                    )
+                    .map(|_| ())
+            }) as DirectBookingRelease
+        });
         for class in profile.classes() {
             tracing::info!(
                 policy_class = class.name,
@@ -578,6 +613,7 @@ impl<
             slots,
             workers_with_configs,
             queueing_enabled,
+            direct_release,
             supports_overlap_refresh: overlap_refresh_after.is_some(),
             non_max_overlap_selection_observer,
             _marker: PhantomData,
@@ -720,6 +756,7 @@ impl<
         SchedulerBookingCleanup {
             cleanup: Arc::clone(&self.cleanup),
             actor_tx: self.admission_tx.clone(),
+            direct_release: self.direct_release.clone(),
         }
     }
 
@@ -759,6 +796,18 @@ impl<
         &self,
         booking: SchedulerBookingDescriptor,
     ) -> Result<(), KvSchedulerError> {
+        if !self.queueing_enabled {
+            return self
+                .slots
+                .mark_prefill_completed_if_booking(
+                    &booking.request_id,
+                    booking.worker,
+                    booking.attempt_id,
+                    Instant::now(),
+                )
+                .map(|_| ())
+                .map_err(|error| KvSchedulerError::BookingFailed(error.to_string()));
+        }
         let (ack_tx, ack_rx) = oneshot::channel();
         self.admission_tx
             .send(AdmissionCommand::MarkPrefillCompleted { booking, ack_tx })
@@ -776,6 +825,18 @@ impl<
         booking: SchedulerBookingDescriptor,
         decay_fraction: Option<f64>,
     ) -> Result<(), KvSchedulerError> {
+        if !self.queueing_enabled {
+            return self
+                .slots
+                .add_output_block_if_booking(
+                    &booking.request_id,
+                    booking.worker,
+                    booking.attempt_id,
+                    decay_fraction,
+                )
+                .map(|_| ())
+                .map_err(|error| KvSchedulerError::BookingFailed(error.to_string()));
+        }
         let (ack_tx, ack_rx) = oneshot::channel();
         self.admission_tx
             .send(AdmissionCommand::AddOutputBlock {
@@ -792,13 +853,18 @@ impl<
             .map_err(|error| KvSchedulerError::BookingFailed(error.to_string()))
     }
 
-    /// Enqueue a booking-fenced output update without waiting for the actor to
-    /// apply it. The bounded command queue still supplies backpressure when full.
+    /// Apply a booking-fenced output update directly when policy queueing is
+    /// disabled. Otherwise enqueue it with bounded backpressure, without an ACK wait.
     pub(crate) async fn enqueue_output_block_if_booking(
         &self,
         booking: SchedulerBookingDescriptor,
         decay_fraction: Option<f64>,
     ) -> Result<(), KvSchedulerError> {
+        if !self.queueing_enabled {
+            return self
+                .add_output_block_if_booking(booking, decay_fraction)
+                .await;
+        }
         let (ack_tx, _ack_rx) = oneshot::channel();
         self.admission_tx
             .send(AdmissionCommand::AddOutputBlock {
@@ -1686,6 +1752,113 @@ mod tests {
 
     type SchedulingResponseReceiver =
         tokio::sync::oneshot::Receiver<Result<SchedulingResponse, KvSchedulerError>>;
+
+    fn poll_once<F: std::future::Future>(future: F) -> std::task::Poll<F::Output> {
+        std::pin::pin!(future).poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+    }
+
+    #[tokio::test]
+    async fn disabled_queueing_lifecycle_does_not_poll_the_actor() {
+        let (queue, slots) = make_queue(1, 16, 64, None);
+        let worker = WorkerWithDpRank::from_worker_id(0);
+        let add = || {
+            let request = SequenceRequest {
+                request_id: "direct-lifecycle".to_string(),
+                token_sequence: Some(vec![1, 2, 3, 4]),
+                track_prefill_tokens: true,
+                expected_output_tokens: None,
+                prefill_load_hint: Some(PrefillLoadHint {
+                    initial_effective_prefill_tokens: 64,
+                    expected_prefill_duration: None,
+                }),
+                worker,
+                lora_name: None,
+            };
+            SchedulerBookingDescriptor {
+                request_id: request.request_id.clone(),
+                worker,
+                attempt_id: slots.add_request_admitted(request, Instant::now()).unwrap(),
+            }
+        };
+        let booking = add();
+        // This is a current-thread runtime. Poll each future once without yielding,
+        // so the spawned actor cannot process any command during these assertions.
+        assert!(matches!(
+            poll_once(queue.mark_prefill_completed_if_booking(booking.clone())),
+            std::task::Poll::Ready(Ok(()))
+        ));
+        assert_eq!(slots.active_tokens(Instant::now()).get(&worker), Some(&0));
+        assert!(matches!(
+            poll_once(queue.enqueue_output_block_if_booking(booking.clone(), None)),
+            std::task::Poll::Ready(Ok(()))
+        ));
+        assert_eq!(slots.active_request_counts().get(&worker), Some(&1));
+        let cleanup = queue.booking_cleanup();
+        let ack = cleanup.enqueue_acknowledged(booking.clone());
+        assert!(matches!(ack.response, CleanupCompletion::Ready(Ok(()))));
+        slots.assert_completely_drained(Instant::now());
+
+        let replacement = add();
+        assert_ne!(booking.attempt_id, replacement.attempt_id);
+        assert!(matches!(
+            poll_once(queue.mark_prefill_completed_if_booking(booking.clone())),
+            std::task::Poll::Ready(Ok(()))
+        ));
+        let _ = cleanup.enqueue_acknowledged(booking.clone());
+        assert_eq!(slots.active_request_counts().get(&worker), Some(&1));
+        assert_eq!(slots.active_tokens(Instant::now()).get(&worker), Some(&64));
+        cleanup.enqueue(replacement.clone());
+        // Drop-only ingress still defers the mutation to the actor.
+        assert_eq!(slots.active_request_counts().get(&worker), Some(&1));
+        let _ = cleanup.enqueue_acknowledged(replacement);
+        slots.assert_completely_drained(Instant::now());
+        // The deferred old cleanup must not affect a later attempt.
+        let newest = add();
+        queue.update().await;
+        tokio::task::yield_now().await;
+        assert_eq!(slots.active_request_counts().get(&worker), Some(&1));
+        let _ = cleanup.enqueue_acknowledged(newest);
+        slots.assert_completely_drained(Instant::now());
+    }
+
+    #[tokio::test]
+    async fn enabled_or_mixed_policy_classes_keep_actor_lifecycle() {
+        let mixed = policy_profile(
+            r#"
+default_policy_family: direct
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: direct
+    policy_family: direct
+    cache_bucket: all
+    quantum: 1
+  - name: queued
+    policy_family: queued
+    cache_bucket: all
+    quantum: 1
+    prefill_busy_threshold: 64
+"#,
+        );
+        for profile in [
+            PolicyProfile::synthetic(Some(1.0), RouterQueuePolicy::Fcfs),
+            mixed,
+        ] {
+            let (queue, _) = make_queue_with_profile(1, 16, 64, profile);
+            let booking = SchedulerBookingDescriptor {
+                request_id: "queued".to_string(),
+                worker: WorkerWithDpRank::from_worker_id(0),
+                attempt_id: AttemptId::new(1),
+            };
+            assert!(queue.booking_cleanup().direct_release.is_none());
+            assert!(
+                poll_once(queue.mark_prefill_completed_if_booking(booking.clone())).is_pending()
+            );
+            let ack = queue.booking_cleanup().enqueue_acknowledged(booking);
+            assert!(matches!(ack.response, CleanupCompletion::Actor(_)));
+        }
+    }
 
     #[test]
     fn admission_lifecycle_cleanup_upgrades_to_the_exact_booking() {
