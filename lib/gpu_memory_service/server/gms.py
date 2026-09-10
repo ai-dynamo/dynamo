@@ -605,7 +605,6 @@ class GMS:
                 )
             except PersistentClaimConflictError as exc:
                 return ErrorResponse(error=str(exc), code=1), -1, False
-            # Drop the claim record too.
             claims = self._persistent_claims_by_session.get(conn.session_id)
             if claims is not None:
                 claims.discard((msg.engine_id, msg.tag))
@@ -664,7 +663,7 @@ class GMS:
                             tag=a.tag,
                             size=a.size,
                             aligned_size=a.aligned_size,
-                            claimed=True,
+                            claimed=self._persistent.is_claimed(a.engine_id, a.tag),
                         )
                         for a in allocations
                     ]

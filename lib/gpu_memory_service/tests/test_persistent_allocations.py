@@ -422,7 +422,6 @@ def test_list_via_rpc(gms):
     assert isinstance(resp, ListPersistentAllocationsResponse)
     engine_ids = sorted(a.engine_id for a in resp.allocations)
     assert engine_ids == ["eng-A", "eng-B"]
-    # All currently claimed
     for a in resp.allocations:
         assert a.claimed is True
 
@@ -497,7 +496,6 @@ def test_orphaned_allocation_is_discoverable_and_reclaimable(gms):
     )
     assert [a for a in resp.allocations] == []
 
-    # include_unclaimed surfaces the orphan.
     resp, _, _ = asyncio.run(
         gms.handle_request(
             other,
@@ -506,6 +504,7 @@ def test_orphaned_allocation_is_discoverable_and_reclaimable(gms):
         )
     )
     assert any(a.tag == "kv_pool" for a in resp.allocations)
+    assert all(a.claimed is False for a in resp.allocations)
 
     # The orphan can be reclaimed by a session that never claimed it.
     resp, _, _ = asyncio.run(
@@ -618,7 +617,6 @@ def test_cleanup_releases_claims_keeps_allocation(gms):
         gms._persistent.get("eng-X", "kv_pool") is not None
     ), "allocation must persist across disconnect"
 
-    # New session can now attach to the same key — re-attach.
     conn2 = _make_dummy_conn()
     resp, _, _ = asyncio.run(
         gms.handle_request(
