@@ -395,10 +395,18 @@ fn cancel_workers() {
 /// [`SHUTDOWN_TIMEOUT`]. Returns `None` when no workers were started, which is
 /// the case whenever request tracing is disabled.
 pub async fn shutdown_workers() -> Option<TraceShutdownReport> {
-    let workers = WORKERS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .take()?;
+    let workers = {
+        let mut slot = WORKERS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let workers = slot.take()?;
+        // Reopen the start gate while the slot is still held. These workers are
+        // gone, so an input that starts afterwards has to be able to spawn a new
+        // set; leaving the gate closed would let it publish into a bus that
+        // nothing is subscribed to.
+        WORKERS_STARTED.store(false, Ordering::Release);
+        workers
+    };
     Some(workers.shutdown(SHUTDOWN_TIMEOUT).await)
 }
 
@@ -407,7 +415,23 @@ fn spawn_workers(
     shutdown: CancellationToken,
 ) -> SinkWorkers {
     let sink_count = sinks.len();
-    let token = shutdown.child_token();
+    // The workers are process-wide, so they cannot hang off the runtime of
+    // whichever input happened to initialize tracing first. The mocker gives
+    // each of its workers its own runtime, and one of those ending — cleanly or
+    // not — would otherwise cancel the shared sinks while the other inputs are
+    // still publishing into them. When an input is registered, teardown belongs
+    // to `ActiveInput`: the last one out cancels these workers whether it
+    // returns, is cancelled, or panics.
+    let token = CancellationToken::new();
+    if ACTIVE_INPUTS.load(Ordering::Acquire) == 0 {
+        // Started outside any input, so the caller's token is the only teardown
+        // signal there is and the workers follow it as before.
+        let linked = token.clone();
+        tokio::spawn(async move {
+            shutdown.cancelled().await;
+            linked.cancel();
+        });
+    }
     let mut handles = Vec::with_capacity(sink_count);
     for sink in &sinks {
         let sink = sink.clone();
@@ -601,25 +625,57 @@ mod tests {
         assert_eq!(report.pending, vec![("fake", 1132)]);
     }
 
-    /// The only test that touches `ACTIVE_INPUTS` and `WORKERS`, so its reads
-    /// and writes are not racing another test in this binary.
-    #[tokio::test]
-    async fn last_input_out_drains_and_a_dropped_last_input_still_cancels() {
-        crate::request_trace::init_bus_for_test(64);
-        let shutdown_done = Arc::new(AtomicBool::new(false));
-        let sink: Arc<dyn RequestTraceSink> = Arc::new(FakeSink {
+    fn fake_sink(shutdown_done: &Arc<AtomicBool>) -> Arc<dyn RequestTraceSink> {
+        Arc::new(FakeSink {
             emitted: Arc::new(AtomicUsize::new(0)),
             shutdown_done: shutdown_done.clone(),
             dropped: 0,
             hang_on_shutdown: false,
-        });
+        })
+    }
+
+    fn install_workers(sink: Arc<dyn RequestTraceSink>, shutdown: CancellationToken) {
+        WORKERS_STARTED.store(true, Ordering::SeqCst);
         *WORKERS
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-            Some(spawn_workers(vec![sink], CancellationToken::new()));
+            Some(spawn_workers(vec![sink], shutdown));
+    }
+
+    fn workers_are_cancelled() -> bool {
+        WORKERS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .expect("the workers should still be installed")
+            .token
+            .is_cancelled()
+    }
+
+    /// The only test that touches `ACTIVE_INPUTS`, `WORKERS` and
+    /// `WORKERS_STARTED`, so its reads and writes are not racing another test in
+    /// this binary.
+    #[tokio::test]
+    async fn only_the_last_input_out_stops_the_shared_workers() {
+        crate::request_trace::init_bus_for_test(64);
+        let shutdown_done = Arc::new(AtomicBool::new(false));
 
         let first = ActiveInput::register();
         let second = ActiveInput::register();
+        // The runtime of the input that initialized tracing. Every later input
+        // has a runtime of its own, so this one ending says nothing about them.
+        let first_runtime = CancellationToken::new();
+        install_workers(fake_sink(&shutdown_done), first_runtime.clone());
+
+        first_runtime.cancel();
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !workers_are_cancelled(),
+            "one input's runtime must not stop the shared workers while another input is still publishing"
+        );
+
         assert!(
             !first.release(),
             "an input that finishes while another is still running must not drain"
@@ -629,16 +685,16 @@ mod tests {
         // cannot await the drain, but it must still start one.
         drop(second);
         assert_eq!(ACTIVE_INPUTS.load(Ordering::SeqCst), 0);
+        assert!(
+            workers_are_cancelled(),
+            "dropping the last input must cancel the workers"
+        );
 
         let workers = WORKERS
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
             .expect("the drop path must leave the workers joinable");
-        assert!(
-            workers.token.is_cancelled(),
-            "dropping the last input must cancel the workers"
-        );
         tokio::time::timeout(
             Duration::from_secs(5),
             futures::future::join_all(workers.handles),
@@ -648,6 +704,25 @@ mod tests {
         assert!(
             shutdown_done.load(Ordering::SeqCst),
             "each sink should have run its own shutdown after the cancellation"
+        );
+
+        // A second set of inputs in the same process: the last one out gets the
+        // bounded drain, and the drain reopens the start gate so a set after
+        // that one can be spawned at all.
+        let drained = Arc::new(AtomicBool::new(false));
+        install_workers(fake_sink(&drained), CancellationToken::new());
+        let only = ActiveInput::register();
+
+        let report = only
+            .release_and_drain()
+            .await
+            .expect("the last input out drains the workers it can still see");
+
+        assert!(!report.timed_out);
+        assert!(drained.load(Ordering::SeqCst));
+        assert!(
+            !WORKERS_STARTED.load(Ordering::SeqCst),
+            "a drained worker set must leave the start gate open for the next one"
         );
     }
 

@@ -693,6 +693,8 @@ mod tests {
 
         let dropped = sink.dropped.load(Ordering::Relaxed);
         assert_eq!(dropped, (total - capacity) as u64);
+        // The shutdown report reads the same counter the worker adds to.
+        assert_eq!(sink.dropped_records(), dropped);
     }
 
     #[test]
@@ -742,19 +744,5 @@ mod tests {
         upload_ready_batch(&uploader, &mut batch, &mut seq, &dropped).await;
 
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
-    }
-
-    #[tokio::test]
-    async fn dropped_records_totals_backpressure_and_worker_losses() {
-        let capacity = 1;
-        let (sink, _rx) = stalled_sink(capacity);
-
-        // One record fills the channel, the next is turned away by `emit`.
-        sink.emit(&sample_record()).await;
-        sink.emit(&sample_record()).await;
-        // The worker then loses a whole batch to a refused upload.
-        note_dropped_records(&sink.dropped, 12, "upload_failed");
-
-        assert_eq!(sink.dropped_records(), 13);
     }
 }
