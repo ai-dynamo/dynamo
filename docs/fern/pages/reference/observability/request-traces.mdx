@@ -15,6 +15,7 @@ one or more sinks. For the capture and replay workflow, see
 | --- | --- | --- | --- |
 | `DYN_REQUEST_TRACE` | unset | Truthy value | Master switch. When enabled and `DYN_REQUEST_TRACE_RECORDS` is unset, emits `request_end,tool`. |
 | `DYN_REQUEST_TRACE_RECORDS` | `request_end,tool` | `request_end`, `request_payload`, `tool` | Comma-separated record types. Setting the variable enables only the listed types. |
+| `DYN_REQUEST_TRACE_OUTPUT_SEQUENCE_HASHES` | unset | Truthy value | Adds generated-continuation sequence hashes to `request_end` rows. Requires `request_end`; no output text or token IDs are recorded. |
 | `DYN_REQUEST_TRACE_SINKS` | `file` | `file`, `stderr`, `nats`, `otel` | Comma-separated sinks. |
 | `DYN_REQUEST_TRACE_FILE_PATH` | `/tmp/dynamo-request-trace` | Path or prefix | Literal path for `jsonl`; segment prefix for `jsonl_gz`. |
 | `DYN_REQUEST_TRACE_FILE_FORMAT` | `jsonl_gz` | `jsonl`, `jsonl_gz` | File encoding and rotation mode. |
@@ -133,8 +134,12 @@ A payload row stores the client request under `payload.request`, the completed r
 }
 ```
 
-`input_sequence_hashes` are Dynamo's sequence-aware rolling hashes. DynoSim maps them to compact
-internal IDs while loading the original trace; it does not create an intermediate Mooncake file.
+`input_sequence_hashes` are Dynamo's sequence-aware rolling hashes. Set
+`DYN_REQUEST_TRACE_OUTPUT_SEQUENCE_HASHES=1` to add `output_sequence_hashes`, which continues the
+same chain across generated tokens. When an input ends mid-block, its first output hash replaces the
+trailing input hash; otherwise output hashes append to the input chain. DynoSim maps these hashes to
+compact internal IDs while loading the original trace; it does not create an intermediate Mooncake
+file.
 
 ## Supported Replay Requests
 

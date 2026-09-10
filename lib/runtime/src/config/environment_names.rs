@@ -583,6 +583,10 @@ pub mod llm {
         /// `request_payload`, `tool`.
         pub const DYN_REQUEST_TRACE_RECORDS: &str = "DYN_REQUEST_TRACE_RECORDS";
 
+        /// Opt in to sequence hashes for generated tokens on request-end records.
+        pub const DYN_REQUEST_TRACE_OUTPUT_SEQUENCE_HASHES: &str =
+            "DYN_REQUEST_TRACE_OUTPUT_SEQUENCE_HASHES";
+
         /// NATS subject the request trace sink publishes to.
         pub const DYN_REQUEST_TRACE_NATS_SUBJECT: &str = "DYN_REQUEST_TRACE_NATS_SUBJECT";
 
@@ -1039,6 +1043,7 @@ mod tests {
             llm::request_trace::DYN_REQUEST_TRACE_FILE_FORMAT,
             llm::request_trace::DYN_REQUEST_TRACE_CAPACITY,
             llm::request_trace::DYN_REQUEST_TRACE_RECORDS,
+            llm::request_trace::DYN_REQUEST_TRACE_OUTPUT_SEQUENCE_HASHES,
             llm::request_trace::DYN_REQUEST_TRACE_NATS_SUBJECT,
             llm::request_trace::DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES,
             llm::request_trace::DYN_REQUEST_TRACE_FILE_BUFFER_BYTES,

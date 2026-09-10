@@ -95,6 +95,7 @@ pub struct RequestTracePolicy {
     pub file_roll_lines: Option<u64>,
     pub nats_subject: String,
     pub otel_max_payload_bytes: usize,
+    pub capture_output_sequence_hashes: bool,
     pub http_header_capture_list: Vec<String>,
     pub tool_events_zmq_endpoint: Option<String>,
     pub tool_events_zmq_topic: Option<String>,
@@ -194,6 +195,9 @@ fn load_from_env() -> RequestTracePolicy {
     ])
     .filter(|value| *value > 0)
     .unwrap_or(DEFAULT_OTEL_MAX_PAYLOAD_BYTES);
+    let capture_output_sequence_hashes = enabled
+        && records.contains(&RequestTraceRecordKind::RequestEnd)
+        && env_is_truthy(env_request_trace::DYN_REQUEST_TRACE_OUTPUT_SEQUENCE_HASHES);
     let http_header_capture_list =
         std::env::var(env_request_trace::DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST)
             .ok()
@@ -248,6 +252,7 @@ fn load_from_env() -> RequestTracePolicy {
         file_roll_lines,
         nats_subject,
         otel_max_payload_bytes,
+        capture_output_sequence_hashes,
         http_header_capture_list,
         tool_events_zmq_endpoint,
         tool_events_zmq_topic,
@@ -442,6 +447,7 @@ mod tests {
         env_request_trace::DYN_REQUEST_TRACE_FILE_FORMAT,
         env_request_trace::DYN_REQUEST_TRACE_CAPACITY,
         env_request_trace::DYN_REQUEST_TRACE_RECORDS,
+        env_request_trace::DYN_REQUEST_TRACE_OUTPUT_SEQUENCE_HASHES,
         env_request_trace::DYN_REQUEST_TRACE_NATS_SUBJECT,
         env_request_trace::DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES,
         env_request_trace::DYN_REQUEST_TRACE_FILE_BUFFER_BYTES,
@@ -564,6 +570,37 @@ mod tests {
             let policy = load_from_env();
             assert!(policy.http_header_capture_list.is_empty());
         });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn output_sequence_hashes_require_request_end_records_and_explicit_opt_in() {
+        with_request_trace_env(&[(env_request_trace::DYN_REQUEST_TRACE, "1")], || {
+            assert!(!load_from_env().capture_output_sequence_hashes)
+        });
+        with_request_trace_env(
+            &[
+                (env_request_trace::DYN_REQUEST_TRACE, "1"),
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_OUTPUT_SEQUENCE_HASHES,
+                    "true",
+                ),
+            ],
+            || assert!(load_from_env().capture_output_sequence_hashes),
+        );
+        with_request_trace_env(
+            &[
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_RECORDS,
+                    "request_payload",
+                ),
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_OUTPUT_SEQUENCE_HASHES,
+                    "true",
+                ),
+            ],
+            || assert!(!load_from_env().capture_output_sequence_hashes),
+        );
     }
 
     #[test]
