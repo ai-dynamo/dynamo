@@ -18,6 +18,7 @@ use crate::sequences::{SequencePublishQueueError, SequencePublisher, SequenceSub
 use crate::services::common::zmq::{
     create_bound_pub_socket, create_sub_socket_topics, validate_endpoint,
 };
+#[cfg(feature = "standalone-selection")]
 use crate::services::selection::affinity::{AffinityReplicaSink, AffinityTarget, AffinityVersion};
 
 pub(crate) const REPLICA_EVENT_CHANNEL_CAPACITY: usize = 100_000;
@@ -40,6 +41,7 @@ pub(crate) struct AffinityBindingEvent {
     pub writer_id: u64,
 }
 
+#[cfg(feature = "standalone-selection")]
 impl AffinityBindingEvent {
     pub(crate) fn target(&self) -> AffinityTarget {
         AffinityTarget::new(self.worker_id, self.dp_rank)
@@ -53,6 +55,7 @@ impl AffinityBindingEvent {
     }
 }
 
+#[cfg(feature = "standalone-selection")]
 /// Publishes bindings from a [`super::super::selection::affinity::SessionAffinity`]
 /// into the mesh. Best effort: a full channel drops the update.
 struct AffinityMeshSink {
@@ -60,6 +63,7 @@ struct AffinityMeshSink {
     tx: mpsc::Sender<AffinityBindingEvent>,
 }
 
+#[cfg(feature = "standalone-selection")]
 impl AffinityReplicaSink for AffinityMeshSink {
     fn publish(&self, session_id: &str, target: AffinityTarget, version: AffinityVersion) {
         let update = AffinityBindingEvent {
@@ -166,6 +170,7 @@ impl ReplicaSyncConfig {
         self.process_id
     }
 
+    #[cfg(feature = "standalone-selection")]
     /// Sink that publishes session bindings into the mesh, when this runtime
     /// carries them.
     pub(crate) fn affinity_sink(
@@ -222,6 +227,7 @@ pub struct HostReplicaChannels {
     pub process_id: u64,
 }
 
+#[cfg(feature = "standalone-selection")]
 /// Per-partition factory for [`HostReplicaChannels`]; `None` disables replica
 /// sync for that partition.
 pub type HostReplicaSyncFactory =
