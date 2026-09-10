@@ -10,7 +10,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, Data};
 use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
-use dynamo_runtime::{component::Endpoint, protocols::EndpointId};
+use dynamo_runtime::{
+    component::{Client, Endpoint},
+    protocols::EndpointId,
+};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
@@ -33,6 +36,60 @@ use crate::{
 };
 
 type StreamingEngine<Req, Resp> = Arc<dyn AsyncEngine<SingleIn<Req>, ManyOut<Resp>, Error>>;
+
+/// A topology hop must retain the provider's admission and configuration, even
+/// when other cards share its endpoint or the endpoint is reused by a successor.
+#[derive(Clone)]
+pub(crate) struct CommittedWorkerSetTarget {
+    pub(crate) endpoint: Endpoint,
+    pub(crate) group: String,
+    pub(crate) generation: u64,
+    pub(crate) card: Arc<ModelDeploymentCard>,
+    pub(crate) admitted_ids: watch::Receiver<Vec<u64>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum WorkerSetTargetId {
+    Committed { group: String, generation: u64 },
+    Legacy(EndpointId),
+}
+
+#[derive(Clone)]
+pub(crate) enum WorkerSetTarget {
+    Committed(CommittedWorkerSetTarget),
+    /// Explicit endpoint constructors predate controller-owned admission.
+    Legacy(Endpoint),
+}
+
+impl WorkerSetTarget {
+    pub(crate) fn id(&self) -> WorkerSetTargetId {
+        match self {
+            Self::Committed(target) => WorkerSetTargetId::Committed {
+                group: target.group.clone(),
+                generation: target.generation,
+            },
+            Self::Legacy(endpoint) => WorkerSetTargetId::Legacy(endpoint.id()),
+        }
+    }
+
+    pub(crate) fn endpoint(&self) -> &Endpoint {
+        match self {
+            Self::Committed(target) => &target.endpoint,
+            Self::Legacy(endpoint) => endpoint,
+        }
+    }
+
+    pub(crate) async fn client(&self, cancellation: CancellationToken) -> anyhow::Result<Client> {
+        let client = self.endpoint().client().await?;
+        Ok(match self {
+            Self::Committed(target) => client.with_admitted_instances_and_cancellation(
+                target.admitted_ids.clone(),
+                cancellation,
+            ),
+            Self::Legacy(_) => client,
+        })
+    }
+}
 
 struct RequestLifetimeEngine<Req, Resp>
 where
@@ -137,8 +194,8 @@ pub struct WorkerSet {
     /// this; in-process models have no distributed endpoint.
     endpoint_id: Option<EndpointId>,
 
-    /// Endpoint handle used only by committed topology reconciliation.
-    topology_endpoint: Option<Endpoint>,
+    /// Admission and configuration exported through committed topology reconciliation.
+    topology_target: Option<CommittedWorkerSetTarget>,
 
     /// MDC checksum for this set's configuration
     mdcsum: String,
@@ -190,7 +247,7 @@ impl WorkerSet {
         Self {
             namespace,
             endpoint_id: None,
-            topology_endpoint: None,
+            topology_target: None,
             mdcsum,
             card,
             chat_engine: None,
@@ -223,9 +280,9 @@ impl WorkerSet {
         self.endpoint_id.as_ref()
     }
 
-    pub(crate) fn set_topology_endpoint(&mut self, endpoint: Endpoint) {
-        self.endpoint_id = Some(endpoint.id());
-        self.topology_endpoint = Some(endpoint);
+    pub(crate) fn set_topology_target(&mut self, target: CommittedWorkerSetTarget) {
+        self.endpoint_id = Some(target.endpoint.id());
+        self.topology_target = Some(target);
     }
 
     pub(crate) fn set_load_context(&mut self, load_context: Arc<RoutingLoadContext>) {
@@ -237,8 +294,8 @@ impl WorkerSet {
         self.load_context.as_ref()
     }
 
-    pub(crate) fn topology_endpoint(&self) -> Option<&Endpoint> {
-        self.topology_endpoint.as_ref()
+    pub(crate) fn topology_target(&self) -> Option<&CommittedWorkerSetTarget> {
+        self.topology_target.as_ref()
     }
 
     pub fn mdcsum(&self) -> &str {
@@ -432,7 +489,7 @@ impl WorkerSet {
         let mut view = Self {
             namespace: self.namespace.clone(),
             endpoint_id: self.endpoint_id.clone(),
-            topology_endpoint: self.topology_endpoint.clone(),
+            topology_target: self.topology_target.clone(),
             mdcsum: self.mdcsum.clone(),
             card,
             chat_engine: lora_context_engine(&self.chat_engine, &lora_name),
