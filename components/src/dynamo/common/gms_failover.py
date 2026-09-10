@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import signal
 import time
 import uuid
 from dataclasses import dataclass
@@ -585,6 +586,45 @@ async def _release_lock_after_activation_error(lock: Any, *, backend_name: str) 
         raise cancelled
 
 
+async def _requiesce_after_activation_error(
+    controller: Any,
+    tags: list[str],
+    *,
+    backend_name: str,
+) -> tuple[bool, asyncio.CancelledError | None]:
+    """Finish re-quiescing despite repeated cancellation."""
+    timeout = max(
+        0.1,
+        _float_env("DYN_GMS_FAILOVER_REQUIESCE_TIMEOUT_SECS", 30.0),
+    )
+    task = asyncio.create_task(
+        asyncio.wait_for(controller.quiesce(tags), timeout=timeout)
+    )
+    cancelled: asyncio.CancelledError | None = None
+    while True:
+        try:
+            await asyncio.shield(task)
+            return True, cancelled
+        except asyncio.CancelledError as exc:
+            if task.cancelled():
+                logger.critical(
+                    "[GMS failover] %s re-quiesce task was cancelled",
+                    backend_name,
+                )
+                return False, cancelled or exc
+            cancelled = cancelled or exc
+            current = asyncio.current_task()
+            if current is not None:
+                current.uncancel()
+        except BaseException:
+            logger.critical(
+                "[GMS failover] %s failed to re-quiesce after activation error",
+                backend_name,
+                exc_info=True,
+            )
+            return False, cancelled
+
+
 async def acquire_gms_failover_lock_before_init(
     *,
     backend_name: str,
@@ -737,14 +777,17 @@ async def prepare_gms_failover(
         if not keep_shadow_ready and set_health_status is not None:
             set_health_status(True)
     except BaseException:
+        safe_to_release = not resume_started
+        cleanup_cancelled = None
         if resume_started:
-            try:
-                await controller.quiesce(tag_list)
-            except BaseException:
-                logger.exception(
-                    "[GMS failover] %s failed to re-quiesce after activation error",
-                    backend_name,
-                )
+            (
+                safe_to_release,
+                cleanup_cancelled,
+            ) = await _requiesce_after_activation_error(
+                controller,
+                tag_list,
+                backend_name=backend_name,
+            )
         if set_health_status is not None:
             try:
                 set_health_status(False)
@@ -753,7 +796,16 @@ async def prepare_gms_failover(
                     "[GMS failover] %s failed to mark activation unhealthy",
                     backend_name,
                 )
-        await _release_lock_after_activation_error(lock, backend_name=backend_name)
+        if safe_to_release:
+            await _release_lock_after_activation_error(lock, backend_name=backend_name)
+        else:
+            # Keep a strong reference to the lock until SIGTERM completes process
+            # teardown. Releasing it while the engine may still write shared KV
+            # would allow two physical writers.
+            owner._gms_failover_lock = lock
+            os.kill(os.getpid(), signal.SIGTERM)
+        if cleanup_cancelled is not None:
+            raise cleanup_cancelled
         raise
 
     logger.info(
