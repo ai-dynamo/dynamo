@@ -272,8 +272,6 @@ async def test_gms_failover_replacement_primary_index_becomes_shadow_when_lock_b
     monkeypatch,
 ):
     monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "true")
-    # Replacement pods can reuse index 0 after a failover while index 1 is the
-    # current active holder. The lock, not the static index, must decide role.
     monkeypatch.setenv("ENGINE_ID", "0")
     owner = _Owner()
     runtime = _Runtime()
@@ -641,6 +639,58 @@ async def test_gms_failover_shadow_runs_warmup_before_ready(monkeypatch):
         ("health", True),
     ]
     assert runtime.health == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_activation_cancellation_drains_lock_release(monkeypatch):
+    monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "true")
+    owner = _Owner()
+    runtime = _Runtime()
+    warmup_started = asyncio.Event()
+    release_started = asyncio.Event()
+    allow_release = asyncio.Event()
+    created = []
+
+    class BlockingReleaseLock(_BusyOnTryLock):
+        def __init__(self, path):
+            super().__init__(path)
+            created.append(self)
+
+        async def release(self):
+            release_started.set()
+            await allow_release.wait()
+            self.released += 1
+
+    async def blocking_warmup():
+        warmup_started.set()
+        await asyncio.Event().wait()
+
+    activation = asyncio.create_task(
+        prepare_gms_failover(
+            owner,
+            runtime,
+            backend_name="test",
+            tags=["kv_cache"],
+            lock_factory=BlockingReleaseLock,
+            promotion_warmup=blocking_warmup,
+        )
+    )
+    await warmup_started.wait()
+    activation.cancel()
+    await release_started.wait()
+    activation.cancel()
+    await asyncio.sleep(0)
+    assert not activation.done()
+
+    allow_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await activation
+
+    assert created[0].released == 1
+    assert owner._quiesce_controller.quiesce_calls == [
+        ["kv_cache"],
+        ["kv_cache"],
+    ]
 
 
 @pytest.mark.asyncio
