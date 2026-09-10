@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use crossbeam_queue::SegQueue;
 use parking_lot::Mutex;
+use rustc_hash::FxHashMap;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
@@ -37,7 +38,7 @@ use crate::protocols::{
 use crate::sequences::topology::WorkerDpRange;
 use crate::sequences::{
     ActiveSequencesMultiWorker, LifecycleMutationOutcome, PreparedReplicaPrompt, SequenceError,
-    SequencePublisher, SequenceRequest,
+    SequencePublisher, SequenceRequest, WorkerLoadProjection,
 };
 
 /// Large default for max_num_batched_tokens when not configured (effectively disables queueing for that worker)
@@ -486,6 +487,7 @@ struct SchedulerQueueActor<
     class_counters: Arc<Vec<ClassQueueCounters>>,
     slots: Arc<ActiveSequencesMultiWorker<P>>,
     workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
+    projected_loads: FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
     start_time: Instant,
     block_size: u32,
     selector: Sel,
@@ -639,6 +641,7 @@ impl<
             class_counters: Arc::clone(&class_counters),
             slots: Arc::clone(&slots),
             workers_with_configs: workers_with_configs.clone(),
+            projected_loads: FxHashMap::default(),
             start_time: Instant::now(),
             block_size,
             selector,
@@ -1452,16 +1455,30 @@ impl<
         }
     }
 
+    /// Keep projections installed through booking and response-field capture.
+    /// Only the allocation is reused; the derived read is refreshed for every request.
+    fn with_projected_loads<R>(
+        &mut self,
+        mut request: SchedulingRequest,
+        decay_now: Instant,
+        handle: impl FnOnce(&Self, &mut SchedulingRequest) -> R,
+    ) -> R {
+        request.worker_loads = std::mem::take(&mut self.projected_loads);
+        self.slots.project_worker_loads_into(
+            request.token_seq.as_deref(),
+            decay_now,
+            &mut request.worker_loads,
+        );
+        let result = handle(self, &mut request);
+        self.projected_loads = std::mem::take(&mut request.worker_loads);
+        result
+    }
+
     fn select_worker_for_request(
         &self,
-        request: &mut SchedulingRequest,
-        decay_now: Instant,
+        request: &SchedulingRequest,
         defer_response: bool,
     ) -> Result<SelectedWorkerForRequest, KvSchedulerError> {
-        request.worker_loads = self
-            .slots
-            .project_worker_loads(request.token_seq.as_deref(), decay_now);
-
         {
             let workers = self.workers_with_configs.borrow();
             let overloaded_worker_ids = self
@@ -1538,25 +1555,27 @@ impl<
     }
 
     fn select_without_admission_inner(
-        &self,
-        mut request: SchedulingRequest,
+        &mut self,
+        request: SchedulingRequest,
         decay_now: Instant,
     ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
-        let selected = self.select_worker_for_request(&mut request, decay_now, false)?;
-        let target_cached_prefix_blocks =
-            target_cached_prefix_blocks(&request, selected.selection.worker);
+        self.with_projected_loads(request, decay_now, |actor, request| {
+            let selected = actor.select_worker_for_request(request, false)?;
+            let target_cached_prefix_blocks =
+                target_cached_prefix_blocks(request, selected.selection.worker);
 
-        Ok(AdvisorySchedulingResponse {
-            selected_worker_load: selected.selected_worker_load,
-            response: SchedulingResponse {
-                best_worker: selected.selection.worker,
-                effective_overlap_blocks: selected.selection.effective_overlap_blocks,
-                cached_tokens: selected.selection.cached_tokens,
-                selected_worker_tiers: selected.selected_worker_tiers,
-                target_cached_prefix_blocks,
-                kv_transfer_candidates: request.kv_transfer_candidates.take(),
-                potential_decode_blocks: selected.selection.potential_decode_blocks,
-            },
+            Ok(AdvisorySchedulingResponse {
+                selected_worker_load: selected.selected_worker_load,
+                response: SchedulingResponse {
+                    best_worker: selected.selection.worker,
+                    effective_overlap_blocks: selected.selection.effective_overlap_blocks,
+                    cached_tokens: selected.selection.cached_tokens,
+                    selected_worker_tiers: selected.selected_worker_tiers,
+                    target_cached_prefix_blocks,
+                    kv_transfer_candidates: request.kv_transfer_candidates.take(),
+                    potential_decode_blocks: selected.selection.potential_decode_blocks,
+                },
+            })
         })
     }
 
@@ -1564,17 +1583,25 @@ impl<
     /// compute projected load -> select worker -> book tracked state -> respond.
     fn admit_one(
         &mut self,
-        mut request: SchedulingRequest,
+        request: SchedulingRequest,
         attempt_tx: Option<oneshot::Sender<AttemptId>>,
         lifecycle_transfer: Option<Arc<AdmissionLifecycleTransfer>>,
         decay_now: Instant,
         preparation: &mut AdmissionPreparation,
     ) -> bool {
-        let selected = match self.select_worker_for_request(
-            &mut request,
-            decay_now,
-            preparation.defer_response,
-        ) {
+        self.with_projected_loads(request, decay_now, |actor, request| {
+            actor.admit_one_projected(request, attempt_tx, lifecycle_transfer, preparation)
+        })
+    }
+
+    fn admit_one_projected(
+        &self,
+        request: &mut SchedulingRequest,
+        attempt_tx: Option<oneshot::Sender<AttemptId>>,
+        lifecycle_transfer: Option<Arc<AdmissionLifecycleTransfer>>,
+        preparation: &mut AdmissionPreparation,
+    ) -> bool {
+        let selected = match self.select_worker_for_request(request, preparation.defer_response) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("scheduling failed: {e}");
@@ -1586,7 +1613,7 @@ impl<
         let target_cached_prefix_blocks = if preparation.defer_response {
             0 // Filled from the captured tier maps before the response is delivered.
         } else {
-            target_cached_prefix_blocks(&request, selected.selection.worker)
+            target_cached_prefix_blocks(request, selected.selection.worker)
         };
         let response = SchedulingResponse {
             best_worker: selected.selection.worker,
@@ -1645,7 +1672,7 @@ impl<
     #[allow(clippy::too_many_arguments)]
     fn book_and_respond(
         &self,
-        mut request: SchedulingRequest,
+        request: &mut SchedulingRequest,
         attempt_tx: Option<oneshot::Sender<AttemptId>>,
         lifecycle_transfer: Option<Arc<AdmissionLifecycleTransfer>>,
         sequence_request: SequenceRequest,
@@ -2627,6 +2654,74 @@ policy_classes:
             resp_tx: Some(tx),
         };
         (req, rx)
+    }
+
+    #[tokio::test]
+    async fn projection_storage_survives_admission_and_is_reused_without_stale_entries() {
+        let (queue, slots) = make_queue(1, 16, 64, None);
+        let profile = PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs);
+        let mut actor = SchedulerQueueActor {
+            pending: PolicyQueue::new(profile.clone()),
+            cleanup: Arc::clone(&queue.cleanup),
+            profile,
+            pending_count: Arc::clone(&queue.pending_count),
+            pending_isl_tokens: Arc::clone(&queue.pending_isl_tokens),
+            class_counters: Arc::clone(&queue.class_counters),
+            slots: Arc::clone(&slots),
+            workers_with_configs: queue.workers_with_configs.clone(),
+            projected_loads: FxHashMap::with_capacity_and_hasher(8, Default::default()),
+            start_time: Instant::now(),
+            block_size: 16,
+            selector: DefaultWorkerSelector::new(None, "test"),
+            prefill_load_estimator: None,
+            overlap_scores_refresh: None::<Arc<NoopOverlapScoresRefresh>>,
+            overlap_refresh_after: None,
+            overloaded_worker_provider: None,
+            available_worker_provider: None,
+            non_max_overlap_selection_observer: Arc::clone(
+                &queue.non_max_overlap_selection_observer,
+            ),
+        };
+        let worker = WorkerWithDpRank::new(0, 0);
+        let stale = WorkerWithDpRank::new(999, 0);
+        let capacity = actor.projected_loads.capacity();
+        let mut previous_storage = None;
+        for id in ["reuse-first", "reuse-second"] {
+            actor
+                .projected_loads
+                .insert(stale, WorkerLoadProjection::default());
+            let now = Instant::now();
+            let expected = slots.project_worker_loads(None, now);
+            let (request, mut rx) = make_request(id, 64);
+            let storage = actor.with_projected_loads(request, now, |actor, request| {
+                assert_eq!(request.worker_loads, expected);
+                assert!(!request.worker_loads.contains_key(&stale));
+                let storage = request.worker_loads.get(&worker).unwrap() as *const _;
+                assert!(actor.admit_one_projected(
+                    request,
+                    None,
+                    None,
+                    &mut AdmissionPreparation::default(),
+                ));
+                // Booking and response construction must not take the projection away.
+                assert_eq!(request.worker_loads, expected);
+                assert_eq!(rx.try_recv().unwrap().unwrap().best_worker, worker);
+                storage
+            });
+            assert_eq!(actor.projected_loads.capacity(), capacity);
+            assert_eq!(
+                actor.projected_loads.get(&worker).unwrap() as *const _,
+                storage
+            );
+            if let Some(previous) = previous_storage {
+                assert_eq!(previous, storage);
+            }
+            previous_storage = Some(storage);
+        }
+        for id in ["reuse-first", "reuse-second"] {
+            slots.free(&id.to_owned(), Instant::now()).unwrap();
+        }
+        slots.assert_completely_drained(Instant::now());
     }
 
     #[test]

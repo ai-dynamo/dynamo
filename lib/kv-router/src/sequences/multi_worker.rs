@@ -1249,15 +1249,25 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         token_sequence: Option<&[SequenceHash]>,
         decay_now: Instant,
     ) -> FxHashMap<WorkerWithDpRank, WorkerLoadProjection> {
+        let mut projections = FxHashMap::default();
+        self.project_worker_loads_into(token_sequence, decay_now, &mut projections);
+        projections
+    }
+
+    pub(crate) fn project_worker_loads_into(
+        &self,
+        token_sequence: Option<&[SequenceHash]>,
+        decay_now: Instant,
+        projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    ) {
         #[cfg(feature = "bench")]
         let start = tokio::time::Instant::now();
 
         #[cfg(feature = "bench")]
         let num_workers = self.workers.read().slots.len();
 
-        let result = self
-            .prompt_registry
-            .project_worker_loads(token_sequence, decay_now);
+        self.prompt_registry
+            .project_worker_loads_into(token_sequence, decay_now, projections);
 
         #[cfg(feature = "bench")]
         {
@@ -1268,8 +1278,17 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 "project_worker_loads completed"
             );
         }
+    }
 
-        result
+    #[cfg(feature = "bench")]
+    #[doc(hidden)]
+    pub fn bench_project_worker_loads_into(
+        &self,
+        token_sequence: Option<&[SequenceHash]>,
+        decay_now: Instant,
+        projections: &mut FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+    ) {
+        self.project_worker_loads_into(token_sequence, decay_now, projections);
     }
 
     /// Query all workers for their current number of active blocks.
