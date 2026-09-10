@@ -1622,48 +1622,6 @@ var _ = Describe("DGDR Helper Functions", func() {
 		})
 	})
 
-	Context("isOnlineProfiling", func() {
-		It("Should always return true regardless of spec", func() {
-			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
-				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-					Model:   "test-model",
-					Backend: "vllm",
-				},
-			}
-			Expect(isOnlineProfiling(dgdr)).Should(BeTrue())
-		})
-
-		It("Should return true with search strategy rapid", func() {
-			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
-				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-					Model:          "test-model",
-					Backend:        "trtllm",
-					SearchStrategy: "rapid",
-				},
-			}
-			Expect(isOnlineProfiling(dgdr)).Should(BeTrue())
-		})
-
-		It("Should return true with search strategy thorough", func() {
-			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
-				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-					Model:          "test-model",
-					Backend:        "vllm",
-					SearchStrategy: "thorough",
-				},
-			}
-			Expect(isOnlineProfiling(dgdr)).Should(BeTrue())
-		})
-
-		It("Should return true with nil spec fields", func() {
-			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
-				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
-					Model: "test-model",
-				},
-			}
-			Expect(isOnlineProfiling(dgdr)).Should(BeTrue())
-		})
-	})
 })
 
 var _ = Describe("DGDR Validation", func() {
