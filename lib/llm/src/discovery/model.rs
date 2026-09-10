@@ -2001,16 +2001,11 @@ mod tests {
         );
     }
 
-    /// Two typed prefill endpoints in one namespace (a rolling upgrade, or a
-    /// stray second prefill deployment) make the prefill role ambiguous. The
-    /// pairing cannot be resolved, so `reconcile_discovery_topology` leaves the
-    /// prefill target unset and `PrefillRouter::generate` forwards to the decode
-    /// backend — aggregated serving. The live decode WorkerSet must therefore
-    /// stay selectable through *both* admission gates, which read the same
-    /// `evaluate_namespace(..).ready`: `has_ready_workers` on the HTTP path and
+    /// Covers both admission gates, which read the same
+    /// `evaluate_namespace(..).ready`: `has_ready_workers` on the HTTP path, and
     /// the readiness filter inside `select_worker_set_with` behind every engine
-    /// accessor. Gating either on ambiguity answers 503 for the whole namespace
-    /// while a healthy decode worker sits idle.
+    /// accessor. Either one refusing is enough to take the namespace out of
+    /// service, so neither is sufficient on its own as regression coverage.
     #[test]
     fn ambiguous_prefill_topology_keeps_decode_serving() {
         let model = Model::new("llama".to_string());
