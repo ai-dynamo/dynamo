@@ -7,7 +7,7 @@ subtitle: Let workers finish in-flight requests and release resources cleanly wh
 
 When Kubernetes terminates a pod (rollout, scale-down, node drain), Dynamo workers stop accepting new requests, keep serving in-flight ones through a grace period, then release engine and connection resources before exiting. This is **on by default** — every component handles `SIGTERM`/`SIGINT` and drains automatically. The steps below tune *how long* it waits and make sure interrupted requests are recovered.
 
-The knobs are three timeouts plus enabling migration. The default flow: endpoints unregister from discovery immediately, workers serve for a short grace period, then endpoints drain (bounded by a timeout) before resources are cleaned up.
+The knobs are five timeouts and a policy, plus enabling migration. The default flow: endpoints unregister from discovery immediately, workers serve for a short grace period, then endpoints drain (bounded by a timeout) before resources are cleaned up.
 
 > **How it works:** the signal handlers, the `graceful_shutdown()` sequence, per-backend `cleanup()` code, and error-initiated shutdown are documented in [Graceful Shutdown Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/graceful-shutdown-architecture.md).
 
@@ -40,15 +40,28 @@ Rough guidance:
 
 <Step title="Tune the drain windows">
 
-Three environment variables control Dynamo's internal draining. Set the HTTP timeout on the Frontend and the runtime values on worker components:
+Six environment variables control Dynamo's internal draining. Set the HTTP timeout on the Frontend and the runtime values on worker components:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` | `5` | How long the Frontend waits for admitted HTTP and WebSocket inference requests to finish before it cancels runtime state. |
 | `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS` | `5` | How long workers keep serving after endpoints unregister from discovery, before endpoints are invalidated. |
 | `DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` | `900` | Upper bound on waiting for in-flight requests to finish. If draining exceeds this, Dynamo logs the remaining endpoint count and tears down anyway. |
+| `DYN_WORKER_SHUTDOWN_INFLIGHT_TIMEOUT_SECS` | `900` | Upper bound on a worker waiting for admitted requests to finish, before it releases engine resources. |
+| `DYN_WORKER_SHUTDOWN_KV_TRANSFER_FALLBACK` | engine's choice | `wait` or `skip`. What a prefill worker does when its engine cannot report KV-transfer state. Overrides the engine's own declaration. Leave unset unless you know the engine holds no KV a decode peer could still be reading — `skip` can free GPU memory mid-transfer. |
+| `DYN_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECS` | `30` | Upper bound on a worker's `engine.cleanup()` (both Rust and Python engines run under the same Rust worker). If teardown exceeds this, Dynamo abandons the call — it keeps running until the process exits — and continues with transport teardown rather than hanging. Defaults to `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT` (30s release, 5s debug). |
 
 The defaults are sound for most deployments. Raise the relevant timeout only for long generations or sustained high utilization. Keep every internal timeout below `terminationGracePeriodSeconds` so Dynamo can finish its own cleanup before Kubernetes force-kills the pod.
+
+> **Rust backend workers spend one total budget, not a sum.** Each per-stage
+> timeout is a cap, and every stage draws from the same
+> `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT` deadline measured from SIGTERM: a
+> stage gets `min(its cap, what is left)`, with a reserve held back so cleanup
+> is always funded. Size `terminationGracePeriodSeconds` against that total
+> plus a margin, not against the sum of the individual caps.
+>
+> The frontend's `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` is separate — it
+> bounds a different process.
 
 </Step>
 

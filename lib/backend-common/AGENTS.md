@@ -50,7 +50,7 @@ opt-out and lets `run.rs` stay non-generic.
   Component Metrics** below for the push contract.
 
   Framework-owned lifecycle gauges
-  (`dynamo_component_{cleanup_time_seconds,drain_time_seconds,model_load_time_seconds}`)
+  (`dynamo_component_{cleanup_time_seconds,drain_time_seconds,model_load_time_seconds,shutdown_stage_seconds}`)
   are emitted by `Worker` independent of this method. The Worker
   constructs `LifecycleGauges` after `engine.start()` succeeds, seeds
   `model_load_time` with the elapsed `start()` time, and observes
@@ -75,14 +75,18 @@ opt-out and lets `run.rs` stay non-generic.
 - `is_quiescent(&self) -> Result<Option<bool>, DynamoError>` — optional,
   default `Ok(None)`. Whether in-flight KV transfers are done so GPU memory
   can be released. Polled **only on prefill workers**, every
-  `DRAIN_POLL_INTERVAL_S` between the grace period and `cleanup`:
+  `QUIESCENCE_POLL_INTERVAL` after the in-flight barrier and before `cleanup`:
   `Ok(Some(true))` exits the loop; `Ok(Some(false))`/`Ok(None)`/`Err`
-  keep polling until the budget expires. Budget = `DYN_PREFILL_DRAIN_TIMEOUT_S`
-  (default 30s) capped at `graceful_shutdown_timeout - CLEANUP_RESERVE_S`.
-  The default `Ok(None)` never frees KV early — vLLM and TRT-LLM keep it (no
-  reliable idle signal); SGLang overrides it by counting in-flight prefill
-  streams. The mode-gate, poll loop, and SIGTERM/SIGINT ownership live in the
-  `Worker`.
+  keep polling until the budget expires. The stage runs **after** the
+  request-plane in-flight barrier, so by the time it is polled no request is
+  executing — it waits only on transfers that outlive the request stream.
+  Budget = `min(DYN_PREFILL_DRAIN_TIMEOUT_S, remaining total - cleanup reserve)`;
+  see `shutdown.rs`.
+  The default `Ok(None)` never frees KV early. No Rust engine currently
+  overrides it — the vLLM, SGLang, and TRT-LLM sidecar adapters all inherit
+  the default, so their prefill drain waits the full budget rather than
+  exiting early. The Python `BaseEngine` default is `None` too. The
+  mode-gate, poll loop, and SIGTERM/SIGINT ownership live in the `Worker`.
 - `cleanup(&self) -> Result<(), DynamoError>` — called exactly once.
   Runs after `start()` returns Ok on shutdown (even if registration /
   serve fails), **and** after `start()` raises — so implementations
@@ -90,7 +94,13 @@ opt-out and lets `run.rs` stay non-generic.
   background tasks). Must also be idempotent: a second call after a
   successful first returns `Ok(())` without re-entering teardown. The
   conformance kit pins both — `CleanupWithoutStartFailed` and
-  `SecondCleanupFailed`.
+  `SecondCleanupFailed`. **Bounded** by
+  `DYN_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECS` (default: the post-signal
+  shutdown deadline); on expiry the `Worker` logs an error, abandons the
+  call, and continues to transport teardown. An engine that blocks here
+  delays but cannot prevent shutdown. Note "abandons" means the future is
+  dropped, not cancelled: a Python `cleanup()` coroutine already handed to
+  the event loop keeps running until the process exits.
 - `health_check_payload(&self) -> Result<Option<Value>, DynamoError>` —
   optional, default `Ok(None)`. Canary payload the runtime sends through
   `generate` to actively probe an idle endpoint; `None` disables active
@@ -550,7 +560,7 @@ Also available: `testing::mock_context()` and
 | File | What it does |
 |------|-------------|
 | `engine.rs` | `LLMEngine` trait, `EngineConfig`, `GenerateContext`, `MetricsBindings`, `OnSnapshotPublisherReady`, `ComponentSnapshot`, `chunk::token`, `LLMEngineOutputExt` setters, `usage()` helper. Re-exports `PreprocessedRequest` / `LLMEngineOutput` / `FinishReason` / `PrefillResult` / `BootstrapInfo` / etc. |
-| `metrics.rs` | `EngineMetrics` (capability handle passed to `setup_metrics` — `add_expfmt_callback` for foreign registries + precomputed `auto_labels` for FFI). `LifecycleGauges` (framework-owned `cleanup_time` / `drain_time` / `model_load_time`). `ComponentGauges` (per-rank `total_blocks` / `gpu_cache_usage_percent` / `kv_cache_hit_rate`; seeded at construction). |
+| `metrics.rs` | `EngineMetrics` (capability handle passed to `setup_metrics` — `add_expfmt_callback` for foreign registries + precomputed `auto_labels` for FFI). `LifecycleGauges` (framework-owned `cleanup_time` / `drain_time` / `model_load_time`, plus `shutdown_stage_seconds` labelled by `stage` and by the `reason` the stage ended — a 30s stage that completed and one that timed out are the same number and very different events). `ComponentGauges` (per-rank `total_blocks` / `gpu_cache_usage_percent` / `kv_cache_hit_rate`; seeded at construction). |
 | `snapshot_publisher.rs` | `SnapshotPublisher` — single push surface. `publish(dp_rank, ComponentSnapshot)` fans out inline to `ComponentGauges` and per-rank `WorkerMetricsPublisher`. |
 | `publisher.rs` | `setup_publishers` — constructs `KvEventPublisher`s + `SnapshotPublisher` from engine bindings; owned by `Worker` until shutdown. |
 | `worker.rs` | `Worker` — runtime lifecycle: create `DistributedRuntime`, register model (with `disaggregation_mode` adjustments), serve endpoint, orchestrate drain + cleanup. `WorkerConfig` lives here. |

@@ -235,9 +235,9 @@ fn error_outcome(error_type: ErrorType) -> &'static str {
         ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument) => {
             "rejected"
         }
-        ErrorType::ResourceExhausted
-        | ErrorType::WorkerOverloaded
-        | ErrorType::WorkerDraining => "rejected",
+        ErrorType::ResourceExhausted | ErrorType::WorkerOverloaded | ErrorType::WorkerDraining => {
+            "rejected"
+        }
         ErrorType::Unavailable | ErrorType::WorkerUnavailable => "unavailable",
         ErrorType::Cancelled | ErrorType::Backend(BackendError::Cancelled) => "cancelled",
         ErrorType::Unknown | ErrorType::Backend(BackendError::Unknown) => "error",

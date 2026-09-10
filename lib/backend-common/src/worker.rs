@@ -36,28 +36,16 @@ use crate::engine::{
     EngineConfig, KvEventSource, LLMEngine, MetricsBindings, MetricsCtx, RawEngine,
 };
 use crate::error::{BackendError, DynamoError, ErrorType};
-use crate::lifecycle::{RequestTracker, WorkerLifecycleController};
+use crate::lifecycle::RequestTracker;
+use crate::lifecycle::{
+    stage_await_inflight, stage_kv_quiescence, stage_router_grace, stage_stop_admission,
+    stage_unregister,
+};
 use crate::publisher::{PublisherHandles, setup_publishers};
-
-/// Default grace-period in seconds between discovery unregister and engine drain.
-/// Mirrors the Python `_DEFAULT_GRACE_PERIOD_SECS` constant.
-const DEFAULT_GRACE_PERIOD_SECS: f64 = 5.0;
-
-/// Environment variable name for overriding the grace-period.
-/// Shared with the Python helper so a single env var controls both.
-const GRACE_PERIOD_ENV: &str = "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS";
-
-/// Default drain budget: max time spent polling `is_quiescent` before cleanup.
-/// Capped at `graceful_shutdown_timeout - CLEANUP_RESERVE_S`.
-const DEFAULT_DRAIN_TIMEOUT_S: f64 = 30.0;
-const DRAIN_TIMEOUT_ENV: &str = "DYN_PREFILL_DRAIN_TIMEOUT_S";
-/// Interval between `engine.is_quiescent()` polls during drain.
-const DRAIN_POLL_INTERVAL_S: f64 = 0.5;
-/// Cadence at which the drain loop emits a progress log.
-const DRAIN_HEARTBEAT_INTERVAL_S: f64 = 5.0;
-/// Budget reserved for `cleanup()` so the drain loop can't consume the whole
-/// graceful-shutdown deadline and trip the hard-exit that skips cleanup.
-const CLEANUP_RESERVE_S: f64 = 5.0;
+use crate::shutdown::{
+    CLEANUP_RESERVE_S, CLEANUP_TIMEOUT_ENV, KvTransferFallback, ShutdownBudget, ShutdownConfig,
+    Stage, StageOutcome, StageReason, cleanup_timeout, total_budget,
+};
 
 /// Operator override for the health-check canary, mirrors the Python helper
 /// in `lib/bindings/python/src/dynamo/health_check.py`.
@@ -180,6 +168,8 @@ pub struct WorkerConfig {
     /// Runtime / transport overrides applied via env vars before the
     /// `DistributedRuntime` is constructed.
     pub runtime: RuntimeConfig,
+    /// Shutdown timing overrides. Unset fields fall back to the environment.
+    pub shutdown: ShutdownConfig,
     /// When `true`, this worker declares an upstream `Encode` dependency in
     /// its topology `needs`. Meaningful only for `Prefill` and `Aggregated`
     /// roles -- setting it on `Decode` or `Encode` is rejected at
@@ -232,6 +222,7 @@ impl Default for WorkerConfig {
             structural_tag_scope: StructuralTagScope::Auto,
             structural_tag_schema: StructuralTagSchemaMode::Auto,
             runtime: RuntimeConfig::default(),
+            shutdown: ShutdownConfig::default(),
             route_to_encoder: false,
             enable_rl: false,
             rl_metadata: None,
@@ -288,6 +279,16 @@ impl EngineKind {
         match self {
             EngineKind::Llm(e) => e.cleanup().await,
             EngineKind::Raw(e) => e.cleanup().await,
+        }
+    }
+
+    /// See [`LLMEngine::kv_transfer_fallback`]. Raw media engines are
+    /// aggregated, so the KV stage is skipped for them before the policy is
+    /// ever consulted.
+    pub(crate) fn kv_transfer_fallback(&self) -> KvTransferFallback {
+        match self {
+            EngineKind::Llm(e) => e.kv_transfer_fallback(),
+            EngineKind::Raw(_) => KvTransferFallback::Undeclared,
         }
     }
 
@@ -416,6 +417,15 @@ pub struct Worker {
     /// adapters that detach work (such as a separately scheduled language
     /// runtime task) remain responsible for cancelling that work themselves.
     engine_route_shutdown: CancellationToken,
+    /// Shared with the caller so transport teardown, which happens after
+    /// `run()` returns, can draw on the same deadline instead of starting a
+    /// fresh one. See [`Worker::shutdown_deadline`].
+    shutdown_deadline: Arc<std::sync::OnceLock<std::time::Instant>>,
+    /// The single SIGTERM-to-exit budget, armed once by whichever comes first:
+    /// the shutdown signal reaching the orchestrator, or a non-signal path
+    /// entering it (serve error, external `Runtime::shutdown`). Never reset —
+    /// every stage after it draws from the same deadline.
+    shutdown_budget: Option<ShutdownBudget>,
     /// KV-aware-routing publisher handles. Drained in `cleanup_once` while NATS is alive.
     publishers: Option<PublisherHandles>,
     /// Framework-owned lifecycle gauges. Set in `setup_publishing` after
@@ -447,6 +457,8 @@ impl Worker {
             )),
             engine_route_mutation: Arc::new(tokio::sync::Mutex::new(())),
             engine_route_shutdown: CancellationToken::new(),
+            shutdown_deadline: Arc::new(std::sync::OnceLock::new()),
+            shutdown_budget: None,
             publishers: None,
             lifecycle: None,
         }
@@ -455,17 +467,18 @@ impl Worker {
     /// Lifecycle driver. Takes owned `self` — `Worker` is single-shot and
     /// cannot be reused after `run()` returns.
     ///
-    /// Shutdown sequence (mirrors `graceful_shutdown_with_discovery` in
-    /// `components/src/dynamo/common/utils/graceful_shutdown.py`):
-    ///   1. `endpoint.unregister_endpoint_instance()` — router stops routing.
-    ///   2. Sleep `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS` (default 5s) to
-    ///      let in-flight router decisions complete.
-    ///   3. Poll `engine.is_quiescent()` until it returns true or the drain
-    ///      budget (`DYN_PREFILL_DRAIN_TIMEOUT_S`, default 30s) expires.
-    ///   4. `engine.cleanup()` — release engine resources while NATS / etcd
+    /// Shutdown sequence, driven by [`orchestrator_steps`](Self::orchestrator_steps)
+    /// with every stage drawing on one budget armed at the first entry:
+    ///   1. unregister from discovery — routers stop selecting this worker.
+    ///   2. router grace — keep serving while routers observe that.
+    ///   3. stop admission — reject new requests with `WorkerDraining`.
+    ///   4. wait for in-flight requests to finish. This precedes cleanup so a
+    ///      request can never execute against memory cleanup has released.
+    ///   5. on prefill, wait for KV-transfer quiescence.
+    ///   6. `engine.cleanup()` — release engine resources while NATS / etcd
     ///      are still reachable.
-    ///   5. Return — caller (`run.rs`) drives `runtime.shutdown()` for
-    ///      request-plane drain and transport teardown.
+    ///   7. Return — the caller (`run.rs`) awaits transport teardown, spending
+    ///      what is left of the same budget.
     ///
     /// A SIGTERM/SIGINT listener is installed at the top of `run` and
     /// shared via a [`CancellationToken`]:
@@ -531,6 +544,7 @@ impl Worker {
         // risk), otherwise we force-exit. Healthy long-running workers
         // never hit this — the timer only starts after `shutdown_token`
         // is cancelled.
+        let shutdown_config = self.config.shutdown;
         let outcome = {
             let inner_fut = self.run_inner(runtime, &shutdown_token);
             tokio::pin!(inner_fut);
@@ -538,14 +552,14 @@ impl Worker {
             tokio::select! {
                 result = &mut inner_fut => result,
                 _ = shutdown_token.cancelled() => {
-                    let timeout = graceful_shutdown_timeout();
-                    let grace = grace_period_secs();
-                    let deadline = shutdown_deadline(timeout, grace);
+                    // The same total the stages spend against. Reading the
+                    // environment here instead would ignore a programmatic
+                    // `total_secs` and force-exit on a different deadline than
+                    // the one the budget was handing out.
+                    let deadline = total_budget(&shutdown_config);
                     tracing::debug!(
-                        "graceful shutdown started; deadline {}s ({}s timeout + {:.2}s grace)",
+                        "graceful shutdown started; deadline {}s",
                         deadline.as_secs(),
-                        timeout.as_secs(),
-                        grace,
                     );
                     match tokio::time::timeout(deadline, &mut inner_fut).await {
                         Ok(result) => result,
@@ -864,19 +878,87 @@ impl Worker {
     /// Full graceful-shutdown orchestrator: discovery unregister →
     /// grace period → engine drain → cleanup. Shared by every shutdown path —
     /// pre-serve (mid-start signal) and the serve loop's signal arm.
+    /// The terminal shutdown sequence, in order, drawing on one budget:
+    ///
+    /// ```text
+    /// unregister -> router grace -> stop admission
+    ///   -> wait in-flight == 0 -> KV quiescence -> cleanup
+    /// ```
+    ///
+    /// Each stage appears exactly once here. An earlier revision split the
+    /// first three into a separate helper and ended up serving the router
+    /// grace twice, which at the debug defaults consumed the whole deadline
+    /// before cleanup was reached; one call site per stage makes that
+    /// unrepresentable.
+    ///
+    /// `tracker` is `None` only on the pre-serve path — a signal arriving
+    /// during startup, before any adapter exists, so nothing can be in flight.
     async fn orchestrator_steps(
         &mut self,
         endpoint: &dynamo_runtime::component::Endpoint,
-        lifecycle: Option<&WorkerLifecycleController>,
+        tracker: Option<&RequestTracker>,
     ) {
-        if let Some(lifecycle) = lifecycle {
-            lifecycle.begin_shutdown().await;
-        } else if let Err(e) = endpoint.unregister_endpoint_instance().await {
-            tracing::warn!(error = %e, "discovery unregister failed");
-        } else {
-            tracing::info!("Endpoint unregistered from discovery");
+        // Armed before the first stage, so every stage below shares one
+        // deadline measured from here.
+        let budget = self.arm_shutdown_budget();
+        // Nothing cancels the terminal path: it is irreversible by
+        // construction. The reversible drain that needs cancellation lives
+        // with the worker Admin API.
+        let cancel = CancellationToken::new();
+
+        let outcome = stage_unregister(endpoint, &budget).await;
+        self.observe_stage(&outcome);
+
+        let outcome = stage_router_grace(None, &budget, &cancel).await;
+        self.observe_stage(&outcome);
+
+        if let Some(tracker) = tracker {
+            let outcome = stage_stop_admission(tracker, &budget);
+            self.observe_stage(&outcome);
+
+            // The request-plane barrier, before anything frees engine memory.
+            let outcome = stage_await_inflight(tracker, &budget, &cancel).await;
+            self.observe_stage(&outcome);
         }
-        self.run_engine_shutdown_steps().await;
+
+        self.run_engine_shutdown_steps(&budget, &cancel).await;
+    }
+
+    /// Record one shutdown stage on `dynamo_component_shutdown_stage_seconds`.
+    /// No-op before the gauges exist (a signal arriving during startup).
+    fn observe_stage(&self, outcome: &StageOutcome) {
+        if let Some(gauges) = self.lifecycle.as_ref() {
+            gauges.observe_shutdown_stage(outcome);
+        }
+    }
+
+    /// Arm the total shutdown budget, or return the one already armed.
+    ///
+    /// Idempotent on purpose: several paths reach the orchestrator, and the
+    /// deadline must start at the first of them and never restart. Paths that
+    /// arrive without a signal (serve error, external `Runtime::shutdown`)
+    /// still get a budget, so `engine.cleanup()` stays bounded on the paths
+    /// where the hard-exit timer was never armed.
+    fn arm_shutdown_budget(&mut self) -> ShutdownBudget {
+        let config = self.config.shutdown;
+        let budget = *self
+            .shutdown_budget
+            .get_or_insert_with(|| ShutdownBudget::from_config(&config));
+        // Publish the instant the whole shutdown must finish by, so the caller
+        // driving transport teardown after `run()` returns spends what is left
+        // of this budget rather than starting a second one.
+        if let Some(remaining) = budget.remaining() {
+            let _ = self
+                .shutdown_deadline
+                .set(std::time::Instant::now() + remaining);
+        }
+        budget
+    }
+
+    /// Handle to the shutdown deadline, readable after `run()` has consumed
+    /// the `Worker`. Unset until shutdown begins.
+    pub fn shutdown_deadline(&self) -> Arc<std::sync::OnceLock<std::time::Instant>> {
+        Arc::clone(&self.shutdown_deadline)
     }
 
     /// Start the engine exactly once. `Worker::run` consumes `self`, so all
@@ -920,10 +1002,61 @@ impl Worker {
             LifecycleState::Running | LifecycleState::StartFailed => {}
         }
         let cleanup_start = std::time::Instant::now();
-        match self.engine.cleanup().await {
-            Ok(()) => tracing::info!("Engine cleanup complete"),
-            Err(e) => tracing::error!(error = %e, "engine cleanup failed"),
-        }
+        // Bounded: an engine that hangs in cleanup must not wedge the worker.
+        // On the signal path the outer deadline would eventually hard-exit,
+        // but the serve-error and external-shutdown paths never arm it, so
+        // without this an engine could hang the process indefinitely.
+        // Cleanup draws from the same total as every other stage. Three cases
+        // are deliberately distinct:
+        //   * no budget armed  — not a shutdown path; use the configured bound
+        //   * unbounded        — reversible drain; use the configured bound
+        //   * zero remaining   — the total is spent, but abandoning teardown
+        //     leaks GPU memory, so cleanup still gets the reserve floor and
+        //     the hard-exit deadline remains the real backstop
+        let budget = match self.shutdown_budget.map(|b| b.allowance(Stage::Cleanup)) {
+            None | Some(None) => cleanup_timeout(),
+            Some(Some(remaining)) if remaining.is_zero() => {
+                tracing::warn!(
+                    "shutdown budget exhausted before cleanup; granting the {:.0}s reserve",
+                    CLEANUP_RESERVE_S
+                );
+                Duration::from_secs_f64(CLEANUP_RESERVE_S)
+            }
+            Some(Some(remaining)) => remaining,
+        };
+        // An engine error is still a completed stage: teardown ran and
+        // returned. Only the timeout means the stage did not finish.
+        let cleanup_reason = match tokio::time::timeout(budget, self.engine.cleanup()).await {
+            Ok(Ok(())) => {
+                tracing::info!("Engine cleanup complete");
+                StageReason::Completed
+            }
+            Ok(Err(e)) => {
+                tracing::error!(error = %e, "engine cleanup failed");
+                StageReason::Completed
+            }
+            Err(_) => {
+                tracing::error!(
+                    timeout_secs = budget.as_secs(),
+                    "engine cleanup exceeded its budget; abandoning it and continuing shutdown. \
+                     Set {} to override.",
+                    CLEANUP_TIMEOUT_ENV
+                );
+                StageReason::TimedOut
+            }
+        };
+        let cleanup_outcome = StageOutcome::new(
+            Stage::Cleanup,
+            cleanup_reason,
+            cleanup_start.elapsed(),
+            &self
+                .shutdown_budget
+                .unwrap_or_else(ShutdownBudget::unbounded),
+        );
+        // Logged as well as measured: every other stage emits a record, and a
+        // log-only consumer was seeing six stages where there are seven.
+        cleanup_outcome.log();
+        self.observe_stage(&cleanup_outcome);
         let cleanup_elapsed = cleanup_start.elapsed().as_secs_f64();
         // Record cleanup latency on dynamo_component_cleanup_time_seconds.
         // The gauge is operator-useful when scraped in the brief window
@@ -1016,13 +1149,6 @@ impl Worker {
         // (`RawEngineAdapter`) is already JSON-shaped, so it serves as its
         // own probe. The tuple annotation drives the trait-object coercions.
         let request_tracker = RequestTracker::new();
-        let lifecycle = WorkerLifecycleController::new(
-            Arc::clone(&request_tracker),
-            endpoint.clone(),
-            self.engine.clone(),
-            self.config.disaggregation_mode,
-            Duration::from_secs_f64(grace_period_secs()),
-        );
 
         let (ingress, probe_engine): (
             Arc<dyn dynamo_runtime::pipeline::network::PushWorkHandler>,
@@ -1129,7 +1255,7 @@ impl Worker {
                 Ok(endpoint) => endpoint,
                 Err(error) => {
                     self.begin_engine_route_shutdown().await;
-                    self.orchestrator_steps(&endpoint, Some(&lifecycle)).await;
+                    self.orchestrator_steps(&endpoint, Some(&request_tracker)).await;
                     return Err(err(
                         ErrorType::Backend(BackendError::Unknown),
                         format!("serve: {error}"),
@@ -1138,7 +1264,7 @@ impl Worker {
             },
             _ = shutdown.cancelled() => {
                 self.begin_engine_route_shutdown().await;
-                self.orchestrator_steps(&endpoint, Some(&lifecycle)).await;
+                self.orchestrator_steps(&endpoint, Some(&request_tracker)).await;
                 return Ok(());
             }
         };
@@ -1151,15 +1277,14 @@ impl Worker {
             if let Err(error) = primary_endpoint.shutdown().await {
                 tracing::warn!(%error, "primary endpoint shutdown failed");
             }
-            self.orchestrator_steps(&endpoint, Some(&lifecycle)).await;
+            self.orchestrator_steps(&endpoint, Some(&request_tracker))
+                .await;
             return Ok(());
         }
 
         // Administrative routes are registered above, but remain gated until
         // the exact primary discovery instance is callable.
         self.activate_engine_routes().await;
-
-        lifecycle.register_admin_routes(endpoint.drt().engine_routes());
 
         let rl_endpoint = if let Some(rl_config) = rl_config {
             match crate::rl::serve_endpoint(&endpoint, rl_config).await {
@@ -1169,7 +1294,8 @@ impl Worker {
                     if let Err(shutdown_error) = primary_endpoint.shutdown().await {
                         tracing::warn!(%shutdown_error, "primary endpoint shutdown failed");
                     }
-                    self.orchestrator_steps(&endpoint, Some(&lifecycle)).await;
+                    self.orchestrator_steps(&endpoint, Some(&request_tracker))
+                        .await;
                     return Err(err(
                         ErrorType::Backend(BackendError::Unknown),
                         format!("RL endpoint setup: {error}"),
@@ -1222,184 +1348,35 @@ impl Worker {
             tracing::warn!(%error, "RL discovery endpoint shutdown failed");
         }
 
-        self.orchestrator_steps(&endpoint, Some(&lifecycle)).await;
+        self.orchestrator_steps(&endpoint, Some(&request_tracker))
+            .await;
         serve_result
     }
 
-    /// Engine-facing shutdown sequence: grace period sleep → drain loop on
-    /// `engine.is_quiescent()` → `cleanup_once()`. Each engine step swallows
-    /// non-fatal failures so a misbehaving engine can't block the worker
-    /// from exiting.
-    async fn run_engine_shutdown_steps(&mut self) {
-        self.run_engine_shutdown_steps_with_grace(grace_period_secs())
-            .await
-    }
-
-    /// Same as [`run_engine_shutdown_steps`] but with an explicit grace
-    /// period. Lets unit tests assert on call ordering without setting
-    /// `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS` (which is process-global
-    /// and would race other parallel tests).
-    async fn run_engine_shutdown_steps_with_grace(&mut self, grace: f64) {
-        if grace > 0.0 {
-            tracing::info!("Grace period {:.2}s before drain", grace);
-            tokio::time::sleep(Duration::from_secs_f64(grace)).await;
-        }
-
-        let drain_start = std::time::Instant::now();
-        self.drain_until_idle_or_deadline().await;
-        let drain_elapsed = drain_start.elapsed().as_secs_f64();
-        if let Some(lifecycle) = self.lifecycle.as_ref() {
-            lifecycle.observe_drain_time(drain_elapsed);
+    /// The engine-facing tail of the sequence: KV quiescence, then cleanup.
+    /// Split out only because several early-return paths reach it without
+    /// having served the earlier stages.
+    async fn run_engine_shutdown_steps(
+        &mut self,
+        budget: &ShutdownBudget,
+        cancel: &CancellationToken,
+    ) {
+        let outcome = stage_kv_quiescence(
+            &self.engine,
+            self.config.disaggregation_mode,
+            budget,
+            cancel,
+        )
+        .await;
+        self.observe_stage(&outcome);
+        // Kept alongside the per-stage gauge: existing dashboards read
+        // `drain_time_seconds`, and the KV wait is what it has always meant.
+        if let Some(gauges) = self.lifecycle.as_ref() {
+            gauges.observe_drain_time(outcome.elapsed.as_secs_f64());
         }
 
         self.cleanup_once().await;
     }
-
-    /// Hold a prefill worker open until its KV transfers finish, so cleanup
-    /// doesn't free GPU memory a decode peer is still pulling.
-    ///
-    /// Prefill-only: aggregated/decode workers return immediately. Otherwise
-    /// poll [`is_quiescent`](LLMEngine::is_quiescent) every
-    /// `DRAIN_POLL_INTERVAL_S`, exiting on `Some(true)` or when the budget
-    /// expires. Budget = `DYN_PREFILL_DRAIN_TIMEOUT_S` capped at
-    /// `graceful_shutdown_timeout - CLEANUP_RESERVE_S`.
-    async fn drain_until_idle_or_deadline(&self) {
-        if !self.config.disaggregation_mode.is_prefill() {
-            return;
-        }
-        let configured = drain_timeout_secs();
-        let cap = (graceful_shutdown_timeout().as_secs_f64() - CLEANUP_RESERVE_S).max(0.0);
-        let budget = configured.min(cap);
-        let deadline = std::time::Instant::now() + Duration::from_secs_f64(budget);
-        let start = std::time::Instant::now();
-        let mut last_heartbeat = start;
-        let mut announced = false;
-        loop {
-            match self.engine.is_quiescent().await {
-                // Quiescent: in-flight transfers done, safe to exit drain.
-                Ok(Some(true)) => {
-                    if announced {
-                        tracing::info!(
-                            "drain: exited (quiescent, elapsed={:.1}s)",
-                            start.elapsed().as_secs_f64()
-                        );
-                    }
-                    return;
-                }
-                // Busy (Some(false)) or no introspection (None): keep polling.
-                Ok(Some(false)) | Ok(None) => {}
-                Err(e) => {
-                    tracing::debug!(error = %e, "is_quiescent raised; treating as not quiescent")
-                }
-            }
-            if !announced {
-                // First non-quiescent poll: announce once that we're waiting.
-                tracing::info!(
-                    "drain: waiting for prefill to quiesce; polling is_quiescent (timeout={:.1}s)",
-                    budget
-                );
-                announced = true;
-            }
-            if std::time::Instant::now() >= deadline {
-                tracing::warn!(
-                    "drain: timed out at {:.1}s; proceeding with cleanup",
-                    start.elapsed().as_secs_f64()
-                );
-                return;
-            }
-            if last_heartbeat.elapsed().as_secs_f64() >= DRAIN_HEARTBEAT_INTERVAL_S {
-                tracing::info!(
-                    "drain: heartbeat (elapsed={:.1}s)",
-                    start.elapsed().as_secs_f64()
-                );
-                last_heartbeat = std::time::Instant::now();
-            }
-            tokio::time::sleep(Duration::from_secs_f64(DRAIN_POLL_INTERVAL_S)).await;
-        }
-    }
-}
-
-/// Drain-budget resolver: `DYN_PREFILL_DRAIN_TIMEOUT_S` with the same
-/// validation policy as `grace_period_secs` (invalid → default, negative
-/// → 0).
-fn drain_timeout_secs() -> f64 {
-    match std::env::var(DRAIN_TIMEOUT_ENV) {
-        Err(_) => DEFAULT_DRAIN_TIMEOUT_S,
-        Ok(s) if s.is_empty() => DEFAULT_DRAIN_TIMEOUT_S,
-        Ok(s) => match s.parse::<f64>() {
-            Ok(v) if !v.is_finite() => {
-                tracing::warn!(
-                    "Non-finite {}={:?}; using default {:.1}s",
-                    DRAIN_TIMEOUT_ENV,
-                    s,
-                    DEFAULT_DRAIN_TIMEOUT_S
-                );
-                DEFAULT_DRAIN_TIMEOUT_S
-            }
-            Ok(v) if v < 0.0 => {
-                tracing::warn!("Negative {}={:?}; clamping to 0", DRAIN_TIMEOUT_ENV, s);
-                0.0
-            }
-            Ok(v) => v,
-            Err(_) => {
-                tracing::warn!(
-                    "Invalid {}={:?}; using default {:.1}s",
-                    DRAIN_TIMEOUT_ENV,
-                    s,
-                    DEFAULT_DRAIN_TIMEOUT_S
-                );
-                DEFAULT_DRAIN_TIMEOUT_S
-            }
-        },
-    }
-}
-
-/// Read the post-signal shutdown deadline from
-/// `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT` (matching `dynamo_runtime::Worker`).
-/// On expiry the worker hard-exits with [`EXIT_CODE_SHUTDOWN_TIMEOUT`] — same contract as the
-/// upstream `worker.execute` flow we bypass. Defaults are imported from
-/// `dynamo_runtime::worker` so a default change there propagates here
-/// without manual sync.
-fn graceful_shutdown_timeout() -> Duration {
-    use dynamo_runtime::config::environment_names::worker as env_worker;
-    use dynamo_runtime::worker::{
-        DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG, DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_RELEASE,
-    };
-
-    let default = if cfg!(debug_assertions) {
-        DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG
-    } else {
-        DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_RELEASE
-    };
-
-    let value = std::env::var(env_worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT).ok();
-    let secs = graceful_shutdown_timeout_secs(value.as_deref(), default);
-    Duration::from_secs(secs)
-}
-
-fn graceful_shutdown_timeout_secs(value: Option<&str>, default: u64) -> u64 {
-    value
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(default)
-}
-
-/// Compose the post-signal shutdown deadline from the drain+cleanup
-/// timeout and the grace-period sleep that precedes them.
-///
-/// The grace sleep is a fixed wait (not a hang risk), so reserving its
-/// duration on top of `timeout` ensures the drain loop and
-/// `engine.cleanup()` always get the full timeout budget regardless of
-/// how the operator configures the grace period. Without this reserve,
-/// a grace period equal to the timeout (the debug default — both 5s)
-/// consumes the whole budget and the deadline expires before drain or
-/// cleanup get scheduled.
-fn shutdown_deadline(timeout: Duration, grace_secs: f64) -> Duration {
-    let grace = if grace_secs > 0.0 {
-        Duration::from_secs_f64(grace_secs)
-    } else {
-        Duration::ZERO
-    };
-    timeout.saturating_add(grace)
 }
 
 /// Validate that `value` is a JSON object and stamp the canary marker on
@@ -1453,32 +1430,6 @@ fn load_health_check_payload(raw: Option<&str>) -> Option<serde_json::Value> {
             tracing::warn!(env = HEALTH_CHECK_PAYLOAD_ENV, error = %e, "parse failed");
             None
         }
-    }
-}
-
-/// Read the grace-period seconds from `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS`,
-/// matching the Python helper. Negative values clamp to 0.
-fn grace_period_secs() -> f64 {
-    let value = std::env::var(GRACE_PERIOD_ENV).ok();
-    grace_period_secs_from(value.as_deref())
-}
-
-fn grace_period_secs_from(value: Option<&str>) -> f64 {
-    match value {
-        Some(s) if !s.is_empty() => match s.parse::<f64>() {
-            Ok(v) if v >= 0.0 => v,
-            Ok(_) => 0.0,
-            Err(_) => {
-                tracing::warn!(
-                    "Invalid {}={:?}; using default {}",
-                    GRACE_PERIOD_ENV,
-                    s,
-                    DEFAULT_GRACE_PERIOD_SECS
-                );
-                DEFAULT_GRACE_PERIOD_SECS
-            }
-        },
-        _ => DEFAULT_GRACE_PERIOD_SECS,
     }
 }
 
@@ -3005,6 +2956,55 @@ mod tests {
         assert_eq!(worker.state, LifecycleState::Stopped);
     }
 
+    /// Engine whose `cleanup` never returns — stands in for a native
+    /// teardown that deadlocks on a driver lock or a child process.
+    struct HangingCleanupEngine;
+
+    #[async_trait]
+    impl LLMEngine for HangingCleanupEngine {
+        async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
+            Ok(EngineConfig {
+                model: "mock".to_string(),
+                ..EngineConfig::default()
+            })
+        }
+
+        async fn generate(
+            &self,
+            _request: PreprocessedRequest,
+            _ctx: crate::engine::GenerateContext,
+        ) -> Result<
+            BoxStream<'static, Result<crate::engine::LLMEngineOutput, DynamoError>>,
+            DynamoError,
+        > {
+            unreachable!("not used in cleanup tests")
+        }
+
+        async fn cleanup(&self) -> Result<(), DynamoError> {
+            std::future::pending::<()>().await;
+            unreachable!("pending never resolves")
+        }
+    }
+
+    /// A wedged `engine.cleanup()` must not wedge the worker. Before this was
+    /// bounded, the serve-error and external-shutdown paths (which never arm
+    /// the post-signal deadline) could hang the process forever.
+    #[tokio::test(start_paused = true)]
+    async fn cleanup_once_is_bounded_when_engine_hangs() {
+        let mut worker = worker_with(Arc::new(HangingCleanupEngine));
+        worker.start_engine(0).await.unwrap();
+
+        // Outer guard is far larger than the cleanup budget: if cleanup_once
+        // were still unbounded this would hang rather than fail.
+        tokio::time::timeout(Duration::from_secs(3600), worker.cleanup_once())
+            .await
+            .expect("cleanup_once must be bounded; it hung past the outer guard");
+
+        // State advances despite the timeout so shutdown continues to
+        // transport teardown instead of retrying a wedged teardown.
+        assert_eq!(worker.state, LifecycleState::Stopped);
+    }
+
     // The pre-start shutdown path is handled in `run_inner` via a
     // `CancellationToken` cancellation check before `start_engine` is
     // called — not by flipping state to `Stopped` first. There is no
@@ -3016,6 +3016,7 @@ mod tests {
     // Orchestrator step-ordering tests
     // -------------------------------------------------------------------
 
+    use crate::shutdown::DRAIN_TIMEOUT_ENV;
     use std::sync::Mutex as StdMutex;
 
     /// Serializes env-mutating drain tests in this module so cargo's parallel
@@ -3087,7 +3088,9 @@ mod tests {
         let mut worker = worker_with_prefill(engine);
         worker.start_engine(0).await.unwrap();
 
-        worker.run_engine_shutdown_steps_with_grace(0.0).await;
+        worker
+            .run_engine_shutdown_steps(&ShutdownBudget::from_env(), &CancellationToken::new())
+            .await;
 
         let recorded = log.lock().unwrap().clone();
         assert_eq!(
@@ -3115,7 +3118,9 @@ mod tests {
         let mut worker = worker_with_prefill(engine);
         worker.start_engine(0).await.unwrap();
 
-        worker.run_engine_shutdown_steps_with_grace(0.0).await;
+        worker
+            .run_engine_shutdown_steps(&ShutdownBudget::from_env(), &CancellationToken::new())
+            .await;
 
         // is_quiescent ran at least once (and errored), then cleanup ran.
         let recorded = log.lock().unwrap().clone();
@@ -3142,7 +3147,9 @@ mod tests {
         let mut worker = worker_with(engine); // WorkerConfig::default() => Aggregated
         worker.start_engine(0).await.unwrap();
 
-        worker.run_engine_shutdown_steps_with_grace(0.0).await;
+        worker
+            .run_engine_shutdown_steps(&ShutdownBudget::from_env(), &CancellationToken::new())
+            .await;
 
         let recorded = log.lock().unwrap().clone();
         assert_eq!(
@@ -3157,38 +3164,6 @@ mod tests {
     // shutdown returns from `run_inner` before `serve_with_orchestrator`
     // (and therefore `run_engine_shutdown_steps`) ever runs. So we don't
     // pin a contract for run_engine_shutdown_steps in the Stopped state.
-
-    #[test]
-    fn grace_period_default_when_unset() {
-        assert_eq!(grace_period_secs_from(None), DEFAULT_GRACE_PERIOD_SECS);
-    }
-
-    #[test]
-    fn grace_period_parses_valid_value() {
-        assert_eq!(grace_period_secs_from(Some("2.5")), 2.5);
-    }
-
-    #[test]
-    fn grace_period_clamps_negative_to_zero() {
-        assert_eq!(grace_period_secs_from(Some("-1")), 0.0);
-    }
-
-    #[test]
-    fn grace_period_falls_back_to_default_on_parse_error() {
-        assert_eq!(
-            grace_period_secs_from(Some("not-a-number")),
-            DEFAULT_GRACE_PERIOD_SECS
-        );
-    }
-
-    #[test]
-    fn grace_period_treats_empty_as_unset() {
-        assert_eq!(grace_period_secs_from(Some("")), DEFAULT_GRACE_PERIOD_SECS);
-    }
-
-    // -------------------------------------------------------------------
-    // load_health_check_payload_from_env
-    // -------------------------------------------------------------------
 
     #[test]
     fn health_check_payload_env_returns_object() {
@@ -3233,137 +3208,31 @@ mod tests {
         );
     }
 
-    // -------------------------------------------------------------------
-    // graceful_shutdown_timeout env-var parsing
-    // -------------------------------------------------------------------
-
-    fn expected_default_timeout_secs() -> u64 {
-        if cfg!(debug_assertions) {
-            dynamo_runtime::worker::DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG
-        } else {
-            dynamo_runtime::worker::DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_RELEASE
-        }
-    }
-
-    #[test]
-    fn shutdown_timeout_default_when_unset() {
-        assert_eq!(
-            graceful_shutdown_timeout_secs(None, expected_default_timeout_secs()),
-            expected_default_timeout_secs()
-        );
-    }
-
-    #[test]
-    fn shutdown_timeout_parses_valid_value() {
-        assert_eq!(
-            graceful_shutdown_timeout_secs(Some("42"), expected_default_timeout_secs()),
-            42
-        );
-    }
-
-    #[test]
-    fn shutdown_timeout_falls_back_to_default_on_parse_error() {
-        assert_eq!(
-            graceful_shutdown_timeout_secs(Some("not-a-number"), expected_default_timeout_secs()),
-            expected_default_timeout_secs()
-        );
-    }
-
-    #[test]
-    fn shutdown_timeout_treats_empty_as_unset() {
-        assert_eq!(
-            graceful_shutdown_timeout_secs(Some(""), expected_default_timeout_secs()),
-            expected_default_timeout_secs()
-        );
-    }
-
-    // -------------------------------------------------------------------
-    // shutdown_deadline composition + budget interaction with the grace
-    // sleep. Regression coverage for the bug where deadline == timeout
-    // and grace == timeout (the debug default) starves drain + cleanup.
-    // -------------------------------------------------------------------
-
-    #[test]
-    fn shutdown_deadline_adds_grace_to_timeout() {
-        assert_eq!(
-            shutdown_deadline(Duration::from_secs(5), 5.0),
-            Duration::from_secs(10)
-        );
-        assert_eq!(
-            shutdown_deadline(Duration::from_secs(30), 0.0),
-            Duration::from_secs(30)
-        );
-        assert_eq!(
-            shutdown_deadline(Duration::from_secs(2), 0.5),
-            Duration::from_millis(2_500)
-        );
-    }
-
-    #[test]
-    fn shutdown_deadline_clamps_negative_grace() {
-        assert_eq!(
-            shutdown_deadline(Duration::from_secs(5), -1.0),
-            Duration::from_secs(5)
-        );
-    }
-
-    /// Regression: with the buggy deadline (timeout only, no grace
-    /// reserve), a grace period at or above the timeout consumes the
-    /// whole budget and drain + cleanup never get scheduled. This is
-    /// the default-env debug failure mode — DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG
-    /// (5) equals DEFAULT_GRACE_PERIOD_SECS (5.0), and the unregister
-    /// network call (~ms-scale) tips sleep past the deadline. We use
-    /// grace > timeout to model that real-world latency deterministically
-    /// in virtual time.
+    /// The engine-facing tail must run to completion under the real
+    /// configured budget, not just an artificial one — this is the assertion
+    /// that would fail if a stage ever consumed the budget the stages after it
+    /// need.
+    ///
+    /// Grace-period capping itself is a property of `stage_router_grace` and
+    /// `ShutdownBudget::allowance`, covered directly in `shutdown.rs` and
+    /// `lifecycle.rs`.
     #[tokio::test(start_paused = true)]
-    async fn timeout_alone_starves_drain_cleanup_when_grace_meets_timeout() {
-        let (engine, log) = OrderingMockEngine::new(false);
-        let mut worker = worker_with(engine);
-        worker.start_engine(0).await.unwrap();
-
-        let timeout = Duration::from_secs(5);
-        let grace = 5.1;
-
-        // The pre-fix deadline (timeout, no grace reserve).
-        let result =
-            tokio::time::timeout(timeout, worker.run_engine_shutdown_steps_with_grace(grace)).await;
-        assert!(
-            result.is_err(),
-            "buggy deadline must expire before drain/cleanup run"
-        );
-
-        let recorded = log.lock().unwrap().clone();
-        assert_eq!(
-            recorded,
-            vec!["start"],
-            "drain and cleanup must not have been observed"
-        );
-    }
-
-    /// The fix: deadline = timeout + grace. Same scenario as above —
-    /// grace exceeding the raw timeout — but drain and cleanup now both
-    /// complete because the grace sleep is reserved on top of the
-    /// timeout budget.
-    #[tokio::test(start_paused = true)]
-    async fn shutdown_deadline_reserves_grace_so_drain_cleanup_complete() {
+    async fn engine_tail_completes_under_the_configured_budget() {
         let (engine, log) = OrderingMockEngine::new(false);
         let mut worker = worker_with_prefill(engine);
         worker.start_engine(0).await.unwrap();
 
-        let timeout = Duration::from_secs(5);
-        let grace = 5.1;
-
-        let deadline = shutdown_deadline(timeout, grace);
-        let result =
-            tokio::time::timeout(deadline, worker.run_engine_shutdown_steps_with_grace(grace))
-                .await;
-        assert!(
-            result.is_ok(),
-            "fixed deadline must allow drain + cleanup to finish"
-        );
+        let budget = ShutdownBudget::from_env();
+        worker
+            .run_engine_shutdown_steps(&budget, &CancellationToken::new())
+            .await;
 
         let recorded = log.lock().unwrap().clone();
-        assert_eq!(recorded, vec!["start", "is_quiescent", "cleanup"]);
+        assert_eq!(
+            recorded,
+            vec!["start", "is_quiescent", "cleanup"],
+            "KV quiescence must run, and cleanup must still be reached after it"
+        );
     }
 
     // -------------------------------------------------------------------

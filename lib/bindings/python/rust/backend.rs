@@ -25,6 +25,10 @@ use dynamo_backend_common::{
     ErrorType, KvEventSource as RsKvEventSource, LLMEngine, LLMEngineOutput,
     LlmRegistration as RsLlmRegistration, MetricsBindings, MetricsCtx, OnPublisherReady,
     PreprocessedRequest, RawEngine, RuntimeConfig as RsRuntimeConfig,
+    shutdown::{
+        KvTransferFallback as RsKvTransferFallback, ShutdownConfig as RsShutdownConfig,
+        is_valid_configured_secs as rs_is_valid_configured_secs,
+    },
     SnapshotPublisher as RsSnapshotPublisher, Worker as RsWorker, WorkerConfig as RsWorkerConfig,
 };
 use dynamo_llm::local_model::runtime_config::{
@@ -71,6 +75,7 @@ pub fn add_to_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<EngineConfig>()?;
     m.add_class::<LlmRegistration>()?;
     m.add_class::<RuntimeConfig>()?;
+    m.add_class::<ShutdownConfig>()?;
     m.add_class::<WorkerConfig>()?;
     m.add_class::<Worker>()?;
     m.add_class::<PySnapshotPublisher>()?;
@@ -394,6 +399,87 @@ impl RuntimeConfig {
 }
 
 // ---------------------------------------------------------------------------
+// ShutdownConfig
+// ---------------------------------------------------------------------------
+
+/// Shutdown timing overrides. Every field is optional; an unset field falls
+/// back to the corresponding environment variable, then the built-in default.
+///
+/// Nested rather than flattened onto `WorkerConfig` so a new knob costs one
+/// edit here instead of one in each of the Rust struct, this signature and the
+/// Python dataclass.
+#[pyclass(module = "dynamo._core.backend", name = "ShutdownConfig")]
+#[derive(Clone, Default)]
+pub struct ShutdownConfig {
+    inner: RsShutdownConfig,
+}
+
+#[pymethods]
+impl ShutdownConfig {
+    #[new]
+    #[pyo3(signature = (
+        total_secs = None,
+        router_grace_secs = None,
+        inflight_timeout_secs = None,
+        kv_transfer_timeout_secs = None,
+        cleanup_timeout_secs = None,
+        kv_transfer_fallback = None,
+    ))]
+    fn new(
+        total_secs: Option<f64>,
+        router_grace_secs: Option<f64>,
+        inflight_timeout_secs: Option<f64>,
+        kv_transfer_timeout_secs: Option<f64>,
+        cleanup_timeout_secs: Option<f64>,
+        kv_transfer_fallback: Option<String>,
+    ) -> PyResult<Self> {
+        // Parsed here rather than accepted as a free string so a typo fails at
+        // construction, not silently at shutdown time.
+        let kv_transfer_fallback = match kv_transfer_fallback.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(value) => match value.to_ascii_lowercase().as_str() {
+                "wait" => Some(RsKvTransferFallback::WaitFullBudget),
+                "skip" => Some(RsKvTransferFallback::Skip),
+                other => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "kv_transfer_fallback must be 'wait' or 'skip', got {other:?}"
+                    )));
+                }
+            },
+        };
+        // Validated here, not at shutdown: `Duration::from_secs_f64` panics on
+        // a value it cannot represent, and a panic while shutting down aborts
+        // the drain. `inf` and `1e30` both reach that call unless rejected.
+        for (name, value) in [
+            ("total_secs", total_secs),
+            ("router_grace_secs", router_grace_secs),
+            ("inflight_timeout_secs", inflight_timeout_secs),
+            ("kv_transfer_timeout_secs", kv_transfer_timeout_secs),
+            ("cleanup_timeout_secs", cleanup_timeout_secs),
+        ] {
+            if let Some(value) = value
+                && !rs_is_valid_configured_secs(value)
+            {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "{name} must be a finite, non-negative number of seconds \
+                     within a sane range, got {value}"
+                )));
+            }
+        }
+        Ok(Self {
+            inner: RsShutdownConfig {
+                total_secs,
+                router_grace_secs,
+                inflight_timeout_secs,
+                kv_transfer_timeout_secs,
+                cleanup_timeout_secs,
+                kv_transfer_fallback,
+            },
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // WorkerConfig
 // ---------------------------------------------------------------------------
 
@@ -422,6 +508,7 @@ impl WorkerConfig {
         enable_kv_routing = true,
         metrics_labels = Vec::new(),
         runtime = None,
+        shutdown = None,
         disaggregation_mode = DisaggregationMode::Aggregated,
         health_check_payload = None,
         structural_tag_mode = "off".to_string(),
@@ -451,6 +538,7 @@ impl WorkerConfig {
         enable_kv_routing: bool,
         metrics_labels: Vec<(String, String)>,
         runtime: Option<RuntimeConfig>,
+        shutdown: Option<ShutdownConfig>,
         disaggregation_mode: DisaggregationMode,
         health_check_payload: Option<PyObject>,
         structural_tag_mode: String,
@@ -541,6 +629,7 @@ impl WorkerConfig {
                 structural_tag_scope: st_scope,
                 structural_tag_schema: st_schema,
                 runtime: runtime.map(|r| r.inner).unwrap_or_default(),
+                shutdown: shutdown.map(|c| c.inner).unwrap_or_default(),
                 route_to_encoder,
                 // Python vLLM owns and serves its existing `.rl` endpoint.
                 // The shared Rust endpoint is opt-in for Rust sidecars only.
@@ -676,7 +765,13 @@ impl Worker {
             // cancellation tokens and a graceful-shutdown tracker. This run
             // owns that wrapper, including cleanup on engine startup failure;
             // shutting it down does not cancel another DistributedRuntime.
-            runtime.shutdown();
+            //
+            // Awaited, not fire-and-forget: `shutdown` only spawns the
+            // teardown, so returning here lets the interpreter exit before the
+            // endpoint in-flight drain runs.
+            runtime
+                .shutdown_and_wait(Some(rs::worker::graceful_shutdown_timeout()))
+                .await;
 
             result
         })

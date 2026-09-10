@@ -1103,8 +1103,6 @@ navigation:
           - page: Multi-Datacenter KV Relay Configuration
             path: pages/reference/components/kv-dc-relay-configuration.md
             slug: dc-kv-relay-configuration
-          - page: Worker Admin API
-            path: pages/reference/components/worker-admin-api.mdx
           - page: Planner Configuration
             path: pages/reference/components/planner-configuration.mdx
           - page: Profiler Configuration
