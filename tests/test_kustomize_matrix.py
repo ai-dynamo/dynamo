@@ -47,6 +47,33 @@ def test_user_facing_manifests_use_short_vllm_component_names():
     )
 
 
+@pytest.mark.parametrize(
+    ("deployment", "expected_worker_names"),
+    [
+        ("agg-gb200-agentic", {"worker"}),
+        ("agg-gb300-agentic", {"worker"}),
+        ("agg-h200-agentic", {"worker"}),
+        ("disagg-gb300-agentic", {"prefill", "decode"}),
+    ],
+)
+def test_kimi_k3_vllm_recipes_use_short_worker_names(deployment, expected_worker_names):
+    """Unprefixed names like PrefillWorker must not escape the vLLM rename."""
+    manifest = REPO_ROOT / "recipes/kimi-k3/vllm" / deployment / "deploy.yaml"
+    resources = list(yaml.safe_load_all(manifest.read_text(encoding="utf-8")))
+    dgd = next(
+        resource
+        for resource in resources
+        if resource and resource.get("kind") == "DynamoGraphDeployment"
+    )
+    worker_names = {
+        component["name"]
+        for component in dgd["spec"]["components"]
+        if component["type"] != "frontend"
+    }
+
+    assert worker_names == expected_worker_names
+
+
 def load_matrix_module():
     spec = importlib.util.spec_from_file_location("kustomize_matrix", MODULE_PATH)
     assert spec is not None and spec.loader is not None
