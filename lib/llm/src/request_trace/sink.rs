@@ -95,7 +95,8 @@ impl RequestTraceSink for NatsRequestTraceSink {
 }
 
 pub struct JsonlRequestTraceSink {
-    writer: JsonlWriter<RequestTraceRecord>,
+    /// `None` once the sink has been shut down; further records are dropped.
+    writer: tokio::sync::Mutex<Option<JsonlWriter<RequestTraceRecord>>>,
 }
 
 impl JsonlRequestTraceSink {
@@ -103,7 +104,9 @@ impl JsonlRequestTraceSink {
         let writer = JsonlWriter::new(path.clone(), options)
             .await
             .with_context(|| format!("opening jsonl request trace sink at {path}"))?;
-        Ok(Self { writer })
+        Ok(Self {
+            writer: tokio::sync::Mutex::new(Some(writer)),
+        })
     }
 
     async fn from_policy(policy: &RequestTracePolicy) -> anyhow::Result<Self> {
@@ -132,21 +135,32 @@ impl RequestTraceSink for JsonlRequestTraceSink {
     }
 
     async fn emit(&self, record: &RequestTraceRecord) {
-        if self.writer.send(record.clone()).await.is_err() {
-            tracing::warn!("request trace file sink closed; dropping record");
+        let guard = self.writer.lock().await;
+        match guard.as_ref() {
+            Some(writer) => {
+                if writer.send(record.clone()).await.is_err() {
+                    tracing::warn!("request trace file writer channel closed; dropping record");
+                }
+            }
+            None => tracing::warn!("request trace file sink shut down; dropping record"),
         }
     }
 
     async fn shutdown(&self) {
-        // Drain and flush the buffered writer so a graceful shutdown doesn't
-        // truncate the final records.
-        self.writer.shutdown().await;
+        // Serialize callers until the drain finishes, including concurrent shutdowns.
+        let mut guard = self.writer.lock().await;
+        if let Some(writer) = guard.as_mut() {
+            if let Err(error) = writer.shutdown().await {
+                tracing::warn!(%error, "request trace file sink shutdown failed");
+            }
+            guard.take();
+        }
     }
 }
 
 pub struct JsonlGzipRequestTraceSink {
     // Cloned input channel used by emit, so concurrent emits never contend on the
-    // writer lock. Sending fails once the writer task exits, dropping late records.
+    // writer lock. Sending fails once the writer closes admission for shutdown.
     sender: mpsc::Sender<RequestTraceRecord>,
     // shutdown consumes the writer; None means it has already closed.
     writer: Mutex<Option<JsonlGzipWriter<RequestTraceRecord>>>,
@@ -204,10 +218,11 @@ impl RequestTraceSink for JsonlGzipRequestTraceSink {
     }
 
     async fn shutdown(&self) {
-        // Release the lock before awaiting the final flush.
-        let writer = self.writer.lock().await.take();
-        if let Some(writer) = writer
-            && let Err(error) = writer.close().await
+        // Serialize shutdown callers until the final flush completes. Keep the
+        // writer available if this caller is cancelled while awaiting it.
+        let mut writer = self.writer.lock().await;
+        if let Some(writer) = writer.as_mut()
+            && let Err(error) = writer.shutdown().await
         {
             tracing::warn!(
                 target: "dynamo_llm::request_trace",
@@ -215,6 +230,7 @@ impl RequestTraceSink for JsonlGzipRequestTraceSink {
                 "request trace file sink: gzip writer close failed during shutdown"
             );
         }
+        writer.take();
     }
 }
 
@@ -470,6 +486,42 @@ mod tests {
             segment.display()
         );
         let bytes = std::fs::read(&segment).unwrap();
+        let mut content = String::new();
+        MultiGzDecoder::new(bytes.as_slice())
+            .read_to_string(&mut content)
+            .unwrap();
+        assert!(content.contains("\"request_id\":\"req-123\""));
+    }
+
+    #[tokio::test]
+    async fn gzip_sink_concurrent_shutdown_waits_for_reserved_record() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("request_trace_concurrent_shutdown");
+        let sink = JsonlGzipRequestTraceSink::new(
+            path.display().to_string(),
+            JsonlGzipSinkOptions::default(),
+        )
+        .await
+        .unwrap();
+        let permit = sink.sender.clone().reserve_owned().await.unwrap();
+        let first = RequestTraceSink::shutdown(&sink);
+        let second = RequestTraceSink::shutdown(&sink);
+        tokio::pin!(first, second);
+        tokio::select! {
+            _ = &mut first => panic!("shutdown abandoned an outstanding permit"),
+            _ = tokio::time::timeout(Duration::from_secs(5), sink.sender.closed()) => {
+                assert!(sink.sender.is_closed(), "shutdown must close admission");
+            }
+        }
+        assert!(futures::poll!(&mut second).is_pending());
+        permit.send(sample_record());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(first, second);
+        })
+        .await
+        .unwrap();
+
+        let bytes = std::fs::read(segment_path(&path, 0)).unwrap();
         let mut content = String::new();
         MultiGzDecoder::new(bytes.as_slice())
             .read_to_string(&mut content)
