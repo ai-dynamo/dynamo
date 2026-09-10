@@ -93,8 +93,7 @@ examples:
   - 'tests/test_generate_kustomize_openapi.py'
   - 'tests/test_kustomize_matrix.py'
   - 'docs/tests/**'
-  - 'deploy/operator/config/crd/bases/nvidia.com_dynamographdeployment.yaml'
-  - 'deploy/operator/config/crd/bases/nvidia.com_dynamographdeploymentrequests.yaml'
+  - 'deploy/operator/config/crd/bases/**'
 
 ignore:
   # Classification-only, moved out of `docs`: these match files anywhere in the
@@ -262,7 +261,7 @@ snapshot:
   - 'deploy/operator/api/v1beta1/dynamographdeployment_conversion.go'
   - 'deploy/operator/config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml'
   - 'deploy/operator/config/crd/bases/nvidia.com_dynamographdeployments.yaml'
-  - 'deploy/operator/config/rbac/role.yaml'
+  - 'deploy/helm/charts/platform/components/operator/files/role.yaml'
   - 'deploy/operator/go.mod'
   - 'deploy/operator/go.sum'
   - 'deploy/helm/charts/platform/components/operator/**'
