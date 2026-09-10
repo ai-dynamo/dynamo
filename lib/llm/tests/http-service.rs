@@ -2405,6 +2405,7 @@ async fn test_images_worker_invalid_argument_maps_to_400_with_message() {
     let error = DynamoError::builder()
         .error_type(DynamoErrorType::InvalidArgument)
         .message("n must be in [1, 10], got 11")
+        .public_message("n must be in [1, 10], got 11")
         .build();
     let engine: OpenAIImagesStreamingEngine = Arc::new(ErrorImagesEngine { error });
     let (port, token, task) = start_images_service(engine).await;
