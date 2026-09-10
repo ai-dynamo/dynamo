@@ -22,7 +22,7 @@ use dynamo_llm::{
         Metrics,
         error::HttpError,
         metrics::{Endpoint, ErrorType, RequestType, Status},
-        service_v2::HttpService,
+        service_v2::{BackendErrorCheck, HttpService},
     },
     model_card::ModelDeploymentCard,
 };
@@ -451,12 +451,35 @@ impl
 
 struct AlwaysFailEngine {}
 
+const INVALID_ARGUMENT_MESSAGE: &str =
+    "Received multimodal data but multimodal processing is not enabled";
+
 /// Engine that yields a single `Backend(InvalidArgument)` error frame as the
-/// first stream event — modeling a text-only model refusing multimodal input.
-struct InvalidArgumentEngine {}
+/// first stream event after `delay` — modeling a text-only model refusing
+/// multimodal input. A non-zero delay models a backend that fails only after
+/// the frontend's bounded peek window has elapsed.
+struct InvalidArgumentEngine {
+    delay: std::time::Duration,
+}
 
 /// Engine that rejects during request admission, before a response stream exists.
 struct AdmissionInvalidArgumentEngine {}
+
+fn invalid_argument_error_frame<T>() -> Annotated<T> {
+    use dynamo_runtime::error::{BackendError, ErrorType as DynErrorType};
+    Annotated {
+        data: None,
+        id: None,
+        event: Some("error".to_string()),
+        comment: None,
+        error: Some(
+            DynamoError::builder()
+                .error_type(DynErrorType::Backend(BackendError::InvalidArgument))
+                .message(INVALID_ARGUMENT_MESSAGE)
+                .build(),
+        ),
+    }
+}
 
 #[async_trait]
 impl
@@ -470,22 +493,35 @@ impl
         &self,
         request: SingleIn<NvCreateChatCompletionRequest>,
     ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
-        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynErrorType};
         let (_request, context) = request.transfer(());
         let ctx = context.context();
+        let delay = self.delay;
         let stream = stream! {
-            yield Annotated::<NvCreateChatCompletionStreamResponse> {
-                data: None,
-                id: None,
-                event: Some("error".to_string()),
-                comment: None,
-                error: Some(
-                    DynamoError::builder()
-                        .error_type(DynErrorType::Backend(BackendError::InvalidArgument))
-                        .message("Received multimodal data but multimodal processing is not enabled")
-                        .build(),
-                ),
-            };
+            tokio::time::sleep(delay).await;
+            yield invalid_argument_error_frame();
+        };
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateCompletionRequest>,
+        ManyOut<Annotated<NvCreateCompletionResponse>>,
+        Error,
+    > for InvalidArgumentEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
+        let (_request, context) = request.transfer(());
+        let ctx = context.context();
+        let delay = self.delay;
+        let stream = stream! {
+            tokio::time::sleep(delay).await;
+            yield invalid_argument_error_frame();
         };
         Ok(ResponseStream::new(Box::pin(stream), ctx))
     }
@@ -1788,7 +1824,9 @@ async fn test_streaming_responses_returns_4xx_on_backend_invalid_argument() {
         .add_chat_completions_model(
             "invalid-arg-model",
             card.mdcsum(),
-            Arc::new(InvalidArgumentEngine {}),
+            Arc::new(InvalidArgumentEngine {
+                delay: std::time::Duration::ZERO,
+            }),
         )
         .unwrap();
 
@@ -1820,12 +1858,236 @@ async fn test_streaming_responses_returns_4xx_on_backend_invalid_argument() {
         "streaming Backend(InvalidArgument) on /v1/responses must land as HTTP 400 before HTTP 200 is committed; got {status}, body: {text}"
     );
     assert!(
-        text.contains("Received multimodal data but multimodal processing is not enabled"),
+        text.contains(INVALID_ARGUMENT_MESSAGE),
         "expected typed backend error message forwarded to client; got: {text}"
     );
 
     cancel_token.cancel();
     task.await.unwrap().unwrap();
+}
+
+const DELAYED_ERROR_MODEL: &str = "delayed-error-model";
+
+/// Delay before `InvalidArgumentEngine` emits its error frame in the tests
+/// below: longer than any bounded peek window they configure, shorter than
+/// the request timeouts.
+const BACKEND_ERROR_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Start a service whose streaming handlers apply `check`, register an
+/// `InvalidArgumentEngine` that fails after `BACKEND_ERROR_DELAY` for both
+/// chat and completions, post `body` to `path`, and return the status and
+/// body text.
+async fn post_streaming_with_check(
+    check: BackendErrorCheck,
+    path: &str,
+    body: serde_json::Value,
+) -> (StatusCode, String) {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .enable_chat_endpoints(true)
+        .enable_cmpl_endpoints(true)
+        .streaming_backend_error_check(check)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    let card = ModelDeploymentCard::with_name_only(DELAYED_ERROR_MODEL);
+    let engine = Arc::new(InvalidArgumentEngine {
+        delay: BACKEND_ERROR_DELAY,
+    });
+    state
+        .manager()
+        .add_chat_completions_model(DELAYED_ERROR_MODEL, card.mdcsum(), engine.clone())
+        .unwrap();
+    state
+        .manager()
+        .add_completions_model(DELAYED_ERROR_MODEL, card.mdcsum(), engine)
+        .unwrap();
+
+    let response = reqwest::Client::new()
+        .post(format!("http://localhost:{port}{path}"))
+        .json(&body)
+        .send()
+        .await
+        .expect("request failed");
+    let status = response.status();
+    let text = timeout(std::time::Duration::from_secs(5), response.text())
+        .await
+        .expect("response body did not finish")
+        .unwrap_or_default();
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+    (status, text)
+}
+
+fn delayed_error_chat_body() -> serde_json::Value {
+    serde_json::json!({
+        "model": DELAYED_ERROR_MODEL,
+        "stream": true,
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+}
+
+/// With `UntilFirstEvent` the HTTP status is not committed until the backend
+/// produces its first item, and that item is still the first thing the client
+/// reads: the wait must not consume it.
+#[tokio::test]
+async fn test_streaming_chat_until_first_event_holds_status_for_first_item() {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .enable_chat_endpoints(true)
+        .streaming_backend_error_check(BackendErrorCheck::UntilFirstEvent)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    let first_token_gate = Arc::new(tokio::sync::Notify::new());
+    let card = ModelDeploymentCard::with_name_only("gated-model");
+    state
+        .manager()
+        .add_chat_completions_model(
+            "gated-model",
+            card.mdcsum(),
+            Arc::new(FirstTokenGateEngine {
+                release: first_token_gate.clone(),
+            }),
+        )
+        .unwrap();
+
+    let body = serde_json::json!({
+        "model": "gated-model",
+        "stream": true,
+        "messages": [{"role": "user", "content": "hi"}],
+    });
+    let client = reqwest::Client::new();
+    let send = client
+        .post(format!("http://localhost:{port}/v1/chat/completions"))
+        .json(&body)
+        .send();
+    tokio::pin!(send);
+
+    assert!(
+        timeout(std::time::Duration::from_millis(300), &mut send)
+            .await
+            .is_err(),
+        "HTTP status was committed before the backend produced its first event"
+    );
+
+    first_token_gate.notify_one();
+    let response = timeout(std::time::Duration::from_secs(5), &mut send)
+        .await
+        .expect("response did not arrive after the first backend event")
+        .expect("request failed");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let text = timeout(std::time::Duration::from_secs(5), response.text())
+        .await
+        .expect("stream did not finish")
+        .expect("failed to read stream");
+    assert!(
+        text.contains("choice 0"),
+        "first backend item was consumed by the wait: {text}"
+    );
+    assert!(
+        text.contains("data: [DONE]"),
+        "stream did not terminate with [DONE]: {text}"
+    );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+/// A backend error that arrives after any bounded peek window still maps to
+/// its typed 4xx when the service waits for the first event. With a bounded
+/// or skipped check, HTTP 200 has already been committed by then.
+#[tokio::test]
+async fn test_streaming_chat_delayed_backend_error_status_follows_check() {
+    for (check, expected) in [
+        (BackendErrorCheck::Skip, StatusCode::OK),
+        (
+            BackendErrorCheck::Bounded(std::time::Duration::from_millis(20)),
+            StatusCode::OK,
+        ),
+        (BackendErrorCheck::UntilFirstEvent, StatusCode::BAD_REQUEST),
+    ] {
+        let (status, text) =
+            post_streaming_with_check(check, "/v1/chat/completions", delayed_error_chat_body())
+                .await;
+        assert_eq!(status, expected, "{check:?}: body: {text}");
+        if expected == StatusCode::BAD_REQUEST {
+            assert!(
+                text.contains(INVALID_ARGUMENT_MESSAGE),
+                "{check:?}: expected typed backend error message; got: {text}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_streaming_responses_until_first_event_returns_4xx_on_delayed_backend_error() {
+    let body = serde_json::json!({
+        "model": DELAYED_ERROR_MODEL,
+        "stream": true,
+        "input": "hi",
+    });
+    let (status, text) =
+        post_streaming_with_check(BackendErrorCheck::UntilFirstEvent, "/v1/responses", body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {text}");
+    assert!(
+        text.contains(INVALID_ARGUMENT_MESSAGE),
+        "expected typed backend error message; got: {text}"
+    );
+}
+
+/// Streaming completions, single prompt and batch, run the same pre-commit
+/// check as chat: a backend error before the first item is a typed 4xx under
+/// both a bounded window that covers it and an unbounded wait, and stays an
+/// HTTP 200 when the check is skipped.
+#[tokio::test]
+async fn test_streaming_completions_delayed_backend_error_status_follows_check() {
+    for prompt in [
+        serde_json::json!("hello"),
+        serde_json::json!(["hello", "world"]),
+    ] {
+        let body = serde_json::json!({
+            "model": DELAYED_ERROR_MODEL,
+            "stream": true,
+            "prompt": prompt,
+        });
+        for check in [
+            BackendErrorCheck::Bounded(std::time::Duration::from_secs(5)),
+            BackendErrorCheck::UntilFirstEvent,
+        ] {
+            let (status, text) =
+                post_streaming_with_check(check, "/v1/completions", body.clone()).await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{check:?} prompt {prompt}: body: {text}"
+            );
+            assert!(
+                text.contains(INVALID_ARGUMENT_MESSAGE),
+                "{check:?} prompt {prompt}: expected typed backend error message; got: {text}"
+            );
+        }
+
+        let (status, text) =
+            post_streaming_with_check(BackendErrorCheck::Skip, "/v1/completions", body).await;
+        assert_eq!(status, StatusCode::OK, "Skip prompt {prompt}: body: {text}");
+    }
 }
 
 #[tokio::test]

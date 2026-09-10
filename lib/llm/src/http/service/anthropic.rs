@@ -37,7 +37,7 @@ use super::{
         CancellationLabels, Endpoint, ErrorType, InflightGuard,
         process_chat_response_and_observe_metrics as process_response_and_observe_metrics,
     },
-    service_v2,
+    service_v2::{self, BackendErrorCheck},
 };
 use crate::engines::ValidateRequest;
 use crate::protocols::anthropic::stream_converter::AnthropicStreamConverter;
@@ -729,7 +729,8 @@ async fn anthropic_messages(
         // Non-streaming path: aggregate stream into single response
 
         // Check first event for backend errors using the openai helper
-        let stream_with_check = super::openai::check_for_backend_error(engine_stream, None)
+        let check = BackendErrorCheck::UntilFirstEvent;
+        let stream_with_check = super::openai::check_for_backend_error(engine_stream, check)
             .await
             .map_err(|(status, _json_err)| {
                 // check_for_backend_error has already sanitized the body and

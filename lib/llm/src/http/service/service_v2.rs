@@ -145,6 +145,7 @@ pub struct State {
     frontend_api_config: FrontendApiConfig,
     nvext_enabled: bool,
     sse_keep_alive: Option<Duration>,
+    streaming_backend_error_check: Option<BackendErrorCheck>,
 }
 
 /// Typed config needed only to construct HTTP shared state.
@@ -156,6 +157,7 @@ struct StateConfig {
     frontend_api_config: FrontendApiConfig,
     nvext_enabled: bool,
     sse_keep_alive: Option<Duration>,
+    streaming_backend_error_check: Option<BackendErrorCheck>,
 }
 
 fn parse_sse_keep_alive(value: Result<String, std::env::VarError>) -> Option<Duration> {
@@ -210,6 +212,41 @@ fn effective_sse_keep_alive(
     response_can_defer_all_output: bool,
 ) -> Option<Duration> {
     configured.or(response_can_defer_all_output.then_some(DEFERRED_RESPONSE_KEEP_ALIVE))
+}
+
+/// How a handler waits on the backend stream before committing the HTTP status.
+///
+/// Non-streaming handlers always wait for the first event because they need it
+/// to build the response. Streaming handlers use the service-wide policy from
+/// [`State::streaming_backend_error_check`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendErrorCheck {
+    /// Commit the status immediately and hand the stream to the client
+    /// untouched. A backend error that arrives afterwards surfaces as an SSE
+    /// error frame behind an HTTP 200.
+    Skip,
+    /// Wait at most this long for the first non-annotation event. An error
+    /// within the window maps to its HTTP status; once the window elapses the
+    /// stream is handed over as with `Skip`.
+    Bounded(Duration),
+    /// Wait for the first non-annotation event however long it takes, so a
+    /// backend error before the first item always maps to its HTTP status.
+    UntilFirstEvent,
+}
+
+impl BackendErrorCheck {
+    /// Policy from `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS`: unset, unparsable, or
+    /// `0` is `Skip`; any other value is `Bounded` for that many milliseconds.
+    pub fn from_env() -> Self {
+        Self::parse(std::env::var(env_llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS))
+    }
+
+    fn parse(value: Result<String, std::env::VarError>) -> Self {
+        match value.ok().and_then(|value| value.parse::<u64>().ok()) {
+            Some(0) | None => Self::Skip,
+            Some(milliseconds) => Self::Bounded(Duration::from_millis(milliseconds)),
+        }
+    }
 }
 
 /// Lifecycle stage for the HTTP frontend.
@@ -489,6 +526,7 @@ impl State {
             cancel_token,
             frontend_api_config: config.frontend_api_config,
             sse_keep_alive: config.sse_keep_alive,
+            streaming_backend_error_check: config.streaming_backend_error_check,
         }
     }
 
@@ -578,6 +616,18 @@ impl State {
         response_can_defer_all_output: bool,
     ) -> Option<Duration> {
         effective_sse_keep_alive(self.sse_keep_alive, response_can_defer_all_output)
+    }
+
+    /// How streaming handlers wait for the first backend event before
+    /// committing the HTTP status.
+    ///
+    /// A policy supplied through the builder wins. Otherwise
+    /// `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS` is read per request: the lookup is
+    /// a sub-microsecond hashmap read, and reading it live keeps the window
+    /// tunable at test time without a process restart.
+    pub fn streaming_backend_error_check(&self) -> BackendErrorCheck {
+        self.streaming_backend_error_check
+            .unwrap_or_else(BackendErrorCheck::from_env)
     }
 
     /// Returns true if Anthropic billing preamble stripping is enabled.
@@ -740,6 +790,12 @@ pub struct HttpServiceConfig {
     /// Defaults to `DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS` when not set explicitly.
     #[builder(setter(strip_option), default = "sse_keep_alive_from_env()")]
     sse_keep_alive: Option<Duration>,
+
+    /// How streaming handlers wait for the first backend event before
+    /// committing the HTTP status. Defaults to `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS`,
+    /// read per request, when not set explicitly.
+    #[builder(setter(strip_option), default = "None")]
+    streaming_backend_error_check: Option<BackendErrorCheck>,
 }
 
 fn default_rl_port() -> u16 {
@@ -1159,6 +1215,7 @@ impl HttpServiceConfigBuilder {
                 frontend_api_config,
                 nvext_enabled,
                 sse_keep_alive: config.sse_keep_alive,
+                streaming_backend_error_check: config.streaming_backend_error_check,
             },
         ));
         state
@@ -2366,6 +2423,26 @@ mod tests {
                 "builder=false wins even if disable is unset"
             );
         });
+    }
+
+    #[test]
+    fn test_backend_error_check_env_var() {
+        assert_eq!(
+            BackendErrorCheck::parse(Err(std::env::VarError::NotPresent)),
+            BackendErrorCheck::Skip
+        );
+        assert_eq!(
+            BackendErrorCheck::parse(Ok("0".to_string())),
+            BackendErrorCheck::Skip
+        );
+        assert_eq!(
+            BackendErrorCheck::parse(Ok("invalid".to_string())),
+            BackendErrorCheck::Skip
+        );
+        assert_eq!(
+            BackendErrorCheck::parse(Ok("500".to_string())),
+            BackendErrorCheck::Bounded(Duration::from_millis(500))
+        );
     }
 
     #[test]

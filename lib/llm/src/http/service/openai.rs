@@ -47,7 +47,7 @@ use super::{
         process_response_and_observe_metrics,
         process_response_using_event_converter_and_observe_metrics,
     },
-    service_v2,
+    service_v2::{self, BackendErrorCheck},
 };
 use crate::engines::ValidateRequest;
 use crate::preprocessor::{PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, decode_base64_to_floats};
@@ -1002,6 +1002,17 @@ async fn completions_single(
     let stream = stream::iter(annotations).chain(stream);
 
     if streaming {
+        // Same pre-commit check as chat_completions: a backend error before
+        // the first item maps to its HTTP status instead of an SSE frame
+        // behind an HTTP 200.
+        let stream = check_for_backend_error(stream, state.streaming_backend_error_check())
+            .await
+            .map_err(|error_response| {
+                tracing::error!(request_id, "Backend error detected: {:?}", error_response);
+                inflight_guard.mark_error(extract_error_type_from_response(&error_response));
+                error_response
+            })?;
+
         // For streaming, we'll drop the http_queue_guard on the first token
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream
@@ -1039,7 +1050,7 @@ async fn completions_single(
         // Preserve typed backend errors before the completions aggregator turns
         // them into strings. In particular, Python ValueError/TypeError arrives
         // as Backend(InvalidArgument) and must remain an HTTP 400.
-        let stream = check_for_backend_error(stream, None)
+        let stream = check_for_backend_error(stream, BackendErrorCheck::UntilFirstEvent)
             .await
             .map_err(|error_response| {
                 tracing::error!(request_id, "Backend error detected: {:?}", error_response);
@@ -1173,6 +1184,7 @@ type BoxedCompletionResponseStream =
 /// Poll all streams concurrently so batch startup is not serialized.
 async fn check_completion_batch_streams<S>(
     streams: Vec<S>,
+    check: BackendErrorCheck,
 ) -> Result<Vec<BoxedCompletionResponseStream>, ErrorResponse>
 where
     S: futures::Stream<Item = Annotated<NvCreateCompletionResponse>> + Send + 'static,
@@ -1180,7 +1192,7 @@ where
     futures::future::try_join_all(
         streams
             .into_iter()
-            .map(|stream| check_for_backend_error(stream, None)),
+            .map(|stream| check_for_backend_error(stream, check)),
     )
     .await
 }
@@ -1287,23 +1299,21 @@ async fn completions_batch(
         all_streams.push(remapped_stream);
     }
 
-    let all_streams: Vec<BoxedCompletionResponseStream> = if streaming {
-        all_streams
-            .into_iter()
-            .map(|stream| Box::pin(stream) as BoxedCompletionResponseStream)
-            .collect()
+    let check = if streaming {
+        state.streaming_backend_error_check()
     } else {
-        check_completion_batch_streams(all_streams)
-            .await
-            .map_err(|error_response| {
-                tracing::error!(request_id, "Backend error detected: {:?}", error_response);
-                inflight_guard.mark_error(extract_error_type_from_response(&error_response));
-                error_response
-            })?
+        BackendErrorCheck::UntilFirstEvent
     };
+    let all_streams = check_completion_batch_streams(all_streams, check)
+        .await
+        .map_err(|error_response| {
+            tracing::error!(request_id, "Backend error detected: {:?}", error_response);
+            inflight_guard.mark_error(extract_error_type_from_response(&error_response));
+            error_response
+        })?;
 
-    // Merge all streams after every non-streaming prompt has passed its own
-    // backend-error preflight.
+    // Merge all streams after every prompt has passed its own backend-error
+    // check.
     let merged_stream = stream::select_all(all_streams);
     let merged_stream = aggregate_batch_completion_usage(merged_stream, request_id.clone());
 
@@ -2458,17 +2468,19 @@ const MAX_LEADING_ANNOTATIONS: usize = 16;
 
 /// Inspect the first non-annotation event in the stream for a backend error.
 ///
-/// `timeout = None` — await stream events indefinitely (non-streaming preflight).
-/// `timeout = Some(dur)` — race against a single deadline captured at function
-/// entry (streaming pre-commit peek). If the deadline elapses before a
-/// non-annotation event arrives, return the buffered annotations chained with
-/// the remaining stream so downstream sees the original ordering.
+/// `BackendErrorCheck::UntilFirstEvent` awaits stream events indefinitely
+/// (non-streaming preflight). `BackendErrorCheck::Bounded` races against a
+/// single deadline captured at function entry (streaming pre-commit peek); if
+/// the deadline elapses before a non-annotation event arrives, the buffered
+/// annotations are returned chained with the remaining stream so downstream
+/// sees the original ordering. `BackendErrorCheck::Skip` returns the stream
+/// untouched.
 ///
 /// Returns `Err(ErrorResponse)` if the first non-annotation event is a backend
 /// error, `Ok(stream)` otherwise.
 pub(super) async fn check_for_backend_error<T>(
     stream: impl futures::Stream<Item = Annotated<T>> + Send + 'static,
-    timeout: Option<std::time::Duration>,
+    check: BackendErrorCheck,
 ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Annotated<T>> + Send>>, ErrorResponse>
 where
     T: serde::Serialize + Send + 'static,
@@ -2478,7 +2490,11 @@ where
     let mut stream = Box::pin(stream);
     // Single deadline captured at entry so the peek window is bounded in total,
     // not per-iteration.
-    let deadline = timeout.map(|t| tokio::time::Instant::now() + t);
+    let deadline = match check {
+        BackendErrorCheck::Skip => return Ok(stream),
+        BackendErrorCheck::Bounded(window) => Some(tokio::time::Instant::now() + window),
+        BackendErrorCheck::UntilFirstEvent => None,
+    };
     let mut buffered: Vec<Annotated<T>> = Vec::new();
 
     loop {
@@ -2559,28 +2575,6 @@ fn backend_error_response(backend_error: BackendErrorInfo) -> ErrorResponse {
                 metric_error_type: None,
             }),
         ),
-    }
-}
-
-/// Read the pre-commit peek window from the environment.
-///
-/// `Some(dur)` — poll for that duration before committing SSE.
-/// `None` — the peek is disabled entirely (default; matches pre-fix behavior
-/// where all backend errors surface as SSE frames post-HTTP-200).
-///
-/// Read live per streaming request. Reading `std::env::var` is a hashmap
-/// lookup — sub-microsecond, negligible next to the peek window
-/// itself. Live reads make the value tunable at test time without a
-/// process restart.
-// FIXME: unify env-var initialization with the rest of `env_llm::*` once that
-// module gets a standard reader.
-fn pre_commit_error_peek_timeout() -> Option<std::time::Duration> {
-    match std::env::var(env_llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS)
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-    {
-        Some(0) | None => None,
-        Some(ms) => Some(std::time::Duration::from_millis(ms)),
     }
 }
 
@@ -2948,29 +2942,20 @@ async fn chat_completions(
     // note - we might do this as part of the post processing set to make it more generic
 
     if streaming {
-        // Peek the first non-annotation event for a synchronous backend error
-        // (e.g. `Backend(InvalidArgument)` from a text-only model receiving
-        // image content) before committing HTTP 200, so we can return the
-        // typed 4xx that the non-streaming path returns. The peek window is
-        // short (`DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS`) — if no signal arrives,
-        // fall through to SSE, and `monitor_for_disconnects` owns the long
-        // backend-inactivity timeout from there.
-        let stream = match pre_commit_error_peek_timeout() {
-            Some(dur) => check_for_backend_error(stream, Some(dur))
-                .await
-                .map_err(|err_response| {
-                    tracing::error!(request_id = %request_id, "Backend error detected: {:?}", err_response);
-                    inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-                    err_response
-                })?,
-            // Env var unset → skip peek, commit HTTP 200 immediately (pre-fix
-            // behavior). Backend errors will surface as SSE error frames via
-            // monitor_for_disconnects.
-            None => Box::pin(stream)
-                as std::pin::Pin<
-                    Box<dyn futures::Stream<Item = _> + Send>,
-                >,
-        };
+        // Inspect the first non-annotation event for a synchronous backend
+        // error (e.g. `Backend(InvalidArgument)` from a text-only model
+        // receiving image content) before committing HTTP 200, so we can
+        // return the typed 4xx that the non-streaming path returns. How long
+        // to wait is service configuration; with a bounded window and no
+        // signal, fall through to SSE, and `monitor_for_disconnects` owns the
+        // long backend-inactivity timeout from there.
+        let stream = check_for_backend_error(stream, state.streaming_backend_error_check())
+            .await
+            .map_err(|err_response| {
+                tracing::error!(request_id = %request_id, "Backend error detected: {:?}", err_response);
+                inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+                err_response
+            })?;
 
         let mut http_queue_guard = Some(http_queue_guard);
         let tool_dispatch_enabled = state.streaming_tool_dispatch_enabled();
@@ -3080,14 +3065,13 @@ async fn chat_completions(
         Ok(sse_stream.into_response())
     } else {
         // Check first event for backend errors before aggregating (non-streaming only)
-        let stream_with_check =
-            check_for_backend_error(stream, None)
-                .await
-                .map_err(|error_response| {
-                    tracing::error!(request_id, "Backend error detected: {:?}", error_response);
-                    inflight_guard.mark_error(extract_error_type_from_response(&error_response));
-                    error_response
-                })?;
+        let stream_with_check = check_for_backend_error(stream, BackendErrorCheck::UntilFirstEvent)
+            .await
+            .map_err(|error_response| {
+                tracing::error!(request_id, "Backend error detected: {:?}", error_response);
+                inflight_guard.mark_error(extract_error_type_from_response(&error_response));
+                error_response
+            })?;
 
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream_with_check.inspect(move |response| {
@@ -3575,24 +3559,20 @@ async fn responses(
     let ctx = engine_stream.context();
 
     if streaming {
-        // Peek the first non-annotation event for a synchronous backend error
-        // before committing HTTP 200 — same rationale as chat_completions
-        // above. Short peek window; the long backend-inactivity safety net
+        // Inspect the first non-annotation event for a synchronous backend
+        // error before committing HTTP 200 — same rationale as
+        // chat_completions above. The long backend-inactivity safety net
         // lives in `monitor_for_disconnects`.
-        let engine_stream = match pre_commit_error_peek_timeout() {
-            Some(dur) => check_for_backend_error(engine_stream, Some(dur))
-                .await
-                .map_err(|err_response| {
-                    tracing::error!(request_id = %request_id, "Backend error detected: {:?}", err_response);
-                    inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-                    err_response
-                })?,
-            // Env var unset → skip peek, commit HTTP 200 immediately.
-            None => Box::pin(engine_stream)
-                as std::pin::Pin<
-                    Box<dyn futures::Stream<Item = _> + Send>,
-                >,
-        };
+        let engine_stream = check_for_backend_error(
+            engine_stream,
+            state.streaming_backend_error_check(),
+        )
+        .await
+        .map_err(|err_response| {
+            tracing::error!(request_id = %request_id, "Backend error detected: {:?}", err_response);
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
 
         // Streaming path: convert chat completion stream chunks to Responses API SSE events.
         // The engine yields Annotated<NvCreateChatCompletionStreamResponse>. We extract the
@@ -3689,7 +3669,7 @@ async fn responses(
 
         // Check first event for backend errors before aggregating (non-streaming only)
         let stream_with_check =
-            check_for_backend_error(engine_stream, None)
+            check_for_backend_error(engine_stream, BackendErrorCheck::UntilFirstEvent)
                 .await
                 .map_err(|error_response| {
                     tracing::error!(request_id, "Backend error detected: {:?}", error_response);
@@ -4897,7 +4877,7 @@ async fn audio_speech(
         err_response
     })?;
 
-    let stream = check_for_backend_error(stream, None)
+    let stream = check_for_backend_error(stream, BackendErrorCheck::UntilFirstEvent)
         .await
         .inspect_err(|error_response| {
             let error_type = match error_response.0 {
@@ -6999,7 +6979,7 @@ mod tests {
         };
 
         let test_stream = stream::iter(vec![error_event]);
-        let result = check_for_backend_error(test_stream, None).await;
+        let result = check_for_backend_error(test_stream, BackendErrorCheck::UntilFirstEvent).await;
 
         // Should return an error
         assert!(result.is_err());
@@ -7039,7 +7019,11 @@ mod tests {
                 ),
             };
 
-            let result = check_for_backend_error(stream::iter(vec![error_event]), None).await;
+            let result = check_for_backend_error(
+                stream::iter(vec![error_event]),
+                BackendErrorCheck::UntilFirstEvent,
+            )
+            .await;
 
             let error_response = match result {
                 Err(error_response) => error_response,
@@ -7070,11 +7054,15 @@ mod tests {
             ),
         };
 
-        let error_response =
-            match check_for_backend_error(stream::iter(vec![error_event]), None).await {
-                Ok(_) => panic!("typed completion error must fail"),
-                Err(error_response) => error_response,
-            };
+        let error_response = match check_for_backend_error(
+            stream::iter(vec![error_event]),
+            BackendErrorCheck::UntilFirstEvent,
+        )
+        .await
+        {
+            Ok(_) => panic!("typed completion error must fail"),
+            Err(error_response) => error_response,
+        };
 
         assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
         assert_eq!(error_response.1.code, StatusCode::BAD_REQUEST.as_u16());
@@ -7112,10 +7100,13 @@ mod tests {
             ),
         };
 
-        let result = check_completion_batch_streams(vec![
-            stream::iter(vec![normal_event]),
-            stream::iter(vec![error_event]),
-        ])
+        let result = check_completion_batch_streams(
+            vec![
+                stream::iter(vec![normal_event]),
+                stream::iter(vec![error_event]),
+            ],
+            BackendErrorCheck::UntilFirstEvent,
+        )
         .await;
 
         let error_response = match result {
@@ -7145,7 +7136,7 @@ mod tests {
         };
 
         let test_stream = stream::iter(vec![error_event]);
-        let result = check_for_backend_error(test_stream, None).await;
+        let result = check_for_backend_error(test_stream, BackendErrorCheck::UntilFirstEvent).await;
 
         // Should return an error with correct status code extracted from JSON
         assert!(result.is_err());
@@ -7178,7 +7169,7 @@ mod tests {
         };
 
         let test_stream = stream::iter(vec![error_event]);
-        let result = check_for_backend_error(test_stream, None).await;
+        let result = check_for_backend_error(test_stream, BackendErrorCheck::UntilFirstEvent).await;
 
         assert!(result.is_err());
         if let Err(error_response) = result {
@@ -7207,7 +7198,7 @@ mod tests {
         };
 
         let test_stream = stream::iter(vec![error_event]);
-        let result = check_for_backend_error(test_stream, None).await;
+        let result = check_for_backend_error(test_stream, BackendErrorCheck::UntilFirstEvent).await;
 
         assert!(result.is_err());
         if let Err(error_response) = result {
@@ -7250,7 +7241,11 @@ mod tests {
                 error: None,
             };
 
-            let result = check_for_backend_error(stream::iter(vec![error_event]), None).await;
+            let result = check_for_backend_error(
+                stream::iter(vec![error_event]),
+                BackendErrorCheck::UntilFirstEvent,
+            )
+            .await;
             let Err(response) = result else {
                 panic!("backend status {code} should produce an error response");
             };
@@ -7283,7 +7278,11 @@ mod tests {
             error: None,
         };
 
-        let result = check_for_backend_error(stream::iter(vec![error_event]), None).await;
+        let result = check_for_backend_error(
+            stream::iter(vec![error_event]),
+            BackendErrorCheck::UntilFirstEvent,
+        )
+        .await;
         let Err(response) = result else {
             panic!("an overload status should produce an error response");
         };
@@ -7336,7 +7335,7 @@ mod tests {
         };
 
         let test_stream = stream::iter(vec![error_event]);
-        let result = check_for_backend_error(test_stream, None).await;
+        let result = check_for_backend_error(test_stream, BackendErrorCheck::UntilFirstEvent).await;
 
         assert!(result.is_err());
         if let Err(error_response) = result {
@@ -7373,7 +7372,7 @@ mod tests {
         };
 
         let test_stream = stream::iter(vec![annotation, error_event]);
-        let result = check_for_backend_error(test_stream, None).await;
+        let result = check_for_backend_error(test_stream, BackendErrorCheck::UntilFirstEvent).await;
 
         assert!(
             result.is_err(),
@@ -7421,7 +7420,7 @@ mod tests {
         };
 
         let test_stream = stream::iter(vec![annotation, normal_event]);
-        let result = check_for_backend_error(test_stream, None).await;
+        let result = check_for_backend_error(test_stream, BackendErrorCheck::UntilFirstEvent).await;
 
         assert!(result.is_ok());
         let mut returned: Vec<_> = result.unwrap().collect().await;
@@ -7461,7 +7460,7 @@ mod tests {
         };
 
         let test_stream = stream::iter(vec![normal_event.clone()]);
-        let result = check_for_backend_error(test_stream, None).await;
+        let result = check_for_backend_error(test_stream, BackendErrorCheck::UntilFirstEvent).await;
 
         // Should return Ok with the stream
         assert!(result.is_ok());
@@ -7482,7 +7481,7 @@ mod tests {
         // Create an empty stream
         let test_stream =
             stream::iter::<Vec<Annotated<NvCreateChatCompletionStreamResponse>>>(vec![]);
-        let result = check_for_backend_error(test_stream, None).await;
+        let result = check_for_backend_error(test_stream, BackendErrorCheck::UntilFirstEvent).await;
 
         // Should return Ok with an empty stream
         assert!(result.is_ok());
@@ -7508,7 +7507,7 @@ mod tests {
         };
 
         let test_stream = stream::iter(vec![error_event]);
-        let result = check_for_backend_error(test_stream, None).await;
+        let result = check_for_backend_error(test_stream, BackendErrorCheck::UntilFirstEvent).await;
 
         // Should return an error based on is_backend_error_event logic
         assert!(result.is_err());
