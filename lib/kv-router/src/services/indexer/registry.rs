@@ -521,8 +521,10 @@ impl WorkerRegistry {
             }
         }
 
-        if let Some(ie) = self.indexers.get(&key) {
-            ie.indexer.remove_worker(instance_id).await;
+        // Registration needs this map's write lock while removal can wait on indexer queues.
+        let indexer = self.indexers.get(&key).map(|entry| entry.indexer.clone());
+        if let Some(indexer) = indexer {
+            indexer.remove_worker(instance_id).await;
         }
         self.maybe_remove_indexer(&key);
         Ok(())
@@ -569,13 +571,17 @@ impl WorkerRegistry {
                 .remove_if(&instance_id, |_, entry| entry.listeners.is_empty())
                 .is_some();
             if actually_removed {
-                if let Some(ie) = self.indexers.get(&key) {
-                    ie.indexer.remove_worker(instance_id).await;
+                let indexer = self.indexers.get(&key).map(|entry| entry.indexer.clone());
+                if let Some(indexer) = indexer {
+                    indexer.remove_worker(instance_id).await;
                 }
                 self.maybe_remove_indexer(&key);
             }
-        } else if let Some(ie) = self.indexers.get(&key) {
-            ie.indexer.remove_worker_dp_rank(instance_id, dp_rank).await;
+        } else {
+            let indexer = self.indexers.get(&key).map(|entry| entry.indexer.clone());
+            if let Some(indexer) = indexer {
+                indexer.remove_worker_dp_rank(instance_id, dp_rank).await;
+            }
         }
 
         Ok(())
@@ -610,8 +616,9 @@ impl WorkerRegistry {
             }
         }
 
-        if let Some(ie) = self.indexers.get(&key) {
-            ie.indexer.remove_worker(instance_id).await;
+        let indexer = self.indexers.get(&key).map(|entry| entry.indexer.clone());
+        if let Some(indexer) = indexer {
+            indexer.remove_worker(instance_id).await;
         }
         self.maybe_remove_indexer(&key);
         Ok(())
@@ -819,15 +826,98 @@ impl WorkerRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
     use std::sync::atomic::Ordering;
+    use std::task::{Context, Poll, Waker};
+    use std::time::Duration;
 
     fn test_registry() -> WorkerRegistry {
         WorkerRegistry::new(1)
     }
 
+    #[rstest::rstest]
+    #[case("worker")]
+    #[case("all_groups")]
+    #[case("last_rank")]
     #[tokio::test]
-    async fn deregister_removes_watermark() {
+    async fn registration_progresses_while_removal_is_backpressured(#[case] removal: &str) {
         let registry = test_registry();
+        let key = RoutingPartitionId::new("test-model", "default");
+        registry
+            .register(
+                1,
+                "tcp://127.0.0.1:15557".into(),
+                0,
+                "test-model".into(),
+                "default".into(),
+                1,
+                None,
+            )
+            .await
+            .unwrap();
+        let indexer = registry.indexers.get(&key).unwrap().indexer.clone();
+        let Indexer::Single { primary, .. } = indexer else {
+            unreachable!();
+        };
+        let sender = primary.remove_worker_sender();
+        // Reserve the entire queue so removal must yield without blocking the executor.
+        let permits = sender.reserve_many(sender.max_capacity()).await.unwrap();
+        let removal = async {
+            match removal {
+                "worker" => registry.deregister(1, "test-model", "default").await,
+                "all_groups" => {
+                    registry
+                        .deregister_all_routing_groups(1, "test-model")
+                        .await
+                }
+                "last_rank" => {
+                    registry
+                        .deregister_dp_rank(1, 0, "test-model", "default")
+                        .await
+                }
+                _ => unreachable!(),
+            }
+        };
+        tokio::pin!(removal);
+        assert!(matches!(
+            removal
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Pending
+        ));
+        // A nonblocking probe makes the regression fail instead of deadlocking the test.
+        assert!(matches!(
+            registry.indexers.try_get_mut(&key),
+            dashmap::try_result::TryResult::Present(_)
+        ));
+        registry
+            .register(
+                2,
+                "tcp://127.0.0.1:15558".into(),
+                0,
+                "test-model".into(),
+                "default".into(),
+                1,
+                None,
+            )
+            .await
+            .unwrap();
+        drop(permits);
+        tokio::time::timeout(Duration::from_secs(5), removal)
+            .await
+            .expect("removal should finish after queue capacity is released")
+            .unwrap();
+        assert!(registry.workers.contains_key(&2));
+        assert!(registry.indexers.contains_key(&key));
+        registry.root_cancel_token.cancel();
+    }
+
+    #[rstest::rstest]
+    #[case(1)]
+    #[case(2)]
+    #[tokio::test]
+    async fn deregister_removes_watermark(#[case] num_threads: usize) {
+        let registry = WorkerRegistry::new(num_threads);
         registry.signal_ready();
 
         registry
@@ -856,9 +946,12 @@ mod tests {
         );
     }
 
+    #[rstest::rstest]
+    #[case(1)]
+    #[case(2)]
     #[tokio::test]
-    async fn deregister_dp_rank_removes_watermark() {
-        let registry = test_registry();
+    async fn deregister_dp_rank_removes_watermark(#[case] num_threads: usize) {
+        let registry = WorkerRegistry::new(num_threads);
         registry.signal_ready();
 
         registry
@@ -950,9 +1043,12 @@ mod tests {
         assert_eq!(registry.listener_cancelled(1, 0), Some(true));
     }
 
+    #[rstest::rstest]
+    #[case(1)]
+    #[case(2)]
     #[tokio::test]
-    async fn re_register_gets_fresh_watermark() {
-        let registry = test_registry();
+    async fn re_register_gets_fresh_watermark(#[case] num_threads: usize) {
+        let registry = WorkerRegistry::new(num_threads);
         registry.signal_ready();
 
         registry
@@ -1002,9 +1098,12 @@ mod tests {
         );
     }
 
+    #[rstest::rstest]
+    #[case(1)]
+    #[case(2)]
     #[tokio::test]
-    async fn deregister_all_routing_groups_removes_watermarks() {
-        let registry = test_registry();
+    async fn deregister_all_routing_groups_removes_watermarks(#[case] num_threads: usize) {
+        let registry = WorkerRegistry::new(num_threads);
         registry.signal_ready();
 
         registry

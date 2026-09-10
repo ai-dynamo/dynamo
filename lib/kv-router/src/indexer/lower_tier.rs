@@ -622,7 +622,7 @@ impl LowerTierIndexer {
         let indexed_owner = IndexedResidencyOwner::from_exact(owner);
         let remove_worker_entry = {
             let Some(owner_state) = worker_blocks.get_mut(&indexed_owner) else {
-                return Err(KvCacheEventError::BlockNotFound);
+                return Ok(());
             };
             if owner_state.owner != owner {
                 return Err(KvCacheEventError::UnsupportedResidencyDomain);
@@ -631,7 +631,7 @@ impl LowerTierIndexer {
 
             for block_hash in block_hashes {
                 let Some(key) = worker_map.remove(block_hash) else {
-                    return Err(KvCacheEventError::BlockNotFound);
+                    continue;
                 };
 
                 self.remove_owner_from_edge(key, indexed_owner);
@@ -2012,6 +2012,55 @@ mod tests {
             after_one_remove.get(&WorkerWithDpRank::new(13, 0)),
             Some(&0)
         );
+    }
+
+    #[test]
+    fn removal_batches_are_idempotent_and_preserve_other_owners() {
+        let mut index = TestLowerTierIndex::new();
+        let removed = WorkerWithDpRank::new(1, 0);
+        let other_rank = WorkerWithDpRank::new(1, 1);
+        let other_worker = WorkerWithDpRank::new(2, 0);
+        for worker in [removed, other_rank, other_worker] {
+            index
+                .apply_event(store_event(
+                    worker.worker_id,
+                    worker.dp_rank,
+                    0,
+                    None,
+                    &[11, 12],
+                    &[101, 102],
+                ))
+                .unwrap();
+        }
+
+        let batch = remove_event(
+            1,
+            1,
+            0,
+            vec![
+                ExternalSequenceBlockHash(999),
+                ExternalSequenceBlockHash(101),
+                ExternalSequenceBlockHash(101),
+                ExternalSequenceBlockHash(102),
+            ],
+        );
+        index.apply_event(batch.clone()).unwrap();
+        index.apply_event(batch).unwrap();
+        index
+            .apply_event(remove_event(99, 2, 0, vec![ExternalSequenceBlockHash(101)]))
+            .unwrap();
+
+        let continuations = [removed, other_rank, other_worker]
+            .into_iter()
+            .map(|worker| (worker, LowerTierContinuation::from_root(0)))
+            .collect::<FxHashMap<_, _>>();
+        let hits = index.query_contiguous_hits(&local_hashes(&[11, 12]), &continuations);
+        assert_eq!(hits.get(&removed), Some(&0));
+        assert_eq!(hits.get(&other_rank), Some(&2));
+        assert_eq!(hits.get(&other_worker), Some(&2));
+        assert!(index.dump_events().iter().all(|event| {
+            event.worker_id != removed.worker_id || event.event.dp_rank != removed.dp_rank
+        }));
     }
 
     #[test]
