@@ -557,7 +557,13 @@ class GMS:
             key = (msg.engine_id, msg.tag)
             try:
                 if key in claims and getattr(msg, "shared", False):
-                    alloc, reattached = self._persistent.get(*key), True
+                    alloc = self._persistent.get_compatible(
+                        msg.engine_id,
+                        msg.tag,
+                        msg.size,
+                        shared=True,
+                    )
+                    reattached = True
                 else:
                     alloc, reattached = self._persistent.claim(
                         engine_id=msg.engine_id,
@@ -569,8 +575,6 @@ class GMS:
                 return ErrorResponse(error=str(exc), code=1), -1, False
             except (ValueError, MemoryError) as exc:
                 return ErrorResponse(error=str(exc), code=2), -1, False
-            # Track for cleanup-on-disconnect: when this session goes
-            # away, we'll unclaim every key it owns.
             claims.add(key)
             self._sync_persistent_layout_events()
             return (

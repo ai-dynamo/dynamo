@@ -228,6 +228,22 @@ def test_list_filters_by_engine(fake_cuda):
     assert len(all_list) == 2
 
 
+def test_export_failure_releases_new_cuda_handle(fake_cuda, monkeypatch):
+    manager = PersistentAllocationManager(device=0)
+
+    def fail_export(_handle):
+        raise RuntimeError("export failed")
+
+    monkeypatch.setattr(fake_cuda, "export_to_shareable_handle", fail_export)
+
+    with pytest.raises(RuntimeError, match="export failed"):
+        manager.claim("eng", "kv_pool", 4096)
+
+    assert fake_cuda.server_handles == set()
+    assert manager.list() == []
+    assert manager.active_claim_count == 0
+
+
 def test_claim_validation(fake_cuda):
     m = PersistentAllocationManager(device=0)
     with pytest.raises(ValueError):
@@ -301,7 +317,7 @@ def test_claim_release_round_trip_via_rpc(gms):
     assert isinstance(resp, ClaimPersistentAllocationResponse)
     assert resp.reattached is False
     assert resp.size == 8192
-    assert fd == -1  # claim doesn't pass an FD
+    assert fd == -1
 
     rel_req = ReleasePersistentAllocationRequest(
         engine_id="eng-X",
@@ -328,6 +344,24 @@ def test_repeated_shared_claim_from_one_session_is_idempotent(gms):
 
     asyncio.run(gms.cleanup_connection(conn))
     assert not gms._persistent.is_claimed("eng-X", "kv_pool")
+
+
+def test_repeated_shared_claim_rejects_larger_size(gms):
+    conn = _make_dummy_conn()
+    first = ClaimPersistentAllocationRequest(
+        engine_id="eng-X", tag="kv_pool", size=4096, shared=True
+    )
+    larger = ClaimPersistentAllocationRequest(
+        engine_id="eng-X", tag="kv_pool", size=8192, shared=True
+    )
+
+    response, _, _ = asyncio.run(gms.handle_request(conn, first, lambda: True))
+    assert isinstance(response, ClaimPersistentAllocationResponse)
+
+    response, _, _ = asyncio.run(gms.handle_request(conn, larger, lambda: True))
+    assert isinstance(response, ErrorResponse)
+    assert "capacity mismatch" in response.error
+    assert gms._persistent.shared_claim_count("eng-X", "kv_pool") == 1
 
 
 def test_shared_claimant_cannot_release_peer_allocation_via_rpc(gms):
