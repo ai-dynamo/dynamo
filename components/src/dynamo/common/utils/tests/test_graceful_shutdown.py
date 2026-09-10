@@ -364,6 +364,41 @@ def test_fast_failover_mode_preserves_engine_cleanup_before_shutdown(monkeypatch
     assert shutdown_event.is_set()
 
 
+def test_fast_failover_unregister_timeout_is_hard(monkeypatch):
+    runtime = MagicMock()
+    endpoint = AsyncMock()
+    cancellation_seen = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def cancellation_resistant_unregister():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            await finish.wait()
+
+    endpoint.unregister_endpoint_instance = cancellation_resistant_unregister
+    monkeypatch.setenv("DYN_GMS_FAILOVER_FAST_EXIT_ON_SIGTERM", "1")
+    monkeypatch.setenv("DYN_GMS_FAILOVER_UNREGISTER_TIMEOUT_SECS", "0.01")
+
+    async def run():
+        await asyncio.wait_for(
+            graceful_shutdown_with_discovery(
+                runtime=runtime,
+                endpoints=[endpoint],
+                grace_period_s=0,
+            ),
+            timeout=0.5,
+        )
+        await asyncio.wait_for(cancellation_seen.wait(), timeout=0.1)
+        assert runtime.shutdown.call_count == 1
+        finish.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+
+
 def test_normal_shutdown_does_not_apply_failover_unregister_timeout(monkeypatch):
     monkeypatch.setenv("DYN_GMS_FAILOVER_FAST_EXIT_ON_SIGTERM", "0")
     endpoint = AsyncMock()
