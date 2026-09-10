@@ -30,7 +30,7 @@ pub mod sglang_renderer_client;
 pub mod topology_adapter;
 pub mod vllm_render_client;
 
-pub use admission::{RouterRejection, classify_router_error, requested_ttft_slo};
+pub use admission::{RouterRejection, classify_router_error};
 pub use epp::Router;
 pub use epp_router::EppRouter;
 pub use epp_standalone_config::{

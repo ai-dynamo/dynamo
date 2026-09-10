@@ -10,13 +10,9 @@
 //! rejection reason is added to the router, both hosts have to learn it; this
 //! module is the EPP's side.
 //!
-//! Two pieces live here:
-//!
-//! - [`classify_router_error`] turns an `anyhow::Error` from a routing call
-//!   back into a typed rejection, so the ext_proc boundary can pick the right
-//!   status class instead of flattening everything to 503.
-//! - [`requested_ttft_slo`] reads the per-request TTFT budget that DEP #9755
-//!   defines, which is the input the router needs to order by deadline.
+//! [`classify_router_error`] turns an `anyhow::Error` from a routing call back
+//! into a typed rejection, so the ext_proc boundary can pick the right status
+//! class instead of flattening everything to 503.
 //!
 //! # Why classification is needed at all
 //!
@@ -32,34 +28,10 @@
 //! `lib/kv-router/src/services/selection/error.rs`, so a rejection means the
 //! same thing to a client whichever host produced it.
 
-use std::time::Duration;
-
 use dynamo_kv_router::scheduling::KvSchedulerError;
-use dynamo_llm::http::service::metadata::extract_metadata_from_header_pairs;
 use dynamo_runtime::error::{DynamoError, ErrorType};
 
 use crate::picker::PickError;
-
-/// Metadata key naming the per-request time-to-first-token budget, in
-/// milliseconds.
-///
-/// Rides the same Dynamo metadata-header mechanism as the policy class (see
-/// [`crate::epp_router::requested_policy_class`]), so the wire header is this
-/// key behind `DYNAMO_METADATA_HEADER_PREFIX_DEFAULT` —
-/// `x-dynamo-meta-slo-ttft-ms` by default, and whatever
-/// `DYNAMO_METADATA_HEADER_ENV` sets otherwise.
-///
-/// Note this differs from DEP #9755, which writes the header as
-/// `x-dynamo-slo-ttft-ms`. The metadata prefix is the mechanism the codebase
-/// actually implements and the one the policy class already uses, so the SLO
-/// budget follows it rather than introducing a second, unprefixed convention
-/// with a different trust boundary.
-pub const SLO_TTFT_MS_KEY: &str = "slo-ttft-ms";
-
-/// Largest TTFT budget the EPP will accept, bounding a value that reaches the
-/// scheduler's ordering key. A budget beyond this is a configuration mistake
-/// rather than a real latency target, and clamping silently would hide it.
-const MAX_TTFT_SLO: Duration = Duration::from_secs(3600);
 
 /// Why the embedded router refused to place a request.
 ///
@@ -187,70 +159,10 @@ fn classify_scheduler_error(error: &KvSchedulerError) -> RouterRejection {
     }
 }
 
-/// Read the per-request TTFT budget from the request's Dynamo metadata headers.
-///
-/// DEP #9755 defines the router's queue key as
-/// `due_time = receive_time + selected_ttft_slo`, with a trusted per-request
-/// override taking precedence over the policy class default. For gateway
-/// traffic the EPP is the component that sees the headers, so it is the
-/// component that has to read it.
-///
-/// Returns `Ok(None)` when the caller supplied no budget, which means the
-/// policy class default applies.
-///
-/// # Trust
-///
-/// The value is only as trustworthy as the gateway in front of the EPP. It
-/// rides the Dynamo metadata-header prefix, and `envoy_helpers` already strips
-/// the client-spoofable `x-gateway-*` control headers on the way in, so a
-/// deployment that lets clients set arbitrary `x-dynamo-*` headers is letting
-/// them choose their own queue priority. That is the same exposure the policy
-/// class already has.
-pub fn requested_ttft_slo(headers: &[(String, String)]) -> Result<Option<Duration>, PickError> {
-    let metadata =
-        extract_metadata_from_header_pairs(headers.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-            .map_err(|e| PickError::MetadataHeadersInvalid(e.to_string()))?;
-
-    let Some(raw) = metadata.get(SLO_TTFT_MS_KEY) else {
-        return Ok(None);
-    };
-
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-
-    let millis: u64 = trimmed.parse().map_err(|_| {
-        PickError::InvalidRequest(format!(
-            "{SLO_TTFT_MS_KEY} must be a whole number of milliseconds"
-        ))
-    })?;
-
-    if millis == 0 {
-        return Err(PickError::InvalidRequest(format!(
-            "{SLO_TTFT_MS_KEY} must be greater than zero"
-        )));
-    }
-
-    let slo = Duration::from_millis(millis);
-    if slo > MAX_TTFT_SLO {
-        return Err(PickError::InvalidRequest(format!(
-            "{SLO_TTFT_MS_KEY} must not exceed {} ms",
-            MAX_TTFT_SLO.as_millis()
-        )));
-    }
-
-    Ok(Some(slo))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use dynamo_kv_router::protocols::WorkerId;
-
-    fn header(key: &str, value: &str) -> Vec<(String, String)> {
-        vec![(key.to_string(), value.to_string())]
-    }
 
     fn anyhow_from(error: KvSchedulerError) -> anyhow::Error {
         error.into()
@@ -394,55 +306,5 @@ mod tests {
         unique.sort_unstable();
         unique.dedup();
         assert_eq!(unique.len(), labels.len(), "labels must be distinct");
-    }
-
-    #[test]
-    fn ttft_slo_absent_is_not_an_error() {
-        assert_eq!(requested_ttft_slo(&[]).unwrap(), None);
-        assert_eq!(
-            requested_ttft_slo(&header("content-type", "application/json")).unwrap(),
-            None
-        );
-    }
-
-    #[test]
-    fn ttft_slo_parses_milliseconds() {
-        let headers = header("x-dynamo-meta-slo-ttft-ms", "250");
-        assert_eq!(
-            requested_ttft_slo(&headers).unwrap(),
-            Some(Duration::from_millis(250))
-        );
-    }
-
-    #[test]
-    fn ttft_slo_blank_value_is_treated_as_absent() {
-        let headers = header("x-dynamo-meta-slo-ttft-ms", "   ");
-        assert_eq!(requested_ttft_slo(&headers).unwrap(), None);
-    }
-
-    #[test]
-    fn ttft_slo_rejects_malformed_values() {
-        for value in ["abc", "-5", "1.5", "250ms"] {
-            let headers = header("x-dynamo-meta-slo-ttft-ms", value);
-            assert!(
-                matches!(
-                    requested_ttft_slo(&headers),
-                    Err(PickError::InvalidRequest(_))
-                ),
-                "{value} should be rejected as a client error"
-            );
-        }
-    }
-
-    #[test]
-    fn ttft_slo_rejects_zero_and_absurd_budgets() {
-        assert!(matches!(
-            requested_ttft_slo(&header("x-dynamo-meta-slo-ttft-ms", "0")),
-            Err(PickError::InvalidRequest(_))
-        ));
-        assert!(matches!(
-            requested_ttft_slo(&header("x-dynamo-meta-slo-ttft-ms", "3600001")),
-            Err(PickError::InvalidRequest(_))
-        ));
     }
 }
