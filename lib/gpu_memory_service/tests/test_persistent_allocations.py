@@ -94,7 +94,6 @@ def test_reclaim_after_unclaim_returns_existing(fake_cuda):
     alloc1, r1 = m.claim("eng-A", "kv_pool", 4096)
     assert r1 is False
 
-    # Simulate engine disconnect.
     assert m.unclaim("eng-A", "kv_pool") is True
 
     alloc2, r2 = m.claim("eng-A", "kv_pool", 4096)
@@ -157,6 +156,16 @@ def test_shared_claim_can_reattach_to_larger_existing_allocation(fake_cuda):
     assert alloc2.aligned_size == alloc1.aligned_size
 
 
+def test_shared_claim_rejects_undersized_existing_allocation(fake_cuda):
+    m = PersistentAllocationManager(device=0)
+    m.claim("eng-A", "kv_pool", 4096, shared=True)
+
+    with pytest.raises(PersistentClaimConflictError, match="capacity mismatch"):
+        m.claim("eng-A", "kv_pool", 8192, shared=True)
+
+    assert m.shared_claim_count("eng-A", "kv_pool") == 1
+
+
 def test_shared_and_exclusive_claims_conflict(fake_cuda):
     m = PersistentAllocationManager(device=0)
     m.claim("eng-A", "kv_pool", 4096)
@@ -174,8 +183,6 @@ def test_release_frees_and_removes(fake_cuda):
     alloc, _ = m.claim("eng-A", "kv_pool", 4096)
     assert m.release("eng-A", "kv_pool") is True
     assert m.is_claimed("eng-A", "kv_pool") is False
-    # Subsequent claim with the same key creates a NEW allocation
-    # (not a reattach).
     alloc2, reattached = m.claim("eng-A", "kv_pool", 4096)
     assert reattached is False
     assert alloc.allocation_id != alloc2.allocation_id
@@ -390,7 +397,6 @@ def test_conflict_returns_error_response(gms):
         size=8192,
     )
     asyncio.run(gms.handle_request(conn, claim, lambda: True))
-    # Don't unclaim. Second claim with same key → conflict.
     resp, _, _ = asyncio.run(gms.handle_request(conn, claim, lambda: True))
     assert isinstance(resp, ErrorResponse)
     assert "already claimed" in resp.error
@@ -456,7 +462,6 @@ def test_persistent_rpc_requires_session_claim_for_release_and_export(gms):
         )
     )
     assert isinstance(resp, ErrorResponse)
-    # Release is refused because the allocation is still claimed by `owner`.
     assert "claimed by another session" in resp.error
     assert gms._persistent.is_claimed("eng-X", "kv_pool")
 
@@ -484,11 +489,9 @@ def test_orphaned_allocation_is_discoverable_and_reclaimable(gms):
             lambda: True,
         )
     )
-    # Simulate the owner's disconnect cleanup: claim dropped, allocation kept.
     asyncio.run(gms.cleanup_connection(owner))
     assert not gms._persistent.is_claimed("eng-X", "kv_pool")
 
-    # Default list from another session sees nothing (no claims of its own).
     resp, _, _ = asyncio.run(
         gms.handle_request(
             other, ListPersistentAllocationsRequest("eng-X"), lambda: True
@@ -506,7 +509,6 @@ def test_orphaned_allocation_is_discoverable_and_reclaimable(gms):
     assert any(a.tag == "kv_pool" for a in resp.allocations)
     assert all(a.claimed is False for a in resp.allocations)
 
-    # The orphan can be reclaimed by a session that never claimed it.
     resp, _, _ = asyncio.run(
         gms.handle_request(
             other,
@@ -573,10 +575,8 @@ def test_persistent_allocations_unaffected_by_rw_abort(gms):
             lambda: True,
         )
     )
-    # Simulate the weights-side cleanup (what would happen on RW_ABORT).
     gms._clear_layout_state()
 
-    # Persistent allocation must still be there.
     resp, _, _ = asyncio.run(
         gms.handle_request(
             conn,
@@ -608,7 +608,6 @@ def test_cleanup_releases_claims_keeps_allocation(gms):
     )
     assert gms._persistent.is_claimed("eng-X", "kv_pool") is True
 
-    # Simulate disconnect of session 1.
     asyncio.run(gms.cleanup_connection(conn1))
     assert (
         gms._persistent.is_claimed("eng-X", "kv_pool") is False
@@ -683,11 +682,9 @@ def test_release_dedupes_session_claim_record(gms):
         )
     )
     assert not gms._persistent.is_claimed("eng-X", "kv_pool")
-    # Session record should be empty (or no entry at all).
     record = gms._persistent_claims_by_session.get(conn.session_id, set())
     assert ("eng-X", "kv_pool") not in record
 
-    # cleanup_connection still works without errors.
     asyncio.run(gms.cleanup_connection(conn))
 
 
@@ -739,7 +736,6 @@ def test_read_block_unmapped_raises(monkeypatch, fake_cuda):
     """If cuMemMap failed at claim time, va_daemon is 0 and
     read/write_block must raise rather than dereference 0."""
 
-    # Force the daemon-side mapping to fail.
     def fail_map(va, size, handle):
         raise RuntimeError("simulated cuMemMap failure")
 
