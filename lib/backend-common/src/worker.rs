@@ -80,7 +80,6 @@ pub struct RuntimeConfig {
 }
 
 impl RuntimeConfig {
-    /// `true` if any per-worker transport option is set.
     pub fn has_overrides(&self) -> bool {
         self.discovery_backend.is_some()
             || self.request_plane.is_some()

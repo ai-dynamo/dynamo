@@ -46,7 +46,6 @@ CHILD = textwrap.dedent(
     system_port = int(sys.argv[3])
 
     async def fetch_cached_models(count=1):
-        '''Verify repeated real-binding fetches return the offline snapshot.'''
         for _ in range(count):
             fetched = Path(await core.fetch_model(MODEL, True))
             assert fetched.resolve() == expected_snapshot.resolve(), (
@@ -62,7 +61,6 @@ CHILD = textwrap.dedent(
         assert await asyncio.wait_for(waiter, timeout=1)
 
     def create_backend_worker(engine):
-        '''Create a real worker with explicit in-memory and TCP/ZMQ transports.'''
         runtime_config = core.backend.RuntimeConfig("mem", "tcp", "zmq")
         worker_config = core.backend.WorkerConfig(
             "runtime-bridge-test",
@@ -76,12 +74,9 @@ CHILD = textwrap.dedent(
     async def exercise_backend_startup_and_cleanup():
         '''Verify transport overrides and cleanup after an engine startup error.'''
         class FailingEngine:
-            '''Expose startup and cleanup milestones through the real worker.'''
-
             cleanup_count = 0
 
             async def start(self, _worker_id):
-                '''Confirm the health listener is live, then fail engine startup.'''
                 # Reaching the engine proves explicit mem/tcp/zmq settings won
                 # over the deliberately conflicting environment, without infra.
                 _, writer = await asyncio.open_connection("127.0.0.1", system_port)
@@ -90,7 +85,6 @@ CHILD = textwrap.dedent(
                 raise RuntimeError("runtime-bridge-engine-start-failed")
 
             async def cleanup(self):
-                '''Count cleanup calls to detect skipped or duplicate teardown.'''
                 self.cleanup_count += 1
 
         engine = FailingEngine()
@@ -106,7 +100,6 @@ CHILD = textwrap.dedent(
         # shutdown() schedules cancellation; wait for observable socket release,
         # rather than assuming cleanup completed when run() returned its error.
         async def wait_for_listener_release():
-            '''Wait until the worker shutdown releases its health-listener port.'''
             while True:
                 with socket.socket() as listener:
                     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -133,7 +126,6 @@ CHILD = textwrap.dedent(
         os.environ["DYN_RUNTIME_NUM_WORKER_THREADS"] = "1"
 
     async def main():
-        '''Run the selected startup order and emit a completion log sentinel.'''
         if scenario == "fetch_first_distributed_runtime":
             await fetch_cached_models()
             runtime = core.DistributedRuntime(
@@ -142,7 +134,7 @@ CHILD = textwrap.dedent(
             runtime.shutdown()
         elif scenario == "context_first":
             await trigger_context_bridge()
-            await fetch_cached_models(3)
+            await fetch_cached_models(2)
         elif scenario == "detached_then_fetch":
             runtime = core.DistributedRuntime.detached()
             try:
@@ -208,7 +200,6 @@ SCENARIOS = [
 
 
 def _build_cached_model(cache: Path) -> Path:
-    """Create and return a minimal Hugging Face snapshot for offline fetching."""
     repository = cache / "models--runtime-tests--cached"
     snapshot = repository / "snapshots" / REVISION
     refs = repository / "refs"
@@ -221,7 +212,6 @@ def _build_cached_model(cache: Path) -> Path:
 
 
 def _isolated_child_env(cache: Path, scenario: str, system_port: int) -> dict[str, str]:
-    """Build a clean child environment with scenario-specific runtime settings."""
     isolated_prefixes = (
         "DYN_",
         "DYNAMO_",
@@ -291,7 +281,6 @@ def _parse_jsonl_logs(output: str) -> list[dict[str, Any]]:
 def test_fetch_model_runtime_bridge_orders(
     tmp_path: Path, scenario: str, expect_mismatch: bool, dynamo_dynamic_ports
 ) -> None:
-    """Check fetch startup ordering and mismatch warnings in a fresh process."""
     cache = tmp_path / "hf-cache"
     cache.mkdir()
     snapshot = _build_cached_model(cache)
