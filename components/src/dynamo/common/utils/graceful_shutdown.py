@@ -86,6 +86,33 @@ async def _unregister_endpoints(endpoints: Iterable) -> None:
             )
 
 
+def _consume_detached_unregister_result(task: asyncio.Task[None]) -> None:
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        pass
+    except BaseException:
+        logger.debug("Detached discovery unregister failed", exc_info=True)
+
+
+async def _unregister_endpoints_bounded(endpoints: Iterable, *, timeout: float) -> bool:
+    # Endpoint unregister is control-plane cleanup and cannot mutate shared KV.
+    # It is safe to cancel and detach at the hard failover deadline.
+    task = asyncio.create_task(_unregister_endpoints(endpoints))
+    try:
+        done, _ = await asyncio.wait({task}, timeout=timeout)
+    except asyncio.CancelledError:
+        task.cancel()
+        task.add_done_callback(_consume_detached_unregister_result)
+        raise
+    if not done:
+        task.cancel()
+        task.add_done_callback(_consume_detached_unregister_result)
+        return False
+    task.result()
+    return True
+
+
 async def graceful_shutdown_with_discovery(
     runtime: DistributedRuntime,
     endpoints: Iterable,
@@ -132,11 +159,9 @@ async def graceful_shutdown_with_discovery(
     fast_failover_exit = fast_failover_exit_enabled()
     if fast_failover_exit:
         unregister_timeout = failover_unregister_timeout_secs()
-        try:
-            await asyncio.wait_for(
-                _unregister_endpoints(list(endpoints)), timeout=unregister_timeout
-            )
-        except asyncio.TimeoutError:
+        if not await _unregister_endpoints_bounded(
+            list(endpoints), timeout=unregister_timeout
+        ):
             logger.warning(
                 "Discovery unregister did not complete within %.1fs; proceeding so "
                 "failover ownership is released promptly",
