@@ -20567,6 +20567,13 @@ spec:
                       description: |-
                         packDomain is the topology domain to pack pods within. Must match a
                         domain defined in the referenced ClusterTopology CR.
+
+                        The domain constrains each gang-scheduled replica group independently.
+                        This component's replicas are not packed into one shared domain with each
+                        other, and replicas added by a later replica-count change are placed
+                        independently of where the existing replicas already run. The number of
+                        replicas gang-scheduled together is `minAvailable`, which is immutable
+                        after creation and so must be set when the deployment is created.
                       pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
                       type: string
                   required:

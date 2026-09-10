@@ -100,7 +100,7 @@ spec:
     Name of the `ClusterTopology` resource defining the topology hierarchy for this deployment.
   </ParamField>
   <ParamField path="packDomain" type="string">
-    Default topology domain to pack pods within. Optional at this level; omit when only components carry constraints.
+    Default topology domain to pack pods within. Optional at this level; omit when only components carry constraints. The domain constrains each gang-scheduled replica group independently: a component's replicas are not packed into one shared domain with each other, and replicas added by a later replica-count change are placed independently of where the existing replicas already run. The number of replicas gang-scheduled together is `minAvailable`, which is immutable after creation and so must be set when the deployment is created.
   </ParamField>
 </Indent>
 
