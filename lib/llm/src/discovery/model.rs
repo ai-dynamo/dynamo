@@ -2049,8 +2049,6 @@ mod tests {
             "KServe readiness must agree with what routing accepts"
         );
 
-        // The ambiguity is still reported, so an operator can see the pairing is
-        // off even though traffic is being served.
         let readiness = model.namespace_readiness();
         let ns = readiness.namespaces.get("pd").expect("namespace reported");
         assert!(ns.ready);

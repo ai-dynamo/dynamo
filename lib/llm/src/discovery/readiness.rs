@@ -32,11 +32,7 @@ pub struct ReadinessEval {
     pub missing: HashSet<WorkerType>,
     /// Non-`Aggregated` worker types with more than one live unit in the namespace.
     ///
-    /// Reported, never gated on. A duplicated role means the topology cannot say
-    /// which endpoint of that role to pair with, so `reconcile_discovery_topology`
-    /// declines to pair it and the routers pass requests straight through; it does
-    /// not mean the namespace stopped serving. Consumers surface this as a
-    /// diagnostic, not as a reason to withhold traffic.
+    /// Diagnostic only: it does not gate `ready`.
     pub ambiguous: HashSet<WorkerType>,
 }
 

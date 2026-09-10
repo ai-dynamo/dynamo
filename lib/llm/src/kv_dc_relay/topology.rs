@@ -330,9 +330,13 @@ fn derive_topology(
                 left.endpoint.to_string().cmp(&right.endpoint.to_string())
             });
             let evaluation = evaluate_readiness(&group.units);
+            // Stricter than local serving on purpose: a namespace with a duplicated
+            // role degrades to aggregated serving on its own decode worker, but a
+            // remote peer picking a KV source cannot tell which duplicate owns the
+            // blocks, so the pool stays unadvertised.
             let state = if !group.availability_authoritative {
                 TopologyReadinessState::Unknown
-            } else if evaluation.ready {
+            } else if evaluation.ready && evaluation.ambiguous.is_empty() {
                 TopologyReadinessState::Ready
             } else {
                 TopologyReadinessState::Unavailable
@@ -462,9 +466,11 @@ fn derive_adapters(
         .iter()
         .map(|(model, aggregate)| {
             let evaluation = evaluate_readiness(&aggregate.units);
+            // Same stricter rule as `derive_topology`: an ambiguous role is not
+            // advertised to remote peers, which have no aggregated fallback.
             let state = if !aggregate.availability_authoritative {
                 TopologyReadinessState::Unknown
-            } else if evaluation.ready {
+            } else if evaluation.ready && evaluation.ambiguous.is_empty() {
                 TopologyReadinessState::Ready
             } else {
                 TopologyReadinessState::Unavailable
@@ -672,8 +678,8 @@ mod tests {
             Some(WorkerType::Decode),
             vec![vec![WorkerType::Prefill]],
         );
-        // A second Decode worker set serving a different surface: the request plane
-        // sees two WorkerSets of one role and reports the role as ambiguous.
+        // A second Decode worker set serving a different surface: the relay sees two
+        // WorkerSets of one role and declines to advertise the namespace.
         decode.worker_topology.insert(
             2,
             DomainWorkerTopology {
@@ -695,7 +701,7 @@ mod tests {
         let snapshot = publisher.snapshot();
         let topology = entry(&snapshot, "llama");
 
-        assert_eq!(topology.state, TopologyReadinessState::Ready);
+        assert_eq!(topology.state, TopologyReadinessState::Unavailable);
         assert_eq!(topology.duplicate_role_endpoints, [WorkerRole::Decode]);
     }
 
@@ -1012,7 +1018,9 @@ mod tests {
         let snapshot = publisher.snapshot();
         let topology = entry(&snapshot, "llama");
 
-        assert_eq!(topology.state, TopologyReadinessState::Ready);
+        // The relay withholds an ambiguous namespace, and the duplicated roles
+        // explain why.
+        assert_eq!(topology.state, TopologyReadinessState::Unavailable);
         assert_eq!(
             topology.duplicate_role_endpoints,
             [WorkerRole::Prefill, WorkerRole::Decode]
@@ -1195,7 +1203,7 @@ mod tests {
         let snapshot = publisher.snapshot();
         let topology = entry(&snapshot, "llama");
 
-        assert_eq!(topology.state, TopologyReadinessState::Ready);
+        assert_eq!(topology.state, TopologyReadinessState::Unavailable);
         assert_eq!(topology.duplicate_role_endpoints, [WorkerRole::Encode]);
     }
 
