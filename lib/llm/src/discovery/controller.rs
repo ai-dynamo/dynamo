@@ -24,6 +24,12 @@ use crate::{model_card::ModelDeploymentCard, namespace::NamespaceFilter};
 
 const DEFAULT_MAX_CONCURRENT_BUILDS: usize = 8;
 const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(30);
+/// How long a committed group that has lost every member keeps its serving state
+/// before it is withdrawn. Sized an order of magnitude above the gap between one
+/// worker's card being withdrawn and its replacement's card being published, and
+/// an order of magnitude below `RECONCILIATION_INTERVAL`, so a deferred removal
+/// can never survive into the next reconciliation sweep.
+const GROUP_REMOVAL_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub(crate) struct GroupKey {
@@ -139,6 +145,10 @@ struct DesiredGroup {
     cohorts: HashMap<String, BTreeSet<String>>,
     admission_tx: watch::Sender<Vec<u64>>,
     status: GroupStatus,
+    /// When a committed group emptied out, the instant after which its catalog
+    /// entry is withdrawn. A member joining the same key before then takes the
+    /// group over in place; nothing removes it early.
+    pending_removal: Option<Instant>,
 }
 
 impl DesiredGroup {
@@ -150,6 +160,7 @@ impl DesiredGroup {
             cohorts: HashMap::new(),
             admission_tx,
             status: GroupStatus::Idle,
+            pending_removal: None,
         }
     }
 
@@ -382,11 +393,23 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         if group.cohorts.is_empty() {
             group.admission_tx.send_replace(Vec::new());
             cancel_build(&old_status);
-            if status_has_commit(&old_status) {
-                self.host.remove_group(key);
+            if !status_has_commit(&old_status) {
+                return;
             }
+            // The group keeps its commit, with no admitted instances, so requests
+            // for the model are unavailable rather than unknown while a
+            // replacement worker has the chance to take the group over in place.
+            // The deadline is armed once per emptying: a group can be reconciled
+            // repeatedly while empty, and extending it each time would let the
+            // group linger indefinitely.
+            if group.pending_removal.is_none() {
+                group.pending_removal = Some(Instant::now() + GROUP_REMOVAL_GRACE);
+            }
+            group.status = old_status;
+            self.groups.insert(key.clone(), group);
             return;
         }
+        group.pending_removal = None;
 
         if group.cohorts.len() > 1 {
             group.admission_tx.send_replace(Vec::new());
@@ -741,19 +764,32 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
     fn next_retry_deadline(&self) -> Option<Instant> {
         self.groups
             .values()
-            .filter_map(|group| match group.status {
-                GroupStatus::Retrying { deadline, .. }
-                | GroupStatus::Blocked { deadline, .. }
-                | GroupStatus::BlockedReady { deadline, .. } => Some(deadline),
-                _ => None,
+            .flat_map(|group| {
+                let retry = match group.status {
+                    GroupStatus::Retrying { deadline, .. }
+                    | GroupStatus::Blocked { deadline, .. }
+                    | GroupStatus::BlockedReady { deadline, .. } => Some(deadline),
+                    _ => None,
+                };
+                [retry, group.pending_removal]
             })
+            .flatten()
             .min()
     }
 
     fn release_due_retries(&mut self) {
         let now = Instant::now();
         let mut retained_retries = Vec::new();
+        let mut due_removals = Vec::new();
         for (key, group) in &mut self.groups {
+            if group.cohorts.is_empty()
+                && group
+                    .pending_removal
+                    .is_some_and(|deadline| deadline <= now)
+            {
+                due_removals.push(key.clone());
+                continue;
+            }
             let (fingerprint, deadline) = match &group.status {
                 GroupStatus::Retrying {
                     fingerprint,
@@ -785,6 +821,10 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         }
         for key in retained_retries {
             self.reconcile_group(&key, false);
+        }
+        for key in due_removals {
+            self.host.remove_group(&key);
+            self.groups.remove(&key);
         }
     }
 
@@ -1296,6 +1336,78 @@ mod tests {
         assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn emptied_group_serves_through_a_replacement_without_rebuilding() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        let departing = instance(1, "spec");
+        controller.apply_added(departing.clone());
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([departing.key.clone()])
+        );
+
+        controller.apply_removed(&departing.key);
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([departing.key.clone()])
+        );
+
+        tokio::time::advance(Duration::from_millis(500)).await;
+        controller.release_due_retries();
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([departing.key.clone()])
+        );
+
+        let replacement = instance(2, "spec");
+        controller.apply_added(replacement.clone());
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([replacement.key.clone()])
+        );
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+        assert_eq!(host.starts.load(Ordering::SeqCst), 1);
+
+        tokio::time::advance(Duration::from_secs(5)).await;
+        controller.release_due_retries();
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([replacement.key])
+        );
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn emptied_group_is_withdrawn_when_no_replacement_arrives() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        let departing = instance(1, "spec");
+        controller.apply_added(departing.clone());
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([departing.key.clone()])
+        );
+
+        controller.apply_removed(&departing.key);
+        tokio::time::advance(Duration::from_secs(5)).await;
+        controller.release_due_retries();
+
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 1);
+        assert!(host.members(&group_key()).is_empty());
+        assert!(!controller.groups.contains_key(&group_key()));
+    }
+
     #[tokio::test]
     async fn recreated_group_rejects_prepared_result_from_prior_lifetime() {
         let (host, mut starts) = FakeHost::new();
@@ -1324,7 +1436,7 @@ mod tests {
         assert_eq!(host.members(&group_key()), BTreeSet::from([first.key]));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn adapter_cards_neither_start_nor_keep_worker_sets_alive() {
         let (host, mut starts) = FakeHost::new();
         let mut controller = ModelDiscoveryController::new(host.clone());
@@ -1369,6 +1481,8 @@ mod tests {
         assert_eq!(host.starts.load(Ordering::SeqCst), 1);
 
         controller.apply_removed(&base.key);
+        tokio::time::advance(Duration::from_secs(5)).await;
+        controller.release_due_retries();
         assert!(host.members(&group_key()).is_empty());
         assert!(host.adapters(&group_key()).is_empty());
         assert!(controller.desired.contains_key(&adapter.key));
