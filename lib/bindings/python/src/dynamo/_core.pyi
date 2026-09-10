@@ -1458,12 +1458,22 @@ class HttpService:
     It is a OpenAI compatible http ingress into the Dynamo Distributed Runtime.
     """
 
-    def __init__(self, port: Optional[int] = None) -> None:
+    def __init__(
+        self, port: Optional[int] = None, wait_for_first_item: bool = False
+    ) -> None:
         """
         Create a new HTTP service.
 
         Args:
             port: Optional port number to bind the service to (default: 8080)
+            wait_for_first_item: When True, streaming requests wait for the
+                engine's first item before the HTTP status is committed, so an
+                exception raised by an engine generator before its first
+                ``yield`` maps to the same HTTP error response as it does for a
+                non-streaming request. When False (the default), streaming
+                requests commit HTTP 200 immediately and such an error arrives
+                as an SSE error frame. The default follows
+                ``DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS``; True overrides it.
         """
         ...
 
