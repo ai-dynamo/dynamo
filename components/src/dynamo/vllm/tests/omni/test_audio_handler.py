@@ -366,6 +366,29 @@ class TestResolveRefAudio:
         with pytest.raises(ValueError, match="too large"):
             asyncio.run(handler._resolve_ref_audio(self._data_uri(self._wav_bytes())))
 
+    def test_accepts_a_payload_exactly_at_the_limit(self):
+        # The encoded guard must not consume any of the decoded budget: base64
+        # expansion and the URI header are not audio bytes.
+        wav = self._wav_bytes()
+        handler = _make_audio_handler(tts_ref_audio_max_bytes=len(wav))
+        data, _ = asyncio.run(handler._resolve_ref_audio(self._data_uri(wav)))
+        assert len(data) == 1600
+
+    def test_percent_encoding_does_not_consume_the_decoded_budget(self):
+        # Percent escapes cost 3 URI characters per base64 character, so a
+        # naive length estimate rejects a payload whose decoded size fits.
+        import base64
+        import urllib.parse
+
+        wav = self._wav_bytes()
+        quoted = urllib.parse.quote(base64.b64encode(wav).decode(), safe="=")
+        assert len(quoted) > len(wav) * 4 // 3  # really is inflated
+        handler = _make_audio_handler(tts_ref_audio_max_bytes=len(wav))
+        data, _ = asyncio.run(
+            handler._resolve_ref_audio(f"data:audio/wav;base64,{quoted}")
+        )
+        assert len(data) == 1600
+
     def test_rejects_an_unsupported_scheme(self):
         handler = _make_audio_handler()
         with pytest.raises(ValueError, match="must be a URL"):

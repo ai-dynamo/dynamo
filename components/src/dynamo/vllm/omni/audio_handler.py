@@ -398,23 +398,27 @@ class AudioGenerationHandler:
                             f"max {self.config.tts_ref_audio_max_bytes})"
                         )
         elif ref_audio_str.startswith("data:"):
-            # A data URI carries its payload inline, so the URI length already
-            # bounds the decoded size -- check before decoding, or an oversized
-            # payload is fully materialized just to be rejected.
-            if len(ref_audio_str) * 3 // 4 > self.config.tts_ref_audio_max_bytes:
+            max_bytes = self.config.tts_ref_audio_max_bytes
+            # Bound the *encoded* input separately from the decoded limit. A
+            # data URI carries its payload inline, so without this an unbounded
+            # one is materialized in full before any check can look at it. The
+            # most expensive legal encoding is 4 URI characters per decoded byte
+            # (4/3 base64 characters, each percent-escaped to 3), so this cannot
+            # reject a payload that would have fit -- the exact limit is applied
+            # to the decoded bytes below, where percent escapes and padding have
+            # already been normalized away.
+            if len(ref_audio_str) > max_bytes * 4:
                 raise ValueError(
-                    f"ref_audio data URI too large "
-                    f"(max {self.config.tts_ref_audio_max_bytes} bytes)"
+                    f"ref_audio data URI too large (max {max_bytes} bytes decoded)"
                 )
             try:
                 audio_bytes = decode_data_uri(ref_audio_str)
             except UrlValidationError as exc:
                 raise ValueError(f"Invalid data: ref_audio ({exc})") from exc
-            if len(audio_bytes) > self.config.tts_ref_audio_max_bytes:
+            if len(audio_bytes) > max_bytes:
                 raise ValueError(
                     f"ref_audio data URI too large "
-                    f"({len(audio_bytes)} bytes, "
-                    f"max {self.config.tts_ref_audio_max_bytes})"
+                    f"({len(audio_bytes)} bytes, max {max_bytes})"
                 )
         else:
             raise ValueError(
