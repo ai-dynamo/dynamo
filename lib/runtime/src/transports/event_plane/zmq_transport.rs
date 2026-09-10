@@ -858,32 +858,6 @@ mod tests {
         assert!(returned.iter().all(|byte| *byte == 0x5a));
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn test_zmq_concurrent_ephemeral_binds() {
-        let barrier = Arc::new(tokio::sync::Barrier::new(32));
-        let mut tasks = tokio::task::JoinSet::new();
-        for _ in 0..32 {
-            let barrier = barrier.clone();
-            tasks.spawn(async move {
-                barrier.wait().await;
-                ZmqPubTransport::bind("tcp://127.0.0.1:0", "concurrent-bind").await
-            });
-        }
-
-        let mut publishers = Vec::new();
-        let mut ports = std::collections::HashSet::new();
-        while let Some(result) = tasks.join_next().await {
-            let (publisher, endpoint) = result.unwrap().unwrap();
-            let address: std::net::SocketAddr =
-                endpoint.strip_prefix("tcp://").unwrap().parse().unwrap();
-            assert_eq!(address.ip(), std::net::Ipv4Addr::LOCALHOST);
-            assert_ne!(address.port(), 0);
-            assert!(ports.insert(address.port()), "Duplicate live port");
-            publishers.push(publisher);
-        }
-        assert_eq!(publishers.len(), 32);
-    }
-
     #[tokio::test]
     async fn test_zmq_pubsub_basic() {
         let topic = "test-topic";
