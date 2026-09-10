@@ -465,6 +465,20 @@ impl DistributedRuntime {
         self.discovery_client.shutdown();
     }
 
+    /// [`shutdown`](Self::shutdown) that resolves once the runtime's
+    /// three-phase teardown has finished, so the endpoint inflight drain is
+    /// complete before the caller proceeds. `drain_timeout` bounds Phase 2;
+    /// see [`Runtime::shutdown_and_wait`].
+    pub async fn shutdown_and_wait(&self, drain_timeout: Option<std::time::Duration>) {
+        // Deregister FIRST, matching the sync `shutdown` above. Awaiting the
+        // teardown before deregistering would leave this instance advertised
+        // in discovery for the whole drain window while its endpoint token is
+        // already cancelled — advertised and refusing work, which is worse
+        // than either state alone.
+        self.discovery_client.shutdown();
+        self.runtime.shutdown_and_wait(drain_timeout).await;
+    }
+
     /// Create a [`Namespace`]
     pub fn namespace(&self, name: impl Into<String>) -> Result<Namespace> {
         Namespace::new(self.clone(), name.into())

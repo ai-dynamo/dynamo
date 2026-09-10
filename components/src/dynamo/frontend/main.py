@@ -399,8 +399,16 @@ async def async_main():
         response_plane=config.response_plane,
     )
 
+    # Held so the task is not garbage-collected mid-await, and so `async_main`
+    # can join it below. `create_task` alone returns a handle the event loop
+    # only weakly references: dropping it let the loop close while the teardown
+    # was still awaiting, which silently cancelled the very drain this awaits
+    # for.
+    shutdown_task: list[asyncio.Task] = []
+
     def signal_handler():
-        asyncio.create_task(graceful_shutdown(runtime))
+        if not shutdown_task:
+            shutdown_task.append(asyncio.create_task(graceful_shutdown(runtime)))
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
@@ -480,16 +488,32 @@ async def async_main():
         else:
             await run_input(runtime, "http", engine, frontend_route_extensions)
     except asyncio.exceptions.CancelledError:
+        # Phase 1 cancels the serving task as soon as the signal lands, so this
+        # is the normal shutdown path, not an error.
         pass
+    finally:
+        # Join the teardown before returning. `run_input` is cancelled the
+        # instant Phase 1 fires, so without this the loop closes first and the
+        # drain is cancelled partway through.
+        if shutdown_task:
+            try:
+                await shutdown_task[0]
+            except asyncio.exceptions.CancelledError:
+                pass
 
 
 async def graceful_shutdown(runtime: DistributedRuntime) -> None:
     """Handle graceful shutdown of the distributed runtime.
 
+    Awaits the teardown rather than only starting it: ``shutdown()`` merely
+    spawns the three-phase sequence, so returning here lets the interpreter
+    exit before in-flight requests drain and before the transports are torn
+    down.
+
     Args:
         runtime: The DistributedRuntime instance to shut down.
     """
-    runtime.shutdown()
+    await runtime.shutdown_and_wait()
 
 
 def main() -> None:

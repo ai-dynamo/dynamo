@@ -14,7 +14,8 @@
 //!
 //! On termination, the user application is given a graceful shutdown period of controlled by
 //! the `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT` environment variable. If the application does not
-//! shutdown in time, the worker will terminate the application with an exit code of 911.
+//! shutdown in time, the worker will terminate the application with an exit code of
+//! [`EXIT_CODE_SHUTDOWN_TIMEOUT`].
 //!
 //! The default values of `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT` differ between the development
 //! and release builds. In development, the default is [DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG] and
@@ -58,11 +59,56 @@ const SHUTDOWN_MESSAGE: &str =
 const SHUTDOWN_TIMEOUT_MESSAGE: &str =
     "Use DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT to control the graceful shutdown timeout";
 
+/// Exit code used when the graceful-shutdown deadline expires and the process
+/// is force-terminated.
+///
+/// A process exit code is truncated to its low 8 bits by `wait(2)`, so the
+/// previous value of 911 surfaced as `911 & 0xFF == 143` — identical to a
+/// clean death by SIGTERM, making a timed-out shutdown invisible to operators
+/// and to Kubernetes. 70 is `EX_SOFTWARE` from `sysexits(3)` and survives the
+/// truncation intact.
+pub const EXIT_CODE_SHUTDOWN_TIMEOUT: i32 = 70;
+
 /// Default graceful shutdown timeout in seconds in debug mode
 pub const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG: u64 = 5;
 
 /// Default graceful shutdown timeout in seconds in release mode
 pub const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_RELEASE: u64 = 30;
+
+/// Resolve `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT`, falling back to the
+/// build-profile default. Single source of truth for the post-signal deadline
+/// and for the bound applied to transport teardown.
+pub fn graceful_shutdown_timeout_secs() -> u64 {
+    let default = if cfg!(debug_assertions) {
+        DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG
+    } else {
+        DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_RELEASE
+    };
+    match std::env::var(env_worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT) {
+        Err(_) => default,
+        Ok(raw) if raw.trim().is_empty() => default,
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(secs) => secs,
+            // Warned, not silently dropped: this is the knob that decides how
+            // long a worker gets to shut down, and a typo used to fall back to
+            // the default with no trace of why.
+            Err(_) => {
+                tracing::warn!(
+                    env = env_worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT,
+                    value = raw,
+                    default_secs = default,
+                    "invalid graceful shutdown timeout; using the default"
+                );
+                default
+            }
+        },
+    }
+}
+
+/// [`graceful_shutdown_timeout_secs`] as a [`Duration`].
+pub fn graceful_shutdown_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(graceful_shutdown_timeout_secs())
+}
 
 #[derive(Debug, Clone)]
 pub struct Worker {
@@ -162,7 +208,12 @@ impl Worker {
     {
         let runtime = self.runtime.clone();
         runtime.secondary().block_on(self.execute_internal(f))??;
-        runtime.shutdown();
+        // Awaited, not fire-and-forget: `shutdown` only spawns the teardown,
+        // and returning here lets `main` exit before it runs, skipping the
+        // endpoint inflight drain and leaving transports connected.
+        runtime
+            .secondary()
+            .block_on(runtime.shutdown_and_wait(Some(graceful_shutdown_timeout())));
         Ok(())
     }
 
@@ -174,7 +225,10 @@ impl Worker {
         let runtime = self.runtime.clone();
         let task = self.execute_internal(f);
         task.await??;
-        runtime.shutdown();
+        // See `execute`: the teardown must complete before the caller exits.
+        runtime
+            .shutdown_and_wait(Some(graceful_shutdown_timeout()))
+            .await;
         Ok(())
     }
 
@@ -189,16 +243,7 @@ impl Worker {
         let primary = runtime.primary();
         let secondary = runtime.secondary();
 
-        let timeout = std::env::var(env_worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT)
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or({
-                if cfg!(debug_assertions) {
-                    DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG
-                } else {
-                    DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_RELEASE
-                }
-            });
+        let timeout = graceful_shutdown_timeout_secs();
 
         INIT.set(Mutex::new(Some(secondary.spawn(async move {
             // start signal handler
@@ -230,7 +275,7 @@ impl Worker {
 
                 _ = tokio::time::sleep(tokio::time::Duration::from_secs(timeout)) => {
                     tracing::debug!("Application did not shutdown in time; terminating");
-                    std::process::exit(911);
+                    std::process::exit(EXIT_CODE_SHUTDOWN_TIMEOUT);
                 }
             }?;
 

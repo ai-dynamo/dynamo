@@ -106,7 +106,21 @@ class DistributedRuntime:
 
     def shutdown(self) -> None:
         """
-        Shutdown the runtime by triggering the cancellation token
+        Start runtime teardown and return immediately.
+
+        The three-phase sequence is spawned, so a caller that exits straight
+        after can terminate before it runs, skipping the endpoint in-flight
+        drain. Prefer `shutdown_and_wait()` when the process is about to exit.
+        """
+        ...
+
+    async def shutdown_and_wait(self) -> None:
+        """
+        Await runtime teardown: resolves once the transports have actually been
+        torn down.
+
+        Phase 2 (the wait for in-flight requests) is bounded by
+        `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT`; Phase 3 always runs.
         """
         ...
 
