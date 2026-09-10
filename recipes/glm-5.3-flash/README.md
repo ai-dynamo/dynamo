@@ -37,10 +37,10 @@ Dynamo + vLLM deployment profiles for the GB200 and H200 agentic workload:
 
 1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx).
 2. **GLM-5.3-Flash image**: pinned by digest in the manifests as
-   `vllm/vllm-openai@sha256:2c6da6c6…` — a GLM-specific vLLM build with GLA/KDA attention
-   kernels. `ai-dynamo` is pip-installed at pod startup. The `:glm53-flash` tag is mutable and
-   was re-pushed upstream on 2026-09-09 to an incompatible vLLM nightly, so the manifests
-   reference the validated digest rather than the tag.
+   `vllm/vllm-openai@sha256:2c6da6c6f16ed15c91e412d896dba13701f25fe1861eaec9ddaa4db34d1d21c4` —
+   a GLM-specific vLLM build with GLA/KDA attention kernels. `ai-dynamo` is pip-installed at pod
+   startup. Do not substitute the `:glm53-flash` tag: it is mutable and was re-pushed upstream on
+   2026-09-09 to an incompatible vLLM nightly.
 3. **Hugging Face access** to `zai-org/GLM-5.3-Flash`.
 
 ## Quick Start
