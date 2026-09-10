@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from gms_kv_ring.daemon.kv_cache_manager import GmsKvCacheManager
 
+
 def _directory_record_change_locked(
     daemon: "GmsKvCacheManager",
     key: tuple[str, bytes],
@@ -835,17 +836,14 @@ def handle_directory_publish_batch(
                     if prior_engine == engine_id and int(old_slot) in new_slot_set:
                         continue
                     slot_key = (manifest_id, prior_engine, int(old_slot))
-                    if (
-                        daemon._content_directory_by_slot.get(slot_key)
-                        == content_hash
-                    ):
+                    if daemon._content_directory_by_slot.get(slot_key) == content_hash:
                         daemon._content_directory_by_slot.pop(slot_key, None)
             daemon._content_directory[key] = entry
             _directory_touch_locked(daemon, entry)
             for slot_id in slot_ids:
-                daemon._content_directory_by_slot[(manifest_id, engine_id, slot_id)] = (
-                    content_hash
-                )
+                daemon._content_directory_by_slot[
+                    (manifest_id, engine_id, slot_id)
+                ] = content_hash
             _directory_record_change_locked(daemon, key, entry)
             published += 1
         epoch = int(daemon._content_directory_epoch)
@@ -857,7 +855,6 @@ def handle_directory_publish_batch(
         "directory_epoch": epoch,
         "writer_id": writer_id,
     }
-
 
 
 DIRECTORY_HANDLERS: dict[str, Handler] = {
