@@ -23,12 +23,14 @@ use crate::protocols::{
     WorkerAffinityTarget, WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
 use crate::scheduling::config::RouterConfigOverride;
+use crate::scheduling::queue::SchedulerBookingDescriptor;
 use crate::scheduling::selector::WorkerSelectionPolicy;
 use crate::scheduling::{
-    KvSchedulerError, LocalScheduler, LoraWorkerFilter, OverlapAnalysis, OverlapSignals,
-    OverloadedWorkerProvider, PotentialLoad, PrefillLoadEstimator, ScheduleMode, ScheduleRequest,
-    SessionContext, TieredOverlapRefresher, WorkerAvailabilityProvider, effective_prefill_tokens,
-    narrow_allowed_worker_ids_by_lora, prefill_load_hint_from_effective_tokens,
+    AdmissionAttempt, KvSchedulerError, LocalScheduler, LoraWorkerFilter, OverlapAnalysis,
+    OverlapSignals, OverloadedWorkerProvider, PotentialLoad, PrefillLoadEstimator, ScheduleMode,
+    ScheduleRequest, SessionContext, TieredOverlapRefresher, WorkerAvailabilityProvider,
+    effective_prefill_tokens, narrow_allowed_worker_ids_by_lora,
+    prefill_load_hint_from_effective_tokens,
 };
 use crate::sequences::{
     ActiveSequencesMultiWorker, ReplicaRequestLeaseObserver, ReplicaWorkerPolicy, SequenceError,
@@ -1055,8 +1057,10 @@ impl SelectionCore {
                 retain_kv_transfer_chain,
             )
             .await?;
+        // The queue lease frees a booking whose response is never consumed
+        // (the caller dropped this future after the actor booked).
         let mode = if book {
-            ScheduleMode::Tracked {
+            ScheduleMode::TrackedWithLifecycle {
                 request_id: selection_id.clone().ok_or_else(|| {
                     SelectionError::Internal(
                         "booked selection did not include a selection ID".to_string(),
@@ -1122,7 +1126,7 @@ impl SelectionCore {
             routing_constraints,
             shared_cache_hits,
         };
-        let (response, advisory_load) = tokio::select! {
+        let (response, advisory_load, attempt) = tokio::select! {
             biased;
             _ = self.cancel_token.cancelled() => {
                 return Err(SelectionError::Scheduler(KvSchedulerError::SubscriberShutdown));
@@ -1133,25 +1137,45 @@ impl SelectionCore {
                         .scheduler
                         .select_without_admission(schedule_request)
                         .await
-                        .map(|advisory| (advisory.response, Some(advisory.selected_worker_load)))
+                        .map(|advisory| {
+                            (
+                                advisory.response,
+                                Some(advisory.selected_worker_load),
+                                AdmissionAttempt::Untracked,
+                            )
+                        })
                 } else {
                     entry
                         .scheduler
-                        .schedule_request(schedule_request)
+                        .schedule_request_admitted(schedule_request)
                         .await
-                        .map(|response| (response, None))
+                        .map(|admitted| (admitted.response, None, admitted.attempt))
                 }
             } => result?,
         };
-        let endpoint = self
+        let Some(endpoint) = self
             .catalog
             .schedulable_endpoint(response.best_worker.worker_id, &key)
-            .ok_or_else(|| {
-                SelectionError::Internal(format!(
-                    "selected worker {} is no longer schedulable",
-                    response.best_worker.worker_id
-                ))
-            })?;
+        else {
+            // The worker drained while this request was queued; release the
+            // booking the actor just made for it.
+            if let (AdmissionAttempt::Tracked(attempt_id), Some(request_id)) =
+                (attempt, selection_id.as_deref())
+            {
+                entry
+                    .scheduler
+                    .booking_cleanup()
+                    .enqueue(SchedulerBookingDescriptor {
+                        request_id: request_id.to_string(),
+                        worker: response.best_worker,
+                        attempt_id,
+                    });
+            }
+            return Err(SelectionError::Internal(format!(
+                "selected worker {} is no longer schedulable",
+                response.best_worker.worker_id
+            )));
+        };
         let overlap = MooncakeOverlapSummary::from_selected_worker_tiers(
             &response.selected_worker_tiers,
             entry.block_size,
@@ -2062,17 +2086,21 @@ mod tests {
         }
     }
 
-    async fn wait_for_pending_selection(core: &SelectionCore) {
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if core.loads(Some("model"), Some("default"))[0].pending_count == 1 {
-                    return;
-                }
+    async fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !condition() {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("selection did not queue");
+        .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+    }
+
+    async fn wait_for_pending_selection(core: &SelectionCore) {
+        wait_until("pending selection", || {
+            core.loads(Some("model"), Some("default"))[0].pending_count == 1
+        })
+        .await;
     }
 
     fn assert_shutdown_error(error: SelectionError) {
@@ -3046,6 +3074,87 @@ mod tests {
             err,
             SelectionError::Scheduler(KvSchedulerError::SubscriberShutdown)
         ));
+    }
+
+    #[tokio::test]
+    async fn booking_is_freed_when_selected_worker_drained_while_queued() {
+        let mut config = test_config(false);
+        config.router_queue_threshold = Some(0.0);
+        let core = Arc::new(
+            SelectionCore::try_new_local(
+                config,
+                1,
+                CancellationToken::new(),
+                SelectionCacheConfig::default(),
+            )
+            .expect("valid test config"),
+        );
+        core.upsert_worker(worker(1)).await.expect("worker upsert");
+        let key = RoutingPartitionId::new("model", "default");
+        let entry = core.entry(&key).expect("entry");
+        core.select_and_reserve(reserve_request("res-a"))
+            .await
+            .expect("initial reservation");
+
+        let queued_core = core.clone();
+        let queued = tokio::spawn(async move {
+            queued_core
+                .select_and_reserve(reserve_request("queued"))
+                .await
+        });
+        wait_for_pending_selection(&core).await;
+        // First half of `delete_worker`: the worker drains while the request waits.
+        core.catalog
+            .set_lifecycle(1, WorkerLifecycle::Draining, Vec::new());
+        core.free_reservation("res-a").await.expect("free res-a");
+
+        let err = tokio::time::timeout(Duration::from_secs(2), queued)
+            .await
+            .expect("queued selection timed out")
+            .expect("task panicked")
+            .expect_err("drained worker is not schedulable");
+        assert!(
+            matches!(&err, SelectionError::Internal(m) if m.contains("no longer schedulable")),
+            "{err:?}"
+        );
+        wait_until("booking release", || !entry.scheduler.has_request("queued")).await;
+    }
+
+    #[tokio::test]
+    async fn dropped_selection_future_frees_its_booking() {
+        let core = SelectionCore::try_new_local(
+            test_config(false),
+            1,
+            CancellationToken::new(),
+            SelectionCacheConfig::default(),
+        )
+        .expect("valid test config");
+        core.upsert_worker(worker(1)).await.expect("worker upsert");
+        let key = RoutingPartitionId::new("model", "default");
+        let entry = core.entry(&key).expect("entry");
+
+        // Drive the selection by hand so the actor's response is delivered but
+        // never consumed: poll until the booking exists, then drop the future.
+        let mut selection = Box::pin(core.select_and_reserve(reserve_request("dropped")));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        wait_until("scheduler booking", || {
+            if entry.scheduler.has_request("dropped") {
+                return true;
+            }
+            assert!(
+                selection.as_mut().poll(&mut context).is_pending(),
+                "selection completed before the booking was observed"
+            );
+            false
+        })
+        .await;
+        drop(selection);
+
+        wait_until("booking release", || {
+            !entry.scheduler.has_request("dropped")
+        })
+        .await;
+        assert!(core.reservation_index.read().get("dropped").is_none());
     }
 
     #[tokio::test]
