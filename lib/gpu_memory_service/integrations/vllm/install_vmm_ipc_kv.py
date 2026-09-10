@@ -176,7 +176,6 @@ def _model_identity(model_config) -> str:
 
 
 def _kv_layout_fingerprint(kv_cache_config, model_identity: str) -> str:
-    """Stable digest of model and KV-layout-relevant parameters."""
     parts = [f"model={model_identity}"]
     for group in getattr(kv_cache_config, "kv_cache_groups", ()) or ():
         spec = getattr(group, "kv_cache_spec", None)
@@ -273,14 +272,14 @@ def _is_managed_kv_tag(tag: str) -> bool:
 
 def _release_stale_kv_allocations(
     manager, engine_id: str, allocations, planned
-) -> None:
+) -> set[str]:
+    remaining: set[str] = set()
     for allocation in allocations:
         tag = str(getattr(allocation, "tag", ""))
-        if (
-            tag in planned
-            or not _is_managed_kv_tag(tag)
-            or bool(getattr(allocation, "claimed", False))
-        ):
+        if tag in planned or not _is_managed_kv_tag(tag):
+            continue
+        if bool(getattr(allocation, "claimed", False)):
+            remaining.add(tag)
             continue
         try:
             released = manager.release_persistent(engine_id, tag)
@@ -298,6 +297,7 @@ def _release_stale_kv_allocations(
                     engine_id,
                     tag,
                 )
+                remaining.add(tag)
                 continue
             raise
         if released:
@@ -306,6 +306,7 @@ def _release_stale_kv_allocations(
                 engine_id,
                 tag,
             )
+    return remaining
 
 
 def _persistent_tag_plan_reattaches(
@@ -320,7 +321,15 @@ def _persistent_tag_plan_reattaches(
     """
     planned = set(tag_plan)
     allocations = manager.list_persistent(engine_id=engine_id, include_unclaimed=True)
-    _release_stale_kv_allocations(manager, engine_id, allocations, planned)
+    stale_claims = _release_stale_kv_allocations(
+        manager, engine_id, allocations, planned
+    )
+    if stale_claims:
+        raise RuntimeError(
+            "GMS persistent KV allocations from an incompatible layout are still "
+            f"claimed for engine_id={engine_id}: {sorted(stale_claims)}. Refusing "
+            "to allocate a second KV pool under the same engine ID."
+        )
     if not planned:
         return False
     existing = {str(getattr(allocation, "tag", "")) for allocation in allocations}
