@@ -3071,7 +3071,7 @@ dependencies = [
 [[package]]
 name = "dynamo-tokenizers"
 version = "1.8.1"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=7f567fb5fd97ffb5bb1d2bc27f1bf404852313e2#7f567fb5fd97ffb5bb1d2bc27f1bf404852313e2"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=368053eb760078fa34bf518910a20aa279c34c3d#368053eb760078fa34bf518910a20aa279c34c3d"
 dependencies = [
  "aho-corasick",
  "anyhow",
