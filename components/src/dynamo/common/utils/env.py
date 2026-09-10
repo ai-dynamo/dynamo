@@ -8,13 +8,13 @@ import os
 
 logger = logging.getLogger(__name__)
 
-_TRUTHY = ("true", "1", "yes", "on")
+_TRUTHY = ("true", "1", "yes")
 
 
 def env_bool(name: str, *, default: bool = False) -> bool:
     """Return True if env var `name` is set to a truthy value.
 
-    Truthy values (case-insensitive): "true", "1", "yes", "on". Any other
+    Truthy values (case-insensitive): "true", "1", "yes". Any other
     non-empty value is treated as False. When the var is unset or empty,
     returns `default`.
     """
