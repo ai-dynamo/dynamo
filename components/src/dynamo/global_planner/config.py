@@ -30,6 +30,8 @@ from typing import Literal, Optional
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from dynamo.global_planner.priority import PriorityConfig
+
 logger = logging.getLogger(__name__)
 
 
@@ -95,6 +97,15 @@ class GlobalPlannerConfig(BaseModel):
             "partner. Should be at least 2x the slowest local planner tick so "
             "opposite-direction intents can overlap; throughput scaling ticks "
             "every 180s by default, so 360 covers two ticks."
+        ),
+    )
+
+    priority: PriorityConfig = Field(
+        default_factory=PriorityConfig,
+        description=(
+            "Pool priorities used to arbitrate between competing scale "
+            "requests. Higher is more important; pools no selector matches "
+            "take 'priority.default'."
         ),
     )
 
@@ -205,3 +216,13 @@ class GlobalPlannerConfig(BaseModel):
         # pairing, so log it whenever either bound is active.
         if self.budget_enforcement_enabled():
             logger.info(f"Intent cache TTL seconds: {self.intent_cache_ttl_seconds}")
+
+        logger.info(f"Default pool priority: {self.priority.default}")
+        if self.priority.pools:
+            logger.info(f"Pool priority selectors: {len(self.priority.pools)}")
+            for policy in self.priority.pools:
+                assert policy.rules is not None
+                values = ", ".join(str(rule.priority) for rule in policy.rules)
+                logger.info(f"  {policy.selector} -> {values}")
+        else:
+            logger.info("Pool priority selectors: none (every pool takes the default)")

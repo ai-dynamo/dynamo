@@ -17,6 +17,7 @@ from dynamo.global_planner.argparse_config import (
     resolve_config,
 )
 from dynamo.global_planner.config import GlobalPlannerConfig
+from dynamo.global_planner.priority import DEFAULT_POOL_PRIORITY
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -186,3 +187,38 @@ def test_config_file_path_accepted_by_parser(tmp_path):
     path.write_text("intent_cache_ttl_seconds: 720\n")
     config = _resolve("--config", str(path))
     assert config.intent_cache_ttl_seconds == 720
+
+
+# ---------------------------------------------------------------------------- #
+# Pool priorities                                                              #
+# ---------------------------------------------------------------------------- #
+
+
+def test_priority_defaults_when_unconfigured():
+    config = GlobalPlannerConfig()
+    assert config.priority.default == DEFAULT_POOL_PRIORITY
+    assert config.priority.pools == []
+
+
+def test_priority_table_from_yaml(tmp_path):
+    path = tmp_path / "gp.yaml"
+    path.write_text(
+        "max_total_gpus: 32\n"
+        "priority:\n"
+        "  default: 250\n"
+        "  pools:\n"
+        "    - selector: prod/chat\n"
+        "      priority: 900\n"
+        "    - selector: dev/*\n"
+        "      priority: 10\n"
+    )
+    config = GlobalPlannerConfig.from_config_arg(str(path))
+    assert config.priority.default == 250
+    assert [p.selector for p in config.priority.pools] == ["prod/chat", "dev/*"]
+
+
+def test_invalid_priority_in_config_is_rejected():
+    with pytest.raises(ValidationError):
+        GlobalPlannerConfig.from_config_arg(
+            json.dumps({"priority": {"pools": [{"selector": "a//b", "priority": 0}]}})
+        )
