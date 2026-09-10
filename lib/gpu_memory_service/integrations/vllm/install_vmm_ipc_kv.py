@@ -358,7 +358,6 @@ def _persistent_tag_plan_reattaches(
 def _release_new_persistent_kv_allocations(
     manager, engine_id: str, tag_plan: list[str]
 ) -> None:
-    """Best-effort rollback for a fresh KV pool that failed during creation."""
     for tag in tag_plan:
         try:
             if manager.release_persistent(engine_id, tag):
