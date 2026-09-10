@@ -9,8 +9,10 @@ from types import SimpleNamespace
 import pytest
 from gms_kv_ring.common.content_directory import ContentDirectory
 from gms_kv_ring.daemon.rpc_directory import (
+    SERVER_CONNECTION_ID,
     handle_directory_ensure_hbm_capacity,
     handle_directory_lookup_claim,
+    release_directory_connection_claims,
 )
 
 pytestmark = pytest.mark.pre_merge
@@ -129,3 +131,44 @@ def test_active_hbm_is_claimable_only_during_adoption(
     assert (response["entries"][0] is not None) is expected_hit
     assert (response["claim_token"] is not None) is expected_hit
     assert entry["_claim_count"] == int(expected_hit)
+
+
+def test_disconnect_releases_only_that_connections_claims():
+    hashes = (b"a" * 32, b"b" * 32)
+    entries = {}
+    for slot_id, content_hash in enumerate(hashes, start=7):
+        entries[("manifest", content_hash)] = {
+            "tier": "hbm",
+            "state": "ready",
+            "engine_id": "engine",
+            "slot_ids": [slot_id],
+            "generations": [3],
+            "_claim_count": 0,
+        }
+    daemon = SimpleNamespace(
+        _content_hash_lock=threading.Condition(),
+        _content_directory_writer_id="writer",
+        _content_directory_epoch=4,
+        _content_directory=entries,
+        _content_directory_claims={},
+        _content_directory_access_seq=0,
+    )
+    tokens = []
+    for connection_id, content_hash in zip(("lost", "live"), hashes):
+        response = handle_directory_lookup_claim(
+            daemon,
+            {
+                "manifest_id": "manifest",
+                "writer_id": "writer",
+                "expected_epoch": 4,
+                "hashes": [content_hash.hex()],
+                SERVER_CONNECTION_ID: connection_id,
+            },
+        )
+        tokens.append(response["claim_token"])
+
+    assert release_directory_connection_claims(daemon, "lost") == 1
+    assert tokens[0] not in daemon._content_directory_claims
+    assert tokens[1] in daemon._content_directory_claims
+    assert entries[("manifest", hashes[0])]["_claim_count"] == 0
+    assert entries[("manifest", hashes[1])]["_claim_count"] == 1
