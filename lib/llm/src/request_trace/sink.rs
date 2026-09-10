@@ -24,6 +24,7 @@ use super::{
 
 // Workers own the generation; the registry holds only a weak reference so shutdown permits restart.
 struct WorkerGeneration {
+    shutdown: CancellationToken,
     stopped: CancellationToken,
 }
 
@@ -245,20 +246,41 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = anyhow::Result<Vec<Arc<dyn RequestTraceSink>>>>,
 {
-    let mut live = generation().lock().await;
-    // A cancelled generation stays live while workers drain; replacing it earlier would
-    // duplicate emissions, while rebinding its token would change shared shutdown semantics.
-    if live.upgrade().is_some() {
+    loop {
+        let mut live = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => return Err(anyhow!("request trace initialization cancelled")),
+            live = generation().lock() => live,
+        };
+        if let Some(existing) = live.upgrade() {
+            if !existing.shutdown.is_cancelled() {
+                return Ok(());
+            }
+            // Release the strong reference so the last worker can signal its drop.
+            let stopped = existing.stopped.clone();
+            drop(existing);
+            drop(live);
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => return Err(anyhow!("request trace initialization cancelled")),
+                _ = stopped.cancelled() => {},
+            }
+            continue;
+        }
+
+        let generation = Arc::new(WorkerGeneration {
+            shutdown: shutdown.clone(),
+            stopped: CancellationToken::new(),
+        });
+        let sinks = make_sinks().await?;
+        anyhow::ensure!(
+            !shutdown.is_cancelled(),
+            "request trace initialization cancelled"
+        );
+        spawn_workers(shutdown, sinks, &generation);
+        *live = Arc::downgrade(&generation);
         return Ok(());
     }
-
-    let generation = Arc::new(WorkerGeneration {
-        stopped: CancellationToken::new(),
-    });
-    let sinks = make_sinks().await?;
-    spawn_workers(shutdown, sinks, &generation);
-    *live = Arc::downgrade(&generation);
-    Ok(())
 }
 
 fn spawn_workers(
@@ -505,6 +527,74 @@ mod tests {
         );
 
         shutdown_generation(token_two).await;
+    }
+
+    struct DrainingSink {
+        entered: CancellationToken,
+        release: CancellationToken,
+    }
+
+    #[async_trait]
+    impl RequestTraceSink for DrainingSink {
+        fn name(&self) -> &'static str {
+            "draining"
+        }
+
+        async fn emit(&self, _record: &RequestTraceRecord) {}
+
+        async fn shutdown(&self) {
+            self.entered.cancel();
+            self.release.cancelled().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn successor_waits_for_draining_generation_and_receives_records() {
+        let _serialized = GENERATION_TEST_LOCK.lock().await;
+        crate::request_trace::init_bus_for_test(64);
+        let entered = CancellationToken::new();
+        let release = CancellationToken::new();
+        let sink = Arc::new(DrainingSink {
+            entered: entered.clone(),
+            release: release.clone(),
+        });
+        let old_token = CancellationToken::new();
+        spawn_generation(old_token.clone(), || async move {
+            Ok(vec![sink as Arc<dyn RequestTraceSink>])
+        })
+        .await
+        .unwrap();
+        old_token.cancel();
+        entered.cancelled().await;
+
+        // Cancellation of a waiting runtime must not stop or replace the old drain.
+        let cancelled_token = CancellationToken::new();
+        let mut cancelled = Box::pin(spawn_generation(cancelled_token.clone(), || async {
+            panic!("cancelled waiter must never construct sinks");
+        }));
+        assert!(futures::poll!(cancelled.as_mut()).is_pending());
+        cancelled_token.cancel();
+        assert!(cancelled.await.is_err());
+
+        let (sink, mut records, _) = RecordingSink::new();
+        let token = CancellationToken::new();
+        let builds = AtomicUsize::new(0);
+        let mut successor = Box::pin(spawn_generation(token.clone(), || async {
+            builds.fetch_add(1, Ordering::AcqRel);
+            Ok(vec![sink as Arc<dyn RequestTraceSink>])
+        }));
+        assert!(futures::poll!(successor.as_mut()).is_pending());
+        assert_eq!(builds.load(Ordering::Acquire), 0);
+
+        release.cancel();
+        tokio::time::timeout(Duration::from_secs(5), successor)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(builds.load(Ordering::Acquire), 1);
+        crate::request_trace::publish(record_with_request_id("successor-after-drain"));
+        assert!(await_record(&mut records, "successor-after-drain").await);
+        shutdown_generation(token).await;
     }
 
     #[tokio::test]
