@@ -29,7 +29,7 @@ use dynamo_runtime::{
 use futures::stream::{self, StreamExt};
 
 use crate::{
-    discovery::{ModelManager, RuntimeConfigWatch},
+    discovery::{ModelManager, RuntimeConfigWatch, WorkerSetTarget, WorkerSetTargetId},
     kv_router::{RoutingHost, WorkerSelectorFactory},
     local_model::runtime_config::ModelRuntimeConfig,
     protocols::common::{
@@ -106,6 +106,41 @@ enum PrefillOutcome {
     Terminal {
         output: Box<Annotated<LLMEngineOutput>>,
     },
+}
+
+/// Turn a request whose prefill has finished into its decode leg.
+///
+/// Both surviving outcomes leave KV blocks staged on the prefill worker for one
+/// specific decode worker, and only that worker's KV-transfer-complete path
+/// frees them. `staged_kv_cleanup` records that obligation so routing still
+/// delivers the leg after the client has disconnected.
+fn into_decode_request(
+    mut req: PreprocessedRequest,
+    outcome: PrefillOutcome,
+) -> PreprocessedRequest {
+    match outcome {
+        PrefillOutcome::Bootstrap {
+            bootstrap_info,
+            worker_id,
+        } => {
+            req.bootstrap_info = Some(bootstrap_info);
+            req.routing_mut().prefill_worker_id = Some(worker_id);
+        }
+        PrefillOutcome::Completed {
+            result,
+            worker_id,
+            worker_link,
+        } => {
+            req.prefill_result = Some(result);
+            req.migration_link = worker_link;
+            req.routing_mut().prefill_worker_id = Some(worker_id);
+        }
+        PrefillOutcome::Terminal { .. } => {
+            unreachable!("terminal prefill outcomes return before decode routing")
+        }
+    }
+    req.staged_kv_cleanup = true;
+    req
 }
 
 fn extract_bootstrap_info(params: &serde_json::Value) -> Option<BootstrapInfo> {
@@ -186,8 +221,8 @@ where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     binding: ArcSwapOption<PrefillBinding<Sel>>,
-    target: Mutex<Option<EndpointId>>,
-    target_tx: Option<watch::Sender<Option<dynamo_runtime::component::Endpoint>>>,
+    target: Mutex<Option<WorkerSetTargetId>>,
+    target_tx: Option<watch::Sender<Option<WorkerSetTarget>>>,
     /// Decode routing owns conditional-disagg planning and dispatch. This is
     /// installed after the frontend constructs its one decode `RoutingHost`.
     decode_routing_host: OnceLock<Arc<RoutingHost<Sel>>>,
@@ -222,6 +257,7 @@ struct PrefillBinding<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
+    target_id: WorkerSetTargetId,
     endpoint_id: EndpointId,
     router: Arc<RoutingHost<Sel>>,
     /// Keeps the endpoint's shared runtime-config state alive while a live
@@ -252,14 +288,14 @@ where
 }
 
 pub(crate) trait PrefillRouterLifecycle: Send + Sync {
-    fn set_target(&self, target: Option<dynamo_runtime::component::Endpoint>);
+    fn set_target(&self, target: Option<WorkerSetTarget>);
 }
 
 impl<Sel> PrefillRouterLifecycle for PrefillRouter<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
-    fn set_target(&self, target: Option<dynamo_runtime::component::Endpoint>) {
+    fn set_target(&self, target: Option<WorkerSetTarget>) {
         self.set_target(target);
     }
 }
@@ -529,28 +565,7 @@ where
             let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
         }
 
-        let mut decode_req = req;
-        match outcome {
-            PrefillOutcome::Bootstrap {
-                bootstrap_info,
-                worker_id,
-            } => {
-                decode_req.bootstrap_info = Some(bootstrap_info);
-                decode_req.routing_mut().prefill_worker_id = Some(worker_id);
-            }
-            PrefillOutcome::Completed {
-                result,
-                worker_id,
-                worker_link,
-            } => {
-                decode_req.prefill_result = Some(result);
-                decode_req.migration_link = worker_link;
-                decode_req.routing_mut().prefill_worker_id = Some(worker_id);
-            }
-            PrefillOutcome::Terminal { .. } => {
-                unreachable!("terminal prefill outcomes return before decode routing")
-            }
-        };
+        let mut decode_req = into_decode_request(req, outcome);
 
         if let Some(topology_constraints) = topology_constraints {
             merge_decode_topology_constraints(&mut decode_req, topology_constraints);
@@ -793,6 +808,47 @@ mod tests {
             .annotations(vec!["query_instance_id:".to_string()])
             .build()
             .unwrap()
+    }
+
+    /// The decode leg must carry the cleanup obligation, on both outcomes that
+    /// reach decode routing. Without it the routing host treats a disconnected
+    /// decode request as ordinary traffic and drops it, which is the leak this
+    /// whole path exists to prevent — and nothing else in the Rust suite
+    /// notices, because every routing-host test builds its own request.
+    #[test]
+    fn decode_leg_carries_the_staged_kv_cleanup_obligation() {
+        let bootstrap = PrefillOutcome::Bootstrap {
+            bootstrap_info: BootstrapInfo {
+                bootstrap_host: "prefill-0".to_string(),
+                bootstrap_port: 4242,
+                bootstrap_room: 7,
+                handoff_id: None,
+            },
+            worker_id: 11,
+        };
+        let completed = PrefillOutcome::Completed {
+            result: PrefillResult {
+                disaggregated_params: serde_json::json!({}),
+                prompt_tokens_details: None,
+            },
+            worker_id: 12,
+            worker_link: None,
+        };
+
+        for (label, outcome, expected_worker) in
+            [("bootstrap", bootstrap, 11), ("completed", completed, 12)]
+        {
+            let decode = into_decode_request(query_only_request(), outcome);
+            assert!(
+                decode.staged_kv_cleanup,
+                "{label}: prefill staged KV for one decode worker, so the leg must be marked for cleanup dispatch"
+            );
+            assert_eq!(
+                decode.routing.as_ref().and_then(|r| r.prefill_worker_id),
+                Some(expected_worker),
+                "{label}: the decode leg must record which prefill worker holds the blocks"
+            );
+        }
     }
 
     #[tokio::test]
