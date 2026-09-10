@@ -720,10 +720,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         request_id_future.set_result(sglang_request_id)
                         logging.debug(f"New SGLang Request ID: {sglang_request_id}")
 
-                # Check cancellation before yielding to allow proper cleanup.
-                # This lets SGLang proceed to the second token generation, which will
-                # async context switch and allow the abort monitor to signal cancellation.
-                # The loop should exit by itself when context.is_stopped() returns True.
                 # SGLang omits index for non-n/legacy chunks; treat those as
                 # choice 0 while preserving explicit indices for n>1.
                 output_idx = res.get("index") or 0
@@ -751,11 +747,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
                 # With stream_output=True, output_ids contains only new tokens (disjoint)
                 output_ids = res.get("output_ids", [])
-                # Empty, non-final chunks can happen during scheduler idle ticks.
-                # Keep waiting for the next chunk unless cancellation was requested.
+                # Keep draining empty, non-final chunks after cancellation so the
+                # abort monitor can run and SGLang can finish request cleanup.
                 if not output_ids and not finish_reason:
-                    if context.is_stopped():
-                        break
                     continue
 
                 if output_ids and not first_output_seen:

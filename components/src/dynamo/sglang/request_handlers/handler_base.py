@@ -46,6 +46,7 @@ from dynamo.llm import (
 )
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.runtime import DistributedRuntime
+from dynamo.sglang._compat import resolved_server_args
 from dynamo.sglang.args import Config
 from dynamo.sglang.capacity import kv_event_block_size
 from dynamo.sglang.engine_routes import resolve_configured_engine_routes
@@ -1240,6 +1241,10 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
     ):
         """Background task to handle cancellation and shutdown by monitoring both signals.
 
+        For a submitted ID, wait for registration and dispatch before aborting.
+        The stream consumer keeps draining for cleanup and cancels this monitor
+        when the stream exits.
+
         Args:
             request_id_future: Future that will be set with the SGLang request ID
                               when the first response arrives.
@@ -1276,12 +1281,17 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
                 return_when=asyncio.FIRST_COMPLETED,
             )
 
-            if submitted_request_id is not None:
+            tokenizer_manager = getattr(self.engine, "tokenizer_manager", None)
+            registry = (
+                tokenizer_manager.rid_to_state
+                if submitted_request_id is not None and tokenizer_manager is not None
+                else None
+            )
+            if submitted_request_id is not None and registry is not None:
                 # SGLang's stream is lazy: aborts for an unknown ID can be
                 # ignored. Keep the cancellation pending while the consumer
                 # advances the stream and registers the request. Poll only
                 # after cancellation, not for every active generation.
-                registry = self.engine.tokenizer_manager.rid_to_state
                 while submitted_request_id not in registry:
                     if request_id_future.done():
                         # The engine may replace the ID (e.g. parallel samples),
@@ -1303,17 +1313,14 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             )
 
             # Call abort_request on the tokenizer_manager through the engine
-            if (
-                hasattr(self.engine, "tokenizer_manager")
-                and self.engine.tokenizer_manager
-            ):
-                logging.info(
-                    f"Calling SGLang abort_request for Request ID {sglang_request_id}"
+            if tokenizer_manager is not None:
+                await self._abort_sglang_request(
+                    tokenizer_manager, sglang_request_id, registry
                 )
-                self.engine.tokenizer_manager.abort_request(
-                    rid=sglang_request_id, abort_all=False
+                logging.debug(
+                    "Cancellation monitor finished for SGLang Request ID %s",
+                    sglang_request_id,
                 )
-                logging.info(f"Aborted Request ID: {context.id()}")
             else:
                 logging.error(
                     f"SGLang tokenizer_manager not found for abort request: {context.id()}"
@@ -1344,6 +1351,57 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
                     await awaitable
                 except (asyncio.CancelledError, Exception):
                     pass
+
+    async def _abort_sglang_request(
+        self,
+        tokenizer_manager: Any,
+        request_id: str,
+        registry: dict[str, Any] | None,
+    ) -> None:
+        state = registry.get(request_id) if registry is not None else None
+        if registry is None or state is None:
+            tokenizer_manager.abort_request(rid=request_id, abort_all=False)
+            return
+
+        time_stats = getattr(state, "time_stats", None)
+        has_dispatch_time = hasattr(time_stats, "api_server_dispatch_finish_time")
+        if has_dispatch_time:
+            # SGLang writes this after sending on the scheduler socket, even
+            # with metrics disabled. Registration alone can precede dispatch.
+            while registry.get(request_id) is state:
+                if time_stats.api_server_dispatch_finish_time:
+                    break
+                await asyncio.sleep(0.001)
+            if registry.get(request_id) is not state:
+                return
+
+        tokenizer_manager.abort_request(rid=request_id, abort_all=False)
+        server_args = resolved_server_args(self.config.server_args)
+        # DP attention's global control broadcast can overtake a request sent
+        # to another DP leader. Retain best-effort retries for that topology,
+        # unverified pipeline-parallel paths, and runtimes without dispatch time.
+        retry_abort = (
+            not has_dispatch_time
+            or getattr(server_args, "pp_size", 1) > 1
+            or (
+                getattr(server_args, "enable_dp_attention", False)
+                and not getattr(
+                    server_args, "enable_dp_attention_local_control_broadcast", False
+                )
+            )
+        )
+        if not retry_abort:
+            return
+
+        delay = 0.05
+        while registry.get(request_id) is state:
+            await asyncio.sleep(delay)
+            # The RID may have been reused while this monitor was asleep.
+            if registry.get(request_id) is not state:
+                return
+            logging.debug("Retrying SGLang abort_request for Request ID %s", request_id)
+            tokenizer_manager.abort_request(rid=request_id, abort_all=False)
+            delay = min(delay * 2, 1.0)
 
     @asynccontextmanager
     async def _cancellation_monitor(
