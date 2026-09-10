@@ -18,14 +18,13 @@ from typing import Any, AsyncGenerator, Iterator
 
 import torch
 import yaml
-from vllm_omni.config import register_pipeline
+from vllm_omni.config import register_pipeline, resolve_omni_config
 from vllm_omni.config.config_factory import StageConfigFactory
 from vllm_omni.config.pipeline_registry import OMNI_PIPELINES
 from vllm_omni.distributed.omni_connectors import initialize_orchestrator_connectors
 from vllm_omni.engine.orchestrator import build_engine_core_request_from_tokens
 from vllm_omni.entrypoints.async_omni import AsyncOmni
 from vllm_omni.entrypoints.stage_utils import serialize_obj, shm_write_bytes
-from vllm_omni.entrypoints.utils import load_and_resolve_stage_configs
 from vllm_omni.inputs.data import OmniTokensPrompt
 
 from dynamo import prometheus_names
@@ -481,18 +480,17 @@ async def init_omni_stage(
         getattr(getattr(config, "engine_args", None), "trust_remote_code", False)
     )
 
-    (
-        resolved_stage_configs_path,
-        stage_configs,
-        _omni_lb_policy,
-    ) = load_and_resolve_stage_configs(
+    resolved_config = resolve_omni_config(
         config.model,
-        kwargs={},
+        cli_overrides={},
         trust_remote_code=trust_remote_code,
         deploy_config_path=config.stage_configs_path,
+        stage_overrides=None,
+        strategy_config_path=None,
     )
+    stage_configs = list(resolved_config.stage_configs)
     connector_configs_path = _ensure_stage_connectors(
-        resolved_stage_configs_path,
+        resolved_config.config_path,
         stage_configs,
     )
     # Only register NixlConnector if it's actually used in stage configs

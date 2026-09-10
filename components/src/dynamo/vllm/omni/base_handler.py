@@ -10,6 +10,7 @@ import time
 from typing import Any, AsyncGenerator, Dict
 
 from vllm import SamplingParams
+from vllm_omni.config import resolve_omni_config
 from vllm_omni.entrypoints import AsyncOmni
 
 try:
@@ -126,8 +127,19 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
         if config.stage_configs_path:
             omni_kwargs["deploy_config"] = config.stage_configs_path
 
+        resolved_config = resolve_omni_config(
+            config.model,
+            trust_remote_code=config.engine_args.trust_remote_code,
+            deploy_config_path=config.stage_configs_path,
+            cli_overrides={},
+            stage_overrides=None,
+            strategy_config_path=None,
+        )
+        has_diffusion_stage = any(
+            stage.stage_type == "diffusion" for stage in resolved_config.stage_configs
+        )
         for field, value in dataclasses.asdict(config.diffusion).items():
-            if value is not None:
+            if value is not None and (has_diffusion_stage or field == "enforce_eager"):
                 omni_kwargs[field] = value
 
         # These three fields are shared vLLM engine settings. Keep their CLI

@@ -8,8 +8,8 @@ import logging
 import uuid
 from typing import Any, AsyncGenerator, Dict, List
 
+from vllm_omni.config import resolve_omni_config
 from vllm_omni.distributed.omni_connectors import initialize_orchestrator_connectors
-from vllm_omni.entrypoints.utils import load_and_resolve_stage_configs
 
 from dynamo import prometheus_names
 from dynamo.common.model_taints import register_model_taint_route
@@ -53,26 +53,25 @@ class OmniStageRouter:
     ) -> None:
         self.config = config
         self.connectors: dict[tuple[str, str], Any] = {}
-        (
-            resolved_stage_configs_path,
-            self.stage_configs,
-            _omni_lb_policy,
-        ) = load_and_resolve_stage_configs(
+        resolved_config = resolve_omni_config(
             config.model,
-            kwargs={},
+            cli_overrides={},
             trust_remote_code=bool(
                 getattr(
                     getattr(config, "engine_args", None), "trust_remote_code", False
                 )
             ),
             deploy_config_path=stage_configs_path,
+            stage_overrides=None,
+            strategy_config_path=None,
         )
+        self.stage_configs = list(resolved_config.stage_configs)
         self.stage_clients: Dict[str, Any] = {}
 
         # Initialize connectors so the router can fetch final-stage output
         # via connector.get() instead of SHM -- enabling multi-node deployments.
         connector_configs_path = _ensure_stage_connectors(
-            resolved_stage_configs_path,
+            resolved_config.config_path,
             self.stage_configs,
         )
         # Only register NixlConnector if it's actually used in stage configs
