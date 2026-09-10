@@ -99,10 +99,10 @@ Providers](sweep-config-provider.md) for the complete ABI.
 The experimental `AISIMULATE_SWEEPER_VIZIER_ALGO` environment variable overrides the Vizier
 algorithm. For example, set it to `RANDOM_SEARCH` to bypass the default GP-bandit designer.
 `SPICA_VIZIER_ALGO` remains a deprecated fallback during migration; when both are set, the
-AI Simulate variable takes precedence.
+AISimulate variable takes precedence.
 
 ## Removed KVBM Fields
 
 Sweeper rejects the old KVBM block-count, transfer-bandwidth, offload-batch-size, and cache-hit
-fields. The AI Simulate engine and replay path do not support them, and they have no adapter
+fields. The AISimulate engine and replay path do not support them, and they have no adapter
 migration.

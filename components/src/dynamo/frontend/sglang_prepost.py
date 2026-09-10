@@ -29,9 +29,11 @@ from sglang.srt.parser.jinja_template_utils import (
 from sglang.srt.parser.reasoning_parser import ReasoningParser
 
 from dynamo.common.utils.engine_response import trailing_stop_prefix_len
+from dynamo.common.utils.guided_json import admits_only_empty_object
+from dynamo.llm.exceptions import InvalidArgument
 
 from .thinking import apply_default_thinking_mode_to_template_kwargs
-from .utils import PreprocessError, random_call_id
+from .utils import PreprocessError, legacy_guided_decoding, random_call_id
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,7 @@ class SglangPreprocessResult:
     guided_decoding: dict[str, Any] | None
     request: dict[str, Any]
     force_reasoning: bool = False
+    named_zero_arg_tool: str | None = None
 
 
 # --- force_reasoning detection (mirrors sglang's template_manager) -------
@@ -330,6 +333,20 @@ def _is_named_tool_choice(tool_choice: Any) -> bool:
     )
 
 
+def named_closed_zero_arg_tool(request: dict[str, Any]) -> str | None:
+    """Return the named tool when its only valid argument value is ``{}``."""
+    tool_choice = request.get("tool_choice", "auto")
+    if not _is_named_tool_choice(tool_choice):
+        return None
+    chosen_name = tool_choice["function"]["name"]
+    for tool in convert_tools(request.get("tools")) or []:
+        if tool.function.name == chosen_name and admits_only_empty_object(
+            tool.function.parameters
+        ):
+            return chosen_name
+    return None
+
+
 def _guided_tool_choice_requires_reasoning(
     request: dict[str, Any], force_reasoning: bool
 ) -> bool:
@@ -563,6 +580,9 @@ def build_tool_call_guided_decoding(
     constraint: Any = None
 
     if tool_choice == "required" or _is_named_tool_choice(tool_choice):
+        if named_closed_zero_arg_tool(request) is not None:
+            return {"regex": r"\{\}"}
+
         # get_json_schema_constraint branches on isinstance(tool_choice,
         # ToolChoice) for the named-function case — passing our raw dict
         # would silently fall through and return None, disabling guided
@@ -727,6 +747,7 @@ def preprocess_chat_request(
     Synchronous -- suitable for both main-process and worker-process execution.
     """
     request = _with_thinking_template_kwargs(request, default_thinking_mode)
+    legacy_guidance = legacy_guided_decoding(request)
     messages = _materialize_messages(request.get("messages", []))
 
     # Generation mode is independent of whether the client wants reasoning
@@ -743,11 +764,12 @@ def preprocess_chat_request(
     # Convert tools to SGLang format (done once, shared with parser creation)
     sglang_tools = convert_tools(request.get("tools"))
 
-    # Reject a named tool_choice whose function is missing from tools —
-    # otherwise the chat template would render with zero tools while
-    # guided decoding still constrains the output to that function's
-    # schema, producing confusing model behavior.
+    # Reject a forced tool_choice that cannot be satisfied by the provided tools.
+    # Otherwise the chat template and guided decoding cannot enforce the request.
     tool_choice = request.get("tool_choice", "auto")
+    forced_tool_choice = tool_choice == "required" or _is_named_tool_choice(tool_choice)
+    if tool_choice == "required" and not sglang_tools:
+        raise PreprocessError('tool_choice is "required" but tools is empty')
     if _is_named_tool_choice(tool_choice):
         chosen_name = tool_choice["function"]["name"]
         available_names = {t.function.name for t in (sglang_tools or [])}
@@ -756,6 +778,17 @@ def preprocess_chat_request(
                 f"tool_choice names function {chosen_name!r}, but it is not "
                 f"present in tools (available: {sorted(available_names) or 'none'})"
             )
+
+    response_format = request.get("response_format")
+    if (
+        forced_tool_choice
+        and isinstance(response_format, dict)
+        and response_format.get("type") == "structural_tag"
+    ):
+        raise PreprocessError(
+            "tool_choice forces a tool call and cannot be combined with a "
+            "structural_tag response format"
+        )
 
     template_tools = _filter_template_tools(
         request,
@@ -816,15 +849,6 @@ def preprocess_chat_request(
         tool_call_parser_name=tool_call_parser_name,
         sglang_tools=sglang_tools,
     )
-    # TODO: response_format wins here even when tool_choice is "required" or names
-    # a function, so a request that demanded a tool call can come back with none
-    # -- the tool constraint is dropped and only logged. The other two paths do
-    # the opposite: preprocessor/tool_choice.rs clears the response_format JSON
-    # and keeps the tool constraint, and prepost.py does the same after narrowing
-    # its conflict check. response_format is scoped by the OpenAI spec to the
-    # message the model returns to the user, not to tool calls, so the tool
-    # constraint is the one that must survive.
-    #
     # This path also never reads the legacy guided_json / guided_regex /
     # guided_grammar / guided_choice fields at all, so those are dropped silently
     # while both other paths honor them (and reject them against a forced choice).
@@ -832,10 +856,43 @@ def preprocess_chat_request(
         response_format_guided_decoding is not None
         and tool_call_guided_decoding is not None
     ):
-        logger.warning(
-            "Tool-call guided decoding will be ignored because of response_format already exists."
+        if forced_tool_choice:
+            logger.warning(
+                "response_format guided decoding will be ignored because tool_choice is forced."
+            )
+        else:
+            logger.warning(
+                "Tool-call guided decoding will be ignored because response_format already exists."
+            )
+
+    # A forced tool choice and a legacy guided_* constrain the same token stream,
+    # so honoring the guided_* would drop the tool constraint while the forced-tool
+    # parser stays selected. Reject that rather than drop one silently, matching
+    # prepost.py and preprocessor/tool_choice.rs.
+    #
+    # Only when they actually differ. A named zero-argument tool builds
+    # {"regex": r"\{\}"} above, and a caller may send exactly that as
+    # guided_regex; nothing is displaced, and named_zero_arg_tool below still
+    # recognizes it. Rejecting an identical constraint would refuse a request the
+    # two paths agree on.
+    if (
+        legacy_guidance
+        and tool_call_guided_decoding is not None
+        and legacy_guidance != tool_call_guided_decoding
+        and forced_tool_choice
+    ):
+        raise InvalidArgument(
+            "tool_choice forces a tool call and cannot be combined with an "
+            "explicit guided_* constraint."
         )
-    guided_decoding = response_format_guided_decoding or tool_call_guided_decoding
+
+    guided_decoding = (
+        tool_call_guided_decoding
+        if forced_tool_choice
+        else legacy_guidance
+        or response_format_guided_decoding
+        or tool_call_guided_decoding
+    )
 
     return SglangPreprocessResult(
         prompt_token_ids=prompt_token_ids,
@@ -844,6 +901,11 @@ def preprocess_chat_request(
         guided_decoding=guided_decoding,
         request=request,
         force_reasoning=force_reasoning,
+        named_zero_arg_tool=(
+            named_closed_zero_arg_tool(request)
+            if guided_decoding == {"regex": r"\{\}"}
+            else None
+        ),
     )
 
 
@@ -958,9 +1020,11 @@ class SglangStreamingPostProcessor:
         history_tool_calls_count: int = 0,
         sglang_tools: list[SglangTool] | None = None,
         tool_call_parser_name: str | None = None,
+        named_zero_arg_tool: str | None = None,
         eos_token_ids: list[int] | None = None,
         prompt_token_ids: list[int] | None = None,
         stop_strings: set[str] | None = None,
+        stop_token_ids: set[int] | None = None,
     ) -> None:
         self.tokenizer = tokenizer
         self.tool_call_parser = tool_call_parser
@@ -970,6 +1034,7 @@ class SglangStreamingPostProcessor:
         self._tool_call_parser_name = _normalize_sglang_parser_name(
             tool_call_parser_name
         )
+        self._named_zero_arg_tool = named_zero_arg_tool
         self._fast_plain_text = tool_call_parser is None and reasoning_parser is None
         # Preserve special tokens when a parser is active so tool-call and
         # reasoning delimiters remain visible during incremental decoding.
@@ -981,7 +1046,11 @@ class SglangStreamingPostProcessor:
         self._pending_guided_reasoning_parts: list[str] | None = (
             [] if self._is_json_array_parser and reasoning_parser is not None else None
         )
+        # The frontend owns text shaping. Keep every stop token in the raw
+        # engine stream, but exclude a matched stop suffix when decoding
+        # user-visible text.
         self._eos_token_ids = set(eos_token_ids or [])
+        self._request_stop_token_ids = set(stop_token_ids or [])
         self._stop_strings = stop_strings or set()
         self._pending_stop_text = ""
         self._locally_finished = False
@@ -1010,11 +1079,35 @@ class SglangStreamingPostProcessor:
         # Full text accumulator for robust finish-time re-parse.
         self._tool_text_parts: list[str] = []
 
-    def _strip_trailing_eos_token_ids(self, token_ids: list[int]) -> list[int]:
-        if not self._eos_token_ids:
+    def _strip_matched_stop_token_ids(
+        self, token_ids: list[int], stop_reason: Any
+    ) -> list[int]:
+        """Remove only the engine-reported token-stop suffix from display IDs."""
+        if not token_ids:
             return token_ids
-        while token_ids and token_ids[-1] in self._eos_token_ids:
-            token_ids.pop()
+
+        known_stop_ids = self._eos_token_ids | self._request_stop_token_ids
+        if isinstance(stop_reason, int) and not isinstance(stop_reason, bool):
+            matched_ids = [stop_reason] if stop_reason in known_stop_ids else []
+        elif (
+            isinstance(stop_reason, list)
+            and stop_reason
+            and all(
+                isinstance(token_id, int)
+                and not isinstance(token_id, bool)
+                and token_id in known_stop_ids
+                for token_id in stop_reason
+            )
+        ):
+            matched_ids = stop_reason
+        elif stop_reason is None and token_ids[-1] in self._eos_token_ids:
+            # Model EOS is intentionally omitted from the public stop_reason.
+            matched_ids = [token_ids[-1]]
+        else:
+            matched_ids = []
+
+        if matched_ids and token_ids[-len(matched_ids) :] == matched_ids:
+            del token_ids[-len(matched_ids) :]
         return token_ids
 
     def _tool_call_id(self, name: str, index: int) -> str:
@@ -1338,9 +1431,12 @@ class SglangStreamingPostProcessor:
         stop_reason = engine_response.get("stop_reason")
         log_probs = engine_response.get("log_probs")
         top_logprobs = engine_response.get("top_logprobs")
-        if finish_reason is not None:
+        stop_terminated = engine_response.get(
+            "stop_terminated", finish_reason == "stop"
+        )
+        if stop_terminated:
             raw_token_count = len(token_ids)
-            token_ids = self._strip_trailing_eos_token_ids(list(token_ids))
+            token_ids = self._strip_matched_stop_token_ids(list(token_ids), stop_reason)
             retained_token_count = len(token_ids)
             if log_probs is not None and len(log_probs) == raw_token_count:
                 log_probs = log_probs[:retained_token_count]
@@ -1409,6 +1505,9 @@ class SglangStreamingPostProcessor:
                     normal_text
                 )
             content_text = parsed_text
+            if self._named_zero_arg_tool is not None:
+                # The exact regex emits the argument object, not user-visible text.
+                content_text = ""
 
             for tc in tool_calls:
                 idx = tc.tool_index
@@ -1453,9 +1552,13 @@ class SglangStreamingPostProcessor:
             # can misidentify words in the prompt (e.g. a person's name)
             # as function names.
             known_names = (
-                {t.function.name for t in self._sglang_tools}
-                if self._sglang_tools
-                else set()
+                {self._named_zero_arg_tool}
+                if self._named_zero_arg_tool is not None
+                else (
+                    {t.function.name for t in self._sglang_tools}
+                    if self._sglang_tools
+                    else set()
+                )
             )
             if known_names:
                 for idx in list(self._tool_call_names):
@@ -1493,7 +1596,19 @@ class SglangStreamingPostProcessor:
 
             if should_reparse:
                 if self._is_json_array_parser:
-                    final_calls = _parse_json_array_buffer(full_text)
+                    if (
+                        self._named_zero_arg_tool is not None
+                        and full_text.strip() == "{}"
+                    ):
+                        final_calls = [
+                            ToolCallItem(
+                                tool_index=0,
+                                name=self._named_zero_arg_tool,
+                                parameters="{}",
+                            )
+                        ]
+                    else:
+                        final_calls = _parse_json_array_buffer(full_text)
                     # Secondary fallback: when guided decoding did not
                     # constrain the output (e.g. the backend doesn't
                     # support it), the model may have produced tool calls
@@ -1567,6 +1682,15 @@ class SglangStreamingPostProcessor:
                     "Dropping incomplete SGLang tool calls with no valid arguments: %s",
                     dropped_names,
                 )
+
+            if self._named_zero_arg_tool is not None and not self._tool_call_names:
+                # A backend that cannot enforce the regex may return ordinary text.
+                # It was held back to avoid leaking the exact `{}` argument payload,
+                # so restore it when no zero-argument tool call was recovered.
+                fallback_content = "".join(self._tool_text_parts)
+                if fallback_content.strip() != "{}":
+                    delta["content"] = fallback_content
+                    has_content = True
 
         if finish_reason and self._tool_call_names:
             tool_calls_out: list[dict[str, Any]] = []

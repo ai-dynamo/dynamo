@@ -6,6 +6,7 @@ use dynamo_llm::local_model::{
 };
 use dynamo_runtime::discovery::EventTransportKind;
 use dynamo_runtime::distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode};
+use dynamo_runtime::pipeline::network::ResponsePlaneMode;
 use dynamo_runtime::storage::kv;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
@@ -331,6 +332,10 @@ pub(crate) fn linked_worker_selection_policy_registry() -> WorkerSelectionPolicy
 #[cfg(feature = "custom-policy")]
 fn register_core_with_custom_worker_selection_policy(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let mut registry = WorkerSelectionPolicyRegistry::default();
+    // The policies Dynamo ships register first, so a replaced catalog that reuses one of their
+    // type names fails here instead of silently overriding it.
+    dynamo_custom_policy_builtin::register(&mut registry)
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
     dynamo_worker_selection_policy_catalog::register(&mut registry)
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
 
@@ -387,6 +392,19 @@ fn resolve_event_transport_kind(
         Some("") | None => Ok(discovery_backend.resolve_event_transport_kind()),
         Some(other) => Err(PyValueError::new_err(format!(
             "Invalid event_plane value '{other}'. Valid values: 'nats', 'zmq'"
+        ))),
+    }
+}
+
+fn resolve_response_plane_mode(
+    response_plane: Option<&str>,
+) -> PyResult<Option<ResponsePlaneMode>> {
+    match response_plane {
+        Some("tcp") => Ok(Some(ResponsePlaneMode::Tcp)),
+        Some("quic") => Ok(Some(ResponsePlaneMode::Quic)),
+        Some("") | None => Ok(None),
+        Some(other) => Err(PyValueError::new_err(format!(
+            "Invalid response_plane value '{other}'. Valid values: 'tcp', 'quic'"
         ))),
     }
 }
@@ -1153,13 +1171,14 @@ impl From<llm_rs::worker_type::WorkerType> for WorkerType {
 #[pymethods]
 impl DistributedRuntime {
     #[new]
-    #[pyo3(signature = (event_loop, discovery_backend, request_plane, enable_nats=None, *, event_plane=None))]
+    #[pyo3(signature = (event_loop, discovery_backend, request_plane, enable_nats=None, *, event_plane=None, response_plane=None))]
     fn new(
         event_loop: PyObject,
         discovery_backend: String,
         request_plane: String,
         enable_nats: Option<bool>,
         event_plane: Option<String>,
+        response_plane: Option<String>,
     ) -> PyResult<Self> {
         if enable_nats.is_some() {
             Python::with_gil(|py| {
@@ -1183,6 +1202,7 @@ impl DistributedRuntime {
             }
         };
         let request_plane: RequestPlaneMode = request_plane.parse().map_err(to_pyerr)?;
+        let response_plane = resolve_response_plane_mode(response_plane.as_deref())?;
         let explicit_event_plane = event_plane.as_deref().filter(|value| !value.is_empty());
         let event_transport_kind =
             resolve_event_transport_kind(&discovery_backend_config, event_plane.as_deref())?;
@@ -1229,6 +1249,7 @@ impl DistributedRuntime {
                 None
             },
             request_plane,
+            response_plane,
             event_transport_kind,
         };
         let inner = runtime

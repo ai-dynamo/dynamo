@@ -21,7 +21,9 @@ use super::frontend_extension::{
     FrontendExtensionContext, FrontendRouteExtension, FrontendRouteSet,
 };
 use super::metrics;
-use super::metrics::{register_lora_allocation_metrics, register_worker_timing_metrics};
+use super::metrics::{
+    register_lora_allocation_metrics, register_model_ready_metric, register_worker_timing_metrics,
+};
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
 use crate::kv_router::metrics::{
@@ -1019,6 +1021,11 @@ impl HttpService {
         );
         Ok(())
     }
+
+    #[cfg(test)]
+    pub(crate) fn model_endpoint_enabled(&self, endpoint_type: EndpointType) -> bool {
+        self.state.flags.get(&endpoint_type)
+    }
 }
 
 fn get_graceful_shutdown_timeout() -> usize {
@@ -1119,6 +1126,7 @@ impl HttpServiceConfigBuilder {
     pub fn build(self) -> Result<HttpService, anyhow::Error> {
         let config: HttpServiceConfig = self.build_internal()?;
         let metrics_config = config.metrics_config.clone();
+        let model_ready_metrics_prefix = metrics_config.prefix();
         let frontend_api_config = config.frontend_api_config.clone();
         let anthropic_endpoints_enabled = frontend_api_config.anthropic().enabled();
         let vllm_generate_enabled =
@@ -1188,6 +1196,9 @@ impl HttpServiceConfigBuilder {
         // enable prometheus metrics
         let registry = metrics::Registry::new();
         state.metrics_clone().register(&registry)?;
+
+        // Readiness is evaluated from the live routing catalog at scrape time.
+        register_model_ready_metric(&registry, state.manager_clone(), model_ready_metrics_prefix)?;
 
         // Register worker load metrics (active_decode_blocks, active_prefill_tokens per worker)
         // These are updated by KvWorkerMonitor when receiving ActiveLoad events
@@ -1809,6 +1820,37 @@ mod tests {
             .expect("request failed");
 
         assert_eq!(resp.status(), reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        let body: serde_json::Value = resp.json().await.expect("body must be JSON");
+        assert_eq!(body["code"], 415);
+        assert_eq!(
+            body["message"],
+            "Expected request with Content-Type application/json"
+        );
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_embeddings_non_json_content_type_returns_json_error() {
+        let (port, handle) = spawn_default_service().await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://localhost:{port}/v1/embeddings"))
+            .header("content-type", "text/plain")
+            .body(r#"{"model":"model","input":"hi"}"#)
+            .send()
+            .await
+            .expect("request failed");
+
+        assert_eq!(resp.status(), reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v.starts_with("application/json")),
+            Some(true),
+            "the 415 must be JSON, not Axum's text/plain rejection"
+        );
         let body: serde_json::Value = resp.json().await.expect("body must be JSON");
         assert_eq!(body["code"], 415);
         assert_eq!(
