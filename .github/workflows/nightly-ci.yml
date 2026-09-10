@@ -815,9 +815,12 @@ jobs:
       enable_coverage: true
       run_cpu_only_tests: true
       cpu_only_test_markers: vllm and gpu_0
-      # not sidecar: sidecar-marked tests need dynamo-vllm-sidecar layered onto
-      # the image (see pr.yaml's sidecar-vllm-test), which this plain
+      # not sidecar: sidecar-marked tests need the dynamo-vllm-sidecar binary
+      # installed (see pr.yaml's sidecar-vllm-test), which this plain
       # vllm-runtime image doesn't have.
+      # TODO: this ad-hoc exclusion is duplicated across pr.yaml, post-merge-ci.yml,
+      # and nightly-ci.yml's gpu_test_markers; consolidate into shared-test.yml
+      # once there's a second marker that needs the same treatment.
       gpu_test_markers: vllm and gpu_1 and not sidecar
       gpu_test_timeout_minutes: 240
       # Profiled tests run in the parallel stage; unprofiled fall through to sequential.
