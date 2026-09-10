@@ -64,7 +64,6 @@ type dynamoGraphDeploymentValidation struct {
 	sharedValidation
 	userInfo          *authenticationv1.UserInfo
 	operatorPrincipal string
-	ratchetGPUProduct bool
 }
 
 type dynamoGraphDeploymentSpecValidationOptions struct {
@@ -102,7 +101,6 @@ func (v *DynamoGraphDeploymentValidator) validate(
 			runtimeVersionSource:  runtimeVersionSource,
 			ratchetRuntimeVersion: false,
 		},
-		ratchetGPUProduct: false,
 	}
 
 	allErrs := validation.validateDynamoGraphDeployment(deployment, nil)
@@ -135,7 +133,6 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
 		},
 		userInfo:          userInfo,
 		operatorPrincipal: operatorPrincipal,
-		ratchetGPUProduct: true,
 	}
 
 	// Preserve the existing phase order while one receiver aggregates every
@@ -146,6 +143,11 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
 		return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoGraphDeployment fields: %w", err)
 	}
 	allErrs = append(allErrs, validation.validateDynamoGraphDeploymentV1alpha1(newAlpha)...)
+
+	// Ratchet the GPU-product rule against the complete stateless result before
+	// any update-only rule runs, so suppression only ever removes errors the
+	// stateless traversal actually produced.
+	allErrs = validation.ratchetDGDGPUProductErrors(allErrs, newDGD, oldDGD)
 
 	allErrs = append(allErrs, validation.validateDynamoGraphDeploymentUpdate(newDGD, oldDGD)...)
 	if validation.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
@@ -168,10 +170,10 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
 // Only the metadata update rules run. A finalizer can hold an object terminating
 // for an arbitrary period, so durable controller-owned metadata still has to be
 // protected, but any rule that judges the new object on its own can refuse the
-// cleanup update a legacy object needs and leave it impossible to finalize. The
-// spec update traversal is not purely comparative: it validates new-state GPU
-// memory service settings, and the v1alpha1 compatibility view returns a hard
-// error for an object that cannot round-trip.
+// cleanup update a legacy object needs and leave it impossible to finalize.
+// ValidateUpdate is not an option here: it owns the complete new-state traversal
+// as well as the comparative rules, and the v1alpha1 compatibility view it runs
+// returns a hard error for an object that cannot round-trip.
 //
 // ctx, oldDGD, and newDGD must not be nil. If userInfo is nil, provider
 // materialization fails closed.
@@ -817,23 +819,6 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 				componentsPath.Index(i),
 			)...)
 		}
-
-		// Ratchet the product rule for every new component after existing
-		// immutability checks; a missing stored component disables suppression.
-		// A ratcheted violation stays admissible but must not be silent: the
-		// stored cap keeps feeding Planner's projection, so warn on every write.
-		productErrs, ratcheted := dgdComponentGPUProductUpdateErrors(
-			newComponent,
-			oldComponent,
-			componentsPath.Index(i),
-		)
-		if ratcheted {
-			for _, productErr := range productErrs {
-				v.warnf("Retained pre-existing GPU power violation: %s", productErr.Error())
-			}
-		} else {
-			allErrs = append(allErrs, productErrs...)
-		}
 	}
 
 	if newSpec.BackendFramework != oldSpec.BackendFramework {
@@ -915,10 +900,10 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSharedSpe
 		}
 
 		// Keep the exact GPU product the power range was validated against stable.
-		// The create rules already reject a non-empty nodeName and a missing or
-		// unknown product on any request they are not ratcheted for, and the ratchet
-		// requires an identical placement contract, so no additional nodeName rule
-		// is reachable here.
+		// The stateless product rule already rejects a non-empty nodeName and a
+		// missing or unknown product on every request it is not ratcheted out of,
+		// and the ratchet requires an identical placement contract, so no
+		// additional nodeName rule is reachable here.
 		newGPUProduct := dgdGPUProductSelector(newComponent)
 		if newGPUProduct != dgdGPUProductSelector(oldComponent) {
 			var invalidValue any
@@ -996,10 +981,9 @@ func (v *dynamoGraphDeploymentValidation) validateKvTransferPolicyUpdate(
 // validateDGDComponentPowerAnnotation validates the power-limit annotation value,
 // its incompatibility with DRA-backed GPU allocation, and the GPU product the
 // annotated component selects. component and componentPath must not be nil.
-// The product rule is intentionally skipped in the stateless traversal on an
-// update because it is ratcheted: its update adapter needs stored state, which
-// must not enter this traversal, and evaluates the same pure rule before any
-// suppression.
+// Every rule here runs identically on creates and updates; the update adapter
+// ratchets pre-existing product violations out of the accumulated result
+// afterwards.
 func (v *dynamoGraphDeploymentValidation) validateDGDComponentPowerAnnotation(
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	componentPath *field.Path,
@@ -1023,9 +1007,7 @@ func (v *dynamoGraphDeploymentValidation) validateDGDComponentPowerAnnotation(
 		))
 	}
 
-	if !v.ratchetGPUProduct {
-		allErrs = append(allErrs, dgdComponentGPUProductErrors(component, componentPath, powerLimit, powerLimitPath)...)
-	}
+	allErrs = append(allErrs, dgdComponentGPUProductErrors(component, componentPath, powerLimit, powerLimitPath)...)
 	return allErrs
 }
 
@@ -1099,37 +1081,103 @@ func dgdComponentGPUProductErrors(
 	return allErrs
 }
 
-// dgdComponentGPUProductUpdateErrors applies the GPU-product rule to a component
-// update. It always returns the new-state errors it computed; ratcheted reports
-// whether the suppression contract holds, in which case the caller must surface
-// them as warnings instead of rejecting the update. Returning both keeps the
-// suppression decision in this one function: the caller routes the result and
-// never re-derives why the contracts matched. newComponent and componentPath
-// must not be nil; oldComponent may be nil when the component was newly added.
-func dgdComponentGPUProductUpdateErrors(
-	newComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
-	oldComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+// dgdComponentGPUProductRuleErrors re-evaluates the GPU-product rule for one
+// component exactly as the stateless traversal does, re-deriving the parsed
+// annotation value and leaving its syntax reporting to that traversal.
+// component and componentPath must not be nil.
+func dgdComponentGPUProductRuleErrors(
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	componentPath *field.Path,
-) (errs field.ErrorList, ratcheted bool) {
-	powerLimitValue, hasPowerLimit := dgdPowerLimit(newComponent)
+) field.ErrorList {
+	powerLimitValue, hasPowerLimit := dgdPowerLimit(component)
 	if !hasPowerLimit {
-		return nil, false
+		return nil
 	}
-
 	powerLimitPath := componentPath.Child("podTemplate", "metadata", "annotations").Key(consts.KubeAnnotationGPUPowerLimit)
-	// Re-derive the parsed value while leaving syntax reporting to the stateless traversal.
 	powerLimit, _ := validateDGDPowerLimitValue(powerLimitValue, powerLimitPath)
-	allErrs := dgdComponentGPUProductErrors(newComponent, componentPath, powerLimit, powerLimitPath)
-	if len(allErrs) == 0 {
-		return nil, false
+	return dgdComponentGPUProductErrors(component, componentPath, powerLimit, powerLimitPath)
+}
+
+// ratchetDGDGPUProductErrors removes the GPU-product violations an update
+// carries forward unchanged from the stateless result and reports each removal
+// as a warning. A ratcheted violation stays admissible but must not be silent:
+// the stored cap keeps feeding Planner's projection, so warn on every write.
+// Suppression applies per component and only when the complete normalized
+// power-product contract is identical in the stored and submitted objects; a
+// component that is absent from the stored object is never suppressed.
+// allErrs is the complete accumulated stateless result. newDGD and oldDGD must
+// not be nil.
+func (v *dynamoGraphDeploymentValidation) ratchetDGDGPUProductErrors(
+	allErrs field.ErrorList,
+	newDGD *nvidiacomv1beta1.DynamoGraphDeployment,
+	oldDGD *nvidiacomv1beta1.DynamoGraphDeployment,
+) field.ErrorList {
+	oldComponents := componentsByName(oldDGD.Spec.Components)
+	componentsPath := field.NewPath("spec").Child("components")
+
+	// Collect the suppression candidates first; the accumulated list is not
+	// touched until every candidate has been matched.
+	var candidates field.ErrorList
+	for i := range newDGD.Spec.Components {
+		newComponent := &newDGD.Spec.Components[i]
+		oldComponent, exists := oldComponents[newComponent.ComponentName]
+		if !exists || !equality.Semantic.DeepEqual(
+			dgdPowerProductContract(oldComponent),
+			dgdPowerProductContract(newComponent),
+		) {
+			continue
+		}
+		candidates = append(candidates, dgdComponentGPUProductRuleErrors(newComponent, componentsPath.Index(i))...)
+	}
+	if len(candidates) == 0 {
+		return allErrs
 	}
 
-	// Suppress only an unchanged violation over the complete normalized contract.
-	if oldComponent != nil && equality.Semantic.DeepEqual(
-		dgdPowerProductContract(oldComponent),
-		dgdPowerProductContract(newComponent),
-	) {
-		return allErrs, true
+	// Fail closed on any candidate that does not appear exactly once: an
+	// ambiguous or missing match means this ratchet is no longer reasoning about
+	// the list it was derived from, so retain every error and reject the update.
+	suppressed := make(map[int]bool, len(candidates))
+	for _, candidate := range candidates {
+		index, unique := uniqueFieldErrorIndex(allErrs, candidate)
+		if !unique || suppressed[index] {
+			return allErrs
+		}
+		suppressed[index] = true
 	}
-	return allErrs, false
+
+	// Drop the matched errors in list order so the surviving errors keep the
+	// order the stateless traversal produced and the warnings follow it.
+	retained := make(field.ErrorList, 0, len(allErrs)-len(suppressed))
+	for i, err := range allErrs {
+		if suppressed[i] {
+			v.warnf("Retained pre-existing GPU power violation: %s", err.Error())
+			continue
+		}
+		retained = append(retained, err)
+	}
+	return retained
+}
+
+// uniqueFieldErrorIndex locates the one error in allErrs equal to candidate over
+// its type, field path, detail, and scalar bad value. unique is the explicit
+// presence boolean: it is false when the list holds no such error and equally
+// when it holds more than one, because neither case identifies a single error
+// the caller may remove. candidate must not be nil.
+func uniqueFieldErrorIndex(allErrs field.ErrorList, candidate *field.Error) (index int, unique bool) {
+	found := -1
+	for i, err := range allErrs {
+		if err.Type == candidate.Type &&
+			err.Field == candidate.Field &&
+			err.Detail == candidate.Detail &&
+			equality.Semantic.DeepEqual(err.BadValue, candidate.BadValue) {
+			if found != -1 {
+				return 0, false
+			}
+			found = i
+		}
+	}
+	if found == -1 {
+		return 0, false
+	}
+	return found, true
 }
