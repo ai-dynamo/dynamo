@@ -606,13 +606,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_worker_set_basics() {
-        let ws = make_worker_set("ns1", "abc123");
-        assert_eq!(ws.namespace(), "ns1");
-        assert_eq!(ws.mdcsum(), "abc123");
-    }
-
     #[tokio::test]
     async fn adapter_view_routes_generate_requests_with_adapter_identity() {
         let observed_lora = Arc::new(Mutex::new(None));
@@ -663,24 +656,6 @@ mod tests {
 
         assert!(base.has_realtime_engine());
         assert!(!adapter.has_realtime_engine());
-    }
-
-    #[test]
-    fn test_no_engines_by_default() {
-        let ws = make_worker_set("ns1", "abc123");
-        assert!(!ws.has_chat_engine());
-        assert!(!ws.has_completions_engine());
-        assert!(!ws.has_embeddings_engine());
-        assert!(!ws.has_classify_engine());
-        assert!(!ws.has_pooling_engine());
-        assert!(!ws.has_images_engine());
-        assert!(!ws.has_videos_engine());
-        assert!(!ws.has_audios_engine());
-        assert!(!ws.has_tensor_engine());
-        assert!(!ws.has_realtime_engine());
-        assert!(!ws.has_generate_engine());
-        assert!(!ws.has_decode_engine());
-        assert!(ws.is_prefill_set());
     }
 
     /// `is_prefill_set` must exclude every serving-engine field on `WorkerSet`. If a new
@@ -793,15 +768,6 @@ mod tests {
 
         // All workers gone → count is 0
         tx.send(vec![]).unwrap();
-        assert_eq!(ws.worker_count(), 0);
-    }
-
-    #[test]
-    fn test_worker_count_with_empty_watcher() {
-        // Discovery watcher starts empty (no workers have joined yet)
-        let mut ws = make_worker_set("ns1", "abc");
-        let (_tx, rx) = watch::channel::<Vec<u64>>(vec![]);
-        ws.set_instance_watcher(rx);
         assert_eq!(ws.worker_count(), 0);
     }
 

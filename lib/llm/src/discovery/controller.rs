@@ -1505,61 +1505,6 @@ mod tests {
         assert_eq!(host.starts.load(Ordering::SeqCst), 2);
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn failed_build_remains_unpublished_until_its_retry_succeeds() {
-        let (host, mut starts) = FakeHost::new();
-        host.failures.store(1, Ordering::SeqCst);
-        let mut controller = ModelDiscoveryController::new(host.clone());
-        let desired = instance(1, "spec");
-        controller.apply_added(desired.clone());
-        controller.start_queued_builds();
-        starts.recv().await.unwrap();
-        host.release.add_permits(1);
-        finish_build(&mut controller).await;
-        assert!(host.members(&group_key()).is_empty());
-
-        tokio::time::advance(Duration::from_millis(999)).await;
-        controller.release_due_retries();
-        controller.start_queued_builds();
-        assert!(starts.try_recv().is_err());
-
-        tokio::time::advance(Duration::from_millis(1)).await;
-        controller.release_due_retries();
-        controller.start_queued_builds();
-        starts.recv().await.unwrap();
-        host.release.add_permits(1);
-        finish_build(&mut controller).await;
-        assert_eq!(host.members(&group_key()), BTreeSet::from([desired.key]));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn blocked_group_retries_on_its_deadline_not_unrelated_churn() {
-        let (host, mut starts) = FakeHost::new();
-        host.commit_failures.store(1, Ordering::SeqCst);
-        let mut controller = ModelDiscoveryController::new(host.clone());
-        let desired = instance(1, "spec");
-        controller.apply_added(desired.clone());
-        controller.start_queued_builds();
-        starts.recv().await.unwrap();
-        host.release.add_permits(1);
-        finish_build(&mut controller).await;
-
-        let mut unrelated_adapter = instance(99, "spec");
-        unrelated_adapter.mcid.model_suffix = Some("unrelated-adapter".to_string());
-        unrelated_adapter.key = unrelated_adapter.mcid.to_path();
-        controller.apply_added(unrelated_adapter);
-        controller.start_queued_builds();
-        assert!(starts.try_recv().is_err());
-
-        tokio::time::advance(Duration::from_secs(1)).await;
-        controller.release_due_retries();
-        controller.start_queued_builds();
-        starts.recv().await.unwrap();
-        host.release.add_permits(1);
-        finish_build(&mut controller).await;
-        assert_eq!(host.members(&group_key()), BTreeSet::from([desired.key]));
-    }
-
     #[tokio::test]
     async fn snapshots_preserve_priority_and_recreated_cohorts_join_the_end() {
         let (host, mut starts) = FakeHost::new();
@@ -1615,6 +1560,7 @@ mod tests {
             starts.recv().await.unwrap();
             host.release.add_permits(1);
             finish_build(&mut controller).await;
+            assert!(host.members(&group_key()).is_empty());
 
             tokio::time::advance(Duration::from_millis(500)).await;
             controller.apply_added(rejected.clone());
@@ -1623,10 +1569,20 @@ mod tests {
             controller.apply_added(rejected);
             adapter.projection_fingerprint = "updated".to_string();
             controller.apply_added(adapter.clone());
+            let mut unrelated_adapter = instance(99, "adapter");
+            unrelated_adapter.mcid.model_suffix = Some("unrelated-adapter".to_string());
+            unrelated_adapter.key = unrelated_adapter.mcid.to_path();
+            controller.apply_added(unrelated_adapter);
             controller.start_queued_builds();
             assert!(starts.try_recv().is_err());
 
-            tokio::time::advance(Duration::from_millis(500)).await;
+            tokio::time::advance(Duration::from_millis(499)).await;
+            controller.release_due_retries();
+            controller.start_queued_builds();
+            assert!(starts.try_recv().is_err());
+            assert!(host.members(&group_key()).is_empty());
+
+            tokio::time::advance(Duration::from_millis(1)).await;
             controller.release_due_retries();
             controller.start_queued_builds();
             starts.recv().await.unwrap();

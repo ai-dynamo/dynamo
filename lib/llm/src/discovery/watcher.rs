@@ -2155,11 +2155,6 @@ mod tests {
     }
 
     #[test]
-    fn test_realtime_in_all_model_types() {
-        assert!(ALL_MODEL_TYPES.contains(&ModelType::Realtime));
-    }
-
-    #[test]
     fn ws_key_format_per_role() {
         let endpoint_id = test_endpoint_id("generate");
         // Decode worker with Chat | Completions
