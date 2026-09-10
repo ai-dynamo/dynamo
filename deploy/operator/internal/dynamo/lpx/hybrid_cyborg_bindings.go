@@ -29,7 +29,7 @@ const (
 )
 
 func selectedCyborgConfigMapName(dgdName string) string {
-	return dgdName + selectedCyborgConfigSuffix
+	return boundedAuxiliaryName(dgdName, selectedCyborgConfigSuffix)
 }
 
 // ApplySelectedCyborgContainerDefaults installs the operator-owned V2 Cyborg

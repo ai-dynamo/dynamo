@@ -7,10 +7,29 @@ package lpx
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
+
+func TestLPXAuxiliaryNamesAreBounded(t *testing.T) {
+	t.Log("Use a source name already at the Kubernetes length limit")
+	root := strings.Repeat("a", validation.DNS1123SubdomainMaxLength)
+
+	t.Log("Render the LPU and decode ConfigMap names")
+	lpuName := LPUConfigMapName(root)
+	decodeName := selectedCyborgConfigMapName(root)
+
+	t.Log("Keep names valid and distinct while leaving short names unchanged")
+	require.Len(t, lpuName, validation.DNS1123SubdomainMaxLength)
+	require.Len(t, decodeName, validation.DNS1123SubdomainMaxLength)
+	require.Empty(t, validation.IsDNS1123Subdomain(lpuName))
+	require.Empty(t, validation.IsDNS1123Subdomain(decodeName))
+	require.NotEqual(t, lpuName, decodeName)
+	require.Equal(t, "short-lpu", LPUConfigMapName("short"))
+}
 
 func TestLPURuntimeBuildRef(t *testing.T) {
 	t.Parallel()

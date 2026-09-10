@@ -8,6 +8,7 @@ package lpx
 import (
 	"context"
 	"sort"
+	"strings"
 	"testing"
 
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/thirdparty/lpxscheduler/v1alpha1"
@@ -18,6 +19,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -198,6 +200,28 @@ func TestLPUEviction_PodsForTrigger(t *testing.T) {
 		require.NotNil(t, pods)
 		assert.Equal(t, []string{"agent-0", "agent-1"}, lpuEvictionPodNames(pods))
 	})
+}
+
+func TestLPUEviction_RuntimePartitionTableUsesBoundedGeneratedName(t *testing.T) {
+	t.Log("Create the generated runtime table for a maximum-length DGD name")
+	dgdName := strings.Repeat("a", validation.DNS1123SubdomainMaxLength)
+	config := newLPUEvictionConfigMap()
+	config.Name = dynamolpx.LPUConfigMapName(dgdName)
+
+	t.Log("Override the Agent config volume without replacing its generated partition table")
+	trigger := newLPUEvictionPod("agent-0", "0", "0", false, "")
+	trigger.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dgdName
+	trigger.Annotations[dynamolpx.WorkloadModeAnnotation] = string(lpxv1alpha1.WorkloadModeV2StrictHybrid)
+	trigger.Annotations[commonconsts.AnnotationExtraResourcesHash] = dynamolpx.LPUConfigMapHash(config)
+	trigger.Spec.Volumes = []corev1.Volume{{
+		Name: "config", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+	}}
+	r, _ := newLPUEvictionReconciler(trigger, config)
+
+	t.Log("Read the bounded generated ConfigMap despite the non-ConfigMap volume override")
+	partitions, err := r.runtimePartitionByPodIndex(t.Context(), trigger)
+	require.NoError(t, err)
+	require.Equal(t, map[string]int{"0": 0, "1": 0, "2": 1}, partitions)
 }
 
 func TestLPUEviction_LPUOnlyDeletesSamePCSGReplica(t *testing.T) {

@@ -21,6 +21,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 const (
@@ -31,6 +32,24 @@ const (
 type lpuModelStorage struct {
 	volume corev1.Volume
 	mount  corev1.VolumeMount
+}
+
+func boundedAuxiliaryName(root, suffix string) string {
+	candidate := root + suffix
+	if len(candidate) <= validation.DNS1123SubdomainMaxLength {
+		return candidate
+	}
+
+	// Distinguish overlong resource names using the full name, including its suffix.
+	digest := sha256.Sum256([]byte(candidate))
+	hashSuffix := fmt.Sprintf("-%x", digest[:4])
+	prefix := strings.TrimRight(candidate[:validation.DNS1123SubdomainMaxLength-len(hashSuffix)], "-.")
+	return prefix + hashSuffix
+}
+
+// LPUConfigMapName returns the generated runtime ConfigMap name within the Kubernetes name limit.
+func LPUConfigMapName(root string) string {
+	return boundedAuxiliaryName(root, "-lpu")
 }
 
 func renderLPUConfigMap(
@@ -79,7 +98,7 @@ func renderLPUConfigMap(
 	data["datacenter.toml"] = datacenterTOML.String()
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      dgdName + "-lpu",
+			Name:      LPUConfigMapName(dgdName),
 			Namespace: namespace,
 		},
 		Data: data,
