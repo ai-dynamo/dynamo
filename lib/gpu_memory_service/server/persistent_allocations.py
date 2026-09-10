@@ -232,10 +232,7 @@ class PersistentAllocationManager:
         except Exception:  # noqa: BLE001
             self._vmm.release(int(handle))
             raise
-        # Also map into the daemon's own VA so the daemon can read/write
-        # the same physical pages the engine sees. Failure to map is
-        # non-fatal — we still hand out the FD; va_daemon stays 0 and
-        # direct-access ops will raise.
+        # Daemon mapping is optional; direct-access methods raise without it.
         va_daemon = 0
         mapped = False
         try:

@@ -431,9 +431,7 @@ class GMS:
 
         if msg_type is GetAllocationStateRequest:
             return (
-                GetAllocationStateResponse(
-                    allocation_count=self._allocations.allocation_count
-                ),
+                GetAllocationStateResponse(allocation_count=self.allocation_count),
                 -1,
                 False,
             )

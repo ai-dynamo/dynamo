@@ -26,6 +26,8 @@ from gpu_memory_service.common.protocol.messages import (
     ErrorResponse,
     ExportPersistentAllocationRequest,
     ExportPersistentAllocationResponse,
+    GetAllocationStateRequest,
+    GetAllocationStateResponse,
     ListPersistentAllocationsRequest,
     ListPersistentAllocationsResponse,
     ReleasePersistentAllocationRequest,
@@ -305,9 +307,6 @@ def test_claim_release_round_trip_via_rpc(gms):
     with no active lock, proving the persistent allow-list bypass
     works."""
     conn = _make_dummy_conn()
-    # Connection isn't registered with the FSM, so check_operation
-    # will only let through messages in PERSISTENT_ALLOWED. Perfect
-    # for what we want to test.
     claim_req = ClaimPersistentAllocationRequest(
         engine_id="eng-X",
         tag="kv_pool",
@@ -326,6 +325,26 @@ def test_claim_release_round_trip_via_rpc(gms):
     resp2, _, _ = asyncio.run(gms.handle_request(conn, rel_req, lambda: True))
     assert isinstance(resp2, ReleasePersistentAllocationResponse)
     assert resp2.released is True
+
+
+def test_allocation_state_counts_persistent_allocations(gms):
+    conn = _make_dummy_conn()
+    asyncio.run(
+        gms.handle_request(
+            conn,
+            ClaimPersistentAllocationRequest(
+                engine_id="eng-X", tag="kv_pool", size=8192
+            ),
+            lambda: True,
+        )
+    )
+
+    response, _, _ = asyncio.run(
+        gms.handle_request(conn, GetAllocationStateRequest(), lambda: True)
+    )
+
+    assert isinstance(response, GetAllocationStateResponse)
+    assert response.allocation_count == 1
 
 
 def test_repeated_shared_claim_from_one_session_is_idempotent(gms):
