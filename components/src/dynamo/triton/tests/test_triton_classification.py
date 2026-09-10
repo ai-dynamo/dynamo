@@ -303,7 +303,6 @@ def test_generate_keeps_the_batch_dimension_for_a_batchable_model():
 
 
 def test_generate_mixes_raw_and_classification_outputs():
-    """A request may ask for one output raw and another as classes."""
     _, dynamo_responses = run_handler_generate(
         [
             {"name": "OUTPUT0", "datatype": "FP32"},
@@ -395,7 +394,6 @@ def test_generate_rejects_an_output_the_model_does_not_produce():
 
 
 def test_generate_rejects_an_invalid_classification_parameter_before_infer():
-    """classification: 0 is a request error; the model must not be invoked."""
     model = _MockModel(
         [{"name": "OUTPUT0", "datatype": "FP32"}],
         [build_triton_response("req-id", "classifier", {})],
@@ -410,7 +408,7 @@ def test_generate_rejects_an_invalid_classification_parameter_before_infer():
     assert model.last_request is None
 
 
-@pytest.mark.parametrize("triton_dtype", _UNSUPPORTED_CLASSIFICATION_DTYPES)
+@pytest.mark.parametrize("triton_dtype", ("BYTES", "FP16"))
 def test_generate_rejects_classification_on_an_unsupported_output_dtype(triton_dtype):
     array = (
         np.array([b"a"], dtype=object)
