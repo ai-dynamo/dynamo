@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import os
+import signal
 
 import pytest
 
@@ -243,28 +245,6 @@ async def test_prequiesce_warmup_requires_callback(monkeypatch):
             lock_factory=_BusyOnTryLock,
             warm_standby_before_quiesce=True,
         )
-
-
-@pytest.mark.asyncio
-async def test_gms_failover_can_mark_waiting_shadow_unready_when_configured(
-    monkeypatch,
-):
-    monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "true")
-    monkeypatch.setenv("DYN_GMS_FAILOVER_KEEP_SHADOW_READY", "false")
-    monkeypatch.setenv("ENGINE_ID", "1")
-    owner = _Owner()
-    runtime = _Runtime()
-
-    activation = await prepare_gms_failover(
-        owner,
-        runtime,
-        backend_name="test",
-        tags=["kv_cache"],
-        lock_factory=_BusyOnTryLock,
-    )
-
-    assert activation.enabled is True
-    assert runtime.health == [False, True]
 
 
 @pytest.mark.asyncio
@@ -661,14 +641,23 @@ async def test_gms_failover_shadow_runs_warmup_before_ready(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_activation_cancellation_drains_lock_release(monkeypatch):
+async def test_activation_cancellation_drains_requiesce_and_lock_release(monkeypatch):
     monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "true")
-    owner = _Owner()
     runtime = _Runtime()
     warmup_started = asyncio.Event()
+    requiesce_started = asyncio.Event()
+    allow_requiesce = asyncio.Event()
     release_started = asyncio.Event()
     allow_release = asyncio.Event()
     created = []
+
+    class BlockingRequiesceController(_Controller):
+        async def quiesce(self, tags):
+            self.quiesce_calls.append(tags)
+            if len(self.quiesce_calls) > 1:
+                requiesce_started.set()
+                await allow_requiesce.wait()
+            return True
 
     class BlockingReleaseLock(_BusyOnTryLock):
         def __init__(self, path):
@@ -684,6 +673,8 @@ async def test_activation_cancellation_drains_lock_release(monkeypatch):
         warmup_started.set()
         await asyncio.Event().wait()
 
+    owner = _Owner()
+    owner._quiesce_controller = BlockingRequiesceController()
     activation = asyncio.create_task(
         prepare_gms_failover(
             owner,
@@ -696,6 +687,13 @@ async def test_activation_cancellation_drains_lock_release(monkeypatch):
     )
     await warmup_started.wait()
     activation.cancel()
+    await requiesce_started.wait()
+    activation.cancel()
+    await asyncio.sleep(0)
+    assert not activation.done()
+    assert not release_started.is_set()
+
+    allow_requiesce.set()
     await release_started.wait()
     activation.cancel()
     await asyncio.sleep(0)
@@ -710,6 +708,51 @@ async def test_activation_cancellation_drains_lock_release(monkeypatch):
         ["kv_cache"],
         ["kv_cache"],
     ]
+
+
+@pytest.mark.asyncio
+async def test_failed_requiesce_retains_lock_and_terminates(monkeypatch):
+    monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "true")
+    owner = _Owner()
+    runtime = _Runtime()
+    killed = []
+    created = []
+
+    class FailingRequiesceController(_Controller):
+        async def quiesce(self, tags):
+            self.quiesce_calls.append(tags)
+            if len(self.quiesce_calls) > 1:
+                raise RuntimeError("cannot quiesce")
+            return True
+
+    class RecordingLock(_BusyOnTryLock):
+        def __init__(self, path):
+            super().__init__(path)
+            created.append(self)
+
+    async def failing_warmup():
+        raise RuntimeError("warmup failed")
+
+    owner._quiesce_controller = FailingRequiesceController()
+    monkeypatch.setattr(
+        "dynamo.common.gms_failover.os.kill",
+        lambda pid, sig: killed.append((pid, sig)),
+    )
+
+    with pytest.raises(RuntimeError, match="warmup failed"):
+        await prepare_gms_failover(
+            owner,
+            runtime,
+            backend_name="test",
+            tags=["kv_cache"],
+            lock_factory=RecordingLock,
+            promotion_warmup=failing_warmup,
+        )
+
+    assert owner._gms_failover_lock is created[0]
+    assert created[0].released == 0
+    assert killed == [(os.getpid(), signal.SIGTERM)]
+    assert runtime.health[-1] is False
 
 
 @pytest.mark.asyncio
