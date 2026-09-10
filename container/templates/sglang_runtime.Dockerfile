@@ -275,15 +275,17 @@ RUN set -eux; \
         /root/.cache/pip; \
     ldconfig
 
-# The dev-dsv41 Ubuntu 24.04 base also carries distro libx264/libx265 shared
-# libraries.  They are outside the Python-wheel and /usr/local cleanup above,
-# so purge precisely those packages after the wheel cleanup.  Querying dpkg
-# keeps this valid across the base image's architecture/version suffixes and
-# intentionally avoids autoremove: its dependency graph includes the runtime
-# JIT toolchain and CUDA math libraries.
+# The dev-dsv41 Ubuntu 24.04 base also carries its distro FFmpeg stack. It is
+# outside the Python-wheel and /usr/local cleanup above, so remove the complete
+# set of FFmpeg packages after that cleanup rather than only libx264/libx265:
+# on arm64 the residual libavutil/libpostproc/libsw* libraries are independently
+# caught by the media-codec policy. Querying dpkg keeps this valid across the
+# base image's architecture/version suffixes and intentionally avoids
+# autoremove: its dependency graph includes the runtime JIT toolchain and CUDA
+# math libraries.
 RUN set -eux; \
     purge="$(dpkg-query -W -f='${Package}\n' 2>/dev/null \
-        | grep -E '^(libx264|libx265)(-[0-9]+)?(:[a-z0-9-]+)?$' \
+        | grep -E '^(ffmpeg|libav[a-z]|libsw[a-z]|libpostproc|libx264|libx265|libmp3lame|libaom|libdav1d|libvpx|libtheora|libvorbis|libopus|libsoxr|libcaca|libcdio|libzvbi|libgme|libvidstab|libdc1394|libraw1394|libiec61883|libtwolame|libshine|libsrt[0-9]|libudfread|libsvtav1|libbs2b|librubberband|libchromaprint|libcodec2|libgsm|libass[0-9]|libbluray|libxvidcore|libflite)' \
         || true)"; \
     if [ -n "$purge" ]; then \
         DEBIAN_FRONTEND=noninteractive apt-get purge -y $purge; \
