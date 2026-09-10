@@ -153,6 +153,23 @@ class ClaimPersistentAllocationResponse(
     reattached: bool
 
 
+class UnclaimPersistentAllocationRequest(
+    msgspec.Struct,
+    tag="unclaim_persistent_allocation_request",
+):
+    """Drop this session claim without destroying the allocation."""
+
+    engine_id: str
+    tag: str
+
+
+class UnclaimPersistentAllocationResponse(
+    msgspec.Struct,
+    tag="unclaim_persistent_allocation_response",
+):
+    unclaimed: bool
+
+
 class ReleasePersistentAllocationRequest(
     msgspec.Struct,
     tag="release_persistent_allocation_request",
@@ -339,6 +356,8 @@ Message = Union[
     # Persistent allocations (KV-pool namespace)
     ClaimPersistentAllocationRequest,
     ClaimPersistentAllocationResponse,
+    UnclaimPersistentAllocationRequest,
+    UnclaimPersistentAllocationResponse,
     ReleasePersistentAllocationRequest,
     ReleasePersistentAllocationResponse,
     ExportPersistentAllocationRequest,
