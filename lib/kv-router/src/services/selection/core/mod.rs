@@ -46,7 +46,7 @@ use crate::services::indexer::registry::WorkerRegistry;
 use crate::services::overlap::MooncakeOverlapSummary;
 use crate::tracking_hash::{TrackingHashContext, TrackingHashScope};
 
-use super::affinity::{Acquired, AffinityError, AffinityLease, SessionAffinity};
+use super::affinity::{AcquireStep, Acquired, AffinityError, AffinityLease, SessionAffinity};
 use super::catalog::WorkerCatalog;
 use super::error::SelectionError;
 use super::ingress::{KvEventIngress, ZmqDirectIngress};
@@ -1511,7 +1511,8 @@ impl SelectionCore {
 
     /// Bind (or confirm) `session_id` to the worker a booking landed on and
     /// keep the lease with the booking. A bound session whose worker was not
-    /// selected (it left) is invalidated and rebound.
+    /// selected (it left) is invalidated and rebound; when a concurrent request
+    /// already rebound it, this booking holds that binding's lease instead.
     fn bind_session(
         table: &SessionAffinity,
         hold: Acquired,
@@ -1531,10 +1532,9 @@ impl SelectionCore {
             Acquired::Bound { mut lease, .. } => {
                 lease.invalidate();
                 match table.try_acquire(session_id, None) {
-                    Ok(super::affinity::AcquireStep::Initialize(init)) => {
-                        init.commit(selected).ok()
-                    }
-                    _ => None,
+                    Ok(AcquireStep::Initialize(init)) => init.commit(selected).ok(),
+                    Ok(AcquireStep::Bound { lease, .. }) => return Some(lease),
+                    Ok(AcquireStep::Wait(_)) | Err(_) => None,
                 }
             }
         };
@@ -2808,6 +2808,43 @@ mod tests {
                 .filter(|r| r._affinity_lease.is_some())
                 .count(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_failover_keeps_the_winning_binding_lease() {
+        let table = SessionAffinity::new(Duration::from_secs(60)).expect("affinity table");
+        let departed = WorkerWithDpRank::new(1, 0);
+        let Acquired::Initialize(init) = table.acquire("s", None).await.expect("acquire") else {
+            panic!("fresh session must initialize");
+        };
+        drop(init.commit(SessionTarget::new(1, Some(0))).expect("commit"));
+        let first = table.acquire("s", None).await.expect("first acquire");
+        let second = table.acquire("s", None).await.expect("second acquire");
+        assert!(
+            matches!(first, Acquired::Bound { target, .. } if target.worker_id == departed.worker_id)
+        );
+
+        // Worker 1 left; both bookings landed elsewhere. The first rebinds the
+        // session, the second must hold that binding rather than end up leaseless.
+        let winner = SelectionCore::bind_session(&table, first, "s", WorkerWithDpRank::new(2, 0))
+            .expect("first failover rebinds");
+        let follower =
+            SelectionCore::bind_session(&table, second, "s", WorkerWithDpRank::new(3, 0))
+                .expect("second failover holds the rebound session");
+        let bound = table
+            .query_target("s", None)
+            .expect("query")
+            .expect("bound");
+        assert_eq!(bound.worker_id, 2);
+        drop(winner);
+        drop(follower);
+        assert_eq!(
+            table
+                .query_target("s", None)
+                .expect("query")
+                .map(|t| t.worker_id),
+            Some(2)
         );
     }
 
