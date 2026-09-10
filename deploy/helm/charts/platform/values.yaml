@@ -281,6 +281,9 @@ grove:
   tolerations: []
   # -- Affinity for Grove pods
   affinity: {}
+  crdInstaller:
+    # -- Upgrade Grove CRDs before the bundled operator starts.
+    enabled: true
   config:
     server:
       healthProbes:
