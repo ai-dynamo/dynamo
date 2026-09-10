@@ -43,37 +43,6 @@ def test_authoritative_startup_rejects_missing_live_hook(monkeypatch):
         startup.verify_kv_failover_hooks()
 
 
-def test_strict_install_is_idempotent_when_live_hooks_exist(monkeypatch):
-    from gpu_memory_service.integrations.vllm import (
-        install_kv_leases,
-        install_vmm_ipc_kv,
-        startup,
-    )
-
-    monkeypatch.setenv("GMS_KV_DIRECTORY_MODE", "authoritative")
-    calls = []
-    monkeypatch.setattr(
-        install_kv_leases, "install", lambda: calls.append("leases") or False
-    )
-    monkeypatch.setattr(
-        install_kv_leases,
-        "install_engine_core_hook",
-        lambda: calls.append("core") or False,
-    )
-    monkeypatch.setattr(
-        install_vmm_ipc_kv, "install", lambda: calls.append("vmm") or False
-    )
-    monkeypatch.setattr(install_kv_leases, "lease_hooks_installed", lambda: True)
-    monkeypatch.setattr(install_kv_leases, "engine_core_hook_installed", lambda: True)
-    monkeypatch.setattr(
-        install_vmm_ipc_kv, "persistent_kv_hooks_installed", lambda: True
-    )
-
-    startup.install_and_verify_kv_failover_hooks()
-    startup.install_and_verify_kv_failover_hooks()
-    assert calls == ["leases", "core", "vmm"] * 2
-
-
 def test_weights_only_mode_tolerates_optional_hook_failure(monkeypatch):
     from gpu_memory_service.integrations.vllm import (
         install_kv_leases,

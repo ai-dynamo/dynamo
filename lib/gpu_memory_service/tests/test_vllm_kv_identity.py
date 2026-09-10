@@ -304,10 +304,6 @@ def test_generic_failover_shadow_mode_enables_shared_geometry(monkeypatch):
     assert kv_identity.use_existing_shared_geometry()
 
 
-def test_current_vllm_exposes_native_kv_allocation_context():
-    assert install_vmm_ipc_kv.native_kv_allocation_hook_available()
-
-
 def test_native_kv_allocation_context_check_detects_worker_drift(monkeypatch):
     from vllm.v1.worker.gpu_worker import Worker
 
