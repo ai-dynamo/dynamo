@@ -927,6 +927,19 @@ impl HttpService {
             tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
 
             let state = self.state.clone();
+            use axum::serve::ListenerExt;
+            // Clear Nagle on the client-facing socket. Without this a response
+            // streamed one SSE chunk per token writes a small segment and then
+            // waits on the peer's delayed ACK, which Linux floors at HZ/25, so
+            // every streamed response pays a fixed ~40 ms. The internal
+            // transport already sets this on all of its sockets.
+            let listener = listener.tap_io(|tcp_stream| {
+                if let Err(err) = tcp_stream.set_nodelay(true) {
+                    tracing::trace!(
+                        "failed to set TCP_NODELAY on incoming connection: {err:#}"
+                    );
+                }
+            });
             axum::serve(listener, router)
                 .with_graceful_shutdown(async move {
                     observer.cancelled_owned().await;
