@@ -245,29 +245,7 @@ const ALL_MODEL_TYPES: &[ModelType] = &[
 
 /// Returns true if no models in the manager support the given model type.
 fn is_model_type_list_empty(manager: &ModelManager, model_type: ModelType) -> bool {
-    if model_type == ModelType::Chat {
-        manager.list_chat_completions_models().is_empty()
-    } else if model_type == ModelType::Completions {
-        manager.list_completions_models().is_empty()
-    } else if model_type == ModelType::Embedding {
-        manager.list_embeddings_models().is_empty()
-    } else if model_type == ModelType::Images {
-        manager.list_images_models().is_empty()
-    } else if model_type == ModelType::Audios {
-        manager.list_audios_models().is_empty()
-    } else if model_type == ModelType::Videos {
-        manager.list_videos_models().is_empty()
-    } else if model_type == ModelType::TensorBased {
-        manager.list_tensor_models().is_empty()
-    } else if model_type == ModelType::Realtime {
-        manager.list_realtime_models().is_empty()
-    } else if model_type == ModelType::Classify {
-        manager.list_classify_models().is_empty()
-    } else if model_type == ModelType::Pooling {
-        manager.list_pooling_models().is_empty()
-    } else {
-        true
-    }
+    !manager.has_models_of_type(model_type)
 }
 
 fn removed_model_cards(
@@ -1281,7 +1259,13 @@ fn materialization_fingerprint(
     card: &ModelDeploymentCard,
     default_router_config: &RouterConfig,
 ) -> anyhow::Result<String> {
-    let effective_router = card.router_config.as_ref().unwrap_or(default_router_config);
+    // Hash what the frontend serves with: `prepare` overlays the frontend-owned fields
+    // via `effective_router_config`, so those fields must not split a cohort.
+    let mut effective_router =
+        effective_router_config(card.router_config.as_ref(), default_router_config);
+    // Compatibility with pre-v1.4 workers advertising `enforce_disagg` during v1.5
+    // rolling upgrades. TODO(v1.6): Remove when v1.3 leaves the N-2 compatibility window.
+    effective_router.to_mut().enforce_disagg = false;
     let mut value = serde_json::to_value(card)?;
     let object = value
         .as_object_mut()
@@ -1294,7 +1278,7 @@ fn materialization_fingerprint(
     let normalized: ModelDeploymentCard = serde_json::from_value(value)?;
 
     let mut bytes = normalized.mdcsum().as_bytes().to_vec();
-    let mut router_value = serde_json::to_value(effective_router)?;
+    let mut router_value = serde_json::to_value(effective_router.as_ref())?;
     canonicalize_json(&mut router_value);
     bytes.extend(serde_json::to_vec(&router_value)?);
     Ok(blake3::hash(&bytes).to_string())
@@ -1825,6 +1809,27 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_backed_model_types_emit_retraction_cards() {
+        let manager = ModelManager::new();
+        for unit in ModelType::all().units() {
+            if unit.as_endpoint_types_with_anthropic(true).is_empty() {
+                continue;
+            }
+
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.model_type = unit;
+            let removed_cards = removed_model_cards(&manager, &card);
+
+            assert!(
+                removed_cards
+                    .iter()
+                    .any(|removed| removed.model_type == unit),
+                "{unit:?} maps onto an HTTP endpoint but does not produce a retraction card"
+            );
+        }
+    }
+
+    #[test]
     fn removal_cards_contain_only_the_empty_model_type() {
         let mm = ModelManager::new();
         let mut card = ModelDeploymentCard::with_name_only("model");
@@ -2133,6 +2138,67 @@ mod tests {
         );
         assert!(worker.kv_router_config.router_prefill_policy.is_none());
         assert!(worker.kv_router_config.router_decode_policy.is_none());
+    }
+
+    #[test]
+    fn materialization_fingerprint_joins_router_config_across_generations() {
+        use crate::session_affinity::SessionAffinityMode;
+
+        // The older generation predates `session_affinity_mode`; serde fills the absent
+        // key with `Hard`, encoding the same logical config two different ways.
+        let mut legacy_wire = serde_json::to_value(RouterConfig::default()).unwrap();
+        let legacy_object = legacy_wire.as_object_mut().unwrap();
+        legacy_object.remove("session_affinity_mode");
+        legacy_object.insert("enforce_disagg".to_string(), serde_json::json!(true));
+        let legacy_router: RouterConfig = serde_json::from_value(legacy_wire).unwrap();
+        assert_eq!(
+            legacy_router.session_affinity_mode,
+            SessionAffinityMode::Hard
+        );
+        assert!(legacy_router.enforce_disagg);
+
+        let current_router = RouterConfig {
+            session_affinity_mode: SessionAffinityMode::Soft,
+            ..RouterConfig::default()
+        };
+
+        let mut legacy = ModelDeploymentCard::with_name_only("model");
+        legacy.router_config = Some(legacy_router);
+        let mut current = ModelDeploymentCard::with_name_only("model");
+        current.router_config = Some(current_router);
+
+        // The frontend overlays its own `session_affinity_mode` and nothing reads
+        // `enforce_disagg`, so both workers serve identically and share one cohort.
+        let frontend = RouterConfig {
+            session_affinity_mode: SessionAffinityMode::Soft,
+            ..RouterConfig::default()
+        };
+        assert_eq!(
+            materialization_fingerprint(&legacy, &frontend).unwrap(),
+            materialization_fingerprint(&current, &frontend).unwrap()
+        );
+    }
+
+    #[test]
+    fn materialization_fingerprint_still_splits_on_serving_relevant_differences() {
+        let frontend = RouterConfig::default();
+
+        // `router_mode` changes how requests are placed, so two workers advertising
+        // different modes are not interchangeable.
+        let mut round_robin = ModelDeploymentCard::with_name_only("model");
+        round_robin.router_config = Some(RouterConfig {
+            router_mode: RouterMode::RoundRobin,
+            ..RouterConfig::default()
+        });
+        let mut kv = ModelDeploymentCard::with_name_only("model");
+        kv.router_config = Some(RouterConfig {
+            router_mode: RouterMode::KV,
+            ..RouterConfig::default()
+        });
+        assert_ne!(
+            materialization_fingerprint(&round_robin, &frontend).unwrap(),
+            materialization_fingerprint(&kv, &frontend).unwrap()
+        );
     }
 
     #[tokio::test]
