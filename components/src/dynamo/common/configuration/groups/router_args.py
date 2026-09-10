@@ -79,13 +79,19 @@ class RouterConfigBase(ConfigBase):
     enforce_disagg: bool
     session_affinity_ttl_secs: Optional[int]
     session_affinity_mode: str
+    session_affinity_binding: str = "session"
     active_decode_blocks_threshold: Optional[float]
     active_prefill_tokens_threshold: Optional[int]
     active_prefill_tokens_threshold_frac: Optional[float]
 
     def router_kwargs(self) -> dict:
         """Return a dict suitable for ``RouterConfig(mode, kv_config, **kwargs)``."""
-        return {f: getattr(self, f) for f in _ROUTER_FIELDS}
+        kwargs = {f: getattr(self, f) for f in _ROUTER_FIELDS}
+        # Frontend-only: never carried on a model card, so workers fall back to the default.
+        kwargs["session_affinity_binding"] = getattr(
+            self, "session_affinity_binding", "session"
+        )
+        return kwargs
 
     def validate_rejection_thresholds(self) -> None:
         """Validate independently configured busy-worker rejection thresholds."""
@@ -192,6 +198,19 @@ class RouterArgGroup(ArgGroup):
                 action=_IgnoredAdmissionControlAction,
                 default=argparse.SUPPRESS,
                 help=argparse.SUPPRESS,
+            )
+            add_argument(
+                g,
+                flag_name="--router-session-affinity-binding",
+                env_var="DYN_ROUTER_SESSION_AFFINITY_BINDING",
+                default="session",
+                help=(
+                    "Which id a request's session binding is keyed on. session keys "
+                    "every request on its own session id; parent-group binds a subagent "
+                    "under its parent's group so siblings share a worker. Frontend-only."
+                ),
+                choices=("session", "parent-group"),
+                dest="session_affinity_binding",
             )
             add_argument(
                 g,

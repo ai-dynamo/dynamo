@@ -42,8 +42,9 @@ use crate::{
         timing::{RequestPhase, RoutingData, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL},
     },
     session_affinity::{
-        AffinityAcquire, AffinityCoordinator, AffinityTarget, SessionAffinityMode, affinity_id,
-        explicit_target, invalid_argument,
+        AffinityAcquire, AffinityCoordinator, AffinityTarget, SessionAffinityBinding,
+        SessionAffinityMode, affinity_id, explicit_target, invalid_argument,
+        subagent_group_affinity_id,
     },
 };
 
@@ -250,6 +251,7 @@ where
     request_metrics: Arc<RouterRequestMetrics>,
     affinity: Option<AffinityCoordinator>,
     session_affinity_mode: SessionAffinityMode,
+    session_affinity_binding: SessionAffinityBinding,
     hosted_occupancy: Option<HostedOccupancy>,
     lora: Option<LoraRouting>,
     /// Retains the shared client, overload state, and cancellation subtree for this host.
@@ -427,10 +429,19 @@ where
             request_metrics,
             affinity,
             session_affinity_mode,
+            session_affinity_binding: SessionAffinityBinding::default(),
             hosted_occupancy: None,
             lora: None,
             routing_context: load_context,
         }
+    }
+
+    pub fn with_session_affinity_binding(
+        mut self,
+        session_affinity_binding: SessionAffinityBinding,
+    ) -> Self {
+        self.session_affinity_binding = session_affinity_binding;
+        self
     }
 
     #[cfg(test)]
@@ -515,6 +526,7 @@ where
             request_metrics,
             affinity,
             session_affinity_mode,
+            session_affinity_binding: SessionAffinityBinding::default(),
             hosted_occupancy,
             lora: lora
                 .zip(lora_selector)
@@ -574,6 +586,29 @@ where
             RoutingPolicy::Direct => None,
             RoutingPolicy::Kv(_) => None,
         }
+    }
+
+    /// The parent keeps its own binding, so a group is placed on its own rather than inheriting
+    /// whichever worker the parent already holds. An explicit per-request target stays on the
+    /// request's own session so it cannot be rejected against, or rebind, the group.
+    fn affinity_binding_id(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        explicit: Option<AffinityTarget>,
+    ) -> Result<Option<Arc<SessionAffinityId>>, Error> {
+        if self.session_affinity_binding == SessionAffinityBinding::ParentGroup
+            && explicit.is_none()
+            && let Some(parent_session_id) = request
+                .content()
+                .agent_context
+                .as_ref()
+                .and_then(|context| context.parent_session_id.as_deref())
+        {
+            return Ok(Some(Arc::new(SessionAffinityId::new(
+                subagent_group_affinity_id(parent_session_id),
+            ))));
+        }
+        affinity_id(request)
     }
 
     fn affinity_target_is_valid(&self, target: AffinityTarget) -> bool {
@@ -650,10 +685,10 @@ where
         let Some(affinity) = self.affinity.as_ref() else {
             return Ok((select(None).await?, None));
         };
-        let Some(session_id) = affinity_id(request)? else {
+        let explicit = explicit_target(request.content(), phase)?;
+        let Some(session_id) = self.affinity_binding_id(request, explicit)? else {
             return Ok((select(None).await?, None));
         };
-        let explicit = explicit_target(request.content(), phase)?;
         if is_query_only {
             let target = affinity.query_target(&session_id, explicit)?;
             return Ok((select(target).await?, None));

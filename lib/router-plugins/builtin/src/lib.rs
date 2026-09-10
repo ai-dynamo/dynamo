@@ -18,7 +18,7 @@
 //! beyond `dynamo-kv-router`, put it behind its own default-on Cargo feature so a build can drop
 //! it; every policy registered here is compiled into every artifact that links this crate.
 
-mod subagent_group_affinity;
+mod soft_affinity_load_guard;
 mod two_tier_cost_fn;
 
 use dynamo_kv_router::services::selection::{
@@ -34,7 +34,7 @@ pub fn register(
     registry: &mut WorkerSelectionPolicyRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
     two_tier_cost_fn::register(registry)?;
-    subagent_group_affinity::register(registry)
+    soft_affinity_load_guard::register(registry)
 }
 
 #[cfg(test)]
@@ -94,22 +94,21 @@ worker_selection:
         }
     }
 
-    /// Same contract for the subagent group-affinity policy: the documented instance shape must
+    /// Same contract for the soft-affinity load guard: the documented instance shape must
     /// resolve through the default build path for every stage it selects.
     #[test]
-    fn resolves_documented_subagent_group_affinity_yaml() {
+    fn resolves_documented_soft_affinity_load_guard_yaml() {
         let (config, resolved) = resolve(
             r#"
 worker_selection:
-  aggregated: dynamo-subagent-group-affinity
-  prefill: dynamo-subagent-group-affinity
-  decode: dynamo-subagent-group-affinity
+  aggregated: dynamo-soft-affinity-load-guard
+  prefill: dynamo-soft-affinity-load-guard
+  decode: dynamo-soft-affinity-load-guard
   instances:
-    - name: dynamo-subagent-group-affinity
-      type: dynamo-subagent-group-affinity
+    - name: dynamo-soft-affinity-load-guard
+      type: dynamo-soft-affinity-load-guard
       parameters:
         max_active_requests: 32
-        group_idle_ttl_secs: 300
 "#,
         );
         let factory = resolved
@@ -128,14 +127,14 @@ worker_selection:
 
     /// Every parameter is optional, so an instance with no `parameters` mapping must still start.
     #[test]
-    fn resolves_subagent_group_affinity_without_parameters() {
+    fn resolves_soft_affinity_load_guard_without_parameters() {
         let (config, resolved) = resolve(
             r#"
 worker_selection:
-  aggregated: dynamo-subagent-group-affinity
+  aggregated: dynamo-soft-affinity-load-guard
   instances:
-    - name: dynamo-subagent-group-affinity
-      type: dynamo-subagent-group-affinity
+    - name: dynamo-soft-affinity-load-guard
+      type: dynamo-soft-affinity-load-guard
 "#,
         );
         let factory = resolved
@@ -149,28 +148,26 @@ worker_selection:
         );
     }
 
-    /// A TTL outside the supported range must fail startup rather than leaving a binding map that
-    /// never reclaims.
     #[test]
-    fn rejects_an_out_of_range_group_idle_ttl() {
+    fn rejects_an_unknown_soft_affinity_load_guard_parameter() {
         let (_config, resolved) = resolve(
             r#"
 worker_selection:
-  aggregated: dynamo-subagent-group-affinity
+  aggregated: dynamo-soft-affinity-load-guard
   instances:
-    - name: dynamo-subagent-group-affinity
-      type: dynamo-subagent-group-affinity
+    - name: dynamo-soft-affinity-load-guard
+      type: dynamo-soft-affinity-load-guard
       parameters:
-        group_idle_ttl_secs: 0
+        group_idle_ttl_secs: 300
 "#,
         );
 
         let Err(error) = resolved else {
-            panic!("an out-of-range TTL must fail resolution");
+            panic!("an unknown parameter must fail resolution");
         };
         assert!(
             matches!(&error, WorkerSelectionPolicyRegistryError::Provider { policy_type, .. }
-                if policy_type == subagent_group_affinity::POLICY_TYPE),
+                if policy_type == soft_affinity_load_guard::POLICY_TYPE),
             "unexpected error: {error}"
         );
         assert!(

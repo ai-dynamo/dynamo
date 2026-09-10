@@ -13,8 +13,8 @@ use futures::{StreamExt, stream};
 
 use super::SessionAffinityMode::{Hard, Soft};
 use super::{
-    AffinityAcquire, AffinityCoordinator, AffinityTarget, LlmResponse, affinity_id,
-    coordinator::ReplicaApplyOutcome, explicit_target,
+    AffinityAcquire, AffinityCoordinator, AffinityTarget, LlmResponse, SessionAffinityBinding,
+    affinity_id, coordinator::ReplicaApplyOutcome, explicit_target, subagent_group_affinity_id,
 };
 use crate::{
     preprocessor::PreprocessedRequest,
@@ -871,4 +871,143 @@ async fn session_affinity_completion_restores_expired_remote_binding() {
         replica.query_target(&session_id(), None).unwrap(),
         Some(replicated_target)
     );
+}
+
+#[test]
+fn parses_the_session_affinity_binding() {
+    use std::str::FromStr;
+
+    assert_eq!(
+        SessionAffinityBinding::from_str("parent-group").unwrap(),
+        SessionAffinityBinding::ParentGroup
+    );
+    assert_eq!(
+        SessionAffinityBinding::from_str("session").unwrap(),
+        SessionAffinityBinding::Session
+    );
+    assert_eq!(
+        SessionAffinityBinding::default(),
+        SessionAffinityBinding::Session
+    );
+    assert!(SessionAffinityBinding::from_str("subagent").is_err());
+}
+
+#[test]
+fn a_subagent_group_id_is_namespaced_and_fixed_size() {
+    use super::MAX_SESSION_AFFINITY_ID_BYTES;
+
+    let key = subagent_group_affinity_id("parent-1");
+
+    assert_ne!(key, "parent-1");
+    assert_eq!(key, subagent_group_affinity_id("parent-1"));
+    assert_ne!(key, subagent_group_affinity_id("parent-2"));
+
+    assert!(key.starts_with('\u{1}'));
+    assert!(!"parent-1".contains('\u{1}'));
+
+    let longest_parent = "p".repeat(MAX_SESSION_AFFINITY_ID_BYTES);
+    let derived = subagent_group_affinity_id(&longest_parent);
+    assert_eq!(derived.len(), key.len());
+    assert!(derived.len() <= MAX_SESSION_AFFINITY_ID_BYTES);
+    assert_ne!(
+        derived,
+        subagent_group_affinity_id(&"q".repeat(MAX_SESSION_AFFINITY_ID_BYTES))
+    );
+}
+
+fn group_id() -> SessionAffinityId {
+    SessionAffinityId::new(subagent_group_affinity_id("parent-1"))
+}
+
+#[tokio::test(start_paused = true)]
+async fn subagent_siblings_dispatch_through_one_group_binding() {
+    let coordinator = coordinator();
+
+    let first = coordinator.acquire(&group_id(), None).await.unwrap();
+    assert!(
+        matches!(first, AffinityAcquire::Initialize(_)),
+        "the first subagent must initialize the group"
+    );
+    let mut stream = first
+        .into_stream(target(7, Some(0)), response_stream(1), Soft)
+        .unwrap();
+    while stream.next().await.is_some() {}
+
+    let sibling = coordinator.acquire(&group_id(), None).await.unwrap();
+    assert_eq!(sibling.target(), Some(target(7, Some(0))));
+    assert_eq!(
+        coordinator.query_target(&group_id(), None).unwrap(),
+        Some(target(7, Some(0)))
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_subagent_that_never_dispatches_leaves_the_group_unbound() {
+    let coordinator = coordinator();
+
+    let first = coordinator.acquire(&group_id(), None).await.unwrap();
+    assert!(
+        matches!(first, AffinityAcquire::Initialize(_)),
+        "the first subagent must initialize the group"
+    );
+    drop(first);
+
+    assert_eq!(coordinator.query_target(&group_id(), None).unwrap(), None);
+    assert!(matches!(
+        coordinator.acquire(&group_id(), None).await.unwrap(),
+        AffinityAcquire::Initialize(_)
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn moving_a_ranked_group_persists_the_new_worker_and_rank() {
+    let coordinator = coordinator();
+
+    let first = coordinator.acquire(&group_id(), None).await.unwrap();
+    assert!(
+        matches!(first, AffinityAcquire::Initialize(_)),
+        "the first subagent must initialize the group"
+    );
+    let mut stream = first
+        .into_stream(target(7, Some(0)), response_stream(1), Soft)
+        .unwrap();
+    while stream.next().await.is_some() {}
+
+    let bound = coordinator.acquire(&group_id(), None).await.unwrap();
+    let mut stream = bound
+        .into_stream(target(9, Some(1)), response_stream(1), Soft)
+        .unwrap();
+    while stream.next().await.is_some() {}
+
+    assert_eq!(
+        coordinator.query_target(&group_id(), None).unwrap(),
+        Some(target(9, Some(1)))
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hard_group_pins_siblings_and_refuses_to_move() {
+    let coordinator = coordinator();
+
+    let first = coordinator.acquire(&group_id(), None).await.unwrap();
+    assert!(matches!(first, AffinityAcquire::Initialize(_)));
+    let mut stream = first
+        .into_stream(target(7, Some(0)), response_stream(1), Hard)
+        .unwrap();
+    while stream.next().await.is_some() {}
+
+    let sibling = coordinator.acquire(&group_id(), None).await.unwrap();
+    assert_eq!(sibling.target(), Some(target(7, Some(0))));
+    // A dispatch that disagrees with a hard pin is refused, and the pin is reset so the next
+    // sibling re-selects cleanly; the group is never quietly moved to the mismatched worker.
+    assert!(
+        sibling
+            .into_stream(target(9, Some(1)), response_stream(1), Hard)
+            .is_err()
+    );
+    assert_eq!(coordinator.query_target(&group_id(), None).unwrap(), None);
+    assert!(matches!(
+        coordinator.acquire(&group_id(), None).await.unwrap(),
+        AffinityAcquire::Initialize(_)
+    ));
 }

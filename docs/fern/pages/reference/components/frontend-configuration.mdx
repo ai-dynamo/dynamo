@@ -94,6 +94,22 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
   Environment variable: `DYN_ROUTER_SESSION_AFFINITY_TTL_SECS`
 </ParamField>
 
+<ParamField path="--router-session-affinity-mode" type="string" default="hard">
+  How an existing session binding participates in worker selection. `hard` makes the binding an
+  exact constraint; `soft` exposes it to selection as an advisory target. See
+  [Session affinity](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#session-affinity).
+
+  Environment variable: `DYN_ROUTER_SESSION_AFFINITY_MODE`
+</ParamField>
+
+<ParamField path="--router-session-affinity-binding" type="string" default="session">
+  **Experimental.** Which id a session binding is keyed on. `session` keys every request on its own
+  session id; `parent-group` binds a subagent under its parent's group so siblings share a worker.
+  Frontend-only; never carried on a model card.
+
+  Environment variable: `DYN_ROUTER_SESSION_AFFINITY_BINDING`
+</ParamField>
+
 <ParamField path="--decode-fallback / --no-decode-fallback" type="boolean" default="false">
   Fall back to aggregated mode when prefill workers are unavailable.
 

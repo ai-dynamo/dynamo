@@ -343,7 +343,7 @@ The [custom policy examples](https://github.com/ai-dynamo/dynamo/blob/main/examp
 
 ### Soft Session Affinity
 
-Set `--router-session-affinity-mode soft` with a session-affinity TTL to let a custom policy influence an existing session binding. The current binding enters the normal selection pipeline as `affinity_target()`. The policy still receives the full host-eligible candidate set, subject to its own filters, and may select another worker. Dynamo rebinds the session after dispatch returns a response stream.
+Set `--router-session-affinity-mode soft` with a session-affinity TTL to let a custom policy influence an existing session binding. The current binding enters the normal selection pipeline as `affinity_target()`. The policy still receives the full host-eligible candidate set, subject to its own filters, and may select another worker. Dynamo rebinds the session after dispatch returns a response stream. `--router-session-affinity-binding parent-group` changes only which id the binding is keyed on; the policy still sees it through `affinity_target()`, so it does not need to group subagents itself.
 
 ```mermaid
 flowchart LR
