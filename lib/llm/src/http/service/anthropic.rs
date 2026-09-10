@@ -1129,28 +1129,17 @@ fn anthropic_sanitized_error_with_details(
         .into_response()
 }
 
-/// Match `InvalidArgument` at top-level OR under `Backend()` anywhere in the
-/// error chain. Request validation surfaces `InvalidArgument`, while backends
-/// that reject bad input (e.g. Python `ValueError`/`TypeError` wrapped by
-/// `py_err_to_dynamo`) surface `Backend(InvalidArgument)`. The legacy subtype
-/// is preserved on the wire while `class()` exposes `InvalidRequest`. All three
-/// are client input errors.
+/// Find a request or backend invalid-argument error anywhere in the chain.
 fn find_invalid_argument_in_chain<'a>(
     err: &'a (dyn std::error::Error + 'static),
 ) -> Option<&'a dynamo_runtime::error::DynamoError> {
-    use dynamo_runtime::error::{BackendError, ErrorType};
-
     let mut current = Some(err);
     while let Some(error) = current {
         if let Some(dynamo_error) = error.downcast_ref::<dynamo_runtime::error::DynamoError>()
-            && (matches!(
-                dynamo_error.error_type(),
-                ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument)
-            ) || (matches!(dynamo_error.error_type(), ErrorType::InvalidRequest)
-                && matches!(
-                    dynamo_error.reason().as_str(),
-                    "backend.invalid_argument" | "request.invalid_argument"
-                )))
+            && matches!(
+                dynamo_error.reason().as_str(),
+                "backend.invalid_argument" | "request.invalid_argument"
+            )
         {
             return Some(dynamo_error);
         }
