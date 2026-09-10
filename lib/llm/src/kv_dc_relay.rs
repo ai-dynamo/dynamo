@@ -12,6 +12,7 @@ mod pool_registry;
 mod publication;
 mod resolution;
 mod topology;
+pub mod wan;
 
 pub use discovery::KvDcRelayDiscoveryConfig;
 pub use host::{
