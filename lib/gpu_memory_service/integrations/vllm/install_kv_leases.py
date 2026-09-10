@@ -11,7 +11,6 @@ import os
 from collections.abc import Callable
 
 from gms_kv_ring.common.content_directory import ContentDirectory
-
 from gpu_memory_service.integrations.common.kv_lease_client import (
     GMSKVLeaseClient,
     KVLease,
