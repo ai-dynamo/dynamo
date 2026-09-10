@@ -117,7 +117,7 @@ kubectl --context "${CONTEXT}" -n "${NAMESPACE}" apply \
 ```
 
 See [the 2P1D recipe](vllm/disagg-b200-chat-2p1d/README.md) for readiness checks,
-the frontend service, validation status, and Kustomize authoring instructions.
+the frontend service, and Kustomize authoring instructions.
 
 ## Benchmark
 

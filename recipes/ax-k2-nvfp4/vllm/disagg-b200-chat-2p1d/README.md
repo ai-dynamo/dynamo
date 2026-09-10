@@ -41,14 +41,6 @@ model `skt/A.X-K2-NVFP4`. Confirm both prefill replicas receive requests and
 the decode replica generates tokens before benchmarking. The deployment and
 ConfigMap have distinct names so this variant can coexist with the aggregate recipe.
 
-## Validation
-
-On 2026-09-10, the Kustomize consistency check, configuration assertions, and
-Kubernetes server validation passed. An active prefill/decode pair passed
-the readiness check and five API smoke requests, including four concurrent
-128-token streams, with successful NIXL transfers and EAGLE3 draft steps.
-Full 2P1D validation remains pending; the second prefill had not started.
-
 ## Edit and render
 
 Edit `kustomize/base/deploy.yaml`; `deploy-generic.yaml` is generated. From
