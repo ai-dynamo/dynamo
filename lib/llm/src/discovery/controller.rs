@@ -25,11 +25,37 @@ use crate::{model_card::ModelDeploymentCard, namespace::NamespaceFilter};
 const DEFAULT_MAX_CONCURRENT_BUILDS: usize = 8;
 const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(30);
 /// How long a committed group that has lost every member keeps its serving state
-/// before it is withdrawn. Sized an order of magnitude above the gap between one
-/// worker's card being withdrawn and its replacement's card being published, and
-/// an order of magnitude below `RECONCILIATION_INTERVAL`, so a deferred removal
-/// can never survive into the next reconciliation sweep.
-const GROUP_REMOVAL_GRACE: Duration = Duration::from_secs(2);
+/// before it is withdrawn, unless [`GROUP_REMOVAL_GRACE_ENV`] overrides it. Sized
+/// for the gap between one worker's card being withdrawn and its replacement's
+/// card being published during a rolling update.
+const DEFAULT_GROUP_REMOVAL_GRACE: Duration = Duration::from_secs(2);
+/// Overrides [`DEFAULT_GROUP_REMOVAL_GRACE`], in milliseconds. A deployment whose
+/// replacement worker takes longer than the default to publish its card needs a
+/// larger value, since a group withdrawn before the replacement arrives is the
+/// 404 the grace period exists to avoid. `0` withdraws an emptied group
+/// immediately. Read once, when the controller is constructed.
+const GROUP_REMOVAL_GRACE_ENV: &str = "DYN_DISCOVERY_GROUP_REMOVAL_GRACE_MS";
+
+/// Resolves the grace period from the raw environment value. An unparseable value
+/// falls back to the default rather than failing startup, because the frontend
+/// serving models is worth more than the operator's intended window.
+fn group_removal_grace(raw: Option<&str>) -> Duration {
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return DEFAULT_GROUP_REMOVAL_GRACE;
+    };
+    match raw.parse::<u64>() {
+        Ok(millis) => Duration::from_millis(millis),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                value = raw,
+                grace_ms = DEFAULT_GROUP_REMOVAL_GRACE.as_millis(),
+                "Ignoring unparseable {GROUP_REMOVAL_GRACE_ENV}; using the default grace period"
+            );
+            DEFAULT_GROUP_REMOVAL_GRACE
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub(crate) struct GroupKey {
@@ -209,6 +235,7 @@ pub(crate) struct ModelDiscoveryController<H: ControllerHost> {
     active_builds: usize,
     max_concurrent_builds: usize,
     next_build_generation: u64,
+    removal_grace: Duration,
 }
 
 impl<H: ControllerHost> ModelDiscoveryController<H> {
@@ -228,6 +255,17 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             active_builds: 0,
             max_concurrent_builds: max_concurrent_builds.max(1),
             next_build_generation: 1,
+            removal_grace: group_removal_grace(
+                std::env::var(GROUP_REMOVAL_GRACE_ENV).ok().as_deref(),
+            ),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_removal_grace(host: Arc<H>, removal_grace: Duration) -> Self {
+        Self {
+            removal_grace,
+            ..Self::with_max_concurrent_builds(host, DEFAULT_MAX_CONCURRENT_BUILDS)
         }
     }
 
@@ -399,7 +437,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             // Armed once per emptying: an empty group can be reconciled repeatedly,
             // and re-arming each time would defer removal indefinitely.
             if group.pending_removal.is_none() {
-                group.pending_removal = Some(Instant::now() + GROUP_REMOVAL_GRACE);
+                group.pending_removal = Some(Instant::now() + self.removal_grace);
             }
             group.status = old_status;
             self.groups.insert(key.clone(), group);
@@ -1402,6 +1440,82 @@ mod tests {
         assert_eq!(host.removed_groups.load(Ordering::SeqCst), 1);
         assert!(host.members(&group_key()).is_empty());
         assert!(!controller.groups.contains_key(&group_key()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_configured_grace_holds_the_group_for_a_slow_replacement() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller =
+            ModelDiscoveryController::with_removal_grace(host.clone(), Duration::from_secs(30));
+        let departing = instance(1, "spec");
+        controller.apply_added(departing.clone());
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+
+        controller.apply_removed(&departing.key);
+        tokio::time::advance(Duration::from_secs(10)).await;
+        controller.release_due_retries();
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([departing.key.clone()])
+        );
+
+        let replacement = instance(2, "spec");
+        controller.apply_added(replacement.clone());
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([replacement.key.clone()])
+        );
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+        assert_eq!(host.starts.load(Ordering::SeqCst), 1);
+
+        tokio::time::advance(Duration::from_secs(60)).await;
+        controller.release_due_retries();
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([replacement.key])
+        );
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_zero_grace_withdraws_the_group_as_soon_as_it_empties() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller =
+            ModelDiscoveryController::with_removal_grace(host.clone(), Duration::ZERO);
+        let departing = instance(1, "spec");
+        controller.apply_added(departing.clone());
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+
+        controller.apply_removed(&departing.key);
+        controller.release_due_retries();
+
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 1);
+        assert!(host.members(&group_key()).is_empty());
+        assert!(!controller.groups.contains_key(&group_key()));
+    }
+
+    #[test]
+    fn group_removal_grace_falls_back_to_the_default_for_anything_unusable() {
+        assert_eq!(group_removal_grace(None), DEFAULT_GROUP_REMOVAL_GRACE);
+        assert_eq!(group_removal_grace(Some("")), DEFAULT_GROUP_REMOVAL_GRACE);
+        assert_eq!(group_removal_grace(Some("  ")), DEFAULT_GROUP_REMOVAL_GRACE);
+        assert_eq!(
+            group_removal_grace(Some("30s")),
+            DEFAULT_GROUP_REMOVAL_GRACE
+        );
+        assert_eq!(group_removal_grace(Some("-1")), DEFAULT_GROUP_REMOVAL_GRACE);
+        assert_eq!(group_removal_grace(Some("0")), Duration::ZERO);
+        assert_eq!(
+            group_removal_grace(Some(" 30000 ")),
+            Duration::from_secs(30)
+        );
     }
 
     #[tokio::test]
