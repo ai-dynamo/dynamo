@@ -1222,26 +1222,8 @@ impl ModelDeploymentCard {
                     bytes_to_hash.extend_from_slice(b"\0vllm_enable_tower_connector_lora\0true");
                 }
 
-                // The Qwen video-routing contract decides how the frontend
-                // expands video placeholder tokens for exact KV routing. A
-                // group builds one video-routing processor from a single
-                // representative card and reuses it for every member, so
-                // members whose contract differs must not share a WorkerSet.
-                //
-                // The content is hashed, not merely the key's presence: the
-                // worker derives the contract from its installed Transformers
-                // and vLLM packages, so two workers can both publish and
-                // publish different contracts. Canonicalize first, because
-                // serde_json runs with `preserve_order` here and would
-                // otherwise let key order alone split a WorkerSet.
-                //
-                // Compatibility: workers older than v1.5.0 predate this key
-                // and hash as if the contract were absent, so a rolling
-                // upgrade of a Qwen video deployment across that boundary
-                // leaves the model unadmitted until it completes. That is
-                // deliberate - the alternative is serving one worker's
-                // requests under another worker's video token arithmetic.
-                // Deployments that never carry this key are unaffected.
+                // Workers derive this contract from their own packages, so hash
+                // its content. Canonicalize: serde_json preserves key order.
                 if let Some(contract) = self.runtime_config.runtime_data.get(
                     crate::local_model::runtime_config::VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
                 ) {
@@ -3276,10 +3258,8 @@ mod ownership_tests {
             "two workers publishing different contracts must not share a WorkerSet"
         );
 
-        // serde_json runs with `preserve_order` in this workspace, so an object
-        // keeps the key order it was parsed in. Two workers publishing the same
-        // contract in a different key order still describe the same behaviour
-        // and must stay in one WorkerSet.
+        // serde_json preserves key order here, so the same contract written in
+        // a different key order must still hash the same.
         assert_eq!(
             card_with_contract(legacy_ceil()).mdcsum(),
             card_with_contract(serde_json::json!({
