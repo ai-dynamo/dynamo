@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Exercise LoRA exclusivity through the vLLM command-line parser."""
-
 import pytest
 
 from dynamo.vllm.args import parse_args
