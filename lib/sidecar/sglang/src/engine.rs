@@ -143,7 +143,10 @@ impl SglangSidecarEngine {
     }
 
     async fn await_ready(&self, client: &mut Client, deadline: Instant) -> Result<(), DynamoError> {
+        let started = Instant::now();
+        let mut attempt = 0_u64;
         loop {
+            attempt += 1;
             let retry_message = match client::health_check(client, deadline).await {
                 Ok(healthy) => {
                     if healthy {
@@ -159,6 +162,18 @@ impl SglangSidecarEngine {
                     self.transport.startup_deadline
                 )));
             }
+            // WARN, not silent: this loop previously logged nothing at all on a
+            // failed attempt, so a SGLang engine that's slow (or never becomes)
+            // healthy produced zero visible output anywhere for up to
+            // startup_deadline (default 300s) -- indistinguishable from a hang.
+            tracing::warn!(
+                attempt,
+                elapsed = ?started.elapsed(),
+                remaining = ?deadline.saturating_duration_since(Instant::now()),
+                retry_interval = ?self.transport.retry_interval,
+                reason = %retry_message,
+                "SGLang not healthy yet; retrying"
+            );
             tokio::time::sleep_until(
                 (Instant::now() + self.transport.retry_interval).min(deadline),
             )

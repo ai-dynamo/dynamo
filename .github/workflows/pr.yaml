@@ -133,6 +133,12 @@ jobs:
       - snapshot-placeholder-trtllm
       - power-agent
       - sidecar-build
+      - sidecar-vllm-test-image
+      - sidecar-sglang-test-image
+      - sidecar-trtllm-test-image
+      - sidecar-vllm-test
+      - sidecar-sglang-test
+      - sidecar-trtllm-test
       - vllm-build
       - vllm-local-dev-build
       - sglang-local-dev-build
@@ -357,6 +363,242 @@ jobs:
       diff_current_branch: ${{ github.ref_name }}
       diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
       diff_merge_base_sha: ${{ needs.changed-files.outputs.merge_base_sha }}
+
+  # --------------------------------------------------------------------------
+  # Sidecar E2E: lib/sidecar/*/launch/agg.sh, run against a CI-only image that
+  # layers the dynamo-*-sidecar binary onto the backend's -test image (see
+  # lib/sidecar/ci/sidecar-test-image.Dockerfile). Gated on `sidecar` only, not
+  # on core/vllm/sglang/trtllm: a lib/sidecar/**-only PR doesn't trigger the
+  # backend builds, so each *-test-image job's "Calculate tags" step falls back
+  # to the main-{framework}-runtime-test floating tag instead. gpu_1 fan-out is
+  # a deliberate exception to the narrow-scope TODO on the `sidecar` filter in
+  # .github/filters.yaml; revisit if CI cost becomes an issue.
+  # --------------------------------------------------------------------------
+
+  sidecar-vllm-test-image:
+    name: dynamo-sidecar (vllm test image)
+    needs: [changed-files, vllm-build, sidecar-build]
+    # always(): without it, GitHub Actions auto-skips this job whenever
+    # vllm-build or sidecar-build is skipped/fails (see the fallback tags step).
+    if: always() && needs.changed-files.outputs.sidecar == 'true'
+    runs-on: prod-builder-v3
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+    - name: Docker Login
+      uses: $/.github/actions/docker-login
+      with:
+        aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+        ecr_registry: ${{ vars.ECR_REGISTRY }}
+    - name: Initialize Dynamo Builder
+      uses: $/.github/actions/init-dynamo-builder
+      with:
+        builder_name: ${{ needs.changed-files.outputs.builder_name }}
+        flavor: general
+        arch: linux/amd64
+        namespace: ${{ vars.BUILDKIT_NAMESPACE }}
+    - name: Calculate tags
+      id: tags
+      env:
+        ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+        ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+      run: |
+        set -euo pipefail
+        if [ "${{ needs.vllm-build.result }}" = "success" ]; then
+          echo "base_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}-${{ needs.vllm-build.outputs.target_tag_plain }}-test" >> "${GITHUB_OUTPUT}"
+        else
+          echo "base_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:main-vllm-runtime-test" >> "${GITHUB_OUTPUT}"
+        fi
+        # Must stay in sync with shared-build-sidecar.yml's calculate-target-tag step.
+        if [ "${{ needs.sidecar-build.result }}" = "success" ]; then
+          echo "sidecar_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}-dynamo-sidecar" >> "${GITHUB_OUTPUT}"
+        else
+          echo "sidecar_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:main-dynamo-sidecar" >> "${GITHUB_OUTPUT}"
+        fi
+        echo "image_tag=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}-vllm-sidecar-test" >> "${GITHUB_OUTPUT}"
+    - name: Build and Push sidecar test image
+      uses: $/.github/actions/docker-remote-build
+      with:
+        image_tag: ${{ steps.tags.outputs.image_tag }}
+        framework: dynamo-sidecar-test
+        platform: linux/amd64
+        cuda_version: ''
+        dockerfile: lib/sidecar/ci/sidecar-test-image.Dockerfile
+        aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+        extra_build_args: |
+          BASE_IMAGE=${{ steps.tags.outputs.base_image }}
+          SIDECAR_IMAGE=${{ steps.tags.outputs.sidecar_image }}
+          BACKEND=vllm
+        push_image: true
+        no_load: true
+        use_sccache: false
+
+  sidecar-vllm-test:
+    name: sidecar-runtime # This name overlaps with other sidecar jobs to group them in the UI
+    needs: [changed-files, sidecar-vllm-test-image]
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      test_suite_name: vllm
+      test_type: Sidecar E2E Test
+      amd_runner: prod-tester-amd-gpu-v2
+      target_tag_plain: vllm-sidecar
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      gpu_test_markers: pre_merge and sidecar and vllm and gpu_1
+      gpu_test_timeout_minutes: 30
+    secrets: inherit
+
+  sidecar-sglang-test-image:
+    name: dynamo-sidecar (sglang test image)
+    needs: [changed-files, sglang-build, sidecar-build]
+    # always(): without it, GitHub Actions auto-skips this job whenever
+    # sglang-build or sidecar-build is skipped/fails (see the fallback tags step).
+    if: always() && needs.changed-files.outputs.sidecar == 'true'
+    runs-on: prod-builder-v3
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+    - name: Docker Login
+      uses: $/.github/actions/docker-login
+      with:
+        aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+        ecr_registry: ${{ vars.ECR_REGISTRY }}
+    - name: Initialize Dynamo Builder
+      uses: $/.github/actions/init-dynamo-builder
+      with:
+        builder_name: ${{ needs.changed-files.outputs.builder_name }}
+        flavor: general
+        arch: linux/amd64
+        namespace: ${{ vars.BUILDKIT_NAMESPACE }}
+    - name: Calculate tags
+      id: tags
+      env:
+        ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+        ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+      run: |
+        set -euo pipefail
+        if [ "${{ needs.sglang-build.result }}" = "success" ]; then
+          echo "base_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}-${{ needs.sglang-build.outputs.target_tag_plain }}-test" >> "${GITHUB_OUTPUT}"
+        else
+          echo "base_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:main-sglang-runtime-test" >> "${GITHUB_OUTPUT}"
+        fi
+        # Must stay in sync with shared-build-sidecar.yml's calculate-target-tag step.
+        if [ "${{ needs.sidecar-build.result }}" = "success" ]; then
+          echo "sidecar_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}-dynamo-sidecar" >> "${GITHUB_OUTPUT}"
+        else
+          echo "sidecar_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:main-dynamo-sidecar" >> "${GITHUB_OUTPUT}"
+        fi
+        echo "image_tag=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}-sglang-sidecar-test" >> "${GITHUB_OUTPUT}"
+    - name: Build and Push sidecar test image
+      uses: $/.github/actions/docker-remote-build
+      with:
+        image_tag: ${{ steps.tags.outputs.image_tag }}
+        framework: dynamo-sidecar-test
+        platform: linux/amd64
+        cuda_version: ''
+        dockerfile: lib/sidecar/ci/sidecar-test-image.Dockerfile
+        aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+        extra_build_args: |
+          BASE_IMAGE=${{ steps.tags.outputs.base_image }}
+          SIDECAR_IMAGE=${{ steps.tags.outputs.sidecar_image }}
+          BACKEND=sglang
+        push_image: true
+        no_load: true
+        use_sccache: false
+
+  sidecar-sglang-test:
+    name: sidecar-runtime # This name overlaps with other sidecar jobs to group them in the UI
+    needs: [changed-files, sidecar-sglang-test-image]
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      test_suite_name: sglang
+      test_type: Sidecar E2E Test
+      amd_runner: prod-tester-amd-gpu-v2
+      target_tag_plain: sglang-sidecar
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      gpu_test_markers: pre_merge and sidecar and sglang and gpu_1
+      gpu_test_timeout_minutes: 30
+    secrets: inherit
+
+  sidecar-trtllm-test-image:
+    name: dynamo-sidecar (trtllm test image)
+    needs: [changed-files, trtllm-build, sidecar-build]
+    # always(): without it, GitHub Actions auto-skips this job whenever
+    # trtllm-build or sidecar-build is skipped/fails (see the fallback tags step).
+    if: always() && needs.changed-files.outputs.sidecar == 'true'
+    runs-on: prod-builder-v3
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+    - name: Docker Login
+      uses: $/.github/actions/docker-login
+      with:
+        aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+        ecr_registry: ${{ vars.ECR_REGISTRY }}
+    - name: Initialize Dynamo Builder
+      uses: $/.github/actions/init-dynamo-builder
+      with:
+        builder_name: ${{ needs.changed-files.outputs.builder_name }}
+        flavor: general
+        arch: linux/amd64
+        namespace: ${{ vars.BUILDKIT_NAMESPACE }}
+    - name: Calculate tags
+      id: tags
+      env:
+        ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+        ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+      run: |
+        set -euo pipefail
+        if [ "${{ needs.trtllm-build.result }}" = "success" ]; then
+          echo "base_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}-${{ needs.trtllm-build.outputs.target_tag_plain }}-test" >> "${GITHUB_OUTPUT}"
+        else
+          echo "base_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:main-trtllm-runtime-test" >> "${GITHUB_OUTPUT}"
+        fi
+        # Must stay in sync with shared-build-sidecar.yml's calculate-target-tag step.
+        if [ "${{ needs.sidecar-build.result }}" = "success" ]; then
+          echo "sidecar_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}-dynamo-sidecar" >> "${GITHUB_OUTPUT}"
+        else
+          echo "sidecar_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:main-dynamo-sidecar" >> "${GITHUB_OUTPUT}"
+        fi
+        echo "image_tag=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}-trtllm-sidecar-test" >> "${GITHUB_OUTPUT}"
+    - name: Build and Push sidecar test image
+      uses: $/.github/actions/docker-remote-build
+      with:
+        image_tag: ${{ steps.tags.outputs.image_tag }}
+        framework: dynamo-sidecar-test
+        platform: linux/amd64
+        cuda_version: ''
+        dockerfile: lib/sidecar/ci/sidecar-test-image.Dockerfile
+        aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+        extra_build_args: |
+          BASE_IMAGE=${{ steps.tags.outputs.base_image }}
+          SIDECAR_IMAGE=${{ steps.tags.outputs.sidecar_image }}
+          BACKEND=trtllm
+        push_image: true
+        no_load: true
+        use_sccache: false
+
+  sidecar-trtllm-test:
+    name: sidecar-runtime # This name overlaps with other sidecar jobs to group them in the UI
+    needs: [changed-files, sidecar-trtllm-test-image]
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      test_suite_name: trtllm
+      test_type: Sidecar E2E Test
+      amd_runner: prod-tester-amd-gpu-v2
+      target_tag_plain: trtllm-sidecar
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      gpu_test_markers: pre_merge and sidecar and trtllm and gpu_1
+      gpu_test_timeout_minutes: 30
+    secrets: inherit
 
 # ============================================================================
 # FRAMEWORK PIPELINES (Build → Test → Copy)
@@ -795,7 +1037,10 @@ jobs:
       # Keep the outer step budget above the test's 450s timeout so pytest can
       # finish teardown and upload diagnostics instead of being killed first.
       cpu_e2e_test_timeout_minutes: 15
-      gpu_test_markers: pre_merge and vllm and gpu_1
+      # not sidecar: sidecar-marked tests need dynamo-vllm-sidecar layered onto
+      # the image (see sidecar-vllm-test below), which this plain vllm-runtime
+      # image doesn't have.
+      gpu_test_markers: pre_merge and vllm and gpu_1 and not sidecar
       gpu_test_timeout_minutes: 45
       # Profiled tests run in the parallel stage; unprofiled fall through to sequential.
       # 24 GiB admits all currently profiled vLLM tests (max is ~20.4 GiB) on a 48 GiB GPU.
@@ -838,7 +1083,10 @@ jobs:
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and sglang and gpu_0
-      gpu_test_markers: pre_merge and sglang and gpu_1
+      # not sidecar: sidecar-marked tests need dynamo-sglang-sidecar layered
+      # onto the image (see sidecar-sglang-test below), which this plain
+      # sglang-runtime image doesn't have.
+      gpu_test_markers: pre_merge and sglang and gpu_1 and not sidecar
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled SGLang pool
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
@@ -881,7 +1129,10 @@ jobs:
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and trtllm and gpu_0
-      gpu_test_markers: pre_merge and trtllm and gpu_1
+      # not sidecar: sidecar-marked tests need dynamo-trtllm-sidecar layered
+      # onto the image (see sidecar-trtllm-test below), which this plain
+      # trtllm-runtime image doesn't have.
+      gpu_test_markers: pre_merge and trtllm and gpu_1 and not sidecar
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled TRT-LLM pool
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
