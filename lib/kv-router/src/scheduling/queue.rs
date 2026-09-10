@@ -15,7 +15,7 @@ use tokio::time::Instant;
 #[cfg(test)]
 use super::config::RouterQueuePolicy;
 use super::filter::RoutingEligibility;
-use super::overlap::SelectedWorkerTierSnapshot;
+use super::overlap::{OverlapSignals, SelectedWorkerTierSnapshot};
 use super::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, read_overlap_refresh_after, refresh_overlap,
 };
@@ -27,7 +27,8 @@ use super::selector::{DefaultWorkerSelector, WorkerSelectionInput, WorkerSelecto
 use super::types::{
     AdvisorySchedulingResponse, AdvisoryWorkerLoad, AttemptId, KvSchedulerError,
     NonMaxOverlapSelection, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider,
-    SchedulingContext, SchedulingRequest, SchedulingResponse, WorkerAvailabilityProvider,
+    SchedulingContext, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
+    WorkerAvailabilityProvider,
 };
 use crate::protocols::{
     LocalBlockHash, PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerSelectionResult,
@@ -35,8 +36,8 @@ use crate::protocols::{
 };
 use crate::sequences::topology::WorkerDpRange;
 use crate::sequences::{
-    ActiveSequencesMultiWorker, LifecycleMutationOutcome, SequenceError, SequencePublisher,
-    SequenceRequest,
+    ActiveSequencesMultiWorker, LifecycleMutationOutcome, PreparedReplicaPrompt, SequenceError,
+    SequencePublisher, SequenceRequest,
 };
 
 /// Large default for max_num_batched_tokens when not configured (effectively disables queueing for that worker)
@@ -70,6 +71,44 @@ struct SelectedWorkerForRequest {
     selected_worker_tiers: SelectedWorkerTierSnapshot,
     selected_worker_load: AdvisoryWorkerLoad,
     non_max_overlap_selection: Option<NonMaxOverlapSelection>,
+    dp_range: std::ops::Range<u32>,
+}
+
+#[derive(Default)]
+struct AdmissionPreparation {
+    replica_prompt: Option<PreparedReplicaPrompt>,
+    defer_response: bool,
+    response: Option<DeferredSchedulingResponse>,
+}
+
+struct DeferredSchedulingResponse {
+    response_tx: oneshot::Sender<Result<SchedulingResponse, KvSchedulerError>>,
+    response: SchedulingResponse,
+    tiers: TierOverlapBlocks,
+    dp_range: std::ops::Range<u32>,
+    booking: SchedulerBookingDescriptor,
+    non_max_overlap_selection: Option<NonMaxOverlapSelection>,
+}
+
+impl DeferredSchedulingResponse {
+    fn finish(
+        mut self,
+    ) -> (
+        SchedulerBookingDescriptor,
+        Option<NonMaxOverlapSelection>,
+        bool,
+    ) {
+        let worker = self.response.best_worker;
+        self.response.target_cached_prefix_blocks =
+            target_cached_prefix_from_tiers(&self.tiers, worker);
+        self.response.selected_worker_tiers = OverlapSignals {
+            tier_overlap_blocks: self.tiers,
+            ..Default::default()
+        }
+        .selected_worker_tiers_in_range(worker, self.dp_range);
+        let delivered = self.response_tx.send(Ok(self.response)).is_ok();
+        (self.booking, self.non_max_overlap_selection, delivered)
+    }
 }
 
 fn non_max_overlap_selection<C: WorkerConfigLike>(
@@ -110,21 +149,24 @@ fn non_max_overlap_selection<C: WorkerConfigLike>(
     })
 }
 
+fn dispatch_selection_observer(
+    observer: &OnceLock<NonMaxOverlapSelectionObserver>,
+    request_id: String,
+    selection: NonMaxOverlapSelection,
+) {
+    if let Some(observer) = observer.get() {
+        let observer = Arc::clone(observer);
+        tokio::task::spawn_blocking(move || observer(&request_id, selection));
+    }
+}
+
 fn target_cached_prefix_blocks(request: &SchedulingRequest, target: WorkerWithDpRank) -> u32 {
-    let device = request
-        .overlap
-        .tier_overlap_blocks
-        .device
-        .get(&target)
-        .copied()
-        .unwrap_or(0);
-    let lower_tier = request
-        .overlap
-        .tier_overlap_blocks
-        .host_pinned
-        .get(&target)
-        .copied()
-        .unwrap_or(0);
+    target_cached_prefix_from_tiers(&request.overlap.tier_overlap_blocks, target)
+}
+
+fn target_cached_prefix_from_tiers(tiers: &TierOverlapBlocks, target: WorkerWithDpRank) -> u32 {
+    let device = tiers.device.get(&target).copied().unwrap_or(0);
+    let lower_tier = tiers.host_pinned.get(&target).copied().unwrap_or(0);
     u32::try_from(device.saturating_add(lower_tier)).unwrap_or(u32::MAX)
 }
 
@@ -135,7 +177,11 @@ enum AdmissionCommand {
         attempt_tx: Option<oneshot::Sender<AttemptId>>,
         block_hashes: Option<Vec<LocalBlockHash>>,
         lease: Option<Box<RequestLifecycleLease>>,
-        ack_tx: oneshot::Sender<Option<Box<RequestLifecycleLease>>>,
+        preparation: AdmissionPreparation,
+        ack_tx: oneshot::Sender<(
+            Option<Box<RequestLifecycleLease>>,
+            Option<DeferredSchedulingResponse>,
+        )>,
     },
     SelectWithoutAdmission {
         request: SchedulingRequest,
@@ -713,11 +759,25 @@ impl<
         }
 
         let (ack_tx, ack_rx) = oneshot::channel();
+        let preparation = if !self.queueing_enabled && request.mode.is_tracked() {
+            AdmissionPreparation {
+                replica_prompt: self
+                    .slots
+                    .prepare_replica_prompt(request.token_seq.as_deref()),
+                // The lease must cover cancellation after booking but before the
+                // caller finishes constructing and delivering the response.
+                defer_response: lease.is_some(),
+                response: None,
+            }
+        } else {
+            AdmissionPreparation::default()
+        };
         let command = AdmissionCommand::Enqueue {
             request,
             attempt_tx,
             block_hashes: self.prepare_block_hashes_for_refresh(block_hashes),
             lease,
+            preparation,
             ack_tx,
         };
 
@@ -730,7 +790,28 @@ impl<
         }
 
         match ack_rx.await {
-            Ok(lease) => lease,
+            Ok((lease, response)) => {
+                if let Some(response) = response {
+                    let (booking, observation, delivered) = response.finish();
+                    if delivered {
+                        if let Some(observation) = observation {
+                            dispatch_selection_observer(
+                                &self.non_max_overlap_selection_observer,
+                                booking.request_id,
+                                observation,
+                            );
+                        }
+                    } else if let Err(error) = self.slots.free_if_booking(
+                        &booking.request_id,
+                        booking.worker,
+                        booking.attempt_id,
+                        Instant::now(),
+                    ) {
+                        tracing::error!(%error, "Failed to roll back scheduler booking");
+                    }
+                }
+                lease
+            }
             Err(_) => {
                 tracing::warn!("scheduler queue actor dropped enqueue acknowledgement");
                 None
@@ -947,19 +1028,25 @@ impl<
                     attempt_tx,
                     block_hashes,
                     lease,
+                    mut preparation,
                     ack_tx,
                 } => {
                     let lifecycle_transfer = lease
                         .as_ref()
                         .and_then(|lease| lease.transfer.as_ref().map(Arc::clone));
-                    let enqueue_ready =
-                        self.handle_enqueue(request, attempt_tx, lifecycle_transfer, block_hashes);
+                    let enqueue_ready = self.handle_enqueue(
+                        request,
+                        attempt_tx,
+                        lifecycle_transfer,
+                        block_hashes,
+                        &mut preparation,
+                    );
                     let cleanup_ready = drain_cleanup && self.drain_cleanup();
                     let made_ready = enqueue_ready || cleanup_ready;
                     if made_ready {
                         self.handle_update(None).await;
                     }
-                    let _ = ack_tx.send(lease);
+                    let _ = ack_tx.send((lease, preparation.response));
                 }
                 AdmissionCommand::SelectWithoutAdmission { request, resp_tx } => {
                     let result = self.select_without_admission_inner(request, Instant::now());
@@ -1043,6 +1130,7 @@ impl<
         attempt_tx: Option<oneshot::Sender<AttemptId>>,
         lifecycle_transfer: Option<Arc<AdmissionLifecycleTransfer>>,
         block_hashes: Option<Vec<LocalBlockHash>>,
+        preparation: &mut AdmissionPreparation,
     ) -> bool {
         let decay_now = Instant::now();
         // Synthetic and explicit selections avoid cache work. Family classification
@@ -1065,7 +1153,13 @@ impl<
             self.all_workers_prefill_busy(class, request.eligibility(), decay_now)
         });
         if !should_queue {
-            return self.admit_one(request, attempt_tx, lifecycle_transfer, decay_now);
+            return self.admit_one(
+                request,
+                attempt_tx,
+                lifecycle_transfer,
+                decay_now,
+                preparation,
+            );
         }
 
         let snapshot = snapshot.unwrap_or_else(|| self.snapshot_for(&request));
@@ -1353,6 +1447,7 @@ impl<
                 queued.attempt_tx,
                 queued.lifecycle_transfer,
                 admit_now,
+                &mut AdmissionPreparation::default(),
             );
         }
     }
@@ -1361,6 +1456,7 @@ impl<
         &self,
         request: &mut SchedulingRequest,
         decay_now: Instant,
+        defer_response: bool,
     ) -> Result<SelectedWorkerForRequest, KvSchedulerError> {
         request.worker_loads = self
             .slots
@@ -1409,9 +1505,15 @@ impl<
                     let config = workers
                         .get(&selection.worker.worker_id)
                         .expect("selected worker config must exist");
-                    let selected_worker_tiers = request
-                        .overlap
-                        .selected_worker_tiers(selection.worker, config);
+                    let start = config.data_parallel_start_rank();
+                    let dp_range = start..start.saturating_add(config.data_parallel_size());
+                    let selected_worker_tiers = if defer_response {
+                        SelectedWorkerTierSnapshot::default()
+                    } else {
+                        request
+                            .overlap
+                            .selected_worker_tiers(selection.worker, config)
+                    };
                     let worker_load = request.worker_load_for(selection.worker);
                     let selected_worker_load = AdvisoryWorkerLoad {
                         active_prefill_tokens: worker_load.active_prefill_tokens,
@@ -1429,6 +1531,7 @@ impl<
                         selected_worker_tiers,
                         selected_worker_load,
                         non_max_overlap_selection,
+                        dp_range,
                     }
                 })
         }
@@ -1439,7 +1542,7 @@ impl<
         mut request: SchedulingRequest,
         decay_now: Instant,
     ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
-        let selected = self.select_worker_for_request(&mut request, decay_now)?;
+        let selected = self.select_worker_for_request(&mut request, decay_now, false)?;
         let target_cached_prefix_blocks =
             target_cached_prefix_blocks(&request, selected.selection.worker);
 
@@ -1465,8 +1568,13 @@ impl<
         attempt_tx: Option<oneshot::Sender<AttemptId>>,
         lifecycle_transfer: Option<Arc<AdmissionLifecycleTransfer>>,
         decay_now: Instant,
+        preparation: &mut AdmissionPreparation,
     ) -> bool {
-        let selected = match self.select_worker_for_request(&mut request, decay_now) {
+        let selected = match self.select_worker_for_request(
+            &mut request,
+            decay_now,
+            preparation.defer_response,
+        ) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("scheduling failed: {e}");
@@ -1475,8 +1583,11 @@ impl<
             }
         };
 
-        let target_cached_prefix_blocks =
-            target_cached_prefix_blocks(&request, selected.selection.worker);
+        let target_cached_prefix_blocks = if preparation.defer_response {
+            0 // Filled from the captured tier maps before the response is delivered.
+        } else {
+            target_cached_prefix_blocks(&request, selected.selection.worker)
+        };
         let response = SchedulingResponse {
             best_worker: selected.selection.worker,
             effective_overlap_blocks: selected.selection.effective_overlap_blocks,
@@ -1521,6 +1632,8 @@ impl<
             sequence_request,
             response,
             non_max_overlap_selection,
+            selected.dp_range,
+            preparation,
         )
     }
 
@@ -1529,6 +1642,7 @@ impl<
     /// response: once delivery succeeds, the response channel no longer tracks
     /// request lifetime and the caller must install its RAII cleanup owner. If
     /// delivery loses that race, roll back the booking here.
+    #[allow(clippy::too_many_arguments)]
     fn book_and_respond(
         &self,
         mut request: SchedulingRequest,
@@ -1537,6 +1651,8 @@ impl<
         sequence_request: SequenceRequest,
         response: SchedulingResponse,
         non_max_overlap_selection: Option<NonMaxOverlapSelection>,
+        dp_range: std::ops::Range<u32>,
+        preparation: &mut AdmissionPreparation,
     ) -> bool {
         if request.response_is_closed() {
             tracing::debug!(
@@ -1548,10 +1664,11 @@ impl<
 
         let request_id = sequence_request.request_id.clone();
         let worker = sequence_request.worker;
-        let attempt_id = match self
-            .slots
-            .add_request_admitted(sequence_request, Instant::now())
-        {
+        let attempt_id = match self.slots.add_request_admitted_prepared(
+            sequence_request,
+            Instant::now(),
+            preparation.replica_prompt.take(),
+        ) {
             Ok(attempt_id) => attempt_id,
             Err(error) => {
                 tracing::warn!(%request_id, %error, "Failed to book scheduler state");
@@ -1568,6 +1685,24 @@ impl<
         }
         if let Some(attempt_tx) = attempt_tx {
             let _ = attempt_tx.send(attempt_id);
+        }
+        if preparation.defer_response {
+            preparation.response = Some(DeferredSchedulingResponse {
+                response_tx: request
+                    .resp_tx
+                    .take()
+                    .expect("response checked before booking"),
+                response,
+                tiers: std::mem::take(&mut request.overlap.tier_overlap_blocks),
+                dp_range,
+                booking: SchedulerBookingDescriptor {
+                    request_id,
+                    worker,
+                    attempt_id,
+                },
+                non_max_overlap_selection,
+            });
+            return true;
         }
         if request.respond(Ok(response)) {
             if let Some(selection) = non_max_overlap_selection {
@@ -1591,13 +1726,11 @@ impl<
         request_id: String,
         selection: NonMaxOverlapSelection,
     ) {
-        let Some(observer) = self.non_max_overlap_selection_observer.get() else {
-            return;
-        };
-        let observer = Arc::clone(observer);
-        let _observer_task = tokio::task::spawn_blocking(move || {
-            observer(&request_id, selection);
-        });
+        dispatch_selection_observer(
+            &self.non_max_overlap_selection_observer,
+            request_id,
+            selection,
+        );
     }
 
     fn prefill_load_hint_for(
@@ -1875,6 +2008,79 @@ policy_classes:
             panic!("admitted cleanup must carry the exact booking");
         };
         assert_eq!(cleanup, booking);
+    }
+
+    #[tokio::test]
+    async fn deferred_response_keeps_inputs_and_cleanup_ownership_until_delivery() {
+        for deliver in [true, false] {
+            let (queue, slots) = make_queue(1, 16, 64, None);
+            let worker = WorkerWithDpRank::from_worker_id(0);
+            let (mut request, mut response_rx) = make_request("deferred", 64);
+            request.overlap.tier_overlap_blocks.device.insert(worker, 2);
+            request
+                .overlap
+                .tier_overlap_blocks
+                .host_pinned
+                .insert(worker, 3);
+            let expected = request
+                .overlap
+                .selected_worker_tiers(worker, &SimpleWorkerConfig::default());
+            let lease = queue.new_request_lifecycle_lease(Some("deferred"));
+            let (ack_tx, ack_rx) = oneshot::channel();
+            queue
+                .admission_tx
+                .send(AdmissionCommand::Enqueue {
+                    request,
+                    attempt_tx: None,
+                    block_hashes: None,
+                    lease,
+                    preparation: AdmissionPreparation {
+                        defer_response: true,
+                        ..Default::default()
+                    },
+                    ack_tx,
+                })
+                .await
+                .unwrap_or_else(|_| panic!("actor closed"));
+            let (mut lease, response) = ack_rx.await.unwrap();
+            let response = response.expect("actor returns unfinished response to caller");
+            assert!(matches!(
+                response_rx.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+            assert_eq!(slots.active_request_counts().get(&worker), Some(&1));
+            if deliver {
+                let (booking, _, delivered) = response.finish();
+                assert!(delivered);
+                let result = response_rx.await.unwrap().unwrap();
+                assert_eq!(result.selected_worker_tiers, expected);
+                assert_eq!(result.target_cached_prefix_blocks, 5);
+                queue
+                    .booking_cleanup()
+                    .enqueue_and_wait(booking)
+                    .await
+                    .unwrap();
+                lease.as_mut().unwrap().disarm();
+            } else {
+                // Cancellation after actor booking, before caller construction.
+                drop(response);
+                drop(lease);
+                tokio::time::timeout(Duration::from_secs(1), async {
+                    while slots
+                        .active_request_counts()
+                        .get(&worker)
+                        .copied()
+                        .unwrap_or(0)
+                        != 0
+                    {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+            }
+            slots.assert_completely_drained(Instant::now());
+        }
     }
 
     struct DropResponseOnLoadPublisher {

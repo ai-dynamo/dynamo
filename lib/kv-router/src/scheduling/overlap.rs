@@ -35,12 +35,20 @@ impl OverlapSignals {
     ) -> SelectedWorkerTierSnapshot {
         let start = config.data_parallel_start_rank();
         let end = start.saturating_add(config.data_parallel_size());
+        self.selected_worker_tiers_in_range(worker, start..end)
+    }
+
+    pub(crate) fn selected_worker_tiers_in_range(
+        &self,
+        worker: WorkerWithDpRank,
+        dp_range: std::ops::Range<u32>,
+    ) -> SelectedWorkerTierSnapshot {
         let mut dp_device_blocks = Vec::new();
         let mut gpu_blocks = 0;
         let mut host_pinned_blocks = 0;
         let mut disk_blocks = 0;
 
-        for dp_rank in start..end {
+        for dp_rank in dp_range {
             let rank = WorkerWithDpRank::new(worker.worker_id, dp_rank);
             let device = saturating_u32(
                 self.tier_overlap_blocks
