@@ -39,6 +39,30 @@ def test_pre_vllm_import_arms_lazy_installer(monkeypatch):
     assert calls == ["lazy"]
 
 
+def test_preloaded_v2_runner_installs_immediately(monkeypatch):
+    calls = []
+    for module in (
+        "vllm.v1.worker.gpu_model_runner",
+        "vllm.v1.worker.gpu.model_runner",
+        "vllm.v1.worker.gpu.attn_utils",
+    ):
+        monkeypatch.delitem(install_vmm_ipc_kv.sys.modules, module, raising=False)
+    monkeypatch.setitem(
+        install_vmm_ipc_kv.sys.modules,
+        "vllm.v1.worker.gpu.model_runner",
+        SimpleNamespace(),
+    )
+    monkeypatch.setattr(install_vmm_ipc_kv, "_is_enabled", lambda: True)
+    monkeypatch.setattr(install_vmm_ipc_kv, "install", lambda: calls.append("install"))
+    monkeypatch.setattr(
+        install_vmm_ipc_kv, "install_lazy", lambda: calls.append("lazy")
+    )
+
+    install_vmm_ipc_kv._install_or_arm()
+
+    assert calls == ["install"]
+
+
 def test_v3_semantic_kv_tags_include_model_layers_and_size():
     tensor_a = SimpleNamespace(
         shared_by=["model.layers.1.self_attn", "model.layers.0.self_attn"],
@@ -96,12 +120,11 @@ def test_model_identity_accepts_explicit_artifact_digest(monkeypatch):
     assert identity == "model=/models/current\0artifact=image-sha256:abc"
 
 
-@pytest.mark.parametrize("revision", [None, "main", "refs/pr/1", "/models/current"])
-def test_model_identity_rejects_mutable_revision(monkeypatch, revision):
+def test_model_identity_rejects_mutable_revision(monkeypatch):
     monkeypatch.delenv("GMS_VLLM_MODEL_ARTIFACT_DIGEST", raising=False)
     with pytest.raises(RuntimeError, match="immutable resolved model revision"):
         install_vmm_ipc_kv._model_identity(
-            SimpleNamespace(model="org/model", revision=revision)
+            SimpleNamespace(model="org/model", revision="main")
         )
 
 

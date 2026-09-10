@@ -235,7 +235,6 @@ def _model_identity_from_runner(runner) -> str:
 
 
 def _kv_layout_fingerprint(kv_cache_config, model_identity: str) -> str:
-    """Stable digest of model and KV-layout-relevant parameters."""
     parts = [f"model={model_identity}"]
     for group in getattr(kv_cache_config, "kv_cache_groups", ()) or ():
         spec = getattr(group, "kv_cache_spec", None)
@@ -880,7 +879,12 @@ def install_lazy() -> None:
 def _install_or_arm() -> None:
     if not _is_enabled():
         return
-    if "vllm.v1.worker.gpu_model_runner" not in sys.modules:
+    allocation_modules = {
+        "vllm.v1.worker.gpu_model_runner",
+        "vllm.v1.worker.gpu.model_runner",
+        "vllm.v1.worker.gpu.attn_utils",
+    }
+    if allocation_modules.isdisjoint(sys.modules):
         install_lazy()
         return
     try:
