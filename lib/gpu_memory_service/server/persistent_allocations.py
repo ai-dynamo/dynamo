@@ -179,6 +179,12 @@ class PersistentAllocationManager:
                     f"mismatch: requested aligned {aligned_size} != existing "
                     f"{existing.aligned_size}"
                 )
+            if shared and aligned_size > existing.aligned_size:
+                raise PersistentClaimConflictError(
+                    f"persistent allocation {key!r} shared reattach capacity "
+                    f"mismatch: requested aligned {aligned_size} > existing "
+                    f"{existing.aligned_size}"
+                )
             self._mark_claimed(key, shared=shared)
             logger.info(
                 "Reattached persistent allocation %s engine_id=%s tag=%s shared=%s",
