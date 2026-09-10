@@ -377,6 +377,17 @@ def _short_rpc_directory() -> tempfile.TemporaryDirectory:
     return rpc_directory
 
 
+def _unrecognized_launch_shape(detail: str) -> RuntimeError:
+    """Name the installed vLLM and the shape it yielded, not just the symptom."""
+    return RuntimeError(
+        f"vLLM {vllm.__version__} yields {detail} from launch_core_engines. "
+        f"This unpacking was verified against vLLM "
+        f"{' and '.join(_VERIFIED_VLLM_VERSIONS)}; the result shape has most "
+        "likely changed upstream and _unpack_core_engine_launch needs "
+        "updating to match."
+    )
+
+
 def _unpack_core_engine_launch(launch: Any) -> tuple[Any, Any, Any, Any]:
     """Normalize what ``launch_core_engines`` yields across vLLM releases.
 
@@ -386,6 +397,10 @@ def _unpack_core_engine_launch(launch: Any) -> tuple[Any, Any, Any, Any]:
     exist before 0.28.
     """
     if isinstance(launch, tuple):
+        if len(launch) != 4:
+            raise _unrecognized_launch_shape(
+                f"a {len(launch)}-tuple rather than the expected 4-tuple"
+            )
         return launch
     try:
         return (
@@ -395,13 +410,8 @@ def _unpack_core_engine_launch(launch: Any) -> tuple[Any, Any, Any, Any]:
             launch.tensor_queue,
         )
     except AttributeError as error:
-        raise RuntimeError(
-            f"vLLM {vllm.__version__} yields {type(launch).__name__} from "
-            f"launch_core_engines with no {error.name!r} attribute. This "
-            f"unpacking was verified against vLLM "
-            f"{' and '.join(_VERIFIED_VLLM_VERSIONS)}; the field has most "
-            "likely been renamed upstream and _unpack_core_engine_launch "
-            "needs updating to match."
+        raise _unrecognized_launch_shape(
+            f"a {type(launch).__name__} with no {error.name!r} attribute"
         ) from error
 
 

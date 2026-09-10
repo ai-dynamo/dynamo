@@ -212,6 +212,11 @@ def test_process_group_reports_unexpected_child_exit():
     group._stopping.set()
 
 
+def _assert_names_verified_versions(message):
+    for version in processes._VERIFIED_VLLM_VERSIONS:
+        assert version in message
+
+
 def test_unpack_core_engine_launch_names_a_renamed_field():
     """An upstream rename must say which field went missing."""
     launch = SimpleNamespace(engine_manager=Mock(), coordinator=None, addresses=Mock())
@@ -221,9 +226,19 @@ def test_unpack_core_engine_launch_names_a_renamed_field():
 
     message = str(raised.value)
     assert "tensor_queue" in message
-    for version in processes._VERIFIED_VLLM_VERSIONS:
-        assert version in message
+    _assert_names_verified_versions(message)
     assert isinstance(raised.value.__cause__, AttributeError)
+
+
+@pytest.mark.parametrize("size", [3, 5], ids=["short-tuple", "long-tuple"])
+def test_unpack_core_engine_launch_rejects_a_resized_tuple(size):
+    """A tuple of the wrong arity must not reach the caller's four-name unpack."""
+    with pytest.raises(RuntimeError) as raised:
+        processes._unpack_core_engine_launch(tuple(range(size)))
+
+    message = str(raised.value)
+    assert f"{size}-tuple" in message
+    _assert_names_verified_versions(message)
 
 
 @pytest.mark.parametrize(
