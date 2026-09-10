@@ -37,10 +37,12 @@ def test_block_pool_hbm_directory_survives_engine_replacement(monkeypatch):
     from vllm.v1.core import kv_cache_coordinator
     from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.kv_cache_manager import KVCacheManager
+    from vllm.v1.core.sched.scheduler import Scheduler
 
     original_block_pool_binding = kv_cache_coordinator.BlockPool
     original_block_pool_methods = dict(BlockPool.__dict__)
     original_allocate_slots = KVCacheManager.allocate_slots
+    original_scheduler_init = Scheduler.__init__
     original_directory = leases_mod.ContentDirectory
     original_factory = leases_mod._factory
     original_patched = leases_mod._patched
@@ -326,10 +328,26 @@ def test_block_pool_hbm_directory_survives_engine_replacement(monkeypatch):
     finally:
         kv_cache_coordinator.BlockPool = original_block_pool_binding
         KVCacheManager.allocate_slots = original_allocate_slots
+        Scheduler.__init__ = original_scheduler_init
         leases_mod.ContentDirectory = original_directory
         leases_mod._factory = original_factory
         leases_mod._patched = original_patched
         leases_mod._gms_block_pool_class = None
+
+
+def test_scheduler_completion_fence_uses_native_deferred_free(monkeypatch):
+    import gpu_memory_service.integrations.vllm.install_kv_leases as leases_mod
+
+    def native_init(instance, marker):
+        instance.native_marker = marker
+        instance.defer_block_free = False
+
+    monkeypatch.setattr(leases_mod, "_original_scheduler_init", native_init)
+    scheduler = SimpleNamespace()
+    leases_mod._scheduler_init_with_gms_completion_fence(scheduler, "initialized")
+
+    assert scheduler.native_marker == "initialized"
+    assert scheduler.defer_block_free is True
 
 
 def test_allocate_slots_translates_atomic_lease_race_to_backpressure(monkeypatch):

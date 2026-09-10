@@ -27,6 +27,7 @@ _factory: Callable[[int], KVLeaseClient] | None = None
 _engine_core_hook_patched = False
 _original_run_engine_core = None
 _gms_block_pool_class = None
+_original_scheduler_init = None
 
 
 class GMSKVLeaseUnavailable(ValueError):
@@ -267,10 +268,21 @@ def engine_core_hook_installed() -> bool:
     )
 
 
-# The one remaining vLLM method wrapper translates an atomic lease race into
-# the scheduler's existing backpressure result. BlockPool behavior itself is
+# The allocation wrapper translates the remaining atomic lease race into the
+# scheduler's existing backpressure result. BlockPool behavior itself is
 # provided by a subclass installed at its single construction site.
 orig_allocate_slots = None
+
+
+def _scheduler_init_with_gms_completion_fence(self, *args, **kwargs) -> None:
+    """Keep freed blocks leased until the worker has completed their GPU step."""
+    assert _original_scheduler_init is not None
+    _original_scheduler_init(self, *args, **kwargs)
+    # vLLM already owns the correct scheduler/worker completion sequence for
+    # overlapping batches. Bare GMS is not a KV consumer connector, so opt in
+    # explicitly: BlockPool.free_blocks (which seals/publishes READY) now runs
+    # only after update_from_output proves the last writer has completed.
+    self.defer_block_free = True
 
 
 def _make_client(total_blocks: int) -> KVLeaseClient:
@@ -1089,6 +1101,7 @@ def install(factory: Callable[[int], KVLeaseClient] | None = None) -> bool:
     """Install a lease-aware BlockPool at vLLM's construction site."""
 
     global _patched, _factory, _gms_block_pool_class, orig_allocate_slots
+    global _original_scheduler_init
 
     if factory is not None:
         _factory = factory
@@ -1101,6 +1114,7 @@ def install(factory: Callable[[int], KVLeaseClient] | None = None) -> bool:
         from vllm.v1.core import kv_cache_coordinator
         from vllm.v1.core.block_pool import BlockPool
         from vllm.v1.core.kv_cache_manager import KVCacheManager
+        from vllm.v1.core.sched.scheduler import Scheduler
     except Exception:  # noqa: BLE001
         logger.debug(
             "[GMS-KVLease] vLLM scheduler allocation API not importable",
@@ -1110,6 +1124,8 @@ def install(factory: Callable[[int], KVLeaseClient] | None = None) -> bool:
 
     orig_allocate_slots = KVCacheManager.allocate_slots
     KVCacheManager.allocate_slots = patched_allocate_slots  # type: ignore[method-assign]
+    _original_scheduler_init = Scheduler.__init__
+    Scheduler.__init__ = _scheduler_init_with_gms_completion_fence
     _gms_block_pool_class = _build_gms_block_pool_class(BlockPool)
     kv_cache_coordinator.BlockPool = _gms_block_pool_class
     _patched = True
@@ -1123,6 +1139,7 @@ def lease_hooks_installed() -> bool:
         from vllm.v1.core import kv_cache_coordinator
         from vllm.v1.core.block_pool import BlockPool
         from vllm.v1.core.kv_cache_manager import KVCacheManager
+        from vllm.v1.core.sched.scheduler import Scheduler
     except Exception:  # noqa: BLE001
         return False
     installed = kv_cache_coordinator.BlockPool
@@ -1131,4 +1148,5 @@ def lease_hooks_installed() -> bool:
         and installed is not BlockPool
         and issubclass(installed, BlockPool)
         and KVCacheManager.allocate_slots is patched_allocate_slots
+        and Scheduler.__init__ is _scheduler_init_with_gms_completion_fence
     )
