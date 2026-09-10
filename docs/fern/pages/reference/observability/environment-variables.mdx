@@ -82,6 +82,10 @@ Every Dynamo process reads its own environment at startup, so set these on each 
   **Operator preset:** `9090` on worker, prefill, decode, and planner pods.
 </ParamField>
 
+<ParamField path="DYN_METRICS_CONST_LABELS" type="string" default="unset">
+  Comma-separated `name=value` pairs attached as constant labels to every Prometheus metric the process exposes, for example `cluster=us-west-2,team=search`. Names must match `[a-zA-Z_][a-zA-Z0-9_]*`, must not start with `__`, must not be `le` or `quantile` (reserved for histogram buckets and summary quantiles), must not repeat, and cannot override the auto-injected `dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`, or `worker_id` labels; whitespace around a name or value is trimmed, a value may contain `=` but not `,`; a label a metric already carries is never overwritten. A malformed value is logged and ignored as a whole. Applies to runtime and frontend metrics and to the text returned by exposition callbacks (engine metrics from Python workers); the standalone KV indexer service renders its own registry and is not covered, and neither are components that serve metrics straight from `prometheus_client` in Python (the planner) rather than through a Dynamo endpoint. Set it on every process and keep values low-cardinality.
+</ParamField>
+
 <ParamField path="DYN_HTTP_PORT" type="integer" default="8000">
   Frontend HTTP port, where `dynamo_frontend_*` metrics are served at `/metrics`. Also configurable via the `--http-port` flag.
 

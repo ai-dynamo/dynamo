@@ -2370,10 +2370,15 @@ pub fn router(
 /// Unified metrics handler.
 ///
 /// Gathers from the local HTTP-service registry first, then appends any
-/// metrics from the DRT's registry tree (if configured).
+/// metrics from the DRT's registry tree (if configured), never emitting the same
+/// series twice.
 async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl IntoResponse {
     let encoder = prometheus::TextEncoder::new();
-    let metric_families = state.registry.gather();
+    let mut metric_families = state.registry.gather();
+    dynamo_runtime::metrics::apply_env_const_labels(&mut metric_families);
+    // Remember what this registry emitted so the DRT tree below cannot repeat a series (possible
+    // once constant labels make a local sample and a DRT sample identical).
+    let mut seen_series = dynamo_runtime::metrics::series_keys(&metric_families);
     let mut buffer = vec![];
     if encoder.encode(&metric_families, &mut buffer).is_err() {
         return (
@@ -2396,7 +2401,10 @@ async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl 
 
     // Append DRT registry tree metrics (anything created via metrics().create*()).
     if let Some(ref drt_metrics) = state.drt_metrics {
-        match drt_metrics.prometheus_expfmt_combined() {
+        match drt_metrics.prometheus_expfmt_combined_with(
+            dynamo_runtime::metrics::env_const_labels(),
+            &mut seen_series,
+        ) {
             Ok(drt_text) => {
                 if !drt_text.is_empty() {
                     if !metrics.is_empty() && !metrics.ends_with('\n') {
