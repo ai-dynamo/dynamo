@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib.machinery
 import threading
 from types import SimpleNamespace
 
@@ -37,6 +38,46 @@ def test_pre_vllm_import_arms_lazy_installer(monkeypatch):
     install_vmm_ipc_kv._install_or_arm()
 
     assert calls == ["lazy"]
+
+
+def test_lazy_v2_install_waits_for_model_runner(monkeypatch):
+    events = []
+
+    class Loader:
+        def create_module(self, spec):
+            return None
+
+        def exec_module(self, module):
+            events.append(("loaded", module.__name__))
+
+    class Finder:
+        def find_spec(self, name, path=None, target=None):
+            if name == "vllm.v1.worker.gpu.model_runner":
+                return importlib.machinery.ModuleSpec(name, Loader())
+            return None
+
+    monkeypatch.setattr(install_vmm_ipc_kv, "_is_enabled", lambda: True)
+    monkeypatch.setattr(install_vmm_ipc_kv, "_LAZY_HOOK_INSTALLED", False)
+    monkeypatch.setattr(
+        install_vmm_ipc_kv, "install", lambda: events.append(("installed", None))
+    )
+    monkeypatch.setattr(install_vmm_ipc_kv.sys, "meta_path", [Finder()])
+
+    install_vmm_ipc_kv.install_lazy()
+    lazy_finder = install_vmm_ipc_kv.sys.meta_path[0]
+
+    assert lazy_finder.find_spec("vllm.v1.worker.gpu.attn_utils") is None
+    spec = lazy_finder.find_spec("vllm.v1.worker.gpu.model_runner")
+    assert spec is not None
+    module = spec.loader.create_module(spec) or SimpleNamespace(
+        __name__="vllm.v1.worker.gpu.model_runner"
+    )
+    spec.loader.exec_module(module)
+
+    assert events == [
+        ("loaded", "vllm.v1.worker.gpu.model_runner"),
+        ("installed", None),
+    ]
 
 
 def test_preloaded_v2_runner_installs_immediately(monkeypatch):
