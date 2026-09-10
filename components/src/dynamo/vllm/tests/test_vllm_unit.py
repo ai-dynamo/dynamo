@@ -393,6 +393,33 @@ def test_cli_shadow_mode_rejects_parallel_ranks(mock_vllm_cli, parallel_flag):
         parse_args()
 
 
+def test_generic_shadow_alias_enables_vllm_mode(monkeypatch, mock_vllm_cli):
+    monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "true")
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--load-format",
+        "gms",
+    )
+
+    assert parse_args().gms_shadow_mode is True
+
+
+def test_generic_shadow_alias_uses_vllm_validation(monkeypatch, mock_vllm_cli):
+    monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "true")
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--load-format",
+        "gms",
+        "--tensor-parallel-size",
+        "2",
+    )
+
+    with pytest.raises(ValueError, match="exactly one local vLLM rank"):
+        parse_args()
+
+
 def test_cli_shadow_mode_waits_for_primary_kv_geometry(monkeypatch):
     main = _load_vllm_main()
     from gpu_memory_service.integrations.vllm import install_vmm_ipc_kv
