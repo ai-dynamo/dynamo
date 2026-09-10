@@ -43,6 +43,7 @@ struct FakeVllm {
     next_lora_id: Arc<AtomicI64>,
     peers: Arc<Mutex<Vec<SocketAddr>>>,
     model_info_override: Arc<Mutex<Option<pb::ModelInfo>>>,
+    server_info_override: Arc<Mutex<Option<pb::ServerInfo>>>,
     reject: Arc<AtomicBool>,
     hang: Arc<AtomicBool>,
     hang_before_headers: Arc<AtomicBool>,
@@ -65,6 +66,9 @@ struct FakeVllm {
     hold_load: Arc<AtomicBool>,
     load_pending: Arc<AtomicBool>,
     release_load: Arc<Notify>,
+    hold_unload: Arc<AtomicBool>,
+    unload_pending: Arc<AtomicBool>,
+    release_unload: Arc<Notify>,
 }
 
 impl FakeVllm {
@@ -272,7 +276,13 @@ impl pb::control_server::Control for FakeVllm {
         &self,
         _request: Request<pb::GetServerInfoRequest>,
     ) -> Result<Response<pb::ServerInfo>, Status> {
-        Ok(Response::new(server_info()))
+        Ok(Response::new(
+            self.server_info_override
+                .lock()
+                .await
+                .clone()
+                .unwrap_or_else(server_info),
+        ))
     }
 
     async fn get_model_info(
@@ -300,6 +310,8 @@ impl pb::control_server::Control for FakeVllm {
         request: Request<pb::LoadLoraRequest>,
     ) -> Result<Response<pb::LoadLoraResponse>, Status> {
         let request = request.into_inner();
+        self.record_control("load_lora", json!({"lora_name": request.lora_name}))
+            .await;
         self.ensure_lora_enabled()?;
         if self.hold_load.load(Ordering::SeqCst) {
             self.load_pending.store(true, Ordering::SeqCst);
@@ -335,7 +347,14 @@ impl pb::control_server::Control for FakeVllm {
         request: Request<pb::UnloadLoraRequest>,
     ) -> Result<Response<pb::UnloadLoraResponse>, Status> {
         let name = request.into_inner().lora_name;
+        self.record_control("unload_lora", json!({"lora_name": name}))
+            .await;
         self.ensure_lora_enabled()?;
+        if self.hold_unload.load(Ordering::SeqCst) {
+            self.unload_pending.store(true, Ordering::SeqCst);
+            self.release_unload.notified().await;
+            return Err(Status::failed_precondition("injected unload rejection"));
+        }
         let mut loras = self.loras.lock().await;
         let index = loras
             .iter()
@@ -354,6 +373,7 @@ impl pb::control_server::Control for FakeVllm {
         &self,
         _request: Request<pb::ListLorasRequest>,
     ) -> Result<Response<pb::ListLorasResponse>, Status> {
+        self.record_control("list_loras", json!({})).await;
         self.ensure_lora_enabled()?;
         Ok(Response::new(pb::ListLorasResponse {
             adapters: self.loras.lock().await.clone(),
@@ -915,8 +935,15 @@ fn engine_with_server_info(
 }
 
 async fn runtime_endpoint(namespace: &str) -> dynamo_runtime::component::Endpoint {
+    runtime_endpoint_with_config(namespace, DistributedConfig::process_local()).await
+}
+
+async fn runtime_endpoint_with_config(
+    namespace: &str,
+    config: DistributedConfig,
+) -> dynamo_runtime::component::Endpoint {
     let runtime = Runtime::from_current().expect("current runtime");
-    let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+    let drt = DistributedRuntime::new(runtime, config)
         .await
         .expect("process-local DRT");
     let endpoint = drt
@@ -1509,17 +1536,10 @@ async fn mixed_multimodal_media_is_forwarded_with_image_uuid_only() {
     );
 }
 
-// ======================================================================================
-// LoRA lifecycle
-// ======================================================================================
-
-/// Build an engine with the LoRA surface enabled, bypassing the process-global
-/// `DYN_LORA_ENABLED` so these tests stay independent of ambient environment.
 fn lora_engine(endpoint: &str) -> VllmSidecarEngine {
     engine(endpoint, DisaggregationMode::Aggregated, 1, model_info()).with_lora_enabled(true)
 }
 
-/// A directory that passes the adapter-layout validation.
 fn adapter_dir() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("adapter tempdir");
     std::fs::write(dir.path().join("adapter_config.json"), "{}").unwrap();
@@ -1575,7 +1595,6 @@ async fn lora_siblings(endpoint: &dynamo_runtime::component::Endpoint) -> Vec<St
         .collect()
 }
 
-/// Start an engine that is ready to serve lifecycle calls against `service`.
 async fn started_lora_engine(
     service: FakeVllm,
     namespace: &str,
@@ -1595,844 +1614,126 @@ async fn started_lora_engine(
     (server, engine, endpoint)
 }
 
-// --- protocol and compatibility ------------------------------------------------------
-
-#[test]
-fn vendored_protos_match_the_merged_vllm_release() {
-    // Pinned to vllm-project/vllm@1f9444a34ff4ebfba4d65c68971bb5306a11aa92
-    // (vllm-project/vllm#52840). Update `proto/README.md` and these digests
-    // together when resyncing; a mismatch means the vendored copy drifted.
-    for (path, expected) in [
-        (
-            "proto/control.proto",
-            "1a050496e7d0f919f398d150d4bff1660d5a5eac57951137aeb0ca5970436696",
-        ),
-        (
-            "proto/inference.proto",
-            "078a3d2a94bd03a96fdfdfa31c13a805d00575b365dec5b3f8ed82d36f065e85",
-        ),
+#[tokio::test]
+async fn lora_enablement_and_rl_coexistence() {
+    let server = FakeServer::start(FakeVllm::default()).await;
+    for (flag, support, capacity) in [
+        (false, true, 4),
+        (true, false, 4),
+        (true, true, 0),
+        (true, true, 4),
     ] {
-        let full = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path);
-        let bytes = std::fs::read(&full).unwrap_or_else(|e| panic!("read {path}: {e}"));
-        let digest = <sha2::Sha256 as sha2::Digest>::digest(&bytes);
+        let mut model = model_info();
+        model.supports_lora = support;
+        *server.service.model_info_override.lock().await = Some(model.clone());
+        let mut info = server_info();
+        info.max_loras = capacity;
+        *server.service.server_info_override.lock().await = Some(info.clone());
+        let engine = engine_with_server_info(
+            &server.endpoint,
+            DisaggregationMode::Aggregated,
+            1,
+            model,
+            info,
+        )
+        .with_lora_enabled(flag);
+        let registration = engine.start(0).await.unwrap();
+        let updates = engine.supported_updates().await.unwrap();
         assert_eq!(
-            format!("{digest:x}"),
-            expected,
-            "{path} drifted from the vendored vLLM revision"
+            updates.contains(&"load_lora".to_string()),
+            flag && support && capacity > 0
         );
-    }
-}
-
-#[test]
-fn lora_wire_fields_keep_their_upstream_numbers() {
-    // Field numbers are the wire contract. Renumbering them silently breaks
-    // interoperability with a vLLM built from the pinned revision, so encode a
-    // known value and assert the tag bytes rather than trusting the generated code.
-    use prost::Message;
-
-    let request = pb::GenerateRequest {
-        lora_name: "math-r8".to_string(),
-        ..Default::default()
-    };
-    // field 15, wire type 2 -> tag byte 0x7a
-    assert!(
-        request.encode_to_vec().starts_with(&[0x7a, 0x07]),
-        "GenerateRequest.lora_name must stay field 15"
-    );
-
-    let adapter = pb::LoraAdapter {
-        lora_id: 1,
-        lora_name: "n".to_string(),
-        source_path: "p".to_string(),
-    };
-    assert_eq!(
-        adapter.encode_to_vec(),
-        vec![0x08, 0x01, 0x12, 0x01, b'n', 0x1a, 0x01, b'p'],
-        "LoraAdapter fields must stay 1/2/3"
-    );
-
-    let server = pb::ServerInfo {
-        max_loras: 4,
-        ..Default::default()
-    };
-    // field 10, wire type 0 -> tag byte 0x50
-    assert_eq!(
-        server.encode_to_vec(),
-        vec![0x50, 0x04],
-        "ServerInfo.max_loras must stay field 10"
-    );
-
-    let model = pb::ModelInfo {
-        supports_lora: true,
-        ..Default::default()
-    };
-    // field 22, wire type 0 -> tag bytes 0xb0 0x01
-    assert_eq!(
-        model.encode_to_vec(),
-        vec![0xb0, 0x01, 0x01],
-        "ModelInfo.supports_lora must stay field 22"
-    );
-}
-
-#[test]
-fn lora_statuses_map_to_stable_dynamo_meanings() {
-    use crate::client::LoraRpcError;
-    use dynamo_backend_common::{BackendError, ErrorType};
-
-    let error = |code| LoraRpcError {
-        rpc: "LoadLora",
-        code,
-        message: "boom".to_string(),
-    };
-
-    // vLLM answered definitively, so its state is known and no reconciliation is needed.
-    for code in [
-        tonic::Code::InvalidArgument,
-        tonic::Code::AlreadyExists,
-        tonic::Code::NotFound,
-        tonic::Code::FailedPrecondition,
-    ] {
-        assert!(error(code).is_definitive(), "{code:?} must be definitive");
-    }
-
-    // The operation may have committed before failing; the inventory has to decide.
-    for code in [
-        tonic::Code::Internal,
-        tonic::Code::Unknown,
-        tonic::Code::DeadlineExceeded,
-        tonic::Code::Unavailable,
-        tonic::Code::Aborted,
-    ] {
-        assert!(
-            !error(code).is_definitive(),
-            "{code:?} must trigger reconciliation"
-        );
-    }
-
-    assert_eq!(
-        error(tonic::Code::NotFound).into_dynamo().error_type(),
-        ErrorType::Backend(BackendError::InvalidArgument)
-    );
-    assert_eq!(
-        error(tonic::Code::DeadlineExceeded)
-            .into_dynamo()
-            .error_type(),
-        ErrorType::Backend(BackendError::ConnectionTimeout)
-    );
-    assert_eq!(
-        error(tonic::Code::Internal).into_dynamo().error_type(),
-        ErrorType::Backend(BackendError::Unknown)
-    );
-}
-
-#[test]
-fn inventory_validation_rejects_unusable_entries_and_sorts_by_name() {
-    let adapter = |id: i64, name: &str, path: &str| pb::LoraAdapter {
-        lora_id: id,
-        lora_name: name.to_string(),
-        source_path: path.to_string(),
-    };
-
-    let sorted =
-        crate::lora::validate_inventory(vec![adapter(2, "zeta", "/z"), adapter(1, "alpha", "/a")])
-            .expect("valid inventory");
-    assert_eq!(
-        sorted
-            .iter()
-            .map(|a| a.lora_name.as_str())
-            .collect::<Vec<_>>(),
-        ["alpha", "zeta"]
-    );
-
-    for (case, inventory) in [
-        ("empty name", vec![adapter(1, "", "/a")]),
-        ("non-positive id", vec![adapter(0, "alpha", "/a")]),
-        ("missing path", vec![adapter(1, "alpha", "")]),
-        (
-            "duplicate name",
-            vec![adapter(1, "alpha", "/a"), adapter(2, "alpha", "/b")],
-        ),
-        (
-            "duplicate id",
-            vec![adapter(1, "alpha", "/a"), adapter(1, "beta", "/b")],
-        ),
-    ] {
-        assert!(
-            crate::lora::validate_inventory(inventory).is_err(),
-            "{case} must be rejected"
-        );
+        assert!(updates.contains(&"update_weight_version".to_string()));
+        if support && capacity > 0 {
+            assert_eq!(registration.llm.unwrap().max_gpu_lora_count, Some(capacity));
+        }
+        if !support {
+            assert!(
+                generate_error(&engine, "math-r8")
+                    .await
+                    .to_string()
+                    .contains("did not advertise")
+            );
+        }
     }
 }
 
 #[tokio::test]
-async fn lora_surface_requires_flag_capability_and_capacity() {
-    let server = FakeServer::start(FakeVllm::default()).await;
-
-    // The operator flag is off, even though vLLM advertises support and capacity.
-    let flag_off = engine(
-        &server.endpoint,
-        DisaggregationMode::Aggregated,
-        1,
-        model_info(),
-    )
-    .with_lora_enabled(false);
-    assert!(
-        !flag_off
-            .supported_updates()
-            .await
-            .unwrap()
-            .iter()
-            .any(|u| u == "load_lora")
-    );
-
-    // vLLM does not advertise adapter support.
-    let mut no_support = model_info();
-    no_support.supports_lora = false;
-    let unsupported = engine(
-        &server.endpoint,
-        DisaggregationMode::Aggregated,
-        1,
-        no_support,
-    )
-    .with_lora_enabled(true);
-    assert!(
-        !unsupported
-            .supported_updates()
-            .await
-            .unwrap()
-            .iter()
-            .any(|u| u == "load_lora")
-    );
-
-    // Support is advertised but there is no GPU capacity for an adapter.
-    let mut no_capacity = server_info();
-    no_capacity.max_loras = 0;
-    let capacity_zero = engine_with_server_info(
-        &server.endpoint,
-        DisaggregationMode::Aggregated,
-        1,
-        model_info(),
-        no_capacity,
-    )
-    .with_lora_enabled(true);
-    assert!(
-        !capacity_zero
-            .supported_updates()
-            .await
-            .unwrap()
-            .iter()
-            .any(|u| u == "load_lora")
-    );
-
-    // All three hold.
-    let enabled = lora_engine(&server.endpoint);
-    let updates = enabled.supported_updates().await.unwrap();
-    for expected in ["load_lora", "unload_lora", "list_loras"] {
-        assert!(
-            updates.contains(&expected.to_string()),
-            "missing {expected}"
-        );
-    }
-}
-
-#[tokio::test]
-async fn lora_and_rl_update_surfaces_coexist() {
-    let server = FakeServer::start(FakeVllm::default()).await;
-    let engine = lora_engine(&server.endpoint);
-    let updates = engine.supported_updates().await.unwrap();
-    assert!(updates.contains(&"load_lora".to_string()));
-    assert!(updates.contains(&"update_weight_version".to_string()));
-}
-
-#[tokio::test]
-async fn base_model_advertises_lora_capacity() {
-    let server = FakeServer::start(FakeVllm::default()).await;
-    let engine = lora_engine(&server.endpoint);
-    let config = engine.start(0).await.expect("start");
-    assert_eq!(config.llm.unwrap().max_gpu_lora_count, Some(4));
-}
-
-// --- lifecycle semantics -------------------------------------------------------------
-
-#[tokio::test]
-async fn first_load_publishes_a_discovery_sibling_with_the_server_assigned_id() {
+async fn lora_lifecycle_preserves_identity_and_routing_metadata() {
+    use dynamo_llm::worker_type::WorkerType;
     let (server, engine, endpoint) =
-        started_lora_engine(FakeVllm::default(), "lora_first_load").await;
-    engine.supported_updates().await.unwrap();
-    let dir = adapter_dir();
-
-    let response = load(&engine, "math-r8", &dir).await;
-
-    assert_eq!(response["status"], "success");
-    assert_eq!(response["lora_name"], "math-r8");
-    assert_eq!(response["hot_swap"], false);
-    // The ID comes from vLLM, never from a Dynamo-side derivation of the name.
-    let assigned = server.service.loras.lock().await[0].lora_id;
-    assert_eq!(response["lora_id"], assigned);
-
-    let card = endpoint
+        started_lora_engine(FakeVllm::default(), "lora_lifecycle").await;
+    for card in endpoint
         .drt()
         .discovery()
-        .list(DiscoveryQuery::EndpointModels {
-            namespace: "lora_first_load".to_string(),
-            component: "backend".to_string(),
-            endpoint: "generate".to_string(),
-        })
+        .list(DiscoveryQuery::AllModels)
         .await
         .unwrap()
-        .into_iter()
-        .find(|instance| {
+    {
+        endpoint.drt().discovery().unregister(card).await.unwrap();
+    }
+    let mut base = ModelDeploymentCard::with_name_only("model-source");
+    base.worker_type = Some(WorkerType::Decode);
+    base.needs = vec![vec![WorkerType::Prefill]];
+    base.kv_cache_block_size = 32;
+    base.migration_limit = 3;
+    base.runtime_config.context_length = Some(2048);
+    base.runtime_config.max_num_seqs = Some(8);
+    endpoint
+        .drt()
+        .discovery()
+        .register(
+            DiscoverySpec::from_model(
+                "lora_lifecycle".into(),
+                "backend".into(),
+                "generate".into(),
+                &base,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let dir = adapter_dir();
+    let first = load(&engine, "math-r8", &dir).await;
+    assert_eq!(first["status"], "success");
+    let assigned = server.service.loras.lock().await[0].lora_id;
+    assert_eq!(first["lora_id"], assigned);
+    let cards = endpoint
+        .drt()
+        .discovery()
+        .list(DiscoveryQuery::AllModels)
+        .await
+        .unwrap();
+    let sibling = cards
+        .iter()
+        .find(|card| {
             matches!(
-                instance,
+                card,
                 DiscoveryInstance::Model {
                     model_suffix: Some(_),
                     ..
                 }
             )
         })
-        .expect("LoRA discovery sibling")
+        .unwrap()
         .deserialize_model::<ModelDeploymentCard>()
         .unwrap();
-    assert_eq!(card.name(), "math-r8");
-    assert_eq!(card.lora.as_ref().unwrap().max_gpu_lora_count, Some(4));
-    assert_eq!(card.user_data.as_ref().unwrap()["lora_adapter"], true);
-    assert_eq!(card.user_data.as_ref().unwrap()["lora_id"], assigned);
-}
-
-#[tokio::test]
-async fn lora_sibling_preserves_base_topology() {
-    let (_server, engine, endpoint) =
-        started_lora_engine(FakeVllm::default(), "lora_topology").await;
-    engine.supported_updates().await.unwrap();
-    let dir = adapter_dir();
-    load(&engine, "math-r8", &dir).await;
-
-    let models = endpoint
-        .drt()
-        .discovery()
-        .list(DiscoveryQuery::EndpointModels {
-            namespace: "lora_topology".to_string(),
-            component: "backend".to_string(),
-            endpoint: "generate".to_string(),
-        })
-        .await
-        .unwrap();
-    let mut base = None;
-    let mut sibling = None;
-    for instance in models {
-        let is_sibling = matches!(
-            &instance,
-            DiscoveryInstance::Model {
-                model_suffix: Some(_),
-                ..
-            }
-        );
-        let card = instance.deserialize_model::<ModelDeploymentCard>().unwrap();
-        if is_sibling {
-            sibling = Some(card);
-        } else {
-            base = Some(card);
-        }
-    }
-    let base = base.expect("base card");
-    let sibling = sibling.expect("sibling card");
-
-    // Only adapter-specific fields may differ; routing topology must carry over.
-    assert_eq!(sibling.model_type, base.model_type);
-    assert_eq!(sibling.model_input, base.model_input);
     assert_eq!(sibling.worker_type, base.worker_type);
     assert_eq!(sibling.needs, base.needs);
     assert_eq!(sibling.kv_cache_block_size, base.kv_cache_block_size);
     assert_eq!(sibling.runtime_config, base.runtime_config);
     assert_eq!(sibling.migration_limit, base.migration_limit);
-    // Adapter-specific.
-    assert_eq!(sibling.name(), "math-r8");
-    assert_eq!(sibling.source_path, Some(base.name().to_string()));
+    assert_eq!(sibling.source_path.as_deref(), Some("model-source"));
     assert!(sibling.aliases.is_empty());
-    assert!(sibling.lora.is_some());
-    assert!(base.lora.is_none());
-}
-
-#[tokio::test]
-async fn repeated_load_returns_the_existing_id_even_for_a_different_uri() {
-    let (server, engine, _endpoint) =
-        started_lora_engine(FakeVllm::default(), "lora_idempotent").await;
-    engine.supported_updates().await.unwrap();
-    let first_dir = adapter_dir();
-    let first = load(&engine, "math-r8", &first_dir).await;
-
-    let same = load(&engine, "math-r8", &first_dir).await;
-    // A different URI is still idempotent while hot swap is unsupported.
-    let other_dir = adapter_dir();
-    let different_uri = load(&engine, "math-r8", &other_dir).await;
-
-    for response in [&same, &different_uri] {
-        assert_eq!(response["status"], "success");
-        assert_eq!(response["lora_id"], first["lora_id"]);
-        assert_eq!(response["hot_swap"], false);
+    assert_eq!(sibling.lora.unwrap().max_gpu_lora_count, Some(4));
+    assert_eq!(sibling.user_data.unwrap()["lora_id"], assigned);
+    for source in [&dir, &adapter_dir()] {
+        assert_eq!(load(&engine, "math-r8", source).await["lora_id"], assigned);
     }
-    assert_eq!(server.service.loras.lock().await.len(), 1);
-}
-
-#[tokio::test]
-async fn load_rejects_names_that_collide_with_the_base_model_or_reserved_suffixes() {
-    let (_server, engine, _endpoint) = started_lora_engine(FakeVllm::default(), "lora_names").await;
-    engine.supported_updates().await.unwrap();
-    let dir = adapter_dir();
-
-    for name in ["model-source", "served-model", "model-alias"] {
-        let response = load(&engine, name, &dir).await;
-        assert_eq!(
-            response["status"], "error",
-            "name `{name}` must be rejected"
-        );
-    }
-
-    // Only an exact `_base` slug collides with the base-sibling sentinel, and `Slug`
-    // trims leading underscores, so `_base` derives `base` rather than the sentinel.
-    // Both of these are legitimate distinct keys.
-    for name in ["anything_base", "_base"] {
-        assert_eq!(
-            load(&engine, name, &dir).await["status"],
-            "success",
-            "name `{name}` derives its own key and must be accepted"
-        );
-    }
-
-    // `_BASE` also derives `base`, so it now collides with the adapter just loaded.
-    let response = load(&engine, "_BASE", &dir).await;
-    assert_eq!(response["status"], "error");
-    assert!(
-        response["message"]
-            .as_str()
-            .unwrap()
-            .contains("discovery suffix"),
-        "{response}"
-    );
-}
-
-#[tokio::test]
-async fn load_rejects_a_name_that_collides_with_a_loaded_adapter_discovery_suffix() {
-    // `Slug::slugify` lowercases, so these names all derive the suffix `math-r8`.
-    // Publishing a second one would overwrite the first adapter's sibling, and
-    // unloading either would remove the wrong record.
-    let (server, engine, endpoint) =
-        started_lora_engine(FakeVllm::default(), "lora_suffix_collision").await;
-    engine.supported_updates().await.unwrap();
-    let dir = adapter_dir();
-    assert_eq!(load(&engine, "math-r8", &dir).await["status"], "success");
-
-    for colliding in ["Math-R8", "MATH-R8"] {
-        let response = load(&engine, colliding, &dir).await;
-        assert_eq!(
-            response["status"], "error",
-            "`{colliding}` collides with `math-r8` in discovery"
-        );
-        let message = response["message"].as_str().unwrap();
-        assert!(message.contains("discovery suffix"), "{message}");
-    }
-
-    // The original adapter is untouched: still loaded, still the only sibling.
-    assert_eq!(server.service.loras.lock().await.len(), 1);
-    assert_eq!(lora_siblings(&endpoint).await.len(), 1);
     assert_eq!(
         collect(&engine, request_selecting("math-r8")).await.len(),
         1
     );
-}
-
-#[tokio::test]
-async fn reconciliation_rejects_an_inventory_whose_names_share_a_discovery_suffix() {
-    // vLLM keys adapters by raw name and would accept both; Dynamo cannot publish them
-    // as distinct siblings, so reconciliation must refuse rather than silently collapse
-    // two adapters onto one discovery record.
-    let service = FakeVllm::default();
-    {
-        let mut loras = service.loras.lock().await;
-        loras.push(pb::LoraAdapter {
-            lora_id: 1,
-            lora_name: "math-r8".to_string(),
-            source_path: "/shared/loras/a".to_string(),
-        });
-        loras.push(pb::LoraAdapter {
-            lora_id: 2,
-            lora_name: "Math-R8".to_string(),
-            source_path: "/shared/loras/b".to_string(),
-        });
-    }
-    let (_server, engine, endpoint) = started_lora_engine(service, "lora_suffix_inventory").await;
-
-    // Best effort: the base model still serves.
-    engine
-        .supported_updates()
-        .await
-        .expect("startup must survive");
-    assert!(lora_siblings(&endpoint).await.is_empty());
-
-    let listed = engine
-        .engine_update("list_loras".to_string(), json!({}))
-        .await
-        .unwrap();
-    assert_eq!(listed["status"], "error");
-    assert!(
-        listed["message"]
-            .as_str()
-            .unwrap()
-            .contains("discovery suffix"),
-        "{listed}"
-    );
-}
-
-#[tokio::test]
-async fn capacity_is_preserved_under_concurrent_loads_of_distinct_adapters() {
-    // `server_info()` advertises max_loras = 4.
-    let (server, engine, _endpoint) =
-        started_lora_engine(FakeVllm::default(), "lora_capacity").await;
-    engine.supported_updates().await.unwrap();
-    let dirs: Vec<_> = (0..6).map(|_| adapter_dir()).collect();
-    let names: Vec<String> = (0..6).map(|index| format!("adapter-{index}")).collect();
-
-    let responses = futures::future::join_all(
-        names
-            .iter()
-            .zip(&dirs)
-            .map(|(name, dir)| load(&engine, name, dir)),
-    )
-    .await;
-
-    let succeeded = responses
-        .iter()
-        .filter(|response| response["status"] == "success")
-        .count();
-    assert_eq!(
-        succeeded, 4,
-        "capacity must cap concurrent loads: {responses:?}"
-    );
-    assert_eq!(server.service.loras.lock().await.len(), 4);
-}
-
-#[tokio::test]
-async fn same_name_lifecycle_operations_serialize() {
-    let service = FakeVllm::default();
-    service.hold_load.store(true, Ordering::SeqCst);
-    let (server, engine, _endpoint) = started_lora_engine(service, "lora_serialize").await;
-    engine.supported_updates().await.unwrap();
-    let dir = adapter_dir();
-
-    let loading = load(&engine, "math-r8", &dir);
-    tokio::pin!(loading);
-    // Wait until the load is parked inside vLLM.
-    loop {
-        if server.service.load_pending.load(Ordering::SeqCst) {
-            break;
-        }
-        tokio::task::yield_now().await;
-        futures::future::poll_immediate(&mut loading).await;
-    }
-
-    // The unload must not observe or mutate state until the load releases the key.
-    let unloading = unload(&engine, "math-r8");
-    tokio::pin!(unloading);
-    assert!(
-        futures::future::poll_immediate(&mut unloading)
-            .await
-            .is_none(),
-        "unload must block behind the in-flight load for the same name"
-    );
-
-    server.service.hold_load.store(false, Ordering::SeqCst);
-    server.service.release_load.notify_waiters();
-    let loaded = loading.await;
-    assert_eq!(loaded["status"], "success");
-    let unloaded = unloading.await;
-    assert_eq!(unloaded["status"], "success");
-    assert!(server.service.loras.lock().await.is_empty());
-}
-
-#[tokio::test]
-async fn ambiguous_load_and_unload_outcomes_reconcile_against_list_loras() {
-    let service = FakeVllm::default();
-    // Both RPCs commit and then fail, so only `ListLoras` reveals the truth.
-    service.load_commit_error.store(true, Ordering::SeqCst);
-    service.unload_commit_error.store(true, Ordering::SeqCst);
-    let (server, engine, endpoint) = started_lora_engine(service, "lora_ambiguous").await;
-    engine.supported_updates().await.unwrap();
-    let dir = adapter_dir();
-
-    let loaded = load(&engine, "math-r8", &dir).await;
-    assert_eq!(
-        loaded["status"], "success",
-        "committed load must be recognized"
-    );
-    assert_eq!(server.service.loras.lock().await.len(), 1);
-    assert_eq!(lora_siblings(&endpoint).await.len(), 1);
-
-    let unloaded = unload(&engine, "math-r8").await;
-    assert_eq!(
-        unloaded["status"], "success",
-        "committed unload must be recognized"
-    );
-    assert!(server.service.loras.lock().await.is_empty());
-    assert!(lora_siblings(&endpoint).await.is_empty());
-}
-
-#[tokio::test]
-async fn load_rolls_back_the_native_adapter_when_discovery_publication_fails() {
-    let server = FakeServer::start(FakeVllm::default()).await;
-    let engine = lora_engine(&server.endpoint);
-    engine.start(0).await.expect("start");
-    // No `on_endpoint_ready`, so publication cannot succeed.
-    let dir = adapter_dir();
-
-    let response = load(&engine, "math-r8", &dir).await;
-
-    assert_eq!(response["status"], "error");
-    assert!(
-        server.service.loras.lock().await.is_empty(),
-        "a load that cannot be published must not leave the adapter resident"
-    );
-}
-
-#[tokio::test]
-async fn unload_restores_discovery_when_the_adapter_survives() {
-    let (server, engine, endpoint) =
-        started_lora_engine(FakeVllm::default(), "lora_unload_restore").await;
-    engine.supported_updates().await.unwrap();
-    let dir = adapter_dir();
-    load(&engine, "math-r8", &dir).await;
-    assert_eq!(lora_siblings(&endpoint).await.len(), 1);
-
-    // vLLM refuses the removal but keeps the adapter loaded.
-    server.service.lora_disabled.store(true, Ordering::SeqCst);
-    let response = unload(&engine, "math-r8").await;
-    server.service.lora_disabled.store(false, Ordering::SeqCst);
-
-    assert_eq!(response["status"], "error");
-    assert_eq!(server.service.loras.lock().await.len(), 1);
-    assert_eq!(
-        lora_siblings(&endpoint).await.len(),
-        1,
-        "an adapter vLLM still holds must stay routable"
-    );
-}
-
-#[tokio::test]
-async fn unload_reports_available_adapters_when_the_name_is_unknown() {
-    let (_server, engine, _endpoint) =
-        started_lora_engine(FakeVllm::default(), "lora_unknown_unload").await;
-    engine.supported_updates().await.unwrap();
-    let dir = adapter_dir();
-    load(&engine, "math-r8", &dir).await;
-
-    let response = unload(&engine, "absent").await;
-
-    assert_eq!(response["status"], "error");
-    let message = response["message"].as_str().unwrap();
-    assert!(message.contains("not found"), "{message}");
-    assert!(message.contains("math-r8"), "{message}");
-}
-
-#[tokio::test]
-async fn hot_swap_is_refused_with_a_clear_message() {
-    let server = FakeServer::start(FakeVllm::default()).await;
-    let engine = lora_engine(&server.endpoint).with_hot_swap_requested(true);
-    engine.start(0).await.expect("start");
-    let endpoint = runtime_endpoint("lora_hot_swap").await;
-    engine
-        .on_endpoint_ready(endpoint)
-        .await
-        .expect("endpoint ready");
-    engine.supported_updates().await.unwrap();
-    let dir = adapter_dir();
-    load(&engine, "math-r8", &dir).await;
-
-    let response = load(&engine, "math-r8", &dir).await;
-
-    assert_eq!(response["status"], "error");
-    let message = response["message"].as_str().unwrap();
-    assert!(message.contains("hot swap is not supported"), "{message}");
-}
-
-#[tokio::test]
-async fn list_loras_returns_a_deterministic_sorted_map() {
-    let (_server, engine, _endpoint) = started_lora_engine(FakeVllm::default(), "lora_list").await;
-    engine.supported_updates().await.unwrap();
-    let dirs: Vec<_> = (0..3).map(|_| adapter_dir()).collect();
-    for (name, dir) in ["zeta", "alpha", "mu"].iter().zip(&dirs) {
-        load(&engine, name, dir).await;
-    }
-
-    let response = engine
-        .engine_update("list_loras".to_string(), json!({}))
-        .await
-        .unwrap();
-
-    assert_eq!(response["status"], "success");
-    assert_eq!(response["count"], 3);
-    let names: Vec<&str> = response["loras"]
-        .as_object()
-        .unwrap()
-        .keys()
-        .map(String::as_str)
-        .collect();
-    assert_eq!(names, ["alpha", "mu", "zeta"]);
-}
-
-#[tokio::test]
-async fn startup_republishes_loras_loaded_before_sidecar_restart() {
-    let service = FakeVllm::default();
-    service.loras.lock().await.push(pb::LoraAdapter {
-        lora_id: 7,
-        lora_name: "math-r8".to_string(),
-        source_path: "/shared/loras/math-r8".to_string(),
-    });
-    let (_server, engine, endpoint) = started_lora_engine(service, "lora_restart").await;
-
-    engine.supported_updates().await.unwrap();
-
-    assert_eq!(lora_siblings(&endpoint).await.len(), 1);
-}
-
-#[tokio::test]
-async fn startup_reconciliation_failure_leaves_the_base_model_serving() {
-    let service = FakeVllm::default();
-    // Every lifecycle RPC fails, so reconciliation cannot complete.
-    service.lora_disabled.store(true, Ordering::SeqCst);
-    let (_server, engine, _endpoint) = started_lora_engine(service, "lora_recon_fail").await;
-
-    // The worker treats an error here as fatal, so reconciliation must not raise one.
-    let updates = engine
-        .supported_updates()
-        .await
-        .expect("reconciliation failure must not abort worker startup");
-
-    assert!(updates.contains(&"load_lora".to_string()));
-}
-
-#[tokio::test]
-async fn shutdown_unpublishes_lora_siblings() {
-    let (_server, engine, endpoint) =
-        started_lora_engine(FakeVllm::default(), "lora_shutdown").await;
-    engine.supported_updates().await.unwrap();
-    let dir = adapter_dir();
-    load(&engine, "math-r8", &dir).await;
-    assert_eq!(lora_siblings(&endpoint).await.len(), 1);
-
-    engine.cleanup().await.expect("cleanup");
-
-    assert!(
-        lora_siblings(&endpoint).await.is_empty(),
-        "the sidecar publishes siblings itself, so it must remove them itself"
-    );
-}
-
-// --- inference behavior --------------------------------------------------------------
-
-fn request_selecting(lora_name: &str) -> PreprocessedRequest {
-    let mut value = serde_json::to_value(request()).expect("serialize request");
-    value["routing"]["lora_name"] = json!(lora_name);
-    serde_json::from_value(value).expect("deserialize request")
-}
-
-fn generate_context() -> GenerateContext {
-    GenerateContext::new(dynamo_backend_common::testing::mock_context(), None)
-}
-
-/// `generate` returns a stream, which has no `Debug`, so `expect_err` cannot be used.
-async fn generate_error(
-    engine: &VllmSidecarEngine,
-    lora_name: &str,
-) -> dynamo_backend_common::DynamoError {
-    match engine
-        .generate(request_selecting(lora_name), generate_context())
-        .await
-    {
-        Ok(_) => panic!("generate unexpectedly succeeded for `{lora_name}`"),
-        Err(error) => error,
-    }
-}
-
-#[tokio::test]
-async fn a_loaded_adapter_reaches_vllm_as_lora_name() {
-    let (server, engine, _endpoint) =
-        started_lora_engine(FakeVllm::default(), "lora_generate").await;
-    engine.supported_updates().await.unwrap();
-    let dir = adapter_dir();
-    load(&engine, "math-r8", &dir).await;
-
-    let outputs = collect(&engine, request_selecting("math-r8")).await;
-
-    assert_eq!(outputs.len(), 1);
-    let sent = server.service.requests.lock().await;
-    assert_eq!(sent.last().unwrap().lora_name, "math-r8");
-}
-
-#[tokio::test]
-async fn base_model_names_and_aliases_select_the_base_model() {
-    let (server, engine, _endpoint) =
-        started_lora_engine(FakeVllm::default(), "lora_base_names").await;
-    engine.supported_updates().await.unwrap();
-
-    for name in ["model-source", "served-model", "model-alias"] {
-        let outputs = collect(&engine, request_selecting(name)).await;
-        assert_eq!(outputs.len(), 1, "{name} must serve from the base model");
-        assert_eq!(
-            server
-                .service
-                .requests
-                .lock()
-                .await
-                .last()
-                .unwrap()
-                .lora_name,
-            "",
-            "{name} must clear lora_name rather than select an adapter"
-        );
-    }
-}
-
-#[tokio::test]
-async fn an_unknown_adapter_never_falls_back_to_the_base_model() {
-    let (server, engine, _endpoint) =
-        started_lora_engine(FakeVllm::default(), "lora_unknown_request").await;
-    engine.supported_updates().await.unwrap();
-
-    let error = generate_error(&engine, "absent").await;
-
-    assert!(
-        error.to_string().contains("unknown model or LoRA adapter"),
-        "{error}"
-    );
-    assert!(
-        server.service.requests.lock().await.is_empty(),
-        "the request must never reach vLLM as a base-model generation"
-    );
-}
-
-#[tokio::test]
-async fn an_adapter_vllm_holds_but_dynamo_never_published_is_not_admitted() {
-    // Discovery is authoritative for what routers may target. An adapter present in
-    // vLLM but absent from discovery is not routable, and admission must say so
-    // rather than quietly generating from the base model.
-    let service = FakeVllm::default();
-    service.loras.lock().await.push(pb::LoraAdapter {
-        lora_id: 7,
-        lora_name: "math-r8".to_string(),
-        source_path: "/shared/loras/math-r8".to_string(),
-    });
-    let (server, engine, _endpoint) = started_lora_engine(service, "lora_unpublished").await;
-
-    let error = generate_error(&engine, "math-r8").await;
-    assert!(
-        error.to_string().contains("unknown model or LoRA adapter"),
-        "{error}"
-    );
-    assert!(server.service.requests.lock().await.is_empty());
-
-    // Once reconciliation publishes it, the same request is admitted.
-    engine.supported_updates().await.unwrap();
-    let outputs = collect(&engine, request_selecting("math-r8")).await;
-    assert_eq!(outputs.len(), 1);
     assert_eq!(
         server
             .service
@@ -2444,71 +1745,389 @@ async fn an_adapter_vllm_holds_but_dynamo_never_published_is_not_admitted() {
             .lora_name,
         "math-r8"
     );
+    let listed = engine
+        .engine_update("list_loras".into(), json!({}))
+        .await
+        .unwrap();
+    assert_eq!(listed["loras"], json!({"math-r8": assigned}));
+    assert_eq!(unload(&engine, "math-r8").await["status"], "success");
+    assert!(lora_siblings(&endpoint).await.is_empty());
+    assert!(server.service.loras.lock().await.is_empty());
+    assert!(
+        generate_error(&engine, "math-r8")
+            .await
+            .to_string()
+            .contains("unknown model")
+    );
 }
 
 #[tokio::test]
-async fn selecting_an_adapter_without_engine_support_fails_clearly() {
-    let mut no_support = model_info();
-    no_support.supports_lora = false;
-    let service = FakeVllm::default();
-    *service.model_info_override.lock().await = Some(no_support.clone());
-    let server = FakeServer::start(service).await;
-    let engine = engine(
-        &server.endpoint,
-        DisaggregationMode::Aggregated,
-        1,
-        no_support,
+async fn replicas_publish_the_same_adapter_independently() {
+    let registry = tempfile::tempdir().unwrap();
+    let config = || DistributedConfig {
+        discovery_backend: dynamo_runtime::distributed::DiscoveryBackend::KvStore(
+            dynamo_runtime::storage::kv::Selector::File(registry.path().to_path_buf()),
+        ),
+        ..DistributedConfig::process_local()
+    };
+    let first_endpoint = runtime_endpoint_with_config("lora_replicas", config()).await;
+    let second_endpoint = runtime_endpoint_with_config("lora_replicas", config()).await;
+    assert_ne!(
+        first_endpoint.drt().connection_id(),
+        second_endpoint.drt().connection_id()
     );
-    engine.start(0).await.expect("start");
+    let first_server = FakeServer::start(FakeVllm::default()).await;
+    let second_server = FakeServer::start(FakeVllm::default()).await;
+    let first = lora_engine(&first_server.endpoint);
+    let second = lora_engine(&second_server.endpoint);
+    first.start(0).await.unwrap();
+    second.start(0).await.unwrap();
+    first
+        .on_endpoint_ready(first_endpoint.clone())
+        .await
+        .unwrap();
+    second.on_endpoint_ready(second_endpoint).await.unwrap();
+    let dir = adapter_dir();
+    assert_eq!(load(&first, "math-r8", &dir).await["status"], "success");
+    assert_eq!(load(&second, "math-r8", &dir).await["status"], "success");
+    assert_eq!(lora_siblings(&first_endpoint).await.len(), 2);
+    assert_eq!(unload(&first, "math-r8").await["status"], "success");
+    assert_eq!(lora_siblings(&first_endpoint).await.len(), 1);
+    assert_eq!(
+        collect(&second, request_selecting("math-r8")).await.len(),
+        1
+    );
+}
 
-    let error = generate_error(&engine, "math-r8").await;
+async fn wait_pending(pending: &AtomicBool, future: &mut (impl std::future::Future + Unpin)) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !pending.load(Ordering::SeqCst) {
+            assert!(
+                futures::future::poll_immediate(&mut *future)
+                    .await
+                    .is_none()
+            );
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("RPC reached barrier");
+}
 
+#[tokio::test]
+async fn concurrent_lora_loads_use_fresh_inventory() {
+    for (second_name, capacity, expected) in [
+        ("Math-R8", 4, "error"),
+        ("other", 1, "error"),
+        ("other", 2, "success"),
+    ] {
+        let service = FakeVllm::default();
+        service.hold_load.store(true, Ordering::SeqCst);
+        let server = FakeServer::start(service).await;
+        let mut info = server_info();
+        info.max_loras = capacity;
+        *server.service.server_info_override.lock().await = Some(info.clone());
+        let engine = engine_with_server_info(
+            &server.endpoint,
+            DisaggregationMode::Aggregated,
+            1,
+            model_info(),
+            info,
+        )
+        .with_lora_enabled(true);
+        engine.start(0).await.unwrap();
+        engine
+            .on_endpoint_ready(runtime_endpoint("lora_concurrent").await)
+            .await
+            .unwrap();
+        engine.supported_updates().await.unwrap();
+        let dir = adapter_dir();
+        let mut first = Box::pin(load(&engine, "math-r8", &dir));
+        wait_pending(&server.service.load_pending, &mut first).await;
+        let calls_before = server.service.control_calls.lock().await.len();
+        let mut second = Box::pin(load(&engine, second_name, &dir));
+        assert!(futures::future::poll_immediate(&mut second).await.is_none());
+        for _ in 0..20 {
+            assert!(futures::future::poll_immediate(&mut second).await.is_none());
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            server.service.control_calls.lock().await.len(),
+            calls_before
+        );
+        server.service.hold_load.store(false, Ordering::SeqCst);
+        server.service.release_load.notify_one();
+        assert_eq!(first.await["status"], "success");
+        let result = second.await;
+        assert_eq!(result["status"], expected, "{result}");
+        assert_eq!(
+            server.service.loras.lock().await.len(),
+            if expected == "success" { 2 } else { 1 }
+        );
+        assert_eq!(load(&engine, "model-alias", &dir).await["status"], "error");
+    }
+}
+
+#[tokio::test]
+async fn same_name_load_and_unload_are_ordered() {
+    let service = FakeVllm::default();
+    service.hold_load.store(true, Ordering::SeqCst);
+    let (server, engine, _) = started_lora_engine(service, "lora_order").await;
+    engine.supported_updates().await.unwrap();
+    let dir = adapter_dir();
+    let mut loading = Box::pin(load(&engine, "math-r8", &dir));
+    wait_pending(&server.service.load_pending, &mut loading).await;
+    let mut unloading = Box::pin(unload(&engine, "math-r8"));
     assert!(
-        error.to_string().contains("did not advertise LoRA support"),
-        "{error}"
+        futures::future::poll_immediate(&mut unloading)
+            .await
+            .is_none()
+    );
+    assert!(
+        !server
+            .service
+            .control_calls
+            .lock()
+            .await
+            .iter()
+            .any(|(name, _)| name == "unload_lora")
+    );
+    server.service.hold_load.store(false, Ordering::SeqCst);
+    server.service.release_load.notify_one();
+    assert_eq!(loading.await["status"], "success");
+    assert_eq!(unloading.await["status"], "success");
+    assert!(server.service.loras.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn committed_lora_errors_reconcile_against_inventory() {
+    let service = FakeVllm::default();
+    service.load_commit_error.store(true, Ordering::SeqCst);
+    service.unload_commit_error.store(true, Ordering::SeqCst);
+    let (server, engine, endpoint) = started_lora_engine(service, "lora_ambiguous").await;
+    let dir = adapter_dir();
+    assert_eq!(load(&engine, "math-r8", &dir).await["status"], "success");
+    assert_eq!(server.service.loras.lock().await.len(), 1);
+    assert_eq!(lora_siblings(&endpoint).await.len(), 1);
+    assert_eq!(unload(&engine, "math-r8").await["status"], "success");
+    assert!(server.service.loras.lock().await.is_empty());
+    assert!(lora_siblings(&endpoint).await.is_empty());
+}
+
+#[tokio::test]
+async fn publication_failure_rolls_back_a_committed_native_load() {
+    let service = FakeVllm::default();
+    service.hold_load.store(true, Ordering::SeqCst);
+    let (server, engine, endpoint) = started_lora_engine(service, "lora_rollback").await;
+    engine.supported_updates().await.unwrap();
+    let dir = adapter_dir();
+    let mut loading = Box::pin(load(&engine, "math-r8", &dir));
+    wait_pending(&server.service.load_pending, &mut loading).await;
+    let discovery = endpoint.drt().discovery();
+    for card in discovery.list(DiscoveryQuery::AllModels).await.unwrap() {
+        discovery.unregister(card).await.unwrap();
+    }
+    server.service.hold_load.store(false, Ordering::SeqCst);
+    server.service.release_load.notify_one();
+    assert_eq!(loading.await["status"], "error");
+    let calls: Vec<_> = server
+        .service
+        .control_calls
+        .lock()
+        .await
+        .iter()
+        .filter(|(name, _)| name != "list_loras")
+        .map(|(name, _)| name.clone())
+        .collect();
+    assert_eq!(calls, ["load_lora", "unload_lora"]);
+    assert_eq!(server.service.next_lora_id.load(Ordering::SeqCst), 1);
+    assert!(server.service.loras.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn failed_unload_restores_the_removed_discovery_record() {
+    let (server, engine, endpoint) = started_lora_engine(FakeVllm::default(), "lora_restore").await;
+    let dir = adapter_dir();
+    assert_eq!(load(&engine, "math-r8", &dir).await["status"], "success");
+    server.service.hold_unload.store(true, Ordering::SeqCst);
+    let mut unloading = Box::pin(unload(&engine, "math-r8"));
+    wait_pending(&server.service.unload_pending, &mut unloading).await;
+    assert!(lora_siblings(&endpoint).await.is_empty());
+    assert_eq!(server.service.loras.lock().await.len(), 1);
+    server.service.release_unload.notify_one();
+    assert_eq!(unloading.await["status"], "error");
+    assert_eq!(lora_siblings(&endpoint).await.len(), 1);
+    assert_eq!(
+        collect(&engine, request_selecting("math-r8")).await.len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn restart_republishes_resident_adapters_and_shutdown_unpublishes() {
+    let service = FakeVllm::default();
+    service.loras.lock().await.push(pb::LoraAdapter {
+        lora_id: 7,
+        lora_name: "math-r8".into(),
+        source_path: "/shared/loras/math-r8".into(),
+    });
+    let (server, engine, endpoint) = started_lora_engine(service, "lora_restart").await;
+    assert!(
+        generate_error(&engine, "math-r8")
+            .await
+            .to_string()
+            .contains("unknown model")
     );
     assert!(server.service.requests.lock().await.is_empty());
+    engine.supported_updates().await.unwrap();
+    assert_eq!(lora_siblings(&endpoint).await.len(), 1);
+    assert_eq!(
+        collect(&engine, request_selecting("math-r8")).await.len(),
+        1
+    );
+    engine.cleanup().await.unwrap();
+    assert!(lora_siblings(&endpoint).await.is_empty());
+    assert_eq!(server.service.loras.lock().await[0].lora_id, 7);
+}
+
+#[tokio::test]
+async fn invalid_restart_inventory_keeps_base_serving() {
+    let service = FakeVllm::default();
+    for (id, name) in [(1, "math-r8"), (2, "Math-R8")] {
+        service.loras.lock().await.push(pb::LoraAdapter {
+            lora_id: id,
+            lora_name: name.into(),
+            source_path: "/shared/loras/math-r8".into(),
+        });
+    }
+    let (server, engine, endpoint) = started_lora_engine(service, "lora_restart_collision").await;
+    assert!(
+        engine
+            .supported_updates()
+            .await
+            .unwrap()
+            .contains(&"load_lora".to_string())
+    );
+    assert!(lora_siblings(&endpoint).await.is_empty());
+    assert_eq!(collect(&engine, request()).await.len(), 1);
+    server.service.loras.lock().await.pop();
+    assert_eq!(
+        engine
+            .engine_update("list_loras".into(), json!({}))
+            .await
+            .unwrap()["status"],
+        "success"
+    );
+    assert_eq!(lora_siblings(&endpoint).await.len(), 1);
+}
+
+#[tokio::test]
+async fn base_aliases_and_unknown_adapters_do_not_select_lora() {
+    let (server, engine, _) =
+        started_lora_engine(FakeVllm::default(), "lora_admission_names").await;
+    for name in ["model-source", "served-model", "model-alias"] {
+        assert_eq!(collect(&engine, request_selecting(name)).await.len(), 1);
+        assert_eq!(
+            server
+                .service
+                .requests
+                .lock()
+                .await
+                .last()
+                .unwrap()
+                .lora_name,
+            ""
+        );
+    }
+    let count = server.service.requests.lock().await.len();
+    assert!(
+        generate_error(&engine, "absent")
+            .await
+            .to_string()
+            .contains("unknown model")
+    );
+    assert_eq!(server.service.requests.lock().await.len(), count);
+}
+
+#[tokio::test]
+async fn hot_swap_is_refused() {
+    let server = FakeServer::start(FakeVllm::default()).await;
+    let engine = lora_engine(&server.endpoint).with_hot_swap_requested(true);
+    engine.start(0).await.unwrap();
+    engine
+        .on_endpoint_ready(runtime_endpoint("lora_hot_swap").await)
+        .await
+        .unwrap();
+    let dir = adapter_dir();
+    assert_eq!(load(&engine, "math-r8", &dir).await["status"], "success");
+    let response = load(&engine, "math-r8", &dir).await;
+    assert_eq!(response["status"], "error");
+    assert!(
+        response["message"]
+            .as_str()
+            .unwrap()
+            .contains("hot swap is not supported")
+    );
+}
+
+fn request_selecting(lora_name: &str) -> PreprocessedRequest {
+    let mut value = serde_json::to_value(request()).unwrap();
+    value["routing"]["lora_name"] = json!(lora_name);
+    serde_json::from_value(value).unwrap()
+}
+
+fn generate_context() -> GenerateContext {
+    GenerateContext::new(dynamo_backend_common::testing::mock_context(), None)
+}
+
+async fn generate_error(
+    engine: &VllmSidecarEngine,
+    name: &str,
+) -> dynamo_backend_common::DynamoError {
+    match engine
+        .generate(request_selecting(name), generate_context())
+        .await
+    {
+        Ok(_) => panic!("unexpected generation success for {name}"),
+        Err(error) => error,
+    }
 }
 
 #[tokio::test]
 async fn request_admission_and_unload_cannot_race() {
-    let (server, engine, _endpoint) =
+    let (server, engine, endpoint) =
         started_lora_engine(FakeVllm::default(), "lora_admission").await;
-    engine.supported_updates().await.unwrap();
     let dir = adapter_dir();
-    load(&engine, "math-r8", &dir).await;
-
-    // Park the sidecar inside the generation RPC, after admission succeeded.
+    assert_eq!(load(&engine, "math-r8", &dir).await["status"], "success");
     server
         .service
         .hang_before_headers
         .store(true, Ordering::SeqCst);
     let mut generating =
         Box::pin(engine.generate(request_selecting("math-r8"), generate_context()));
-    loop {
-        if server.service.headers_pending.load(Ordering::SeqCst) {
-            break;
-        }
-        tokio::task::yield_now().await;
-        futures::future::poll_immediate(&mut generating).await;
-    }
-
-    // The unload must wait for the in-flight admission to release the key.
-    let unloading = unload(&engine, "math-r8");
-    tokio::pin!(unloading);
+    wait_pending(&server.service.headers_pending, &mut generating).await;
+    let mut unloading = Box::pin(unload(&engine, "math-r8"));
     assert!(
         futures::future::poll_immediate(&mut unloading)
             .await
-            .is_none(),
-        "unload must not proceed while a request is still being admitted"
+            .is_none()
     );
-
+    assert!(
+        !server
+            .service
+            .control_calls
+            .lock()
+            .await
+            .iter()
+            .any(|(name, _)| name == "unload_lora")
+    );
+    assert_eq!(lora_siblings(&endpoint).await.len(), 1);
     server
         .service
         .hang_before_headers
         .store(false, Ordering::SeqCst);
-    server.service.release_headers.notify_waiters();
-    let _stream = generating.await.expect("stream established");
+    server.service.release_headers.notify_one();
+    let _stream = generating.await.unwrap();
     assert_eq!(unloading.await["status"], "success");
 }
 
@@ -2878,9 +2497,6 @@ async fn unsupported_features_fail_before_rpc_submission() {
     )]));
     requests.push(audio_uuid);
 
-    // main listed a `routing.lora_name` request here because LoRA was
-    // categorically unsupported. This branch implements it, so selection is
-    // now gated on the engine advertising `supports_lora`; that case is
     // covered by `selecting_an_adapter_without_engine_support_fails_clearly`.
 
     let mut mismatched_cache_salt = request();

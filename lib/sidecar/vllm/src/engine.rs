@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashSet;
-use std::path::PathBuf;
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
@@ -34,10 +33,7 @@ pub struct VllmSidecarEngine {
     runtime_endpoint: OnceCell<Endpoint>,
     lora_downloader: OnceCell<LoRADownloader>,
     lora_reconciled: OnceCell<()>,
-    /// Resolved once at construction: the operator opted in via `DYN_LORA_ENABLED`
-    /// and vLLM advertises adapter support with capacity for at least one.
     lora_enabled: bool,
-    /// Resolved once at construction from the legacy `DYN_LORA_HOTSWAP_ENABLED` flag.
     hot_swap_requested: bool,
     lifecycle: lora::LoraLifecycle,
     cancel: CancellationToken,
@@ -180,29 +176,22 @@ impl VllmSidecarEngine {
             .ok_or_else(|| client::engine_shutdown("vLLM sidecar runtime endpoint is not ready"))
     }
 
-    /// LoRA management is exposed only when the operator enabled it, vLLM
-    /// advertises adapter support, and the server reports capacity for at least
-    /// one adapter. `DiscoveredModel::supports_lora` already folds in
-    /// `max_loras > 0`.
     fn lora_enabled(&self) -> bool {
         self.lora_enabled
     }
 
-    /// Force the enablement gate, so tests do not depend on a process-global env var.
     #[cfg(test)]
     pub(crate) fn with_lora_enabled(mut self, enabled: bool) -> Self {
         self.lora_enabled = enabled && self.model.supports_lora();
         self
     }
 
-    /// Force the hot-swap request flag, so tests do not depend on a process-global env var.
     #[cfg(test)]
     pub(crate) fn with_hot_swap_requested(mut self, requested: bool) -> Self {
         self.hot_swap_requested = requested;
         self
     }
 
-    /// Read vLLM's authoritative inventory, validated and sorted by name.
     async fn native_inventory(&self) -> Result<Vec<pb::LoraAdapter>, DynamoError> {
         let adapters = self
             .started_client()?
@@ -212,10 +201,6 @@ impl VllmSidecarEngine {
         crate::lora::validate_inventory(adapters)
     }
 
-    /// The update names the RL weight-transfer surface contributes.
-    ///
-    /// Kept separate from [`Self::lora_updates`] so dispatch can check membership
-    /// without triggering LoRA restart reconciliation.
     fn rl_updates(&self) -> Vec<String> {
         let Some(capabilities) = self.model.rl_capabilities() else {
             return Vec::new();
@@ -235,11 +220,6 @@ impl VllmSidecarEngine {
         updates
     }
 
-    /// The update names the LoRA surface contributes, reconciling restart state first.
-    ///
-    /// Reconciliation is best effort: the worker calls this while bringing up its
-    /// update routes, and a transient `ListLoras` or discovery failure must not
-    /// stop the base model from serving.
     async fn lora_updates(&self) -> Vec<String> {
         if !self.lora_enabled() {
             return Vec::new();
@@ -258,7 +238,6 @@ impl VllmSidecarEngine {
         ]
     }
 
-    /// Dispatch one LoRA lifecycle update, returning the legacy JSON envelope.
     async fn lora_engine_update(&self, update: &str, body: Value) -> Result<Value, DynamoError> {
         let lora_name = body
             .get("lora_name")
@@ -270,8 +249,6 @@ impl VllmSidecarEngine {
                  server advertising LoRA support with max_loras > 0",
             ))
         } else {
-            // Reconciliation is retried here when startup could not complete it, so a
-            // transient failure at boot does not leave discovery permanently stale.
             if let Err(error) = self.reconcile_loaded_loras().await {
                 tracing::warn!(%error, "LoRA reconciliation is still failing; continuing with the requested operation");
             }
@@ -294,30 +271,21 @@ impl VllmSidecarEngine {
         })
     }
 
-    /// Republish discovery records for adapters vLLM already holds, and drop
-    /// Dynamo-only records for adapters it does not.
-    ///
-    /// Runs at most once per process; later lifecycle calls reconcile naturally.
     async fn reconcile_loaded_loras(&self) -> Result<(), DynamoError> {
         self.lora_reconciled
             .get_or_try_init(|| async {
+                let _update = self.lifecycle.updates.lock().await;
                 let endpoint = self.ready_endpoint()?;
                 let adapters = self.native_inventory().await?;
-                let mut records = Vec::with_capacity(adapters.len());
+                let mut records = std::collections::BTreeSet::new();
                 for adapter in &adapters {
-                    lora::publish_lora_model(endpoint, adapter, self.model.max_loras(), true)
+                    lora::publish_lora_model(endpoint, adapter, self.model.max_loras())
                         .await?;
-                    records.push(lora::LoraRecord {
-                        name: adapter.lora_name.clone(),
-                        id: adapter.lora_id,
-                        source_uri: adapter.source_path.clone(),
-                        path: PathBuf::from(&adapter.source_path),
-                        published: true,
-                    });
+                    records.insert(adapter.lora_name.clone());
+                    self.lifecycle.mark_published(&adapter.lora_name).await;
                 }
                 let stale = self.lifecycle.replace_published(records).await;
                 for name in stale {
-                    // Present in Dynamo but absent from vLLM: it must not stay routable.
                     if let Err(error) = lora::unpublish_lora_model(endpoint, &name).await {
                         tracing::warn!(%error, lora_name = %name, "failed to drop stale LoRA discovery record");
                     }
@@ -334,17 +302,14 @@ impl VllmSidecarEngine {
             .copied()
     }
 
-    /// Load one adapter, matching the legacy Python worker wherever the gRPC API allows.
     async fn load_lora(&self, body: &Value) -> Result<Value, DynamoError> {
         let request = parse_load_lora(body)?;
         let client = self.started_client()?;
         let endpoint = self.ready_endpoint()?;
+        let _update = self.lifecycle.updates.lock().await;
         let _guard = self.lifecycle.lock(&request.name).await;
 
-        // vLLM is authoritative for what is loaded.
         let loaded = self.native_inventory().await?;
-        // Validated against the live inventory so a name that collapses onto another
-        // adapter's discovery suffix is rejected before anything is mutated.
         lora::validate_adapter_name(
             &request.name,
             |name| self.model.is_base_model_name(name),
@@ -364,10 +329,7 @@ impl VllmSidecarEngine {
                     request.name
                 )));
             }
-            // Idempotent even when the caller supplied a different URI, matching the
-            // Python worker with hot swap disabled.
-            self.ensure_published(endpoint, existing, &request.uri)
-                .await?;
+            self.ensure_published(endpoint, existing).await?;
             tracing::info!(
                 lora_name = %existing.lora_name,
                 lora_id = existing.lora_id,
@@ -382,12 +344,12 @@ impl VllmSidecarEngine {
             }));
         }
 
-        // Held until this load finishes, so concurrent loads of other adapters
-        // cannot collectively overshoot `max_loras`.
-        let _slot = self
-            .lifecycle
-            .reserve(&request.name, loaded.len(), self.model.max_loras())
-            .await?;
+        if loaded.len() >= self.model.max_loras() as usize {
+            return Err(client::invalid_argument(format!(
+                "LoRA capacity exceeded: at most {} adapter(s) may be loaded",
+                self.model.max_loras()
+            )));
+        }
 
         let downloader = self
             .lora_downloader
@@ -404,8 +366,6 @@ impl VllmSidecarEngine {
             Ok(response) => self.expect_adapter(response.adapter, &request.name)?,
             Err(error) if error.is_definitive() => {
                 if error.code == tonic::Code::AlreadyExists {
-                    // Lost a race with another loader for this name; reconcile and
-                    // report the identity vLLM settled on.
                     let observed = self.find_loaded(&request.name).await?.ok_or_else(|| {
                         client::protocol_error(format!(
                             "LoadLora reported `{}` as already loaded but ListLoras does not \
@@ -413,8 +373,7 @@ impl VllmSidecarEngine {
                             request.name
                         ))
                     })?;
-                    self.ensure_published(endpoint, &observed, &request.uri)
-                        .await?;
+                    self.ensure_published(endpoint, &observed).await?;
                     return Ok(json!({
                         "status": "success",
                         "message": format!("LoRA adapter '{}' already loaded", observed.lora_name),
@@ -426,8 +385,6 @@ impl VllmSidecarEngine {
                 return Err(error.into_dynamo());
             }
             Err(error) => {
-                // Timed out, or vLLM returned an internal/unknown status: the load may
-                // still have committed, so let the inventory decide.
                 tracing::warn!(%error, lora_name = %request.name, "LoadLora outcome is ambiguous; reconciling");
                 match self.find_loaded(&request.name).await? {
                     Some(observed) if lora::paths_agree(&observed.source_path, &source_path) => {
@@ -446,24 +403,14 @@ impl VllmSidecarEngine {
         };
 
         if let Err(error) =
-            lora::publish_lora_model(endpoint, &adapter, self.model.max_loras(), false).await
+            lora::publish_lora_model(endpoint, &adapter, self.model.max_loras()).await
         {
-            // An adapter loaded into the GPU that no router can reach is worse than a
-            // failed load: undo it rather than leaking capacity.
             tracing::error!(%error, lora_name = %adapter.lora_name, "failed to publish LoRA discovery record; rolling back the native load");
             self.rollback_loaded_adapter(client, &adapter).await;
             self.lifecycle.forget(&adapter.lora_name).await;
             return Err(error);
         }
-        self.lifecycle
-            .mark_published(lora::LoraRecord {
-                name: adapter.lora_name.clone(),
-                id: adapter.lora_id,
-                source_uri: request.uri.clone(),
-                path: source_path,
-                published: true,
-            })
-            .await;
+        self.lifecycle.mark_published(&adapter.lora_name).await;
 
         tracing::info!(lora_name = %adapter.lora_name, lora_id = adapter.lora_id, "loaded LoRA adapter");
         Ok(json!({
@@ -475,11 +422,11 @@ impl VllmSidecarEngine {
         }))
     }
 
-    /// Unload one adapter, stopping new routed traffic before mutating vLLM.
     async fn unload_lora(&self, body: &Value) -> Result<Value, DynamoError> {
         let lora_name = parse_lora_name(body)?;
         let client = self.started_client()?;
         let endpoint = self.ready_endpoint()?;
+        let _update = self.lifecycle.updates.lock().await;
         let _guard = self.lifecycle.lock(&lora_name).await;
 
         let loaded = self.native_inventory().await?;
@@ -497,15 +444,13 @@ impl VllmSidecarEngine {
             )));
         };
 
-        // Stop advertising before touching vLLM, so no request can be routed to an
-        // adapter that is about to disappear.
+        // Stop routing new requests before unloading the adapter.
         lora::unpublish_lora_model(endpoint, &lora_name).await?;
-        let previous = self.lifecycle.forget(&lora_name).await;
+        self.lifecycle.forget(&lora_name).await;
 
         let removed = match client.unload_lora(lora_name.clone()).await {
             Ok(response) => self.expect_adapter(response.adapter, &lora_name)?,
             Err(error) if error.is_definitive() && error.code == tonic::Code::NotFound => {
-                // Already gone; the unload is what the caller wanted.
                 existing.clone()
             }
             Err(error) => {
@@ -518,12 +463,9 @@ impl VllmSidecarEngine {
                 };
                 match still_loaded {
                     Some(observed) => {
-                        // vLLM kept it, so it must stay routable.
-                        self.restore_unloaded_adapter(endpoint, &observed, previous)
-                            .await;
+                        self.restore_unloaded_adapter(endpoint, &observed).await;
                         return Err(error.into_dynamo());
                     }
-                    // It disappeared despite the error: treat the unload as committed.
                     None => existing.clone(),
                 }
             }
@@ -538,7 +480,6 @@ impl VllmSidecarEngine {
         }))
     }
 
-    /// Report vLLM's inventory as a deterministic name-to-ID map.
     async fn list_loras(&self) -> Result<Value, DynamoError> {
         let adapters = self.native_inventory().await?;
         let loras: Map<String, Value> = adapters
@@ -552,11 +493,6 @@ impl VllmSidecarEngine {
         }))
     }
 
-    /// Hold the adapter's admission lock until the generation stream is established.
-    ///
-    /// The upstream server resolves the adapter before it starts generating, so once
-    /// the streaming RPC is accepted an unload can no longer strand this request. The
-    /// guard is returned to the caller so it drops with that borrow, not earlier.
     async fn admit_lora_request(&self, lora_name: &str) -> Result<lora::LoraGuard, DynamoError> {
         if !self.model.supports_lora() {
             return Err(client::invalid_argument(format!(
@@ -564,12 +500,8 @@ impl VllmSidecarEngine {
                  advertise LoRA support"
             )));
         }
+        // Hold admission until vLLM resolves the adapter for the request.
         let guard = self.lifecycle.lock(lora_name).await;
-        // Checked against Dynamo's own published set rather than a `ListLoras` call:
-        // discovery is what routers act on, and admission is on the request path, so a
-        // control-plane round trip per request would be pure added latency. vLLM
-        // independently rejects names it has not loaded, so a stale record cannot turn
-        // into a silent base-model generation.
         if !self.lifecycle.is_published(lora_name).await {
             return Err(client::invalid_argument(format!(
                 "unknown model or LoRA adapter: '{lora_name}'"
@@ -611,28 +543,16 @@ impl VllmSidecarEngine {
         Ok(adapter)
     }
 
-    /// Republish an adapter vLLM already holds, so an idempotent load still leaves
-    /// discovery consistent.
     async fn ensure_published(
         &self,
         endpoint: &Endpoint,
         adapter: &pb::LoraAdapter,
-        source_uri: &str,
     ) -> Result<(), DynamoError> {
-        lora::publish_lora_model(endpoint, adapter, self.model.max_loras(), true).await?;
-        self.lifecycle
-            .mark_published(lora::LoraRecord {
-                name: adapter.lora_name.clone(),
-                id: adapter.lora_id,
-                source_uri: source_uri.to_string(),
-                path: PathBuf::from(&adapter.source_path),
-                published: true,
-            })
-            .await;
+        lora::publish_lora_model(endpoint, adapter, self.model.max_loras()).await?;
+        self.lifecycle.mark_published(&adapter.lora_name).await;
         Ok(())
     }
 
-    /// Best-effort removal of an adapter whose discovery publication failed.
     async fn rollback_loaded_adapter(&self, client: &VllmClient, adapter: &pb::LoraAdapter) {
         match client.unload_lora(adapter.lora_name.clone()).await {
             Ok(_) => tracing::info!(
@@ -647,24 +567,10 @@ impl VllmSidecarEngine {
         }
     }
 
-    /// Best-effort restoration of discovery after an unload that did not commit.
-    async fn restore_unloaded_adapter(
-        &self,
-        endpoint: &Endpoint,
-        adapter: &pb::LoraAdapter,
-        previous: Option<lora::LoraRecord>,
-    ) {
-        match lora::publish_lora_model(endpoint, adapter, self.model.max_loras(), true).await {
+    async fn restore_unloaded_adapter(&self, endpoint: &Endpoint, adapter: &pb::LoraAdapter) {
+        match lora::publish_lora_model(endpoint, adapter, self.model.max_loras()).await {
             Ok(()) => {
-                self.lifecycle
-                    .mark_published(previous.unwrap_or_else(|| lora::LoraRecord {
-                        name: adapter.lora_name.clone(),
-                        id: adapter.lora_id,
-                        source_uri: adapter.source_path.clone(),
-                        path: PathBuf::from(&adapter.source_path),
-                        published: true,
-                    }))
-                    .await;
+                self.lifecycle.mark_published(&adapter.lora_name).await;
                 tracing::info!(
                     lora_name = %adapter.lora_name,
                     "restored the LoRA discovery record after a failed unload"
@@ -678,8 +584,8 @@ impl VllmSidecarEngine {
         }
     }
 
-    /// Drop every sibling record this sidecar published.
     async fn unpublish_all_loras(&self) {
+        let _update = self.lifecycle.updates.lock().await;
         let Ok(endpoint) = self.ready_endpoint() else {
             return;
         };
@@ -1317,10 +1223,6 @@ fn bootstrap_discover(
     })
 }
 
-/// True when the deployment asked for hot swap through the legacy Python env var.
-///
-/// The gRPC control surface cannot honor it, so this only exists to produce a clear
-/// error instead of silently loading with different semantics.
 fn hot_swap_requested() -> bool {
     dynamo_runtime::config::env_is_truthy("DYN_LORA_HOTSWAP_ENABLED")
 }

@@ -72,9 +72,14 @@ control surface does not expose the primitives they need:
 
 Custom Python-only LoRA source schemes are not available in the sidecar implementation.
 
-Runnable examples: [`launch/agg_lora.sh`](launch/agg_lora.sh) and
-[`launch/disagg_lora.sh`](launch/disagg_lora.sh). Both require a vLLM build containing
+LoRA lifecycle mutations are serialized per worker, including source resolution. Requests
+using other loaded adapters can continue during a load or unload. Multiple workers can
+publish the same adapter independently.
+
+LoRA requires a vLLM build containing
 [vllm-project/vllm#52840](https://github.com/vllm-project/vllm/pull/52840).
+NIXL prefill/decode also requires the gRPC numeric-conversion fix in
+[vllm-project/vllm#54814](https://github.com/vllm-project/vllm/pull/54814).
 
 ## Run
 

@@ -232,16 +232,9 @@ pub(crate) fn protocol_error(message: impl Into<String>) -> DynamoError {
     dynamo_sidecar_common::protocol_error("vLLM", message)
 }
 
-/// Bounded deadline applied to every LoRA lifecycle RPC.
-///
-/// `GrpcTransportConfig` only bounds connection startup, so without this a stalled
-/// vLLM server would hold an adapter's lifecycle lock forever.
+// Bound how long a stalled RPC can hold the lifecycle lock.
 pub(crate) const LORA_RPC_DEADLINE: Duration = Duration::from_secs(60);
 
-/// A failed LoRA lifecycle RPC, retaining the native gRPC status.
-///
-/// Dynamo needs the raw code to decide whether the call definitively failed or
-/// may have committed on the vLLM side and therefore requires reconciliation.
 #[derive(Debug, Clone)]
 pub(crate) struct LoraRpcError {
     pub(crate) rpc: &'static str,
@@ -250,10 +243,7 @@ pub(crate) struct LoraRpcError {
 }
 
 impl LoraRpcError {
-    /// True when vLLM gave a definitive answer, so its state is known.
-    ///
-    /// Anything else (internal errors, timeouts, a dropped connection) may have
-    /// committed before failing and must be reconciled against `ListLoras`.
+    // Other errors may follow a committed mutation; reconcile them with ListLoras.
     pub(crate) fn is_definitive(&self) -> bool {
         matches!(
             self.code,
@@ -275,7 +265,6 @@ impl std::fmt::Display for LoraRpcError {
     }
 }
 
-/// Drive one LoRA lifecycle RPC under [`LORA_RPC_DEADLINE`].
 async fn lora_rpc<T>(
     rpc: &'static str,
     call: impl Future<Output = Result<tonic::Response<T>, tonic::Status>>,

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -20,7 +20,6 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 use crate::client;
 use crate::proto as pb;
 
-/// Engine-update names that address the LoRA lifecycle surface.
 pub(crate) const LOAD_LORA: &str = "load_lora";
 pub(crate) const UNLOAD_LORA: &str = "unload_lora";
 pub(crate) const LIST_LORAS: &str = "list_loras";
@@ -29,155 +28,54 @@ pub(crate) fn is_lora_update(update: &str) -> bool {
     matches!(update, LOAD_LORA | UNLOAD_LORA | LIST_LORAS)
 }
 
-/// Discovery reserves this suffix for the base-model sibling of a LoRA worker set.
 const RESERVED_BASE_SUFFIX: &str = "_base";
 
-/// Dynamo's view of one adapter.
-///
-/// vLLM owns whether the adapter is loaded and what its ID is; this record exists so
-/// Dynamo can tie the server-assigned identity back to the source the caller asked for
-/// and to the discovery record that makes the adapter routable.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LoraRecord {
-    /// Public adapter name. The lifecycle key.
-    pub(crate) name: String,
-    /// Server-assigned, opaque. Never generated or inferred by Dynamo.
-    pub(crate) id: i64,
-    /// The URI the caller supplied.
-    pub(crate) source_uri: String,
-    /// Canonical local directory both Dynamo and vLLM resolve the adapter through.
-    pub(crate) path: PathBuf,
-    /// Whether Dynamo published the sibling discovery record.
-    pub(crate) published: bool,
-}
-
-/// Held for the lifetime of one lifecycle operation or request admission on a
-/// single adapter name.
 pub(crate) type LoraGuard = OwnedMutexGuard<()>;
 
-/// An in-flight capacity reservation, released when the load finishes.
-///
-/// The slot only covers the window between the capacity check and vLLM accepting
-/// the adapter. Once `LoadLora` returns, the adapter appears in `ListLoras` and is
-/// counted there instead, so holding the reservation any longer would double-count it.
-pub(crate) struct CapacitySlot {
-    name: String,
-    reservations: Arc<Mutex<HashSet<String>>>,
-}
-
-impl Drop for CapacitySlot {
-    fn drop(&mut self) {
-        let name = std::mem::take(&mut self.name);
-        let reservations = self.reservations.clone();
-        // `try_lock` succeeds in the common case: the map is only ever held across
-        // non-awaiting critical sections. Falling back to a task keeps `Drop` sync.
-        if let Ok(mut guard) = reservations.try_lock() {
-            guard.remove(&name);
-            return;
-        }
-        tokio::spawn(async move {
-            reservations.lock().await.remove(&name);
-        });
-    }
-}
-
-/// Dynamo-side LoRA lifecycle state.
-///
-/// Concurrency is deliberately split so that unrelated adapters never serialize
-/// against each other:
-///
-/// - a keyed lock per adapter name orders load, unload, and request admission for
-///   that one name;
-/// - a short-lived global guard makes the capacity check and reservation atomic
-///   across different names, and is never held across a download or an RPC.
 #[derive(Default)]
 pub(crate) struct LoraLifecycle {
+    // Serialize inventory checks through native mutation and discovery publication.
+    pub(crate) updates: Mutex<()>,
     locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
-    capacity_guard: Mutex<()>,
-    reservations: Arc<Mutex<HashSet<String>>>,
-    published: Mutex<BTreeMap<String, LoraRecord>>,
+    published: Mutex<BTreeSet<String>>,
 }
 
 impl LoraLifecycle {
-    /// Acquire the per-adapter lock, serializing operations on `name` alone.
     pub(crate) async fn lock(&self, name: &str) -> LoraGuard {
-        let lock = {
-            let mut locks = self.locks.lock().await;
-            // Stripes are intentionally retained rather than evicted on unload:
-            // dropping one could separate a waiting request from a later
-            // lifecycle operation on the same name.
-            locks.entry(name.to_string()).or_default().clone()
-        };
+        let lock = self
+            .locks
+            .lock()
+            .await
+            .entry(name.to_string())
+            .or_default()
+            .clone();
         lock.lock_owned().await
     }
 
-    /// Reserve one GPU adapter slot, counting adapters vLLM already holds plus
-    /// loads that are still in flight.
-    ///
-    /// The guard is released before the caller downloads or calls `LoadLora`, so
-    /// concurrent loads of different adapters overlap.
-    pub(crate) async fn reserve(
-        &self,
-        name: &str,
-        loaded: usize,
-        max_loras: u32,
-    ) -> Result<CapacitySlot, DynamoError> {
-        let _guard = self.capacity_guard.lock().await;
-        let mut reservations = self.reservations.lock().await;
-        let in_flight = reservations.iter().filter(|held| *held != name).count();
-        if loaded + in_flight >= max_loras as usize {
-            return Err(client::invalid_argument(format!(
-                "LoRA capacity exceeded: at most {max_loras} adapter(s) may be loaded"
-            )));
-        }
-        reservations.insert(name.to_string());
-        Ok(CapacitySlot {
-            name: name.to_string(),
-            reservations: self.reservations.clone(),
-        })
+    pub(crate) async fn mark_published(&self, name: &str) {
+        self.published.lock().await.insert(name.to_string());
     }
 
-    pub(crate) async fn mark_published(&self, record: LoraRecord) {
-        self.published
-            .lock()
-            .await
-            .insert(record.name.clone(), record);
+    pub(crate) async fn forget(&self, name: &str) {
+        self.published.lock().await.remove(name);
     }
 
-    pub(crate) async fn forget(&self, name: &str) -> Option<LoraRecord> {
-        self.published.lock().await.remove(name)
-    }
-
-    /// Whether Dynamo currently advertises `name` as routable.
     pub(crate) async fn is_published(&self, name: &str) -> bool {
-        self.published.lock().await.contains_key(name)
+        self.published.lock().await.contains(name)
     }
 
-    /// Names Dynamo believes it has published, for shutdown cleanup.
     pub(crate) async fn published_names(&self) -> Vec<String> {
-        self.published.lock().await.keys().cloned().collect()
+        self.published.lock().await.iter().cloned().collect()
     }
 
-    /// Replace the published set with `records`, returning names that were
-    /// tracked before but are absent now (stale Dynamo-only records).
-    pub(crate) async fn replace_published(&self, records: Vec<LoraRecord>) -> Vec<String> {
+    pub(crate) async fn replace_published(&self, fresh: BTreeSet<String>) -> Vec<String> {
         let mut published = self.published.lock().await;
-        let fresh: BTreeMap<String, LoraRecord> = records
-            .into_iter()
-            .map(|record| (record.name.clone(), record))
-            .collect();
-        let stale = published
-            .keys()
-            .filter(|name| !fresh.contains_key(*name))
-            .cloned()
-            .collect();
+        let stale = published.difference(&fresh).cloned().collect();
         *published = fresh;
         stale
     }
 }
 
-/// Reject adapter names that would collide with the base model or with discovery's
-/// own naming, before any state is mutated.
 pub(crate) fn validate_adapter_name(
     name: &str,
     is_base_model_name: impl Fn(&str) -> bool,
@@ -188,18 +86,11 @@ pub(crate) fn validate_adapter_name(
             "LoRA adapter `{name}` conflicts with the base model name or one of its aliases"
         )));
     }
-    // Discovery keys on the *derived* suffix, not the raw name, so every check below
-    // has to be made on the suffix. `Slug::slugify` lowercases and rewrites anything
-    // outside [a-z0-9-_] to `-`, which means distinct adapter names routinely collapse
-    // onto one key: `Math-R8` and `math.r8` both become `math-r8`.
     let Some(suffix) = derive_lora_suffix(Some(name)).filter(|suffix| !suffix.is_empty()) else {
         return Err(client::invalid_argument(format!(
             "LoRA adapter `{name}` does not produce a usable discovery suffix"
         )));
     };
-    // Defense in depth: `Slug` trims leading underscores, so a slug of exactly `_base`
-    // is not currently reachable. The sentinel is upstream's, and this keeps the
-    // invariant local if that ever changes.
     if suffix == RESERVED_BASE_SUFFIX {
         return Err(client::invalid_argument(format!(
             "LoRA adapter `{name}` derives the reserved `{RESERVED_BASE_SUFFIX}` discovery \
@@ -220,10 +111,6 @@ pub(crate) fn validate_adapter_name(
     Ok(())
 }
 
-/// Validate one `ListLoras` inventory and return it sorted by name.
-///
-/// vLLM is authoritative for what is loaded, but Dynamo still refuses to build
-/// routing state out of an inventory that cannot be keyed unambiguously.
 pub(crate) fn validate_inventory(
     adapters: Vec<pb::LoraAdapter>,
 ) -> Result<Vec<pb::LoraAdapter>, DynamoError> {
@@ -260,8 +147,6 @@ pub(crate) fn validate_inventory(
                 adapter.lora_id
             )));
         }
-        // Distinct names can still collapse onto one discovery key, which would make
-        // reconciliation publish two adapters over the same sibling record.
         let Some(suffix) =
             derive_lora_suffix(Some(&adapter.lora_name)).filter(|suffix| !suffix.is_empty())
         else {
@@ -283,11 +168,6 @@ pub(crate) fn validate_inventory(
     Ok(adapters)
 }
 
-/// Compare a path reported by vLLM against the directory Dynamo resolved.
-///
-/// Both sides must see the adapter at the same absolute path through their shared
-/// mount, so a mismatch means the deployment is misconfigured or the name was
-/// loaded from somewhere else.
 pub(crate) fn paths_agree(reported: &str, resolved: &Path) -> bool {
     Path::new(reported) == resolved
 }
@@ -339,9 +219,6 @@ pub(crate) fn build_downloader() -> Result<LoRADownloader, DynamoError> {
         Arc::new(LocalLoRASource::new()),
         Arc::new(HuggingFaceLoRASource::from_env()),
     ];
-    // `S3LoRASource::from_env` became infallible in #13844: it defers endpoint and
-    // credential resolution to a `OnceCell` so a missing S3 configuration surfaces
-    // when an `s3://` source is actually resolved, not at construction.
     sources.push(Arc::new(S3LoRASource::from_env()));
     let cache = LoRACache::from_env()
         .map_err(|error| client::invalid_argument(format!("invalid LoRA cache: {error}")))?;
@@ -352,8 +229,6 @@ pub(crate) async fn resolve_source_path(
     downloader: &LoRADownloader,
     uri: &str,
 ) -> Result<PathBuf, DynamoError> {
-    // The URI itself was already validated by `parse_load_lora`, so a failure here is
-    // a download or storage fault rather than bad caller input.
     let downloaded = downloader.download_if_needed(uri).await.map_err(|error| {
         client::protocol_error(format!("failed to resolve LoRA source `{uri}`: {error}"))
     })?;
@@ -380,15 +255,10 @@ pub(crate) async fn resolve_source_path(
     Ok(canonical)
 }
 
-/// Publish the sibling record, failing if another instance already advertises the name.
-///
-/// `allow_existing` is set during restart reconciliation and idempotent loads, where
-/// re-publishing our own record is the intended outcome.
 pub(crate) async fn publish_lora_model(
     endpoint: &Endpoint,
     adapter: &pb::LoraAdapter,
     max_loras: u32,
-    allow_existing: bool,
 ) -> Result<(), DynamoError> {
     let discovery = endpoint.drt().discovery();
     let discovery = discovery.as_ref();
@@ -409,22 +279,22 @@ pub(crate) async fn publish_lora_model(
             client::protocol_error(format!("failed to query base model discovery: {error}"))
         })?;
     let suffix = derive_lora_suffix(Some(&adapter.lora_name));
-    if !allow_existing {
-        let collision = models.iter().any(|instance| {
-            matches!(
-                instance,
-                DiscoveryInstance::Model {
-                    instance_id: candidate_id,
-                    model_suffix,
-                    ..
-                } if *model_suffix == suffix && *candidate_id != instance_id
-            )
-        });
-        if collision {
-            return Err(client::invalid_argument(format!(
-                "LoRA adapter `{}` collides with an existing discovery record",
-                adapter.lora_name
-            )));
+    for instance in &models {
+        if matches!(instance, DiscoveryInstance::Model {
+            instance_id: candidate_id, model_suffix, ..
+        } if *candidate_id == instance_id && *model_suffix == suffix)
+        {
+            let card = instance
+                .deserialize_model::<ModelDeploymentCard>()
+                .map_err(|error| {
+                    client::protocol_error(format!("invalid LoRA model card: {error}"))
+                })?;
+            if card.name() != adapter.lora_name {
+                return Err(client::invalid_argument(format!(
+                    "LoRA adapter `{}` collides with an existing discovery record",
+                    adapter.lora_name
+                )));
+            }
         }
     }
     let base = models
@@ -440,11 +310,6 @@ pub(crate) async fn publish_lora_model(
             )
         })
         .ok_or_else(|| client::protocol_error("base model is not registered in discovery"))?;
-    // Derive the sibling from the base card so the routing topology carries over
-    // verbatim: model and worker type, prefill/decode `needs`, the data-parallel rank
-    // range, router hints, context length and token budget, KV-event configuration,
-    // tool and reasoning parsers, and any encoder dependency. Only the adapter-specific
-    // fields below may differ.
     let mut card = base
         .deserialize_model::<ModelDeploymentCard>()
         .map_err(|error| client::protocol_error(format!("invalid base model card: {error}")))?;
@@ -475,7 +340,6 @@ pub(crate) async fn publish_lora_model(
     Ok(())
 }
 
-/// Remove the sibling record for `lora_name`, reporting whether one existed.
 pub(crate) async fn unpublish_lora_model(
     endpoint: &Endpoint,
     lora_name: &str,
