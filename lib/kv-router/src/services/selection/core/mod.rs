@@ -58,6 +58,7 @@ use super::types::{
 };
 use crate::WorkerSelectionPolicyFactory;
 use crate::WorkerType;
+use crate::indexer::KvRouterError;
 use crate::services::common::replica_sync::AffinityBindingEvent;
 
 /// The scheduler type every partition runs.
@@ -1782,7 +1783,12 @@ impl SelectionCore {
                         },
                     )
                     .await
-                    .map_err(|error| SelectionError::Internal(error.to_string()))
+                    .map_err(|error| match error {
+                        KvRouterError::IndexerOffline => {
+                            SelectionError::NotReady(error.to_string())
+                        }
+                        other => SelectionError::Internal(other.to_string()),
+                    })
             }
         };
         let shared_cache = query_shared_cache
@@ -2267,6 +2273,40 @@ mod tests {
         })
         .await;
         assert_eq!(credited.worker_id, 1);
+    }
+
+    #[tokio::test]
+    async fn unreachable_remote_indexer_is_reported_not_ready() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let base_url = format!("http://{}", listener.local_addr().expect("addr"));
+        drop(listener);
+        let config = test_config(true);
+        let tracking_hash = Arc::new(
+            TrackingHashContext::from_config(&config).expect("valid tracking hash configuration"),
+        );
+        let indexer_policy = IndexerPolicy::from_router_config(&config)
+            .expect("indexer policy")
+            .with_remote_indexer(base_url)
+            .expect("remote policy");
+        let core = SelectionCore::new_inner(
+            config,
+            1,
+            CancellationToken::new(),
+            None,
+            None,
+            SelectionHost::default(),
+            WorkerType::Aggregated,
+            true,
+            SelectionCacheConfig::default(),
+            tracking_hash,
+            indexer_policy,
+            None,
+        );
+        core.upsert_worker(worker(1)).await.expect("worker upsert");
+        assert!(matches!(
+            core.select(select_request()).await,
+            Err(SelectionError::NotReady(_))
+        ));
     }
 
     #[tokio::test]

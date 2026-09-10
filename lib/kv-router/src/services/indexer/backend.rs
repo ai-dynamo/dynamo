@@ -59,6 +59,8 @@ impl Eq for RemoteIndexerTransport {}
 
 impl RemoteIndexerTransport {
     pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+    /// A blackholed indexer fails fast instead of consuming the whole request budget.
+    const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
     pub fn new(base_url: impl Into<String>) -> Result<Self> {
         Self::new_with_timeout(base_url, Self::DEFAULT_TIMEOUT)
@@ -70,6 +72,7 @@ impl RemoteIndexerTransport {
             anyhow::bail!("remote indexer URL must start with http:// or https://: {base_url}");
         }
         let client = reqwest::Client::builder()
+            .connect_timeout(Self::CONNECT_TIMEOUT.min(timeout))
             .timeout(timeout)
             .build()
             .context("failed to build remote indexer HTTP client")?;
@@ -131,12 +134,24 @@ impl RemoteIndexerClient {
             .send()
             .await
             .map_err(|error| {
-                tracing::warn!(%error, url, "Remote indexer query failed");
+                tracing::warn!(
+                    %error,
+                    url,
+                    is_timeout = error.is_timeout(),
+                    is_connect = error.is_connect(),
+                    "Remote indexer query failed"
+                );
                 KvRouterError::IndexerOffline
             })?;
         let status = response.status();
         if !status.is_success() {
-            tracing::warn!(%status, url, "Remote indexer query returned an error status");
+            tracing::warn!(
+                %status,
+                url,
+                model_name = %self.key.model_name,
+                routing_group = %self.key.routing_group,
+                "Remote indexer query returned an error status"
+            );
             return Err(KvRouterError::IndexerOffline);
         }
         let body: TieredQueryResponse = response.json().await.map_err(|error| {
