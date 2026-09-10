@@ -41,10 +41,14 @@ Review the proposed change for runtime defects. Read the diff and surrounding co
 
 ## Performance
 
-7. Check performance changes against all supported callers of the changed helper. Buffer reuse
-   can increase allocations for one-frame responses or for callers that still require an owned
-   vector. A conversion that returns a copy is not a no-op merely because the input already has
-   the requested format.
+7. Inspect performance impact on inference request and response paths using the implementation
+   and any supplied calculations or measurements. If more evidence is needed to establish a
+   suspected regression, ask the PR author for the relevant calculations or measurements;
+   do not undertake inference benchmarking during review. Check performance changes against
+   all supported callers of the changed helper.
+   Buffer reuse can increase allocations for one-frame responses or for callers that still
+   require an owned vector. A conversion that returns a copy is not a no-op merely because the
+   input already has the requested format.
 
 8. Look for new per-request allocations, locks, clock reads, or scans whose concrete cost follows
    from the implementation, especially when state could instead be updated when discovery
@@ -75,7 +79,7 @@ Review the proposed change for runtime defects. Read the diff and surrounding co
     addresses, and confirm the documented behavior of the pinned HTTP library before reporting a
     bypass or regression.
 
-## Telemetry
+## Runtime observability
 
 14. For runtime telemetry changes, verify that metric-family metadata is committed only when the
     corresponding family is accepted, and that rejected duplicates cannot change a surviving
@@ -85,6 +89,13 @@ Review the proposed change for runtime defects. Read the diff and surrounding co
     only when a future is polled does not reparent an already-created child. Report demonstrably
     incorrect classification, exported data, or parentage, rather than requesting additional
     instrumentation that the pull request explicitly defers.
+
+## Test evidence
+
+16. Verify that added or changed tests exercise the functionality being changed and can
+    distinguish the relevant regression. Prefer the smallest set of cases that preserves
+    distinct supported outcomes; before recommending consolidation, identify the retained test
+    and the behavior it still covers.
 
 ## Reporting findings
 
