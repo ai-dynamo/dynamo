@@ -115,16 +115,17 @@ Volcano:
 ` }}
 {{- end }}
 
-{{- $groveEnabled := or
-  (and .Values.global .Values.global.grove .Values.global.grove.enabled)
-  (and .Values.global .Values.global.grove .Values.global.grove.install)
+{{- $groveInstalled := and
+  .Values.global
+  .Values.global.grove
+  .Values.global.grove.install
 }}
 {{- $kaiInstalled := and
   .Values.global
   (index .Values.global "kai-scheduler")
   (index .Values.global "kai-scheduler").install
 }}
-{{- if and $groveEnabled $kaiInstalled }}
+{{- if and $groveInstalled $kaiInstalled }}
   {{- $kaiValues := default (dict) (index .Values "kai-scheduler") }}
   {{- $schedulerValues := default (dict) (index $kaiValues "scheduler") }}
   {{- $schedulerArgs := default (dict) (index $schedulerValues "args") }}
