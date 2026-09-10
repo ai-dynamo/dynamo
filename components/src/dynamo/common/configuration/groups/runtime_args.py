@@ -560,14 +560,14 @@ class DynamoRuntimeArgGroup(ArgGroup):
 
 
 def resolve_structural_tag_config(
-    runtime_config: object,
+    runtime_config: DynamoRuntimeConfig,
 ) -> Optional[dict[str, object]]:
     """Normalize the public setting and hidden legacy flags."""
 
-    structural_tag_setting = getattr(runtime_config, "dyn_structural_tag", None)
-    legacy_enable = getattr(runtime_config, "dyn_enable_structural_tag", None)
-    legacy_scope = getattr(runtime_config, "dyn_structural_tag_scope", None)
-    legacy_schema = getattr(runtime_config, "dyn_structural_tag_schema", None)
+    structural_tag_setting = runtime_config.dyn_structural_tag
+    legacy_enable = runtime_config.dyn_enable_structural_tag
+    legacy_scope = runtime_config.dyn_structural_tag_scope
+    legacy_schema = runtime_config.dyn_structural_tag_schema
 
     legacy_options = []
     if legacy_enable is not None:
