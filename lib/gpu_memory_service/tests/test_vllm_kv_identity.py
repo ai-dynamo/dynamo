@@ -70,6 +70,38 @@ def test_model_identity_includes_resolved_model_revision():
     assert identity == f"model=org/model\0artifact={commit}\0quantization=fp8"
 
 
+def test_model_identity_uses_hf_snapshot_directory_commit(monkeypatch):
+    monkeypatch.delenv("GMS_VLLM_MODEL_ARTIFACT_DIGEST", raising=False)
+    commit = "c" * 40
+    model = f"/hf/hub/models--org--model/snapshots/{commit}"
+    identity = install_vmm_ipc_kv._model_identity(
+        SimpleNamespace(
+            model=model,
+            revision=None,
+            code_revision=None,
+            hf_config=SimpleNamespace(),
+        )
+    )
+
+    assert identity == f"model={model}\0artifact={commit}"
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        f"/models/snapshots/{'c' * 40}",
+        f"/hf/hub/models--org--model/snapshots/{'c' * 39}",
+        "/hf/hub/models--org--model/snapshots/main",
+    ],
+)
+def test_model_identity_ignores_paths_that_are_not_hf_snapshots(monkeypatch, model):
+    monkeypatch.delenv("GMS_VLLM_MODEL_ARTIFACT_DIGEST", raising=False)
+    with pytest.raises(RuntimeError, match="immutable resolved model revision"):
+        install_vmm_ipc_kv._model_identity(
+            SimpleNamespace(model=model, revision=None, hf_config=SimpleNamespace())
+        )
+
+
 def test_model_identity_accepts_explicit_artifact_digest(monkeypatch):
     monkeypatch.setenv("GMS_VLLM_MODEL_ARTIFACT_DIGEST", "image-sha256:abc")
     identity = install_vmm_ipc_kv._model_identity(
