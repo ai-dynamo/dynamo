@@ -28,12 +28,13 @@ pub use crate::services::common::replica_sync::{
     ScopedSequencePublisher,
 };
 pub use core::{
-    HostCache, HostEligibility, HostLoad, HostReplication, HostTelemetry, KvIndexSource,
-    SelectionCore, SelectionHost, SelectionPartition, SelectionScheduler, SelectionServiceConfig,
+    HostCache, HostEligibility, HostLoad, HostReplication, HostTelemetry, KvIndexSource, Selected,
+    SelectionAdmission, SelectionCore, SelectionHost, SelectionOperation, SelectionOutcome,
+    SelectionPartition, SelectionScheduler, SelectionServiceConfig, SessionBinding,
 };
 pub use error::SelectionError;
 pub use ingress::{KvEventIngress, ZmqDirectIngress};
-pub use input::PromptRequest;
+pub use input::{PromptRequest, PromptView};
 pub use membership::{CatalogObserver, CatalogReconciler, WorkerCatalogSource};
 pub use pending::SelectionCacheConfig;
 pub use policy_registry::{

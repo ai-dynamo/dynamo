@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -21,10 +21,9 @@ use crate::kv_hints::{
 #[cfg(test)]
 use crate::protocols::ActiveSequenceEventData;
 use crate::protocols::{
-    ActiveSequenceEvent, LocalBlockHash, PrefillLoadHint, RoutingConstraints, SharedCacheHits,
-    WorkerAffinityTarget, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    ActiveSequenceEvent, LocalBlockHash, PrefillLoadHint, SharedCacheHits, WorkerAffinityTarget,
+    WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
-use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::queue::SchedulerBookingDescriptor;
 use crate::scheduling::selector::WorkerSelectionPolicy;
 use crate::scheduling::{
@@ -49,11 +48,19 @@ use crate::services::indexer::registry::WorkerRegistry;
 use crate::services::overlap::MooncakeOverlapSummary;
 use crate::tracking_hash::{TrackingHashContext, TrackingHashScope};
 
-use super::affinity::{AffinityError, AffinityLease, Hold, SessionAffinity, SessionAffinityConfig};
+mod operation;
+
+pub use operation::{
+    Selected, SelectionAdmission, SelectionOperation, SelectionOutcome, SessionBinding,
+};
+
+use super::affinity::{
+    AcquireStep, AffinityError, AffinityLease, Hold, SessionAffinity, SessionAffinityConfig,
+};
 use super::catalog::WorkerCatalog;
 use super::error::SelectionError;
 use super::ingress::{KvEventIngress, ZmqDirectIngress};
-use super::input::{PromptRequest, TrackingHashInput};
+use super::input::{PromptView, TrackingHashInput};
 use super::pending::{PendingSelection, SelectionCache, SelectionCacheConfig};
 use super::types::{
     ModelLoadResponse, OverlapScoresRequest, OverlapScoresResponse, PotentialLoadsRequest,
@@ -152,24 +159,6 @@ impl SelectionEntry {
     }
 }
 
-struct SelectionOperation {
-    key: RoutingPartitionId,
-    selection_id: Option<String>,
-    prompt: PromptRequest,
-    router_config_override: Option<RouterConfigOverride>,
-    expected_output_tokens: Option<u32>,
-    priority_jump: f64,
-    strict_priority: u32,
-    policy_class: Option<String>,
-    session_context: Option<SessionContext>,
-    affinity_target: Option<WorkerAffinityTarget>,
-    pinned_worker: Option<WorkerWithDpRank>,
-    allowed_worker_ids: Option<HashSet<WorkerId>>,
-    routing_constraints: RoutingConstraints,
-    /// Skip queue admission and return the chosen worker's load snapshot.
-    advisory: bool,
-}
-
 /// Resolved inputs for booking a reservation, shared by the cached and explicit
 /// `create_reservation` paths.
 struct ReservationBooking {
@@ -183,6 +172,7 @@ struct ReservationBooking {
     lora_name: Option<String>,
     /// Public block hashes to record into an approximate indexer once booked.
     routing_hashes: Option<Vec<LocalBlockHash>>,
+    session_id: Option<String>,
 }
 
 /// What an embedding host supplies to every partition the core creates,
@@ -1015,26 +1005,36 @@ impl SelectionCore {
         policy_class: Option<String>,
     ) -> Result<SelectResponse, SelectionError> {
         let session_context = req.take_session_context();
-        self.schedule_selection(
-            SelectionOperation {
+        let is_steerable = req.affinity_target.is_none() && req.pinned_worker.is_none();
+        let session = session_binding(session_context.as_ref(), is_steerable, false);
+        let admission = if req.advisory {
+            SelectionAdmission::Advisory {
+                request_id: req.selection_id.clone(),
+            }
+        } else {
+            SelectionAdmission::Query {
+                request_id: req.selection_id.clone(),
+            }
+        };
+        let selected = self
+            .select_or_reject(SelectionOperation {
                 key: RoutingPartitionId::new(req.model_name, req.routing_group),
-                selection_id: req.selection_id,
-                prompt: req.prompt,
+                prompt: req.prompt.view(),
                 router_config_override: req.router_config_override,
                 expected_output_tokens: req.expected_output_tokens,
                 priority_jump: req.priority_jump.unwrap_or_default(),
                 strict_priority: req.strict_priority.unwrap_or(0),
                 policy_class,
                 session_context,
+                session,
                 affinity_target: req.affinity_target,
                 pinned_worker: req.pinned_worker,
                 allowed_worker_ids: req.allowed_worker_ids,
                 routing_constraints: req.routing_constraints,
-                advisory: req.advisory,
-            },
-            false,
-        )
-        .await
+                admission,
+            })
+            .await?;
+        Ok(self.select_response(selected, req.selection_id))
     }
 
     pub async fn select_and_reserve(
@@ -1053,36 +1053,109 @@ impl SelectionCore {
         let selection_id = req
             .selection_id
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        self.schedule_selection(
-            SelectionOperation {
+        let is_steerable = req.affinity_target.is_none() && req.pinned_worker.is_none();
+        let session = session_binding(session_context.as_ref(), is_steerable, true);
+        let selected = self
+            .select_or_reject(SelectionOperation {
                 key: RoutingPartitionId::new(req.model_name, req.routing_group),
-                selection_id: Some(selection_id),
-                prompt: req.prompt,
+                prompt: req.prompt.view(),
                 router_config_override: req.router_config_override,
                 expected_output_tokens: req.expected_output_tokens,
                 priority_jump: req.priority_jump.unwrap_or_default(),
                 strict_priority: req.strict_priority.unwrap_or(0),
                 policy_class,
                 session_context,
+                session,
                 affinity_target: req.affinity_target,
                 pinned_worker: req.pinned_worker,
                 allowed_worker_ids: req.allowed_worker_ids,
                 routing_constraints: req.routing_constraints,
-                advisory: false,
-            },
-            true,
-        )
-        .await
+                admission: SelectionAdmission::Book {
+                    selection_id: selection_id.clone(),
+                },
+            })
+            .await?;
+        Ok(self.select_response(selected, Some(selection_id)))
     }
 
-    async fn schedule_selection(
+    /// The wire shape of a selection; a queue rejection keeps its 503 body.
+    async fn select_or_reject(
         &self,
-        operation: SelectionOperation,
-        book: bool,
-    ) -> Result<SelectResponse, SelectionError> {
+        operation: SelectionOperation<'_>,
+    ) -> Result<Selected, SelectionError> {
+        match self.run_selection(operation).await? {
+            SelectionOutcome::Selected(selected) => Ok(selected),
+            SelectionOutcome::QueueRejected { rejection } => Err(SelectionError::Scheduler(
+                KvSchedulerError::QueueRejected(rejection),
+            )),
+        }
+    }
+
+    fn select_response(&self, selected: Selected, selection_id: Option<String>) -> SelectResponse {
+        let Selected {
+            key,
+            response,
+            advisory_load,
+            total_kv_blocks,
+            endpoint,
+            block_size,
+            isl_tokens,
+            sequence_hashes,
+            track_prefill_tokens,
+            effective_prefill_tokens,
+            kv_hint,
+        } = selected;
+        let booked = sequence_hashes.is_some();
+        let potential_decode_blocks = response.potential_decode_blocks as u64;
+        let decode_busy = self
+            .kv_router_config
+            .conditional_disagg_decode_busy_threshold
+            .zip(total_kv_blocks)
+            .map(|(threshold, total_kv_blocks)| {
+                potential_decode_blocks as f64 > threshold * total_kv_blocks as f64
+            });
+        let worker_load = advisory_load.map(|load| SelectionWorkerLoad {
+            active_prefill_tokens: load.active_prefill_tokens,
+            prefill_token_capacity: load.prefill_token_capacity,
+            total_kv_blocks,
+            prefill_busy: self
+                .kv_router_config
+                .conditional_disagg_prefill_busy_threshold
+                .map(|threshold| load.prefill_load_exceeds(threshold)),
+        });
+        SelectResponse {
+            selection_id,
+            sequence_hashes: sequence_hashes
+                .map(|hashes| hashes.into_iter().map(|hash| hash as i64).collect()),
+            isl_tokens: booked.then_some(isl_tokens),
+            track_prefill_tokens: booked.then_some(track_prefill_tokens),
+            model_name: key.model_name,
+            routing_group: key.routing_group,
+            worker_id: response.best_worker.worker_id,
+            dp_rank: response.best_worker.dp_rank,
+            endpoint,
+            block_size,
+            overlap: MooncakeOverlapSummary::from_selected_worker_tiers(
+                &response.selected_worker_tiers,
+                block_size,
+            ),
+            effective_prefill_tokens,
+            potential_decode_blocks,
+            decode_busy,
+            worker_load,
+            kv_hint,
+        }
+    }
+
+    /// Run one selection: resolve the session, look the prompt up, schedule,
+    /// and (for `Book`) install the reservation. Every host's selection goes
+    /// through here.
+    pub async fn run_selection(
+        &self,
+        operation: SelectionOperation<'_>,
+    ) -> Result<SelectionOutcome, SelectionError> {
         let SelectionOperation {
             key,
-            selection_id,
             prompt,
             router_config_override,
             expected_output_tokens,
@@ -1090,35 +1163,38 @@ impl SelectionCore {
             strict_priority,
             policy_class,
             session_context,
+            session,
             affinity_target,
             pinned_worker,
             allowed_worker_ids,
             routing_constraints,
-            advisory,
+            admission,
         } = operation;
         self.ensure_running()?;
 
         let entry = self.ready_entry(&key)?;
-        let claim = match selection_id.as_deref() {
-            Some(selection_id) if book => Some(self.claim_reservation(selection_id, &key)?),
+        let book = admission.is_booking();
+        let claim = match &admission {
+            SelectionAdmission::Book { selection_id } => {
+                Some(self.claim_reservation(selection_id, &key)?)
+            }
             _ => None,
         };
 
         // Session stickiness: a bound session steers selection (exclusive for
-        // the default selector); a new session is bound to the worker chosen.
-        // An explicit affinity target or pin from the caller wins.
+        // the default selector); a new session is bound to the worker booked.
         let table = entry.affinity.get();
-        let session_id = table
-            .and(session_context.as_ref())
-            .filter(|_| affinity_target.is_none() && pinned_worker.is_none())
-            .map(|context| context.session_id().to_string());
         let mut affinity_hold = None;
-        let affinity_target = match (session_id.as_deref(), table) {
-            (Some(session_id), Some(table)) if book => {
+        let managed_session = match (&session, table) {
+            (SessionBinding::Managed { session_id }, Some(table)) => Some((table, session_id)),
+            _ => None,
+        };
+        let affinity_target = match (&session, table) {
+            (SessionBinding::Managed { session_id }, Some(table)) => {
                 affinity_hold = self.hold_session(table, session_id, &key).await?;
                 affinity_hold.as_ref().and_then(Hold::target)
             }
-            (Some(session_id), Some(table)) => table
+            (SessionBinding::Query { session_id }, Some(table)) => table
                 .query_target(session_id, None)
                 .map_err(affinity_error)?
                 .map(|target| WorkerAffinityTarget::new(target.worker_id, target.dp_rank)),
@@ -1149,52 +1225,57 @@ impl SelectionCore {
             .await?;
         // The queue lease frees a booking whose response is never consumed
         // (the caller dropped this future after the actor booked).
-        let mode = if book {
-            ScheduleMode::TrackedWithLifecycle {
-                request_id: selection_id.clone().ok_or_else(|| {
-                    SelectionError::Internal(
-                        "booked selection did not include a selection ID".to_string(),
-                    )
-                })?,
-            }
-        } else {
-            ScheduleMode::QueryOnly {
+        let mode = match &admission {
+            SelectionAdmission::Book { selection_id } => ScheduleMode::TrackedWithLifecycle {
                 request_id: selection_id.clone(),
-            }
+            },
+            SelectionAdmission::Query { request_id } => ScheduleMode::QueryOnly {
+                request_id: request_id.clone(),
+            },
+            SelectionAdmission::Advisory { request_id } => ScheduleMode::QueryOnly {
+                request_id: request_id.clone(),
+            },
         };
         let track_prefill_tokens = router_config_override
             .as_ref()
             .and_then(|cfg| cfg.track_prefill_tokens)
             .unwrap_or(self.kv_router_config.router_track_prefill_tokens);
-        // `select` (book == false) with a selection_id caches the booking inputs
-        // so a follow-up `create_reservation` can replay them by that id.
-        let cached_inputs = (!book).then(|| selection_id.clone()).flatten().map(|id| {
-            (
-                id,
+        // An unbooked selection with an id caches the booking inputs so a
+        // follow-up `create_reservation` can replay them by that id.
+        let cached_inputs = match &admission {
+            SelectionAdmission::Query {
+                request_id: Some(id),
+            }
+            | SelectionAdmission::Advisory {
+                request_id: Some(id),
+            } => Some((
+                id.clone(),
                 sequence_hashes.clone(),
-                prompt.lora_name.clone(),
+                prompt.lora_name.map(str::to_string),
                 track_prefill_tokens,
-            )
-        });
+                match &session {
+                    SessionBinding::Query { session_id } => Some(session_id.clone()),
+                    _ => None,
+                },
+            )),
+            _ => None,
+        };
         let allowed_worker_ids = match self.host.eligibility.lora_worker_filter.as_deref() {
             Some(filter) => narrow_allowed_worker_ids_by_lora(
                 filter,
-                prompt.lora_name.as_deref(),
+                prompt.lora_name,
                 allowed_worker_ids,
                 pinned_worker.as_ref(),
                 || self.catalog.schedulable_worker_ids_for_key(&key),
             ),
             None => allowed_worker_ids,
         };
-        let response_sequence_hashes =
-            book.then(|| sequence_hashes.iter().map(|hash| *hash as i64).collect());
-        let response_isl_tokens = book.then_some(isl_tokens);
-        let response_track_prefill_tokens = book.then_some(track_prefill_tokens);
         // Bookings (now, or later via the pending-selection cache) are recorded
         // into an approximate indexer; keep the public hashes for that.
         let routing_hashes = (entry.indexer.records_routing_decisions()
             && (book || cached_inputs.is_some()))
         .then(|| block_hashes.clone());
+        let booked_sequence_hashes = book.then(|| sequence_hashes.clone());
         let schedule_request = ScheduleRequest {
             mode,
             token_seq: Some(sequence_hashes),
@@ -1204,7 +1285,7 @@ impl SelectionCore {
             kv_transfer_candidates,
             retain_kv_transfer_chain,
             router_config_override,
-            lora_name: prompt.lora_name,
+            lora_name: prompt.lora_name.map(str::to_string),
             priority_jump,
             strict_priority,
             policy_class,
@@ -1218,13 +1299,13 @@ impl SelectionCore {
         };
         // `lease` guards the booking until it is installed below: any early
         // return or drop before then frees it.
-        let (response, advisory_load, lease) = tokio::select! {
+        let scheduled = tokio::select! {
             biased;
             _ = self.cancel_token.cancelled() => {
                 return Err(SelectionError::Scheduler(KvSchedulerError::SubscriberShutdown));
             }
             result = async {
-                if advisory {
+                if matches!(admission, SelectionAdmission::Advisory { .. }) {
                     entry
                         .scheduler
                         .select_without_admission(schedule_request)
@@ -1239,7 +1320,14 @@ impl SelectionCore {
                         .await
                         .map(|(admitted, lease)| (admitted.response, None, lease))
                 }
-            } => result?,
+            } => result,
+        };
+        let (response, advisory_load, lease) = match scheduled {
+            Ok(scheduled) => scheduled,
+            Err(KvSchedulerError::QueueRejected(rejection)) => {
+                return Ok(SelectionOutcome::QueueRejected { rejection });
+            }
+            Err(error) => return Err(error.into()),
         };
         let Some(endpoint) = self
             .catalog
@@ -1250,25 +1338,12 @@ impl SelectionCore {
                 response.best_worker.worker_id
             )));
         };
-        let overlap = MooncakeOverlapSummary::from_selected_worker_tiers(
-            &response.selected_worker_tiers,
-            entry.block_size,
-        );
-
         let effective_prefill = effective_prefill_tokens(isl_tokens, response.cached_tokens);
-        let potential_decode_blocks = response.potential_decode_blocks as u64;
         let total_kv_blocks = advisory_load
             .and_then(|load| load.total_kv_blocks.map(|blocks| blocks as u64))
             .or_else(|| {
                 self.catalog
                     .total_kv_blocks(response.best_worker.worker_id, &key)
-            });
-        let decode_busy = self
-            .kv_router_config
-            .conditional_disagg_decode_busy_threshold
-            .zip(total_kv_blocks)
-            .map(|(threshold, total_kv_blocks)| {
-                potential_decode_blocks as f64 > threshold * total_kv_blocks as f64
             });
         let kv_hint = if retain_kv_transfer_chain {
             transfer_hint_for_selection(
@@ -1279,23 +1354,17 @@ impl SelectionCore {
             )
             .map(|payload| {
                 KvHint::new(
-                    selection_id.as_deref().unwrap_or_default(),
+                    admission.request_id().unwrap_or_default(),
                     vec![KvHintAction::fetch("a1", payload)],
                 )
             })
         } else {
             None
         };
-        let worker_load = advisory_load.map(|load| SelectionWorkerLoad {
-            active_prefill_tokens: load.active_prefill_tokens,
-            prefill_token_capacity: load.prefill_token_capacity,
-            total_kv_blocks,
-            prefill_busy: self
-                .kv_router_config
-                .conditional_disagg_prefill_busy_threshold
-                .map(|threshold| load.prefill_load_exceeds(threshold)),
-        });
 
+        // The routing hashes go to exactly one of: the booking recorded now, or
+        // the cached inputs a later replay records.
+        let mut routing_hashes = routing_hashes;
         if let Some(claim) = claim {
             let Some(lease) = lease else {
                 return Err(SelectionError::Internal(
@@ -1304,14 +1373,13 @@ impl SelectionCore {
             };
             // A rejected affinity commit returns while the lease is still armed,
             // so the booking is freed and nothing below is recorded.
-            let affinity_lease = match (affinity_hold, session_id.as_deref(), table) {
-                (Some(hold), Some(session_id), Some(table)) => Some(
-                    self.commit_session(table, hold, session_id, response.best_worker, &key)
-                        .await?,
-                ),
+            let affinity_lease = match (affinity_hold, managed_session) {
+                (Some(hold), Some((table, session_id))) => {
+                    self.commit_session(table, hold, session_id, response.best_worker, &key)?
+                }
                 _ => None,
             };
-            if let Some(hashes) = routing_hashes.clone() {
+            if let Some(hashes) = routing_hashes.take() {
                 self.record_routing_decision(&entry, response.best_worker, hashes)
                     .await;
             }
@@ -1322,7 +1390,9 @@ impl SelectionCore {
             });
         }
 
-        if let Some((cache_id, sequence_hashes, lora_name, track_prefill_tokens)) = cached_inputs {
+        if let Some((cache_id, sequence_hashes, lora_name, track_prefill_tokens, session_id)) =
+            cached_inputs
+        {
             self.selection_cache.insert(
                 cache_id,
                 PendingSelection {
@@ -1335,29 +1405,24 @@ impl SelectionCore {
                     track_prefill_tokens,
                     lora_name,
                     routing_hashes,
+                    session_id,
                 },
                 Instant::now(),
             );
         }
-
-        Ok(SelectResponse {
-            selection_id,
-            sequence_hashes: response_sequence_hashes,
-            isl_tokens: response_isl_tokens,
-            track_prefill_tokens: response_track_prefill_tokens,
-            model_name: key.model_name,
-            routing_group: key.routing_group,
-            worker_id: response.best_worker.worker_id,
-            dp_rank: response.best_worker.dp_rank,
+        Ok(SelectionOutcome::Selected(Selected {
+            key,
+            response,
+            advisory_load,
+            total_kv_blocks,
             endpoint,
             block_size: entry.block_size,
-            overlap,
+            isl_tokens,
+            sequence_hashes: booked_sequence_hashes,
+            track_prefill_tokens,
             effective_prefill_tokens: effective_prefill,
-            potential_decode_blocks,
-            decode_busy,
-            worker_load,
             kv_hint,
-        })
+        }))
     }
 
     pub async fn create_reservation(
@@ -1388,7 +1453,15 @@ impl SelectionCore {
                 req.selection_id
             )));
         };
-        let response = self.book_cached_selection(pending, &req).await?;
+        let response = match self.book_cached_selection(pending, &req).await {
+            Ok(response) => response,
+            // The session moved: the cached worker can never be booked for it.
+            Err(SelectionError::BadRequest(message)) => {
+                self.selection_cache.discard(&key, &req.selection_id);
+                return Err(SelectionError::BadRequest(message));
+            }
+            Err(error) => return Err(error),
+        };
         self.selection_cache
             .remove(&key, &req.selection_id, generation);
         Ok(response)
@@ -1416,6 +1489,7 @@ impl SelectionCore {
                 track_prefill_tokens,
                 lora_name: pending.lora_name.clone(),
                 routing_hashes: pending.routing_hashes.clone(),
+                session_id: pending.session_id.clone(),
             },
         )
         .await
@@ -1470,7 +1544,7 @@ impl SelectionCore {
         req: ReservationRequest,
     ) -> Result<ReservationResponse, SelectionError> {
         let entry = self.ready_entry(&key)?;
-        let normalized = req.prompt.normalize_for_reservation(
+        let normalized = req.prompt.view().normalize_for_reservation(
             entry.is_eagle,
             TrackingHashInput {
                 context: &self.tracking_hash,
@@ -1504,6 +1578,7 @@ impl SelectionCore {
         let routing_hashes = can_record
             .then(|| {
                 req.prompt
+                    .view()
                     .block_hashes_for_indexer(entry.block_size, entry.is_eagle)
             })
             .transpose()?;
@@ -1521,6 +1596,7 @@ impl SelectionCore {
                 track_prefill_tokens,
                 lora_name: req.prompt.lora_name,
                 routing_hashes,
+                session_id: None,
             },
         )
         .await
@@ -1545,9 +1621,19 @@ impl SelectionCore {
             track_prefill_tokens,
             lora_name,
             routing_hashes,
+            session_id,
         } = booking;
 
         let claim = self.claim_reservation(&selection_id, &key)?;
+        // Hold the session before booking: holding after would wait on an
+        // initializer that may itself be waiting for this worker's capacity.
+        let session = match (session_id.as_deref(), entry.affinity.get()) {
+            (Some(session_id), Some(table)) => self
+                .hold_session(table, session_id, &key)
+                .await?
+                .map(|hold| (table, session_id, hold)),
+            _ => None,
+        };
         // Strict booking: never lazily recreate a worker/rank removed since the
         // reservation was resolved. The lease frees the booking if this future
         // is dropped before `install`.
@@ -1562,13 +1648,19 @@ impl SelectionCore {
                 worker,
                 lora_name,
             })?;
+        let affinity_lease = match session {
+            Some((table, session_id, hold)) => {
+                self.commit_session(table, hold, session_id, worker, &key)?
+            }
+            None => None,
+        };
         if let Some(hashes) = routing_hashes {
             self.record_routing_decision(&entry, worker, hashes).await;
         }
         claim.install(Reservation {
             partition: key.clone(),
             booking: Some(lease.commit().ok_or_else(missing_booking)?),
-            _affinity_lease: None,
+            _affinity_lease: affinity_lease,
         });
 
         Ok(ReservationResponse {
@@ -1650,29 +1742,36 @@ impl SelectionCore {
 
     /// Bind the held session to `dispatched`. A `Hard` rejection whose bound
     /// worker departed after [`Self::hold_session`] checked it is not a client
-    /// fault: the binding is re-initialized on the dispatched worker instead.
-    async fn commit_session(
+    /// fault: the session is re-initialized on the dispatched worker instead.
+    /// This runs with the booking held, so it never waits on another request's
+    /// initialization (which may itself be queued behind this booking); when
+    /// one is in flight the booking stands unbound, `None`.
+    fn commit_session(
         &self,
         table: &SessionAffinity,
         hold: Hold,
         session_id: &str,
         dispatched: WorkerWithDpRank,
         key: &RoutingPartitionId,
-    ) -> Result<AffinityLease, SelectionError> {
+    ) -> Result<Option<AffinityLease>, SelectionError> {
         let bound = hold.target();
         let dispatched = WorkerAffinityTarget::new(dispatched.worker_id, Some(dispatched.dp_rank));
         match table.commit(hold, dispatched) {
-            Ok(lease) => Ok(lease),
+            Ok(lease) => Ok(Some(lease)),
             Err(error) => {
                 let departed =
                     bound.is_some_and(|target| !self.catalog.is_schedulable(target.worker_id, key));
                 if !departed {
                     return Err(affinity_error(error));
                 }
-                // `commit` invalidated the stale binding; the next hold initializes.
-                match self.hold_session(table, session_id, key).await? {
-                    Some(hold) => table.commit(hold, dispatched).map_err(affinity_error),
-                    None => Err(affinity_error(error)),
+                // `commit` invalidated the stale binding.
+                match table.try_acquire(session_id, None) {
+                    Ok(AcquireStep::Held(hold)) => table
+                        .commit(hold, dispatched)
+                        .map(Some)
+                        .map_err(affinity_error),
+                    Ok(AcquireStep::Wait(_)) | Err(AffinityError::ResourceExhausted(_)) => Ok(None),
+                    Err(error) => Err(affinity_error(error)),
                 }
             }
         }
@@ -1866,7 +1965,7 @@ impl SelectionCore {
         let prepared = self
             .prepare_selection_inputs(
                 &entry,
-                &req.prompt,
+                &req.prompt.view(),
                 self.kv_router_config
                     .assume_kv_reuse(req.router_config_override.as_ref()),
                 false,
@@ -1894,6 +1993,7 @@ impl SelectionCore {
         let entry = self.ready_entry(&key)?;
         let block_hashes = req
             .prompt
+            .view()
             .block_hashes_for_indexer(entry.block_size, entry.is_eagle)?;
         let num_blocks = block_hashes.len();
         let tiered = entry
@@ -1922,7 +2022,7 @@ impl SelectionCore {
     async fn prepare_selection_inputs(
         &self,
         entry: &SelectionEntry,
-        prompt: &PromptRequest,
+        prompt: &PromptView<'_>,
         assume_kv_reuse: bool,
         query_shared_cache: bool,
         retain_kv_transfer_chain: bool,
@@ -1959,11 +2059,11 @@ impl SelectionCore {
         let shared_cache = query_shared_cache
             .then_some(self.host.cache.shared.as_deref())
             .flatten()
-            .zip(prompt.token_ids.as_deref());
+            .zip(prompt.token_ids);
         let shared_cache_lookup = async {
             let (shared_cache, tokens) = shared_cache?;
             match shared_cache
-                .check_blocks(tokens, entry.block_size, prompt.cache_namespace.as_deref())
+                .check_blocks(tokens, entry.block_size, prompt.cache_namespace)
                 .await
             {
                 Ok(hits) => Some(hits),
@@ -2023,6 +2123,24 @@ fn sweep_reservation_index(entries: &SelectionEntries, index: &ReservationIndex)
             .is_some_and(|entry| entry.scheduler.has_booking(booking))
     });
     before - index.len()
+}
+
+/// The core's use of the session table for a request: a session is steered
+/// only when the caller did not pin or target a worker explicitly.
+fn session_binding(
+    context: Option<&SessionContext>,
+    is_steerable: bool,
+    is_booking: bool,
+) -> SessionBinding {
+    match context.filter(|_| is_steerable) {
+        Some(context) if is_booking => SessionBinding::Managed {
+            session_id: context.session_id().to_string(),
+        },
+        Some(context) => SessionBinding::Query {
+            session_id: context.session_id().to_string(),
+        },
+        None => SessionBinding::None,
+    }
 }
 
 fn missing_booking() -> SelectionError {
@@ -2132,9 +2250,11 @@ impl Drop for SelectionCore {
 #[cfg(test)]
 mod tests {
     use super::super::affinity::SessionAffinityMode;
+    use super::super::input::PromptRequest;
     use super::*;
-    use crate::protocols::StorageTier;
+    use crate::protocols::{RoutingConstraints, StorageTier};
     use crate::services::indexer::backend::test_util::store_event;
+    use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread::sleep;
     use std::time::Duration;
@@ -4179,6 +4299,80 @@ mod tests {
             table.query_target("s", None).expect("query"),
             Some(replacement)
         );
+    }
+
+    fn replay_reservation(selection_id: &str) -> ReservationRequest {
+        ReservationRequest {
+            model_name: "model".to_string(),
+            routing_group: "default".to_string(),
+            selection_id: selection_id.to_string(),
+            worker_id: None,
+            dp_rank: None,
+            prompt: PromptRequest::default(),
+            router_config_override: None,
+            expected_output_tokens: None,
+            effective_prefill_tokens: None,
+            track_prefill_tokens: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn two_phase_reservation_binds_the_session() {
+        let core = core_with_session_affinity();
+        core.upsert_worker(worker(1)).await.expect("worker upsert");
+        core.upsert_worker(worker(2)).await.expect("worker upsert");
+        let mut request = select_request();
+        request.selection_id = Some("pending".to_string());
+        request.session_id = Some("s".to_string());
+        let selected = core.select(request).await.expect("select");
+        assert_eq!(bound_worker(&core, "s"), None, "select alone binds nothing");
+
+        core.create_reservation(replay_reservation("pending"))
+            .await
+            .expect("replay booking");
+        assert_eq!(bound_worker(&core, "s"), Some(selected.worker_id));
+        core.free_reservation("pending").await.expect("free");
+
+        // The binding steers the session's next selection.
+        let mut request = select_request();
+        request.session_id = Some("s".to_string());
+        assert_eq!(
+            core.select(request).await.expect("select").worker_id,
+            selected.worker_id
+        );
+    }
+
+    #[tokio::test]
+    async fn two_phase_replay_rejects_a_worker_the_session_left() {
+        let core = core_with_session_affinity();
+        core.upsert_worker(worker(1)).await.expect("worker upsert");
+        core.upsert_worker(worker(2)).await.expect("worker upsert");
+        let mut request = select_request();
+        request.selection_id = Some("pending".to_string());
+        request.session_id = Some("s".to_string());
+        let cached = core.select(request).await.expect("select");
+        // Another request binds the session elsewhere before the replay.
+        let other = if cached.worker_id == 1 { 2 } else { 1 };
+        let mut request = session_reservation("r1", "s");
+        request.allowed_worker_ids = Some(HashSet::from([other]));
+        core.select_and_reserve(request)
+            .await
+            .expect("bind elsewhere");
+        core.free_reservation("r1").await.expect("free");
+
+        let err = core
+            .create_reservation(replay_reservation("pending"))
+            .await
+            .expect_err("hard affinity rejects the stale cached worker");
+        assert!(matches!(err, SelectionError::BadRequest(_)), "{err:?}");
+        let entry = core
+            .entry(&RoutingPartitionId::new("model", "default"))
+            .expect("entry");
+        wait_until("rejected booking release", || {
+            !entry.scheduler.has_request("pending")
+        })
+        .await;
+        assert!(core.reservation_index.read().is_empty());
     }
 
     #[tokio::test]

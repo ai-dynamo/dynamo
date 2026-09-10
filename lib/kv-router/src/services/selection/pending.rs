@@ -59,6 +59,8 @@ pub(super) struct PendingSelection {
     /// Public block hashes retained only when the partition indexer records
     /// routing decisions, so the replayed booking can be recorded too.
     pub routing_hashes: Option<Vec<LocalBlockHash>>,
+    /// The session the selection steered by, bound when the booking replays.
+    pub session_id: Option<String>,
 }
 
 struct Entry {
@@ -81,6 +83,7 @@ fn entry_bytes(key: &CacheKey, selection: &PendingSelection) -> usize {
         + key.0.model_name.len()
         + key.0.routing_group.len()
         + selection.lora_name.as_deref().map_or(0, str::len)
+        + selection.session_id.as_deref().map_or(0, str::len)
 }
 
 struct State {
@@ -274,6 +277,7 @@ mod tests {
             track_prefill_tokens: true,
             lora_name: None,
             routing_hashes: None,
+            session_id: None,
         }
     }
 

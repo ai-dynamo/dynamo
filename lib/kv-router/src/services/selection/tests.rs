@@ -127,6 +127,7 @@ fn normalize_prompt(request: &PromptRequest) -> super::input::NormalizedPrompt {
     let config = test_config();
     let context = TrackingHashContext::from_config(&config).unwrap();
     request
+        .view()
         .normalize_for_selection(
             false,
             TrackingHashInput {
@@ -566,6 +567,7 @@ fn keyed_prompt_tracking_leaves_indexer_hashes_public() {
     .unwrap();
 
     let normalized = request
+        .view()
         .normalize_for_selection(
             false,
             TrackingHashInput {
@@ -604,6 +606,7 @@ fn disabled_kv_reuse_keeps_public_indexer_hashes_and_randomizes_tracking() {
     .unwrap();
     let normalize = || {
         request
+            .view()
             .normalize_for_selection(
                 false,
                 TrackingHashInput {
@@ -650,6 +653,7 @@ fn keyed_reservation_hashes_directly_from_tokens() {
     };
 
     let normalized = request
+        .view()
         .normalize_for_reservation(
             false,
             TrackingHashInput {
@@ -697,6 +701,7 @@ fn keyed_hash_only_inputs_remain_trusted_for_selection_and_reservation() {
     };
 
     let selection = request
+        .view()
         .normalize_for_selection(
             false,
             TrackingHashInput {
@@ -707,6 +712,7 @@ fn keyed_hash_only_inputs_remain_trusted_for_selection_and_reservation() {
         )
         .unwrap();
     let reservation = request
+        .view()
         .normalize_for_reservation(
             false,
             TrackingHashInput {
@@ -750,6 +756,7 @@ fn randomized_reservation_uses_canonical_complete_block_count() {
         }))
         .unwrap();
         let normalized = request
+            .view()
             .normalize_for_reservation(
                 false,
                 TrackingHashInput {
@@ -2004,4 +2011,18 @@ async fn hash_path_validation_returns_bad_request() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn empty_raw_tokens_win_over_supplied_hashes() {
+    let request: PromptRequest = serde_json::from_value(serde_json::json!({
+        "token_ids": [],
+        "block_hashes": [11, 12],
+        "sequence_hashes": [21, 22],
+        "isl_tokens": 8
+    }))
+    .unwrap();
+    let normalized = normalize_prompt(&request);
+    assert!(normalized.block_hashes.is_empty());
+    assert_eq!(normalized.isl_tokens, 0);
 }
