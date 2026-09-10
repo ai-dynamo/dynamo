@@ -16,7 +16,9 @@ use dynamo_kv_router::WorkerType;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::identity::RoutingPartitionId;
 use dynamo_kv_router::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
-use dynamo_kv_router::scheduling::queue::{SchedulerBookingCleanup, SchedulerBookingDescriptor};
+use dynamo_kv_router::scheduling::queue::{
+    DEFAULT_MAX_BATCHED_TOKENS, SchedulerBookingCleanup, SchedulerBookingDescriptor,
+};
 use dynamo_kv_router::scheduling::{
     AdmittedSchedulingResponse, AdvisorySchedulingResponse, AttemptId, KvSchedulerError,
     OverloadedWorkerProvider, PotentialLoad, ScheduleRequest, WorkerAvailabilityProvider,
@@ -430,7 +432,13 @@ pub(crate) fn worker_request_from_runtime_config(
         block_size: Some(block_size),
         data_parallel_start_rank: Some(dp_start),
         data_parallel_size: Some(dp_size),
-        max_num_batched_tokens: config.max_num_batched_tokens,
+        // Default unreported capacity so the catalog's queueing gate does not
+        // mark the worker Incomplete; the scheduler applies the same fallback.
+        max_num_batched_tokens: Some(
+            config
+                .max_num_batched_tokens
+                .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS),
+        ),
         total_kv_blocks: config.total_kv_blocks,
         stable_routing_id: config.stable_routing_id.clone(),
         is_eagle: Some(is_eagle),
@@ -492,6 +500,17 @@ mod tests {
                 (2, "tcp://w:9002".to_string()),
                 (3, "tcp://w:9003".to_string())
             ])
+        );
+    }
+
+    #[test]
+    fn worker_request_defaults_unreported_capacity() {
+        let key = RoutingPartitionId::new("model", DEFAULT_ROUTING_GROUP);
+        let request =
+            worker_request_from_runtime_config(7, &ModelRuntimeConfig::default(), &key, 16, false);
+        assert_eq!(
+            request.max_num_batched_tokens,
+            Some(DEFAULT_MAX_BATCHED_TOKENS)
         );
     }
 }
