@@ -790,6 +790,10 @@ mod tests {
     #[test]
     fn structural_tag_config_round_trips_and_rejects_unknown_fields() {
         assert_eq!(
+            serde_json::from_value::<StructuralTagConfig>(serde_json::json!({})).unwrap(),
+            StructuralTagConfig::default()
+        );
+        assert_eq!(
             StructuralTagConfig::default().reasoning_boundary,
             StructuralTagReasoningBoundary::Auto
         );

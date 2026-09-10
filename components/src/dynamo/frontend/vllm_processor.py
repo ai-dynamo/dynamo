@@ -151,6 +151,21 @@ def _runtime_config_structural_tag_options(
     structural_tag = runtime_config.get("structural_tag")
     if not isinstance(structural_tag, dict):
         return "off", "auto", "auto"
+    unsupported_options = [
+        name
+        for name, default in (
+            ("allow_tool_calls_with_structured_output", False),
+            ("exclude_special_tokens", None),
+            ("reasoning_boundary", "auto"),
+            ("tool_arguments_any_order", False),
+        )
+        if structural_tag.get(name, default) != default
+    ]
+    if unsupported_options:
+        logger.warning(
+            "vLLM chat processor ignores unsupported structural-tag option(s): %s",
+            ", ".join(unsupported_options),
+        )
     return (
         "on",
         structural_tag.get("scope", "auto"),
