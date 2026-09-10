@@ -75,6 +75,15 @@ def test_model_identity_fails_closed_when_unavailable():
         install_vmm_ipc_kv._model_identity(SimpleNamespace())
 
 
+def test_semantic_kv_tags_fail_closed_without_model_identity():
+    config = SimpleNamespace(
+        kv_cache_tensors=[SimpleNamespace(shared_by=["layer.0"], size=123)]
+    )
+
+    with pytest.raises(RuntimeError, match="stable model identity"):
+        install_vmm_ipc_kv._semantic_kv_tensor_tag_plan(config)
+
+
 def test_semantic_kv_tags_disambiguate_duplicate_layer_identity():
     tensor_a = SimpleNamespace(shared_by=["model.layers.0.self_attn"], size=123)
     tensor_b = SimpleNamespace(shared_by=["model.layers.0.self_attn"], size=123)
