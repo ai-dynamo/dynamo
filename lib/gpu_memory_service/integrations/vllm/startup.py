@@ -30,7 +30,6 @@ def _try_install(name: str, installer: Callable[[], object], *, required: bool) 
 
 
 def verify_kv_failover_hooks() -> None:
-    """Reject an incomplete live integration when persistent failover is enabled."""
     if not failover_hooks_required():
         return
     from gpu_memory_service.integrations.vllm import (
