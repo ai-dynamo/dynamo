@@ -139,8 +139,10 @@ impl LLMEngine for TrtllmSidecarEngine {
         let client = TrtllmClient::connect(&self.endpoint, self.transport).await?;
         let connection_count = client.connection_count();
 
-        // Some TensorRT-LLM releases report `max_input_len` (or zero) as
-        // `GetModelInfo.max_seq_len`, so a configured `--context-length` wins.
+        // `GetModelInfo` reports the engine's `--max_seq_len`, which is unset by
+        // default; `client::model_info` discards the value TensorRT-LLM
+        // substitutes for it. A configured `--context-length` wins over what
+        // survives that check.
         let mut model = self.model.clone();
         let reported = match client.model_info().await {
             Ok(reported) => reported,
@@ -181,6 +183,7 @@ impl LLMEngine for TrtllmSidecarEngine {
             endpoint = %self.endpoint,
             connections = connection_count,
             model = %model.source,
+            context_length = ?model.context_length,
             "TensorRT-LLM gRPC is ready"
         );
         Ok(model.engine_config())
