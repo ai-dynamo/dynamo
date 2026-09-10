@@ -314,7 +314,9 @@ async def test_gms_failover_promotion_warmup_drains_non_error_stream(monkeypatch
     async def generate(request, context):
         seen.append((request, context.id(), context.trace_headers()))
         yield {"token_ids": [1], "finish_reason": None}
+        seen.append("after-first-chunk")
         yield {"token_ids": [], "finish_reason": "stop"}
+        seen.append("stream-drained")
 
     await run_gms_failover_promotion_warmup(
         generate,
@@ -322,10 +324,10 @@ async def test_gms_failover_promotion_warmup_drains_non_error_stream(monkeypatch
         backend_name="test",
     )
 
-    assert len(seen) == 1
     assert seen[0][0]["token_ids"] == [1]
     assert seen[0][1].startswith("gms-failover-promotion-warmup-")
     assert seen[0][2] == {}
+    assert seen[1:] == ["after-first-chunk", "stream-drained"]
 
 
 @pytest.mark.asyncio
@@ -505,7 +507,12 @@ async def test_gms_failover_shadow_runs_warmup_before_ready(monkeypatch):
     async def promotion_warmup():
         order.append(("warmup", None))
 
-    runtime = _Runtime()
+    class _OrderedRuntime(_Runtime):
+        def set_health_status(self, ready):
+            order.append(("health", ready))
+            super().set_health_status(ready)
+
+    runtime = _OrderedRuntime()
     activation = await prepare_gms_failover(
         _OrderedOwner(),
         runtime,
@@ -518,11 +525,48 @@ async def test_gms_failover_shadow_runs_warmup_before_ready(monkeypatch):
     assert activation.enabled is True
     assert order == [
         ("quiesce", ["kv_cache"]),
+        ("health", False),
         ("resume", ["kv_cache"]),
         ("mark_resumed", None),
         ("warmup", None),
+        ("health", True),
     ]
     assert runtime.health == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_gms_failover_warmup_failure_requiesces_and_releases_lock(monkeypatch):
+    monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "true")
+    monkeypatch.setenv("DYN_GMS_FAILOVER_KEEP_SHADOW_READY", "false")
+    owner = _Owner()
+    runtime = _Runtime()
+    created = []
+
+    class RecordingLock(_BusyOnTryLock):
+        def __init__(self, path):
+            super().__init__(path)
+            created.append(self)
+
+    async def failing_warmup():
+        raise RuntimeError("warmup failed")
+
+    with pytest.raises(RuntimeError, match="warmup failed"):
+        await prepare_gms_failover(
+            owner,
+            runtime,
+            backend_name="test",
+            tags=["kv_cache"],
+            lock_factory=RecordingLock,
+            promotion_warmup=failing_warmup,
+        )
+
+    assert owner._quiesce_controller.quiesce_calls == [
+        ["kv_cache"],
+        ["kv_cache"],
+    ]
+    assert owner._quiesce_controller.resume_calls == [["kv_cache"]]
+    assert created[0].released == 1
+    assert runtime.health == [False, False]
 
 
 @pytest.mark.asyncio

@@ -450,7 +450,7 @@ def _controller_from(owner: Any) -> Any:
 
 
 def _lock_factory_or_default(
-    lock_factory: Callable[[str], Any] | None
+    lock_factory: Callable[[str], Any] | None,
 ) -> Callable[[str], Any]:
     if lock_factory is not None:
         return lock_factory
@@ -646,20 +646,48 @@ async def prepare_gms_failover(
         backend_name,
         role,
     )
-    await run_gms_failover_post_lock_fence(backend_name=backend_name, role=role)
-    if activation_barrier is not None:
-        await activation_barrier()
+    resume_started = False
+    try:
+        await run_gms_failover_post_lock_fence(backend_name=backend_name, role=role)
+        if activation_barrier is not None:
+            await activation_barrier()
 
-    await controller.resume(tag_list)
-    mark_resumed = getattr(controller, "mark_resumed", None)
-    if mark_resumed is not None:
-        mark_resumed()
+        resume_started = True
+        await controller.resume(tag_list)
+        mark_resumed = getattr(controller, "mark_resumed", None)
+        if mark_resumed is not None:
+            mark_resumed()
 
-    if promotion_warmup is not None and not standby_prewarmed:
-        await promotion_warmup()
+        if promotion_warmup is not None and not standby_prewarmed:
+            await promotion_warmup()
 
-    if not keep_shadow_ready and set_health_status is not None:
-        set_health_status(True)
+        if not keep_shadow_ready and set_health_status is not None:
+            set_health_status(True)
+    except BaseException:
+        if resume_started:
+            try:
+                await controller.quiesce(tag_list)
+            except BaseException:
+                logger.exception(
+                    "[GMS failover] %s failed to re-quiesce after activation error",
+                    backend_name,
+                )
+        if set_health_status is not None:
+            try:
+                set_health_status(False)
+            except BaseException:
+                logger.exception(
+                    "[GMS failover] %s failed to mark activation unhealthy",
+                    backend_name,
+                )
+        try:
+            await lock.release()
+        except BaseException:
+            logger.exception(
+                "[GMS failover] %s failed to release lock after activation error",
+                backend_name,
+            )
+        raise
 
     logger.info(
         "[GMS failover] %s %s resumed; registering with discovery",
