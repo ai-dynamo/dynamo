@@ -1006,7 +1006,6 @@ class GMSClientMemoryManager:
             reallocated,
         )
 
-
     def close(self, *, best_effort: bool = False) -> None:
         """Cleanup mappings and abort.
 
