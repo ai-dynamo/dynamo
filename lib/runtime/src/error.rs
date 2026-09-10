@@ -282,6 +282,9 @@ impl ErrorClass {
         }
     }
 
+    /// Map a legacy or backend-specific variant to its canonical semantic class.
+    ///
+    /// New producers should construct canonical classes directly. [`DynamoError::class`] applies this mapping after validating the class/reason identity and is the normal consumer entry point. Serialization also emits that validated canonical class, while retaining a compatible legacy representation during the migration window.
     pub fn normalized(self) -> Self {
         match self {
             Self::Unknown => Self::Internal,
@@ -686,9 +689,13 @@ impl<'de> Deserialize<'de> for Diagnostic {
 /// ```
 #[derive(Debug, Clone)]
 pub struct DynamoError {
+    /// Coarse semantic category. This may retain a compatible legacy variant internally; use [`Self::class`] for validated consumer policy.
     pub class: ErrorClass,
+    /// Registered, bounded cause key that must belong to the normalized class; use [`Self::reason`] for validated consumer policy.
     pub reason: ErrorReason,
+    /// Optional bounded operator-only context. This is not client-safe and must not be used as a metric label.
     pub diagnostic: Option<Diagnostic>,
+    /// Optional explicitly client-safe data. The producer remains responsible for ensuring every contained value is safe to expose.
     pub public: Option<PublicDetails>,
 }
 
