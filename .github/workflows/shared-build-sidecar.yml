@@ -45,6 +45,13 @@ on:
         required: false
         type: string
         default: ''
+    outputs:
+      target_tag_plain:
+        description: 'Plain sidecar image tag prefix'
+        value: ${{ jobs.build.outputs.target_tag_plain }}
+      binary_artifact:
+        description: 'Name of the workflow artifact containing the amd64 dynamo-*-sidecar binaries'
+        value: ${{ jobs.build.outputs.binary_artifact }}
 
 jobs:
   build:
@@ -54,6 +61,9 @@ jobs:
     permissions:
       actions: read
       contents: read
+    outputs:
+      target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
+      binary_artifact: ${{ steps.binary-artifact.outputs.name }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -122,6 +132,35 @@ jobs:
           push_image: true
           no_load: true
           use_sccache: false
+
+      # No derived per-backend test image: shared-test.yml pulls the backend's
+      # own -test image unmodified and installs the sidecar binary from this
+      # artifact via PATH (see shared-test.yml's sidecar_binary_artifact
+      # input). amd64-only: sidecar tests only run on amd64 GPU runners.
+      - name: Extract sidecar binaries (amd64)
+        id: binary-artifact
+        shell: bash
+        env:
+          IMAGE_URI: ${{ steps.calculate-target-tag.outputs.image_uri }}
+        run: |
+          set -euo pipefail
+          docker pull --platform linux/amd64 "${IMAGE_URI}"
+          cid=$(docker create --platform linux/amd64 "${IMAGE_URI}")
+          trap 'docker rm -f "${cid}" >/dev/null 2>&1 || true' EXIT
+          mkdir -p sidecar-binaries
+          for backend in vllm sglang trtllm; do
+            docker cp "${cid}:/usr/local/bin/dynamo-${backend}-sidecar" \
+              "sidecar-binaries/dynamo-${backend}-sidecar"
+          done
+          name="dynamo-sidecar-binaries-${GITHUB_SHA}"
+          echo "name=${name}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload sidecar binaries
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: ${{ steps.binary-artifact.outputs.name }}
+          path: sidecar-binaries/
+          retention-days: 7
 
       - name: Resolve diff baseline
         id: resolve-diff-base

@@ -18,6 +18,8 @@ use crate::proto::sglang_service_client::SglangServiceClient;
 
 pub type Client = SglangServiceClient<Channel>;
 
+const RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
+
 /// Metadata exposed by SGLang's model/server discovery RPCs.
 #[derive(Clone, Debug)]
 pub struct Discovery {
@@ -36,8 +38,12 @@ pub async fn connect(
 ) -> Result<Client, DynamoError> {
     let endpoint = Endpoint::from_shared(uri.to_string())
         .map_err(|err| invalid_arg(format!("invalid SGLang gRPC endpoint `{uri}`: {err}")))?;
+    let started = Instant::now();
+    let mut attempt = 0_u64;
     let mut last_err;
+    let mut last_logged_at: Option<Instant> = None;
     loop {
+        attempt += 1;
         match try_connect_once(&endpoint, cfg, deadline).await {
             Ok(client) => return Ok(client),
             Err(err) => {
@@ -48,7 +54,24 @@ pub async fn connect(
                         cfg.startup_deadline
                     )));
                 }
-                tokio::time::sleep_until((Instant::now() + cfg.retry_interval).min(deadline)).await;
+                let now = Instant::now();
+                if last_logged_at.is_none_or(|last| now.duration_since(last) >= RETRY_LOG_INTERVAL)
+                {
+                    // WARN, not silent: matches GrpcChannelPool::connect_until_ready's
+                    // retry-logging convention (lib/sidecar/common/src/transport.rs) so
+                    // a sidecar stuck retrying its connection to SGLang isn't
+                    // indistinguishable from a true hang.
+                    tracing::warn!(
+                        endpoint = %uri,
+                        attempt,
+                        elapsed = ?started.elapsed(),
+                        retry_interval = ?cfg.retry_interval,
+                        error = %last_err,
+                        "SGLang gRPC connection attempt failed; retrying"
+                    );
+                    last_logged_at = Some(now);
+                }
+                tokio::time::sleep_until((now + cfg.retry_interval).min(deadline)).await;
             }
         }
     }

@@ -45,7 +45,7 @@ sidecar_configs = {
         model="Qwen/Qwen3-0.6B",
         # Piped (non-tty) stdout is block-buffered by default, so without this
         # a hung/slow launch shows literally nothing in CI logs until the
-        # process is killed. Real Python subprocess behavior, not a guess.
+        # process is killed.
         env={"PYTHONUNBUFFERED": "1"},
         request_payloads=[
             chat_payload_default(),

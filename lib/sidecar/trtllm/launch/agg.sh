@@ -72,7 +72,7 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 # `grpc-smg` extra. Constraint copied from that extra so we resolve what
 # upstream resolves.
 if ! "$TRTLLM_PYTHON" -c "import smg_grpc_proto" >/dev/null 2>&1; then
-    "$TRTLLM_PYTHON" -m pip install --no-cache-dir "smg-grpc-proto>=0.4.2"
+    "$TRTLLM_PYTHON" -m pip install --no-cache-dir "smg-grpc-proto==0.4.2"
 fi
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"

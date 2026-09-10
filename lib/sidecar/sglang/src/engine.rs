@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
@@ -28,6 +29,8 @@ use crate::protocol::{
     build_generate_request, disaggregated_params_to_json, engine_data_from_meta, extract_logprobs,
     meta_u32, output_ids_to_u32, terminal_from_meta,
 };
+
+const RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 pub struct SglangSidecarEngine {
     endpoint: GrpcEndpoint,
@@ -145,6 +148,7 @@ impl SglangSidecarEngine {
     async fn await_ready(&self, client: &mut Client, deadline: Instant) -> Result<(), DynamoError> {
         let started = Instant::now();
         let mut attempt = 0_u64;
+        let mut last_logged_at: Option<Instant> = None;
         loop {
             attempt += 1;
             let retry_message = match client::health_check(client, deadline).await {
@@ -162,22 +166,26 @@ impl SglangSidecarEngine {
                     self.transport.startup_deadline
                 )));
             }
-            // WARN, not silent: this loop previously logged nothing at all on a
-            // failed attempt, so a SGLang engine that's slow (or never becomes)
-            // healthy produced zero visible output anywhere for up to
-            // startup_deadline (default 300s) -- indistinguishable from a hang.
-            tracing::warn!(
-                attempt,
-                elapsed = ?started.elapsed(),
-                remaining = ?deadline.saturating_duration_since(Instant::now()),
-                retry_interval = ?self.transport.retry_interval,
-                reason = %retry_message,
-                "SGLang not healthy yet; retrying"
-            );
-            tokio::time::sleep_until(
-                (Instant::now() + self.transport.retry_interval).min(deadline),
-            )
-            .await;
+            let now = Instant::now();
+            if last_logged_at.is_none_or(|last| now.duration_since(last) >= RETRY_LOG_INTERVAL) {
+                // WARN, not silent: this loop previously logged nothing at all on a
+                // failed attempt, so a SGLang engine that's slow (or never becomes)
+                // healthy produced zero visible output anywhere for up to
+                // startup_deadline (default 300s) -- indistinguishable from a hang.
+                // Rate-limited like GrpcChannelPool::connect_until_ready: a normal
+                // slow startup retries every retry_interval (default 1s) and would
+                // otherwise spam hundreds of lines.
+                tracing::warn!(
+                    attempt,
+                    elapsed = ?started.elapsed(),
+                    remaining = ?deadline.saturating_duration_since(now),
+                    retry_interval = ?self.transport.retry_interval,
+                    reason = %retry_message,
+                    "SGLang not healthy yet; retrying"
+                );
+                last_logged_at = Some(now);
+            }
+            tokio::time::sleep_until((now + self.transport.retry_interval).min(deadline)).await;
         }
     }
 }
