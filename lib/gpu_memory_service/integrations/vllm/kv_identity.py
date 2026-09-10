@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import os
+
 from gpu_memory_service.integrations.common.utils import (
     env_enabled_by_default,
     get_gms_persistent_kv_engine_id,
@@ -16,6 +18,15 @@ def shared_kv_enabled() -> bool:
             env_enabled_by_default("DYN_VLLM_GMS_SHADOW_MODE", default=False)
             or env_enabled_by_default("DYN_GMS_FAILOVER_SHADOW_MODE", default=False)
         ),
+    )
+
+
+def failover_hooks_required() -> bool:
+    """Return whether startup must provide the complete persistent-KV path."""
+    return (
+        shared_kv_enabled()
+        or os.environ.get("GMS_KV_DIRECTORY_MODE", "off").strip().lower()
+        == "authoritative"
     )
 
 
