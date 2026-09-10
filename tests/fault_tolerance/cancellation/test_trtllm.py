@@ -31,6 +31,13 @@ from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.payloads import check_health_generate, check_models_api
 from tests.utils.port_utils import allocate_port, deallocate_port
 
+# A stranded KV transfer does not fail loudly: the deployment keeps answering,
+# just late, and TRT-LLM only reclaims at kv_transfer_timeout_ms (60s default).
+# Bounding the follow-up below that turns "eventually returned 200" into a
+# failure, which is the symptom a wedge actually produces.
+FOLLOWUP_TIMEOUT_S = 30.0
+
+
 logger = logging.getLogger(__name__)
 
 pytestmark = [
@@ -469,6 +476,7 @@ def test_request_cancellation_trtllm_prefill_cancel(
                     prompt="hello",
                     max_tokens=4,
                     frontend_port=frontend.frontend_port,
+                    timeout_s=FOLLOWUP_TIMEOUT_S,
                 )
                 followup.wait()
                 response = followup.get_response()

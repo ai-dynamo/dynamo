@@ -36,6 +36,13 @@ from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.payloads import check_health_generate, check_models_api
 from tests.utils.port_utils import allocate_port, deallocate_port
 
+# A stranded KV transfer does not fail loudly: the deployment keeps answering,
+# just late, and TRT-LLM only reclaims at kv_transfer_timeout_ms (60s default).
+# Bounding the follow-up below that turns "eventually returned 200" into a
+# failure, which is the symptom a wedge actually produces.
+FOLLOWUP_TIMEOUT_S = 30.0
+
+
 logger = logging.getLogger(__name__)
 
 CANCELLATION_MAX_TOKENS = 2048
@@ -471,14 +478,11 @@ def test_request_cancellation_vllm_prefill_cancel(
     A client that disconnects before the first token must stop the prefill
     worker, rather than leaving it to finish work nobody is waiting for.
 
-    This inverts the contract this test previously asserted (PR #7489), which
-    let the prefill run to completion to avoid leaking KV on a torn-down NIXL
-    transfer. That trade-off no longer applies to vLLM: it aborts promptly and
-    releases KV that was already committed for a decode worker which never
-    collects it, so the worker declares ``prefill_cancel_until="anytime"`` and
-    the router propagates cancellation to the prefill request. The leak the old
-    contract guarded against is still checked below, via the post-cancel
-    requests.
+    vLLM declares ``prefill_cancel_until="anytime"`` because an aborted prefill
+    frees its blocks in the same scheduler step and never arms the KV lease that
+    a normal completion would, so cancelling cannot strand a transfer. The
+    post-cancel requests below guard that: stranded KV shows up as latency, not
+    as an error, so a bounded follow-up is what would catch it.
 
     Timing (Last Run: 2026-08-28): ~108s [nats] / ~123s [tcp] (requires 2 GPUs)
     - Engine initialization: ~23s (decode + prefill workers)
@@ -564,6 +568,7 @@ def test_request_cancellation_vllm_prefill_cancel(
                         prompt="hello",
                         max_tokens=4,
                         frontend_port=frontend.frontend_port,
+                        timeout_s=FOLLOWUP_TIMEOUT_S,
                     )
                     followup.wait()
                     response = followup.get_response()

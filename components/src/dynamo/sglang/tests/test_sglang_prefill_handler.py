@@ -23,6 +23,7 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.pre_merge,
+    pytest.mark.timeout(30),
 ]
 
 
