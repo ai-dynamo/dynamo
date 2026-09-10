@@ -55,9 +55,8 @@ func (r *TopologyLabelReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	// Every terminal path below logs, so that an absence of records for a pod means
-	// this controller never reconciled it rather than that it reconciled and had
-	// nothing to do.
+	// Every terminal path below logs, so no record for a pod means this
+	// controller never reconciled it rather than reconciled and did nothing.
 	if len(copyTargets) == 0 {
 		logger.Info("Pod needs no topology label copy",
 			"pod", req.NamespacedName, "node", pod.Spec.NodeName)

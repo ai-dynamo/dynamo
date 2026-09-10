@@ -301,10 +301,8 @@ func TestTopologyLabelReconciler_SkipsNonDynamoComponentPod(t *testing.T) {
 	assert.NotContains(t, unchanged.Labels, "topology.kubernetes.io/zone")
 }
 
-// TestTopologyLabelReconciler_LogsEveryTerminalPath pins the property an operator
-// relies on when reading the controller-manager log: every terminal path of
-// Reconcile leaves a record, so an absence of records means this controller did
-// not run rather than that it ran and chose to do nothing.
+// TestTopologyLabelReconciler_LogsEveryTerminalPath pins that every terminal path
+// of Reconcile logs, so silence means the controller never ran on that pod.
 func TestTopologyLabelReconciler_LogsEveryTerminalPath(t *testing.T) {
 	const (
 		labelKey     = "topology.kubernetes.io/zone"
