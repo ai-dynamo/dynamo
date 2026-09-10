@@ -852,7 +852,7 @@ def install_lazy() -> None:
         "vllm.v1.core.block_pool",  # Scheduler-side KV lease publication
         "vllm.v1.engine.core",  # KV sizing call-site imports get_kv_cache_configs by value
         "vllm.v1.worker.gpu_model_runner",
-        "vllm.v1.worker.gpu.attn_utils",
+        "vllm.v1.worker.gpu.model_runner",
     }
 
     class _PatchAfterLoad:
@@ -904,7 +904,6 @@ def _install_or_arm() -> None:
     allocation_modules = {
         "vllm.v1.worker.gpu_model_runner",
         "vllm.v1.worker.gpu.model_runner",
-        "vllm.v1.worker.gpu.attn_utils",
     }
     if allocation_modules.isdisjoint(sys.modules):
         install_lazy()
