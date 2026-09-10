@@ -628,6 +628,30 @@ func TestDGDCheckpointsReconciler_ExplicitRestoreWaitsForActiveWorkerHash(t *tes
 	assert.Equal(t, referenced.UID, info.NativeSnapshot.UID)
 }
 
+func TestCheckpointWorkerHashForComponent_WaitsForCommittedGeneration(t *testing.T) {
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+			}},
+		},
+	}
+
+	t.Log("No annotation: generation is uncommitted; must return empty hash")
+	hash, err := checkpointWorkerHashForComponent(dgd, "worker")
+	require.NoError(t, err)
+	assert.Empty(t, hash, "checkpointWorkerHashForComponent must return empty before the active generation is committed")
+
+	t.Log("Annotation present: generation is committed; must return the active hash")
+	workerHash := betaDGDWorkersSpecHash(t, dgd)
+	dgd.Annotations = map[string]string{commonconsts.AnnotationCurrentWorkerHashV2: workerHash}
+	hash, err = checkpointWorkerHashForComponent(dgd, "worker")
+	require.NoError(t, err)
+	assert.Equal(t, workerHash, hash)
+}
+
 func TestDGDCheckpointsReconciler_RejectsDisabledFeatureBeforeCreatingResources(t *testing.T) {
 	t.Log("Build a checkpoint-enabled DGD while the checkpoint feature is disabled")
 	ctx := context.Background()
