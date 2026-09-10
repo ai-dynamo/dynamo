@@ -5569,6 +5569,30 @@ class InstrumentedScheduler(AsyncScheduler):
                 need += -(-(ctx_len + 1 + headroom) // bs) - ctx_len // bs
         return max(0, need - int(free_fn()))
 
+    def _kvwarm_take_cow_copies(self) -> list:
+        """Drain the copy-on-write forks queued by shadow registration and
+        release their retention references at once; returns the copies.
+
+        vLLM retains both endpoints of a pending copy until the step that
+        runs it has been processed, so a same-step free cannot recycle them.
+        A shadow's endpoints are held for longer than that anyway: the source
+        is a chain block the parked chain owns until the point's cleanup
+        sheds it, and the destination sits in the shadow's own block table
+        until the shadow is finished, both in the untimed window after the
+        steady steps. Releasing the retentions here, instead of through the
+        parent's deferred-free fence, keeps that release out of the admission
+        step's ``update_from_output``, which under ``defer_block_free`` falls
+        inside the steady step's measured inter-update window. Managers
+        without copy-on-write have nothing to drain.
+        """
+        take_copies = getattr(self.kv_cache_manager, "take_kv_cache_block_copies", None)
+        if not callable(take_copies):
+            return []
+        copies, retained = take_copies()
+        if retained:
+            self.kv_cache_manager.block_pool.free_blocks(retained)
+        return copies
+
     def _kvwarm_inject_borrowed(self, context_lengths) -> "SchedulerOutput":
         """Real-content counterpart of _bench_inject_fake_decode: the prompt is
         the chain's real token prefix; the block table shares the chain's
@@ -5598,48 +5622,56 @@ class InstrumentedScheduler(AsyncScheduler):
                 len(context_lengths),
             )
             context_lengths = []
-        for index, ctx_len in enumerate(context_lengths):
-            chain_id = self._kvwarm_chain_ids[index]
-            chain_req = self.requests[chain_id]
-            chain_tokens = self._kvwarm_chain_prompts[chain_id]
-            req_id = f"__bench_{self._bench_seq}"
-            self._bench_seq += 1
-            block_ids, req_zero_ids = self._kvwarm_register_shadow(
-                req_id, chain_id, ctx_len, headroom
-            )
-            zero_ids.extend(req_zero_ids)
-            prompt = list(chain_tokens[: ctx_len + 1])
-            req = Request(
-                request_id=req_id,
-                prompt_token_ids=prompt,
-                # ignore_eos: a sampled EOS would route the shadow through the
-                # normal stop path, freeing chain blocks it never owned.
-                sampling_params=SamplingParams(max_tokens=100_000, ignore_eos=True),
-                pooling_params=None,
-                block_hasher=self._bench_block_hasher,
-                cache_salt=req_id,
-            )
-            req.num_computed_tokens = ctx_len
-            req.status = RequestStatus.RUNNING
-            self.requests[req_id] = req
-            self.running.append(req)  # type: ignore[has-type]
-            self._bench_active_req_ids.add(req_id)
-            self._kvwarm_borrowed_ids.add(req_id)
-            new_reqs_data.append(
-                NewRequestData(
-                    req_id=req_id,
-                    prompt_token_ids=prompt,
-                    mm_features=[],
-                    sampling_params=req.sampling_params,
-                    pooling_params=None,
-                    block_ids=block_ids,
-                    num_computed_tokens=ctx_len,
-                    lora_request=None,
-                    prefill_token_ids=req._all_token_ids,
+        try:
+            for index, ctx_len in enumerate(context_lengths):
+                chain_id = self._kvwarm_chain_ids[index]
+                chain_req = self.requests[chain_id]
+                chain_tokens = self._kvwarm_chain_prompts[chain_id]
+                req_id = f"__bench_{self._bench_seq}"
+                self._bench_seq += 1
+                block_ids, req_zero_ids = self._kvwarm_register_shadow(
+                    req_id, chain_id, ctx_len, headroom
                 )
-            )
-            num_scheduled_tokens[req_id] = 1
-            del chain_req  # blocks only; never mutate the chain request itself
+                zero_ids.extend(req_zero_ids)
+                prompt = list(chain_tokens[: ctx_len + 1])
+                req = Request(
+                    request_id=req_id,
+                    prompt_token_ids=prompt,
+                    # ignore_eos: a sampled EOS would route the shadow through the
+                    # normal stop path, freeing chain blocks it never owned.
+                    sampling_params=SamplingParams(max_tokens=100_000, ignore_eos=True),
+                    pooling_params=None,
+                    block_hasher=self._bench_block_hasher,
+                    cache_salt=req_id,
+                )
+                req.num_computed_tokens = ctx_len
+                req.status = RequestStatus.RUNNING
+                self.requests[req_id] = req
+                self.running.append(req)  # type: ignore[has-type]
+                self._bench_active_req_ids.add(req_id)
+                self._kvwarm_borrowed_ids.add(req_id)
+                new_reqs_data.append(
+                    NewRequestData(
+                        req_id=req_id,
+                        prompt_token_ids=prompt,
+                        mm_features=[],
+                        sampling_params=req.sampling_params,
+                        pooling_params=None,
+                        block_ids=block_ids,
+                        num_computed_tokens=ctx_len,
+                        lora_request=None,
+                        prefill_token_ids=req._all_token_ids,
+                    )
+                )
+                num_scheduled_tokens[req_id] = 1
+                del chain_req  # blocks only; never mutate the chain request itself
+        except Exception:
+            # Shadows registered before the failure queued forks that will
+            # never reach the worker; drop them now so their retentions do
+            # not outlive the shadows the abort path is about to finish (a
+            # block left referenced fails the prefix-cache reset).
+            self._kvwarm_take_cow_copies()
+            raise
         output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=CachedRequestData.make_empty(),
@@ -5652,16 +5684,10 @@ class InstrumentedScheduler(AsyncScheduler):
             free_encoder_mm_hashes=[],
             new_block_ids_to_zero=zero_ids or None,
         )
-        take_copies = getattr(self.kv_cache_manager, "take_kv_cache_block_copies", None)
-        if callable(take_copies):
-            # CoW forks of the chain tails run with this admission step; their
-            # retention refs are released once the step has been processed.
-            copies, retained = take_copies()
-            if copies:
-                output.kv_cache_block_copies = copies
-                release = getattr(self, "_free_cow_retained_blocks", None)
-                if callable(release):
-                    release(retained, getattr(self, "sched_step_seq", 0) + 1)
+        copies = self._kvwarm_take_cow_copies()
+        if copies:
+            # The forks of the chain tails run with this admission step.
+            output.kv_cache_block_copies = copies
         if self.connector is not None:
             output.kv_connector_metadata = self.connector.build_connector_meta(output)
         if self.ec_connector is not None:

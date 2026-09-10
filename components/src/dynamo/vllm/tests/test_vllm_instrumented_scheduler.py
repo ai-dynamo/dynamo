@@ -5300,14 +5300,32 @@ class _FakeManager:
         return self.req_to_blocks.pop(req_id, [])
 
 
+def _take_kv_cache_block_copies(manager):
+    """``KVCacheManager.take_kv_cache_block_copies``: drain every manager's
+    pending (source, cow) pairs into copy descriptors plus the retained
+    endpoints (both blocks of every pair)."""
+    pending = []
+    for mgr in manager.coordinator.single_type_managers:
+        pending.extend(mgr.take_pending_cow_copies())
+    copies = [(src.block_id, dst.block_id) for src, dst in pending]
+    return copies, [block for pair in pending for block in pair]
+
+
 def _shadow_stub(cow=True):
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     chain = [_FakeBlock(i) for i in range(10)]  # 160 tokens
     mgr = _FakeManager(chain, cow=cow)
     pool = _FakePool()
-    stub.kv_cache_manager = SimpleNamespace(
+    manager = SimpleNamespace(
         block_pool=pool, coordinator=SimpleNamespace(single_type_managers=[mgr])
     )
+    if cow:
+        # A vLLM whose managers fork with ``_apply_cow`` also drains the forks
+        # at the manager level; older ones offer neither.
+        manager.take_kv_cache_block_copies = lambda: _take_kv_cache_block_copies(
+            manager
+        )
+    stub.kv_cache_manager = manager
     stub.cache_config = SimpleNamespace(block_size=16)
     return stub, mgr, pool, chain
 
@@ -5870,10 +5888,10 @@ def test_kvwarm_shadow_lifecycle_returns_every_reference(cow):
        source tail block gets +1 (the hit-ref a partial prefix hit carries in
        production) and the fresh block +1 retention
        (``SingleTypeKVCacheManager._apply_cow``).
-    2. Copy completion (CoW only): ``Scheduler.schedule`` drains
-       ``KVCacheManager.take_kv_cache_block_copies`` and hands both endpoints
-       to ``Scheduler._free_cow_retained_blocks`` -> ``BlockPool.free_blocks``
-       (-1 each) once the copying step's output has been processed.
+    2. Retention release (CoW only): ``_kvwarm_inject_borrowed`` drains
+       ``KVCacheManager.take_kv_cache_block_copies`` right after registration
+       and returns both endpoints through ``BlockPool.free_blocks`` (-1 each);
+       the copies themselves ride on the admission step.
     3. Shadow release: ``finish_requests`` -> ``_free_request`` ->
        ``_free_request_blocks`` -> ``KVCacheManager.free`` ->
        ``SingleTypeKVCacheManager.free`` =
@@ -5899,12 +5917,12 @@ def test_kvwarm_shadow_lifecycle_returns_every_reference(cow):
     if cow:
         assert (src.ref_cnt, fresh.ref_cnt) == (2, 2)
         assert zero_ids == []
-        # 2. copy completion
-        copies = mgr.take_pending_cow_copies()
-        assert copies == [(src, fresh)]
-        pool.free_blocks([block for pair in copies for block in pair])
+        # 2. retention release
+        copies = InstrumentedScheduler._kvwarm_take_cow_copies(stub)
+        assert copies == [(src.block_id, fresh.block_id)]
         assert (src.ref_cnt, fresh.ref_cnt) == (1, 1)
         assert pool.free_queue == []
+        assert mgr.take_pending_cow_copies() == []
     else:
         assert (src.ref_cnt, fresh.ref_cnt) == (1, 1)
         assert zero_ids == [fresh.block_id]
@@ -5923,6 +5941,135 @@ def test_kvwarm_shadow_lifecycle_returns_every_reference(cow):
         b.block_id for b in [*chain, fresh]
     )
     assert len(pool.free_queue) == len(chain) + 1
+
+
+def _kvwarm_injection_stub(chain_ids):
+    """Everything ``_kvwarm_inject_borrowed`` reads, over the fake pool and a
+    CoW manager; every chain owns ten blocks (160 tokens) at ref 1, parked."""
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    chains = {
+        chain_id: [_FakeBlock(100 * index + i) for i in range(10)]
+        for index, chain_id in enumerate(chain_ids)
+    }
+    mgr = _FakeManager(chains[chain_ids[0]], cow=True)
+    mgr.req_to_blocks = dict(chains)
+    pool = _FakePool()
+    pool.get_num_free_blocks = lambda: 10
+    manager = SimpleNamespace(
+        block_pool=pool,
+        coordinator=SimpleNamespace(single_type_managers=[mgr]),
+        num_kv_cache_groups=1,
+    )
+    manager.take_kv_cache_block_copies = lambda: _take_kv_cache_block_copies(manager)
+    stub.kv_cache_manager = manager
+    stub.cache_config = SimpleNamespace(block_size=16)
+    stub._kvwarm_chain_ids = list(chain_ids)
+    stub._kvwarm_chain_prompts = {chain_id: list(range(160)) for chain_id in chain_ids}
+    stub.requests = {
+        chain_id: SimpleNamespace(request_id=chain_id) for chain_id in chain_ids
+    }
+    stub.running = []
+    stub.finished_req_ids = set()
+    stub._bench_seq = 0
+    stub._bench_active_req_ids = set()
+    stub._kvwarm_borrowed_ids = set()
+    stub._bench_block_hasher = None
+    stub._bench_extra_steps_left = 3
+    stub.connector = None
+    stub.ec_connector = None
+    stub.defer_block_free = True
+    stub.deferred_frees = deque()
+    stub._free_cow_retained_blocks = MagicMock()
+    return stub, mgr, pool, chains
+
+
+def test_kvwarm_inject_borrowed_releases_cow_retentions_before_the_step_runs():
+    """Under ``defer_block_free`` the parent's ``_free_cow_retained_blocks``
+    would park the retention release behind the fence and drain it in the
+    admission step's ``update_from_output`` -- inside the steady step's
+    measured window. The injection releases it at once instead: the chain
+    and the shadow's own table keep both endpoints alive until the point's
+    untimed cleanup."""
+    stub, mgr, pool, chains = _kvwarm_injection_stub(["chain-a"])
+    chain = chains["chain-a"]
+
+    output = InstrumentedScheduler._kvwarm_inject_borrowed(stub, [40])
+
+    shadow = mgr.req_to_blocks["__bench_0"]
+    src, cow = chain[2], shadow[2]
+    assert output.total_num_scheduled_tokens == 1
+    assert output.kv_cache_block_copies == [(src.block_id, cow.block_id)]
+    assert output.scheduled_new_reqs[0].block_ids == ([0, 1, cow.block_id],)
+    assert output.scheduled_new_reqs[0].num_computed_tokens == 40
+    assert len(output.scheduled_new_reqs[0].prompt_token_ids) == 41
+    # Retentions released here (-1 each); the chain still owns the source and
+    # the shadow's table still owns the fork, so nothing reaches the pool.
+    assert pool.freed == [src, cow]
+    assert (src.ref_cnt, cow.ref_cnt) == (1, 1)
+    assert pool.free_queue == []
+    assert mgr.take_pending_cow_copies() == []
+    assert list(stub.deferred_frees) == []
+    stub._free_cow_retained_blocks.assert_not_called()
+    assert stub._bench_active_req_ids == {"__bench_0"}
+    assert stub._kvwarm_borrowed_ids == {"__bench_0"}
+    assert stub.requests["__bench_0"].status == RequestStatus.RUNNING
+
+
+def test_kvwarm_inject_borrowed_drops_queued_copies_when_a_later_shadow_fails():
+    """A failure while registering the second shadow leaves the first one's
+    fork queued in the manager. The step it would have ridden on is never
+    built, so the injection drops the queue and releases the retentions;
+    the abort path's cleanup then finds every block at exactly the chain's
+    and the shadow's own references and the prefix-cache reset succeeds."""
+    stub, mgr, pool, chains = _kvwarm_injection_stub(["chain-a", "chain-b"])
+    chain_a, chain_b = chains["chain-a"], chains["chain-b"]
+    take = pool.get_new_blocks
+
+    def get_new_blocks(n):
+        if pool.next_id > 1000:  # the first shadow's tail is already out
+            raise ValueError(f"Cannot get {n} free blocks from the pool")
+        return take(n)
+
+    pool.get_new_blocks = get_new_blocks
+
+    with pytest.raises(ValueError, match="free blocks"):
+        InstrumentedScheduler._kvwarm_inject_borrowed(stub, [40, 40])
+
+    cow = mgr.req_to_blocks["__bench_0"][2]
+    assert mgr.take_pending_cow_copies() == []
+    # First shadow: shared prefix +1, source hit-ref released, fork held by
+    # the shadow's table only.
+    assert [b.ref_cnt for b in chain_a] == [2, 2, 1] + [1] * 7
+    assert cow.ref_cnt == 1
+    # Second shadow: nothing registered, its chain untouched.
+    assert "__bench_1" not in mgr.req_to_blocks
+    assert all(b.ref_cnt == 1 for b in chain_b)
+    assert stub._bench_active_req_ids == {"__bench_0"}
+
+    # The abort path: finish the shadows, shed the chains, reset the cache.
+    def finish_requests(req_ids, status):
+        assert status is RequestStatus.FINISHED_ABORTED
+        for req_id in req_ids:
+            pool.free_blocks(reversed(mgr.pop_blocks_for_free(req_id)))
+            stub.requests.pop(req_id, None)
+
+    stub.finish_requests = finish_requests
+    stub._schedule_times = deque()
+    stub._kvwarm_stage_batch = 2
+    stub._kvwarm_building = False
+    stub._bench_prefix_cache_cleared = False
+    every_block = [*chain_a, *chain_b, cow]
+    stub.kv_cache_manager.reset_prefix_cache = lambda: all(
+        b.ref_cnt == 0 for b in every_block
+    )
+
+    InstrumentedScheduler._bench_cleanup_requests(stub)
+    assert InstrumentedScheduler._bench_clear_prefix_cache(stub, allow_pending=True)
+    assert stub._bench_prefix_cache_cleared is True
+    assert sorted(b.block_id for b in pool.free_queue) == sorted(
+        b.block_id for b in every_block
+    )
+    assert len(pool.free_queue) == len(every_block)
 
 
 # ---------------------------------------------------------------------------
