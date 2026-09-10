@@ -257,16 +257,6 @@ mod tests {
         }
     }
 
-    /// Regression test for the "WorkerSet churn" leak this fix closes:
-    /// `base_runtime_config_watch`'s task must exit when its `lifecycle` token
-    /// cancels, even on a quiescent stream that never emits an event again.
-    ///
-    /// Before this fix the task's only exit paths were the stream ending or a
-    /// failed `tx.send` — and `tx.send` runs only when a discovery event
-    /// changes `configs`, so on a quiescent endpoint (the state a retired
-    /// WorkerSet's discovery stream is normally left in) neither path ever
-    /// fires. The task then outlived every dropped reference to its receiver
-    /// and leaked until process shutdown.
     /// A worker registered on the endpoint but with no base model runtime config is
     /// silently absent from the routable set, and the request that later fails carries no
     /// hint of which of the two discovery sources was missing it. It must be reported.
@@ -345,6 +335,16 @@ mod tests {
         assert!(excluded.is_empty());
     }
 
+    /// Regression test for the "WorkerSet churn" leak this fix closes:
+    /// `base_runtime_config_watch`'s task must exit when its `lifecycle` token
+    /// cancels, even on a quiescent stream that never emits an event again.
+    ///
+    /// Before this fix the task's only exit paths were the stream ending or a
+    /// failed `tx.send` — and `tx.send` runs only when a discovery event
+    /// changes `configs`, so on a quiescent endpoint (the state a retired
+    /// WorkerSet's discovery stream is normally left in) neither path ever
+    /// fires. The task then outlived every dropped reference to its receiver
+    /// and leaked until process shutdown.
     #[tokio::test]
     async fn base_runtime_config_watch_exits_on_lifecycle_cancellation_with_no_stream_activity() {
         // `_tx` stays alive for the whole test, so the stream never ends on its
