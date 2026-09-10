@@ -97,9 +97,8 @@ def _gms_malloc(size: int, device: int, stream: int) -> int:
         raise RuntimeError(f"Unknown GMS allocation tag: {tag}")
 
     if state.is_persistent:
-        # Private-bootstrap shadows allocate VA-only scratch first and later
-        # remap those VAs onto the shared namespace. Their tags must therefore
-        # match the shared pool tags exactly.
+        # Stable semantic tags bind every allocator callback to its exact
+        # daemon-owned persistent allocation.
         if state.persistent_tag_plan is not None:
             # A semantic plan is supposed to cover EVERY persistent allocation.
             # If the malloc sequence overflows it, the callback fired more times
@@ -153,7 +152,7 @@ def _gms_malloc(size: int, device: int, stream: int) -> int:
 
 def _gms_free(ptr: int, size: int, device: int, stream: int) -> None:
     # Content-driven dispatch: torch only gives us a VA, no tag context.
-    # Try the scratch registry first across all managers, then standard.
+    # Search all registered managers for the owning mapping.
     va = int(ptr)
     for tag, state in _tag_states.items():
         if va not in state.manager.mappings:
