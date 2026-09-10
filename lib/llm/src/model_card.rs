@@ -1222,6 +1222,35 @@ impl ModelDeploymentCard {
                     bytes_to_hash.extend_from_slice(b"\0vllm_enable_tower_connector_lora\0true");
                 }
 
+                // The Qwen video-routing contract decides how the frontend
+                // expands video placeholder tokens for exact KV routing. A
+                // group builds one video-routing processor from a single
+                // representative card and reuses it for every member, so
+                // members whose contract differs must not share a WorkerSet.
+                //
+                // The content is hashed, not merely the key's presence: the
+                // worker derives the contract from its installed Transformers
+                // and vLLM packages, so two workers can both publish and
+                // publish different contracts. Canonicalize first, because
+                // serde_json runs with `preserve_order` here and would
+                // otherwise let key order alone split a WorkerSet.
+                //
+                // Compatibility: workers older than v1.5.0 predate this key
+                // and hash as if the contract were absent, so a rolling
+                // upgrade of a Qwen video deployment across that boundary
+                // leaves the model unadmitted until it completes. That is
+                // deliberate - the alternative is serving one worker's
+                // requests under another worker's video token arithmetic.
+                // Deployments that never carry this key are unaffected.
+                if let Some(contract) = self.runtime_config.runtime_data.get(
+                    crate::local_model::runtime_config::VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+                ) {
+                    let mut contract = contract.clone();
+                    crate::utils::canonicalize_json(&mut contract);
+                    bytes_to_hash.extend_from_slice(b"\0vllm_qwen_video_processor_contract\0");
+                    bytes_to_hash.extend(blake3::hash(contract.to_string().as_bytes()).as_bytes());
+                }
+
                 // TODO: Do we want any other user_data or runtime_config?
 
                 blake3::hash(&bytes_to_hash).to_string()
@@ -3199,6 +3228,77 @@ mod ownership_tests {
 
         assert_eq!(missing.mdcsum(), disabled.mdcsum());
         assert_ne!(missing.mdcsum(), enabled.mdcsum());
+    }
+
+    /// The group builds one video-routing processor from a single
+    /// representative card, so every member of a WorkerSet is served with the
+    /// representative's Qwen video contract. Cards whose contract differs -
+    /// including a card that withholds it because engine-level
+    /// `--mm-processor-kwargs` may change the video token layout - must
+    /// therefore hash apart.
+    ///
+    /// Note: `mdcsum()` caches its result on first call via `OnceLock`, so each
+    /// case builds a fresh card rather than mutating one and re-hashing.
+    #[test]
+    fn qwen_video_processor_contract_isolates_worker_sets() {
+        use crate::local_model::runtime_config::VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY;
+
+        fn card_with_contract(contract: serde_json::Value) -> ModelDeploymentCard {
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.runtime_config.runtime_data.insert(
+                VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY.to_string(),
+                contract,
+            );
+            card
+        }
+
+        fn legacy_ceil() -> serde_json::Value {
+            serde_json::json!({
+                "placeholder_target": "bare_video_token",
+                "resize_mode": "legacy_ceil",
+            })
+        }
+
+        let withheld = ModelDeploymentCard::with_name_only("model");
+        assert_ne!(
+            withheld.mdcsum(),
+            card_with_contract(legacy_ceil()).mdcsum(),
+            "a worker that never published the contract must not join the WorkerSet of one that did"
+        );
+
+        assert_ne!(
+            card_with_contract(legacy_ceil()).mdcsum(),
+            card_with_contract(serde_json::json!({
+                "placeholder_target": "bare_video_token",
+                "resize_mode": "smart_resize",
+            }))
+            .mdcsum(),
+            "two workers publishing different contracts must not share a WorkerSet"
+        );
+
+        // serde_json runs with `preserve_order` in this workspace, so an object
+        // keeps the key order it was parsed in. Two workers publishing the same
+        // contract in a different key order still describe the same behaviour
+        // and must stay in one WorkerSet.
+        assert_eq!(
+            card_with_contract(legacy_ceil()).mdcsum(),
+            card_with_contract(serde_json::json!({
+                "resize_mode": "legacy_ceil",
+                "placeholder_target": "bare_video_token",
+            }))
+            .mdcsum(),
+            "key order within the contract must not change the checksum"
+        );
+
+        // Negative control: a deployment that never carries this key is
+        // unaffected, so its cache directory and reported checksum do not move.
+        let bare = ModelDeploymentCard::with_name_only("model");
+        let mut unrelated = ModelDeploymentCard::with_name_only("model");
+        unrelated
+            .runtime_config
+            .runtime_data
+            .insert("some_unrelated_runtime_key".to_string(), true.into());
+        assert_eq!(bare.mdcsum(), unrelated.mdcsum());
     }
 }
 
