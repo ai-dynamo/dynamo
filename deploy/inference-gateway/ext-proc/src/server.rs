@@ -970,6 +970,28 @@ impl ExtProcError {
                 status_code: StatusCode::ServiceUnavailable,
                 message: e.to_string(),
             },
+            // Router-reported rejections. Status classes mirror
+            // `scheduler_error_status` in
+            // `lib/kv-router/src/services/selection/error.rs` so a rejection
+            // means the same thing regardless of which host surfaced it. Every
+            // message below is the client-safe variant text; the router's own
+            // detail is logged at the classification site, never returned.
+            PickError::RouterOverloaded => Self {
+                status_code: StatusCode::TooManyRequests,
+                message: e.to_string(),
+            },
+            PickError::RouterQueueRejected => Self {
+                status_code: StatusCode::ServiceUnavailable,
+                message: e.to_string(),
+            },
+            PickError::RouterConflict => Self {
+                status_code: StatusCode::Conflict,
+                message: e.to_string(),
+            },
+            PickError::RouterInternal => Self {
+                status_code: StatusCode::InternalServerError,
+                message: e.to_string(),
+            },
         }
     }
 
@@ -1601,5 +1623,61 @@ mod tests {
             "metadata headers exceed the limit of 64 entries".to_string(),
         ));
         assert_eq!(err.status_code, StatusCode::BadRequest);
+    }
+
+    /// Router-reported worker saturation is 429, matching `scheduler_error_status`
+    /// in `lib/kv-router/src/services/selection/error.rs`. Distinct from the EPP's
+    /// own front-door shed above, which stays 503.
+    #[test]
+    fn router_overloaded_maps_to_429_unlike_the_epp_front_door_shed() {
+        let router = ExtProcError::from_pick_error(PickError::RouterOverloaded);
+        assert_eq!(router.status_code, StatusCode::TooManyRequests);
+
+        let front_door = ExtProcError::from_pick_error(PickError::Overloaded);
+        assert_eq!(front_door.status_code, StatusCode::ServiceUnavailable);
+    }
+
+    /// A full policy-class queue is 503, not 429: the workers may have capacity
+    /// while the class's queue is full, and the router maps it that way too.
+    #[test]
+    fn router_queue_rejection_maps_to_503() {
+        let err = ExtProcError::from_pick_error(PickError::RouterQueueRejected);
+        assert_eq!(err.status_code, StatusCode::ServiceUnavailable);
+    }
+
+    #[test]
+    fn router_conflict_and_internal_keep_their_own_classes() {
+        assert_eq!(
+            ExtProcError::from_pick_error(PickError::RouterConflict).status_code,
+            StatusCode::Conflict
+        );
+        assert_eq!(
+            ExtProcError::from_pick_error(PickError::RouterInternal).status_code,
+            StatusCode::InternalServerError
+        );
+    }
+
+    /// Router rejections must not hand the router's internal text to the client.
+    /// Before typed classification, every one of these arrived as
+    /// `RoutingFailed(format!("Decode query failed: {error:?}"))`, which put the
+    /// scheduler's `Debug` output in the response body.
+    #[test]
+    fn router_rejection_messages_are_client_safe() {
+        for pick_error in [
+            PickError::RouterOverloaded,
+            PickError::RouterQueueRejected,
+            PickError::RouterConflict,
+            PickError::RouterInternal,
+        ] {
+            let message = ExtProcError::from_pick_error(pick_error).message;
+            assert!(
+                !message.contains("Decode query failed"),
+                "leaked internal routing text: {message}"
+            );
+            assert!(
+                !message.contains('{') && !message.contains("KvSchedulerError"),
+                "leaked a Debug-formatted router error: {message}"
+            );
+        }
     }
 }
