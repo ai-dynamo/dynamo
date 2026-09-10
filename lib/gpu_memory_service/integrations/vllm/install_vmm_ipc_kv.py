@@ -217,7 +217,13 @@ def _semantic_kv_tensor_tag(index: int, kv_cache_tensor, layout_fp: str) -> str:
     return f"kv_pool:v3:{digest}"
 
 
-def _semantic_kv_tensor_tag_plan(kv_cache_config, model_identity: str) -> list[str]:
+def _semantic_kv_tensor_tag_plan(
+    kv_cache_config, model_identity: str | None = None
+) -> list[str]:
+    if not model_identity:
+        raise RuntimeError(
+            "Persistent GMS KV allocation requires a stable model identity"
+        )
     layout_fp = _kv_layout_fingerprint(kv_cache_config, model_identity)
     base_tags = [
         _semantic_kv_tensor_tag(index, kv_cache_tensor, layout_fp)
