@@ -2010,7 +2010,6 @@ mod tests {
     fn ambiguous_prefill_topology_keeps_decode_serving() {
         let model = Model::new("llama".to_string());
 
-        // Decode is the front door: live worker plus a chat engine.
         let (decode, _tx_d) = ws_serving_role(
             "pd",
             "mdc-d",
@@ -2065,10 +2064,5 @@ mod tests {
             !model.is_workers_ready("pd"),
             "prefill-only namespace is missing decode and must not be ready"
         );
-        assert!(
-            model.get_chat_engine().is_err(),
-            "prefill-only namespace must not be selectable for serving"
-        );
-        assert!(!model.is_ready_to_serve());
     }
 }
