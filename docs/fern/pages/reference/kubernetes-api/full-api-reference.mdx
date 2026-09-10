@@ -136,6 +136,26 @@ ComponentKind represents the type of underlying Kubernetes resource.
 - <Badge intent="note" minimal>LeaderWorkerSet</Badge> ComponentKindLeaderWorkerSet represents a LeaderWorkerSet resource.
 </Accordion>
 
+<Accordion id="componentrolespec" title="ComponentRoleSpec">
+ComponentRoleSpec configures one named Pod-producing role inside a compound component.
+The enclosing component type defines the allowed role names and cardinality.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+
+<ParamField path="name" type="string" required={true}>
+Name identifies the role within the enclosing component independently of generated provider resource names.
+**Validation:** MaxLength: 63  MinLength: 1  Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`  Required: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="providerOverride" type="ProviderOverride">
+ProviderOverride configures the provider workload unit generated for this role. It is supported only for components embedded in a DGD.
+See [ProviderOverride](#provideroverride).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
 <Accordion id="configmapkeyselector" title="ConfigMapKeySelector">
 ConfigMapKeySelector selects a specific key from a ConfigMap.
 Used to reference external configuration data stored in ConfigMaps.
@@ -439,6 +459,12 @@ Multinode is the configuration for multinode components.
 See [MultinodeSpec](#multinodespec).
 </ParamField>
 
+<ParamField path="roles" type="ComponentRoleSpec array">
+Roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Their cardinality is derived from multinode.nodeCount. Omission preserves the implicit multinode role layout.
+See [ComponentRoleSpec](#componentrolespec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
 <ParamField path="scalingAdapter" type="ScalingAdapter">
 ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter. When enabled, replicas are managed by the DGDSA and external autoscalers scale the service via the Scale subresource; when disabled, replicas are set directly. Opt in with `scalingAdapter: \{enabled: true\}` -- a bare `scalingAdapter: \{\}` is disabled because `enabled` defaults to false.
 See [ScalingAdapter](#scalingadapter).
@@ -595,8 +621,14 @@ MinAvailable maps to Grove PodClique minAvailable for single-node and Grove PodC
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="multinode" type="object">
-Multinode is the configuration for multinode components. Standalone DCDs accept only `nodeCount`; `leader` and `worker` are DGD-only provider contexts.
+<ParamField path="multinode" type="MultinodeSpec">
+Multinode is the configuration for multinode components.
+See [MultinodeSpec](#multinodespec).
+</ParamField>
+
+<ParamField path="roles" type="object array">
+Roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Their cardinality is derived from multinode.nodeCount. Omission preserves the implicit multinode role layout. Standalone DCD roles accept only `name`; `providerOverride` is a DGD-only provider context.
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="scalingAdapter" type="ScalingAdapter">
@@ -1476,40 +1508,14 @@ URI is the model source URI Supported formats: - S3: s3://bucket/path/to/model -
 </ParamField>
 </Accordion>
 
-<Accordion id="multinoderolespec" title="MultinodeRoleSpec">
-MultinodeRoleSpec configures one explicit role of a multinode component.
-
-
-**Kind:** `type`
-**Appears in:** [MultinodeSpec](#multinodespec)
-
-<ParamField path="providerOverride" type="ProviderOverride">
-providerOverride configures the Grove PCLQ template generated for this multinode role. It uses apiVersion `grove.io/v1alpha1`, target `PodCliqueTemplateSpec`, and may set only `topologyConstraint`. It is supported only for components embedded in a DGD.
-See [ProviderOverride](#provideroverride).
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-</Accordion>
-
 <Accordion id="multinodespec" title="MultinodeSpec">
 
 **Kind:** `type`
-**Appears in:** [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+**Appears in:** [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 <ParamField path="nodeCount" type="integer" default="2">
 Indicates the number of nodes to deploy for multinode components. Total number of GPUs is NumberOfNodes * GPU limit. Must be greater than 1.
 **Validation:** Minimum: 2
-</ParamField>
-
-<ParamField path="leader" type="MultinodeRoleSpec">
-Leader configures the generated multinode leader unit.
-See [MultinodeRoleSpec](#multinoderolespec).
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="worker" type="MultinodeRoleSpec">
-Worker configures the generated multinode worker unit.
-See [MultinodeRoleSpec](#multinoderolespec).
-**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -1644,7 +1650,7 @@ All other providers, versions, targets, and fields are rejected.
 
 
 **Kind:** `type`
-**Appears in:** [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec), [DynamoGraphDeploymentSpec](#dynamographdeploymentspec), [MultinodeRoleSpec](#multinoderolespec)
+**Appears in:** [ComponentRoleSpec](#componentrolespec), [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec), [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
 
 <ParamField path="apiVersion" type="string" required={true}>
 apiVersion is the Kubernetes API group and version of the provider schema. Grove requires `grove.io/v1alpha1`.
@@ -2389,6 +2395,26 @@ scheduledReplicas is the number of replicas the backend scheduler has scheduled,
 </ParamField>
 </Accordion>
 
+<Accordion id="v1beta1-componentrolespec" title="ComponentRoleSpec">
+ComponentRoleSpec configures one named Pod-producing role inside a compound component.
+The enclosing component type defines the allowed role names and cardinality.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
+
+<ParamField path="name" type="string" required={true}>
+name identifies the role within the enclosing component independently of generated provider resource names.
+**Validation:** MaxLength: 63  MinLength: 1  Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`  Required: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="providerOverride" type="ProviderOverride">
+providerOverride configures the provider workload unit generated for this role. It is supported only for components embedded in a DGD.
+See [ProviderOverride](#v1beta1-provideroverride).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
 <Accordion id="componenttype" title="ComponentType">
 ComponentType identifies the role of a Dynamo component within a graph.
 In v1beta1 this is a strict enum. Unlike v1alpha1 (where `subComponentType`
@@ -2611,6 +2637,12 @@ See [MultinodeSpec](#v1beta1-multinodespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
+<ParamField path="roles" type="ComponentRoleSpec array">
+roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Their cardinality is derived from multinode.nodeCount. Omission preserves the implicit multinode role layout.
+See [ComponentRoleSpec](#v1beta1-componentrolespec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
 <ParamField path="sharedMemorySize" type="Quantity">
 sharedMemorySize controls the size of the tmpfs mounted at `/dev/shm`. `nil` selects the operator default (8Gi), a positive quantity sets a custom size, and `"0"` disables the shared-memory volume entirely. Simpler replacement for v1alpha1's `SharedMemorySpec` struct with its `disabled bool` + `size Quantity` pattern.
 See [Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api).
@@ -2708,8 +2740,14 @@ minAvailable maps to Grove PodCliqueScalingGroup minAvailable for components ren
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="multinode" type="object">
-multinode configures multinode components. Standalone DCDs accept only `nodeCount`; `leader` and `worker` are DGD-only provider contexts.
+<ParamField path="multinode" type="MultinodeSpec">
+multinode configures multinode components.
+See [MultinodeSpec](#v1beta1-multinodespec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="roles" type="object array">
+roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Their cardinality is derived from multinode.nodeCount. Omission preserves the implicit multinode role layout. Standalone DCD roles accept only `name`; `providerOverride` is a DGD-only provider context.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
@@ -3423,7 +3461,7 @@ GroveSpec groups experimental Grove-specific rendering options.
 **Appears in:** [ExperimentalSpec](#experimentalspec)
 
 <ParamField path="forceScalingGroup" type="boolean">
-forceScalingGroup opts a single-node component into rendering as a PodCliqueScalingGroup with one single-pod PodClique per replica. Scaling changes the scaling-group replica count. The first `minAvailable` replicas join the deployment's base PodGang together with its other base workloads; each replica beyond `minAvailable` gets its own PodGang, gang-scheduled separately from the rest of the deployment. `false` or omitted means automatic selection (multi-node and inter-pod GMS components use a scaling group, other single-node components a standalone PodClique), not "force PodClique". Immutable after creation.
+forceScalingGroup opts a single-node component into rendering as a PodCliqueScalingGroup with one single-pod PodClique per replica. Scaling changes the scaling-group replica count. The first `minAvailable` replicas join the deployment's base PodGang together with its other base workloads; each replica beyond `minAvailable` gets its own PodGang, gang-scheduled separately from the rest of the deployment. `false` or omitted means automatic selection (multi-node and inter-pod GMS components use a scaling group, other single-node components a standalone PodClique), not "force PodClique". The pointer preserves field presence on the wire: `nil` and `false` are semantically identical, and consumers must dereference with `false`. Immutable after creation.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -3593,44 +3631,16 @@ revision is the model revision/version.
 </ParamField>
 </Accordion>
 
-<Accordion id="v1beta1-multinoderolespec" title="MultinodeRoleSpec">
-MultinodeRoleSpec configures one explicit role of a multinode component.
-Additional role-specific settings can be added here without introducing a
-polymorphic list keyed by generated provider resource names.
-
-
-**Kind:** `type`
-**Appears in:** [MultinodeSpec](#v1beta1-multinodespec)
-
-<ParamField path="providerOverride" type="ProviderOverride">
-providerOverride configures the Grove PCLQ template generated for this multinode role. It uses apiVersion `grove.io/v1alpha1`, target `PodCliqueTemplateSpec`, and may set only `topologyConstraint`. It is supported only for components embedded in a DGD.
-See [ProviderOverride](#v1beta1-provideroverride).
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-</Accordion>
-
 <Accordion id="v1beta1-multinodespec" title="MultinodeSpec">
 MultinodeSpec configures a multinode component.
 
 
 **Kind:** `type`
-**Appears in:** [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
+**Appears in:** [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#v1beta1-dynamocomponentdeploymentspec)
 
 <ParamField path="nodeCount" type="integer" default="2">
 nodeCount is the number of nodes to deploy for the multinode component. Total GPUs used is `nodeCount * container GPU request`.
 **Validation:** Minimum: 2  Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="leader" type="MultinodeRoleSpec">
-leader configures the generated multinode leader unit.
-See [MultinodeRoleSpec](#v1beta1-multinoderolespec).
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="worker" type="MultinodeRoleSpec">
-worker configures the generated multinode worker unit.
-See [MultinodeRoleSpec](#v1beta1-multinoderolespec).
-**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -3792,7 +3802,7 @@ All other providers, versions, targets, and fields are rejected.
 
 
 **Kind:** `type`
-**Appears in:** [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec), [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec), [MultinodeRoleSpec](#v1beta1-multinoderolespec)
+**Appears in:** [ComponentRoleSpec](#v1beta1-componentrolespec), [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec), [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 <ParamField path="apiVersion" type="string" required={true}>
 apiVersion is the Kubernetes API group and version of the provider schema. Grove requires `grove.io/v1alpha1`.
