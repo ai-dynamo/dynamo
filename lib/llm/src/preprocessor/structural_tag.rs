@@ -23,10 +23,33 @@ struct StructuralTagBuildRequest<'a> {
     parallel_tool_calls: Option<bool>,
     schema_mode: StructuralTagSchemaMode,
     exclude_special_tokens: Option<bool>,
-    reasoning_boundary: StructuralTagReasoningBoundary,
+    reasoning_boundary: ResolvedReasoningBoundary,
     tool_arguments_any_order: bool,
     starts_in_reasoning: bool,
     structured_output_schema: Option<&'a serde_json::Value>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ResolvedReasoningBoundary {
+    StructuralTag,
+    Backend,
+}
+
+fn resolve_reasoning_boundary(
+    configured: StructuralTagReasoningBoundary,
+    backend_excludes_reasoning: bool,
+) -> Result<ResolvedReasoningBoundary, &'static str> {
+    match (configured, backend_excludes_reasoning) {
+        (StructuralTagReasoningBoundary::Auto, false)
+        | (StructuralTagReasoningBoundary::StructuralTag, false) => {
+            Ok(ResolvedReasoningBoundary::StructuralTag)
+        }
+        (StructuralTagReasoningBoundary::Auto, true)
+        | (StructuralTagReasoningBoundary::Backend, _) => Ok(ResolvedReasoningBoundary::Backend),
+        (StructuralTagReasoningBoundary::StructuralTag, true) => Err(
+            "structural_tag.reasoning_boundary=structural_tag conflicts with the backend's reasoning-aware guided-decoding policy; use 'auto' or 'backend'",
+        ),
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -236,10 +259,8 @@ impl OpenAIPreprocessor {
         let parser_name = self.tool_call_parser.as_deref();
         let explicit_config = self.runtime_config.structural_tag.as_ref();
 
-        let mut config = explicit_config.cloned().unwrap_or_default();
-        if explicit_config.is_none() && self.backend_excludes_reasoning_from_structural_tag() {
-            config.reasoning_boundary = StructuralTagReasoningBoundary::Backend;
-        }
+        let config = explicit_config.cloned().unwrap_or_default();
+        let reasoning_boundary = self.structural_tag_reasoning_boundary;
         let StructuralTagDecision::Required(builder) = structural_tag_decision(
             parser_name,
             tool_choice,
@@ -268,7 +289,7 @@ impl OpenAIPreprocessor {
             parallel_tool_calls,
             schema_mode: config.schema,
             exclude_special_tokens: config.exclude_special_tokens,
-            reasoning_boundary: config.reasoning_boundary,
+            reasoning_boundary,
             tool_arguments_any_order: config.tool_arguments_any_order,
             starts_in_reasoning: prompt_injected_reasoning,
             structured_output_schema,
@@ -287,27 +308,9 @@ impl OpenAIPreprocessor {
         }
         if applied && prompt_injected_reasoning {
             preprocessed_request.require_reasoning =
-                config.reasoning_boundary == StructuralTagReasoningBoundary::Backend;
+                reasoning_boundary == ResolvedReasoningBoundary::Backend;
         }
         Ok(applied)
-    }
-
-    fn backend_excludes_reasoning_from_structural_tag(&self) -> bool {
-        match self
-            .runtime_config
-            .get_engine_specific::<bool>(TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY)
-        {
-            Ok(Some(excludes_reasoning)) => excludes_reasoning,
-            Ok(None) => false,
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    key = TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
-                    "Ignoring invalid structural-tag reasoning metadata"
-                );
-                false
-            }
-        }
     }
 
     /// Decide whether this request should use a tool-call format tag.
@@ -357,10 +360,43 @@ fn apply_structural_tag(
     Ok(true)
 }
 
-pub(super) fn validate_runtime_config(runtime_config: &ModelRuntimeConfig) -> anyhow::Result<()> {
-    let Some(config) = runtime_config.structural_tag.as_ref() else {
-        return Ok(());
+pub(super) fn validate_runtime_config(
+    runtime_config: &ModelRuntimeConfig,
+) -> anyhow::Result<ResolvedReasoningBoundary> {
+    let backend_excludes_reasoning = match runtime_config
+        .get_engine_specific::<bool>(TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY)
+    {
+        Ok(value) => value.unwrap_or(false),
+        Err(error) if runtime_config.structural_tag.is_none() => {
+            tracing::warn!(
+                %error,
+                key = TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+                "Ignoring invalid structural-tag reasoning metadata"
+            );
+            false
+        }
+        Err(error) => return Err(error),
     };
+    let configured_boundary = runtime_config
+        .structural_tag
+        .as_ref()
+        .map_or(StructuralTagReasoningBoundary::default(), |config| {
+            config.reasoning_boundary
+        });
+    let reasoning_boundary =
+        resolve_reasoning_boundary(configured_boundary, backend_excludes_reasoning)
+            .map_err(anyhow::Error::msg)?;
+
+    let Some(config) = runtime_config.structural_tag.as_ref() else {
+        return Ok(reasoning_boundary);
+    };
+
+    if config.reasoning_boundary == StructuralTagReasoningBoundary::Backend {
+        anyhow::ensure!(
+            runtime_config.reasoning_parser.is_some(),
+            "structural_tag.reasoning_boundary=backend requires a reasoning parser"
+        );
+    }
 
     let v2_only_option = config
         .allow_tool_calls_with_structured_output
@@ -377,7 +413,7 @@ pub(super) fn validate_runtime_config(runtime_config: &ModelRuntimeConfig) -> an
             .tool_arguments_any_order
             .then_some("tool_arguments_any_order"));
     let Some(v2_only_option) = v2_only_option else {
-        return Ok(());
+        return Ok(reasoning_boundary);
     };
 
     anyhow::ensure!(
@@ -397,21 +433,7 @@ pub(super) fn validate_runtime_config(runtime_config: &ModelRuntimeConfig) -> an
         "parser '{parser_name}' does not provide a parsers-v2 structural-tag builder"
     );
 
-    if config.reasoning_boundary == StructuralTagReasoningBoundary::Backend {
-        anyhow::ensure!(
-            runtime_config.reasoning_parser.is_some(),
-            "structural_tag.reasoning_boundary=backend requires a reasoning parser"
-        );
-        let capability = runtime_config
-            .get_engine_specific::<bool>(TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY)?
-            .unwrap_or(false);
-        anyhow::ensure!(
-            capability,
-            "structural_tag.reasoning_boundary=backend is not supported by this backend"
-        );
-    }
-
-    Ok(())
+    Ok(reasoning_boundary)
 }
 
 #[cfg(test)]
@@ -521,6 +543,62 @@ mod tests {
             format["elements"][0]["value"],
             "<|tool_calls_section_begin|>"
         );
+    }
+
+    #[test]
+    fn reasoning_boundary_resolution_follows_backend_policy_and_rejects_conflicts() {
+        assert_eq!(
+            resolve_reasoning_boundary(StructuralTagReasoningBoundary::Auto, false).unwrap(),
+            ResolvedReasoningBoundary::StructuralTag
+        );
+        assert_eq!(
+            resolve_reasoning_boundary(StructuralTagReasoningBoundary::Auto, true).unwrap(),
+            ResolvedReasoningBoundary::Backend
+        );
+        assert_eq!(
+            resolve_reasoning_boundary(StructuralTagReasoningBoundary::Backend, false).unwrap(),
+            ResolvedReasoningBoundary::Backend
+        );
+        assert!(
+            resolve_reasoning_boundary(StructuralTagReasoningBoundary::StructuralTag, true)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn reasoning_boundary_is_resolved_when_the_preprocessor_is_created() {
+        assert_eq!(
+            kimi_k2_preprocessor(None).structural_tag_reasoning_boundary,
+            ResolvedReasoningBoundary::StructuralTag
+        );
+        assert_eq!(
+            kimi_k2_preprocessor(Some(true)).structural_tag_reasoning_boundary,
+            ResolvedReasoningBoundary::Backend
+        );
+    }
+
+    #[test]
+    fn conflicting_reasoning_boundary_is_rejected_when_the_preprocessor_is_created() {
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        mdc.runtime_config.structural_tag = Some(StructuralTagConfig {
+            reasoning_boundary: StructuralTagReasoningBoundary::StructuralTag,
+            ..Default::default()
+        });
+        mdc.runtime_config
+            .set_engine_specific(
+                TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+                true,
+            )
+            .unwrap();
+
+        let error = OpenAIPreprocessor::new(mdc)
+            .err()
+            .expect("the conflicting boundary must fail during preprocessor initialization");
+        assert!(error.to_string().contains(
+            "structural_tag.reasoning_boundary=structural_tag conflicts with the backend"
+        ));
     }
 
     #[test]

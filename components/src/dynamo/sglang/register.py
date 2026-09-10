@@ -30,7 +30,7 @@ from dynamo.llm import (
     WorkerType,
     register_model,
 )
-from dynamo.sglang._compat import sglang_uses_mla_backend
+from dynamo.sglang._compat import sglang_uses_mla_backend, supports_require_reasoning
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import DynamoConfig, use_modelexpress_remote_instance
 from dynamo.sglang.capacity import (
@@ -44,6 +44,17 @@ from dynamo.sglang.engine_generate import SGLANG_GENERATE_CAPABILITY
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
+TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY = (
+    "tool_call_structural_tag_excludes_reasoning"
+)
+
+
+def _backend_excludes_reasoning_from_structural_tag(
+    engine: Optional[sgl.Engine], server_args: ServerArgs
+) -> bool:
+    return bool(getattr(server_args, "reasoning_parser", None)) and (
+        supports_require_reasoning(engine)
+    )
 
 
 def _supports_engine_generate(
@@ -417,6 +428,12 @@ async def get_runtime_config(
         dynamo_args.exclude_tools_when_tool_choice_none
     )
     runtime_config.set_structural_tag(dynamo_args.structural_tag)
+    runtime_config.set_engine_specific(
+        TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+        json.dumps(
+            _backend_excludes_reasoning_from_structural_tag(engine, server_args)
+        ),
+    )
     # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
     is_decode_worker = server_args.disaggregation_mode == "decode"
     runtime_config.enable_local_indexer = (

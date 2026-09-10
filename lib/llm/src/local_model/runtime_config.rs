@@ -79,8 +79,10 @@ pub enum StructuralTagScope {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum StructuralTagReasoningBoundary {
-    /// Include reasoning and its closing marker in the structural tag.
+    /// Follow the reasoning-boundary policy advertised by the inference backend.
     #[default]
+    Auto,
+    /// Include reasoning and its closing marker in the structural tag.
     StructuralTag,
     /// Let the inference backend activate a suffix-only structural tag after reasoning.
     Backend,
@@ -787,6 +789,11 @@ mod tests {
 
     #[test]
     fn structural_tag_config_round_trips_and_rejects_unknown_fields() {
+        assert_eq!(
+            StructuralTagConfig::default().reasoning_boundary,
+            StructuralTagReasoningBoundary::Auto
+        );
+
         let config = StructuralTagConfig {
             scope: StructuralTagScope::Always,
             schema: StructuralTagSchemaMode::Strict,

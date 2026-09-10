@@ -24,6 +24,37 @@ pytestmark = [
 
 
 @pytest.mark.parametrize(
+    ("engine_supports_gate", "reasoning_parser", "expected"),
+    [
+        (True, "glm45", True),
+        (True, None, False),
+        (False, "glm45", False),
+        (False, None, False),
+    ],
+)
+def test_structural_tag_reasoning_policy_requires_parser_and_gate_support(
+    engine_supports_gate, reasoning_parser, expected
+):
+    from dynamo.sglang import register
+
+    class ReasoningEngine:
+        async def async_generate(self, require_reasoning=False):
+            return None
+
+    class OldEngine:
+        async def async_generate(self, input_ids=None):
+            return None
+
+    engine = ReasoningEngine() if engine_supports_gate else OldEngine()
+
+    server_args = SimpleNamespace(reasoning_parser=reasoning_parser)
+    assert (
+        register._backend_excludes_reasoning_from_structural_tag(engine, server_args)
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
     "server_args, expected",
     [
         (SimpleNamespace(page_size=64), 64),

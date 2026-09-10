@@ -1556,6 +1556,7 @@ pub struct OpenAIPreprocessor {
     lora_name: Option<String>,
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
     runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
+    structural_tag_reasoning_boundary: structural_tag::ResolvedReasoningBoundary,
     /// KV cache block size published in the model deployment card.
     kv_cache_block_size: usize,
     tool_call_parser: Option<String>,
@@ -2275,7 +2276,8 @@ impl OpenAIPreprocessor {
 
         // // Initialize runtime config from the ModelDeploymentCard
         let runtime_config = mdc.runtime_config.clone();
-        structural_tag::validate_runtime_config(&runtime_config)?;
+        let structural_tag_reasoning_boundary =
+            structural_tag::validate_runtime_config(&runtime_config)?;
         let token_budget = match runtime_config
             .get_engine_specific::<TokenBudget>(TOKEN_BUDGET_RUNTIME_KEY)
         {
@@ -2557,6 +2559,7 @@ impl OpenAIPreprocessor {
             mdcsum,
             lora_name,
             runtime_config,
+            structural_tag_reasoning_boundary,
             kv_cache_block_size,
             tool_call_parser,
             normalize_tool_call_args,

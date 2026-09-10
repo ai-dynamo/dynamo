@@ -31,7 +31,7 @@ class StructuralTagConfig(msgspec.Struct, forbid_unknown_fields=True):
     schema: Literal["auto", "strict"] = "auto"
     allow_tool_calls_with_structured_output: bool = False
     exclude_special_tokens: Optional[bool] = None
-    reasoning_boundary: Literal["structural_tag", "backend"] = "structural_tag"
+    reasoning_boundary: Literal["auto", "structural_tag", "backend"] = "auto"
     tool_arguments_any_order: bool = False
 
 

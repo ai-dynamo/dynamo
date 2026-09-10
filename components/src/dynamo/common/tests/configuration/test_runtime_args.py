@@ -172,7 +172,7 @@ def test_structural_tag_flag_uses_default_config(monkeypatch):
         "schema": "auto",
         "allow_tool_calls_with_structured_output": False,
         "exclude_special_tokens": None,
-        "reasoning_boundary": "structural_tag",
+        "reasoning_boundary": "auto",
         "tool_arguments_any_order": False,
     }
     assert "DYN_STRUCTURAL_TAG" in help_text
