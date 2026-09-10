@@ -139,7 +139,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_declared_window_is_linked() {
-        for policy in [PrefillCancelUntil::Anytime, PrefillCancelUntil::PreCommit] {
+        for policy in [PrefillCancelUntil::Anytime, PrefillCancelUntil::PreHandoff] {
             let client = Context::new(()).context();
             let prefill = Context::new(()).context();
 
@@ -155,7 +155,7 @@ mod tests {
 
     #[tokio::test]
     async fn revoked_link_leaves_prefill_running() {
-        // Past the handoff commitment a PreCommit worker must be left alone:
+        // Past the handoff commitment a PreHandoff worker must be left alone:
         // aborting there orphans KV that the decode leg still needs to collect.
         let parent = Context::new(()).context();
         let child = Context::new(()).context();
