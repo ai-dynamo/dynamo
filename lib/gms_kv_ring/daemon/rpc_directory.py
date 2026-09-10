@@ -192,8 +192,6 @@ def handle_directory_promote(daemon: "GmsKvCacheManager", msg: Message) -> Respo
         current = int(daemon._content_directory_epoch)
         active = daemon._content_directory_writer_id
         if active == writer_id:
-            # Idempotent self-promote (e.g. TP ranks repeating the post-lock
-            # hook, or the same writer restarting with a stable writer_id).
             # Release any claims this writer left pinned before a crash-restart
             # so they cannot pin HBM forever.
             _directory_release_writer_claims_locked(daemon, writer_id)
@@ -570,6 +568,13 @@ def handle_directory_ensure_hbm_capacity(
                 "ok": True,
                 "victims": [],
                 "rejected_stale_writer": True,
+            }
+        if required == 0:
+            return {
+                "ok": True,
+                "victims": [],
+                "freed_blocks": 0,
+                "rejected_stale_writer": False,
             }
         candidates = [
             (key, entry)
