@@ -130,7 +130,6 @@ spec:
             - "4"
             - --max-ep-size
             - "8"
-            # Elastic-EP scale-up is asserted to run with both CUDA graphs off.
             - --cuda-graph-backend-decode
             - disabled
             - --cuda-graph-backend-prefill
