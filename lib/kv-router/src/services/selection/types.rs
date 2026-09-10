@@ -57,6 +57,10 @@ pub struct SelectionWorkerConfig {
     /// Per-global-DP-rank KV control endpoints a hint target fetches from.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub router_hint_source_control_endpoints: HashMap<u32, String>,
+    /// How the worker publishes KV events; a `state_agent_v2` worker is never
+    /// a router-hint source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_event_source_mode: Option<String>,
 }
 
 impl WorkerConfigLike for SelectionWorkerConfig {
@@ -148,6 +152,8 @@ pub struct WorkerCatalogRecord {
     pub router_hint_worker_type: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub router_hint_source_control_endpoints: HashMap<u32, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_event_source_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub not_schedulable_reasons: Vec<String>,
 }
@@ -177,6 +183,7 @@ impl WorkerCatalogRecord {
             kv_transfer_preferred_weight: req.kv_transfer_preferred_weight,
             router_hint_worker_type: req.router_hint_worker_type,
             router_hint_source_control_endpoints: req.router_hint_source_control_endpoints,
+            kv_event_source_mode: req.kv_event_source_mode,
             not_schedulable_reasons: Vec::new(),
         }
     }
@@ -215,6 +222,7 @@ impl WorkerCatalogRecord {
             kv_transfer_preferred_weight: self.kv_transfer_preferred_weight,
             router_hint_worker_type: self.router_hint_worker_type.clone(),
             router_hint_source_control_endpoints: self.router_hint_source_control_endpoints.clone(),
+            kv_event_source_mode: self.kv_event_source_mode.clone(),
         })
     }
 
@@ -275,6 +283,7 @@ impl Default for WorkerRequest {
             kv_transfer_preferred_weight: None,
             router_hint_worker_type: None,
             router_hint_source_control_endpoints: HashMap::new(),
+            kv_event_source_mode: None,
         }
     }
 }
@@ -312,6 +321,8 @@ pub struct WorkerRequest {
     /// Per-global-DP-rank KV control endpoints this worker can serve hints from.
     #[serde(default)]
     pub router_hint_source_control_endpoints: HashMap<u32, String>,
+    #[serde(default)]
+    pub kv_event_source_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -336,6 +347,8 @@ pub struct WorkerPatchRequest {
     pub router_hint_worker_type: Option<String>,
     #[serde(default)]
     pub router_hint_source_control_endpoints: Option<HashMap<u32, String>>,
+    #[serde(default)]
+    pub kv_event_source_mode: Option<String>,
 }
 
 impl WorkerCatalogRecord {
@@ -396,6 +409,9 @@ impl WorkerCatalogRecord {
         }
         if let Some(endpoints) = patch.router_hint_source_control_endpoints {
             self.router_hint_source_control_endpoints = endpoints;
+        }
+        if patch.kv_event_source_mode.is_some() {
+            self.kv_event_source_mode = patch.kv_event_source_mode;
         }
     }
 }

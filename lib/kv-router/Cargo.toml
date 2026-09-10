@@ -98,3 +98,8 @@ harness = false
 [[bench]]
 name = "worker_selection"
 harness = false
+
+[[bench]]
+name = "selection_core"
+harness = false
+required-features = ["standalone-selection"]

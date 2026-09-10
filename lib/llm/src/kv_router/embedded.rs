@@ -618,6 +618,7 @@ pub(crate) fn worker_request_from_runtime_config(
         kv_transfer_preferred_weight: config.kv_transfer_preferred_weight,
         router_hint_worker_type,
         router_hint_source_control_endpoints,
+        kv_event_source_mode: config.kv_event_source_mode.clone(),
         ..WorkerRequest::default()
     }
 }

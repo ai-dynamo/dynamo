@@ -159,6 +159,10 @@ rank:
 }
 ```
 
+A worker whose KV events come from a state agent sets
+`"kv_event_source_mode": "state_agent_v2"`; it can receive hints but is never
+chosen as a hint source.
+
 `PATCH /workers/{worker_id}` updates supplied fields, `DELETE
 /workers/{worker_id}` removes the worker, and `GET /workers` lists catalog
 state. `model_name` and `routing_group` scope selection, indexer, and load state;

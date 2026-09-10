@@ -976,23 +976,22 @@ impl SelectionCore {
     }
 
     fn ready_entry(&self, key: &RoutingPartitionId) -> Result<Arc<SelectionEntry>, SelectionError> {
-        if self.catalog.schedulable_count() == 0 {
-            return Err(SelectionError::NotReady(
-                "no schedulable workers are available".to_string(),
-            ));
-        }
-
         let Some(entry) = self.entry(key) else {
-            return Err(SelectionError::NotReady(format!(
-                "no schedulable workers for {key}"
-            )));
+            return Err(self.not_ready(key));
         };
         if !self.catalog.has_schedulable_for_key(key) {
-            return Err(SelectionError::NotReady(format!(
-                "no schedulable workers for {key}"
-            )));
+            return Err(self.not_ready(key));
         }
         Ok(entry)
+    }
+
+    /// Only the failure path pays for the catalog-wide count.
+    fn not_ready(&self, key: &RoutingPartitionId) -> SelectionError {
+        if self.catalog.schedulable_count() == 0 {
+            SelectionError::NotReady("no schedulable workers are available".to_string())
+        } else {
+            SelectionError::NotReady(format!("no schedulable workers for {key}"))
+        }
     }
 
     pub async fn select(&self, req: SelectRequest) -> Result<SelectResponse, SelectionError> {
@@ -1345,9 +1344,9 @@ impl SelectionCore {
                 self.catalog
                     .total_kv_blocks(response.best_worker.worker_id, &key)
             });
-        let kv_hint = if retain_kv_transfer_chain {
+        let kv_hint = if retain_kv_transfer_chain && response.kv_transfer_candidates.is_some() {
             transfer_hint_for_selection(
-                &self.catalog.scheduler_configs_for_key(&key),
+                &entry.workers_tx.borrow(),
                 response.best_worker,
                 response.target_cached_prefix_blocks,
                 response.kv_transfer_candidates.as_ref(),
@@ -2174,7 +2173,7 @@ fn spawn_reservation_index_sweep(
 /// Pick the best router-hint source for `target`: a same-role worker (or
 /// cache owner) holding a longer root-aligned prefix than the target's own
 /// `target_cached_prefix_blocks`, with a non-empty control endpoint. Mirrors the
-/// frontend `KvRouter::router_hint_for_selection`.
+/// frontend `KvRouter::transfer_hint_for_selection`.
 fn transfer_hint_for_selection(
     configs: &HashMap<WorkerId, SelectionWorkerConfig>,
     target: WorkerWithDpRank,
@@ -2191,14 +2190,15 @@ fn transfer_hint_for_selection(
             KvTransferCandidateSource::Worker(worker) => {
                 worker != target
                     && configs.get(&worker.worker_id).is_some_and(|config| {
-                        config
-                            .kv_hint_transfer_metadata_for_dp_rank(worker.dp_rank)
-                            .is_some_and(|source_metadata| {
-                                source_metadata.worker_type == target_metadata.worker_type
-                                    && source_metadata
-                                        .source_control_endpoint
-                                        .is_some_and(|endpoint| !endpoint.is_empty())
-                            })
+                        config.kv_event_source_mode.as_deref() != Some("state_agent_v2")
+                            && config
+                                .kv_hint_transfer_metadata_for_dp_rank(worker.dp_rank)
+                                .is_some_and(|source_metadata| {
+                                    source_metadata.worker_type == target_metadata.worker_type
+                                        && source_metadata
+                                            .source_control_endpoint
+                                            .is_some_and(|endpoint| !endpoint.is_empty())
+                                })
                     })
             }
             KvTransferCandidateSource::CacheOwner(owner) => candidates
@@ -2290,6 +2290,7 @@ mod tests {
             kv_transfer_preferred_weight: None,
             router_hint_worker_type: None,
             router_hint_source_control_endpoints: HashMap::new(),
+            kv_event_source_mode: None,
         }
     }
 
@@ -2676,10 +2677,13 @@ mod tests {
         server.abort();
     }
 
-    #[tokio::test]
-    async fn booked_selection_attaches_router_hint_from_a_better_source() {
+    /// Two event-driven workers; worker 1 holds every block of an 8-token
+    /// prompt. `configure` adjusts each registration before upsert.
+    async fn hint_fixture(
+        configure: impl Fn(&mut WorkerRequest),
+    ) -> (SelectionCore, Arc<SelectionEntry>, Vec<u32>) {
         use crate::indexer::KvIndexerInterface;
-        use crate::protocols::{BlockHashOptions, StorageTier, compute_block_hash_for_seq};
+        use crate::protocols::{BlockHashOptions, compute_block_hash_for_seq};
 
         let core = SelectionCore::try_new_local(
             test_config(true),
@@ -2690,22 +2694,17 @@ mod tests {
         .expect("valid test config");
         for worker_id in [1, 2] {
             let mut request = worker_with_kv_events(worker_id);
-            request.router_hint_worker_type = Some("decode".to_string());
-            request.router_hint_source_control_endpoints =
-                HashMap::from([(0, format!("tcp://worker-{worker_id}:9000"))]);
+            configure(&mut request);
             core.upsert_worker(request).await.expect("worker upsert");
         }
-        let key = RoutingPartitionId::new("model", "default");
-        let entry = core.entry(&key).expect("entry");
-        assert!(entry.indexer.supports_kv_transfer_chain_retention());
-
-        // Worker 1 holds both blocks of the prompt; worker 2 holds nothing.
+        let entry = core
+            .entry(&RoutingPartitionId::new("model", "default"))
+            .expect("entry");
         let tokens: Vec<u32> = (1..=8).collect();
         let hashes: Vec<u64> = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default())
             .into_iter()
             .map(|hash| hash.0)
             .collect();
-        assert_eq!(hashes.len(), 2);
         entry
             .indexer
             .apply_event_routed(store_event(1, 0, 1, &[], &hashes, StorageTier::Device))
@@ -2714,16 +2713,37 @@ mod tests {
         if let Indexer::Single { primary, .. } = &entry.indexer {
             let _ = primary.flush().await;
         }
-        let prompt = || PromptRequest {
-            token_ids: Some(tokens.clone()),
+        (core, entry, tokens)
+    }
+
+    fn hint_capable(request: &mut WorkerRequest) {
+        request.router_hint_worker_type = Some("decode".to_string());
+        request.router_hint_source_control_endpoints =
+            HashMap::from([(0, format!("tcp://worker-{}:9000", request.worker_id))]);
+    }
+
+    async fn reserve_pinned(
+        core: &SelectionCore,
+        selection_id: &str,
+        tokens: &[u32],
+        worker_id: WorkerId,
+    ) -> SelectResponse {
+        let mut request = reserve_request(selection_id);
+        request.prompt = PromptRequest {
+            token_ids: Some(tokens.to_vec()),
             ..PromptRequest::default()
         };
+        request.pinned_worker = Some(WorkerWithDpRank::new(worker_id, 0));
+        core.select_and_reserve(request).await.expect("reserve")
+    }
+
+    #[tokio::test]
+    async fn booked_selection_attaches_router_hint_from_a_better_source() {
+        let (core, entry, tokens) = hint_fixture(hint_capable).await;
+        assert!(entry.indexer.supports_kv_transfer_chain_retention());
 
         // Booking on worker 2: worker 1 is a same-role source with a longer prefix.
-        let mut request = reserve_request("to-worker-2");
-        request.prompt = prompt();
-        request.pinned_worker = Some(WorkerWithDpRank::new(2, 0));
-        let response = core.select_and_reserve(request).await.expect("reserve");
+        let response = reserve_pinned(&core, "to-worker-2", &tokens, 2).await;
         let hint = response.kv_hint.expect("router hint for worker 2");
         assert_eq!(hint.message_id, "to-worker-2");
         assert_eq!(hint.actions[0].action_type, "kv.fetch");
@@ -2734,56 +2754,38 @@ mod tests {
         assert_eq!(payload.block_hashes.len(), 2);
 
         // Booking on worker 1 itself: nothing holds a longer prefix.
-        let mut request = reserve_request("to-worker-1");
-        request.prompt = prompt();
-        request.pinned_worker = Some(WorkerWithDpRank::new(1, 0));
-        let response = core.select_and_reserve(request).await.expect("reserve");
+        let response = reserve_pinned(&core, "to-worker-1", &tokens, 1).await;
         assert!(response.kv_hint.is_none());
 
         // Query-only selections never carry a hint.
         let mut request = select_request();
-        request.prompt = prompt();
+        request.prompt = PromptRequest {
+            token_ids: Some(tokens.clone()),
+            ..PromptRequest::default()
+        };
         request.pinned_worker = Some(WorkerWithDpRank::new(2, 0));
         let response = core.select(request).await.expect("select");
         assert!(response.kv_hint.is_none());
     }
 
     #[tokio::test]
-    async fn router_hint_needs_capable_workers() {
-        use crate::indexer::KvIndexerInterface;
-        use crate::protocols::{BlockHashOptions, StorageTier, compute_block_hash_for_seq};
+    async fn state_agent_workers_are_not_router_hint_sources() {
+        let (core, _entry, tokens) = hint_fixture(|request| {
+            hint_capable(request);
+            if request.worker_id == 1 {
+                request.kv_event_source_mode = Some("state_agent_v2".to_string());
+            }
+        })
+        .await;
+        // Worker 1 holds the prefix but reports through a state agent.
+        let response = reserve_pinned(&core, "to-worker-2", &tokens, 2).await;
+        assert!(response.kv_hint.is_none());
+    }
 
-        let core = SelectionCore::try_new_local(
-            test_config(true),
-            1,
-            CancellationToken::new(),
-            SelectionCacheConfig::default(),
-        )
-        .expect("valid test config");
-        for worker_id in [1, 2] {
-            core.upsert_worker(worker_with_kv_events(worker_id))
-                .await
-                .expect("worker upsert");
-        }
-        let entry = core
-            .entry(&RoutingPartitionId::new("model", "default"))
-            .expect("entry");
-        let hashes: Vec<u64> =
-            compute_block_hash_for_seq(&[1, 2, 3, 4], 4, BlockHashOptions::default())
-                .into_iter()
-                .map(|hash| hash.0)
-                .collect();
-        entry
-            .indexer
-            .apply_event_routed(store_event(1, 0, 1, &[], &hashes, StorageTier::Device))
-            .await
-            .unwrap();
-        if let Indexer::Single { primary, .. } = &entry.indexer {
-            let _ = primary.flush().await;
-        }
-        let mut request = reserve_request("plain");
-        request.pinned_worker = Some(WorkerWithDpRank::new(2, 0));
-        let response = core.select_and_reserve(request).await.expect("reserve");
+    #[tokio::test]
+    async fn router_hint_needs_capable_workers() {
+        let (core, _entry, tokens) = hint_fixture(|_| {}).await;
+        let response = reserve_pinned(&core, "plain", &tokens, 2).await;
         assert!(response.kv_hint.is_none());
     }
 
