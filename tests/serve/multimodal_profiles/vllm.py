@@ -195,6 +195,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # Post_merge MM-routing coverage for the Qwen3-VL family — the
             # smaller Qwen3.5-0.8B (`agg_router` below) is the pre_merge gater.
             "agg_router": TopologyConfig(
+                health_check_workers=True,
+                health_check_worker_count=2,
                 marks=[pytest.mark.post_merge],
                 timeout_s=400,
                 profiled_vram_gib=13.0,
@@ -220,6 +222,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # SINGLE_GPU=true packs both workers onto GPU 0 to match the
             # single-GPU CI environment.
             "agg_router_chat_processor": TopologyConfig(
+                health_check_workers=True,
+                health_check_worker_count=2,
                 marks=[pytest.mark.post_merge],
                 timeout_s=400,
                 profiled_vram_gib=13.0,
@@ -237,6 +241,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # CI; the content-hash correctness assertion lives in
             # tests/mm_router/test_router_rust_mm_frontend_decode_e2e.py.
             "agg_router_frontend_decode": TopologyConfig(
+                health_check_workers=True,
+                health_check_worker_count=2,
                 marks=[pytest.mark.post_merge],
                 timeout_s=400,
                 profiled_vram_gib=13.0,
@@ -265,6 +271,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 ],
             ),
             "epd": TopologyConfig(
+                health_check_workers=True,
+                health_check_worker_count=3,
                 marks=[pytest.mark.post_merge],
                 timeout_s=300,
                 single_gpu=True,
@@ -282,6 +290,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 ],
             ),
             "epd_video": TopologyConfig(
+                health_check_workers=True,
+                health_check_worker_count=3,
                 # E/P/D regression gate: the decode handoff must retain both
                 # the reconstructed image placeholder and reloaded video.
                 marks=[
@@ -342,6 +352,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         short_name="qwen2.5-vl-3b",
         topologies={
             "agg_router": TopologyConfig(
+                health_check_workers=True,
+                health_check_worker_count=2,
                 marks=[pytest.mark.post_merge],
                 timeout_s=500,
                 profiled_vram_gib=19.0,
@@ -371,6 +383,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         short_name="qwen2-vl-2b",
         topologies={
             "agg_router": TopologyConfig(
+                health_check_workers=True,
+                health_check_worker_count=2,
                 marks=[pytest.mark.post_merge],
                 timeout_s=500,
                 profiled_vram_gib=16.0,
@@ -421,6 +435,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # hit-rate ceiling (N-1)/N. Filler 120 → ~6 blocks → ceiling ≈0.83;
             # threshold 0.7 fires on real degradation, tolerates variance.
             "agg_router": TopologyConfig(
+                health_check_workers=True,
+                health_check_worker_count=2,
                 marks=[pytest.mark.pre_merge],
                 timeout_s=400,
                 profiled_vram_gib=8.0,
@@ -561,6 +577,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # Qwen3-VL-2B / Qwen2.5-VL-3B / Qwen2-VL-2B
             # profiles above without the LLaVA flake.
             "agg_router": TopologyConfig(
+                health_check_workers=True,
+                health_check_worker_count=2,
                 marks=[
                     pytest.mark.skip(
                         reason="LLaVA-1.5 flake on vLLM 0.20 (see PR #9336); "
@@ -640,6 +658,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 ],
             ),
             "epd": TopologyConfig(
+                health_check_workers=True,
+                health_check_worker_count=3,
                 # Moved to post_merge: same LLaVA-1.5 flake as e_pd above.
                 marks=[pytest.mark.post_merge],
                 timeout_s=600,
@@ -685,6 +705,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         short_name="llava-next-mistral-7b",
         topologies={
             "agg_router": TopologyConfig(
+                health_check_workers=True,
+                health_check_worker_count=2,
                 marks=[
                     pytest.mark.skip(
                         reason="LLaVA-NeXT inherits LLaVA-1.5 flake on vLLM 0.20 "

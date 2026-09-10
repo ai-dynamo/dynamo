@@ -835,7 +835,10 @@ def vllm_config_test(request):
 
 @pytest.mark.vllm
 @pytest.mark.e2e
-@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+# 3, not 2: the E/P/D multimodal topologies bind three worker system ports, and
+# tests/conftest.py sizes the NIXL side-channel list off the same count, so this
+# supplies DYN_SYSTEM_PORT3 and a third DYN_VLLM_NIXL_SIDE_CHANNEL_PORT.
+@pytest.mark.parametrize("num_system_ports", [3], indirect=True)
 def test_serve_deployment(
     vllm_config_test,
     request,
