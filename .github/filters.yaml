@@ -344,6 +344,8 @@ sidecar:
   # acceptable CI fan-out is agreed. Keep the remaining scope narrow for now.
   - 'lib/sidecar/**'
   - '.github/workflows/shared-build-sidecar.yml'
+  - 'Cargo.toml'
+  - 'Cargo.lock'
   # Compliance policy and baseline changes can fail the sidecar image build.
   - 'container/compliance/**'
   - '!**/*.md'

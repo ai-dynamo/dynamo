@@ -3236,12 +3236,6 @@ impl OpenAIPreprocessor {
                     continue;
                 };
 
-                if type_str != "image_url" && uuid.is_some() {
-                    return Err(invalid_argument_error(
-                        "multimodal cache UUIDs are supported only for image_url parts with vLLM",
-                    ));
-                }
-
                 #[cfg(feature = "mm-routing")]
                 if type_str == "image_url" {
                     total_image_count += 1;
@@ -3265,12 +3259,10 @@ impl OpenAIPreprocessor {
                 let slots = media_map.entry(type_str.to_string()).or_default();
                 let slot_idx = slots.len();
                 has_user_uuid |= uuid.is_some();
-                if type_str == "image_url" {
-                    uuid_map
-                        .entry(type_str.to_string())
-                        .or_default()
-                        .push(uuid.clone());
-                }
+                uuid_map
+                    .entry(type_str.to_string())
+                    .or_default()
+                    .push(uuid.clone());
 
                 match (url, uuid) {
                     (Some(url), _) => {
@@ -3289,8 +3281,13 @@ impl OpenAIPreprocessor {
                         }
                         slots.push(MultimodalData::Url(url));
                     }
-                    (None, Some(uuid)) => {
+                    (None, Some(uuid)) if type_str == "image_url" => {
                         slots.push(MultimodalData::UuidOnly(uuid));
+                    }
+                    (None, Some(_)) => {
+                        return Err(invalid_argument_error(format!(
+                            "UUID-only cache reuse is not supported for media modality `{type_str}`; provide a media URL"
+                        )));
                     }
                     (None, None) => {
                         return Err(invalid_argument_error(format!(
