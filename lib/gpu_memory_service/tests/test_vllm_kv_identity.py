@@ -21,28 +21,58 @@ def _clear_dynamic_gms_role_env(monkeypatch):
     monkeypatch.delenv("DYN_VLLM_GMS_ACTIVE_LOCK_HELD", raising=False)
 
 
-def test_v2_semantic_kv_tags_follow_layer_identity():
+def test_v3_semantic_kv_tags_include_model_layers_and_size():
     tensor_a = SimpleNamespace(
-        shared_by=["model.layers.1.self_attn", "model.layers.0.self_attn"], size=123
+        shared_by=["model.layers.1.self_attn", "model.layers.0.self_attn"],
+        size=123,
     )
-    tensor_b = SimpleNamespace(shared_by=["model.layers.0.mla"], size=456)
     same_a_different_order = SimpleNamespace(
         shared_by=["model.layers.0.self_attn", "model.layers.1.self_attn"],
-        size=789,
+        size=123,
+    )
+    resized_a = SimpleNamespace(shared_by=tensor_a.shared_by, size=789)
+
+    def config(tensor):
+        return SimpleNamespace(kv_cache_tensors=[tensor])
+
+    tag_a = install_vmm_ipc_kv._semantic_kv_tensor_tag_plan(
+        config(tensor_a), "model=org/model\0revision=abc"
+    )[0]
+    same_tag = install_vmm_ipc_kv._semantic_kv_tensor_tag_plan(
+        config(same_a_different_order), "model=org/model\0revision=abc"
+    )[0]
+    resized_tag = install_vmm_ipc_kv._semantic_kv_tensor_tag_plan(
+        config(resized_a), "model=org/model\0revision=abc"
+    )[0]
+    different_model_tag = install_vmm_ipc_kv._semantic_kv_tensor_tag_plan(
+        config(tensor_a), "model=org/model\0revision=def"
+    )[0]
+
+    assert tag_a.startswith("kv_pool:v3:")
+    assert tag_a == same_tag
+    assert tag_a != resized_tag
+    assert tag_a != different_model_tag
+
+
+def test_model_identity_includes_resolved_model_revision():
+    identity = install_vmm_ipc_kv._model_identity(
+        SimpleNamespace(
+            model="org/model",
+            revision="main",
+            code_revision=None,
+            quantization="fp8",
+            hf_config=SimpleNamespace(_commit_hash="abcdef"),
+        )
     )
 
-    tag_a, tag_b = install_vmm_ipc_kv._semantic_kv_tensor_tag_plan(
-        SimpleNamespace(kv_cache_tensors=[tensor_a, tensor_b])
-    )
-    tag_b2, tag_a2 = install_vmm_ipc_kv._semantic_kv_tensor_tag_plan(
-        SimpleNamespace(kv_cache_tensors=[tensor_b, same_a_different_order])
+    assert identity == (
+        "model=org/model\0revision=main\0quantization=fp8\0hf_commit=abcdef"
     )
 
-    assert tag_a.startswith("kv_pool:v2:")
-    assert tag_b.startswith("kv_pool:v2:")
-    assert tag_a == tag_a2
-    assert tag_b == tag_b2
-    assert tag_a != tag_b
+
+def test_model_identity_fails_closed_when_unavailable():
+    with pytest.raises(RuntimeError, match="stable model identity"):
+        install_vmm_ipc_kv._model_identity(SimpleNamespace())
 
 
 def test_semantic_kv_tags_disambiguate_duplicate_layer_identity():
@@ -50,11 +80,11 @@ def test_semantic_kv_tags_disambiguate_duplicate_layer_identity():
     tensor_b = SimpleNamespace(shared_by=["model.layers.0.self_attn"], size=123)
 
     tag_a, tag_b = install_vmm_ipc_kv._semantic_kv_tensor_tag_plan(
-        SimpleNamespace(kv_cache_tensors=[tensor_a, tensor_b])
+        SimpleNamespace(kv_cache_tensors=[tensor_a, tensor_b]), "model=org/model"
     )
 
-    assert tag_a.startswith("kv_pool:v2:")
-    assert tag_b.startswith("kv_pool:v2:")
+    assert tag_a.startswith("kv_pool:v3:")
+    assert tag_b.startswith("kv_pool:v3:")
     assert tag_a != tag_b
     assert tag_a.endswith(":dup0")
     assert tag_b.endswith(":dup1")
