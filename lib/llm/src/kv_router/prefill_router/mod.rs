@@ -302,6 +302,8 @@ where
         &self,
         endpoint: &EndpointId,
     ) -> Option<std::collections::HashSet<u64>> {
+        // Target changes and activation publish binding/lifecycle under this same lock.
+        let _target = self.target.lock();
         let binding = self.binding.load();
         let binding = binding
             .as_ref()

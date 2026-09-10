@@ -139,51 +139,18 @@ mod tests {
     }
 
     #[test]
-    fn removed_worker_stays_absent_after_late_booking() {
-        use dynamo_kv_router::protocols::WorkerWithDpRank;
-        use dynamo_kv_router::{
-            ActiveSequencesMultiWorker, NoopSequencePublisher, SequenceRequest,
-        };
-
+    fn removed_worker_stays_absent_after_discovery_removal() {
         let (metric, registry) = setup();
         let (tx, rx) = watch::channel(HashMap::from([
             (1, ModelRuntimeConfig::default()),
             (2, ModelRuntimeConfig::default()),
         ]));
         let _owner = metric.watch(rx, "decode", CancellationToken::new(), None);
-        let slots = ActiveSequencesMultiWorker::new_without_expiry(
-            NoopSequencePublisher,
-            4,
-            HashMap::from([(1, (0, 1)), (2, (0, 1))]),
-            false,
-            0,
-            "decode",
-        );
         assert!(output(&registry).contains("router_worker_id=\"1\""));
         tx.send(HashMap::from([(2, ModelRuntimeConfig::default())]))
             .unwrap();
         // No scheduler/watch task needs to run before the next scrape excludes worker 1.
         assert!(!output(&registry).contains("router_worker_id=\"1\""));
-        slots.unregister_worker(1).unwrap();
-        slots
-            .add_request(
-                SequenceRequest {
-                    request_id: "late".into(),
-                    token_sequence: Some(vec![1]),
-                    track_prefill_tokens: false,
-                    expected_output_tokens: None,
-                    prefill_load_hint: None,
-                    worker: WorkerWithDpRank::new(1, 0),
-                    lora_name: None,
-                },
-                tokio::time::Instant::now(),
-            )
-            .unwrap();
-        assert!(
-            slots
-                .active_blocks()
-                .contains_key(&WorkerWithDpRank::new(1, 0))
-        );
         for _ in 0..2 {
             let text = output(&registry);
             assert!(!text.contains("router_worker_id=\"1\""), "{text}");

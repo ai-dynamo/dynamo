@@ -469,7 +469,10 @@ impl WorkerSet {
             prefill_router: self.prefill_router.clone(),
             encoder_router: self.encoder_router.clone(),
             instance_count_rx: self.instance_count_rx.clone(),
-            lifecycle_cancellation: None,
+            lifecycle_cancellation: self
+                .lifecycle_cancellation
+                .as_ref()
+                .map(CancellationToken::child_token),
             allocator_trim: None,
             allocator_trim_wrapped: false,
         };
@@ -628,6 +631,51 @@ mod tests {
             observed_lora.lock().unwrap().as_deref(),
             Some("adapter-model")
         );
+    }
+
+    #[test]
+    fn adapter_view_lifecycle_cancellation_follows_base() {
+        let mut base = make_worker_set("ns1", "abc123");
+        let (_tx, rx) = watch::channel(vec![1]);
+        base.set_instance_watcher(rx);
+        let cancellation = CancellationToken::new();
+        base.set_lifecycle_cancellation(cancellation.clone());
+
+        let mut adapter_card = ModelDeploymentCard::with_name_only("adapter-model");
+        adapter_card.lora = Some(crate::model_card::LoraInfo {
+            name: "adapter-model".to_string(),
+            max_gpu_lora_count: Some(4),
+        });
+        let adapter = base.adapter_view(adapter_card);
+
+        assert_eq!(
+            adapter.available_worker_ids(),
+            Some([1].into_iter().collect())
+        );
+        cancellation.cancel();
+        assert!(adapter.available_worker_ids().is_none());
+    }
+
+    #[test]
+    fn dropping_adapter_view_does_not_cancel_base_lifecycle() {
+        let mut base = make_worker_set("ns1", "abc123");
+        let (_tx, rx) = watch::channel(vec![1]);
+        base.set_instance_watcher(rx);
+        let cancellation = CancellationToken::new();
+        base.set_lifecycle_cancellation(cancellation.clone());
+
+        let mut adapter_card = ModelDeploymentCard::with_name_only("adapter-model");
+        adapter_card.lora = Some(crate::model_card::LoraInfo {
+            name: "adapter-model".to_string(),
+            max_gpu_lora_count: Some(4),
+        });
+        let adapter = base.adapter_view(adapter_card);
+        let adapter_cancellation = adapter.lifecycle_cancellation.clone().unwrap();
+        drop(adapter);
+
+        assert!(adapter_cancellation.is_cancelled());
+        assert!(!cancellation.is_cancelled());
+        assert_eq!(base.available_worker_ids(), Some([1].into_iter().collect()));
     }
 
     #[test]

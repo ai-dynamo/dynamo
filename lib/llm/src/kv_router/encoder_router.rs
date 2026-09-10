@@ -81,6 +81,8 @@ impl EncoderRouter {
         &self,
         endpoint: &EndpointId,
     ) -> Option<std::collections::HashSet<u64>> {
+        // Target changes and activation publish binding/lifecycle under this same lock.
+        let _target = self.target.lock();
         let binding = self.binding.load();
         let binding = binding
             .as_ref()
@@ -503,6 +505,64 @@ mod tests {
             router.available_worker_ids_for(&endpoint.id()),
             Some(HashSet::new())
         );
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn binding_availability_waits_for_rebind_publication() {
+        use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+        use std::{sync::mpsc, time::Duration};
+
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let component = distributed
+            .namespace("encoder-rebind")
+            .unwrap()
+            .component("workers")
+            .unwrap();
+        let original = component.endpoint("original");
+        let replacement = Arc::new(
+            EncoderRouter::build(component.endpoint("replacement"))
+                .await
+                .unwrap(),
+        );
+        let router = EncoderRouter::disabled();
+        let binding = Arc::new(EncoderRouter::build(original.clone()).await.unwrap());
+        binding.router.client.override_discovered_instances(vec![1]);
+        router.binding.store(Some(binding));
+        router
+            .lifecycle
+            .store(EncoderLifecycleState::Active as u8, Ordering::Release);
+        let mut target = router.target.lock();
+        *target = Some(original.id());
+        let (started_tx, started_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let reader_router = router.clone();
+        let reader = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            result_tx
+                .send(reader_router.available_worker_ids_for(&original.id()))
+                .unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(
+            result_rx.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        *target = Some(replacement.endpoint_id.clone());
+        router.binding.store(Some(replacement));
+        router
+            .lifecycle
+            .store(EncoderLifecycleState::Active as u8, Ordering::Release);
+        drop(target);
+        assert_eq!(
+            result_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            None
+        );
+        reader.join().unwrap();
         runtime.shutdown();
     }
 

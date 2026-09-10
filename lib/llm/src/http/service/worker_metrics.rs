@@ -32,6 +32,15 @@ type InventorySnapshot = Vec<(WorkerGroupObservation, HashSet<u64>)>;
 type InventoryProvider = Arc<dyn Fn() -> InventorySnapshot + Send + Sync>;
 type AllowedRanks = HashMap<(u64, String), HashSet<u32>>;
 
+fn worker_last_metric_names() -> [String; 3] {
+    [
+        frontend_service::WORKER_LAST_TIME_TO_FIRST_TOKEN_SECONDS,
+        frontend_service::WORKER_LAST_INPUT_SEQUENCE_TOKENS,
+        frontend_service::WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS,
+    ]
+    .map(|suffix| format!("{}_{suffix}", name_prefix::FRONTEND))
+}
+
 #[derive(Clone, Copy)]
 struct WorkerState {
     state: &'static str,
@@ -235,9 +244,12 @@ impl Collector for WorkerMetricsCollector {
         }
         let mut result = metrics.counts.collect();
         result.extend(metrics.states.collect());
+        let worker_last_metric_names = worker_last_metric_names();
         for collector in &self.values {
             for mut family in collector.collect() {
-                let allow_unset_rank = family.name().starts_with("dynamo_frontend_worker_last_");
+                let allow_unset_rank = worker_last_metric_names
+                    .iter()
+                    .any(|name| name == family.name());
                 let retained: Vec<_> = family
                     .take_metric()
                     .into_iter()
@@ -315,7 +327,10 @@ mod tests {
             .into_iter()
             .map(|suffix| {
                 IntGaugeVec::new(
-                    Opts::new(format!("dynamo_frontend_{suffix}"), "Observed value"),
+                    Opts::new(
+                        format!("{}_{suffix}", name_prefix::FRONTEND),
+                        "Observed value",
+                    ),
                     &["worker_id", "dp_rank", "worker_type"],
                 )
                 .unwrap()
@@ -414,7 +429,7 @@ mod tests {
             }
         }
         assert_eq!(f.count("available"), Some(2.0));
-        for gauge in &f.values {
+        for (index, gauge) in f.values.iter().enumerate() {
             let name = &gauge.desc()[0].fq_name;
             assert_eq!(
                 f.sample(name, &[("worker_id", "1"), ("dp_rank", "0")]),
@@ -423,7 +438,7 @@ mod tests {
             assert_eq!(f.sample(name, &[("dp_rank", "99")]), None);
             assert_eq!(
                 f.sample(name, &[("dp_rank", "none")]).is_some(),
-                name.starts_with("dynamo_frontend_worker_last_")
+                index >= 2, // The fixture's first two gauges are load metrics; the rest are timing.
             );
         }
 
