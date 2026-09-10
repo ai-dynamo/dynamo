@@ -321,7 +321,7 @@ See [Forward Pass Metrics Trace Reference](forward-pass-metrics-traces.mdx) for 
 </ParamField>
 
 <ParamField path="DYN_REQUEST_TRACE_S3_BUCKET" type="string">
-  Destination bucket for the `s3` sink. Required when `DYN_REQUEST_TRACE_SINKS` includes `s3`; startup fails if unset.
+  Destination bucket for the `s3` sink. Required when `DYN_REQUEST_TRACE_SINKS` includes `s3`. When it is unset, the `s3` sink fails to initialize: Dynamo logs a warning carrying the underlying error, starts no sink from that `DYN_REQUEST_TRACE_SINKS` list, and keeps serving. Startup does not fail. See [Sink Behavior](request-traces.mdx#sink-behavior).
 </ParamField>
 
 <ParamField path="DYN_REQUEST_TRACE_S3_REGION" type="string">
