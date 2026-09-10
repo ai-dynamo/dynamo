@@ -149,7 +149,6 @@ pub struct Tensor {
 pub struct RequestedOutput {
     pub name: String,
 
-    /// Optional parameters for this output
     #[serde(skip_serializing_if = "HashMap::is_empty", default)]
     pub parameters: Parameters,
 }
