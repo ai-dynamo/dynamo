@@ -2374,7 +2374,7 @@ mod tests {
                 request: SingleIn<PreprocessedRequest>,
             ) -> Result<ManyOut<Annotated<BackendOutput>>> {
                 let call = self.calls.fetch_add(1, Ordering::SeqCst);
-                let (preprocessed_request, context) = request.transfer(());
+                let (preprocessed_request, _context) = request.transfer(());
 
                 if call == 0 {
                     // First attempt: deliver one good chunk that leaves "STOP" withheld as
