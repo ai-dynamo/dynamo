@@ -594,7 +594,6 @@ async def preprocess_chat_request(
     )
 
 
-
 def _tool_calls_from_forced_choice_text(
     text: str, tool_choice: Any = None
 ) -> list[tuple[str, str]]:
@@ -639,6 +638,7 @@ def _tool_calls_from_forced_choice_text(
         args = item.get("parameters", item.get("arguments", {}))
         calls.append((name, _json.dumps(args if args is not None else {})))
     return calls
+
 
 class StreamingPostProcessor:
     def __init__(
@@ -849,9 +849,7 @@ class StreamingPostProcessor:
                             index=i,
                             type="function",
                             id=make_tool_call_id(),
-                            function=DeltaFunctionCall(
-                                name=name, arguments=arguments
-                            ),
+                            function=DeltaFunctionCall(name=name, arguments=arguments),
                         ),
                     )
                 return self._compose_delta_message(saved_reasoning, None)
