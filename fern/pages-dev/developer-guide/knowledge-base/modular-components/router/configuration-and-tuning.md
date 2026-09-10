@@ -15,11 +15,59 @@ For the routing cost model and worker-selection behavior, see
 
 The Frontend configuration is the default for worker sets that do not advertise router settings. A worker set that advertises router configuration replaces that default for requests routed to the set; it does not merge individual settings with the Frontend configuration.
 
-Every replica in a worker set must advertise the same routing configuration. A worker set is defined by namespace, component, endpoint, model, and worker type. Mixed router settings split the set into conflicting cohorts, so Dynamo admits no instances from that set.
+Every replica admitted to a worker set must have the same model deployment card (MDC) checksum after discovery normalization and tokenizer overrides. A worker set is defined by namespace, component, endpoint, model, and worker type. The first valid card observed by a Frontend reserves the set's configuration; replicas with a different checksum receive no traffic and cannot disrupt that configuration.
 
 When a worker set advertises `--router-mode kv`, restate every non-default setting that it needs. An omitted worker flag selects the shared default, not the Frontend's tuned value. This distinction matters most when the Frontend and workers receive different environment variables, such as separate Kubernetes services.
 
 For example, if the Frontend sets `--router-kv-overlap-score-credit 2.5` but a worker set advertises only `--router-mode kv`, the worker set uses the default overlap credit of `1.0`. If both processes inherit the same environment variable, they resolve to the same value. Check the `Activating prefill router` log line to confirm the resolved configuration for each hop.
+
+### Worker-Set Admission and Succession
+
+The first configuration retains its reservation while any matching workers remain,
+including during queued construction, failed construction, and retries. Workers
+with a different checksum form rejected cohorts. Their registration, removal,
+and adapter updates cannot change the incumbent's admissions, serving state,
+routing configuration, or retry schedule. A larger rejected cohort has no priority
+over the incumbent. The Frontend logs each newly rejected cohort at `ERROR`.
+
+Checksum equality is stricter than equivalent serving behavior. Different advertised
+router settings, absent versus explicit defaults, and different model `source_path`
+values can produce different checksums even when workers could serve requests the
+same way. These differences reject only the newcomer. Supported legacy cards still
+join when existing discovery-boundary normalization produces matching checksums;
+there is no additional equivalence check or normalized materialization fingerprint.
+The MDC checksum algorithm and metadata-cache identity are unchanged.
+
+When the last incumbent worker disappears, the Frontend withdraws its pipeline and
+starts a fresh pipeline for the oldest remaining cohort. Duplicate discovery events
+and snapshots preserve cohort order. A cohort that disappears completely and later
+returns joins the end. Old pipelines cannot route through the successor, even if it
+uses the same endpoint or checksum.
+
+For example, a rolling update can serve `model-a` from both `dgd-name-v1` and
+`dgd-name-v2`. These versioned namespaces identify separate worker sets, each with
+its own admitted configuration and routing pipeline. Their cards do not need to
+match each other. Within either set, a replica advertising a different local model
+directory is rejected if that difference changes its MDC checksum.
+
+Admission applies to every discovery-managed Frontend routing hop, including
+prefill and encoder requests. Each hop uses its committed worker set's selected
+card and admitted instances. Prefill routing mode and KV block size come from that
+card. Compatible replicas can join without rebuilding the hop; succession replaces
+its configuration even if the endpoint is unchanged.
+
+<Note>
+Selection is local to each Frontend. Frontends that observe conflicting cards in
+different orders may choose different incumbents; no cross-Frontend agreement is
+promised. This intentionally favors serving each Frontend's admitted incumbent
+over serving none. Different local winners are expected; discovery does not
+withdraw service or run a shared election to force agreement.
+
+Frontend readiness reflects committed membership. The KV DC Relay
+evaluates discovery independently and may remain conservative while a Frontend
+serves its incumbent. The shared readiness evaluator produces the same answer
+only for equivalent input units.
+</Note>
 
 ## Routing Behavior
 
