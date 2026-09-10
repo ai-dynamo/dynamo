@@ -649,27 +649,26 @@ class Orchestrator:
 
     def _iter_pair_partners(
         self,
-        request_participant_id: str,
         request_pool_keys: set[tuple[str, str]],
         all_pools: PoolSnapshot,
         request_net_delta_gpu: int,
     ) -> Iterator[PartnerTransfer]:
-        """Yield qualifying pair-partner candidates, same-participant first.
+        """Yield qualifying pair-partner candidates in unspecified order.
 
         A candidate qualifies when it (a) is not in the requesting pool set, (b)
         has a fresh cached intent (within TTL) whose desired differs from current
         replicas, and (c) the partner delta points opposite to the request's net
         delta.
 
-        Yields in two passes: same-participant candidates first (atomic-patch
-        preference), then cross-participant candidates. The caller picks the first
-        one whose pair total actually lands in the budget band.
+        Ordering belongs to :meth:`_find_pair_partner_set`, which sorts these
+        candidates before packing them. This used to yield same-participant
+        candidates ahead of cross-participant ones, but that grouping was
+        discarded by the caller's sort, so the preference now lives in the sort
+        key where it actually takes effect.
         """
         if request_net_delta_gpu == 0:
             return
         now = self._now()
-        same: list[PartnerTransfer] = []
-        cross: list[PartnerTransfer] = []
         for pid, pools in all_pools.items():
             for sub_type, spec in pools.items():
                 if (pid, sub_type) in request_pool_keys:
@@ -692,13 +691,7 @@ class Orchestrator:
                     request_net_delta_gpu < 0 and partner_delta_gpu <= 0
                 ):
                     continue
-                candidate = PartnerTransfer(pid, sub_type, intent.last_desired, spec)
-                if pid == request_participant_id:
-                    same.append(candidate)
-                else:
-                    cross.append(candidate)
-        yield from same
-        yield from cross
+                yield PartnerTransfer(pid, sub_type, intent.last_desired, spec)
 
     def _partial_partner(
         self,
@@ -785,7 +778,6 @@ class Orchestrator:
 
         all_candidates = list(
             self._iter_pair_partners(
-                request_participant_id,
                 request_pool_keys,
                 all_pools,
                 request_net_delta_gpu,
@@ -801,13 +793,26 @@ class Orchestrator:
             + [s.gpu_per_replica for s in candidate_specs]
         )
 
-        # Sort ascending by |delta_gpu| — smaller pieces overshoot less.
         def cand_delta(c: PartnerTransfer) -> int:
             return (
                 c.applied_desired - c.spec.current_replicas
             ) * c.spec.gpu_per_replica
 
-        all_candidates.sort(key=lambda c: abs(cand_delta(c)))
+        # Same-participant partners first, then ascending |delta_gpu| — smaller
+        # pieces overshoot less. The participant term is the primary key on
+        # purpose: an intra-participant partner merges into the request's single
+        # atomic set_component_replicas call, while a cross-participant partner
+        # needs its own patch and can leave a half-applied transfer behind when a
+        # later patch fails (see _observe_decide_apply). Sorting on |delta_gpu|
+        # alone silently discarded that preference, because a cross-participant
+        # candidate with a smaller delta sorted ahead of every intra-participant
+        # one.
+        all_candidates.sort(
+            key=lambda c: (
+                c.participant_id != request_participant_id,
+                abs(cand_delta(c)),
+            )
+        )
 
         selected: list[PartnerTransfer] = []
         overrides = dict(standalone_overrides)
