@@ -871,6 +871,19 @@ impl HttpService {
                 .handle(handle.clone())
                 .serve(router.into_make_service());
 
+            let server = async {
+                tokio::pin!(server);
+                tokio::select! {
+                    result = &mut server => result,
+                    address = handle.listening() => {
+                        if let Some(address) = address {
+                            tracing::info!(%address, "HTTPS server listening");
+                        }
+                        server.await
+                    }
+                }
+            };
+
             self.spawn_rl_listener_if_configured(&cancel_token).await?;
 
             // Spawn canary after all fallible startup so it won't leak on early errors
@@ -1706,8 +1719,18 @@ mod tests {
         assert_eq!(response.version(), reqwest::Version::HTTP_11);
 
         if mtls {
-            assert!(unauthenticated_client.get(&url).send().await.is_err());
-            assert!(untrusted_client.get(&url).send().await.is_err());
+            let error = unauthenticated_client
+                .get(&url)
+                .send()
+                .await
+                .expect_err("client without a certificate must be rejected");
+            assert!(!error.is_timeout(), "request timed out: {error}");
+            let error = untrusted_client
+                .get(&url)
+                .send()
+                .await
+                .expect_err("client with an untrusted certificate must be rejected");
+            assert!(!error.is_timeout(), "request timed out: {error}");
         }
 
         cancel.cancel();
