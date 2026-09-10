@@ -111,9 +111,8 @@ def _disagg_state(
         )
     )
 
-    # A None raw count stands for a perf model that cannot size the tick; the
-    # real _compute_* record the aggregate reason before returning None, so the
-    # stubs must too.
+    # A None raw count stands for a perf model that cannot size the tick. The
+    # real _compute_* record the aggregate reason, so the stubs do too.
     def _prefill(_self, _demand, _isl, _osl, _kv_hit_rate=None):
         if raw_p is None:
             _self._diag_throughput_reason = "model_not_ready"
@@ -391,9 +390,8 @@ def test_single_endpoint_recovery_overrides_cap_without_minimum_gpu_budget():
 
 
 def test_disagg_throughput_applies_min_endpoint_floor_when_perf_model_not_ready():
-    # A perf model that cannot estimate (both components return None) must not
-    # cost the tick its endpoint floor: decode sits one replica under the
-    # configured minimum of three.
+    # Both components return None (the perf model cannot estimate) and decode
+    # sits one replica under its configured minimum of three.
     state = _disagg_state(
         1,
         1,

@@ -66,11 +66,8 @@ class ThroughputScalingMixin:
             else self._compute_decode_replicas(demand_rps, isl, osl)
         )
         current = self._num_p_workers if component == "prefill" else self._num_d_workers
-        # ``_compute_*`` returns None when the perf model cannot size this tick.
-        # Hold at the current replica count instead of abandoning the tick, so
-        # the endpoint floor below is applied on every tick: a not-ready tick
-        # produces no throughput-driven movement, but it still recovers a
-        # component sitting under its configured minimum.
+        # ``_compute_*`` returns None when the perf model cannot size this
+        # tick; hold at the current count so the endpoint floor still applies.
         model_not_ready = desired is None
         if desired is None:
             desired = current
@@ -142,12 +139,8 @@ class ThroughputScalingMixin:
             self._diag_throughput_reason_decode = (
                 "model_not_ready" if num_d is None else "partner_not_ready"
             )
-            # Hold both components at their current replica counts instead of
-            # abandoning the tick, so the endpoint floor below is applied on
-            # every tick. Substituting for both components — rather than letting
-            # the ready side act on its own estimate — keeps a not-ready tick
-            # free of throughput-driven movement; it only stops the tick from
-            # skipping the floor.
+            # Hold both components at their current counts: acting on the ready
+            # side's own estimate would move a tick the perf model cannot size.
             num_p = self._num_p_workers
             num_d = self._num_d_workers
 
@@ -230,9 +223,8 @@ class ThroughputScalingMixin:
         engine_rps = capacity.rps if capacity is not None else 0.0
         model_not_ready = capacity is None or engine_rps <= 0
         if capacity is None or engine_rps <= 0:
-            # No capacity estimate, so the demand division below cannot run.
-            # Hold at the current replica count instead of abandoning the tick,
-            # so the endpoint floor is applied on every tick.
+            # No capacity estimate, so the demand division below cannot run;
+            # hold at the current count so the endpoint floor still applies.
             logger.warning(
                 "Agg perf model not ready, holding at the current replica count "
                 "and enforcing the endpoint floor"
