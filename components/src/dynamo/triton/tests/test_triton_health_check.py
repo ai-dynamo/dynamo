@@ -65,6 +65,7 @@ def _make_handler(
     model.ready = _readiness(model_ready)
     model.name = model_name
     model.metadata = MagicMock(return_value={"outputs": output_metadata})
+    model.config = MagicMock(return_value={})
     model.async_infer = MagicMock(
         side_effect=AssertionError("async_infer must not be called")
     )
