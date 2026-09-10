@@ -705,6 +705,55 @@ class TestEmbeddingWorkerProcesses:
         ):
             config._validate_embedding_worker_processes()
 
+    def test_nixl_truthy_token_other_than_y_is_reserved(self, monkeypatch):
+        """NIXL accepts more than "y", so Dynamo must reserve the port for them.
+
+        NIXL treats y, 1, yes, on, true and enable as enabled, case-insensitively.
+        Treating only "y" as enabled skips the reservation while NIXL really is
+        listening, which is the collision this check exists to catch.
+        """
+        monkeypatch.setenv("DYN_SYSTEM_PORT", "19089")
+        monkeypatch.setenv("NIXL_TELEMETRY_ENABLE", "true")
+        monkeypatch.setenv("NIXL_TELEMETRY_EXPORTER", "prometheus")
+        monkeypatch.setenv("NIXL_TELEMETRY_PROMETHEUS_PORT", "19090")
+        config = create_config()
+        config.embedding_worker = True
+        config.embedding_worker_processes = 3
+
+        with pytest.raises(
+            ValueError,
+            match="NIXL_TELEMETRY_PROMETHEUS_PORT reserves 19090",
+        ):
+            config._validate_embedding_worker_processes()
+
+    def test_nixl_without_exporter_reserves_nothing(self, monkeypatch):
+        """An unset exporter means NIXL runs no Prometheus listener.
+
+        NIXL never falls back to the Prometheus exporter, so with the variable
+        unset there is no listener on 19090 and nothing for Dynamo to reserve.
+        """
+        monkeypatch.setenv("DYN_SYSTEM_PORT", "19089")
+        monkeypatch.setenv("NIXL_TELEMETRY_ENABLE", "y")
+        monkeypatch.setenv("NIXL_TELEMETRY_PROMETHEUS_PORT", "19090")
+        config = create_config()
+        config.embedding_worker = True
+        config.embedding_worker_processes = 3
+        config._validate_embedding_worker_processes()
+
+    def test_nixl_without_prometheus_port_reserves_nothing(self, monkeypatch):
+        """19090 is Dynamo's convention, not the NIXL exporter's default.
+
+        With the port variable unset the exporter binds a port Dynamo cannot
+        name, so assuming 19090 would reserve a port nothing is listening on.
+        """
+        monkeypatch.setenv("DYN_SYSTEM_PORT", "19089")
+        monkeypatch.setenv("NIXL_TELEMETRY_ENABLE", "y")
+        monkeypatch.setenv("NIXL_TELEMETRY_EXPORTER", "prometheus")
+        config = create_config()
+        config.embedding_worker = True
+        config.embedding_worker_processes = 3
+        config._validate_embedding_worker_processes()
+
     def test_fixed_tcp_rpc_port_is_rejected(self, monkeypatch):
         monkeypatch.setenv("DYN_TCP_RPC_PORT", "25000")
         config = create_config()
