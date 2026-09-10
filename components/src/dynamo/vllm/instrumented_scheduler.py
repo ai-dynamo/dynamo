@@ -4486,7 +4486,8 @@ class InstrumentedScheduler(AsyncScheduler):
         return int(os.environ.get("DYN_BENCH_GIANT_KV_THRESHOLD", "1000000"))
 
     def _kvwarm_giant_repeats(self) -> int:
-        """Steady-step repeat count for median protection on giant points."""
+        """Steady-step repeat count for median protection: every real-KV
+        decode point and every fake-injected point above the giant threshold."""
         return max(1, int(os.environ.get("DYN_BENCH_GIANT_KV_REPEATS", "3")))
 
     def _kvwarm_meta_init(self) -> dict:
@@ -4822,17 +4823,20 @@ class InstrumentedScheduler(AsyncScheduler):
         decode_pts = self._kvwarm_order_decode_points(decode_pts)
         self._bench_grid = deque(other_pts + decode_pts)
         # Warmup depth per batch rung = max(ctx) of its deepest warmable point
-        # + 1 + steady-write headroom (headroom = giant-point repeat count,
-        # so multi-step writes never overrun the chain blocks); capped by
-        # pool feasibility.
-        giant_thr = self._kvwarm_giant_threshold()
+        # + 1 + steady-write headroom, capped by pool feasibility. Every
+        # real-KV point runs the repeat count of steady steps (see
+        # ``_bench_step_decode``), so the headroom is the repeat count for
+        # every point, giant or not: it must reserve the same span as
+        # ``_kvwarm_point_need`` and the block check in
+        # ``_kvwarm_register_shadow``, otherwise a covered point's shadow can
+        # need one block more than its chain holds.
         repeats = self._kvwarm_giant_repeats()
+        margin = 1 + repeats
         plan: dict = {}
         for p in decode_pts:
             ctxs = self._bench_decode_context_lengths(
                 p.total_kv_read_tokens, p.batch_size
             )
-            margin = 1 + (repeats if p.total_kv_read_tokens >= giant_thr else 1)
             # Cap at -4: a chain with prompt = max_len-1 is reclaimed by the
             # length stop right at its prefill completion step (that step
             # already carries the first sampled token); keep drift headroom.
@@ -5051,12 +5055,14 @@ class InstrumentedScheduler(AsyncScheduler):
     # ------- Shadow injection: borrow chain blocks, original two-step flow -------
 
     def _kvwarm_point_need(self, point) -> int:
-        """Per-request context length this decode point needs from a chain."""
-        # Non-giant points: admission writes ctx-1, steady writes ctx -> must
-        # cover injected+1, i.e. chain depth >= injected+2; giant multi-step
-        # points add repeats-1.
-        giant = point.total_kv_read_tokens >= self._kvwarm_giant_threshold()
-        return 2 + (self._kvwarm_giant_repeats() - 1 if giant else 0)
+        """Chain depth a real-KV decode point needs beyond its injected
+        context: the admission write at ``injected`` plus one steady write per
+        repeated step, i.e. ``1 + repeats``. Every real-KV point runs the
+        repeat count of steady steps whatever its size
+        (``_bench_step_decode``), and ``_kvwarm_register_shadow`` checks the
+        chain blocks against the same ``injected + 1 + headroom`` span, so
+        this is the single figure both the plan margin and coverage use."""
+        return 1 + self._kvwarm_giant_repeats()
 
     def _kvwarm_covers(self, point, injected_lengths) -> bool:
         """Whether the parked chains can serve every request of ``point``."""
@@ -5172,9 +5178,10 @@ class InstrumentedScheduler(AsyncScheduler):
         new_reqs_data: list = []
         num_scheduled_tokens: dict = {}
         zero_ids: list[int] = []
-        # Steady steps this point will run (repeats for giants, else 1): the
-        # shadow writes positions ctx .. ctx+headroom, which is exactly what
-        # ``_kvwarm_point_need`` (1 + headroom) and the plan margin reserve.
+        # Steady steps this point will run (the repeat count, clipped only at
+        # the model length): the shadow writes positions ctx .. ctx+headroom,
+        # which is exactly what ``_kvwarm_point_need`` (1 + repeats) and the
+        # plan margin reserve.
         headroom = max(1, int(getattr(self, "_bench_extra_steps_left", 1)))
         shortfall = self._kvwarm_shadow_pool_shortfall(context_lengths, headroom)
         if shortfall > 0:

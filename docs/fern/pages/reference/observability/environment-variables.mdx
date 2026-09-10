@@ -291,11 +291,11 @@ These variables tune the vLLM worker's self-benchmark collector (`--benchmark-mo
 </ParamField>
 
 <ParamField path="DYN_BENCH_GIANT_KV_THRESHOLD" type="integer" default="1000000">
-  Total-KV-read threshold (tokens) above which a decode point is measured with repeated steady steps. Set `0` to apply repeat protection to every point.
+  Total-KV-read threshold (tokens) above which a fake-injected decode point is measured with repeated steady steps. Points served from the real-KV warm-up chains always repeat. Set `0` to apply repeat protection to every point.
 </ParamField>
 
 <ParamField path="DYN_BENCH_GIANT_KV_REPEATS" type="integer" default="3">
-  Steady-step repeat count for points above the threshold; the recorded latency is the median.
+  Steady-step repeat count for real-KV points and for fake-injected points above the threshold; the recorded latency is the median. The warm-up chains reserve this many steady writes per request.
 </ParamField>
 
 <ParamField path="DYN_BENCH_PREFILL_CONTENT" type="string">

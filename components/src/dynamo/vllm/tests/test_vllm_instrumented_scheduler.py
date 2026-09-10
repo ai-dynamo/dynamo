@@ -27,11 +27,14 @@ from vllm.v1.request import RequestStatus  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _isolate_synthetic_content_env(monkeypatch):
-    """Synthetic-prompt content selection reads the process environment;
-    tests that want a non-default path set it explicitly."""
+    """Synthetic-prompt content selection and the giant-KV repeat knobs read
+    the process environment; tests that want a non-default path set it
+    explicitly."""
     monkeypatch.delenv("DYN_BENCH_PREFILL_CONTENT", raising=False)
     monkeypatch.delenv("DYN_BENCH_POOL_TAG", raising=False)
     monkeypatch.delenv("DYN_BENCH_PREFILL_REAL_SEED", raising=False)
+    monkeypatch.delenv("DYN_BENCH_GIANT_KV_THRESHOLD", raising=False)
+    monkeypatch.delenv("DYN_BENCH_GIANT_KV_REPEATS", raising=False)
 
 
 # Module-level import: triggers real site-packages ``vllm`` to load before
@@ -4324,14 +4327,20 @@ def test_seed_and_measuring_request_share_block_hashes():
     assert measuring_hashes[: len(seed_hashes)] == seed_hashes
 
 
-def test_kvwarm_point_need_adds_repeats_only_for_giant_points():
+def test_kvwarm_point_need_is_one_plus_repeats_for_every_point(monkeypatch):
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     small = SimpleNamespace(total_kv_read_tokens=999_999)
     giant = SimpleNamespace(total_kv_read_tokens=1_000_000)
-    # Non-giant: admission writes ctx-1, steady writes ctx -> need 2.
-    assert InstrumentedScheduler._kvwarm_point_need(stub, small) == 2
-    # Giant (>= threshold): median-of-repeats adds repeats-1 (default 3).
+    # Admission writes at the injected length, then one steady write per
+    # repeated step: default repeats 3 -> need 4 on both sides of the
+    # giant threshold, because every real-KV point runs the repeats.
+    assert InstrumentedScheduler._kvwarm_point_need(stub, small) == 4
     assert InstrumentedScheduler._kvwarm_point_need(stub, giant) == 4
+    monkeypatch.setenv("DYN_BENCH_GIANT_KV_REPEATS", "5")
+    assert InstrumentedScheduler._kvwarm_point_need(stub, small) == 6
+    # Repeats floor at one steady step: two positions at minimum.
+    monkeypatch.setenv("DYN_BENCH_GIANT_KV_REPEATS", "0")
+    assert InstrumentedScheduler._kvwarm_point_need(stub, small) == 2
 
 
 def test_kvwarm_covers_requires_ready_chains_deep_enough():
@@ -4342,9 +4351,10 @@ def test_kvwarm_covers_requires_ready_chains_deep_enough():
     stub._kvwarm_chain_ids = ["c0", "c1"]
     stub._kvwarm_chain_prompts = {"c0": [1] * 50, "c1": [1] * 50}
     point = SimpleNamespace(batch_size=2, total_kv_read_tokens=10_000)
-    # injected + need(2) must fit inside every chain's prompt depth.
-    assert InstrumentedScheduler._kvwarm_covers(stub, point, [48, 48])
-    assert not InstrumentedScheduler._kvwarm_covers(stub, point, [49, 48])
+    # injected + need (1 + default repeats 3) must fit inside every chain's
+    # prompt depth.
+    assert InstrumentedScheduler._kvwarm_covers(stub, point, [46, 46])
+    assert not InstrumentedScheduler._kvwarm_covers(stub, point, [47, 46])
     # A fleet still under construction never covers.
     stub._kvwarm_building = True
     assert not InstrumentedScheduler._kvwarm_covers(stub, point, [10, 10])
@@ -4779,10 +4789,9 @@ def test_kvwarm_prepare_reserves_shadow_tail_blocks(monkeypatch):
     shadows' private tail blocks, or injection dies with
     "Cannot get N free blocks from the pool" (seen at batch=1024 on B200)."""
     monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
-    monkeypatch.setenv("DYN_BENCH_GIANT_KV_THRESHOLD", str(10**12))
     monkeypatch.setenv("DYN_BENCH_GIANT_KV_REPEATS", "3")
     batch, ctx = 4, 1000
-    want = ctx + 2  # max(ctx) + 1 + non-giant headroom
+    want = ctx + 1 + 3  # max(ctx) + 1 + repeats of steady-write headroom
     chain_blocks = -(-want // 16) * batch  # 63 blocks per chain, 252 total
     stub = _kvwarm_planner_stub(usable_blocks=chain_blocks)
     stub._bench_grid = deque(
@@ -4805,6 +4814,61 @@ def test_kvwarm_prepare_reserves_shadow_tail_blocks(monkeypatch):
     # injection instead of crashing the run.
     point = stub._bench_grid[-1]
     assert not InstrumentedScheduler._kvwarm_plan_covers(stub, point)
+
+
+@pytest.mark.parametrize("ctx", [12, 13, 14, 15])
+def test_kvwarm_plan_depth_covers_the_shadow_span_at_block_boundaries(ctx):
+    """The plan margin, ``_kvwarm_point_need`` and the block check in
+    ``_kvwarm_register_shadow`` must reserve the same ``injected + 1 +
+    repeats`` span for every real-KV point (all of them run the repeated
+    steady steps). A plan that budgeted a single steady step for non-giant
+    points let ``_kvwarm_covers`` accept the rung's deepest point while its
+    shadow needed one block more than the chain held whenever the chain
+    depth landed on a block boundary -- a fatal 'too shallow' mid-run."""
+    block_size = 16
+    stub = _kvwarm_planner_stub(usable_blocks=10**6, block_size=block_size)
+    # Default (non-giant) settings from the autouse fixture: repeats 3.
+    repeats = InstrumentedScheduler._kvwarm_giant_repeats(stub)
+    assert repeats == 3
+    # batch=1: the point's context is ctx + 1 and it is admitted at ctx.
+    point = BenchmarkPoint(
+        point_type="decode", total_kv_read_tokens=ctx + 1, batch_size=1
+    )
+    stub._bench_grid = deque([point])
+    InstrumentedScheduler._kvwarm_prepare(stub, "decode")
+    depth = stub._kvwarm_plan[1]
+    assert depth >= ctx + 1 + repeats
+    assert InstrumentedScheduler._kvwarm_plan_covers(stub, point)
+    # Live-chain coverage agrees with the plan for a chain of exactly that depth.
+    stub._kvwarm_building = False
+    stub._kvwarm_stage_batch = 1
+    stub._kvwarm_chain_ids = ["chain"]
+    stub._kvwarm_chain_prompts = {"chain": [1] * depth}
+    assert InstrumentedScheduler._kvwarm_covers(stub, point, [ctx])
+    # ...and so does the shadow's block check, with the headroom the point
+    # will actually run (repeats steady steps) and a chain holding only the
+    # blocks its prompt needs.
+    chain = [_FakeBlock(i) for i in range(-(-depth // block_size))]
+    mgr = _FakeManager(chain, cow=False)
+    stub.kv_cache_manager = SimpleNamespace(
+        block_pool=_FakePool(),
+        coordinator=SimpleNamespace(single_type_managers=[mgr]),
+    )
+    table, _ = InstrumentedScheduler._kvwarm_register_shadow(
+        stub, "shadow", "chain", ctx, repeats
+    )
+    assert len(table[0]) == -(-(ctx + 1 + repeats) // block_size)
+
+
+def test_kvwarm_shadow_block_check_rejects_a_single_steady_step_margin():
+    """The former non-giant plan built a 16-token chain (one block) for a rung
+    whose deepest point is admitted at 13 tokens; a shadow that runs the
+    default three steady steps writes positions 13..16, and position 16 needs
+    a second block the chain never held."""
+    stub, mgr, pool, chain = _shadow_stub(cow=False)
+    mgr.req_to_blocks["chain"] = chain[:1]
+    with pytest.raises(RuntimeError, match="too shallow"):
+        InstrumentedScheduler._kvwarm_register_shadow(stub, "shadow", "chain", 13, 3)
 
 
 def test_kvwarm_step_busy_stops_building_after_soft_timeout():
