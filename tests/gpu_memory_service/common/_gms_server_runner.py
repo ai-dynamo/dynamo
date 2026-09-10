@@ -19,12 +19,21 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("socket_path")
     parser.add_argument("--device", type=int, default=0)
+    parser.add_argument("--directory-socket")
     args = parser.parse_args()
 
     # Deferred to keep import cost out of --help and pytest collection.
     from gpu_memory_service.server.rpc import GMSRPCServer
 
-    asyncio.run(GMSRPCServer(args.socket_path, device=args.device).serve())
+    async def serve() -> None:
+        servers = [GMSRPCServer(args.socket_path, device=args.device).serve()]
+        if args.directory_socket:
+            from gms_kv_ring.daemon.directory_server import DirectoryDaemon
+
+            servers.append(DirectoryDaemon(args.directory_socket).serve())
+        await asyncio.gather(*servers)
+
+    asyncio.run(serve())
 
 
 if __name__ == "__main__":
