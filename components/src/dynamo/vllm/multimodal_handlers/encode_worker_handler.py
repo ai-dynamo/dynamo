@@ -180,8 +180,8 @@ class EncodeWorkerHandler:
         self._accumulated_time = 0.0
         self._processed_requests = 0
         self.readables: list[Any] = []
-        # Named embedding_cache_manager because worker_factory looks the cache up
-        # by that attribute name to register the Prometheus cache metrics.
+        # Named embedding_cache_manager to match the prefill and decode
+        # handlers, which call their MultimodalEmbeddingCacheManager the same.
         self.embedding_cache_manager = _build_embedding_cache(
             embedding_cache_capacity_gb
         )
