@@ -144,6 +144,15 @@ pub struct Tensor {
     pub data: FlattenTensor,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RequestedOutput {
+    pub name: String,
+
+    #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+    pub parameters: Parameters,
+}
+
 impl validator::Validate for Tensor {
     fn validate(&self) -> Result<(), validator::ValidationErrors> {
         use validator::{ValidationError, ValidationErrors};
@@ -196,6 +205,10 @@ pub struct NvCreateTensorRequest {
     /// Input tensors.
     #[validate(nested)]
     pub tensors: Vec<Tensor>,
+
+    /// Outputs the client asked for. An empty list asks for every model output.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub outputs: Vec<RequestedOutput>,
 
     /// Optional request-level parameters
     #[serde(skip_serializing_if = "HashMap::is_empty", default)]
