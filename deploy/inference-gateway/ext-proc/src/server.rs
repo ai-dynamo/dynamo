@@ -1626,15 +1626,13 @@ mod tests {
     }
 
     /// Router-reported worker saturation is 429, matching `scheduler_error_status`
-    /// in `lib/kv-router/src/services/selection/error.rs`. Distinct from the EPP's
-    /// own front-door shed above, which stays 503.
+    /// in `lib/kv-router/src/services/selection/error.rs`. Deliberately distinct
+    /// from the EPP's own front-door shed, which stays 503 — see
+    /// `overloaded_pick_error_maps_to_503` above.
     #[test]
-    fn router_overloaded_maps_to_429_unlike_the_epp_front_door_shed() {
-        let router = ExtProcError::from_pick_error(PickError::RouterOverloaded);
-        assert_eq!(router.status_code, StatusCode::TooManyRequests);
-
-        let front_door = ExtProcError::from_pick_error(PickError::Overloaded);
-        assert_eq!(front_door.status_code, StatusCode::ServiceUnavailable);
+    fn router_overloaded_maps_to_429() {
+        let err = ExtProcError::from_pick_error(PickError::RouterOverloaded);
+        assert_eq!(err.status_code, StatusCode::TooManyRequests);
     }
 
     /// A full policy-class queue is 503, not 429: the workers may have capacity
@@ -1658,9 +1656,6 @@ mod tests {
     }
 
     /// Router rejections must not hand the router's internal text to the client.
-    /// Before typed classification, every one of these arrived as
-    /// `RoutingFailed(format!("Decode query failed: {error:?}"))`, which put the
-    /// scheduler's `Debug` output in the response body.
     #[test]
     fn router_rejection_messages_are_client_safe() {
         for pick_error in [

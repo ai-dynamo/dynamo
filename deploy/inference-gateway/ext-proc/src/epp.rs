@@ -35,7 +35,7 @@ use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 use uuid::Uuid;
 
-use crate::admission::{RouterRejection, classify_router_error};
+use crate::admission::{RouterRejection, classify_router_error, requested_ttft_slo};
 use crate::epp_router::{endpoint_in_subset, requested_policy_class};
 use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo, ResponseUsage};
 
@@ -1476,6 +1476,17 @@ impl EndpointPicker for Router {
         let cache_namespace =
             cache_namespace_with_header_override(&req.headers, body_cache_namespace);
         let policy_class = requested_policy_class(&req.headers)?;
+        // Validate the caller's TTFT budget on the request path, alongside the
+        // policy class it accompanies, so a malformed value is a 400 here
+        // rather than a surprise once the scheduler starts consuming it.
+        //
+        // TODO(epp-ttft-slo-handoff): pass this to the scheduler as the
+        // request's `due_at`. `find_best_match_details_with_policy_class` has no
+        // parameter for a per-request deadline; ai-dynamo/dynamo#14176 adds the
+        // queue-side plumbing (`enqueue_with_due_at`), after which this value
+        // should reach it. Until then a request carrying a budget is ordered
+        // exactly like one without.
+        let _ttft_slo = requested_ttft_slo(&req.headers)?;
         let reservation_id = Uuid::new_v4().to_string();
 
         // Try prefill routing first (disaggregated mode).
