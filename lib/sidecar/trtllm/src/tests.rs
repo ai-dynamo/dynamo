@@ -37,6 +37,16 @@ struct FakeTrtllm {
     peers: Arc<Mutex<Vec<SocketAddr>>>,
     reject: Arc<AtomicBool>,
     hang: Arc<AtomicBool>,
+    /// `(max_seq_len, max_input_len)` for `GetModelInfo`; unset reports 4096
+    /// with `max_input_len` absent.
+    model_info: Arc<Mutex<Option<(i32, i32)>>>,
+}
+
+impl FakeTrtllm {
+    async fn reporting(self, max_seq_len: i32, max_input_len: i32) -> Self {
+        *self.model_info.lock().await = Some((max_seq_len, max_input_len));
+        self
+    }
 }
 
 #[tonic::async_trait]
@@ -147,9 +157,11 @@ impl pb::trtllm_service_server::TrtllmService for FakeTrtllm {
         &self,
         _request: Request<pb::GetModelInfoRequest>,
     ) -> Result<Response<pb::GetModelInfoResponse>, Status> {
+        let (max_seq_len, max_input_len) = self.model_info.lock().await.unwrap_or((4096, 0));
         Ok(Response::new(pb::GetModelInfoResponse {
             model_id: "fake-model".to_string(),
-            max_seq_len: 4096,
+            max_seq_len,
+            max_input_len,
             vocab_size: 32000,
             ..Default::default()
         }))
@@ -662,6 +674,31 @@ async fn configured_context_length_overrides_the_engine_report() {
     // 8192 configured minus request()'s three prompt tokens; the reported
     // 4096 would give 4093.
     assert_eq!(sent.max_tokens, 8189);
+}
+
+#[tokio::test]
+async fn a_max_seq_len_equal_to_max_input_len_is_not_registered() {
+    // TensorRT-LLM answers `max_seq_len` with `max_input_len` when the engine
+    // was started without `--max_seq_len`, so an equal pair carries no model
+    // information and must not reach registration.
+    let server = FakeServer::start(FakeTrtllm::default().reporting(1024, 1024).await).await;
+    let engine = engine(&server.endpoint, 1);
+    let config = engine.start(0).await.expect("start");
+    // Nothing is registered, so the frontend keeps the context length it read
+    // from the model itself instead of being pinned to 1024. An omitted
+    // `max_tokens` then has no source to derive from and is rejected, which
+    // `omitted_max_tokens_without_context_length_is_rejected` covers.
+    assert_eq!(config.llm.unwrap().context_length, None);
+}
+
+#[tokio::test]
+async fn a_distinct_max_seq_len_is_registered() {
+    // `max_seq_len != max_input_len` means the engine was given an explicit
+    // `--max_seq_len`, so the report is real and is adopted.
+    let server = FakeServer::start(FakeTrtllm::default().reporting(2048, 1024).await).await;
+    let engine = engine(&server.endpoint, 1);
+    let config = engine.start(0).await.expect("start");
+    assert_eq!(config.llm.unwrap().context_length, Some(2048));
 }
 
 #[tokio::test]
