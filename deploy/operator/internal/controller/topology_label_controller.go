@@ -55,7 +55,12 @@ func (r *TopologyLabelReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	// Every terminal path below logs, so that an absence of records for a pod means
+	// this controller never reconciled it rather than that it reconciled and had
+	// nothing to do.
 	if len(copyTargets) == 0 {
+		logger.Info("Pod needs no topology label copy",
+			"pod", req.NamespacedName, "node", pod.Spec.NodeName)
 		return ctrl.Result{}, nil
 	}
 
@@ -87,6 +92,9 @@ func (r *TopologyLabelReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		patchedLabels++
 	}
 	if patchedLabels == 0 {
+		logger.Info("No topology labels copied to pod",
+			"pod", req.NamespacedName, "node", pod.Spec.NodeName,
+			"copyTargets", len(copyTargets))
 		return ctrl.Result{}, nil
 	}
 
@@ -102,6 +110,7 @@ func (r *TopologyLabelReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 func (r *TopologyLabelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
+		Named("topology-label").
 		For(&corev1.Pod{}).
 		WithEventFilter(predicate.And(
 			commonController.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig),

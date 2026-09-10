@@ -7,13 +7,18 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	"github.com/go-logr/zapr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -23,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
@@ -293,6 +299,106 @@ func TestTopologyLabelReconciler_SkipsNonDynamoComponentPod(t *testing.T) {
 	var unchanged corev1.Pod
 	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: "worker-abc", Namespace: "default"}, &unchanged))
 	assert.NotContains(t, unchanged.Labels, "topology.kubernetes.io/zone")
+}
+
+// TestTopologyLabelReconciler_LogsEveryTerminalPath pins the property an operator
+// relies on when reading the controller-manager log: every terminal path of
+// Reconcile leaves a record, so an absence of records means this controller did
+// not run rather than that it ran and chose to do nothing.
+func TestTopologyLabelReconciler_LogsEveryTerminalPath(t *testing.T) {
+	const (
+		labelKey     = "topology.kubernetes.io/zone"
+		podName      = "worker-abc"
+		podNamespace = "default"
+		nodeName     = "node-1"
+	)
+
+	tests := []struct {
+		name              string
+		podLabels         map[string]string
+		nodeLabels        map[string]string
+		wantMessages      []string
+		absentMessages    []string
+		wantPodLabelValue string
+	}{
+		{
+			name:              "pod already carrying the label records that nothing needed copying",
+			podLabels:         map[string]string{labelKey: "us-east-1a"},
+			nodeLabels:        map[string]string{labelKey: "us-east-1b"},
+			wantMessages:      []string{"Pod needs no topology label copy"},
+			absentMessages:    []string{"Copied node topology label to pod", "No topology labels copied to pod"},
+			wantPodLabelValue: "us-east-1a",
+		},
+		{
+			name:              "node without the source label records that nothing was copied",
+			nodeLabels:        map[string]string{},
+			wantMessages:      []string{"Node missing topology label, skipping", "No topology labels copied to pod"},
+			absentMessages:    []string{"Copied node topology label to pod", "Pod needs no topology label copy"},
+			wantPodLabelValue: "",
+		},
+		{
+			name:              "successful copy still records the unchanged success line",
+			nodeLabels:        map[string]string{labelKey: "us-east-1a"},
+			wantMessages:      []string{"Copied node topology label to pod"},
+			absentMessages:    []string{"Pod needs no topology label copy", "No topology labels copied to pod"},
+			wantPodLabelValue: "us-east-1a",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("build the node and the annotated, scheduled worker pod for this case")
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{Name: nodeName, Labels: tt.nodeLabels},
+			}
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      podName,
+					Namespace: podNamespace,
+					Annotations: map[string]string{
+						consts.KubeAnnotationTopologyLabelKey: labelKey,
+					},
+					Labels: dynamoComponentPodLabels(tt.podLabels),
+				},
+				Spec: corev1.PodSpec{NodeName: nodeName},
+			}
+
+			t.Log("reconcile with a capturing logger installed in the reconcile context")
+			cl := fake.NewClientBuilder().WithObjects(node, pod).Build()
+			r := &TopologyLabelReconciler{Client: cl, NodeReader: cl}
+			core, observed := observer.New(zapcore.InfoLevel)
+			ctx := log.IntoContext(context.Background(), zapr.NewLogger(zap.New(core)))
+
+			result, err := r.Reconcile(ctx, ctrl.Request{
+				NamespacedName: types.NamespacedName{Name: podName, Namespace: podNamespace},
+			})
+			require.NoError(t, err)
+			assert.Equal(t, ctrl.Result{}, result)
+
+			t.Log("each expected message is recorded exactly once and names the pod and the node")
+			for _, message := range tt.wantMessages {
+				entries := observed.FilterMessage(message).All()
+				require.Len(t, entries, 1, "message %q", message)
+				fields := entries[0].ContextMap()
+				assert.Contains(t, fmt.Sprintf("%v", fields["pod"]), podName, "message %q", message)
+				assert.Equal(t, nodeName, fields["node"], "message %q", message)
+			}
+
+			t.Log("no message belonging to another terminal path is recorded")
+			for _, message := range tt.absentMessages {
+				assert.Empty(t, observed.FilterMessage(message).All(), "message %q", message)
+			}
+
+			t.Log("the pod's topology label reflects this case's expected copy outcome")
+			var reconciled corev1.Pod
+			require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: podName, Namespace: podNamespace}, &reconciled))
+			if tt.wantPodLabelValue == "" {
+				assert.NotContains(t, reconciled.Labels, labelKey)
+			} else {
+				assert.Equal(t, tt.wantPodLabelValue, reconciled.Labels[labelKey])
+			}
+		})
+	}
 }
 
 const (
