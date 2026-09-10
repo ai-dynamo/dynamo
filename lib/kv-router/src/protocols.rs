@@ -1466,9 +1466,6 @@ pub enum KvCacheEventError {
     UnsupportedResidencyDomain,
 }
 
-/// Reserved session key for events that predate session attribution.
-pub const UNATTRIBUTED_SESSION_ID: &str = "__dynamo_unattributed__";
-
 /// A [`KvCacheEvent`] on a specific LLM worker denoted by [`WorkerId`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RouterEvent {
@@ -1557,13 +1554,6 @@ impl RouterEvent {
     pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = Some(session_id.into());
         self
-    }
-
-    /// Return the reported session or the shared fallback for unattributed events.
-    pub fn session_id_or_unattributed(&self) -> &str {
-        self.session_id
-            .as_deref()
-            .unwrap_or(UNATTRIBUTED_SESSION_ID)
     }
 
     /// Resolve a storage mutation to its canonical logical domain.

@@ -117,9 +117,10 @@ impl SessionStoreUpdate {
         let KvCacheEventData::Stored(stored) = &event.event.data else {
             return None;
         };
+        let session_id = event.session_id.as_deref()?;
         Some(Self {
             index: Arc::clone(index),
-            session_id: event.session_id_or_unattributed().to_owned(),
+            session_id: session_id.to_owned(),
             parent_hash: stored.parent_hash,
             block_hashes: stored.blocks.iter().map(|block| block.block_hash).collect(),
         })
@@ -638,8 +639,8 @@ mod tests {
         indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics, RoutingDecisionHashes},
         protocols::{
             BlockHashOptions, ExternalSequenceBlockHash, LocalBlockHash, StorageTier,
-            TokensWithHashes, UNATTRIBUTED_SESSION_ID, WorkerWithDpRank,
-            compute_block_hash_for_seq, compute_seq_hash_for_block,
+            TokensWithHashes, WorkerWithDpRank, compute_block_hash_for_seq,
+            compute_seq_hash_for_block,
         },
     };
 
@@ -704,7 +705,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stored_events_update_session_lineage() {
+    async fn only_attributed_stored_events_update_session_lineage() {
         let session_prefix_index = Arc::new(SessionPrefixIndexer::new());
         let indexer = Indexer::KvIndexer {
             primary: KvIndexer::new(
@@ -733,11 +734,12 @@ mod tests {
                 .unwrap(),
             vec![vec![ExternalSequenceBlockHash(41)]]
         );
-        assert_eq!(
+        assert_eq!(session_prefix_index.session_count(), 1);
+        assert_eq!(session_prefix_index.node_count(), 1);
+        assert!(
             session_prefix_index
-                .get_session_block_lineage(UNATTRIBUTED_SESSION_ID, None)
-                .unwrap(),
-            vec![vec![ExternalSequenceBlockHash(51)]]
+                .get_node_from_hash(ExternalSequenceBlockHash(51))
+                .is_none()
         );
     }
 
