@@ -1814,6 +1814,8 @@ class WorkerFactory:
         )
         runtime.register_engine_route("control/ep_capacity", handler.get_ep_capacity)
 
+        enable_rl = bool(handler.config.enable_rl)
+
         rl_routes: dict = {
             "liveness_probe": handler.liveness_probe,
             "pause_generation": handler.pause_generation,
@@ -1824,21 +1826,19 @@ class WorkerFactory:
 
         # Weight-update routes drive engine_client.collective_rpc with a
         # caller-selected method (RCE-capable) and exist only for RL training.
-        # Register them solely when RL is enabled (--enable-rl / DYN_ENABLE_RL,
-        # default off) so a non-RL deployment does not expose the surface on the
-        # worker system server. Operators can further restrict the registered
-        # routes via the engine-route policy.
-        if handler.config.enable_rl:
-            rl_routes.update(
-                {
-                    "update_weights_from_disk": handler.update_weights_from_disk,
-                    "update_weights_from_distributed": handler.update_weights_from_distributed,
-                    "update_weights_from_tensor": handler.update_weights_from_tensor,
-                    "init_weights_update_group": handler.init_weights_update_group,
-                    "destroy_weights_update_group": handler.destroy_weights_update_group,
-                    "get_weight_version": handler.get_weight_version,
-                }
-            )
+        # Always *declare* them but gate them on enable_rl (--enable-rl /
+        # DYN_ENABLE_RL, default off): the runtime registers a gated route only
+        # when the gate is set, so a non-RL deployment never exposes the surface.
+        # Operators can further restrict the registered routes via the
+        # engine-route policy.
+        weight_update_routes: dict = {
+            "update_weights_from_disk": handler.update_weights_from_disk,
+            "update_weights_from_distributed": handler.update_weights_from_distributed,
+            "update_weights_from_tensor": handler.update_weights_from_tensor,
+            "init_weights_update_group": handler.init_weights_update_group,
+            "destroy_weights_update_group": handler.destroy_weights_update_group,
+            "get_weight_version": handler.get_weight_version,
+        }
 
         if lora_enabled:
 
@@ -1851,18 +1851,30 @@ class WorkerFactory:
             rl_routes["load_lora"] = load_lora
             rl_routes["unload_lora"] = unload_lora
 
+        # Always-on admin routes register with the default (enabled) disposition;
+        # the RCE-capable weight-update routes register gated on enable_rl.
         register_rl_routes(
             runtime,
             handler.rl_route_registry,
             rl_routes,
-            enable_dispatch=handler.config.enable_rl,
+            enable_dispatch=enable_rl,
+        )
+        register_rl_routes(
+            runtime,
+            handler.rl_route_registry,
+            weight_update_routes,
+            enable_dispatch=enable_rl,
+            gated_by=enable_rl,
         )
 
         logger.info(
             "Registered engine routes: control/sleep, control/wake_up, "
             "control/scale_elastic_ep, control/ep_capacity, "
             "control/start_profile, control/stop_profile, "
-            "and RL admin routes: %s%s",
+            "and RL admin routes: %s%s%s",
             ", ".join(sorted(rl_routes)),
             " (LoRA routes: load_lora, unload_lora)" if lora_enabled else "",
+            f"; weight-update routes ({', '.join(sorted(weight_update_routes))})"
+            if enable_rl
+            else "; weight-update routes gated off (enable_rl=False)",
         )
