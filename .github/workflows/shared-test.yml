@@ -234,6 +234,10 @@ jobs:
           # baked-in lib/sidecar reflects the last main merge, not this PR. Use
           # rm+cp (not a plain COPY-style merge) so files this PR deleted don't
           # linger from the base image.
+          if [ -z "${CONTAINER_WORKSPACE}" ]; then
+            echo "::error::container_workspace is empty; refusing to rm -rf lib/sidecar under it"
+            exit 1
+          fi
           rm -rf "${CONTAINER_WORKSPACE}/lib/sidecar"
           cp -r "${GITHUB_WORKSPACE}/lib/sidecar" "${CONTAINER_WORKSPACE}/lib/sidecar"
       - name: Export KVBM MLA backend

@@ -133,9 +133,6 @@ jobs:
       - snapshot-placeholder-trtllm
       - power-agent
       - sidecar-build
-      - sidecar-vllm-test-image
-      - sidecar-sglang-test-image
-      - sidecar-trtllm-test-image
       - sidecar-vllm-test
       - sidecar-sglang-test
       - sidecar-trtllm-test
