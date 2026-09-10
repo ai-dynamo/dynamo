@@ -19,7 +19,6 @@ so secondary nodes run neither this headless mode nor the backend at all.
 from __future__ import annotations
 
 import argparse
-import os
 
 from .args import Config
 
@@ -57,7 +56,6 @@ def run_dynamo_headless(config: Config) -> None:
                 configure_mx_ports,
             )
 
-            os.environ["DYN_GMS_SCRATCH_KV_ENABLED"] = "1"
             configure_gms_lock_mode(config.engine_args)
             configure_mx_ports(config.engine_args)
 
