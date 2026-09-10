@@ -322,8 +322,10 @@ fn openai_stream_error(_error: &(dyn std::error::Error + 'static)) -> (ErrorType
 /// This method will consume a stream of SSE events and monitor for disconnects or context cancellation.
 ///
 /// Uses `tokio::select!` to choose between receiving events from the source stream or detecting when
-/// the context is stopped. If the context is stopped, we break the stream. If the source stream ends
-/// naturally, we mark the request as successful and send the final `[DONE]` event.
+/// the context is killed. A graceful `stop_generating()` leaves in-flight results valid, so we
+/// continue draining the source, including any chained terminal events. If the source stream ends
+/// naturally, we mark the request as successful and send the final `[DONE]` event. The configured
+/// inactivity timeout still applies while draining; a stop does not introduce a separate deadline.
 ///
 /// A configurable inactivity timeout (see [`BACKEND_STREAM_TIMEOUT_ENV`]) adds a third arm: if no
 /// SSE event is received from the backend within the timeout window, the engine context is killed and
@@ -452,8 +454,8 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
         tokio::pin!(stream);
         // Keep the context's watch-backed cancellation future alive across body frames.
         // Recreating it for every token repeatedly clones a receiver and churns Notify state.
-        let stopped = context.stopped();
-        tokio::pin!(stopped);
+        let killed = context.killed();
+        tokio::pin!(killed);
         let mut inactivity_deadline =
             inactivity_timeout.map(|timeout| tokio::time::Instant::now() + timeout);
         loop {
@@ -500,8 +502,8 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
                         }
                     }
                 }
-                _ = &mut stopped => {
-                    // Mark as cancelled when context is stopped (client disconnect or timeout)
+                _ = &mut killed => {
+                    // Client disconnects kill the context; graceful stops keep draining.
                     inflight_guard.mark_error(ErrorType::Cancelled);
                     // Token counts (input_tokens, output_tokens) are recorded on
                     // the enclosing span by ResponseMetricCollector::Drop.
@@ -564,12 +566,13 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
 mod tests {
     use super::*;
     use crate::http::service::metrics::{Endpoint, ErrorType, RequestType, Status};
+    use dynamo_runtime::pipeline::context::Controller;
     use futures::StreamExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Debug, Default)]
     struct MockContext {
-        stopped_polls: AtomicUsize,
+        killed_polls: AtomicUsize,
         killed: std::sync::atomic::AtomicBool,
         track_kill: bool,
     }
@@ -606,10 +609,10 @@ mod tests {
             self.track_kill && self.killed.load(std::sync::atomic::Ordering::SeqCst)
         }
         async fn stopped(&self) {
-            self.stopped_polls.fetch_add(1, Ordering::Relaxed);
             std::future::pending::<()>().await;
         }
         async fn killed(&self) {
+            self.killed_polls.fetch_add(1, Ordering::Relaxed);
             std::future::pending::<()>().await;
         }
         fn link_child(&self, _: Arc<dyn dynamo_runtime::engine::AsyncEngineContext>) {}
@@ -655,9 +658,136 @@ mod tests {
         (metrics, guard, context, handle)
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn test_graceful_stop_delivers_delayed_terminal_event() {
+        for timeout in [None, Some(Duration::from_secs(2))] {
+            let model = "graceful-stop";
+            let (metrics, guard, _, handle) = setup_test(model, "req-stop");
+            let context = Arc::new(Controller::default());
+            let producer_context = context.clone();
+            let source = async_stream::try_stream! {
+                yield Event::default().data("token-0");
+                producer_context.stop_generating();
+                // Buffered events already win the biased select on main. The
+                // regression requires the source to be Pending after the stop.
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                yield Event::default().data("token-1");
+            };
+            let terminal = futures::stream::once(async {
+                Ok(Event::default()
+                    .event("response.completed")
+                    .data(r#"{"type":"response.completed"}"#))
+            });
+            let monitored = monitor_for_disconnects_with_timeout(
+                source.chain(terminal),
+                context.clone(),
+                guard,
+                handle,
+                timeout,
+            );
+            let body = tokio::time::timeout(Duration::from_secs(3), collect_sse_body(monitored))
+                .await
+                .expect("gracefully stopped source must finish");
+
+            assert_eq!(
+                body,
+                "data: token-0\n\ndata: token-1\n\nevent: response.completed\n\
+                 data: {\"type\":\"response.completed\"}\n\ndata: [DONE]\n\n"
+            );
+            assert!(context.is_stopped());
+            assert!(!context.is_killed());
+            assert_eq!(metrics.get_inflight_count(model), 0);
+            assert_eq!(
+                metrics.get_request_counter(
+                    model,
+                    &Endpoint::ChatCompletions,
+                    &RequestType::Stream,
+                    &Status::Success,
+                    &ErrorType::None,
+                ),
+                1
+            );
+        }
+    }
+
     #[tokio::test]
-    async fn test_monitor_reuses_stopped_future_across_events() {
-        let model = "reuse-stopped-future";
+    async fn test_kill_terminates_pending_stream_before_or_after_stop() {
+        for stop_first in [false, true] {
+            let model = "killed-stream";
+            let (metrics, guard, _, handle) = setup_test(model, "req-kill");
+            let context = Arc::new(Controller::default());
+            let mut monitored = Box::pin(monitor_for_disconnects_with_timeout(
+                hanging_stream(),
+                context.clone(),
+                guard,
+                handle,
+                None,
+            ));
+            assert!(futures::poll!(monitored.next()).is_pending());
+            if stop_first {
+                context.stop_generating();
+                assert!(futures::poll!(monitored.next()).is_pending());
+            }
+            context.kill();
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), monitored.next())
+                    .await
+                    .expect("kill must terminate without an inactivity timeout")
+                    .is_none(),
+                "kill must not emit a success sentinel"
+            );
+            drop(monitored);
+            assert_eq!(metrics.get_inflight_count(model), 0);
+            assert_eq!(
+                metrics.get_request_counter(
+                    model,
+                    &Endpoint::ChatCompletions,
+                    &RequestType::Stream,
+                    &Status::Error,
+                    &ErrorType::Cancelled,
+                ),
+                1
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_graceful_stop_preserves_inactivity_timeout() {
+        let model = "stopped-inactive-stream";
+        let (metrics, guard, _, handle) = setup_test(model, "req-stop-timeout");
+        let context = Arc::new(Controller::default());
+        context.stop_generating();
+        let started = tokio::time::Instant::now();
+        let monitored = monitor_for_disconnects_with_timeout(
+            hanging_stream(),
+            context.clone(),
+            guard,
+            handle,
+            Some(Duration::from_secs(2)),
+        );
+        let body = tokio::time::timeout(Duration::from_secs(3), collect_sse_body(monitored))
+            .await
+            .expect("stopped source must still time out when inactive");
+
+        assert!(body.is_empty(), "timeout must not emit a success sentinel");
+        assert_eq!(started.elapsed(), Duration::from_secs(2));
+        assert!(context.is_killed());
+        assert_eq!(metrics.get_inflight_count(model), 0);
+        assert_eq!(
+            metrics.get_request_counter(
+                model,
+                &Endpoint::ChatCompletions,
+                &RequestType::Stream,
+                &Status::Error,
+                &ErrorType::ResponseTimeout,
+            ),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_monitor_reuses_killed_future_across_events() {
+        let model = "reuse-killed-future";
         let metrics = Arc::new(Metrics::new());
         let guard = metrics.clone().create_inflight_guard(
             model,
@@ -685,9 +815,9 @@ mod tests {
         while monitored.next().await.is_some() {}
 
         assert_eq!(
-            context.stopped_polls.load(Ordering::Relaxed),
+            context.killed_polls.load(Ordering::Relaxed),
             1,
-            "the same stopped future should remain pending across all response events"
+            "the same killed future should remain pending across all response events"
         );
     }
 
