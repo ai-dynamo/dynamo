@@ -24,6 +24,7 @@ if not HAS_GMS:
     )
 
 from gpu_memory_service.failover_lock.flock import FlockFailoverLock
+from gpu_memory_service.failover_lock.interface import FailoverLockError
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -267,6 +268,42 @@ async def test_release_nowait_is_thread_safe_and_idempotent(lock_path):
     assert sorted(results) == [False, True]
     assert lock._fd is None
 
+    contender = FlockFailoverLock(lock_path)
+    await contender.acquire("contender", timeout=0.1)
+    await contender.release()
+
+
+@pytest.mark.asyncio
+async def test_release_nowait_wins_before_acquire_publishes_fd(lock_path, monkeypatch):
+    lock = FlockFailoverLock(lock_path)
+    entered_write = multiprocessing.Event()
+    finish_write = multiprocessing.Event()
+    release_results = []
+    real_write = os.write
+
+    def blocking_write(fd, data):
+        written = real_write(fd, data)
+        entered_write.set()
+        assert finish_write.wait(timeout=2.0)
+        return written
+
+    monkeypatch.setattr(os, "write", blocking_write)
+
+    def release_during_publication():
+        assert entered_write.wait(timeout=2.0)
+        release_results.append(lock.release_nowait())
+        finish_write.set()
+
+    import threading
+
+    thread = threading.Thread(target=release_during_publication)
+    thread.start()
+    with pytest.raises(FailoverLockError, match="released while acquisition"):
+        await lock.acquire("engine-racing-release")
+    thread.join(timeout=2.0)
+
+    assert release_results == [True]
+    assert lock._fd is None
     contender = FlockFailoverLock(lock_path)
     await contender.acquire("contender", timeout=0.1)
     await contender.release()

@@ -20,11 +20,8 @@ class FlockFailoverLock(FailoverLock):
     The Linux kernel is the lock manager — no server process, no sidecar,
     no protocol. The lock is automatically released when the holding
     process dies (even via SIGKILL), because the kernel closes all file
-    descriptors.
-
-    Cross-container operation: containers sharing an emptyDir volume
-    can contend for the same lock file. Acquiring twice from the same
-    process is harmless — flock succeeds immediately if already held.
+    descriptors. Containers sharing an emptyDir volume can contend for the
+    same lock file. Concurrent acquisition through one instance is rejected.
     """
 
     def __init__(self, lock_path: str):
@@ -32,6 +29,8 @@ class FlockFailoverLock(FailoverLock):
         self._fd: int | None = None
         self._engine_id: str | None = None
         self._state_lock = threading.Lock()
+        self._acquiring = False
+        self._release_requested = False
         # True once acquire() had to wait for a predecessor to release the lock
         # (a real failover), False if it acquired immediately (initial bootup).
         self._was_contended: bool = False
@@ -51,32 +50,26 @@ class FlockFailoverLock(FailoverLock):
         poll_interval: float = 0.1,
         timeout: float | None = None,
     ) -> None:
-        """Acquire the exclusive flock via non-blocking poll loop.
+        """Acquire the exclusive flock without blocking the event loop."""
+        with self._state_lock:
+            if self._fd is not None or self._acquiring:
+                raise FailoverLockError("failover lock acquisition already in progress")
+            self._acquiring = True
+            self._release_requested = False
 
-        Uses LOCK_NB to avoid blocking the asyncio event loop. Polls
-        every ``poll_interval`` seconds (default 100ms).
-        Polling keeps us from blocking the event loop.
-        """
-        # Reset per acquire so was_contended reflects *this* acquisition, not a
-        # prior one (a reused lock object must not report a stale contended flag).
         self._was_contended = False
-        # O_CREAT: create the file if it doesn't exist
-        # O_RDWR:  open for reading and writing (flock requires a valid fd,
-        #          and we write our engine_id into the file after acquiring)
-        fd = os.open(self._lock_path, os.O_CREAT | os.O_RDWR)
+        fd: int | None = None
         start = time.monotonic()
         try:
+            fd = os.open(self._lock_path, os.O_CREAT | os.O_RDWR)
             while True:
+                with self._state_lock:
+                    if self._release_requested:
+                        raise FailoverLockError("failover lock acquisition cancelled")
                 try:
-                    # LOCK_EX: exclusive lock — only one process can hold it
-                    # LOCK_NB: non-blocking — raises BlockingIOError instead of
-                    #          blocking the calling thread, so the asyncio event
-                    #          loop stays responsive between poll attempts
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break
                 except BlockingIOError:
-                    # A predecessor holds the lock: this acquire is a real
-                    # failover (contended), not an immediate initial bootup.
                     self._was_contended = True
                     if timeout is not None:
                         elapsed = time.monotonic() - start
@@ -86,27 +79,44 @@ class FlockFailoverLock(FailoverLock):
                                 f"for engine {engine_id} after {elapsed:.1f}s"
                             )
                     await asyncio.sleep(poll_interval)
-        except Exception as e:
-            os.close(fd)
+
+            os.ftruncate(fd, 0)
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(fd, engine_id.encode())
+
+            with self._state_lock:
+                release_requested = self._release_requested
+                self._release_requested = False
+                self._acquiring = False
+                if not release_requested:
+                    self._fd = fd
+                    self._engine_id = engine_id
+                    fd = None
+
+            if release_requested:
+                raise FailoverLockError(
+                    "failover lock released while acquisition was completing"
+                )
+        except BaseException as exc:
+            with self._state_lock:
+                self._acquiring = False
+                self._release_requested = False
+            if fd is not None:
+                os.close(fd)
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             logger.error(
                 "Failed to acquire failover lock at %s for engine %s: %s",
                 self._lock_path,
                 engine_id,
-                e,
+                exc,
             )
+            if isinstance(exc, FailoverLockError):
+                raise
             raise FailoverLockError(
                 f"Failed to acquire flock at {self._lock_path} for engine "
-                f"{engine_id}: {e}"
-            ) from e
-
-        # Write identity before publishing the held fd. Keeping the fd open is
-        # what owns the kernel flock.
-        os.ftruncate(fd, 0)
-        os.lseek(fd, 0, os.SEEK_SET)
-        os.write(fd, engine_id.encode())
-        with self._state_lock:
-            self._fd = fd
-            self._engine_id = engine_id
+                f"{engine_id}: {exc}"
+            ) from exc
 
         logger.info("Failover lock acquired: %s", engine_id)
 
@@ -123,6 +133,9 @@ class FlockFailoverLock(FailoverLock):
             fd = self._fd
             engine_id = self._engine_id
             if fd is None:
+                if self._acquiring:
+                    self._release_requested = True
+                    return True
                 return False
             self._fd = None
             self._engine_id = None
