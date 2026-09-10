@@ -54,7 +54,13 @@ from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
 from dynamo.vllm.worker_factory import WorkerFactory
 
 from . import envs
-from .args import Config, _uses_dynamo_connector, configure_rl_logprobs_mode, parse_args
+from .args import (
+    Config,
+    _uses_dynamo_connector,
+    configure_rl_logprobs_mode,
+    gms_shadow_mode_enabled,
+    parse_args,
+)
 from .cache_info import get_configured_kv_event_block_size
 from .capacity import (
     get_metrics_model_name,
@@ -91,6 +97,7 @@ from .state_agent import (
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+GMS_VLLM_WORKER_CLS = "gpu_memory_service.integrations.vllm.worker.GMSWorker"
 shutdown_endpoints: list = []
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY = (
@@ -157,6 +164,105 @@ def _register_model_source_path(config: Config, vllm_config: VllmConfig) -> str:
     return config.model
 
 
+def _gms_failover_shadow_member(*, configured: bool = False) -> bool:
+    if not (
+        configured
+        or env_bool("DYN_GMS_FAILOVER_SHADOW_MODE")
+        or env_bool("DYN_VLLM_GMS_SHADOW_MODE")
+    ):
+        return False
+    if env_bool("DYN_VLLM_GMS_ACTIVE_LOCK_HELD"):
+        return False
+    engine_id = os.environ.get("ENGINE_ID", "0")
+    primary_id = os.environ.get("DYN_GMS_FAILOVER_PRIMARY_ENGINE_ID", "0")
+    return engine_id != primary_id
+
+
+def _is_gms_load_format(engine_args: Any) -> bool:
+    return str(getattr(engine_args, "load_format", "")) == "gms"
+
+
+def _configure_gms_vllm_worker(engine_args: Any) -> None:
+    current = getattr(engine_args, "worker_cls", None)
+    if current not in (None, "auto", GMS_VLLM_WORKER_CLS):
+        logger.warning(
+            "[GMS] Overriding user-provided vLLM worker_cls=%s with %s "
+            "because --load-format=gms requires the GMS worker integration",
+            current,
+            GMS_VLLM_WORKER_CLS,
+        )
+
+    engine_args.worker_cls = GMS_VLLM_WORKER_CLS
+
+    # Import eagerly so model-loader/KV patches fail before vLLM starts worker
+    # processes. Worker subprocesses still resolve the class by string.
+    import gpu_memory_service.integrations.vllm.worker  # noqa: F401
+
+    logger.info("[GMS] vLLM worker_cls configured as %s", GMS_VLLM_WORKER_CLS)
+
+
+def _verify_gms_vllm_worker_config(vllm_config: VllmConfig) -> None:
+    worker_cls = getattr(vllm_config.parallel_config, "worker_cls", None)
+    if worker_cls != GMS_VLLM_WORKER_CLS:
+        raise RuntimeError(
+            "GMS load format requires vLLM worker_cls="
+            f"{GMS_VLLM_WORKER_CLS}, got {worker_cls!r}"
+        )
+    logger.info("[GMS] Final vLLM parallel_config.worker_cls=%s", worker_cls)
+
+
+def _gms_shadow_init_geometry_wait_ms() -> int:
+    names = (
+        "DYN_VLLM_GMS_SHADOW_INIT_GEOMETRY_WAIT_MS",
+        "GMS_VLLM_KV_GEOMETRY_WAIT_MS",
+        "GMS_KV_LEASE_GEOMETRY_WAIT_MS",
+    )
+    wait_ms = 300_000
+    for name in names:
+        value = os.environ.get(name)
+        if value is None:
+            continue
+        try:
+            wait_ms = int(value)
+        except ValueError:
+            logger.warning("Ignoring invalid %s=%r", name, value)
+            continue
+        break
+    return max(wait_ms, 0)
+
+
+def _maybe_wait_for_gms_primary_kv_before_init(config: Config) -> None:
+    if getattr(config.engine_args, "load_format", None) != "gms":
+        return
+    if not config.gms_shadow_mode:
+        return
+    if not _gms_failover_shadow_member(configured=config.gms_shadow_mode):
+        return
+    if not env_bool("DYN_VLLM_GMS_WAIT_FOR_PRIMARY_KV_BEFORE_INIT", default=True):
+        return
+
+    from gpu_memory_service.integrations.vllm.install_vmm_ipc_kv import (
+        _existing_shared_kv_blocks,
+    )
+
+    wait_ms = _gms_shadow_init_geometry_wait_ms()
+    logger.info(
+        "[GMS] Shadow engine waiting up to %d ms for primary KV geometry "
+        "before vLLM engine initialization",
+        wait_ms,
+    )
+    blocks = _existing_shared_kv_blocks(wait_ms=wait_ms)
+    if blocks is None:
+        raise RuntimeError(
+            "Timed out waiting for primary GMS KV geometry before shadow "
+            "vLLM engine initialization"
+        )
+    logger.info(
+        "[GMS] Shadow engine observed primary KV geometry before init: blocks=%d",
+        blocks,
+    )
+
+
 async def worker(argv: list[str] | None = None) -> None:
     if argv is None:
         argv = sys.argv[1:]
@@ -212,7 +318,7 @@ async def worker(argv: list[str] | None = None) -> None:
             config,
             lambda: parse_snapshot_restore_runtime_config(argv),
         )
-        config.gms_shadow_mode = env_bool("DYN_VLLM_GMS_SHADOW_MODE")
+        config.gms_shadow_mode = gms_shadow_mode_enabled()
 
     # HEADLESS MODE: bypass DistributedRuntime entirely.
     # Workers run vLLM only (no NATS, etcd, or dynamo endpoints).
@@ -641,8 +747,8 @@ def setup_vllm_engine(
         if "VLLM_LORA_MODULES_LOADING_TIMEOUT" not in os.environ:
             os.environ["VLLM_LORA_MODULES_LOADING_TIMEOUT"] = "600"
 
-    if engine_args.load_format == "gms":
-        engine_args.worker_cls = "gpu_memory_service.integrations.vllm.worker.GMSWorker"
+    if _is_gms_load_format(engine_args):
+        _configure_gms_vllm_worker(engine_args)
 
         if config.gms_shadow_mode:
             from gpu_memory_service.integrations.vllm.utils import (
@@ -650,14 +756,24 @@ def setup_vllm_engine(
                 configure_mx_ports,
             )
 
-            os.environ["DYN_GMS_SCRATCH_KV_ENABLED"] = "1"
-            logger.info(
-                "[GMS] Failover enabled: will use scratch KV for initialization until engine is primary"
-            )
             # ENGINE_ID=0 writes weights, all others import (RO).
             # Prevents deadlock during TP>1 failover.
             configure_gms_lock_mode(engine_args)
             configure_mx_ports(engine_args)
+
+    if engine_args.load_format in ("mx-source", "mx-target"):
+        try:
+            from modelexpress import register_modelexpress_loaders
+
+            if config.model_express_url:
+                os.environ["MODEL_EXPRESS_URL"] = config.model_express_url
+            register_modelexpress_loaders()
+            engine_args.worker_cls = "modelexpress.vllm_worker.ModelExpressWorker"
+        except ImportError as e:
+            raise ImportError(
+                f"ModelExpress package required for --load-format={engine_args.load_format}. "
+                "Install with: pip install modelexpress"
+            ) from e
 
     # Must happen before create_engine_config() so vLLM sees ec_transfer_config.
     configure_multimodal_embedding_cache(
@@ -674,6 +790,8 @@ def setup_vllm_engine(
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector(vllm_config)
     default_sampling_params = vllm_config.model_config.get_diff_sampling_param()
+    if _is_gms_load_format(engine_args):
+        _verify_gms_vllm_worker_config(vllm_config)
 
     # Set up consolidator endpoints if KVBM (DynamoConnector) is enabled
     consolidator_endpoints = None
@@ -726,6 +844,8 @@ def setup_vllm_engine(
     factory = []
     if stat_logger:
         factory.append(stat_logger)
+
+    _maybe_wait_for_gms_primary_kv_before_init(config)
 
     # Time engine initialization
     start_time = time.time()

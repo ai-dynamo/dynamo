@@ -305,6 +305,7 @@ async def test_custom_encoder_shutdown_engine_on_startup_failure(
         component="backend",
         endpoint="generate",
         enable_rl=False,
+        gms_shadow_mode=False,
         engine_args=SimpleNamespace(enable_lora=False),
         enable_multimodal=True,
         custom_encoder_class="encoder.Backend",
@@ -1716,3 +1717,64 @@ async def test_decode_call_site_stops_workers_when_benchmark_wait_raises(
     assert order == ["wait", "stop"]
     register.assert_not_awaited()
     engine_client.shutdown.assert_called_once_with(timeout=5.0)
+
+
+@pytest.mark.asyncio
+async def test_prefill_acquires_failover_lock_before_engine_init(monkeypatch):
+    events = []
+    lock = SimpleNamespace(release=AsyncMock())
+
+    async def acquire_lock():
+        events.append("lock")
+        return lock
+
+    async def fence(**_kwargs):
+        events.append("fence")
+
+    def setup(*_args, **_kwargs):
+        events.append("setup")
+        raise RuntimeError("stop after ordering check")
+
+    factory = _make_factory(setup_vllm_engine_fn=setup)
+    factory._maybe_create_failover_metrics = Mock(return_value=None)
+    factory._acquire_failover_lock = acquire_lock
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.run_gms_failover_post_lock_fence", fence
+    )
+    monkeypatch.setenv("DYN_VLLM_GMS_LOCK_BEFORE_INIT", "1")
+    runtime = Mock()
+    runtime.endpoint.return_value = Mock(connection_id=Mock(return_value="worker-id"))
+    config = SimpleNamespace(
+        namespace="dyn",
+        component="prefill",
+        endpoint="generate",
+        enable_rl=False,
+        engine_args=SimpleNamespace(enable_lora=False),
+        gms_shadow_mode=True,
+    )
+
+    with pytest.raises(RuntimeError, match="ordering check"):
+        await factory._run_prefill_worker(
+            runtime, config, asyncio.Event(), [], snapshot_engine=None
+        )
+
+    assert events == ["lock", "fence", "setup"]
+    runtime.set_health_status.assert_called_once_with(True)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_restore_does_not_reacquire_failover_lock(monkeypatch):
+    factory = _make_factory()
+    factory._acquire_failover_lock = AsyncMock(
+        side_effect=AssertionError("snapshot lifecycle already owns the lock")
+    )
+    monkeypatch.setenv("DYN_VLLM_GMS_LOCK_BEFORE_INIT", "1")
+
+    result = await factory._maybe_acquire_failover_lock_before_init(
+        Mock(),
+        SimpleNamespace(gms_shadow_mode=True),
+        snapshot_engine_present=True,
+    )
+
+    assert result == (None, False)
+    factory._acquire_failover_lock.assert_not_awaited()

@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import os
+import signal
 import time as _time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -20,9 +21,12 @@ from vllm.config import VllmConfig
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo import prometheus_names
+from dynamo.common.gms_failover import (
+    run_gms_failover_post_lock_fence,
+    run_gms_failover_promotion_warmup,
+)
 from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.rl import first_endpoint_response, register_rl_routes
-from dynamo.common.snapshot.lifecycle import elect_and_wake
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
@@ -66,6 +70,50 @@ BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS = 90
 # worker is sub-second; a longer wait means the engine is gone, and neither
 # serving nor error propagation may hang on it.
 WORKER_GC_STOP_TIMEOUT_SECONDS = 30.0
+
+
+class _GMSHardTimeout(asyncio.TimeoutError):
+    def __init__(self, operation: str, timeout: float, *, task_still_running: bool):
+        super().__init__(f"{operation} exceeded {timeout:.1f}s hard deadline")
+        self.task_still_running = task_still_running
+
+
+def _consume_detached_task_result(task: asyncio.Task[Any]) -> None:
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        pass
+    except BaseException:
+        logger.debug("Detached GMS activation task failed", exc_info=True)
+
+
+async def _run_gms_operation_with_hard_timeout(
+    operation: Awaitable[Any], *, timeout: float, label: str
+) -> Any:
+    # Return by the deadline even when the operation suppresses cancellation.
+    task = asyncio.create_task(operation)
+    try:
+        done, _ = await asyncio.wait({task}, timeout=max(0.0, timeout))
+    except asyncio.CancelledError:
+        task.cancel()
+        task.add_done_callback(_consume_detached_task_result)
+        raise
+    if done:
+        return task.result()
+
+    task.cancel()
+    task.add_done_callback(_consume_detached_task_result)
+    # Give an ordinary cancellation one loop turn to finish. A task that
+    # suppresses cancellation is detached; the caller must retain ownership
+    # until process death because its mutation state is unknown.
+    await asyncio.sleep(0)
+    task_still_running = not task.done()
+    raise _GMSHardTimeout(
+        label,
+        timeout,
+        task_still_running=task_still_running,
+    )
+
 
 # (engine_client, vllm_config, default_sampling_params, cleanup_resource, component_gauges)
 # component_gauges is None on the embedding-worker path: pooling engines
@@ -1132,28 +1180,241 @@ class WorkerFactory:
         failover_metrics.set_state("init")
         return failover_metrics
 
+    @staticmethod
+    def _truthy_env(name: str, *, default: bool = False) -> bool:
+        value = os.environ.get(name)
+        if value is None:
+            return default
+        return value.strip().lower() not in ("", "0", "false", "no", "off")
+
+    # Private-bootstrap/scratch shadow KV is deferred: the isolated scratch pool
+    # that used to back those pre-lock modes has been removed. Their forced
+    # prepromotion bypasses the lease-aware shared-pool lifecycle below and can
+    # write shared KV before lock ownership, so fail closed.
+    _REMOVED_PRIVATE_BOOTSTRAP_ENV_VARS = (
+        "DYN_VLLM_GMS_PRIVATE_BOOTSTRAP_KV",
+        "GMS_VLLM_PRIVATE_BOOTSTRAP_KV",
+        "DYN_GMS_FAILOVER_PRIVATE_BOOTSTRAP_KV",
+        "DYN_VLLM_GMS_FORCE_PRIVATE_BOOTSTRAP_KV",
+        "DYN_VLLM_GMS_PRIVATE_BOOTSTRAP_SCRATCH_WARMUP",
+        "GMS_VLLM_PRIVATE_BOOTSTRAP_SCRATCH_WARMUP",
+        "DYN_VLLM_GMS_PREWARM_SHADOW_BEFORE_LOCK",
+        "DYN_VLLM_GMS_PREPROMOTE_SHADOW_KV",
+    )
+
+    @classmethod
+    def _reject_removed_private_bootstrap_options(cls) -> None:
+        enabled = [
+            name
+            for name in cls._REMOVED_PRIVATE_BOOTSTRAP_ENV_VARS
+            if cls._truthy_env(name)
+        ]
+        if enabled:
+            raise RuntimeError(
+                "Refusing to start the vLLM GMS worker: private-bootstrap/scratch "
+                f"shadow KV options are enabled ({', '.join(enabled)}), but the "
+                "isolated scratch KV that made them safe has been removed. With "
+                "these enabled a shadow would initialize or prewarm against the "
+                "SHARED GMS KV pool before it owns the failover lock, which would "
+                "corrupt the live primary's KV. Unset them; shadow prewarm is "
+                "deferred pending a replacement mechanism."
+            )
+
+    async def _acquire_failover_lock(self, *, timeout: float | None = None):
+        from gpu_memory_service.failover_lock.flock import FlockFailoverLock
+
+        lock_path = os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
+        engine_id = os.environ.get("ENGINE_ID", "0")
+        lock = FlockFailoverLock(lock_path)
+        await lock.acquire(engine_id=f"engine-{engine_id}", timeout=timeout)
+        return lock
+
+    async def _wake_up_kv_fenced(self, handler) -> None:
+        """Bound shadow wake so a wedged remap cannot retain ownership."""
+        timeout = float(os.environ.get("DYN_GMS_FAILOVER_WAKEUP_TIMEOUT_SECS", "120"))
+        try:
+            await _run_gms_operation_with_hard_timeout(
+                handler._pause_controller.resume(),
+                timeout=timeout,
+                label="GMS wake/remap",
+            )
+        except _GMSHardTimeout:
+            logger.critical(
+                "[GMS failover] wake_up/remap did not complete within %.0fs; "
+                "failing closed",
+                timeout,
+            )
+            raise
+
+    async def _maybe_acquire_failover_lock_before_init(
+        self,
+        runtime: DistributedRuntime,
+        config: Config,
+        *,
+        snapshot_engine_present: bool = False,
+    ) -> tuple[Any | None, bool]:
+        """Fence shared KV initialization in the correctness-first mode.
+
+        The default waits before engine setup, so takeover includes vLLM startup.
+        Setting ``DYN_VLLM_GMS_LOCK_BEFORE_INIT=0`` selects the explicitly
+        configured preinitialized-standby path handled after setup.
+        """
+        if snapshot_engine_present:
+            return None, False
+        lock_before_init = os.environ.get("DYN_VLLM_GMS_LOCK_BEFORE_INIT", "1").lower()
+        if not config.gms_shadow_mode:
+            return None, False
+        if lock_before_init in {"0", "false", "no", "off"}:
+            logger.warning(
+                "[Shadow] Preinitialized standby explicitly enabled; shared-KV "
+                "safety depends on the complete lease-aware vLLM integration"
+            )
+            return None, False
+
+        logger.info(
+            "[Shadow] Waiting for failover lock before vLLM engine init "
+            "to protect shared GMS KV warmup"
+        )
+        runtime.set_health_status(True)
+        lock = await self._acquire_failover_lock()
+        try:
+            await run_gms_failover_post_lock_fence(
+                backend_name="vllm",
+                role=f"engine-{os.environ.get('ENGINE_ID', '0')}-pre-init",
+            )
+        except BaseException:
+            await lock.release()
+            raise
+        os.environ["DYN_VLLM_GMS_ACTIVE_LOCK_HELD"] = "1"
+        logger.info("[Shadow] Failover lock acquired before vLLM engine init")
+        return lock, True
+
     async def _maybe_wait_for_failover_lock(
         self,
         handler,
         runtime: DistributedRuntime,
         config: Config,
         failover_metrics=None,
+        *,
+        lock_already_acquired: bool = False,
+        promotion_warmup: Callable[[], Awaitable[None]] | None = None,
+        post_lock_fence_already_run: bool = False,
     ) -> bool:
-        # Shadow mode: sleep → probe → block on lock → wake. True only for a real
-        # (contended) failover, not the initial bootup. The election itself is
-        # shared with the snapshot restore path, which arrives already paused;
-        # a cold-start engine is awake, so it sleeps here first.
-        if config.gms_shadow_mode is not True:
+        """Elect one active GMS writer and prepare it before discovery registration."""
+        if not config.gms_shadow_mode:
             return False
 
-        await handler._pause_controller.pause(1)
-        lock = await elect_and_wake(
-            handler._pause_controller,
-            runtime,
-            lock_path=os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock"),
-            failover_metrics=failover_metrics,
-        )
-        return lock is not None and lock.was_contended
+        if lock_already_acquired:
+            if not post_lock_fence_already_run:
+                await run_gms_failover_post_lock_fence(
+                    backend_name="vllm", role="pre-init"
+                )
+            logger.info(
+                "[Shadow] Failover lock already acquired before engine init; "
+                "registering with discovery"
+            )
+            return False
+
+        engine_id = os.environ.get("ENGINE_ID", "0")
+        primary_engine_id = os.environ.get("DYN_GMS_FAILOVER_PRIMARY_ENGINE_ID", "0")
+        is_shadow = engine_id != primary_engine_id
+        if not is_shadow:
+            logger.info("[Primary] Acquiring active failover lock before discovery")
+            lock = await self._acquire_failover_lock()
+            setattr(handler, "_gms_failover_lock", lock)
+            try:
+                await run_gms_failover_post_lock_fence(
+                    backend_name="vllm", role="active"
+                )
+            except BaseException:
+                delattr(handler, "_gms_failover_lock")
+                try:
+                    await lock.release()
+                except BaseException:
+                    logger.exception(
+                        "[Primary] Failed to release lock after fence error"
+                    )
+                raise
+            return False
+
+        # The pre-initialized standby relinquishes its writer role without clearing
+        # prefix metadata, then waits while remaining healthy but undiscoverable.
+        await handler._pause_controller.pause(1, clear_cache=False)
+        if failover_metrics is not None:
+            failover_metrics.set_state("standby")
+        runtime.set_health_status(True)
+        logger.info("[Shadow] Engine sleeping, waiting for failover lock")
+        lock = await self._acquire_failover_lock()
+        setattr(handler, "_gms_failover_lock", lock)
+        was_contended = bool(getattr(lock, "was_contended", False))
+        if failover_metrics is not None:
+            failover_metrics.set_state("waking")
+            if was_contended:
+                failover_metrics.record_switch_attempt()
+        resume_attempted = False
+        resumed = False
+        try:
+            await run_gms_failover_post_lock_fence(backend_name="vllm", role="shadow")
+            resume_attempted = True
+            await self._wake_up_kv_fenced(handler)
+            resumed = True
+            handler._pause_controller.mark_resumed()
+            if promotion_warmup is not None:
+                await promotion_warmup()
+        except BaseException as activation_error:
+            safe_to_release = not resume_attempted
+            activation_may_still_run = isinstance(
+                activation_error, asyncio.CancelledError
+            ) or (
+                isinstance(activation_error, _GMSHardTimeout)
+                and activation_error.task_still_running
+            )
+            if resume_attempted and not activation_may_still_run:
+                try:
+                    if not resumed:
+                        handler._pause_controller.mark_resumed()
+                    try:
+                        cleanup_timeout = max(
+                            0.1,
+                            float(
+                                os.environ.get(
+                                    "DYN_GMS_FAILOVER_REQUIESCE_TIMEOUT_SECS",
+                                    "30",
+                                )
+                            ),
+                        )
+                    except ValueError:
+                        cleanup_timeout = 30.0
+                    await _run_gms_operation_with_hard_timeout(
+                        handler._pause_controller.pause(1, clear_cache=False),
+                        timeout=cleanup_timeout,
+                        label="GMS re-quiesce",
+                    )
+                    safe_to_release = True
+                except BaseException:
+                    logger.critical(
+                        "[Shadow] Failed to re-quiesce after activation error; "
+                        "retaining GMS ownership until process exit",
+                        exc_info=True,
+                    )
+            runtime.set_health_status(False)
+            if safe_to_release:
+                delattr(handler, "_gms_failover_lock")
+                try:
+                    await lock.release()
+                except BaseException:
+                    logger.exception(
+                        "[Shadow] Failed to release lock after activation error"
+                    )
+            else:
+                # Releasing the flock while a half-resumed engine can still
+                # write shared KV would create two physical writers. SIGTERM
+                # starts normal engine/process cleanup; the attached lock stays
+                # live until that cleanup (or kernel process death) completes.
+                os.kill(os.getpid(), signal.SIGTERM)
+            raise
+        logger.info("[Shadow] Engine awake, registering with discovery")
+        return was_contended
 
     async def _create_decode_worker(
         self,
@@ -1189,6 +1450,7 @@ class WorkerFactory:
         lifecycle: _DecodeWorkerLifecycle,
     ) -> None:
         """Initialize and serve a decode worker."""
+        self._reject_removed_private_bootstrap_options()
 
         generate_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
@@ -1232,6 +1494,14 @@ class WorkerFactory:
         # Shadow mode: create metrics + enter 'init' before load, so 'init' spans it.
         failover_metrics = self._maybe_create_failover_metrics(
             config, generate_endpoint
+        )
+        (
+            early_failover_lock,
+            early_failover_fence_run,
+        ) = await self._maybe_acquire_failover_lock_before_init(
+            runtime,
+            config,
+            snapshot_engine_present=snapshot_engine is not None,
         )
 
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
@@ -1297,6 +1567,8 @@ class WorkerFactory:
         )
         lifecycle.handler = handler
         handler.add_temp_dir(prometheus_temp_dir)
+        if early_failover_lock is not None:
+            setattr(handler, "_gms_failover_lock", early_failover_lock)
 
         # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
         consolidator_enabled = False
@@ -1363,10 +1635,25 @@ class WorkerFactory:
                 "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
             )
 
+        health_check_payload = VllmHealthCheckPayload(
+            engine_client, use_text_input=config.use_vllm_tokenizer
+        ).to_dict()
+
+        async def promotion_warmup() -> None:
+            await run_gms_failover_promotion_warmup(
+                handler.generate, health_check_payload, backend_name="vllm"
+            )
+
         was_failover = False
         if snapshot_engine is None:
             was_failover = await self._maybe_wait_for_failover_lock(
-                handler, runtime, config, failover_metrics
+                handler,
+                runtime,
+                config,
+                failover_metrics,
+                lock_already_acquired=early_failover_lock is not None,
+                promotion_warmup=promotion_warmup,
+                post_lock_fence_already_run=early_failover_fence_run,
             )
 
         # Wait for self-benchmark to complete before registering.
@@ -1412,10 +1699,6 @@ class WorkerFactory:
             failover_metrics.set_state("active")
             if was_failover:
                 failover_metrics.record_switch_success()
-
-        health_check_payload = VllmHealthCheckPayload(
-            engine_client, use_text_input=config.use_vllm_tokenizer
-        ).to_dict()
 
         perf_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.get_perf_metrics"
@@ -1518,6 +1801,7 @@ class WorkerFactory:
         """
         Instantiate and serve
         """
+        self._reject_removed_private_bootstrap_options()
         generate_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
         )
@@ -1544,6 +1828,14 @@ class WorkerFactory:
         # Shadow mode: create metrics + enter 'init' before load, so 'init' spans it.
         failover_metrics = self._maybe_create_failover_metrics(
             config, generate_endpoint
+        )
+        (
+            early_failover_lock,
+            early_failover_fence_run,
+        ) = await self._maybe_acquire_failover_lock_before_init(
+            runtime,
+            config,
+            snapshot_engine_present=snapshot_engine is not None,
         )
 
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
@@ -1602,6 +1894,8 @@ class WorkerFactory:
             encode_worker_client=encode_worker_client,
         )
         handler.add_temp_dir(prometheus_temp_dir)
+        if early_failover_lock is not None:
+            setattr(handler, "_gms_failover_lock", early_failover_lock)
 
         # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
         consolidator_enabled = False
@@ -1653,10 +1947,25 @@ class WorkerFactory:
             lora_enabled=config.engine_args.enable_lora,
         )
 
+        health_check_payload = VllmPrefillHealthCheckPayload(
+            engine_client, use_text_input=config.use_vllm_tokenizer
+        ).to_dict()
+
+        async def promotion_warmup() -> None:
+            await run_gms_failover_promotion_warmup(
+                handler.generate, health_check_payload, backend_name="vllm"
+            )
+
         was_failover = False
         if snapshot_engine is None:
             was_failover = await self._maybe_wait_for_failover_lock(
-                handler, runtime, config, failover_metrics
+                handler,
+                runtime,
+                config,
+                failover_metrics,
+                lock_already_acquired=early_failover_lock is not None,
+                promotion_warmup=promotion_warmup,
+                post_lock_fence_already_run=early_failover_fence_run,
             )
 
         # Wait for self-benchmark to complete before registering.
@@ -1708,10 +2017,6 @@ class WorkerFactory:
             failover_metrics.set_state("active")
             if was_failover:
                 failover_metrics.record_switch_success()
-
-        health_check_payload = VllmPrefillHealthCheckPayload(
-            engine_client, use_text_input=config.use_vllm_tokenizer
-        ).to_dict()
 
         prefill_metrics_labels = [
             (

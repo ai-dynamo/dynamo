@@ -28,6 +28,7 @@ from dynamo.common.configuration.groups.runtime_args import (
     DynamoRuntimeConfig,
 )
 from dynamo.common.configuration.utils import split_served_model_names
+from dynamo.common.utils.env import env_bool
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.vllm.backend_args import DynamoVllmArgGroup, DynamoVllmConfig
 from dynamo.vllm.constants import DisaggregationMode
@@ -67,6 +68,14 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
         DynamoVllmConfig.validate(self)
+
+
+def gms_shadow_mode_enabled(configured: bool = False) -> bool:
+    return (
+        configured
+        or env_bool("DYN_VLLM_GMS_SHADOW_MODE")
+        or env_bool("DYN_GMS_FAILOVER_SHADOW_MODE")
+    )
 
 
 @register_encoder(Config)
@@ -116,6 +125,11 @@ def parse_args(argv: list[str] | None = None) -> Config:
 
     args, unknown = parser.parse_known_args(argv)
     dynamo_config = Config.from_cli_args(args)
+    # Canonicalize launcher aliases before validation so none can enable
+    # shared writable KV while bypassing ownership orchestration.
+    dynamo_config.gms_shadow_mode = gms_shadow_mode_enabled(
+        dynamo_config.gms_shadow_mode
+    )
 
     # Consume the router flags before the engine parser sees the remainder.
     dynamo_config.router_advertisement, unknown = parse_worker_router_config(unknown)
@@ -182,6 +196,19 @@ def cross_validate_config(
             "--gms-shadow-mode requires --load-format gms. "
             "Shadow mode depends on GMS for VA-stable weight sharing."
         )
+
+    if dynamo_config.gms_shadow_mode:
+        parallel_sizes = (
+            engine_config.tensor_parallel_size,
+            engine_config.pipeline_parallel_size,
+            engine_config.data_parallel_size,
+        )
+        if dynamo_config.headless or any(size != 1 for size in parallel_sizes):
+            raise ValueError(
+                "--gms-shadow-mode currently supports exactly one local vLLM "
+                "rank; tensor, pipeline, and data parallel failover require a "
+                "coordinated rank-activation barrier"
+            )
 
     if dynamo_config.embedding_worker_processes > 1:
         if engine_config.data_parallel_size != 1:
