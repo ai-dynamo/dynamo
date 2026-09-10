@@ -270,7 +270,7 @@ def test_configured_engine_route_cannot_replace_built_in_route(reserved_path):
     registered_routes = []
 
     class Runtime:
-        def register_engine_route(self, path, route_handler):
+        def register_engine_route(self, path, route_handler, gated_by=None):
             registered_routes.append((path, route_handler))
 
     with pytest.raises(
@@ -323,7 +323,7 @@ def test_builtin_engine_routes_include_model_taint_update(monkeypatch):
     taint_route_endpoints = []
 
     class Runtime:
-        def register_engine_route(self, path, route_handler):
+        def register_engine_route(self, path, route_handler, gated_by=None):
             registered_routes.append((path, route_handler))
 
     runtime = Runtime()
