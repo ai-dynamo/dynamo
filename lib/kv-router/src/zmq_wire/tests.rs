@@ -1032,7 +1032,7 @@ fn test_convert_event_bigram_emits_eagle_windows() {
             assert_eq!(store_data.blocks[0].tokens_hash, expected_first[0]);
             assert_eq!(store_data.blocks[1].tokens_hash, expected_second[0]);
         }
-        other => panic!("expected Stored event, got {other:?}"),
+        _ => panic!("expected Stored event"),
     }
 }
 
@@ -1094,7 +1094,7 @@ fn cpu_event_with_placeholder_payload_is_dropped_safely() {
             assert!(store_data.parent_hash.is_none());
             assert!(store_data.blocks.is_empty());
         }
-        other => panic!("expected Stored event, got {other:?}"),
+        _ => panic!("expected Stored event"),
     }
     assert!(warning_count.load(Ordering::Relaxed) >= 1);
 }
@@ -1133,7 +1133,7 @@ fn cpu_event_with_full_payload_is_indexable() {
                 ExternalSequenceBlockHash(202)
             );
         }
-        other => panic!("expected Stored event, got {other:?}"),
+        _ => panic!("expected Stored event"),
     }
     assert_eq!(warning_count.load(Ordering::Relaxed), 0);
 }
@@ -1464,7 +1464,7 @@ fn test_storage_placeholder_store_is_indexed_as_disk_noop() {
     );
     match placement.event.data {
         KvCacheEventData::Stored(store_data) => assert!(store_data.blocks.is_empty()),
-        other => panic!("expected Stored event, got {other:?}"),
+        _ => panic!("expected Stored event"),
     }
     assert!(warning_count.load(Ordering::Relaxed) >= 1);
 }

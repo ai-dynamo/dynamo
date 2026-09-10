@@ -815,7 +815,7 @@ mod tests_startup_helpers {
             &self,
             event: &RouterEvent,
         ) -> impl Future<Output = anyhow::Result<()>> + Send {
-            let bytes = rmp_serde::to_vec(event).unwrap();
+            let bytes = rmp_serde::to_vec_named(event).unwrap();
             self.published
                 .lock()
                 .unwrap()

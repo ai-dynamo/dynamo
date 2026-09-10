@@ -1487,8 +1487,8 @@ pub struct RouterEvent {
     ///
     /// This is absent on the legacy Worker-only wire. CacheOwner events are
     /// valid only on a versioned, residency-aware source where this field is
-    /// present; they must never be sent to legacy consumers. Optional extension
-    /// fields remain append-only so legacy positional MessagePack stays prefix-compatible.
+    /// present; they must never be sent to legacy consumers. MessagePack
+    /// compatibility relies on `to_vec_named`; positional encoding is unsupported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_source: Option<CacheOwnerId>,
     /// Session that triggered this store or reuse report, if provided by the engine.
