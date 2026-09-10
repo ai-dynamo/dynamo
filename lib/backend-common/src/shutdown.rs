@@ -537,6 +537,22 @@ pub(crate) fn total_budget(config: &ShutdownConfig) -> Duration {
     }
 }
 
+/// The instant the process force-exits, which is the stage budget plus the
+/// floor `cleanup_once` is guaranteed to grant.
+///
+/// The two must not be the same instant. A stage is allowed to spend the whole
+/// remaining budget — the KV wait does exactly that whenever its cap exceeds
+/// what is left, which is the default on both build profiles — and
+/// `cleanup_once` then falls back to [`CLEANUP_RESERVE_S`]. If the watchdog
+/// fired at the end of the stage budget it would kill the process during that
+/// floor, so a healthy worker whose engine simply cannot report KV quiescence
+/// exited 70 with its engine never cleaned up. Extending the watchdog by the
+/// floor does not lengthen shutdown in the normal case; it stops the two
+/// racing.
+pub(crate) fn force_exit_deadline(config: &ShutdownConfig) -> Duration {
+    total_budget(config).saturating_add(Duration::from_secs_f64(CLEANUP_RESERVE_S))
+}
+
 /// Compose the post-signal shutdown deadline from the drain+cleanup
 /// timeout and the grace-period sleep that precedes them.
 ///
@@ -582,7 +598,7 @@ mod tests {
 
     #[test]
     fn env_secs_treats_unset_empty_and_invalid_alike() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _g = EnvGuard::unset(GRACE_PERIOD_ENV);
         assert_eq!(env_secs(GRACE_PERIOD_ENV), None);
 
@@ -594,7 +610,7 @@ mod tests {
 
     #[test]
     fn grace_period_resolves_default_value_and_floor() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         {
             let _g = EnvGuard::unset(GRACE_PERIOD_ENV);
             assert_eq!(grace_period_secs(), DEFAULT_GRACE_PERIOD_SECS);
@@ -612,7 +628,7 @@ mod tests {
 
     #[test]
     fn drain_timeout_resolves_default_value_and_floor() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         {
             let _g = EnvGuard::unset(DRAIN_TIMEOUT_ENV);
             assert_eq!(drain_timeout_secs(), DEFAULT_DRAIN_TIMEOUT_S);
@@ -629,7 +645,7 @@ mod tests {
 
     #[test]
     fn cleanup_timeout_defaults_and_parses() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         {
             let _g = EnvGuard::unset(CLEANUP_TIMEOUT_ENV);
             assert_eq!(cleanup_timeout(), graceful_shutdown_timeout());
@@ -644,7 +660,7 @@ mod tests {
     /// cleanup on its first poll.
     #[test]
     fn cleanup_timeout_rejects_non_positive_rather_than_clamping() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         for bad in ["0", "-1", "abc"] {
             let _g = EnvGuard::set(CLEANUP_TIMEOUT_ENV, bad);
             assert_eq!(
@@ -704,7 +720,7 @@ mod tests {
     /// Stage maxima are caps, not additive deadlines.
     #[test]
     fn allowance_is_capped_by_the_stage_maximum() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _grace = EnvGuard::set(GRACE_PERIOD_ENV, "5");
         let _cleanup = EnvGuard::set(CLEANUP_TIMEOUT_ENV, "10");
 
@@ -719,7 +735,7 @@ mod tests {
     /// With little total left, the remaining budget binds instead of the cap.
     #[test]
     fn allowance_is_capped_by_the_remaining_total() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _grace = EnvGuard::set(GRACE_PERIOD_ENV, "30");
 
         let budget = ShutdownBudget::starting_now(Duration::from_secs(20));
@@ -741,7 +757,7 @@ mod tests {
     /// is exactly 5s left — all of which the old formula reserved.
     #[test]
     fn inflight_barrier_still_has_budget_after_the_grace_at_debug_defaults() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _grace = EnvGuard::unset(GRACE_PERIOD_ENV);
         let _inflight = EnvGuard::unset(INFLIGHT_TIMEOUT_ENV);
         let _cleanup = EnvGuard::unset(CLEANUP_TIMEOUT_ENV);
@@ -763,7 +779,7 @@ mod tests {
     /// need to withhold one.
     #[test]
     fn cleanup_reserve_is_a_floor_not_a_withholding() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _cleanup = EnvGuard::set(CLEANUP_TIMEOUT_ENV, "10");
 
         // Budget fully spent.
@@ -800,7 +816,7 @@ mod tests {
     /// zero under default configuration, silently skipping the KV drain.
     #[test]
     fn default_configuration_leaves_the_kv_stage_a_usable_budget() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _grace = EnvGuard::unset(GRACE_PERIOD_ENV);
         let _cleanup = EnvGuard::unset(CLEANUP_TIMEOUT_ENV);
         let _drain = EnvGuard::unset(DRAIN_TIMEOUT_ENV);
@@ -817,7 +833,7 @@ mod tests {
 
     #[test]
     fn kv_fallback_override_parses_both_policies_case_insensitively() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         for (raw, expected) in [
             ("wait", KvTransferFallback::WaitFullBudget),
             ("WAIT", KvTransferFallback::WaitFullBudget),
@@ -833,7 +849,7 @@ mod tests {
     /// rather than silently picking a policy.
     #[test]
     fn kv_fallback_override_defers_to_the_engine_when_unset_or_invalid() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         {
             let _g = EnvGuard::unset(KV_FALLBACK_ENV);
             assert_eq!(kv_transfer_fallback_override(), None);
@@ -882,7 +898,7 @@ mod tests {
 
     #[test]
     fn env_secs_rejects_out_of_range_magnitudes() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         for bad in ["1e30", "inf", "-inf", "NaN"] {
             let _g = EnvGuard::set(GRACE_PERIOD_ENV, bad);
             assert_eq!(env_secs(GRACE_PERIOD_ENV), None, "{bad:?}");
@@ -895,7 +911,7 @@ mod tests {
     /// deadline the stages knew nothing about.
     #[test]
     fn total_budget_honours_an_explicit_total() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _g = EnvGuard::unset(GRACE_PERIOD_ENV);
         let config = ShutdownConfig {
             total_secs: Some(45.0),
@@ -913,12 +929,41 @@ mod tests {
 
     #[test]
     fn total_budget_falls_back_to_timeout_plus_grace() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _g = EnvGuard::set(GRACE_PERIOD_ENV, "7");
         let config = ShutdownConfig::default();
         assert_eq!(
             total_budget(&config),
             shutdown_deadline(graceful_shutdown_timeout(), 7.0)
+        );
+    }
+
+    /// Regression: a stage may legitimately spend the entire remaining budget
+    /// — `allowance` is `min(cap, remaining)` and the KV cap exceeds what is
+    /// left on both build profiles — after which `cleanup_once` is still owed
+    /// its floor. If the watchdog fired at the end of the stage budget it
+    /// killed the process during that floor, so a healthy prefill worker whose
+    /// engine cannot report quiescence exited 70 with its engine never cleaned
+    /// up.
+    #[test]
+    fn force_exit_deadline_leaves_room_for_the_cleanup_floor() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _grace = EnvGuard::unset(GRACE_PERIOD_ENV);
+        let config = ShutdownConfig::default();
+
+        let stages = total_budget(&config);
+        let watchdog = force_exit_deadline(&config);
+        assert!(
+            watchdog >= stages + Duration::from_secs_f64(CLEANUP_RESERVE_S),
+            "watchdog {watchdog:?} must outlast the stage budget {stages:?} by the cleanup floor"
+        );
+
+        // The precondition that triggered it, asserted without reading the
+        // clock twice: the KV cap meets or exceeds what is left after the
+        // grace, so `min(cap, remaining)` is the whole remainder.
+        assert!(
+            Duration::from_secs_f64(drain_timeout_secs()) >= graceful_shutdown_timeout(),
+            "the KV cap is expected to allow the stage to consume the entire remainder"
         );
     }
 
@@ -934,7 +979,7 @@ mod tests {
 
     #[test]
     fn inflight_timeout_resolves_default_value_and_floor() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         {
             let _g = EnvGuard::unset(INFLIGHT_TIMEOUT_ENV);
             assert_eq!(inflight_timeout_secs(), DEFAULT_INFLIGHT_TIMEOUT_S);
