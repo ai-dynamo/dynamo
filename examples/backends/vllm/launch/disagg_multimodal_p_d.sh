@@ -100,13 +100,8 @@ else
     DECODE_GPU_MEM_ARGS="--gpu-memory-utilization $DYN_DECODE_GPU_MEM"
 fi
 
-# NIXL side-channel and ZMQ KV-event ports are host-wide, so two deployments
-# scheduled concurrently on one host collide on any fixed literal. The
-# tests/serve harness allocates a unique port per worker per deployment and
-# exports DYN_VLLM_NIXL_SIDE_CHANNEL_PORT{1,2} / DYN_VLLM_KV_EVENT_PORT{1,2};
-# prefer those. The literals stay as the fallback for standalone manual runs.
-# 20081/20082 are also disagg_multimodal_epd.sh's prefill/decode ZMQ defaults,
-# so the two topologies collide on four ports when both fall back.
+# Host-wide ports: prefer the harness-allocated DYN_* values. The literal
+# fallbacks 20081/20082 are also disagg_multimodal_epd.sh's, so both collide.
 VLLM_NIXL_SIDE_CHANNEL_PORT_PREFILL="${DYN_VLLM_NIXL_SIDE_CHANNEL_PORT1:-20098}"
 VLLM_NIXL_SIDE_CHANNEL_PORT_DECODE="${DYN_VLLM_NIXL_SIDE_CHANNEL_PORT2:-20099}"
 VLLM_ZMQ_PORT_PREFILL="${DYN_VLLM_KV_EVENT_PORT1:-20081}"

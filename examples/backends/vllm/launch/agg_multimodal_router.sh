@@ -139,13 +139,8 @@ GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 # Phase 1: launch all workers in parallel.
 # Under SINGLE_GPU=true, requires the KV-bytes cap (CI sets it via the
 # requested_vllm_kv_cache_bytes marker) — otherwise vLLM's 0.9 default races.
-#
-# System and KV-event ports are host-wide, so two deployments scheduled
-# concurrently on one host collide on any fixed literal. The tests/serve
-# harness allocates a unique port per worker per deployment and exports
-# DYN_SYSTEM_PORT{i} / DYN_VLLM_KV_EVENT_PORT{i}; prefer those. The *_BASE
-# formulas stay as the fallback for standalone manual runs. Resolve once here
-# because both the readiness wait and the summary below need the same values.
+# Ports are host-wide: prefer the harness-allocated DYN_SYSTEM_PORT{i} /
+# DYN_VLLM_KV_EVENT_PORT{i}, so concurrent runs on one host cannot collide.
 WORKER_PORTS=()
 KV_EVENTS_PORTS=()
 for i in $(seq 1 "${NUM_WORKERS}"); do
@@ -202,8 +197,6 @@ echo
 echo "=== All services are ready ==="
 echo "Frontend:        http://127.0.0.1:${HTTP_PORT}"
 for i in $(seq 1 "${NUM_WORKERS}"); do
-    # Report the resolved values, not the formula — otherwise the summary
-    # misreports every harness-driven run.
     echo "Worker $i health: http://127.0.0.1:${WORKER_PORTS[i-1]}/health"
     echo "Worker $i kv-events: tcp://*:${KV_EVENTS_PORTS[i-1]}"
 done

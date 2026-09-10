@@ -565,9 +565,7 @@ class TopologyConfig:
     single_gpu: bool = False  # append --single-gpu to script_args
     two_gpu: bool = False  # append --two-gpu to script_args (epd only)
     # Poll every worker's DYN_SYSTEM_PORT{1..N}/health before the frontend
-    # check. Opt-in: a topology whose script binds fewer system ports than
-    # health_check_worker_count would fail readiness. Defaults keep every
-    # profile that does not set them on today's frontend-only gate.
+    # check; a script binding fewer system ports would fail readiness.
     health_check_workers: bool = False
     health_check_worker_count: int = 2
     env: dict[str, str] = field(default_factory=dict)  # extra env vars for subprocess

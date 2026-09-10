@@ -226,11 +226,8 @@ def _prepare_deployment(
         # Unique ZMQ port for vLLM KV event publishing (avoids xdist collisions).
         if ports.kv_event_port:
             merged_env["DYN_VLLM_KV_EVENT_PORT"] = str(ports.kv_event_port)
-            # For multi-worker scripts (xpu_2 router tests, the multimodal
-            # E/P/D topologies), allocate a separate KV event port for each
-            # declared worker to avoid ZMQ bind collisions. Worker 1 reuses the
-            # port already allocated above; each later worker gets a fresh one,
-            # recorded in extra_allocated_ports so cleanup releases it.
+            # For multi-worker scripts (router and multimodal E/P/D topologies),
+            # allocate a separate KV event port per worker to avoid ZMQ collisions.
             if len(dynamic_system_ports) >= 2:
                 merged_env["DYN_VLLM_KV_EVENT_PORT1"] = str(ports.kv_event_port)
                 next_start = ports.kv_event_port + 1
