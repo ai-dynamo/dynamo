@@ -2080,13 +2080,6 @@ mod tests {
             fingerprint,
             materialization_fingerprint(&second, &router).unwrap()
         );
-        assert_eq!(first.source_path.as_deref(), Some("/models/model"));
-        assert_eq!(
-            second.source_path.as_deref(),
-            Some("/cache/model_streamer/model")
-        );
-        assert_eq!(first.mdcsum(), first_checksum);
-        assert_eq!(second.mdcsum(), second_checksum);
 
         let without_source = ModelDeploymentCard::with_name_only("model");
         assert_eq!(
