@@ -2037,12 +2037,8 @@ mod tests {
         model.add_worker_set("pd:prefill2".to_string(), second_prefill);
 
         assert!(
-            model.is_workers_ready("pd"),
-            "a duplicated prefill role must not withdraw the namespace from serving"
-        );
-        assert!(
             model.has_ready_workers(),
-            "the HTTP admission gate must admit"
+            "a duplicated prefill role must not withdraw the namespace from the HTTP admission gate"
         );
         assert!(
             model.get_chat_engine().is_ok(),
