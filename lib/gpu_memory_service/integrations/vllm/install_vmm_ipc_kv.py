@@ -21,6 +21,7 @@ Gates:
   GMS_VLLM_VMM_IPC_SOCKET=<path>   daemon UDS (default: derived from device)
   GMS_VLLM_VMM_IPC_ENGINE_ID=<id>  identifier for (engine_id, tag) keying
                                    (default: derived stable Dynamo id)
+  GMS_VLLM_MODEL_ARTIFACT_DIGEST=<id> immutable identity for local/split artifacts
 """
 
 from __future__ import annotations
@@ -29,10 +30,12 @@ import hashlib
 import inspect
 import logging
 import os
+import re
 import sys
 import time
 from collections import Counter
 from contextlib import contextmanager
+from contextvars import ContextVar
 
 from gpu_memory_service.integrations.common.utils import env_enabled_by_default
 from gpu_memory_service.integrations.vllm.kv_identity import (
@@ -43,46 +46,49 @@ logger = logging.getLogger(__name__)
 
 _LAZY_HOOK_INSTALLED = False
 _GEOMETRY_PATCH_INSTALLED = False
+_PRESERVE_KV_ZERO_FILL: ContextVar[list[int] | None] = ContextVar(
+    "gms_preserve_kv_zero_fill", default=None
+)
+_IMMUTABLE_REVISION = re.compile(r"[0-9a-fA-F]{40,64}").fullmatch
+
+
+def _install_contextual_zeros_hook(torch):
+    current_zeros = torch.zeros
+    if getattr(current_zeros, "_gms_contextual_zeros", False):
+        return
+
+    def contextual_zeros(*args, **kwargs):
+        replacements = _PRESERVE_KV_ZERO_FILL.get()
+        if replacements is not None and kwargs.get("dtype") is torch.int8:
+            replacements[0] += 1
+            return torch.empty(*args, **kwargs)
+        return current_zeros(*args, **kwargs)
+
+    contextual_zeros._gms_contextual_zeros = True
+    contextual_zeros._gms_original = current_zeros
+    torch.zeros = contextual_zeros
 
 
 @contextmanager
 def _persistent_kv_zeros_as_empty(enabled: bool):
-    """Avoid touching reserve-only or reattached persistent KV pages.
-
-    vLLM allocates KV buffers with ``torch.zeros``. Private-bootstrap mode
-    has reserve-only VAs, while a cold replacement maps the primary's existing
-    physical pages. Zero-filling either would respectively poison the CUDA
-    context or silently destroy the KV being recovered. During those allocation
-    windows, replace only int8 zero allocations with ``torch.empty`` so vLLM
-    can build tensor views without writing to KV. A genuinely new shared pool
-    keeps vLLM's normal zero initialization.
-    """
     if not enabled:
         yield
         return
 
     import torch
 
-    original_zeros = torch.zeros
-    replacements = 0
-
-    def zeros_as_empty(*args, **kwargs):
-        nonlocal replacements
-        if kwargs.get("dtype") is torch.int8:
-            replacements += 1
-            return torch.empty(*args, **kwargs)
-        return original_zeros(*args, **kwargs)
-
-    torch.zeros = zeros_as_empty
+    _install_contextual_zeros_hook(torch)
+    replacements = [0]
+    token = _PRESERVE_KV_ZERO_FILL.set(replacements)
     try:
         yield
     finally:
-        torch.zeros = original_zeros
-        if replacements:
+        _PRESERVE_KV_ZERO_FILL.reset(token)
+        if replacements[0]:
             logger.info(
                 "[GMS-VMM-IPC] allocated %d persistent KV tensors with "
-                "torch.empty to preserve existing or reserve-only pages",
-                replacements,
+                "torch.empty to preserve existing pages",
+                replacements[0],
             )
 
 
@@ -115,23 +121,57 @@ def _install_kv_leases() -> bool:
         raise
 
 
+def _immutable_revision(value) -> str | None:
+    resolved = getattr(value, "resolved", None)
+    if resolved:
+        return str(resolved)
+    text = str(value) if value is not None else ""
+    return text if _IMMUTABLE_REVISION(text) else None
+
+
 def _model_identity(model_config) -> str:
-    """Return a stable identity for the model that produced KV bytes."""
-    parts: list[str] = []
-    for attr in ("model", "revision", "code_revision", "quantization"):
-        value = getattr(model_config, attr, None)
-        if value is not None:
-            parts.append(f"{attr}={value}")
-
-    hf_config = getattr(model_config, "hf_config", None)
-    commit = getattr(hf_config, "_commit_hash", None)
-    if commit:
-        parts.append(f"hf_commit={commit}")
-
-    if not parts:
-        raise RuntimeError(
-            "Cannot derive a stable model identity for persistent GMS KV"
+    override = os.environ.get("GMS_VLLM_MODEL_ARTIFACT_DIGEST", "").strip()
+    model = str(getattr(model_config, "model", "") or "")
+    if override:
+        artifact = override
+    else:
+        model_weights = getattr(model_config, "model_weights", None)
+        hf_config_path = getattr(model_config, "hf_config_path", None)
+        if (model_weights and str(model_weights) != model) or (
+            hf_config_path and str(hf_config_path) != model
+        ):
+            raise RuntimeError(
+                "Persistent GMS KV with split model artifacts requires "
+                "GMS_VLLM_MODEL_ARTIFACT_DIGEST"
+            )
+        revision = getattr(model_config, "revision", None)
+        hf_config = getattr(model_config, "hf_config", None)
+        artifact = _immutable_revision(revision) or _immutable_revision(
+            getattr(hf_config, "_commit_hash", None)
         )
+        if artifact is None:
+            raise RuntimeError(
+                "Persistent GMS KV requires an immutable resolved model revision "
+                "or GMS_VLLM_MODEL_ARTIFACT_DIGEST"
+            )
+
+    code_revision = getattr(model_config, "code_revision", None)
+    if code_revision is not None and not override:
+        resolved_code_revision = _immutable_revision(code_revision)
+        if resolved_code_revision is None:
+            raise RuntimeError(
+                "Persistent GMS KV with custom model code requires an immutable "
+                "code revision or GMS_VLLM_MODEL_ARTIFACT_DIGEST"
+            )
+    else:
+        resolved_code_revision = None
+
+    parts = [f"model={model}", f"artifact={artifact}"]
+    quantization = getattr(model_config, "quantization", None)
+    if quantization is not None:
+        parts.append(f"quantization={quantization}")
+    if resolved_code_revision is not None:
+        parts.append(f"code_revision={resolved_code_revision}")
     return "\0".join(parts)
 
 
@@ -156,19 +196,50 @@ def _kv_layout_fingerprint(kv_cache_config, model_identity: str) -> str:
     return hashlib.sha1("\0".join(parts).encode("utf-8")).hexdigest()[:12]
 
 
-def _semantic_kv_tensor_tag(index: int, kv_cache_tensor, layout_fp: str) -> str:
-    shared_by = tuple(
-        sorted(str(layer) for layer in getattr(kv_cache_tensor, "shared_by", ()) or ())
-    )
-    layers = "\0".join(shared_by) if shared_by else f"anonymous:{index}"
-    size = getattr(kv_cache_tensor, "size", None)
-    if size is None:
-        raise RuntimeError(
-            f"KV cache tensor {index} has no size for persistent identity"
+def _semantic_kv_allocation_tag(
+    index: int, tensors: tuple[object, ...], layout_fp: str
+) -> str:
+    descriptors = []
+    for tensor in tensors:
+        size = getattr(tensor, "size", None)
+        if size is None:
+            raise RuntimeError(
+                f"KV cache allocation {index} has no size for persistent identity"
+            )
+        layers = ",".join(
+            sorted(str(layer) for layer in getattr(tensor, "shared_by", ()) or ())
         )
-    key = f"size={size}\0{layers}"
+        descriptors.append(
+            "\0".join(
+                (
+                    f"size={size}",
+                    f"offset={getattr(tensor, 'offset', 0)}",
+                    f"block_stride={getattr(tensor, 'block_stride', 0)}",
+                    f"layers={layers}",
+                )
+            )
+        )
+    key = "\0descriptor=".join(sorted(descriptors))
     digest = hashlib.sha1((layout_fp + "\0" + key).encode("utf-8")).hexdigest()[:16]
-    return f"kv_pool:v3:{digest}"
+    return f"kv_pool:v4:{digest}"
+
+
+def _kv_allocation_units(kv_cache_config) -> list[tuple[object, ...]]:
+    tensors = list(getattr(kv_cache_config, "kv_cache_tensors", ()) or ())
+    packed = tuple(
+        tensor for tensor in tensors if int(getattr(tensor, "block_stride", 0)) > 0
+    )
+    packed_emitted = False
+    units: list[tuple[object, ...]] = []
+    for tensor in tensors:
+        if int(getattr(tensor, "block_stride", 0)) > 0:
+            if packed_emitted:
+                continue
+            units.append(packed)
+            packed_emitted = True
+        else:
+            units.append((tensor,))
+    return units
 
 
 def _semantic_kv_tensor_tag_plan(
@@ -180,10 +251,8 @@ def _semantic_kv_tensor_tag_plan(
         )
     layout_fp = _kv_layout_fingerprint(kv_cache_config, model_identity)
     base_tags = [
-        _semantic_kv_tensor_tag(index, kv_cache_tensor, layout_fp)
-        for index, kv_cache_tensor in enumerate(
-            getattr(kv_cache_config, "kv_cache_tensors", ()) or ()
-        )
+        _semantic_kv_allocation_tag(index, unit, layout_fp)
+        for index, unit in enumerate(_kv_allocation_units(kv_cache_config))
     ]
     counts = Counter(base_tags)
     seen: dict[str, int] = {}
@@ -198,6 +267,47 @@ def _semantic_kv_tensor_tag_plan(
     return planned_tags
 
 
+def _is_managed_kv_tag(tag: str) -> bool:
+    return tag.startswith(("kv_pool:v", "kv_pool#"))
+
+
+def _release_stale_kv_allocations(
+    manager, engine_id: str, allocations, planned
+) -> None:
+    for allocation in allocations:
+        tag = str(getattr(allocation, "tag", ""))
+        if (
+            tag in planned
+            or not _is_managed_kv_tag(tag)
+            or bool(getattr(allocation, "claimed", False))
+        ):
+            continue
+        try:
+            released = manager.release_persistent(engine_id, tag)
+        except Exception:
+            current = {
+                str(getattr(item, "tag", "")): item
+                for item in manager.list_persistent(
+                    engine_id=engine_id, include_unclaimed=True
+                )
+            }.get(tag)
+            if current is not None and bool(getattr(current, "claimed", False)):
+                logger.info(
+                    "[GMS-VMM-IPC] preserving stale KV allocation claimed "
+                    "during cleanup: engine_id=%s tag=%s",
+                    engine_id,
+                    tag,
+                )
+                continue
+            raise
+        if released:
+            logger.info(
+                "[GMS-VMM-IPC] released stale KV allocation: engine_id=%s tag=%s",
+                engine_id,
+                tag,
+            )
+
+
 def _persistent_tag_plan_reattaches(
     manager, engine_id: str, tag_plan: list[str]
 ) -> bool:
@@ -208,15 +318,12 @@ def _persistent_tag_plan_reattaches(
     initialization. A partial plan is unsafe: mixing preserved and new tensors
     would create a layout whose metadata cannot describe its contents.
     """
-    if not tag_plan:
-        return False
-    existing = {
-        str(getattr(allocation, "tag", ""))
-        for allocation in manager.list_persistent(
-            engine_id=engine_id, include_unclaimed=True
-        )
-    }
     planned = set(tag_plan)
+    allocations = manager.list_persistent(engine_id=engine_id, include_unclaimed=True)
+    _release_stale_kv_allocations(manager, engine_id, allocations, planned)
+    if not planned:
+        return False
+    existing = {str(getattr(allocation, "tag", "")) for allocation in allocations}
     present = planned & existing
     if os.environ.get("GMS_KV_DIRECTORY_DIAGNOSTICS"):
         logger.warning(
