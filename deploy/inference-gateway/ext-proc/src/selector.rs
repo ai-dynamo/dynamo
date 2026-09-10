@@ -174,7 +174,10 @@ impl Selector {
     /// Select a worker for a prompt and book its load in one operation. Takes the
     /// request by value so per-request fields are moved into the core request
     /// rather than cloned on the hot path.
-    pub async fn select_and_reserve(&self, req: SelectRequest) -> Result<SelectResponse> {
+    pub async fn select_and_reserve(
+        &self,
+        req: SelectRequest,
+    ) -> std::result::Result<SelectResponse, SelectionError> {
         let reservation_id = req.reservation_id;
         let core_req = CoreSelectAndReserveRequest {
             model_name: req.model_name,
@@ -201,8 +204,7 @@ impl Selector {
         let resp = self
             .service
             .select_and_reserve_with_policy_class(core_req, req.policy_class)
-            .await
-            .map_err(|e| anyhow!("select_and_reserve failed: {e}"))?;
+            .await?;
         Ok(SelectResponse {
             reservation_id,
             worker_id: resp.worker_id,
@@ -256,6 +258,7 @@ impl Drop for Selector {
 
 #[cfg(test)]
 mod tests {
+    use dynamo_kv_router::services::selection::affinity::MAX_SESSION_AFFINITY_ID_BYTES;
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -431,6 +434,22 @@ models:
             "a complete worker must be schedulable in-process"
         );
         selector
+    }
+
+    #[tokio::test]
+    async fn over_long_session_id_is_a_bad_request() {
+        let mut cfg = test_config();
+        cfg.session_affinity_ttl_secs = Some(60.0);
+        let selector = Selector::new(&cfg, WorkerSelectionPolicyRegistry::default())
+            .await
+            .expect("selector should build");
+        register(&selector, vec![schedulable_registration(1)]).await;
+        let mut request = select_request("res-long-session");
+        request.session_id = Some("s".repeat(MAX_SESSION_AFFINITY_ID_BYTES + 1));
+        assert!(matches!(
+            selector.select_and_reserve(request).await,
+            Err(SelectionError::BadRequest(_))
+        ));
     }
 
     #[tokio::test]
