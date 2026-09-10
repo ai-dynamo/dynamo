@@ -696,17 +696,17 @@ where
                 )
                 .await
         }
-            .instrument(worker_operation.clone())
-            .await
-            .map_err(|error| {
-                if let Some(metrics) = self.metrics() {
-                    metrics
-                        .error_counter
-                        .with_label_values(&[work_handler::error_types::GENERATE])
-                        .inc();
-                }
-                PipelineError::GenerateError(error)
-            });
+        .instrument(worker_operation.clone())
+        .await
+        .map_err(|error| {
+            if let Some(metrics) = self.metrics() {
+                metrics
+                    .error_counter
+                    .with_label_values(&[work_handler::error_types::GENERATE])
+                    .inc();
+            }
+            PipelineError::GenerateError(error)
+        });
 
         let stream = match stream {
             Ok(stream) => {
@@ -753,10 +753,13 @@ where
             }
         };
 
-        self.pump_response_stream(stream, &publisher, payload_codec)
-            .instrument(lifecycle.start_worker_response_streaming())
-            .instrument(worker_operation)
-            .await;
+        async {
+            self.pump_response_stream(stream, &publisher, payload_codec)
+                .instrument(lifecycle.start_worker_response_streaming())
+                .await
+        }
+        .instrument(worker_operation)
+        .await;
         let finish = if publisher.reset_on_stop()
             && request_context.is_stopped()
             && !request_context.is_killed()

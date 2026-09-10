@@ -3104,9 +3104,6 @@ async fn chat_completions(
         let mut reasoning_buffer: HashMap<u32, String> = HashMap::new();
         let mut dispatched_tool_ids: HashSet<(u32, String)> = HashSet::new();
         let mut emitted_roles: HashSet<u32> = HashSet::new();
-        let streaming_lifecycle = lifecycle.clone();
-        let streaming_request_lifecycle = request_lifecycle.clone();
-
         // Optionally prepend extra SSE events before each regular chunk:
         //   - `event: tool_call_dispatch`  — complete tool call detected early (tool dispatch)
         //   - `event: reasoning_dispatch`  — complete reasoning block (emitted once)
@@ -3116,7 +3113,6 @@ async fn chat_completions(
         let stream = async_stream::stream! {
             let mut stream = Box::pin(stream);
             let mut events: Vec<Result<Event, axum::Error>> = Vec::with_capacity(4);
-            let mut response_streaming = None;
 
             while let Some(mut response) = stream.next().await {
                 events.clear();
@@ -3201,12 +3197,6 @@ async fn chat_completions(
 
                 events.reverse();
                 while let Some(event) = events.pop() {
-                    if response_streaming.is_none() && event.is_ok() {
-                        let _entered_request_lifecycle = streaming_request_lifecycle.enter();
-                        response_streaming = Some(
-                            streaming_lifecycle.start(LifecycleStage::ResponseStreaming),
-                        );
-                    }
                     yield event;
                 }
             }
@@ -3221,11 +3211,22 @@ async fn chat_completions(
             monitor_error_signal.clone(),
         );
         let terminal = terminal.clone();
+        // Arm the cancellation fallback before Axum can take ownership of the
+        // lazy response body. If the body is dropped without being polled, the
+        // guard still records cancellation instead of an unknown outcome.
+        let stream_terminal = StreamingLifecycleTerminal(terminal.clone());
         let stream = async_stream::stream! {
-            let _request_lifecycle = request_lifecycle;
-            let _stream_terminal = StreamingLifecycleTerminal(terminal.clone());
+            let _stream_terminal = stream_terminal;
+            let mut response_streaming = None;
             let mut inner = Box::pin(stream);
             while let Some(item) = inner.next().await {
+                // This monitored stream is the final source of client-visible
+                // SSE events. It includes regular and side-channel events as
+                // well as errors converted into structured SSE + [DONE].
+                if response_streaming.is_none() {
+                    let _entered_request_lifecycle = request_lifecycle.enter();
+                    response_streaming = Some(lifecycle.start(LifecycleStage::ResponseStreaming));
+                }
                 yield item;
             }
             if let Some(error_type) = monitor_error_signal.error_type() {
