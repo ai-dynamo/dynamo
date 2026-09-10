@@ -186,6 +186,9 @@ async def test_dedicated_pooling_registration_health_and_cleanup(
     monkeypatch.delenv("DYN_HEALTH_CHECK_PAYLOAD", raising=False)
 
     engine = Mock()
+    engine.server_args = SimpleNamespace(
+        served_model_name="resolved-pooler", model_path="pooler"
+    )
     engine.tokenizer_manager.tokenizer.bos_token_id = 1
     endpoint = Mock()
     endpoint.serve_endpoint = AsyncMock()
@@ -193,6 +196,7 @@ async def test_dedicated_pooling_registration_health_and_cleanup(
     runtime.endpoint.return_value = endpoint
     config = SimpleNamespace(
         server_args=SimpleNamespace(served_model_name="pooler", model_path="pooler"),
+        use_resolved_server_args=Mock(return_value=engine.server_args),
         dynamo_args=SimpleNamespace(
             namespace="test",
             component="rerank" if rerank else "backend",
@@ -230,6 +234,8 @@ async def test_dedicated_pooling_registration_health_and_cleanup(
         return
     await init(runtime, config, asyncio.Event(), shutdown_endpoints, deferred)
 
+    config.use_resolved_server_args.assert_called_once_with(engine.server_args)
+    assert register.call_args.args[2] is engine.server_args
     assert register.call_args.kwargs["output_type"] == (
         ModelType.Rerank if rerank else ModelType.Embedding
     )
@@ -238,6 +244,7 @@ async def test_dedicated_pooling_registration_health_and_cleanup(
     handlers[int(not rerank)].assert_not_called()
     assert endpoint.serve_endpoint.call_args.args[0] == handler.generate
     payload = endpoint.serve_endpoint.call_args.kwargs["health_check_payload"]
+    assert payload["model"] == "resolved-pooler"
     if rerank:
         assert payload["query"] and payload["documents"]
         assert "input" not in payload
