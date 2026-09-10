@@ -560,6 +560,16 @@ fn validate_kv_transfer_domain(domain: &str) -> Result<(), ValidationError> {
 }
 
 fn validate_model_runtime_config(config: &ModelRuntimeConfig) -> Result<(), ValidationError> {
+    let parsers = [
+        config.tool_call_parser.as_deref(),
+        config.reasoning_parser.as_deref(),
+    ];
+    if parsers.contains(&Some("deepseek_v41")) && parsers != [Some("deepseek_v41"); 2] {
+        return Err(validation_error(
+            "incompatible_parser_pair",
+            "deepseek_v41 requires both tool_call_parser and reasoning_parser to be deepseek_v41",
+        ));
+    }
     if config.data_parallel_size == 0 {
         return Err(validation_error(
             "invalid_data_parallel_size",
@@ -1333,10 +1343,29 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_v41_rejects_conflicting_parser_pairs() {
+        for (tool, reasoning, valid) in [
+            (Some("deepseek_v41"), None, false),
+            (None, Some("deepseek_v41"), false),
+            (Some("deepseek_v41"), Some("deepseek_v41"), true),
+            (Some("deepseek_v41"), Some("qwen3"), false),
+            (Some("qwen3_coder"), Some("deepseek_v41"), false),
+        ] {
+            let config = ModelRuntimeConfig {
+                tool_call_parser: tool.map(str::to_string),
+                reasoning_parser: reasoning.map(str::to_string),
+                ..Default::default()
+            };
+            assert_eq!(validate_model_runtime_config(&config).is_ok(), valid);
+        }
+    }
+
+    #[test]
     fn test_validate_config_checks_tool_call_parser() {
         let validate = |parser: &str| {
             ModelRuntimeConfig {
                 tool_call_parser: Some(parser.to_string()),
+                reasoning_parser: (parser == "deepseek_v41").then(|| parser.to_string()),
                 ..Default::default()
             }
             .validate_config()
