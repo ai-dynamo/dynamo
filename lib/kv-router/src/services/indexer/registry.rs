@@ -311,6 +311,8 @@ pub struct WorkerEntry {
 pub struct WorkerRegistry {
     workers: DashMap<WorkerId, WorkerEntry>,
     indexers: DashMap<RoutingPartitionId, IndexerEntry>,
+    // Serialize indexer claims through worker publication with empty-indexer removal.
+    indexer_lifecycle: tokio::sync::Mutex<()>,
     peers: DashMap<String, ()>,
     watermarks: DashMap<(WorkerId, u32), Arc<AtomicU64>>,
     num_threads: usize,
@@ -358,6 +360,7 @@ impl WorkerRegistry {
         Self {
             workers: DashMap::new(),
             indexers: DashMap::new(),
+            indexer_lifecycle: tokio::sync::Mutex::new(()),
             peers: DashMap::new(),
             watermarks: DashMap::new(),
             num_threads,
@@ -423,6 +426,7 @@ impl WorkerRegistry {
         replay_endpoint: Option<String>,
     ) -> Result<()> {
         let key = RoutingPartitionId::new(model_name, routing_group);
+        let registration = self.indexer_lifecycle.lock().await;
 
         if let Some(entry) = self.workers.get(&instance_id) {
             if entry.key != key {
@@ -495,6 +499,7 @@ impl WorkerRegistry {
             entry.listeners.insert(dp_rank, record.clone());
         }
 
+        drop(registration);
         self.spawn_listener(instance_id, dp_rank, attempt, record);
         Ok(())
     }
@@ -535,7 +540,7 @@ impl WorkerRegistry {
         if let Some(indexer) = indexer {
             indexer.remove_worker(instance_id).await;
         }
-        self.maybe_remove_indexer(&key);
+        self.maybe_remove_indexer(&key).await;
         Ok(())
     }
 
@@ -584,7 +589,7 @@ impl WorkerRegistry {
                 if let Some(indexer) = indexer {
                     indexer.remove_worker(instance_id).await;
                 }
-                self.maybe_remove_indexer(&key);
+                self.maybe_remove_indexer(&key).await;
             }
         } else {
             let indexer = self.indexers.get(&key).map(|entry| entry.indexer.clone());
@@ -629,7 +634,7 @@ impl WorkerRegistry {
         if let Some(indexer) = indexer {
             indexer.remove_worker(instance_id).await;
         }
-        self.maybe_remove_indexer(&key);
+        self.maybe_remove_indexer(&key).await;
         Ok(())
     }
 
@@ -823,9 +828,13 @@ impl WorkerRegistry {
         );
     }
 
-    fn maybe_remove_indexer(&self, key: &RoutingPartitionId) {
-        if self.retain_empty_indexers || self.workers.iter().any(|entry| entry.value().key == *key)
-        {
+    async fn maybe_remove_indexer(&self, key: &RoutingPartitionId) {
+        if self.retain_empty_indexers {
+            return;
+        }
+
+        let _lifecycle = self.indexer_lifecycle.lock().await;
+        if self.workers.iter().any(|entry| entry.value().key == *key) {
             return;
         }
 
@@ -836,6 +845,8 @@ impl WorkerRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocols::{LocalBlockHash, StorageTier, WorkerWithDpRank};
+    use crate::services::indexer::backend::test_util::store_event;
     use std::future::Future;
     use std::sync::atomic::Ordering;
     use std::task::{Context, Poll, Waker};
@@ -919,6 +930,97 @@ mod tests {
             .unwrap();
         assert!(registry.workers.contains_key(&2));
         assert!(registry.indexers.contains_key(&key));
+        registry.root_cancel_token.cancel();
+    }
+
+    #[rstest::rstest]
+    #[case("worker")]
+    #[case("all_groups")]
+    #[case("last_rank")]
+    #[tokio::test]
+    async fn empty_indexer_removal_waits_for_registration(#[case] removal: &str) {
+        let registry = test_registry();
+        let key = RoutingPartitionId::new("test-model", "default");
+        registry
+            .register(
+                1,
+                "tcp://127.0.0.1:15557".into(),
+                0,
+                "test-model".into(),
+                "default".into(),
+                1,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Queue registration ahead of pruning, without timing or thread scheduling assumptions.
+        let lifecycle = registry.indexer_lifecycle.lock().await;
+        let registration = registry.register(
+            2,
+            "tcp://127.0.0.1:15558".into(),
+            0,
+            "test-model".into(),
+            "default".into(),
+            1,
+            None,
+        );
+        tokio::pin!(registration);
+        assert!(matches!(
+            registration
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Pending
+        ));
+
+        let removal = async {
+            match removal {
+                "worker" => registry.deregister(1, "test-model", "default").await,
+                "all_groups" => {
+                    registry
+                        .deregister_all_routing_groups(1, "test-model")
+                        .await
+                }
+                "last_rank" => {
+                    registry
+                        .deregister_dp_rank(1, 0, "test-model", "default")
+                        .await
+                }
+                _ => unreachable!(),
+            }
+        };
+        tokio::pin!(removal);
+        assert!(matches!(
+            removal
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Pending
+        ));
+        assert!(registry.workers.is_empty());
+        assert!(registry.get_indexer(&key).is_some());
+        drop(lifecycle);
+        registration.await.unwrap();
+        removal.await.unwrap();
+
+        // Events written by the new listener must remain visible through the query registry.
+        let listener_indexer = registry.workers.get(&2).unwrap().listeners[&0]
+            .indexer
+            .clone();
+        listener_indexer
+            .apply_event_routed(store_event(2, 0, 0, &[], &[11], StorageTier::Device))
+            .await
+            .unwrap();
+        listener_indexer.dump_events().await.unwrap();
+        let query_indexer = registry
+            .get_indexer(&key)
+            .expect("registered indexer")
+            .indexer
+            .clone();
+        let scores = query_indexer
+            .find_matches(vec![LocalBlockHash(11)])
+            .await
+            .unwrap();
+        assert_eq!(scores.scores.get(&WorkerWithDpRank::new(2, 0)), Some(&1));
         registry.root_cancel_token.cancel();
     }
 
