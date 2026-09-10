@@ -193,9 +193,6 @@ def handle_directory_promote(daemon: "GmsKvCacheManager", msg: Message) -> Respo
         current = int(daemon._content_directory_epoch)
         active = daemon._content_directory_writer_id
         if active == writer_id:
-            # Release any claims this writer left pinned before a crash-restart
-            # so they cannot pin HBM forever.
-            _directory_release_writer_claims_locked(daemon, writer_id)
             return {
                 "ok": True,
                 "promoted": True,
@@ -823,11 +820,8 @@ def handle_directory_publish_batch(
                 entry["_owner_writer"] = writer_id
             if tier:
                 entry["tier"] = tier
-            # If we are overwriting an existing entry for the SAME (manifest,
-            # hash) key with a different slot set, drop the old entry's stale
-            # reverse slot-mappings for slots the new entry does not reuse.
-            # Otherwise a later reuse of an orphaned old slot resolves back to
-            # this hash and deletes the current, valid entry (C2).
+            # Remove stale reverse mappings before replacement; a later reuse
+            # of an old slot could otherwise delete the new entry.
             prior = daemon._content_directory.get(key)
             if prior is not None:
                 prior_engine = prior.get("engine_id", engine_id)
