@@ -3,21 +3,27 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Vendored TensorRT-LLM gRPC protocol
+# Vendored OpenEngine protocol
 
-- Source package: `smg-grpc-proto`
-- Version: `0.4.14`
-- File: `smg_grpc_proto/proto/trtllm_service.proto`
-- Upstream SHA-256: `ec2f93de3af59047e3779283369eba89c2e6981b27849553144671b1fbc8eea5`
+- Source: [`proto/openengine/v1`](https://github.com/ai-dynamo/openengine/tree/b5f2bd93721f7b888d3e2440679e0ae7012939d1/proto/openengine/v1)
+- Commit: `b5f2bd93721f7b888d3e2440679e0ae7012939d1` (tag `v0.1.0`)
 
-`trtllm_service.proto` here is derived from the upstream file above with a
-single, mechanical edit: the `import "common.proto"` line and the two RPCs that
-reference `smg.grpc.common` types — `GetTokenizer` and `SubscribeKvEvents` — are
-removed. The sidecar drives only `Generate`, so dropping the tokenizer/KV-event
-RPCs lets the contract compile standalone without vendoring `common.proto`.
-Every message the sidecar exchanges is preserved byte-for-byte.
+This is the same revision TensorRT-LLM's OpenEngine server is generated from: it
+is the git commit behind Buf Schema Registry module commit `768a93c7b44e` of
+`buf.build/openengine/openengine`.
 
-TensorRT-LLM loads the matching generated stubs from `smg-grpc-proto` at
-runtime (`tensorrt_llm/grpc/__init__.py`), first shipped in TRT-LLM
-`1.3.0rc21`. Update the version, checksum, and this note together when bumping
-the protocol.
+SHA-256:
+
+| File | SHA-256 |
+|------|---------|
+| `openengine/v1/error.proto` | `b1c559a3b7847c55a247145f1493805b56b58491a320fb26e6ebcd7072b62fb3` |
+| `openengine/v1/generation.proto` | `3c4e9f11664d50dd26e393cb2b34dca9af680419097493d4f7ceb2654b0f1058` |
+| `openengine/v1/kv.proto` | `4f5c46a65a7998ecf34ea37117b325b0f0a5a70149702d6bca919726b40526cd` |
+| `openengine/v1/lifecycle.proto` | `0b39bbecc617db3de900333efe6c070dadca2f71f5e372c306d44973229d48c9` |
+| `openengine/v1/lora.proto` | `c1aa58fca3ab1b40f7c75dbbd17280b2b52ee295256479b6b0fc74f924047ef9` |
+| `openengine/v1/model.proto` | `5166cdcdaa260b1f5de2fa8d170dacbab1595af9413e73f09c6902b25f553284` |
+| `openengine/v1/openengine.proto` | `1d1baafee0aaf0dbf51962ae2d293431fbd3be96601b375288fab785fc2d8572` |
+| `openengine/v1/server.proto` | `deb379508d5e93c719cc0c5ebe222e66af7d8784384d3cc270e95d0b48274d96` |
+
+The files are copied without modification. Update the revision and checksums
+together, and add or remove entries in `build.rs`'s `PROTOS` list to match.

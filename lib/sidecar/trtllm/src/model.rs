@@ -10,17 +10,14 @@ use dynamo_backend_common::{EngineConfig, LlmRegistration};
 pub(crate) struct ConfiguredModel {
     /// HF repo name or local path used for tokenization and templates.
     pub source: String,
-    /// Maximum sequence length (input + output), from the `--context-length`
-    /// argument or a server `GetModelInfo` report, if known.
-    pub context_length: Option<u32>,
 }
 
 impl ConfiguredModel {
-    pub(crate) fn engine_config(&self) -> EngineConfig {
+    pub(crate) fn engine_config(&self, context_length: u32) -> EngineConfig {
         let mut runtime_data = HashMap::new();
         runtime_data.insert(
             "grpc_service".to_string(),
-            serde_json::Value::String("trtllm.TrtllmService".to_string()),
+            serde_json::Value::String("openengine.v1.Inference".to_string()),
         );
 
         EngineConfig {
@@ -29,7 +26,7 @@ impl ConfiguredModel {
             model_aliases: Vec::new(),
             runtime_data,
             llm: Some(LlmRegistration {
-                context_length: self.context_length,
+                context_length: Some(context_length),
                 ..Default::default()
             }),
         }
