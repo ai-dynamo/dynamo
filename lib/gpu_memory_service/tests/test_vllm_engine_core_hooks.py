@@ -110,8 +110,11 @@ def test_block_pool_hbm_directory_survives_engine_replacement(monkeypatch):
         def __init__(self):
             self.entries = {}
             self.ensure_calls = []
+            self.fail_publish = False
 
         def publish(self, items):
+            if self.fail_publish:
+                raise RuntimeError("directory unavailable")
             for item in items:
                 content_hash = item["content_hash"]
                 if not item.get("sealed", True):
@@ -208,7 +211,9 @@ def test_block_pool_hbm_directory_survives_engine_replacement(monkeypatch):
             4,
             0,
         )
-        content_hashes = [block.block_hash for block in blocks]
+        native_keys = [bytes(block.block_hash) for block in blocks]
+        assert all(len(key) == 36 for key in native_keys)
+        content_hashes = [leases_mod._directory_key(key) for key in native_keys]
         # Full-block hashing alone is not a durability event: incomplete or
         # still-referenced KV must never be advertised to a replacement.
         assert directory.entries == {}
@@ -218,7 +223,8 @@ def test_block_pool_hbm_directory_survives_engine_replacement(monkeypatch):
         assert all(block.block_id not in state.free for block in blocks)
 
         # A stale snapshot member must not block recovery of the valid sibling.
-        stale_hash = b"stale-directory-entry"
+        stale_native_key = b"stale-directory-entry" + b"\0" * 15
+        stale_hash = leases_mod._directory_key(stale_native_key)
         state.free.remove(7)
         state.held[7] = (99, "dead")
         directory.entries[stale_hash] = {
@@ -227,6 +233,7 @@ def test_block_pool_hbm_directory_survives_engine_replacement(monkeypatch):
             "slot_ids": [7],
             "generations": [1],
             "engine_id": "0",
+            "local_key": stale_native_key,
         }
 
         shadow = GMSBlockPool(8, True, 4)
@@ -279,7 +286,9 @@ def test_block_pool_hbm_directory_survives_engine_replacement(monkeypatch):
             4,
             0,
         )
-        pressure_hashes = [block.block_hash for block in pressure_blocks]
+        pressure_hashes = [
+            leases_mod._directory_key(block.block_hash) for block in pressure_blocks
+        ]
         shadow.free_blocks(pressure_blocks)
         assert directory.ensure_calls == [4]
         assert len(state.free) == 4
@@ -339,6 +348,93 @@ def test_allocate_slots_does_not_hide_unrelated_engine_errors(monkeypatch):
     monkeypatch.setattr(leases_mod, "orig_allocate_slots", fail)
     with pytest.raises(RuntimeError, match="native allocator invariant"):
         leases_mod.patched_allocate_slots(object(), object())
+
+
+def test_bulk_hydration_invalidates_directory_if_native_install_fails():
+    from types import SimpleNamespace
+
+    import gpu_memory_service.integrations.vllm.install_kv_leases as leases_mod
+    from gpu_memory_service.integrations.common.kv_lease_client import KVLease
+
+    content_hash = b"h" * 32
+    old_entry = {
+        "tier": "hbm",
+        "state": "ready",
+        "slot_ids": [1],
+        "generations": [7],
+        "local_key": b"n" * 36,
+    }
+
+    class Directory:
+        enabled = True
+        authoritative = True
+        read_view_is_current_writer = True
+
+        def __init__(self):
+            self.invalidated = []
+            self.released = []
+
+        def read_view_items(self, **_kwargs):
+            return [(content_hash, old_entry)]
+
+        def lookup_and_claim(self, _keys):
+            return [old_entry], "claim"
+
+        def adopt_claim(self, _token, items):
+            assert items == [{"content_hash": content_hash, "generations": [8]}]
+            old_entry["state"] = "active"
+            old_entry["generations"] = [8]
+            return 1
+
+        def release_claim(self, token):
+            self.released.append(token)
+
+        def publish(self, items):
+            self.invalidated.extend(items)
+
+    class Client:
+        def __init__(self):
+            self.released = []
+
+        def adopt(self, leases):
+            assert leases == [KVLease(1, 7)]
+            return [KVLease(1, 8)]
+
+        def release(self, leases):
+            self.released.extend(leases)
+
+    directory = Directory()
+    client = Client()
+    block = SimpleNamespace(block_id=1, ref_cnt=0, block_hash=None)
+    pool = SimpleNamespace(
+        _gms_hydrate_hbm=True,
+        _gms_kv_directory=directory,
+        _gms_kv_lease_client=client,
+        _gms_kv_leases_by_block={},
+        cached_block_hash_to_block=SimpleNamespace(
+            get_one_block=lambda _key: None,
+        ),
+        blocks=[SimpleNamespace(), block],
+        hash_block_size=4,
+        _insert_block_hash=lambda *_args: (_ for _ in ()).throw(
+            RuntimeError("native install failed")
+        ),
+        _maybe_evict_cached_block=lambda _block: None,
+    )
+
+    assert leases_mod._hydrate_hbm_directory(pool, set()) == 0
+    assert client.released == [KVLease(1, 8)]
+    assert directory.invalidated == [
+        {
+            "content_hash": content_hash,
+            "engine_id": leases_mod._directory_pool_id(),
+            "slot_ids": [1],
+            "generations": [8],
+            "tier": "hbm",
+            "sealed": False,
+        }
+    ]
+    assert directory.released == []
 
 
 @pytest.mark.parametrize(
