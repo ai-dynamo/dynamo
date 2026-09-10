@@ -369,9 +369,7 @@ def _process_weights_after_gms_materialization(
     target_device: torch.device,
 ) -> None:
     try:
-        from vllm.model_executor.model_loader.utils import (
-            process_weights_after_loading,
-        )
+        from vllm.model_executor.model_loader.utils import process_weights_after_loading
         from vllm.model_executor.utils import weights_already_processed
     except ImportError:
         _refresh_fused_moe_router_tensors_after_gms_materialization(model)
