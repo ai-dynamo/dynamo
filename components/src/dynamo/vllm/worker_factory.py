@@ -1222,14 +1222,18 @@ class WorkerFactory:
         promotes in ~one heartbeat-timeout, then signal a graceful shutdown of the
         now-broken leader — instead of waiting out the NCCL collective timeout.
         """
+        if not getattr(config, "gms_shadow_mode", False):
+            return None
+        engine_args = getattr(config, "engine_args", None)
+        nnodes = int(getattr(engine_args, "nnodes", 1) or 1)
+        if nnodes <= 1:
+            return None
+
         import signal
 
         from dynamo.common import rank_liveness as rl
 
-        if not rl.liveness_enabled() or not getattr(config, "gms_shadow_mode", False):
-            return None
-        nnodes = int(getattr(config.engine_args, "nnodes", 1) or 1)
-        if nnodes <= 1:
+        if not rl.liveness_enabled():
             return None
 
         loop = asyncio.get_running_loop()
