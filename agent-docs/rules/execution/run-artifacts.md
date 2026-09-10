@@ -34,7 +34,8 @@ runs/<EXP_ID>/
 |   |-- challenger-reviews.jsonl
 |   |-- performance_findings.jsonl
 |   |-- asks.jsonl
-|   `-- search-calibration.md
+|   |-- search-calibration.md
+|   `-- skillpack-defects.md          # report-skillpack-issue unfiled drafts
 |-- final/
 |   |-- recommended_config.md
 |   |-- reproduced_commands.sh
@@ -121,6 +122,9 @@ runs/<EXP_ID>/
   (`EXP_ROOT/analysis/search-calibration.md`) in a terminal state, plus its challenger validation. The ledger is
   the authoritative family table; the submitting iteration's `knowledge-consult.md` records only the stop-request
   delta and cites the ledger path and the SHA256 of the ledger state submitted for validation.
+- `skillpack-defects.md` (under `EXP_ROOT/analysis/`): append-only record of skillpack defect reports drafted by
+  `report-skillpack-issue` that could not be filed (no GitHub access or no operator approval), one dated section per
+  draft with status `unfiled`; written by whichever role invoked the skill. Never placed under `final/`.
 
 ## Deployment Directories
 

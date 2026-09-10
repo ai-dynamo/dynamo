@@ -121,7 +121,10 @@ If label assignment is rejected for lack of permissions, file without the label;
 
 ## Fallback: no GitHub access or no approval
 
-Write the complete draft to a file the operator will find and tell them where it is: inside an optimization
-engagement, append it to `EXP_ROOT/final/known_limitations.md` under a `## Skillpack defects observed` heading;
-outside one, write `skillpack-issue-draft-<n>.md` at the root of the current working directory. A
+Write the complete draft to an append-only artifact the invoking role owns and tell the operator
+where it is. Inside an optimization engagement that is `<EXP_ROOT>/analysis/skillpack-defects.md`
+(one dated section per draft, shaped like an `asks.jsonl` entry: defect class, location, draft
+title, draft body, status `unfiled`); never write under `final/`, whose three artifacts belong to
+`hypothesis-generator` and are written only at stop-request time. Outside an engagement, write
+`skillpack-issue-draft-<n>.md` at the root of the current working directory. A
 drafted-but-unfiled report is still telemetry; a silent workaround is not.
