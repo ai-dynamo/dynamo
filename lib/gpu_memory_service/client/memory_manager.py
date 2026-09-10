@@ -1013,8 +1013,6 @@ class GMSClientMemoryManager:
             reallocated,
         )
 
-    # ==================== Scratch-aliased mappings ====================
-
     def close(self, *, best_effort: bool = False) -> None:
         """Cleanup mappings and abort.
 
