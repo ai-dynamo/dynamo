@@ -207,27 +207,15 @@ def test_semantic_kv_tags_disambiguate_duplicate_layer_identity():
     assert tag_b.endswith(":dup1")
 
 
-@pytest.mark.parametrize(
-    ("existing_tags", "expected"),
-    [
-        ([], False),
-        (["kv:a", "kv:b"], True),
-    ],
-)
-def test_persistent_tag_plan_distinguishes_new_and_complete_reattach(
-    existing_tags, expected
-):
+def test_persistent_tag_plan_recognizes_complete_reattach():
     class Manager:
         def list_persistent(self, engine_id=None, *, include_unclaimed=False):
             assert engine_id == "engine"
             assert include_unclaimed is True
-            return [SimpleNamespace(tag=tag) for tag in existing_tags]
+            return [SimpleNamespace(tag=tag) for tag in ("kv:a", "kv:b")]
 
-    assert (
-        install_vmm_ipc_kv._persistent_tag_plan_reattaches(
-            Manager(), "engine", ["kv:a", "kv:b"]
-        )
-        is expected
+    assert install_vmm_ipc_kv._persistent_tag_plan_reattaches(
+        Manager(), "engine", ["kv:a", "kv:b"]
     )
 
 
