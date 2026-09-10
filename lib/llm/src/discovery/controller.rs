@@ -396,12 +396,8 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             if !status_has_commit(&old_status) {
                 return;
             }
-            // The group keeps its commit, with no admitted instances, so requests
-            // for the model are unavailable rather than unknown while a
-            // replacement worker has the chance to take the group over in place.
-            // The deadline is armed once per emptying: a group can be reconciled
-            // repeatedly while empty, and extending it each time would let the
-            // group linger indefinitely.
+            // Armed once per emptying: an empty group can be reconciled repeatedly,
+            // and re-arming each time would defer removal indefinitely.
             if group.pending_removal.is_none() {
                 group.pending_removal = Some(Instant::now() + GROUP_REMOVAL_GRACE);
             }
