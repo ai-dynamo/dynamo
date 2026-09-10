@@ -68,7 +68,7 @@ Routing fields can also be set via HTTP headers, which take priority over `nvext
 | `x-dynamo-prefill-dp-rank` | `prefill_dp_rank` |
 | `x-tenant-id` | `cache_salt` |
 
-In disaggregated serving, `x-dynamo-worker-instance-id` pins only the token-generating worker; the prefill hop still routes freely unless you also send `x-dynamo-prefill-instance-id`.
+In disaggregated serving, `x-dynamo-worker-instance-id` pins only the token-generating worker; the prefill hop still routes freely unless you also send `x-dynamo-prefill-instance-id`. The same split applies to the ranks: `x-dynamo-dp-rank` is the token-generating worker's rank and is never applied to the prefill hop, so pin a prefill rank with `x-dynamo-prefill-dp-rank`.
 
 > [!WARNING]
 > The unprefixed forms (`x-worker-instance-id`, `x-prefill-instance-id`, `x-dp-rank`,

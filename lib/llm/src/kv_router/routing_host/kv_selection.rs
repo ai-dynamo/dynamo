@@ -423,8 +423,7 @@ fn pinned_worker_hint(
     match phase {
         RequestPhase::Prefill => {
             let worker_id = routing.prefill_worker_id?;
-            let dp_rank = routing.prefill_dp_rank.or(routing.dp_rank);
-            Some((worker_id, dp_rank))
+            Some((worker_id, routing.prefill_dp_rank))
         }
         RequestPhase::Decode => {
             let worker_id = routing.decode_worker_id.or(routing.backend_instance_id)?;
@@ -551,6 +550,24 @@ mod tests {
         assert_eq!(
             pinned_worker_hint(RequestPhase::Aggregated, Some(&routing)),
             Some((1, Some(0)))
+        );
+    }
+
+    #[test]
+    fn pinned_worker_hint_prefill_ignores_decode_dp_rank() {
+        let routing = RoutingHints {
+            prefill_worker_id: Some(2),
+            dp_rank: Some(3),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            pinned_worker_hint(RequestPhase::Prefill, Some(&routing)),
+            Some((2, None))
+        );
+        assert_eq!(
+            pinned_worker_hint(RequestPhase::Decode, Some(&routing)),
+            None
         );
     }
 
