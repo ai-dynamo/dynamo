@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from gpu_memory_service.common.utils import env_enabled_by_default as _env_enabled
+from gpu_memory_service.common.utils import is_truthy_env
 
 _KV_LEASE_SHM_MAGIC = 0x4C534D47
 _KV_LEASE_SHM_VERSION = 1
@@ -122,6 +122,24 @@ def _kv_lease_reservation_path(engine: str, namespace: str) -> str:
     if explicit:
         return explicit
     return _kv_lease_shm_path(engine, namespace) + ".reserve"
+
+
+def _validate_existing_shm(
+    path: str,
+    fd: int,
+    header: tuple[int, int, int, int, int, int] | None,
+) -> tuple[int, int, int, int, int, int]:
+    if not _valid_shm_header(header):
+        raise RuntimeError(f"invalid KV lease shared-memory header: path={path}")
+    assert header is not None
+    expected_size = _KV_LEASE_SHM_HEADER_SIZE + header[2] * header[3]
+    actual_size = os.fstat(fd).st_size
+    if actual_size != expected_size:
+        raise RuntimeError(
+            "KV lease shared-memory file size mismatch: "
+            f"path={path} actual={actual_size} expected={expected_size}"
+        )
+    return header
 
 
 def _owner_hash(owner_id: str) -> int:
@@ -285,7 +303,7 @@ class SharedMemoryKVLeaseClient:
 
     @staticmethod
     def _reset_requested() -> bool:
-        return _env_enabled("GMS_KV_LEASE_SHM_RESET", default=False)
+        return is_truthy_env("GMS_KV_LEASE_SHM_RESET")
 
     def _open_or_init(
         self,
@@ -301,8 +319,7 @@ class SharedMemoryKVLeaseClient:
             locked = True
             header = _read_shm_header(fd)
             stat = os.fstat(fd)
-            should_init = self._reset_requested() or not _valid_shm_header(header)
-            if should_init:
+            if stat.st_size == 0 or self._reset_requested():
                 map_blocks = int(total_blocks)
                 map_size = (
                     _KV_LEASE_SHM_HEADER_SIZE + map_blocks * _KV_LEASE_SHM_RECORD_SIZE
@@ -312,12 +329,8 @@ class SharedMemoryKVLeaseClient:
                 self._rust.kv_lease_init(buf, map_blocks, reserved_blocks)
                 return fd, buf
 
-            assert header is not None
-            _magic, _version, existing_blocks, record_size, _free_count, _epoch = header
-            if record_size != _KV_LEASE_SHM_RECORD_SIZE:
-                raise RuntimeError(
-                    f"unsupported KV lease record size in {shm_path}: {record_size}"
-                )
+            header = _validate_existing_shm(shm_path, fd, header)
+            existing_blocks = header[2]
             if int(existing_blocks) != int(total_blocks):
                 raise RuntimeError(
                     "KV lease shared-memory size mismatch: "
@@ -327,8 +340,6 @@ class SharedMemoryKVLeaseClient:
                 _KV_LEASE_SHM_HEADER_SIZE
                 + int(existing_blocks) * _KV_LEASE_SHM_RECORD_SIZE
             )
-            if stat.st_size < map_size:
-                os.ftruncate(fd, map_size)
             buf = mmap.mmap(fd, map_size)
             return fd, buf
         except Exception:
@@ -1014,9 +1025,9 @@ def _read_existing_total_blocks(shm_path: str) -> int | None:
     try:
         fcntl.flock(fd, fcntl.LOCK_SH)
         header = _read_shm_header(fd)
-        if not _valid_shm_header(header):
+        if header is None:
             return None
-        assert header is not None
+        header = _validate_existing_shm(shm_path, fd, header)
         return int(header[2])
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
@@ -1050,11 +1061,7 @@ def _init_or_adopt_kv_lease_namespace(
         locked = True
         header = _read_shm_header(fd)
         stat = os.fstat(fd)
-        should_init = (
-            SharedMemoryKVLeaseClient._reset_requested()
-            or not _valid_shm_header(header)
-        )
-        if should_init:
+        if stat.st_size == 0 or SharedMemoryKVLeaseClient._reset_requested():
             map_blocks = int(total_blocks)
             map_size = (
                 _KV_LEASE_SHM_HEADER_SIZE + map_blocks * _KV_LEASE_SHM_RECORD_SIZE
@@ -1067,17 +1074,11 @@ def _init_or_adopt_kv_lease_namespace(
             buf.flush()
             return map_blocks
 
-        assert header is not None
-        _magic, _version, existing_blocks, record_size, _free_count, _epoch = header
-        if record_size != _KV_LEASE_SHM_RECORD_SIZE:
-            raise RuntimeError(
-                f"unsupported KV lease record size in {shm_path}: {record_size}"
-            )
+        header = _validate_existing_shm(shm_path, fd, header)
+        existing_blocks = header[2]
         map_size = (
             _KV_LEASE_SHM_HEADER_SIZE + int(existing_blocks) * _KV_LEASE_SHM_RECORD_SIZE
         )
-        if stat.st_size < map_size:
-            os.ftruncate(fd, map_size)
         if int(existing_blocks) != int(total_blocks):
             logger.warning(
                 "Adopting existing KV lease shared-memory geometry: "
@@ -1199,7 +1200,7 @@ def leases_by_block_id(leases: list[KVLease]) -> dict[int, KVLease]:
 
 def kv_leases_enabled(engine: str) -> bool:
     engine_upper = engine.upper().replace("-", "_")
-    value = os.environ.get(f"GMS_{engine_upper}_KV_LEASES")
-    if value is None:
-        value = os.environ.get("GMS_KV_LEASES", "0")
-    return value.strip().lower() not in ("", "0", "false", "no", "off")
+    engine_flag = f"GMS_{engine_upper}_KV_LEASES"
+    if engine_flag in os.environ:
+        return is_truthy_env(engine_flag)
+    return is_truthy_env("GMS_KV_LEASES")
