@@ -44,7 +44,7 @@ use crate::services::indexer::registry::WorkerRegistry;
 use crate::services::overlap::MooncakeOverlapSummary;
 use crate::tracking_hash::{TrackingHashContext, TrackingHashScope};
 
-use super::affinity::{Acquired, AffinityLease, SessionAffinity};
+use super::affinity::{Acquired, AffinityError, AffinityLease, SessionAffinity};
 use super::catalog::WorkerCatalog;
 use super::error::SelectionError;
 use super::ingress::{KvEventIngress, ZmqDirectIngress};
@@ -346,8 +346,7 @@ pub struct SelectionCore {
 
 type SessionTarget = super::affinity::AffinityTarget;
 
-fn affinity_error(error: super::affinity::AffinityError) -> SelectionError {
-    use super::affinity::AffinityError;
+fn affinity_error(error: AffinityError) -> SelectionError {
     match error {
         AffinityError::InvalidArgument(message) => SelectionError::BadRequest(message),
         AffinityError::ResourceExhausted(message) => SelectionError::NotReady(message),
@@ -998,18 +997,29 @@ impl SelectionCore {
         let mut affinity_hold = None;
         let affinity_target = match (session_id.as_deref(), table) {
             (Some(session_id), Some(table)) if book => {
-                match tokio::select! {
+                let acquire_result = tokio::select! {
                     _ = self.cancel_token.cancelled() => return Err(SelectionError::Scheduler(KvSchedulerError::SubscriberShutdown)),
-                    result = table.acquire(session_id, None) => result.map_err(affinity_error)?,
-                } {
-                    Acquired::Initialize(init) => {
+                    result = table.acquire(session_id, None) => result,
+                };
+                match acquire_result {
+                    Ok(Acquired::Initialize(init)) => {
                         affinity_hold = Some(Acquired::Initialize(init));
                         None
                     }
-                    Acquired::Bound { target, lease } => {
+                    Ok(Acquired::Bound { target, lease }) => {
                         affinity_hold = Some(Acquired::Bound { target, lease });
                         Some(WorkerAffinityTarget::new(target.worker_id, target.dp_rank))
                     }
+                    // A full table is a router-side limit, not a client fault:
+                    // route this request unpinned instead of failing it.
+                    Err(AffinityError::ResourceExhausted(_)) => {
+                        tracing::debug!(
+                            session_id,
+                            "affinity table full; routing without session affinity"
+                        );
+                        None
+                    }
+                    Err(error) => return Err(affinity_error(error)),
                 }
             }
             (Some(session_id), Some(table)) => table
@@ -2694,6 +2704,40 @@ mod tests {
             .expect("legacy session context");
         assert_eq!(legacy.session_id(), "legacy-only");
         assert_eq!(legacy.parent_session_id(), None);
+    }
+
+    #[tokio::test]
+    async fn full_affinity_table_routes_without_pinning() {
+        let core = SelectionCore::try_new_local(
+            test_config(false),
+            1,
+            CancellationToken::new(),
+            SelectionCacheConfig::default(),
+        )
+        .expect("valid test config");
+        core.upsert_worker(worker(1)).await.expect("worker upsert");
+        let entry = core
+            .entry(&RoutingPartitionId::new("model", "default"))
+            .expect("entry");
+        let table = SessionAffinity::new_with_limits(Duration::from_secs(60), 1, 256)
+            .expect("affinity table");
+        assert!(entry.affinity.set(table).is_ok());
+
+        for (selection_id, session_id) in [("first", "s1"), ("second", "s2")] {
+            let mut request = reserve_request(selection_id);
+            request.session_id = Some(session_id.to_string());
+            core.select_and_reserve(request)
+                .await
+                .expect("a full affinity table must not fail selection");
+        }
+        assert_eq!(
+            core.reservation_index
+                .read()
+                .values()
+                .filter(|r| r._affinity_lease.is_some())
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]
