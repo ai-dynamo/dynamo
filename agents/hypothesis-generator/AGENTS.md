@@ -9,6 +9,7 @@ intent: >-
 skills:
   - consult-perf-knowledge
   - create-optimization-hypothesis
+  - find-serving-recipe
   - report-skillpack-issue
 "Required Readings: Docs":
   - agent-docs/references/definitions.md

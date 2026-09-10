@@ -25,6 +25,7 @@ from dynamo.sglang._compat import (
     filter_supported_async_generate_kwargs,
     get_sglang_model_config,
     override_server_args,
+    publish_server_args,
     require_reasoning_kwargs,
     resolved_server_args,
     sglang_uses_mla_backend,
@@ -121,28 +122,6 @@ def test_override_server_args_uses_declarative_resolution(monkeypatch):
     assert not hasattr(server_args, "enable_memory_saver")
 
 
-def test_override_server_args_supports_sglang_0_5_17(monkeypatch):
-    calls = []
-
-    class ServerArgs:
-        def override(self, source, **fields):
-            calls.append((source, fields))
-            for name, value in fields.items():
-                object.__setattr__(self, name, value)
-
-    monkeypatch.setattr(sglang_compat, "declare_late_resolution", None)
-    server_args = ServerArgs()
-
-    override_server_args(
-        server_args,
-        "dynamo.test",
-        enable_memory_saver=True,
-    )
-
-    assert calls == [("dynamo.test", {"enable_memory_saver": True})]
-    assert server_args.enable_memory_saver is True
-
-
 def test_override_server_args_supports_legacy_xpu_pin(monkeypatch):
     monkeypatch.setattr(sglang_compat, "declare_late_resolution", None)
     server_args = SimpleNamespace(enable_memory_saver=False)
@@ -156,6 +135,20 @@ def test_override_server_args_supports_legacy_xpu_pin(monkeypatch):
 
     assert server_args.enable_memory_saver is True
     assert server_args.load_format == "legacy-loader"
+
+
+def test_publish_server_args_uses_runtime_context(monkeypatch):
+    calls = []
+    server_args = SimpleNamespace()
+    monkeypatch.setattr(
+        sglang_compat,
+        "_sglang_publish",
+        lambda value, *, role: calls.append((value, role)),
+    )
+
+    publish_server_args(server_args, role="encoder")
+
+    assert calls == [(server_args, "encoder")]
 
 
 def test_resolved_server_args_uses_declarative_view(monkeypatch):
@@ -218,12 +211,15 @@ def test_compat_uses_legacy_sglang_mla_accessor(monkeypatch):
     assert sglang_uses_mla_backend(server_args) is True
 
 
-def test_config_uses_resolved_server_args_after_runtime_init():
+def test_config_uses_resolved_server_args_after_runtime_init(monkeypatch):
     raw_server_args = SimpleNamespace(page_size=None, disaggregation_mode="null")
     resolved_server_args = SimpleNamespace(page_size=64, disaggregation_mode="null")
-    raw_server_args._resolved = lambda: resolved_server_args
+    monkeypatch.setattr(
+        sglang_compat,
+        "sglang_resolved_view",
+        lambda server_args: resolved_server_args,
+    )
     config = sglang_args.Config(raw_server_args, SimpleNamespace())
-
     runtime_server_args = config.use_resolved_server_args(raw_server_args)
 
     assert raw_server_args.page_size is None
@@ -519,6 +515,77 @@ async def test_parse_args_applies_dynamo_defaults_before_resolution(
     mock_sglang_cli("--model", "/tmp", "--dllm-algorithm", "dream")
 
     await parse_args(sys.argv[1:])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("snapshot_enabled", "expected"),
+    [
+        (False, False),
+        (True, True),
+    ],
+)
+async def test_parse_args_sets_raw_memory_saver_before_resolution(
+    monkeypatch, mock_sglang_cli, tmp_path, snapshot_enabled, expected
+):
+    monkeypatch.setattr(
+        "dynamo.sglang.args.configure_snapshot_capture_env", lambda: None
+    )
+    monkeypatch.delenv("DYN_GMS_USE_V1", raising=False)
+    if snapshot_enabled:
+        monkeypatch.setenv(SNAPSHOT_CONTROL_DIR_ENV, str(tmp_path))
+        monkeypatch.setenv("NCCL_CUMEM_ENABLE", "0")
+    else:
+        monkeypatch.delenv(SNAPSHOT_CONTROL_DIR_ENV, raising=False)
+    server_args = SimpleNamespace(
+        disaggregation_mode="null",
+        dllm_algorithm=None,
+        kv_events_config=None,
+        get_model_config=lambda: SimpleNamespace(is_multimodal=False),
+    )
+
+    def resolve(parsed_args):
+        # SGLang 0.5.19 copies this raw field unchanged; late resolution does
+        # not update it before the parent process launches the scheduler.
+        server_args.enable_memory_saver = parsed_args.enable_memory_saver
+        return server_args
+
+    monkeypatch.setattr("dynamo.sglang.args.ServerArgs.from_cli_args", resolve)
+    mock_sglang_cli(model=str(tmp_path))
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.server_args.enable_memory_saver is expected
+
+
+@pytest.mark.asyncio
+async def test_parse_args_disables_raw_fpm_for_snapshot_with_metric_port(
+    monkeypatch, mock_sglang_cli, tmp_path
+):
+    monkeypatch.setattr(
+        "dynamo.sglang.args.configure_snapshot_capture_env", lambda: None
+    )
+    monkeypatch.delenv("DYN_GMS_USE_V1", raising=False)
+    monkeypatch.setenv(SNAPSHOT_CONTROL_DIR_ENV, str(tmp_path))
+    monkeypatch.setenv("DYN_FORWARDPASS_METRIC_PORT", "23456")
+    server_args = SimpleNamespace(
+        disaggregation_mode="null",
+        dllm_algorithm=None,
+        enable_forward_pass_metrics=False,
+        kv_events_config=None,
+        get_model_config=lambda: SimpleNamespace(is_multimodal=False),
+    )
+
+    def resolve(parsed_args):
+        assert parsed_args.enable_forward_pass_metrics is False
+        return server_args
+
+    monkeypatch.setattr("dynamo.sglang.args.ServerArgs.from_cli_args", resolve)
+    mock_sglang_cli(model=str(tmp_path))
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.server_args.enable_forward_pass_metrics is False
 
 
 def test_compat_filters_async_generate_kwargs_for_older_engines():

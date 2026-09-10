@@ -123,7 +123,7 @@ metadata:
   name: vllm-disagg
 spec:
   components:
-  - name: VllmDecodeWorker
+  - name: decode
     podTemplate:
       spec:
         containers:
@@ -157,8 +157,8 @@ dynamo-platform-dynamo-operator-controller-manager-c665684ssqkx   2/2     Runnin
 dynamo-platform-etcd-0                                            1/1     Running   0          65m
 dynamo-platform-nats-0                                            2/2     Running   0          65m
 vllm-disagg-frontend-5954ddc4dd-4w2cb                             1/1     Running   0          11m
-vllm-disagg-vllmdecodeworker-77844cfcff-ddn4v                     1/1     Running   0          11m
-vllm-disagg-vllmprefillworker-55d5b74b4f-zrskh                    1/1     Running   0          11m
+vllm-disagg-decode-77844cfcff-ddn4v                     1/1     Running   0          11m
+vllm-disagg-prefill-55d5b74b4f-zrskh                    1/1     Running   0          11m
 ```
 
 </Step>

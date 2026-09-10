@@ -58,12 +58,26 @@ type ProviderOverride struct {
 	Value apiextensionsv1.JSON `json:"value"`
 }
 
-// MultinodeRoleSpec configures one explicit role of a multinode component.
-type MultinodeRoleSpec struct {
-	// providerOverride configures the Grove PCLQ template generated for this
-	// multinode role. It uses apiVersion `grove.io/v1alpha1`, target
-	// `PodCliqueTemplateSpec`, and may set only `topologyConstraint`. It is
-	// supported only for components embedded in a DGD.
+const (
+	// ComponentRoleLeader identifies the leader Pod-producing role of a multinode component.
+	ComponentRoleLeader = "leader"
+	// ComponentRoleWorker identifies the worker Pod-producing role of a multinode component.
+	ComponentRoleWorker = "worker"
+)
+
+// ComponentRoleSpec configures one named Pod-producing role inside a compound component.
+// The enclosing component type defines the allowed role names and cardinality.
+type ComponentRoleSpec struct {
+	// Name identifies the role within the enclosing component independently of
+	// generated provider resource names.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Name string `json:"name"`
+
+	// ProviderOverride configures the provider workload unit generated for this
+	// role. It is supported only for components embedded in a DGD.
 	// +optional
 	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
 }
