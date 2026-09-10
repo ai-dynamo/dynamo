@@ -4,11 +4,11 @@
 //! Tool-choice guided decoding policy for OpenAI chat requests.
 
 use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
-use crate::protocols::openai::GuidedToolConstraint;
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use crate::protocols::openai::tools::{
     ToolChoiceGuidance, get_tool_choice_guidance_from_tools, validate_openai_tool_choice,
 };
+use crate::protocols::openai::{GuidedToolConstraint, validate};
 
 use dynamo_parsers::tool_calling::{ToolChoice, ToolDefinition};
 use dynamo_protocols::types::{ChatCompletionTool, ChatCompletionToolChoiceOption, ResponseFormat};
@@ -74,6 +74,13 @@ impl OpenAIPreprocessor {
         );
         let has_explicit_guided_decoding = has_explicit_guided_decoding(request);
         let has_response_format_constraint = has_response_format_constraint(request);
+        let structured_output_schema = response_format_json_schema(request);
+
+        validate::validate_response_format_conflicts(
+            &request.inner.response_format,
+            &request.common,
+        )
+        .map_err(|error| invalid_argument(error.to_string()))?;
 
         if is_forced_tool_choice && has_explicit_guided_decoding {
             return Err(invalid_argument(concat!(
@@ -82,11 +89,9 @@ impl OpenAIPreprocessor {
             )));
         }
 
-        // For non-forced tool choice, explicit guided decoding and response_format
-        // constrain assistant content, so tool-choice guided decoding stays inactive.
-        let has_assistant_constraint =
-            has_explicit_guided_decoding || has_response_format_constraint;
-        if !is_forced_tool_choice && has_assistant_constraint {
+        // Explicit guided decoding constrains assistant content and cannot be
+        // composed with structural-tag tool calls.
+        if !is_forced_tool_choice && has_explicit_guided_decoding {
             return Ok(GuidedToolConstraint::None);
         }
 
@@ -103,9 +108,16 @@ impl OpenAIPreprocessor {
             &convert_tools(tools),
             request.inner.parallel_tool_calls,
             prompt_injected_reasoning,
+            structured_output_schema.as_ref(),
             common_request,
         )? {
             return Ok(GuidedToolConstraint::StructuralTag);
+        }
+
+        // If the structural-tag layer did not compose this response format with
+        // auto tool calls, it remains the sole assistant-output constraint.
+        if !is_forced_tool_choice && has_response_format_constraint {
+            return Ok(GuidedToolConstraint::None);
         }
 
         let uses_kimi_k3_parser = uses_kimi_k3_parser(
@@ -176,6 +188,16 @@ fn has_response_format_constraint(request: &NvCreateChatCompletionRequest) -> bo
         .response_format
         .as_ref()
         .is_some_and(|format| !matches!(format, ResponseFormat::Text))
+}
+
+fn response_format_json_schema(
+    request: &NvCreateChatCompletionRequest,
+) -> Option<serde_json::Value> {
+    match request.inner.response_format.as_ref()? {
+        ResponseFormat::Text => None,
+        ResponseFormat::JsonObject => Some(serde_json::json!({"type": "object"})),
+        ResponseFormat::JsonSchema { json_schema } => Some(json_schema.schema.clone()),
+    }
 }
 
 pub(crate) fn convert_tool_choice(tool_choice: &ChatCompletionToolChoiceOption) -> ToolChoice {
