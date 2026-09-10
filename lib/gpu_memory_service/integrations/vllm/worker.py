@@ -457,6 +457,8 @@ class GMSWorker(_BaseWorker):
                 self._gms_kv_manager,
                 self._gms_kv_engine_id,
                 self._gms_kv_cache_config,
+                self.vllm_config.model_config,
                 torch.device(get_vmm_device_type().value, self._gms_device),
+                self.vllm_config.model_config,
             )
         return super()._maybe_get_memory_pool_context(tag)
