@@ -358,9 +358,7 @@ def test_allocate_slots_translates_atomic_lease_race_to_backpressure(monkeypatch
 
     monkeypatch.setattr(leases_mod, "orig_allocate_slots", contend)
     coordinator = SimpleNamespace(
-        single_type_managers=[
-            SimpleNamespace(req_to_blocks={}, num_cached_block={})
-        ],
+        single_type_managers=[SimpleNamespace(req_to_blocks={}, num_cached_block={})],
         free=MagicMock(),
     )
     manager = SimpleNamespace(coordinator=coordinator)

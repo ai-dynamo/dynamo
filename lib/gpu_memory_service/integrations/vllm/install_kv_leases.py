@@ -1021,8 +1021,7 @@ def _free_blocks(self, ordered_blocks):
 
 def _request_is_tracked(coordinator, request_id: str) -> bool:
     return any(
-        request_id in manager.req_to_blocks
-        or request_id in manager.num_cached_block
+        request_id in manager.req_to_blocks or request_id in manager.num_cached_block
         for manager in coordinator.single_type_managers
     )
 
