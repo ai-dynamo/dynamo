@@ -31,6 +31,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -311,7 +312,7 @@ var powerRanges = map[string]powerRangeW{
 	"NVIDIA-GeForce-RTX-3070-Ti":     {Min: 100, Max: 320},
 	"NVIDIA-GeForce-RTX-3080":        {Min: 100, Max: 370},
 	"NVIDIA-GeForce-RTX-3090":        {Min: 100, Max: 400},
-	"NVIDIA-GeForce-RTX-4090":        {Min: 10, Max: 600},
+	"NVIDIA-GeForce-RTX-4090":        {Min: 100, Max: 600},
 	"NVIDIA-GeForce-RTX-5080":        {Min: 250, Max: 360},
 	"NVIDIA-GeForce-RTX-5090":        {Min: 400, Max: 600},
 	"NVIDIA-H100":                    {Min: 200, Max: 700},
@@ -389,8 +390,35 @@ type powerProductContract struct {
 	// length, which Semantic.DeepEqual does distinguish even though it equates a
 	// nil map with an empty one — and equating those two is correct here, since
 	// both express exactly the same placement.
+	//
+	// Affinity is normalized by normalizedAffinity because Semantic.DeepEqual
+	// does not extend its nil-versus-empty map equivalence to a nil struct
+	// pointer. See that function for why the two must compare equal.
 	NodeSelector map[string]string
 	Affinity     *corev1.Affinity
+}
+
+// normalizedAffinity maps an affinity that constrains nothing onto nil so that
+// an absent affinity and an explicitly empty one compare equal.
+//
+// Semantic.DeepEqual equates a nil map with an empty one, but it does not equate
+// a nil *corev1.Affinity with a pointer to a zero Affinity. Without this, a
+// client that starts serializing "affinity: {}" — a re-render by Argo CD, a Helm
+// chart bump, or any round-trip through a struct-valued template — would flip a
+// stored legacy contract without changing where the component can actually run.
+// The ratchet would then stop suppressing, and an otherwise no-op sync of a DGD
+// that was admitted yesterday would be rejected for a field the user never
+// touched, with no remedy short of deleting and recreating the object.
+//
+// Only a wholly zero Affinity normalizes to nil. A populated-but-vacuous term
+// tree, such as a NodeAffinity holding empty selector terms, is left alone: it
+// is not a shape real clients emit, and treating it as absent here would hide a
+// genuine placement edit.
+func normalizedAffinity(affinity *corev1.Affinity) *corev1.Affinity {
+	if affinity == nil || apiequality.Semantic.DeepEqual(affinity, &corev1.Affinity{}) {
+		return nil
+	}
+	return affinity
 }
 
 // dgdPowerProductContract derives the complete normalized power-product rule
@@ -414,7 +442,7 @@ func dgdPowerProductContract(
 	contract.NodeName = podSpec.NodeName
 	if contract.GPUProduct == "" {
 		contract.NodeSelector = podSpec.NodeSelector
-		contract.Affinity = podSpec.Affinity
+		contract.Affinity = normalizedAffinity(podSpec.Affinity)
 	}
 	return contract
 }

@@ -65,7 +65,8 @@ const (
 	powerRangeDetail  = `must be between 200 and 700 watts inclusive for GPU product "NVIDIA-H100-80GB-HBM3"`
 
 	powerUnknownProductDetail = `has no reviewed GPU power range in this operator release; ` +
-		`select a GPU product with a reviewed range or remove annotation "dynamo.nvidia.com/gpu-power-limit"`
+		`select a GPU product with a reviewed range or remove annotation "dynamo.nvidia.com/gpu-power-limit". ` +
+		`Power-aware planning requires exclusive full GPUs, so MIG, time-sliced, and other shared product labels are never eligible`
 	powerSelectorRequiredMessage = `Required value: is required when annotation ` +
 		`"dynamo.nvidia.com/gpu-power-limit" is set, so the requested power limit can be validated ` +
 		`against the selected GPU product`
@@ -1170,6 +1171,21 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
+			// nodeName is the one pre-existing violation repairable in place: clearing
+			// it changes the contract so suppression lifts, but the repaired new state
+			// has nothing left to report. A product or range violation cannot repair
+			// this way because the selector is immutable and the cap is frozen.
+			name:               "product-aware power component repairs a pinned nodeName in place",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
+				betaWorkerComponent(dgd).PodTemplate.Spec.NodeName = dgdAdmissionNodeName
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaWorkerPowerInputs(dgd, "300", "1", 2)
+			}),
+		},
+		{
 			name:               "legacy power component repaired with a valid product selector is rejected as immutable",
 			seedWithoutWebhook: true,
 			oldDeployment:      betaLegacyPowerDGD(nil),
@@ -1229,6 +1245,28 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				betaWorkerComponent(dgd).PodTemplate.Spec.Affinity = gpuProductNodeAffinity(dgdAdmissionGPUProduct)
 			}),
 			wantWebhookCauses: []metav1.StatusCause{webhookCause(metav1.CauseTypeFieldValueRequired, powerProductPath, powerSelectorRequiredMessage)},
+		},
+		{
+			// An empty affinity constrains nothing, so a client that begins or stops
+			// serializing one has not moved the component and must not lose the ratchet.
+			name:               "legacy power component gaining an empty affinity keeps the ratchet",
+			seedWithoutWebhook: true,
+			oldDeployment:      betaLegacyPowerDGD(nil),
+			deployment: betaLegacyPowerDGD(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.PodTemplate.Spec.Affinity = &corev1.Affinity{}
+				worker.Replicas = k8sptr.To(int32(3))
+			}),
+		},
+		{
+			name:               "legacy power component losing an empty affinity keeps the ratchet",
+			seedWithoutWebhook: true,
+			oldDeployment: betaLegacyPowerDGD(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).PodTemplate.Spec.Affinity = &corev1.Affinity{}
+			}),
+			deployment: betaLegacyPowerDGD(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).Replicas = k8sptr.To(int32(3))
+			}),
 		},
 		{
 			name:               "legacy power component gaining an empty product selector key breaks the ratchet",

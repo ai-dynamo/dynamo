@@ -392,7 +392,7 @@ func gpuPowerRangeFromCSVRow(record []string) (string, powerRangeW, bool, error)
 		return "", powerRangeW{}, false, fmt.Errorf("got %d columns, want 5", len(record))
 	}
 	product := record[0]
-	if product == "B300" || strings.HasSuffix(product, bringUpBoardSuffix) {
+	if strings.HasSuffix(product, bringUpBoardSuffix) {
 		return product, powerRangeW{}, false, nil
 	}
 
@@ -419,7 +419,6 @@ func TestGPUPowerRangeFromCSVRow(t *testing.T) {
 		wantRange   powerRangeW
 		wantInclude bool
 	}{
-		{name: "bare product is excluded", record: []string{"B300", "200", "1100", "1100", "1100"}, wantProduct: "B300"},
 		{name: "bring-up board is excluded", record: []string{"example-bring-up-board", "100", "200", "300", "250"}, wantProduct: "example-bring-up-board"},
 		{name: "fractional bounds round inward", record: []string{"example-fractional", "48.75", "60", "62.5", "60"}, wantProduct: "example-fractional", wantRange: powerRangeW{Min: 49, Max: 62}, wantInclude: true},
 		{name: "maximum rather than default feeds catalog", record: []string{"example-distinct-maximum", "100", "200", "300", "250"}, wantProduct: "example-distinct-maximum", wantRange: powerRangeW{Min: 100, Max: 300}, wantInclude: true},

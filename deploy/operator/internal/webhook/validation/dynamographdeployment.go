@@ -1060,7 +1060,7 @@ func dgdComponentGPUProductErrors(
 			selectorPath,
 			product,
 			fmt.Sprintf(
-				"has no reviewed GPU power range in this operator release; select a GPU product with a reviewed range or remove annotation %q",
+				"has no reviewed GPU power range in this operator release; select a GPU product with a reviewed range or remove annotation %q. Power-aware planning requires exclusive full GPUs, so MIG, time-sliced, and other shared product labels are never eligible",
 				consts.KubeAnnotationGPUPowerLimit,
 			),
 		))

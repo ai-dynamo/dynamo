@@ -135,8 +135,13 @@ A component with a non-empty exact GPU product selector is product-aware. Other
 selector keys and affinity do not affect the selected-product rule, but the exact
 product remains immutable. Admission ratchets an unchanged pre-existing product,
 range, or `nodeName` violation only while every normalized input to that rule
-remains identical. Repair a violation by recreating the DGD rather than editing
-the component in place.
+remains identical.
+
+Of those three, only `nodeName` can be repaired in place: clearing it changes the
+rule inputs, so the ratchet lifts, and the repaired component has nothing left to
+reject. A pre-existing product or range violation cannot be repaired that way,
+because the exact product selector and the cap are both immutable — recreate the
+DGD instead.
 
 Components may select different products; the budget still sums their projected
 watts. This example uses one product for both workers only for brevity.
