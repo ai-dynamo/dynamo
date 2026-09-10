@@ -705,7 +705,10 @@ class TestEmbeddingWorkerProcesses:
         ):
             config._validate_embedding_worker_processes()
 
-    def test_nixl_truthy_token_other_than_y_is_reserved(self, monkeypatch):
+    @pytest.mark.parametrize(
+        "enabled_value", ["y", "1", "yes", "on", "true", "enable", "TRUE", "On"]
+    )
+    def test_nixl_truthy_token_is_reserved(self, monkeypatch, enabled_value):
         """NIXL accepts more than "y", so Dynamo must reserve the port for them.
 
         NIXL treats y, 1, yes, on, true and enable as enabled, case-insensitively.
@@ -713,7 +716,7 @@ class TestEmbeddingWorkerProcesses:
         listening, which is the collision this check exists to catch.
         """
         monkeypatch.setenv("DYN_SYSTEM_PORT", "19089")
-        monkeypatch.setenv("NIXL_TELEMETRY_ENABLE", "true")
+        monkeypatch.setenv("NIXL_TELEMETRY_ENABLE", enabled_value)
         monkeypatch.setenv("NIXL_TELEMETRY_EXPORTER", "prometheus")
         monkeypatch.setenv("NIXL_TELEMETRY_PROMETHEUS_PORT", "19090")
         config = create_config()
@@ -740,15 +743,42 @@ class TestEmbeddingWorkerProcesses:
         config.embedding_worker_processes = 3
         config._validate_embedding_worker_processes()
 
-    def test_nixl_without_prometheus_port_reserves_nothing(self, monkeypatch):
-        """19090 is Dynamo's convention, not the NIXL exporter's default.
+    def test_nixl_without_prometheus_port_reserves_the_exporter_default(
+        self, monkeypatch
+    ):
+        """An unset port variable still binds a listener, on the exporter's 9090.
 
-        With the port variable unset the exporter binds a port Dynamo cannot
-        name, so assuming 19090 would reserve a port nothing is listening on.
+        19090 is Dynamo's convention, not the exporter's default. Reserving
+        nothing here would miss the collision with the operator's 9090
+        DYN_SYSTEM_PORT preset, which is the default deployment.
         """
-        monkeypatch.setenv("DYN_SYSTEM_PORT", "19089")
+        monkeypatch.setenv("DYN_SYSTEM_PORT", "9090")
         monkeypatch.setenv("NIXL_TELEMETRY_ENABLE", "y")
         monkeypatch.setenv("NIXL_TELEMETRY_EXPORTER", "prometheus")
+        monkeypatch.delenv("NIXL_TELEMETRY_PROMETHEUS_PORT", raising=False)
+        config = create_config()
+        config.embedding_worker = True
+        config.embedding_worker_processes = 3
+
+        with pytest.raises(
+            ValueError,
+            match="NIXL_TELEMETRY_PROMETHEUS_PORT reserves 9090",
+        ):
+            config._validate_embedding_worker_processes()
+
+    @pytest.mark.parametrize("port_value", ["abc", "0", "99999", "-1"])
+    def test_nixl_with_unusable_prometheus_port_reserves_nothing(
+        self, monkeypatch, port_value
+    ):
+        """A port NIXL cannot use leaves it exporting nothing to reserve.
+
+        NIXL does not fall back to its default for an unusable value: it binds
+        no exporter at all, so there is no listener to collide with.
+        """
+        monkeypatch.setenv("DYN_SYSTEM_PORT", "9090")
+        monkeypatch.setenv("NIXL_TELEMETRY_ENABLE", "y")
+        monkeypatch.setenv("NIXL_TELEMETRY_EXPORTER", "prometheus")
+        monkeypatch.setenv("NIXL_TELEMETRY_PROMETHEUS_PORT", port_value)
         config = create_config()
         config.embedding_worker = True
         config.embedding_worker_processes = 3
