@@ -187,8 +187,17 @@ impl AnthropicStreamConverter {
             .filter(|tool_call| tool_call.is_emit_ready())
             .collect();
         let last_call = ready.len().saturating_sub(1);
+        let call_limit = if self
+            .api_context
+            .as_ref()
+            .is_some_and(|ctx| ctx.disable_parallel_tool_use)
+        {
+            1
+        } else {
+            ready.len()
+        };
 
-        for (call_index, tool_call) in ready.into_iter().enumerate() {
+        for (call_index, tool_call) in ready.into_iter().take(call_limit).enumerate() {
             let emitted_id = new_tool_use_id();
             tracing::debug!(
                 backend_id = %tool_call.backend_id,
