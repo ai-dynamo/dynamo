@@ -65,13 +65,19 @@ version, and defect class are usually enough to reproduce.
 
 ## Step 4: Check for an existing report
 
+Search titles AND bodies, with and without the label, because step 6 permits filing without the
+label when the reporter lacks permissions and step 4 places secondary defects in the body:
+
 ```bash
-gh issue list --repo ai-dynamo/dynamo --label agent-reported --search "<rule-or-skill filename> in:title" --state all
+gh issue list --repo ai-dynamo/dynamo --state all --search "<rule-or-skill filename> in:title,body"
+gh issue list --repo ai-dynamo/dynamo --state all --label agent-reported --search "<rule-or-skill filename> in:title,body"
 ```
 
-If a matching issue exists, add a comment confirming the defect at your pack version instead of filing a duplicate.
-Comments require the same operator approval as filing (step 6). File at most one new issue per session; if the
-session surfaced several defects, put the most impactful one in the issue and list the rest briefly in its body.
+Review every hit whose title starts with `[AGENT]: ` or whose body mentions the same file and
+defect class. If a matching issue exists, add a comment confirming the defect at your pack version
+instead of filing a duplicate. Comments require the same operator approval as filing (step 6).
+File at most one new issue per session; if the session surfaced several defects, put the most
+impactful one in the issue and list the rest briefly in its body.
 
 ## Step 5: Draft the issue
 
