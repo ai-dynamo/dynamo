@@ -493,6 +493,42 @@ async def test_parse_args_enables_incremental_streaming_before_resolution(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("snapshot_enabled", "explicit_memory_saver", "expected"),
+    [(False, False, False), (True, False, True), (False, True, True)],
+)
+async def test_snapshot_memory_saver_is_enabled_before_resolution(
+    monkeypatch, tmp_path, snapshot_enabled, explicit_memory_saver, expected
+):
+    monkeypatch.delenv("DYN_GMS_USE_V1", raising=False)
+    monkeypatch.delenv(SNAPSHOT_CONTROL_DIR_ENV, raising=False)
+    if snapshot_enabled:
+        monkeypatch.setenv(SNAPSHOT_CONTROL_DIR_ENV, str(tmp_path))
+    monkeypatch.setattr(sglang_args, "configure_snapshot_capture_env", lambda: None)
+
+    def resolve(parsed_args):
+        # Engine chooses the subprocess allocator from the raw field; a late
+        # resolved-only override does not configure LD_PRELOAD for its children.
+        assert parsed_args.enable_memory_saver is expected
+        return SimpleNamespace(
+            enable_memory_saver=parsed_args.enable_memory_saver,
+            disaggregation_mode="null",
+            dllm_algorithm=None,
+            kv_events_config=None,
+            get_model_config=lambda: SimpleNamespace(is_multimodal=False),
+        )
+
+    monkeypatch.setattr(sglang_args.ServerArgs, "from_cli_args", resolve)
+    args = ["--model", str(tmp_path)]
+    if explicit_memory_saver:
+        args.append("--enable-memory-saver")
+
+    config = await parse_args(args)
+
+    assert config.server_args.enable_memory_saver is expected
+
+
+@pytest.mark.asyncio
 async def test_parse_args_applies_dynamo_defaults_before_resolution(
     monkeypatch, mock_sglang_cli
 ):
