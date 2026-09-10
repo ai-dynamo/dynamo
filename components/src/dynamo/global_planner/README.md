@@ -43,7 +43,7 @@ That is fine for isolated deployments, but it becomes awkward when you want one 
 - Optionally authorizes caller namespaces
 - Executes scaling through `KubernetesConnector`
 - Returns operation status and observed replica counts
-- Supports dry-run mode via `--no-operation`
+- Supports dry-run mode via `no_operation`
 
 ## Runtime Endpoints
 
@@ -64,30 +64,20 @@ Given `DYN_NAMESPACE=<ns>`, this component serves:
 ### Command Line
 
 ```bash
-# Accept scale requests from any namespace
+# Defaults: accept scale requests from any namespace, no GPU budget
 DYN_NAMESPACE=global-infra python -m dynamo.global_planner
 ```
 
 ```bash
-# Restrict requests to specific planner namespaces
+# From a config file (JSON or YAML)
 DYN_NAMESPACE=global-infra python -m dynamo.global_planner \
-  --managed-namespaces app-ns-1 app-ns-2
+  --config /etc/global-planner/config.yaml
 ```
 
 ```bash
-# Dry-run mode (no Kubernetes updates)
-DYN_NAMESPACE=global-infra python -m dynamo.global_planner --no-operation
-```
-
-```bash
-# Enforce a maximum total GPU budget across managed pools
-DYN_NAMESPACE=global-infra python -m dynamo.global_planner --max-total-gpus 16
-```
-
-```bash
-# Fixed-total deployment: pin the cluster at 16 GPUs with cross-pool transfers
+# From an inline JSON string — a fixed-total deployment pinned at 16 GPUs
 DYN_NAMESPACE=global-infra python -m dynamo.global_planner \
-  --min-total-gpus 16 --max-total-gpus 16
+  --config '{"min_total_gpus": 16, "max_total_gpus": 16}'
 ```
 
 ### Arguments
@@ -102,12 +92,16 @@ Optional environment variables:
 
 CLI arguments:
 
-- `--managed-namespaces <ns1> <ns2> ...`: Allowlist for `caller_namespace`. If omitted, accepts all namespaces.
-- `--environment kubernetes`: Execution environment (currently only `kubernetes` is supported).
-- `--no-operation`: Log incoming scale requests and return success without applying Kubernetes scaling.
-- `--max-total-gpus <n>`: Reject scale requests that would push the managed pools above the configured total GPU cap.
-- `--min-total-gpus <n>`: Floor for total GPUs across managed pools. Scale-down requests that would drop below the floor are denied unless they can be paired with a pending scale-up on another pool (intra-DGD or cross-DGD). `-1` (default) disables the floor.
-- `--intent-cache-ttl-seconds <s>`: How long a cached scale intent from a pool is considered fresh for pairing (default `360`). Should be at least `2x` the local planner's slowest tick interval so opposite-direction intents can overlap; throughput-based scaling ticks every `180s` by default, so `360` covers two ticks.
+- `--config <json-or-path>`: Inline JSON string or path to a JSON/YAML file holding the configuration below. Mirrors how `dynamo.planner` is configured. Omit to run with defaults.
+
+Config fields:
+
+- `managed_namespaces` (list): Allowlist for `caller_namespace`. If omitted, accepts all namespaces.
+- `environment` (`"kubernetes"`): Execution environment (currently only `kubernetes` is supported).
+- `no_operation` (bool): Log incoming scale requests and return success without applying Kubernetes scaling.
+- `max_total_gpus` (int): Reject scale requests that would push the managed pools above the configured total GPU cap. `-1` (default) disables the ceiling.
+- `min_total_gpus` (int): Floor for total GPUs across managed pools. Scale-down requests that would drop below the floor are denied unless they can be paired with a pending scale-up on another pool (intra-DGD or cross-DGD). `-1` (default) disables the floor.
+- `intent_cache_ttl_seconds` (float): How long a cached scale intent from a pool is considered fresh for pairing (default `360`). Should be at least `2x` the local planner's slowest tick interval so opposite-direction intents can overlap; throughput-based scaling ticks every `180s` by default, so `360` covers two ticks.
 
 ## Scale Request Contract
 
@@ -135,14 +129,38 @@ Response fields:
 - `message`: status detail
 - `current_replicas`: map of observed replicas, for example `{"prefill": 3, "decode": 5}`
 
+## Configuration
+
+Every setting lives in one place: the `--config` document. There are no
+per-setting CLI flags, so there is no precedence to reason about and no way for
+two sources to disagree.
+
+```yaml
+# /etc/global-planner/config.yaml
+managed_namespaces:
+  - app-ns-1
+  - app-ns-2
+min_total_gpus: 16
+max_total_gpus: 16
+intent_cache_ttl_seconds: 360
+```
+
+The config is validated at startup. Two configurations that previously started
+and then misbehaved at request time are now startup failures:
+
+- `min_total_gpus > max_total_gpus` — a band no total GPU count satisfies, which
+  would have denied every request on one edge or the other.
+- `intent_cache_ttl_seconds <= 0` — no cached intent is ever fresh, silently
+  disabling all pool pairing.
+
 ## Behavior
 
-- If `--managed-namespaces` is set and `caller_namespace` is not authorized, Global Planner returns `error` and does not scale.
-- In `--no-operation` mode, Global Planner logs the request and returns `success` with empty `current_replicas`.
+- If `managed_namespaces` is set and `caller_namespace` is not authorized, Global Planner returns `error` and does not scale.
+- In `no_operation` mode, Global Planner logs the request and returns `success` with empty `current_replicas`.
 
 ### Minimum GPU budget and pool arbitration
 
-When `--min-total-gpus` is set the Global Planner enforces a floor on total GPUs across all managed DGDs. Combined with `--max-total-gpus`, this lets you run a *fixed-size* deployment that scales load between pools without changing the total.
+When `min_total_gpus` is set the Global Planner enforces a floor on total GPUs across all managed DGDs. Combined with `max_total_gpus`, this lets you run a *fixed-size* deployment that scales load between pools without changing the total.
 
 **Arbitration across all pools.** Every scale request that would breach the budget band triggers a search for opposite-direction pending intents on any other pool the Global Planner knows about — prefill ↔ decode within the same DGD, or across two different DGDs entirely (e.g., multiple agg DGDs sharing a cluster-wide budget).
 
@@ -160,9 +178,9 @@ This scope is needed for "multiple agg pools sharing a budget" deployments such 
 
 **Tolerance for asymmetric pools.** When two paired pools have different `resources.limits.gpu` per replica, a single-worker step cannot always exactly cancel. Paired transfers may land up to `max(gpu_per_replica across the paired pools)` **below** `min` so the pair can still rebalance in whole-worker steps. `max` is a hard cluster-capacity bound and is never relaxed — pairs whose post-transfer total would exceed `max` are denied. Standalone (non-paired) requests must stay strictly within `[min, max]`.
 
-**Intent cache.** Each scale request updates a per-pool cache with the pool's most recent desired replica count and a timestamp. Entries are eligible as pair partners when they are within `--intent-cache-ttl-seconds` of the current time and the pool's cached `desired` still differs from its current Kubernetes replica count (i.e., the intent is *pending*, not yet satisfied). An entry whose desired equals current is considered satisfied and is skipped when looking for partners.
+**Intent cache.** Each scale request updates a per-pool cache with the pool's most recent desired replica count and a timestamp. Entries are eligible as pair partners when they are within `intent_cache_ttl_seconds` of the current time and the pool's cached `desired` still differs from its current Kubernetes replica count (i.e., the intent is *pending*, not yet satisfied). An entry whose desired equals current is considered satisfied and is skipped when looking for partners.
 
-**Soft floor at startup.** If the discovered initial total GPUs is below `--min-total-gpus`, the Global Planner logs a warning and continues. Scale-down requests that breach the floor are still denied, and natural scale-ups from local planners will drift toward the floor. No proactive fill is issued; if load is permanently low, the deployment may remain below the floor. The floor is a target enforced on the way down, not a hard invariant.
+**Soft floor at startup.** If the discovered initial total GPUs is below `min_total_gpus`, the Global Planner logs a warning and continues. Scale-down requests that breach the floor are still denied, and natural scale-ups from local planners will drift toward the floor. No proactive fill is issued; if load is permanently low, the deployment may remain below the floor. The floor is a target enforced on the way down, not a hard invariant.
 
 ## Related Documentation
 

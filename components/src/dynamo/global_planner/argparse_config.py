@@ -1,9 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Argument parsing for GlobalPlanner."""
+"""Argument parsing for GlobalPlanner.
+
+The component takes a single ``--config`` argument -- an inline JSON string or a
+path to a JSON/YAML file -- matching how ``dynamo.planner`` is configured. Every
+setting lives in :class:`~dynamo.global_planner.config.GlobalPlannerConfig` and
+has exactly one place it can be set, so there is no flag-versus-file precedence
+to reason about.
+"""
 
 import argparse
+
+from dynamo.global_planner.config import GlobalPlannerConfig
 
 
 def create_global_planner_parser() -> argparse.ArgumentParser:
@@ -17,64 +26,38 @@ def create_global_planner_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Simple deployment (accept all namespaces)
+  # Defaults: accept all namespaces, no GPU budget
   DYN_NAMESPACE=global-infra python -m dynamo.global_planner
 
-  # With authorization
+  # From a config file
   DYN_NAMESPACE=global-infra python -m dynamo.global_planner \\
-    --managed-namespaces app-ns-1 app-ns-2 app-ns-3
+    --config /etc/global-planner/config.yaml
 
-  # Custom environment
+  # From an inline JSON string
   DYN_NAMESPACE=global-infra python -m dynamo.global_planner \\
-    --environment=kubernetes
+    --config '{"min_total_gpus": 16, "max_total_gpus": 16}'
         """,
     )
 
     parser.add_argument(
-        "--managed-namespaces",
+        "--config",
         type=str,
-        nargs="+",
         default=None,
-        help="Optional: List of namespaces authorized to use this GlobalPlanner (default: accept all)",
-    )
-
-    parser.add_argument(
-        "--environment",
-        default="kubernetes",
-        choices=["kubernetes"],
-        help="Environment type (currently only kubernetes supported)",
-    )
-
-    parser.add_argument(
-        "--no-operation",
-        action="store_true",
-        default=False,
-        dest="no_operation",
-        help="Log incoming scale requests without executing them (useful for testing the e2e flow without actual K8s scaling)",
-    )
-
-    parser.add_argument(
-        "--max-total-gpus",
-        type=int,
-        default=-1,
-        dest="max_total_gpus",
-        help="Maximum total GPUs across all managed pools. Requests that would exceed this limit are rejected. 0 means no GPU scaling is allowed. -1 (default) disables enforcement entirely.",
-    )
-
-    parser.add_argument(
-        "--min-total-gpus",
-        type=int,
-        default=-1,
-        dest="min_total_gpus",
-        help="Minimum total GPUs across all managed pools. Scale-down requests that would drop below this floor are denied unless a pending scale-up on another pool can be paired with them. -1 (default) disables the floor.",
-    )
-
-    parser.add_argument(
-        "--intent-cache-ttl-seconds",
-        type=float,
-        default=360.0,
-        dest="intent_cache_ttl_seconds",
-        help="Cached scale-intent from a pool is considered fresh for this many seconds (default: 360). This should be at least 2x the local planner's slowest tick interval so opposite-direction intents can overlap. Default throughput-based scaling ticks every 180s, so 360 covers two ticks.",
+        help=(
+            "Inline JSON string or path to a JSON/YAML file holding GlobalPlanner "
+            "configuration. Omit to run with defaults."
+        ),
     )
 
     return parser
+
+
+def resolve_config(args: argparse.Namespace) -> GlobalPlannerConfig:
+    """Build a validated config from parsed arguments.
+
+    Returns the default configuration when no ``--config`` was supplied.
+    """
+    config_arg = getattr(args, "config", None)
+    if not config_arg:
+        return GlobalPlannerConfig()
+    return GlobalPlannerConfig.from_config_arg(config_arg)

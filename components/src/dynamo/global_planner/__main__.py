@@ -9,9 +9,9 @@ Entry point for the GlobalPlanner component.
 Usage:
     DYN_NAMESPACE=global-infra python -m dynamo.global_planner
 
-With authorization:
+From a config file:
     DYN_NAMESPACE=global-infra python -m dynamo.global_planner \\
-        --managed-namespaces app-ns-1 app-ns-2
+        --config /etc/global-planner/config.yaml
 """
 
 import asyncio
@@ -20,7 +20,11 @@ import os
 
 from pydantic import BaseModel
 
-from dynamo.global_planner.argparse_config import create_global_planner_parser
+from dynamo.global_planner.argparse_config import (
+    create_global_planner_parser,
+    resolve_config,
+)
+from dynamo.global_planner.config import GlobalPlannerConfig
 from dynamo.global_planner.scale_handler import ScaleRequestHandler
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -36,7 +40,7 @@ class HealthCheckRequest(BaseModel):
 
 
 @dynamo_worker()
-async def main(runtime: DistributedRuntime, args):
+async def main(runtime: DistributedRuntime, config: GlobalPlannerConfig):
     """Initialize and run GlobalPlanner.
 
     The GlobalPlanner is a centralized scaling service that:
@@ -47,7 +51,7 @@ async def main(runtime: DistributedRuntime, args):
 
     Args:
         runtime: Dynamo runtime instance
-        args: Parsed command-line arguments
+        config: Validated GlobalPlanner configuration
     """
     # Get Dynamo namespace from environment variable
     namespace = os.environ.get("DYN_NAMESPACE")
@@ -61,36 +65,7 @@ async def main(runtime: DistributedRuntime, args):
     logger.info("Starting GlobalPlanner")
     logger.info("=" * 60)
     logger.info(f"Namespace: {namespace}")
-    logger.info(f"Environment: {args.environment}")
-
-    if args.managed_namespaces:
-        logger.info("Authorization: ENABLED")
-        logger.info(f"Authorized namespaces: {args.managed_namespaces}")
-    else:
-        logger.info("Authorization: DISABLED (accepting all namespaces)")
-
-    if args.no_operation:
-        logger.info(
-            "No-operation mode: ENABLED (scale requests will be logged, not executed)"
-        )
-    else:
-        logger.info("No-operation mode: DISABLED")
-
-    if args.max_total_gpus >= 0:
-        logger.info(f"Max total GPUs: {args.max_total_gpus}")
-    else:
-        logger.info("Max total GPUs: UNLIMITED")
-
-    if args.min_total_gpus >= 0:
-        logger.info(f"Min total GPUs: {args.min_total_gpus}")
-    else:
-        logger.info("Min total GPUs: DISABLED")
-
-    # Intent cache TTL governs pair freshness for BOTH floor and ceiling
-    # pairing, so log it whenever either bound is active.
-    if args.min_total_gpus >= 0 or args.max_total_gpus >= 0:
-        logger.info(f"Intent cache TTL seconds: {args.intent_cache_ttl_seconds}")
-
+    config.log_summary()
     logger.info("=" * 60)
 
     # Get K8s namespace (where GlobalPlanner pod is running)
@@ -100,12 +75,12 @@ async def main(runtime: DistributedRuntime, args):
     # Create scale request handler
     handler = ScaleRequestHandler(
         runtime=runtime,
-        managed_namespaces=args.managed_namespaces,
+        managed_namespaces=config.managed_namespaces,
         k8s_namespace=k8s_namespace,
-        no_operation=args.no_operation,
-        max_total_gpus=args.max_total_gpus,
-        min_total_gpus=args.min_total_gpus,
-        intent_cache_ttl_seconds=args.intent_cache_ttl_seconds,
+        no_operation=config.no_operation,
+        max_total_gpus=config.max_total_gpus,
+        min_total_gpus=config.min_total_gpus,
+        intent_cache_ttl_seconds=config.intent_cache_ttl_seconds,
     )
 
     logger.info("Serving endpoints...")
@@ -118,7 +93,7 @@ async def main(runtime: DistributedRuntime, args):
             "status": "healthy",
             "component": "GlobalPlanner",
             "namespace": namespace,
-            "managed_namespaces": args.managed_namespaces or "all",
+            "managed_namespaces": config.managed_namespaces or "all",
         }
 
     logger.info("  ✓ scale_request - Receives scaling requests from Planners")
@@ -149,5 +124,4 @@ async def main(runtime: DistributedRuntime, args):
 
 if __name__ == "__main__":
     parser = create_global_planner_parser()
-    args = parser.parse_args()
-    asyncio.run(main(args))
+    asyncio.run(main(resolve_config(parser.parse_args())))

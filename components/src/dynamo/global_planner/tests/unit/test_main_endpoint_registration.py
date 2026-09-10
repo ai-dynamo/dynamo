@@ -21,6 +21,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from dynamo.global_planner import __main__ as gp_main
+from dynamo.global_planner.config import GlobalPlannerConfig
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -57,13 +58,7 @@ async def test_main_registers_both_endpoints_concurrently():
     runtime = MagicMock()
     runtime.endpoint = MagicMock(side_effect=make_endpoint)
 
-    args = MagicMock()
-    args.environment = "kubernetes"
-    args.managed_namespaces = None
-    args.no_operation = False
-    args.max_total_gpus = -1
-    args.min_total_gpus = -1
-    args.intent_cache_ttl_seconds = 120.0
+    config = GlobalPlannerConfig(intent_cache_ttl_seconds=120.0)
 
     with patch.dict(
         os.environ, {"DYN_NAMESPACE": "gp-ns", "POD_NAMESPACE": "default"}
@@ -75,7 +70,7 @@ async def test_main_registers_both_endpoints_concurrently():
         # cancel and inspect what was registered.
         # Calling the underlying coroutine (the @dynamo_worker-wrapped `main`
         # expects a runtime injected by the decorator; we bypass it).
-        task = asyncio.create_task(gp_main.main.__wrapped__(runtime, args))
+        task = asyncio.create_task(gp_main.main.__wrapped__(runtime, config))
         # Let the event loop run. With asyncio.gather both serve_endpoint
         # futures are scheduled in one step; with sequential awaits only
         # the first one is ever called, which is exactly the bug.
