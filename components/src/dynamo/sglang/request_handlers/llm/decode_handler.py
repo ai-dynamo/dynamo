@@ -416,8 +416,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         input_param: Dict[str, Any],
         context: Context,
         priority: int | None,
-    ) -> AsyncGenerator[Dict[str, Any], None]:
-        """Build and dispatch one native SGLang request."""
+    ) -> tuple[str, AsyncGenerator[Dict[str, Any], None]]:
+        """Build and dispatch one native SGLang request.
+
+        Returns the ID the request was submitted under together with its
+        stream, so cancellation aborts exactly what was submitted rather than
+        a separately derived guess at it.
+        """
         raise_if_unextracted_multimodal(request)
         input_ids = input_param.get("input_ids")
         if not isinstance(input_ids, list):
@@ -446,7 +451,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             routed_dp_rank=routing.get("dp_rank"),
             lora_path=self._resolve_lora(request),
         )
-        return native_generate_stream(self.engine, native_request)
+        if not isinstance(native_request.rid, str):
+            # A caller may supply its own rid in the opaque native payload.
+            # abort_request takes a single key, so anything else would leave
+            # the request uncancellable; the prefill handler rejects it too.
+            raise ValueError(
+                "SGLang decode requires a single request ID to remain cancellable"
+            )
+        return native_request.rid, native_generate_stream(self.engine, native_request)
 
     async def generate(
         self, request: Dict[str, Any], context: Context
@@ -475,14 +487,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         priority = (request.get("routing") or {}).get("priority")
         native_payload = native_generate_payload(request)
         if native_payload is not None:
-            stream = self._native_generate_stream(
+            native_rid, stream = self._native_generate_stream(
                 request,
                 native_payload,
                 input_param,
                 context,
                 priority,
             )
-            native_rid = native_payload.get("rid") or sglang_request_id
             async for output in self._process_native_generate_stream(
                 stream, context, native_rid
             ):
