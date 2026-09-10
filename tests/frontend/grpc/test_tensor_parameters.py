@@ -15,10 +15,10 @@ import logging
 import os
 import runpy
 import shlex
+import shutil
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
-import shutil
 
 import numpy as np
 import pytest
