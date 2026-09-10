@@ -9,6 +9,7 @@ import msgspec
 import numpy as np
 import pytest
 import zstandard as zstd
+
 from dynamo.artifacts.format_v1 import (
     CODEC_NONE,
     CODEC_ZSTD,
@@ -50,9 +51,14 @@ def _artifact_view() -> GenerationArtifactView:
 
 
 def _replace_manifest(encoded: bytes, manifest: dict) -> bytes:
-    magic, major, minor, codec, old_manifest_bytes, payload_bytes = (
-        _PRELUDE.unpack_from(encoded)
-    )
+    (
+        magic,
+        major,
+        minor,
+        codec,
+        old_manifest_bytes,
+        payload_bytes,
+    ) = _PRELUDE.unpack_from(encoded)
     assert codec == CODEC_NONE
     old_body = encoded[_PRELUDE.size :]
     payload = old_body[((old_manifest_bytes + 63) & ~63) :]

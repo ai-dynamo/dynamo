@@ -33,6 +33,19 @@ from typing import (
 
 import numpy as np
 import torch
+from vllm import PoolingParams
+from vllm.config import ModelConfig
+from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
+from vllm.lora.request import LoRARequest
+from vllm.outputs import RequestOutput
+from vllm.renderers.embed_utils import safe_load_prompt_embeds
+from vllm.sampling_params import (
+    RequestOutputKind,
+    SamplingParams,
+    StructuredOutputsParams,
+)
+from vllm.v1.engine.exceptions import EngineDeadError
+
 from dynamo._core import Context
 from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.lora.manager import LoRAInfo, get_lora_manager
@@ -80,19 +93,6 @@ from dynamo.vllm.kv_connector_protocols import (
     make_kv_connector_protocol,
 )
 from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
-
-from vllm import PoolingParams
-from vllm.config import ModelConfig
-from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
-from vllm.lora.request import LoRARequest
-from vllm.outputs import RequestOutput
-from vllm.renderers.embed_utils import safe_load_prompt_embeds
-from vllm.sampling_params import (
-    RequestOutputKind,
-    SamplingParams,
-    StructuredOutputsParams,
-)
-from vllm.v1.engine.exceptions import EngineDeadError
 
 from .args import Config
 from .cache_info import get_configured_kv_event_block_size
@@ -3300,9 +3300,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 for output in res.outputs:
                     output_idx = getattr(output, "index", 0) or 0
                     token_ids = list(output.token_ids or [])
-                    total_output_tokens_by_index[output_idx] = (
-                        total_output_tokens_by_index.get(output_idx, 0) + len(token_ids)
-                    )
+                    total_output_tokens_by_index[
+                        output_idx
+                    ] = total_output_tokens_by_index.get(output_idx, 0) + len(token_ids)
                     finish_reason = getattr(output, "finish_reason", None)
                     stop_reason = getattr(output, "stop_reason", None)
                     if not token_ids and not finish_reason and not stop_reason:
@@ -3361,11 +3361,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             finish_reason
                         )
                         out["finish_reason"] = normalized_finish_reason
-                        out["completion_usage"] = (
-                            BaseWorkerHandler._build_completion_usage(
-                                request_output=res,
-                                completion_token_counts=total_output_tokens_by_index,
-                            )
+                        out[
+                            "completion_usage"
+                        ] = BaseWorkerHandler._build_completion_usage(
+                            request_output=res,
+                            completion_token_counts=total_output_tokens_by_index,
                         )
                         if prompt_logprobs_payload is not None:
                             _attach_prompt_logprobs_engine_data(
@@ -3401,7 +3401,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                         token_start=effective_start,
                                     )
                                 )
-                            except Exception:  # noqa: BLE001 - emit a safe terminal receipt
+                            except (
+                                Exception
+                            ):  # noqa: BLE001 - emit a safe terminal receipt
                                 logger.warning(
                                     "Generation artifact delivery failed for request %s",
                                     request_id,
@@ -3825,9 +3827,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         if abort_guard is not None:
                             abort_guard.signal_first_token()
                         if prefill_result is not None and "completion_usage" in tok:
-                            tok["completion_usage"]["prompt_tokens_details"] = (
-                                prefill_prompt_tokens_details
-                            )
+                            tok["completion_usage"][
+                                "prompt_tokens_details"
+                            ] = prefill_prompt_tokens_details
 
                         if want_engine_data:
                             _accumulate_engine_data(
@@ -4165,9 +4167,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         if embedding_params is not None:
             disaggregated_params["embedding_params"] = embedding_params
         if expanded_prompt_token_ids is not None:
-            disaggregated_params["expanded_prompt_token_ids"] = (
-                expanded_prompt_token_ids
-            )
+            disaggregated_params[
+                "expanded_prompt_token_ids"
+            ] = expanded_prompt_token_ids
 
         return disaggregated_params if disaggregated_params else None
 

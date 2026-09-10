@@ -12,6 +12,7 @@ from uuid import uuid4
 import boto3
 import pytest
 from botocore.client import Config
+
 from dynamo.artifacts.storage import (
     ArtifactStorageError,
     ManagedFsspecTarget,
