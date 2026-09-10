@@ -163,6 +163,23 @@ def test_should_use_nvdec_false_when_unavailable(monkeypatch):
     assert nd.should_use_nvdec("h264") is False
 
 
+def test_frame_to_rgb_hwc_copies_out_of_decoder_memory():
+    """The decoder hands over host frames (``use_device_memory=False``) and is
+    free to recycle the underlying buffer between indexed reads, so the
+    conversion must copy. numpy arrays export DLPack exactly like a
+    ``DecodedFrame`` does: without the copy, torch wraps the buffer zero-copy
+    and mutating the source would corrupt the already-collected frame.
+    """
+    source = np.full((4, 6, 3), 7, dtype=np.uint8)
+
+    converted = nd._frame_to_rgb_hwc(source)
+    source[:] = 99  # the decoder reuses its buffer for the next frame
+
+    assert converted.dtype == np.uint8
+    assert converted.shape == (4, 6, 3)
+    np.testing.assert_array_equal(converted, np.full((4, 6, 3), 7, dtype=np.uint8))
+
+
 def test_decode_matches_frame_contract(monkeypatch):
     monkeypatch.setitem(
         sys.modules, "PyNvVideoCodec", _fake_pynv(num_frames=10, h=4, w=6)
