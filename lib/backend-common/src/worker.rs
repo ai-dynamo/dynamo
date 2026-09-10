@@ -1137,6 +1137,7 @@ impl Worker {
                 Ok(endpoint) => Some(endpoint),
                 Err(error) => {
                     self.begin_engine_route_shutdown().await;
+                    set_worker_health(&endpoint, HealthStatus::NotReady);
                     if let Err(shutdown_error) = primary_endpoint.shutdown().await {
                         tracing::warn!(%shutdown_error, "primary endpoint shutdown failed");
                     }
@@ -1156,6 +1157,10 @@ impl Worker {
         // readiness that shutdown has already invalidated.
         if shutdown.is_cancelled() {
             self.begin_engine_route_shutdown().await;
+            // Engine routes have been open since `activate_engine_routes`, so a
+            // resume control may already have published readiness. Withdraw it
+            // here as the serve loop's own teardown does.
+            set_worker_health(&endpoint, HealthStatus::NotReady);
             if let Some(rl_endpoint) = rl_endpoint
                 && let Err(error) = rl_endpoint.shutdown().await
             {
@@ -1171,7 +1176,7 @@ impl Worker {
         // First instant the worker is serviceable: every mandatory endpoint is
         // registered, the token is uncancelled, and engine routes are open.
         // Nothing earlier may report ready.
-        set_process_health(&endpoint, HealthStatus::Ready);
+        set_worker_health(&endpoint, HealthStatus::Ready);
 
         let serve_fut = primary_endpoint.wait();
         tokio::pin!(serve_fut);
@@ -1211,7 +1216,7 @@ impl Worker {
 
         // Symmetric with the ready write: stop advertising ready before the
         // orchestrator drains and unregisters.
-        set_process_health(&endpoint, HealthStatus::NotReady);
+        set_worker_health(&endpoint, HealthStatus::NotReady);
 
         if let Some(rl_endpoint) = rl_endpoint
             && let Err(error) = rl_endpoint.shutdown().await
@@ -1316,14 +1321,28 @@ impl Worker {
     }
 }
 
-/// Set the process-wide health the runtime's health route falls back to when no
-/// endpoint canary target is registered.
-fn set_process_health(endpoint: &dynamo_runtime::component::Endpoint, status: HealthStatus) {
-    endpoint
-        .drt()
-        .system_health()
-        .lock()
-        .set_health_status(status);
+/// Publish worker readiness on both layers the runtime's health route reads.
+///
+/// `SystemHealth::get_health_status` consults `use_endpoint_health_status`, then
+/// the canary targets, and only falls back to the process-wide status last. The
+/// operator renders those two shapes on different containers — worker base
+/// containers get `DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS`, failover engine
+/// containers have it stripped — so a write to either layer alone is invisible
+/// to half the fleet.
+///
+/// `Ready` goes through `set_endpoint_registered`, which skips the endpoint
+/// layer whenever that endpoint owns a canary target. Writing the target
+/// `Ready` here instead would report readiness the canary has not yet verified.
+fn set_worker_health(endpoint: &dynamo_runtime::component::Endpoint, status: HealthStatus) {
+    let system_health = endpoint.drt().system_health();
+    let mut system_health = system_health.lock();
+    match status {
+        HealthStatus::Ready => system_health.set_endpoint_registered(endpoint.name()),
+        HealthStatus::NotReady => {
+            system_health.set_endpoint_health_status(endpoint.name(), HealthStatus::NotReady)
+        }
+    }
+    system_health.set_health_status(status);
 }
 
 /// Drain-budget resolver: `DYN_PREFILL_DRAIN_TIMEOUT_S` with the same
@@ -1772,7 +1791,7 @@ fn wrap_engine_control_callback(
                     // control itself then succeeds or fails, the endpoint is
                     // left unregistered, so readiness stays withdrawn until a
                     // resume control re-registers it.
-                    set_process_health(&endpoint, HealthStatus::NotReady);
+                    set_worker_health(&endpoint, HealthStatus::NotReady);
 
                     let callback_result = tokio::select! {
                         biased;
@@ -1847,7 +1866,7 @@ fn wrap_engine_control_callback(
                             "engine resumed but re-registration failed after /engine/control/{control_name}: {e}; retry /engine/control/{control_name} to rejoin discovery"
                         )));
                     }
-                    set_process_health(&endpoint, HealthStatus::Ready);
+                    set_worker_health(&endpoint, HealthStatus::Ready);
                     Ok(response)
                 }
             }
@@ -3936,9 +3955,9 @@ mod handoff_and_lifecycle_tests {
 
     /// Assemble a worker whose engine supplies no health-check payload — the
     /// `LLMEngine` trait default — over the in-memory discovery runtime, and
-    /// hand back the process-wide health handle the runtime's health route
-    /// reads. With no payload there is no health-check target, so that route
-    /// falls through to the process-wide status and nothing else can mask it.
+    /// hand back the health handle the runtime's health route reads. With no
+    /// payload there is no canary target, so the route resolves to whichever of
+    /// the remaining branches the caller's environment selects.
     async fn payload_free_serving_worker() -> (
         dynamo_runtime::component::Endpoint,
         Arc<parking_lot::Mutex<dynamo_runtime::SystemHealth>>,
@@ -3968,11 +3987,39 @@ mod handoff_and_lifecycle_tests {
         false
     }
 
+    /// `DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS` as the operator renders it on a
+    /// worker base container. Selects the endpoint-health branch of
+    /// `SystemHealth::get_health_status`; absent, the process-wide fallback
+    /// branch runs instead, which is the shape a failover engine container gets.
+    const WORKER_CONTAINER_ENDPOINT_HEALTH: &str = r#"["generate"]"#;
+
+    /// Run `case` under each health-route shape the operator renders, so a
+    /// readiness write that lands on only one layer of the cascade fails here.
+    async fn with_each_health_route_shape<F, Fut>(case: F)
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        use dynamo_runtime::config::environment_names::runtime::system::DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS;
+
+        for endpoint_health in [None, Some(WORKER_CONTAINER_ENDPOINT_HEALTH)] {
+            temp_env::async_with_vars(
+                [(DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS, endpoint_health)],
+                case(),
+            )
+            .await;
+        }
+    }
+
     /// A pause control leaves the endpoint out of discovery, so readiness must
     /// be withdrawn with it and restored only once a resume control has
     /// re-registered.
     #[tokio::test]
     async fn engine_controls_track_readiness_with_discovery() {
+        with_each_health_route_shape(engine_controls_track_readiness_case).await;
+    }
+
+    async fn engine_controls_track_readiness_case() {
         let endpoint = test_local_endpoint().await;
         let system_health = endpoint.drt().system_health();
         let (engine, _) = HandoffMockEngine::new(
@@ -3984,7 +4031,7 @@ mod handoff_and_lifecycle_tests {
         worker.register_engine_controls(&endpoint).await.unwrap();
         worker.activate_engine_routes().await;
         endpoint.register_endpoint_instance().await.unwrap();
-        set_process_health(&endpoint, HealthStatus::Ready);
+        set_worker_health(&endpoint, HealthStatus::Ready);
 
         let routes = endpoint.drt().engine_routes();
         let response = routes.get("control/sleep").unwrap()(serde_json::json!({}))
@@ -4008,10 +4055,14 @@ mod handoff_and_lifecycle_tests {
         worker.begin_engine_route_shutdown().await;
     }
 
-    /// Ensures a payload-free Rust backend publishes process readiness while it
-    /// is serviceable and withdraws it again on shutdown.
+    /// Ensures a payload-free Rust backend publishes readiness while it is
+    /// serviceable and withdraws it again on shutdown.
     #[tokio::test]
     async fn shutdown_returns_the_serving_worker_to_not_ready() {
+        with_each_health_route_shape(shutdown_returns_the_serving_worker_to_not_ready_case).await;
+    }
+
+    async fn shutdown_returns_the_serving_worker_to_not_ready_case() {
         let (endpoint, system_health, mut worker, engine_config) =
             payload_free_serving_worker().await;
 
