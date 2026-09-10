@@ -552,8 +552,6 @@ async def _try_acquire_active_lock(lock: Any, engine_name: str) -> bool:
         await lock.acquire(engine_id=engine_name, timeout=0.0)
         return True
     except TypeError:
-        # Minimal test doubles may not accept keyword arguments. Treat those as
-        # uncontended locks so existing unit fakes keep the simple acquire path.
         await lock.acquire(engine_name)
         return True
     except FailoverLockContended:
@@ -561,13 +559,31 @@ async def _try_acquire_active_lock(lock: Any, engine_name: str) -> bool:
 
 
 async def _release_lock_after_activation_error(lock: Any, *, backend_name: str) -> None:
-    try:
-        await lock.release()
-    except BaseException:
-        logger.exception(
-            "[GMS failover] %s failed to release lock after activation error",
-            backend_name,
-        )
+    release = asyncio.create_task(lock.release())
+    cancelled: asyncio.CancelledError | None = None
+    while True:
+        try:
+            await asyncio.shield(release)
+            break
+        except asyncio.CancelledError as exc:
+            cancelled = exc
+            if release.cancelled():
+                logger.exception(
+                    "[GMS failover] %s lock release was cancelled",
+                    backend_name,
+                )
+                break
+            current = asyncio.current_task()
+            if current is not None:
+                current.uncancel()
+        except BaseException:
+            logger.exception(
+                "[GMS failover] %s failed to release lock after activation error",
+                backend_name,
+            )
+            break
+    if cancelled is not None:
+        raise cancelled
 
 
 async def acquire_gms_failover_lock_before_init(
