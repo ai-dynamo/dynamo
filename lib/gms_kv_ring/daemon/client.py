@@ -110,8 +110,6 @@ class DaemonClient:
             )
         return resp
 
-    # ---- API ----
-
     def directory_lookup(
         self,
         manifest_id: str,
