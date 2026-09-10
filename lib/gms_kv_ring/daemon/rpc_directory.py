@@ -14,6 +14,15 @@ from gms_kv_ring.daemon.rpc_types import Handler, Message, Response
 
 logger = logging.getLogger(__name__)
 
+SERVER_CONNECTION_ID = "__gms_server_connection_id"
+
+
+def _directory_connection_id(msg: Message) -> str:
+    # Direct handler calls are used by focused unit tests. Socket servers always
+    # replace this private field with an unforgeable per-connection identity.
+    return str(msg.get(SERVER_CONNECTION_ID) or "direct")
+
+
 if TYPE_CHECKING:
     from gms_kv_ring.daemon.kv_cache_manager import GmsKvCacheManager
 
@@ -95,11 +104,10 @@ def _directory_release_claim_locked(
     claim = daemon._content_directory_claims.pop(claim_token, None)
     if claim is None:
         return False
-    # Decrement based on CLAIM IDENTITY, not generation equality: adopt_claim
-    # overwrites an entry's generations, so a generation-gated decrement would
-    # skip and leak _claim_count, pinning the entry (unevictable/unreplaceable)
-    # for the daemon's lifetime. Each claim token incremented the count once, so
-    # release it once regardless of any subsequent generation change.
+    # Decrement based on CLAIM IDENTITY, not generation equality: concurrent
+    # TP ranks can stage a successor generation while older claims still refer
+    # to the preserved source generation. Each token incremented the count once,
+    # so release it once regardless of later adoption progress.
     for key, _generations in claim["entries"]:
         entry = daemon._content_directory.get(key)
         if entry is None:
@@ -122,6 +130,22 @@ def _directory_release_writer_claims_locked(
     for token in tokens:
         _directory_release_claim_locked(daemon, token)
     return len(tokens)
+
+
+def release_directory_connection_claims(
+    daemon: "GmsKvCacheManager",
+    connection_id: str,
+) -> int:
+    """Release eviction pins abandoned by a disconnected RPC client."""
+    with daemon._content_hash_lock:
+        tokens = [
+            token
+            for token, claim in daemon._content_directory_claims.items()
+            if claim.get("connection_id") == connection_id
+        ]
+        for token in tokens:
+            _directory_release_claim_locked(daemon, token)
+        return len(tokens)
 
 
 def _directory_entry_ready(daemon: "GmsKvCacheManager", entry: dict) -> bool:
@@ -375,6 +399,7 @@ def handle_directory_lookup_claim(
     """Lookup READY entries and pin every hit under one opaque claim."""
     manifest_id = str(msg.get("manifest_id", "")).strip()
     writer_id = str(msg.get("writer_id", "")).strip()
+    connection_id = _directory_connection_id(msg)
     try:
         expected_epoch = int(msg["expected_epoch"])
         content_hashes = [bytes.fromhex(str(h)) for h in msg.get("hashes", [])]
@@ -401,7 +426,22 @@ def handle_directory_lookup_claim(
             if entry is not None and not _directory_entry_ready(daemon, entry):
                 _directory_remove_locked(daemon, key)
                 entry = None
-            if entry is None or entry.get("state") != "ready":
+            # Tensor-parallel ranks share one logical directory writer, but
+            # each rank must adopt the preserved page in its device-local
+            # lease ring. The first rank changes the directory entry from
+            # READY to ACTIVE. Keep it claimable by the same fenced writer so
+            # slower ranks observe the identical prefix; hiding it here lets
+            # TP ranks choose different cache lengths and deadlock their next
+            # collective. Other writers are rejected by the fence above.
+            claimable = entry is not None and (
+                entry.get("state") == "ready"
+                or (
+                    entry.get("state") == "active"
+                    and entry.get("_owner_writer") == writer_id
+                    and entry.get("_pending_generations") is not None
+                )
+            )
+            if not claimable:
                 entries.append(None)
                 continue
             entry["_claim_count"] = int(entry.get("_claim_count", 0)) + 1
@@ -413,6 +453,7 @@ def handle_directory_lookup_claim(
             daemon._content_directory_claims[claim_token] = {
                 "writer_id": writer_id,
                 "epoch": expected_epoch,
+                "connection_id": connection_id,
                 "entries": claimed,
             }
         if os.environ.get("GMS_KV_DIRECTORY_DIAGNOSTICS"):
@@ -442,13 +483,24 @@ def handle_directory_release_claim(
     token = str(msg.get("claim_token", "")).strip()
     if not token:
         return {"ok": False, "error": "claim_token is required"}
+    connection_id = _directory_connection_id(msg)
     with daemon._content_hash_lock:
+        claim = daemon._content_directory_claims.get(token)
+        if claim is not None and claim.get("connection_id") != connection_id:
+            return {"ok": False, "error": "claim token belongs to another connection"}
         released = _directory_release_claim_locked(daemon, token)
     return {"ok": True, "released": released}
 
 
 def handle_directory_adopt_claim(daemon: "GmsKvCacheManager", msg: Message) -> Response:
-    """Commit new lease generations for HBM entries held by a claim."""
+    """Stage successor leases while keeping the claimed source stable.
+
+    TP ranks have device-local lease rings but share this logical directory.
+    Every rank must therefore claim the same source generation. The successor
+    becomes public only when the engine seals the adopted block and marks it
+    dormant; a crash before then leaves an ACTIVE entry that promotion drops.
+    """
+    connection_id = _directory_connection_id(msg)
     token = str(msg.get("claim_token", "")).strip()
     writer_id = str(msg.get("writer_id", "")).strip()
     manifest_id = str(msg.get("manifest_id", "")).strip()
@@ -465,6 +517,8 @@ def handle_directory_adopt_claim(daemon: "GmsKvCacheManager", msg: Message) -> R
         return {"ok": False, "error": f"malformed adopt: {exc}"}
     with daemon._content_hash_lock:
         claim = daemon._content_directory_claims.get(token)
+        if claim is not None and claim.get("connection_id") != connection_id:
+            return {"ok": False, "error": "claim token belongs to another connection"}
         if (
             claim is None
             or claim.get("writer_id") != writer_id
@@ -487,10 +541,16 @@ def handle_directory_adopt_claim(daemon: "GmsKvCacheManager", msg: Message) -> R
                 or len(generations) != len(entry.get("slot_ids") or [])
             ):
                 return {"ok": False, "error": "adopt entry is not a claimed HBM hit"}
+            pending = entry.get("_pending_generations")
+            if pending is not None and list(pending) != generations:
+                return {
+                    "ok": False,
+                    "error": "TP ranks produced different successor generations",
+                }
             parsed.append((key, entry, generations))
         _directory_release_claim_locked(daemon, token)
         for key, entry, generations in parsed:
-            entry["generations"] = generations
+            entry["_pending_generations"] = generations
             entry["state"] = "active"
             entry["_owner_writer"] = writer_id
             _directory_touch_locked(daemon, entry)
@@ -531,6 +591,9 @@ def handle_directory_mark_hbm_dormant(
                 or entry.get("_owner_writer") != writer_id
             ):
                 continue
+            pending = entry.pop("_pending_generations", None)
+            if pending is not None:
+                entry["generations"] = pending
             entry["state"] = "ready"
             entry.pop("_owner_writer", None)
             _directory_touch_locked(daemon, entry)

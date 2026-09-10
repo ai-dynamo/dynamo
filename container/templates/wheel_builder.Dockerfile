@@ -719,8 +719,10 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
 RUN mkdir -p /opt/dynamo/dist ${CARGO_TARGET_DIR} && \
     touch /opt/dynamo/dist/.placeholder.whl
 
-# Dev/local-dev skip the full COPY lib/ above, so copy gpu_memory_service source explicitly for the wheel build below
+# Dev/local-dev skip the full COPY lib/ above, so copy the GMS wheel sources
+# explicitly for the build below.
 COPY lib/gpu_memory_service/ /opt/dynamo/lib/gpu_memory_service/
+COPY lib/gms_kv_ring/ /opt/dynamo/lib/gms_kv_ring/
 {% endif %}
 
 # Build gpu-memory-service wheel → /opt/dynamo/dist/gpu_memory_service*.whl (small C++ extension, fast build -- all targets, all frameworks)
