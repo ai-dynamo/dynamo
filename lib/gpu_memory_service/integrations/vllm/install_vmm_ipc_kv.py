@@ -240,7 +240,9 @@ def _persistent_tag_plan_reattaches(
 
 
 @contextmanager
-def persistent_kv_allocation_context(manager, engine_id: str, kv_cache_config, device):
+def persistent_kv_allocation_context(
+    manager, engine_id: str, kv_cache_config, model_config, device
+):
     """Allocate vLLM KV through GMS with stable restart-safe identities.
 
     This is the supported integration point for vLLM versions that accept a
@@ -254,7 +256,9 @@ def persistent_kv_allocation_context(manager, engine_id: str, kv_cache_config, d
         set_persistent_allocator_tag_plan,
     )
 
-    tag_plan = _semantic_kv_tensor_tag_plan(kv_cache_config)
+    tag_plan = _semantic_kv_tensor_tag_plan(
+        kv_cache_config, _model_identity(model_config)
+    )
     reattaching = _persistent_tag_plan_reattaches(manager, engine_id, tag_plan)
     if tag_plan:
         set_persistent_allocator_tag_plan("kv_pool", tag_plan)

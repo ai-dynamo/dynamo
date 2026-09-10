@@ -448,6 +448,7 @@ class GMSWorker(Worker):
                 self._gms_kv_manager,
                 self._gms_kv_engine_id,
                 self._gms_kv_cache_config,
+                self.vllm_config.model_config,
                 torch.device("cuda", self._gms_device),
             )
         return super()._maybe_get_memory_pool_context(tag)
