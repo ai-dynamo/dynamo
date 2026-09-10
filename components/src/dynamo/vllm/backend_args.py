@@ -34,9 +34,7 @@ PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
 MAX_PORT = 65535
 
 # NIXL's own truthy tokens for NIXL_TELEMETRY_ENABLE, compared case-insensitively.
-# Restated here because NIXL exposes no predicate Dynamo could ask instead: the
-# Python surface has no effective-state readback, and building an agent during
-# argument parsing would make the transfer library a hard import dependency.
+# Restated here because NIXL exposes no predicate Dynamo could ask instead.
 _NIXL_TELEMETRY_ENABLED_VALUES = frozenset({"y", "1", "yes", "on", "true", "enable"})
 
 
