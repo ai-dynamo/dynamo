@@ -12,6 +12,7 @@ from tritonserver import Tensor as TritonTensor
 from tritonserver import TritonError
 
 from dynamo.common.backend.health_check import is_probe
+from dynamo.triton.classification import class_count, top_k_classifications
 from dynamo.triton.util import (
     TRITON_TO_DYNAMO_DTYPE,
     dynamo_tensor_to_numpy,
@@ -29,10 +30,12 @@ class RequestHandler:
     def __init__(self, server: TritonServer, model: TritonModel):
         self._server = server
         self._model = model
-        # Output schema is fixed at load time; cache to avoid a per-response lookup.
+        # Output schema and batching are fixed at load time; cache to avoid a
+        # per-response lookup.
         self._output_dtypes: dict[str, str] = {
             out["name"]: out["datatype"] for out in model.metadata()["outputs"]
         }
+        self._batched = model.config().get("max_batch_size", 0) > 0
 
     async def generate(self, request: dict) -> AsyncGenerator[dict, None]:
         logger.debug(f"Received request: {request}")
@@ -43,6 +46,9 @@ class RequestHandler:
             return
 
         self._validate_request(request)
+        requested_outputs = {
+            output["name"]: output for output in request.get("outputs") or []
+        }
 
         inference_request = self._model.create_request()
         for tensor in request["tensors"]:
@@ -54,11 +60,16 @@ class RequestHandler:
         async for inference_response in inference_responses:
             response_tensors = []
             for output_name, output_tensor in inference_response.outputs.items():
+                requested_output = requested_outputs.get(output_name)
+                if requested_outputs and requested_output is None:
+                    continue
+
                 triton_dtype = self._output_dtypes[output_name]
-                if triton_dtype not in TRITON_TO_DYNAMO_DTYPE.keys():
-                    raise TypeError(
-                        f"Requested dtype '{triton_dtype}', for output '{output_name}', is not supported."
-                    )
+                req_class_count = (
+                    class_count(requested_output.get("parameters") or {})
+                    if requested_output is not None
+                    else None
+                )
 
                 if triton_dtype == "BYTES":
                     # String/BYTES tensors are not DLPack-compatible; pull them as
@@ -74,6 +85,21 @@ class RequestHandler:
                         output_tensor = output_tensor.to_host()
 
                     response_arr = np.from_dlpack(output_tensor)
+
+                if req_class_count is not None:
+                    response_arr = top_k_classifications(
+                        response_arr,
+                        req_class_count,
+                        triton_dtype,
+                        self._batched,
+                        inference_response,
+                        output_name,
+                    )
+                    triton_dtype = "BYTES"
+                elif triton_dtype not in TRITON_TO_DYNAMO_DTYPE.keys():
+                    raise TypeError(
+                        f"Requested dtype '{triton_dtype}', for output '{output_name}', is not supported."
+                    )
 
                 dtype_str = TRITON_TO_DYNAMO_DTYPE.get(triton_dtype, triton_dtype)
                 response_tensors.append(
@@ -99,7 +125,9 @@ class RequestHandler:
             yield response
 
     def _validate_request(self, request: dict) -> None:
-        """Reject non-tensor requests and unsupported input dtypes early."""
+        """Reject non-tensor requests, unsupported input dtypes, requested
+        outputs the model does not produce, and an ill-formed classification
+        parameter."""
         if "tensors" not in request:
             raise ValueError(
                 "dynamo.triton only accepts tensor requests; missing 'tensors' "
@@ -116,6 +144,19 @@ class RequestHandler:
             raise ValueError(
                 f"dynamo does not support {' / '.join(bad_dtypes)} input tensors."
             )
+        unknown = sorted(
+            output["name"]
+            for output in request.get("outputs") or []
+            if output["name"] not in self._output_dtypes
+        )
+        if unknown:
+            names = " / ".join(f"'{name}'" for name in unknown)
+            raise ValueError(
+                f"unexpected inference output {names} for model "
+                f"'{self._model.name}'"
+            )
+        for output in request.get("outputs") or []:
+            class_count(output.get("parameters") or {})
 
     def _probe(self) -> dict:
         """Report readiness without invoking Triton inference.
