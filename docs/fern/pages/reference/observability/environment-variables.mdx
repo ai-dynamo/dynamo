@@ -280,10 +280,6 @@ See [Forward Pass Metrics Trace Reference](forward-pass-metrics-traces.mdx) for 
   Comma-separated record types: `request_end`, `request_payload`, and `tool`.
 </ParamField>
 
-<ParamField path="DYN_REQUEST_TRACE_OUTPUT_SEQUENCE_HASHES" type="boolean">
-  Opt in to generated-continuation sequence hashes on `request_end` rows. Dynamo retains no output text or token IDs.
-</ParamField>
-
 <ParamField path="DYN_REQUEST_TRACE_SINKS" type="string" default="file">
   Comma-separated sinks: `file`, `stderr`, `nats`, `otel`, and `s3`.
 </ParamField>

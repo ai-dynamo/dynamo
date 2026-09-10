@@ -67,7 +67,6 @@ pub(crate) fn build_request_end_trace_state(
         context,
         trace_block_size,
         super::policy().emit_request_end_records(),
-        super::policy().capture_output_sequence_hashes,
     )
 }
 
@@ -77,7 +76,6 @@ fn build_request_end_trace_state_for_policy(
     context: &Context<()>,
     trace_block_size: usize,
     request_trace_enabled: bool,
-    capture_output_sequence_hashes: bool,
 ) -> Option<RequestEndTraceState> {
     let has_agent_context = common_request.agent_context.is_some();
 
@@ -123,9 +121,10 @@ fn build_request_end_trace_state_for_policy(
 
     let request = RequestTraceRequestEndState {
         request_tracker,
-        output_sequence_hash_capture: capture_output_sequence_hashes.then(|| {
-            super::output_sequence_hash_capture(&common_request.token_ids, &replay_metrics)
-        }),
+        output_sequence_hash_capture: Some(super::output_sequence_hash_capture(
+            &common_request.token_ids,
+            &replay_metrics,
+        )),
         replay_metrics,
     };
 
@@ -407,7 +406,6 @@ mod tests {
             &context,
             2,
             true,
-            false,
         )
         .unwrap();
         let stream = TrackerDropStream {
@@ -475,8 +473,7 @@ mod tests {
         let tracker = Some(Arc::new(RequestTracker::new()));
         let context = Context::new(());
 
-        let state =
-            build_request_end_trace_state_for_policy(&request, &tracker, &context, 2, true, false);
+        let state = build_request_end_trace_state_for_policy(&request, &tracker, &context, 2, true);
 
         assert!(state.is_none());
     }
