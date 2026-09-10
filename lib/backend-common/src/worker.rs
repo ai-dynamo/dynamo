@@ -44,7 +44,7 @@ use crate::lifecycle::{
 use crate::publisher::{PublisherHandles, setup_publishers};
 use crate::shutdown::{
     CLEANUP_RESERVE_S, CLEANUP_TIMEOUT_ENV, KvTransferFallback, ShutdownBudget, ShutdownConfig,
-    Stage, StageOutcome, StageReason, cleanup_timeout, total_budget,
+    Stage, StageOutcome, StageReason, cleanup_timeout, force_exit_deadline,
 };
 
 /// Operator override for the health-check canary, mirrors the Python helper
@@ -552,11 +552,11 @@ impl Worker {
             tokio::select! {
                 result = &mut inner_fut => result,
                 _ = shutdown_token.cancelled() => {
-                    // The same total the stages spend against. Reading the
-                    // environment here instead would ignore a programmatic
-                    // `total_secs` and force-exit on a different deadline than
-                    // the one the budget was handing out.
-                    let deadline = total_budget(&shutdown_config);
+                    // The stage budget plus the cleanup floor: a stage may
+                    // legitimately spend everything, and `cleanup_once` is
+                    // still owed its floor after that. Firing at the end of the
+                    // stage budget killed the process mid-cleanup.
+                    let deadline = force_exit_deadline(&shutdown_config);
                     tracing::debug!(
                         "graceful shutdown started; deadline {}s",
                         deadline.as_secs(),
