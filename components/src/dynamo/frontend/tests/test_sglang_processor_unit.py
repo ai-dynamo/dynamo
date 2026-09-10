@@ -37,7 +37,6 @@ from dynamo.frontend.sglang_prepost import (
     SglangStreamingPostProcessor,
     _flatten_message_content,
     _guided_output_requires_reasoning,
-    _needs_structured_json_fallback,
     _normalize_assistant_tool_call_arguments,
     _normalize_prompt_token_ids,
     _normalize_sglang_parser_name,
@@ -1116,7 +1115,6 @@ def test_structured_response_respects_legacy_constraint_precedence(
 ):
     request = {"response_format": {"type": "json_schema"}, **legacy_constraint}
 
-    assert _needs_structured_json_fallback(request, True) is expected
     assert _guided_output_requires_reasoning(request, True, "qwen3") is expected
 
 
@@ -1132,7 +1130,7 @@ def test_structured_response_respects_legacy_constraint_precedence(
         pytest.param(True, True, True, False, id="pool-structured"),
     ],
 )
-def test_structured_response_generator_routes_json_and_preserves_streaming(
+def test_structured_response_generator_forwards_reasoning_gate(
     tokenizer, monkeypatch, use_pool, thinking, separate_reasoning, legacy_regex
 ):
     response_format = {
@@ -1156,13 +1154,7 @@ def test_structured_response_generator_routes_json_and_preserves_streaming(
     }
     if legacy_regex:
         request["guided_regex"] = "trueish"
-    response_text = "trueish" if legacy_regex else '{"answer":42}'
-    routed_engine = FakeRoutedEngine(
-        items=[
-            {"token_ids": tokenizer.encode(response_text, add_special_tokens=False)},
-            {"token_ids": [], "finish_reason": "stop"},
-        ]
-    )
+    routed_engine = FakeRoutedEngine(items=[{"token_ids": [], "finish_reason": "stop"}])
 
     class InlinePreprocessPool:
         # Keep the real worker and pool generator path without spawning processes.
@@ -1170,16 +1162,6 @@ def test_structured_response_generator_routes_json_and_preserves_streaming(
             future = Future()
             future.set_result(fn(*args))
             return future
-
-    fallback_flags = []
-
-    def capture_postprocessor(**kwargs):
-        fallback_flags.append(kwargs["structured_guided_json"])
-        return SglangStreamingPostProcessor(**kwargs)
-
-    monkeypatch.setattr(
-        sglang_processor_module, "SglangStreamingPostProcessor", capture_postprocessor
-    )
 
     if use_pool:
         monkeypatch.setattr(sglang_processor_module, "_w_tokenizer", tokenizer)
@@ -1204,41 +1186,21 @@ def test_structured_response_generator_routes_json_and_preserves_streaming(
     )
 
     async def collect():
-        responses = []
-        content_emission_positions = []
-        async for item in processor.generator(request):
-            if "data" not in item:
-                continue
-            for choice in item["data"]["choices"]:
-                responses.append(choice)
-                if choice["delta"].get("content"):
-                    content_emission_positions.append(routed_engine.yielded)
-        return responses, content_emission_positions
+        return [item async for item in processor.generator(request)]
 
-    responses, content_emission_positions = asyncio.run(collect())
+    asyncio.run(collect())
+    assert len(routed_engine.requests) == 1
     assert routed_engine.requests[0]["require_reasoning"] is (
         thinking and not legacy_regex
     )
-    assert fallback_flags == [thinking and not legacy_regex]
     if legacy_regex:
         assert routed_engine.requests[0]["sampling_options"]["guided_decoding"] == {
             "regex": "trueish"
         }
-    content = "".join(choice["delta"].get("content", "") for choice in responses)
-    reasoning = "".join(
-        choice["delta"].get("reasoning_content", "") for choice in responses
-    )
-    if legacy_regex:
-        assert content + reasoning == response_text
-        assert responses[-1]["finish_reason"] == "stop"
-        return
-    assert content == response_text
-    assert reasoning == ""
-    assert responses[-1]["finish_reason"] == "stop"
-    if not thinking or not separate_reasoning:
-        assert content_emission_positions[0] == 1
     else:
-        assert content_emission_positions == [2]
+        assert routed_engine.requests[0]["sampling_options"]["guided_decoding"] == {
+            "json": response_format["json_schema"]["schema"]
+        }
 
 
 class _CapturingReasoningParser:
@@ -4275,33 +4237,26 @@ class TestReasoningParsing:  # FRONTEND.9 — reasoning ↔ tool-call orchestrat
         ("chunk_size", "finish_with_tokens"), [(1, False), (10000, True)]
     )
     @pytest.mark.parametrize(
-        ("prefix", "response_json", "expected_reasoning", "finish_reason"),
+        ("text", "expected_reasoning", "expected_content", "finish_reason"),
         [
-            ("", '{"answer":42}', "", "stop"),
-            (" \n", '[{"answer":42}]', "", "stop"),
+            ('{"answer":42}', '{"answer":42}', "", "stop"),
+            ('{"answer":42}', '{"answer":42}', "", "length"),
             (
-                "Check the request.</think>",
+                '{"answer":41}</think>{"answer":42}',
+                '{"answer":41}',
                 '{"answer":42}',
-                "Check the request.",
                 "stop",
             ),
-            (
-                "[Check the request]</think>",
-                '{"answer":42}',
-                "[Check the request]",
-                "stop",
-            ),
-            ("", '{"answer":', '{"answer":', "length"),
         ],
     )
-    def test_structured_response_distinguishes_bare_json_from_reasoning(
+    def test_structured_response_preserves_reasoning_boundaries(
         self,
         tokenizer,
         chunk_size,
         finish_with_tokens,
-        prefix,
-        response_json,
+        text,
         expected_reasoning,
+        expected_content,
         finish_reason,
     ):
         _, reasoning_parser = create_parsers(
@@ -4325,9 +4280,8 @@ class TestReasoningParsing:  # FRONTEND.9 — reasoning ↔ tool-call orchestrat
             tokenizer=case_tokenizer,
             tool_call_parser=None,
             reasoning_parser=reasoning_parser,
-            structured_guided_json=True,
         )
-        token_ids = case_tokenizer.encode(prefix + response_json)
+        token_ids = case_tokenizer.encode(text, add_special_tokens=False)
         responses = []
         for offset in range(0, len(token_ids), chunk_size):
             is_last = offset + chunk_size >= len(token_ids)
@@ -4351,83 +4305,9 @@ class TestReasoningParsing:  # FRONTEND.9 — reasoning ↔ tool-call orchestrat
         reasoning = "".join(
             item["delta"].get("reasoning_content", "") for item in responses
         )
-        if finish_reason == "length":
-            assert content == ""
-        else:
-            assert content == (
-                prefix + response_json if not expected_reasoning else response_json
-            )
+        assert content == expected_content
         assert reasoning == expected_reasoning
         assert responses[-1]["finish_reason"] == finish_reason
-
-    @pytest.mark.core
-    @pytest.mark.timeout(60)
-    @pytest.mark.parametrize(
-        ("text", "expected_content", "expected_reasoning"),
-        [
-            ("42", "42", ""),
-            ("true", "true", ""),
-            ("false", "false", ""),
-            ("null", "null", ""),
-            ('"ok"', '"ok"', ""),
-            ('"contains { and ["', '"contains { and ["', ""),
-            ("-1.25e-3", "-1.25e-3", ""),
-            ('{"answer":42}<|structured_end|>', '{"answer":42}', ""),
-            ('{"answer":42} trailing text', "", '{"answer":42} trailing text'),
-            ('{"answer":42}<|unknown_end|>', "", '{"answer":42}<|unknown_end|>'),
-            ('{"answer":42}</think>43', "43", '{"answer":42}'),
-            ("42 is a candidate.</think>43", "43", "42 is a candidate."),
-        ],
-    )
-    def test_structured_response_scalars_and_trailing_tokens(
-        self, tokenizer, text, expected_content, expected_reasoning
-    ):
-        _, reasoning_parser = create_parsers(
-            {},
-            tool_call_parser_name=None,
-            reasoning_parser_name="qwen3",
-            force_reasoning=True,
-        )
-        assert reasoning_parser is not None
-        case_tokenizer = copy.deepcopy(tokenizer)
-        detector = reasoning_parser.detector
-        case_tokenizer.add_special_tokens(
-            {
-                "additional_special_tokens": [
-                    detector.think_start_token,
-                    detector.think_end_token,
-                    "<|structured_end|>",
-                ]
-            }
-        )
-        assert case_tokenizer.convert_tokens_to_ids("<|structured_end|>") != (
-            case_tokenizer.eos_token_id
-        )
-        post = SglangStreamingPostProcessor(
-            tokenizer=case_tokenizer,
-            tool_call_parser=None,
-            reasoning_parser=reasoning_parser,
-            structured_guided_json=True,
-        )
-        responses = []
-        for token_id in case_tokenizer.encode(text, add_special_tokens=False):
-            choice = post.process_output({"token_ids": [token_id]})
-            if choice:
-                responses.append(choice)
-        terminal = post.process_output({"token_ids": [], "finish_reason": "stop"})
-        assert terminal is not None
-        responses.append(terminal)
-        assert (
-            "".join(choice["delta"].get("content", "") for choice in responses)
-            == expected_content
-        )
-        assert (
-            "".join(
-                choice["delta"].get("reasoning_content", "") for choice in responses
-            )
-            == expected_reasoning
-        )
-        assert responses[-1]["finish_reason"] == "stop"
 
 
 # ---------------------------------------------------------------------------

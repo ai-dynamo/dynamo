@@ -370,17 +370,6 @@ def _guided_output_requires_reasoning(
     return response_format.get("type") != "text"
 
 
-def _needs_structured_json_fallback(
-    request: dict[str, Any], force_reasoning: bool
-) -> bool:
-    if not force_reasoning or legacy_guided_decoding(request):
-        return False
-    response_format = request.get("response_format")
-    if not isinstance(response_format, dict):
-        return False
-    return response_format.get("type") in {"json_object", "json_schema"}
-
-
 def _normalize_deepseek_v4_hint(value: Any) -> str:
     return str(value or "").lower().replace("-", "").replace("_", "")
 
@@ -1015,31 +1004,6 @@ def _try_parse_json_array(text: str) -> list | None:
     return None
 
 
-def _try_parse_structured_json(
-    text: str, trailing_special_tokens: set[str]
-) -> str | None:
-    """Retain one JSON value, allowing only known special tokens after it."""
-    stripped = text.lstrip()
-    try:
-        _, end = json.JSONDecoder().raw_decode(stripped)
-    except json.JSONDecodeError:
-        return None
-
-    suffix = stripped[end:]
-    if not suffix.strip():
-        return text
-    tokens = sorted(trailing_special_tokens - {""}, key=len, reverse=True)
-    while suffix:
-        suffix = suffix.lstrip()
-        if not suffix:
-            break
-        token = next((token for token in tokens if suffix.startswith(token)), None)
-        if token is None:
-            return None
-        suffix = suffix[len(token) :]
-    return text[: len(text) - len(stripped) + end]
-
-
 class SglangStreamingPostProcessor:
     """Streaming post-processor using SGLang parsers and HF tokenizer detokenization.
 
@@ -1062,7 +1026,6 @@ class SglangStreamingPostProcessor:
         eos_token_ids: list[int] | None = None,
         prompt_token_ids: list[int] | None = None,
         stop_strings: set[str] | None = None,
-        structured_guided_json: bool = False,
     ) -> None:
         self.tokenizer = tokenizer
         self.tool_call_parser = tool_call_parser
@@ -1078,12 +1041,11 @@ class SglangStreamingPostProcessor:
         # reasoning delimiters remain visible during incremental decoding.
         self._skip_special_tokens = self._fast_plain_text
         self._is_json_array_parser = isinstance(tool_call_parser, JsonArrayParser)
-        self._structured_guided_json = structured_guided_json
-        # Delay ambiguous JSON prefixes so bare values do not get trapped as
-        # reasoning. Required/named tools only need bracket-leading buffering.
-        needs_guided_buffer = self._is_json_array_parser or structured_guided_json
+        # Required/named guided output may be either bare JSON or
+        # reasoning followed by JSON. Delay only the ambiguous bracket-leading
+        # prefix so bare JSON does not get trapped as reasoning.
         self._pending_guided_reasoning_parts: list[str] | None = (
-            [] if needs_guided_buffer and reasoning_parser is not None else None
+            [] if self._is_json_array_parser and reasoning_parser is not None else None
         )
         self._eos_token_ids = set(eos_token_ids or [])
         self._stop_strings = stop_strings or set()
@@ -1402,32 +1364,19 @@ class SglangStreamingPostProcessor:
             and len(stripped) < len(think_start)
             and think_start.startswith(stripped)
         )
-        json_starts = '[{"-0123456789tfn' if self._structured_guided_json else "[{"
-        could_be_guided_json = bool(stripped and stripped[0] in json_starts)
 
         if not finish_reason and (
             not stripped
             or could_be_partial_start
-            or (could_be_guided_json and not starts_reasoning)
+            or (stripped[0] in "[{" and not starts_reasoning)
         ):
             return None, ""
 
         self._pending_guided_reasoning_parts = None
-        if finish_reason:
-            if self._structured_guided_json:
-                # Do not strip reasoning delimiters: JSON-looking thoughts
-                # followed by </think> still belong to the reasoning parser.
-                reasoning_tokens = {think_start, detector.think_end_token}
-                trailing_tokens = set(self.tokenizer.all_special_tokens)
-                json_text = _try_parse_structured_json(
-                    buffered, trailing_tokens - reasoning_tokens
-                )
-                if json_text is not None:
-                    return None, json_text
-            elif _try_parse_json_array(buffered) is not None:
-                return None, buffered
+        if finish_reason and _try_parse_json_array(buffered) is not None:
+            return None, buffered
 
-        if finish_reason and could_be_guided_json and not starts_reasoning:
+        if finish_reason and stripped and stripped[0] in "[{" and not starts_reasoning:
             reasoning_text, normal_text = self.reasoning_parser.parse_non_stream(
                 buffered
             )

@@ -33,7 +33,6 @@ from .sglang_prepost import (
     _client_wants_separate_reasoning,
     _get_history_tool_calls_count,
     _guided_output_requires_reasoning,
-    _needs_structured_json_fallback,
     convert_tools,
     create_parsers,
     detect_force_reasoning_from_template,
@@ -613,9 +612,6 @@ class SglangProcessor:
             eos_token_ids=self.eos_token_ids,
             prompt_token_ids=pre.prompt_token_ids,
             stop_strings=_request_stop_strings(request),
-            structured_guided_json=_needs_structured_json_fallback(
-                request, pre.force_reasoning
-            ),
         )
 
         async for item in self._generate_and_stream(
@@ -678,9 +674,6 @@ class SglangProcessor:
             eos_token_ids=self.eos_token_ids,
             prompt_token_ids=preproc_result.prompt_token_ids,
             stop_strings=_request_stop_strings(request),
-            structured_guided_json=_needs_structured_json_fallback(
-                request, preproc_result.force_reasoning
-            ),
         )
 
         async for item in self._generate_and_stream(
