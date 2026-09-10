@@ -158,9 +158,16 @@ def register_rl_routes(
     routes: Mapping[str, RLRouteHandler],
     *,
     enable_dispatch: bool,
+    gated_by: bool | None = None,
 ) -> None:
-    """Register worker system routes and optionally expose route descriptors."""
+    """Register worker system routes and optionally expose route descriptors.
+
+    ``gated_by`` marks the routes as sensitive: the runtime registers them only
+    when the gate is True (and never wires them otherwise, so they 404). Leave
+    it ``None`` for always-on routes. Independently, ``enable_dispatch`` controls
+    whether the routes are also exposed through the RL dispatch stream.
+    """
     for name, handler in routes.items():
-        runtime.register_engine_route(name, handler)
+        runtime.register_engine_route(name, handler, gated_by=gated_by)
         if enable_dispatch:
             registry.add_route(name, handler)

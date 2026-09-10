@@ -23,12 +23,16 @@ class _Runtime:
     def __init__(self, system_url: str | None = None) -> None:
         self.system_url = system_url
         self.registered: list[tuple[str, object]] = []
+        self.gated: list[tuple[str, bool | None]] = []
 
     def system_status_server_url(self) -> str | None:
         return self.system_url
 
-    def register_engine_route(self, name: str, handler: object) -> None:
+    def register_engine_route(
+        self, name: str, handler: object, gated_by: bool | None = None
+    ) -> None:
         self.registered.append((name, handler))
+        self.gated.append((name, gated_by))
 
 
 def test_route_registry_describes_routes() -> None:
@@ -92,6 +96,30 @@ def test_register_rl_routes_always_registers_engine_route() -> None:
     register_rl_routes(runtime, registry, {"ping": ping}, enable_dispatch=True)
 
     assert registry.routes == {"ping": ping}
+
+
+def test_register_rl_routes_passes_gated_by_through() -> None:
+    runtime = _Runtime()
+    registry = RLRouteRegistry(runtime)
+
+    async def ping(body: dict) -> dict:
+        return {"status": "ok", "body": body}
+
+    # Default: an always-on route registers ungated.
+    register_rl_routes(runtime, registry, {"ping": ping}, enable_dispatch=False)
+    assert runtime.gated == [("ping", None)]
+
+    # A sensitive route carries the gate flag to the runtime, which decides
+    # whether to wire it. enable_dispatch is independent of the gate.
+    runtime.gated.clear()
+    register_rl_routes(
+        runtime,
+        registry,
+        {"update_weights_from_disk": ping},
+        enable_dispatch=False,
+        gated_by=False,
+    )
+    assert runtime.gated == [("update_weights_from_disk", False)]
 
 
 def test_first_endpoint_response_returns_first_chunk() -> None:
