@@ -79,12 +79,9 @@ pub(crate) fn supports_family(family: &str) -> bool {
 /// engine, so it is not accepted.
 pub(crate) const UNIFIED_FAMILIES: &[&str] = &["muse_glimmer", "muse"];
 
-/// The parser names that route through the muse unified pass. Public accessor for
-/// [`UNIFIED_FAMILIES`] so the Python bindings can add muse to the selectable
-/// tool-call and reasoning parser names — fc's v1 registries dropped muse, so this
-/// is the only source of truth for the unified names.
+/// Parser names served exclusively by unified parsers, exposed to configuration and Python.
 pub fn unified_family_names() -> &'static [&'static str] {
-    UNIFIED_FAMILIES
+    &["muse_glimmer", "muse", "deepseek_v41"]
 }
 
 /// The unified family for a request, or `None`. Keyed on EITHER the tool-call or

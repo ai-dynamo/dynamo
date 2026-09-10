@@ -6,10 +6,7 @@ use dynamo_parsers::reasoning::get_available_reasoning_parsers;
 use dynamo_parsers::tool_calling::parsers::get_available_tool_parsers;
 use pyo3::prelude::*;
 
-/// Append the muse unified family names, skipping any already present. fc's v1
-/// registries dropped muse, so it lives only in dynamo's `UNIFIED_FAMILIES`;
-/// `unified_family` routes to the unified pass when EITHER the tool-call or the
-/// reasoning parser is a muse name, so both name lists must accept muse.
+/// Unified-only families are absent from the legacy parser registries.
 fn with_unified_families(mut names: Vec<&'static str>) -> Vec<&'static str> {
     for &name in unified_family_names() {
         if !names.contains(&name) {
