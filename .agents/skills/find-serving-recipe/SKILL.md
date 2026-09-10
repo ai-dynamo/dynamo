@@ -82,7 +82,10 @@ Two invocation contexts, with different outputs:
 - `docs/fern/pages/recipes/_catalog/`: the schema-validated machine-readable index
   (`index.yaml`, `recipes/*.yaml`, validated by `validate.py` against `schema.json`). Match on
   `model.hf_id`, `targets[].hardware`, `targets[].runtime.framework`, and `targets[].topology`.
-  Prefer `status: validated` and `recommended: true` targets. Surface the entry's `gaps` list in
+  Two fields live at different levels: `status` (`validated` or `experimental`) is an ENTRY-level
+  property and gates every target under it, while `recommended` is a TARGET-level property. Prefer
+  targets with `recommended: true` under entries with `status: validated`; an `experimental` entry
+  caps all of its targets at `hypothesis`. Surface the entry's `gaps` list in
   the dossier rather than hiding it.
 - The matched entry's `deploy.asset` points at the `recipes/<model>/.../deploy.yaml`
   DynamoGraphDeployment and its benchmark manifests; `expected_performance.summary` carries the
@@ -100,18 +103,22 @@ Consult in this order when Tier 0 yields no candidate meeting the required verdi
 
 1. **`vllm-project/recipes`** (vLLM engine). Consume the JSON API, not the YAML files:
    `https://recipes.vllm.ai/models.json`, then `/<hf_org>/<hf_repo>.json`, then
-   `/<hf_org>/<hf_repo>/hw/<hardware>.json`. Branch on the per-hardware response's
-   `deploy_type`: for `single_node` it returns `argv`, `docker_image`, `env`, and a
-   `hardware_profile` whose `gpu_count` is the total; for `multi_node` it returns `head_argv`,
-   `worker_argvs`, `node_count`, and a `hardware_profile` whose `gpu_count` is PER NODE, so the
-   total requirement is `node_count` times `gpu_count` (the `strategy_spec` names the
-   interconnect assumption, for example InfiniBand for multi-node TP). Never read the flat
-   single-node fields from a multi-node response; a missing `argv` is a schema branch, not an
-   absent recipe. Respect `min_vllm_version` and the per-hardware `verified` flag. Two caveats:
-   most recipes fall back to a mutable `latest` image (the tag gate then classifies them
-   ceiling-only unless the engagement pins its own image), and the exported JSON drops the
-   prefill/decode `strategy_overrides`; for disaggregated topology, read the recipe's YAML from
-   the git repo and compose against its `strategies.json`.
+   `/<hf_org>/<hf_repo>/hw/<hardware>.json`. Read the MODEL-LEVEL JSON first and take three
+   things from it, because they do not appear on the per-hardware response: the version floor at
+   `$.model.min_vllm_version` (variants may carry their own under `$.variants.<name>.min_vllm_version`),
+   the verification signal at `$.meta.hardware`, a hardware-to-status map (a hardware key absent from
+   that map is unverified for this model even if `/hw/<hardware>.json` renders a config), and the
+   freshness date at `$.meta.date_updated`. Then fetch the per-hardware response and branch on its
+   `deploy_type`: for `single_node` it returns `argv`, `docker_image`, `env`, and a `hardware_profile`
+   whose `gpu_count` is the total; for `multi_node` it returns `head_argv`, `worker_argvs`,
+   `node_count`, and a `hardware_profile` whose `gpu_count` is PER NODE, so the total requirement is
+   `node_count` times `gpu_count` (the `strategy_spec` names the interconnect assumption, for example
+   InfiniBand for multi-node TP). Never read the flat single-node fields from a multi-node response;
+   a missing `argv` is a schema branch, not an absent recipe. Two caveats: most recipes fall back to
+   a mutable `latest` image (the tag gate then classifies them ceiling-only unless the engagement
+   pins its own image), and the exported JSON drops the prefill/decode `strategy_overrides`; for
+   disaggregated topology, read the recipe's YAML from the git repo and compose against its
+   `strategies.json`.
 2. **`NVIDIA/srt-slurm-recipes`** for frontier models on Blackwell-class hardware, especially
    disaggregated and multi-node. Recipes are SLURM-shaped but carry the full engine
    configuration, worker split, and image. **Exclude `**/agentic/` and `*-sa/` paths from
@@ -202,7 +209,9 @@ Every candidate gets exactly one grade, decided by these conditions in order:
   SKU mapping); every infrastructure prerequisite the recipe declares is satisfiable on the
   stated target or has a documented adaptation; the image resolves to an immutable release tag
   or digest; the freshness check passes (current or immediately previous minor with unchanged
-  flags); the source is not marked experimental or unverified; and the translation into a
+  flags); the source is not marked experimental or unverified (for Tier 0 that is the ENTRY-level
+  `status`; for vLLM recipes it is the model-level `$.meta.hardware` map naming the target hardware);
+  and the translation into a
   DynamoGraphDeployment is mechanical (no guessed fields).
 - `hypothesis` otherwise: a real, fetched, resolvable config that needs porting, re-verification,
   adaptation, or a close-but-not-exact hardware or topology match before it could be proposed.
@@ -215,7 +224,9 @@ would promote it.
 Write the dossier as an IMMUTABLE snapshot at
 `<EXP_ROOT>/analysis/recipe-dossier/<NNN>-<UTC timestamp>.md` (NNN zero-padded, increasing per
 invocation), in both invocation contexts (the interviewer establishes `EXP_ROOT` before the
-ladder runs). Never modify a snapshot after writing it; a later invocation writes the next
+ladder runs). When invoked standalone with no `EXP_ROOT`, use `./recipe-dossier/` under the
+current working directory with the same layout and tell the operator where it landed.
+Never modify a snapshot after writing it; a later invocation writes the next
 snapshot and may summarize deltas against the previous one. Maintain
 `<EXP_ROOT>/analysis/recipe-dossier/index.md` listing every snapshot with its SHA256. Return the
 snapshot path and its SHA256 to the caller; callers cite exactly that pair, so an evidence record
