@@ -153,7 +153,6 @@ spec:
           - --tp
           - "1"
           - --trust-remote-code
-          - --skip-tokenizer-init
 ```
 
 </Tab>
@@ -643,7 +642,6 @@ spec:
           - --context-length
           - "32000"
           - --trust-remote-code
-          - --skip-tokenizer-init
           resources:
             requests:
               nvidia.com/gpu: "2"
