@@ -182,6 +182,7 @@ impl Qwen3VideoRoutingSpec {
 
         Ok(VideoRoutingReplacement {
             placeholder_token_id: self.video_token_id,
+            event_video_token_id: Some(self.video_token_id),
             target_tokens,
             replacement_tokens,
         })
