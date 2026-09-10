@@ -14,9 +14,7 @@ same mechanism the Rust frontend uses on reqwest's ``dns_resolver``
 
 Scope: this governs **direct** connections. When an egress proxy is configured,
 the proxy resolves the origin, so SSRF must be enforced at the proxy / network
-layer instead (true of the Rust path as well). httpx has no equivalent resolver
-hook, so it relies on the pre-check + per-hop redirect revalidation in
-``base.py`` (see the note in ``httpx_client``).
+layer instead (true of the Rust path as well).
 """
 
 from __future__ import annotations
@@ -31,7 +29,7 @@ class SsrfBlockedAddress(OSError):
     """Raised at connect time when every resolved IP is in a blocked range."""
 
 
-try:  # aiohttp is the default backend; httpx-only envs still import this module.
+try:  # guard the aiohttp import so the module still loads if aiohttp is absent.
     from aiohttp.abc import AbstractResolver
     from aiohttp.resolver import DefaultResolver
 
