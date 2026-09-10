@@ -47,11 +47,47 @@ pub(crate) struct DesiredInstance {
     pub(crate) group_key: GroupKey,
     pub(crate) fingerprint: String,
     pub(crate) projection_fingerprint: String,
+    /// Digest of the Qwen video prompt-expansion contract this worker
+    /// published, or `None` when it published none. Deliberately not part of
+    /// `fingerprint`: it is resolved across the cohort rather than per card.
+    pub(crate) video_contract: Option<String>,
 }
 
 impl DesiredInstance {
     fn materializes_worker_set(&self) -> bool {
         self.mcid.model_suffix.is_none()
+    }
+}
+
+/// The Qwen video prompt-expansion contract every member of the cohort
+/// published, or `None` when they do not all publish the same one.
+///
+/// A WorkerSet is served by a single video-routing processor, so it may only
+/// use a contract the whole cohort agrees on. Members can legitimately
+/// disagree: workers older than the contract publish nothing, and engine-level
+/// `--mm-processor-kwargs` can change the video token layout between two
+/// workers of the same version.
+fn cohort_video_contract(members: &[DesiredInstance]) -> Option<String> {
+    let mut members = members.iter();
+    let agreed = members.next()?.video_contract.clone()?;
+    members
+        .all(|member| member.video_contract.as_deref() == Some(agreed.as_str()))
+        .then_some(agreed)
+}
+
+/// Fold the cohort's video contract into the fingerprint the status machine
+/// compares against.
+///
+/// The contract is outside the card checksum, so a member joining or leaving
+/// can change what the cohort agrees on without changing any member's
+/// fingerprint. Folding it in here rebuilds the group on that transition
+/// instead of leaving it serving with a contract one of its members never
+/// published. A cohort with no agreement keeps the bare fingerprint, so
+/// deployments that never carry the contract are unaffected.
+fn cohort_fingerprint(fingerprint: &str, video_contract: Option<&str>) -> String {
+    match video_contract {
+        Some(contract) => format!("{fingerprint}\0video_contract\0{contract}"),
+        None => fingerprint.to_string(),
     }
 }
 
@@ -61,6 +97,9 @@ pub(crate) struct GroupSpec {
     pub(crate) fingerprint: String,
     pub(crate) generation: u64,
     pub(crate) representative: DesiredInstance,
+    /// The cohort-wide contract from [`cohort_video_contract`]. `None` means
+    /// the group must build with exact video routing disabled.
+    pub(crate) video_contract: Option<String>,
 }
 
 #[async_trait]
@@ -158,6 +197,14 @@ impl DesiredGroup {
             .entry(instance.fingerprint.clone())
             .or_default()
             .insert(instance.key.clone());
+    }
+
+    /// The one cohort's per-card fingerprint and members, or `None` while the
+    /// group is empty or in conflict.
+    fn sole_cohort(&self) -> Option<(&String, &BTreeSet<String>)> {
+        let mut cohorts = self.cohorts.iter();
+        let cohort = cohorts.next()?;
+        cohorts.next().is_none().then_some(cohort)
     }
 
     fn remove(&mut self, instance: &DesiredInstance) {
@@ -410,6 +457,8 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             .map(|(fingerprint, members)| (fingerprint.clone(), members.clone()))
             .expect("non-empty group has one cohort");
         let members = self.members(&member_keys);
+        let fingerprint =
+            cohort_fingerprint(&fingerprint, cohort_video_contract(&members).as_deref());
         let admitted = admitted_ids(&members);
         if !matches!(
             &old_status,
@@ -597,16 +646,21 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 continue;
             };
             let fingerprint = fingerprint.clone();
-            let Some(member_key) = group
-                .cohorts
-                .get(&fingerprint)
-                .and_then(|members| members.first())
-            else {
+            // The status carries the cohort fingerprint, which folds in the
+            // agreed video contract, so it is not a key into `cohorts`. A
+            // queued group has exactly one cohort — more than one is a
+            // conflict — so take that one.
+            let Some((_, member_keys)) = group.sole_cohort() else {
                 continue;
             };
-            let Some(representative) = self.desired.get(member_key).cloned() else {
+            let members = member_keys
+                .iter()
+                .filter_map(|member_key| self.desired.get(member_key).cloned())
+                .collect::<Vec<_>>();
+            let Some(representative) = members.first().cloned() else {
                 continue;
             };
+            let video_contract = cohort_video_contract(&members);
 
             let cancellation = CancellationToken::new();
             let generation = self.next_build_generation;
@@ -616,6 +670,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 fingerprint: fingerprint.clone(),
                 generation,
                 representative,
+                video_contract,
             };
             group.status = GroupStatus::Building {
                 fingerprint,
@@ -661,6 +716,21 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             }
             return;
         };
+        // `cohorts` is keyed by the per-card fingerprint while the spec carries
+        // the cohort fingerprint, which also folds in the agreed video
+        // contract. Derive the group's current cohort fingerprint rather than
+        // looking the spec's up, so a build stays current only while the cohort
+        // it was started for still describes the group.
+        let cohort_members = group
+            .sole_cohort()
+            .map(|(fingerprint, member_keys)| (fingerprint.clone(), member_keys.clone()))
+            .filter(|(fingerprint, member_keys)| {
+                cohort_fingerprint(
+                    fingerprint,
+                    cohort_video_contract(&self.members(member_keys)).as_deref(),
+                ) == result.spec.fingerprint
+            })
+            .map(|(_, member_keys)| member_keys);
         let is_current = matches!(
             &group.status,
             GroupStatus::Building {
@@ -668,8 +738,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 generation,
                 ..
             } if fingerprint == &result.spec.fingerprint && *generation == result.spec.generation
-        ) && group.cohorts.len() == 1
-            && group.cohorts.contains_key(&result.spec.fingerprint);
+        ) && cohort_members.is_some();
         if !is_current {
             if let BuildOutcome::Prepared(prepared) = result.outcome {
                 self.host.discard_prepared(prepared);
@@ -680,11 +749,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
 
         match result.outcome {
             BuildOutcome::Prepared(prepared) => {
-                let member_keys = group
-                    .cohorts
-                    .get(&result.spec.fingerprint)
-                    .cloned()
-                    .unwrap_or_default();
+                let member_keys = cohort_members.unwrap_or_default();
                 let members = self.members(&member_keys);
                 let adapters = self.adapters_for_members(&member_keys);
                 group.admission_tx.send_replace(admitted_ids(&members));
@@ -1045,6 +1110,7 @@ mod tests {
                 card,
                 fingerprint: "spec".to_string(),
                 projection_fingerprint: "projection".to_string(),
+                video_contract: None,
             }))
         }
 
@@ -1161,6 +1227,14 @@ mod tests {
             group_key: group_key(),
             fingerprint: fingerprint.to_string(),
             projection_fingerprint: fingerprint.to_string(),
+            video_contract: None,
+        }
+    }
+
+    fn instance_with_contract(id: u64, fingerprint: &str, contract: &str) -> DesiredInstance {
+        DesiredInstance {
+            video_contract: Some(contract.to_string()),
+            ..instance(id, fingerprint)
         }
     }
 
@@ -1256,6 +1330,107 @@ mod tests {
         host.release.add_permits(1);
         finish_build(&mut controller).await;
         assert_eq!(host.members(&group_key()), BTreeSet::from([compatible.key]));
+    }
+
+    /// A worker that predates the video contract publishes none, so a rolling
+    /// upgrade routinely mixes it with workers that do. The card checksum is
+    /// the same either way, so the two share a cohort and text serving
+    /// survives; only exact video routing is withdrawn, and it comes back once
+    /// the group agrees again.
+    #[tokio::test]
+    async fn a_worker_without_the_video_contract_joins_instead_of_conflicting() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        let current = instance_with_contract(1, "spec", "contract-a");
+        controller.apply_added(current.clone());
+        controller.start_queued_builds();
+        assert_eq!(
+            starts.recv().await.unwrap().video_contract.as_deref(),
+            Some("contract-a")
+        );
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+
+        let legacy = instance(2, "spec");
+        controller.apply_added(legacy.clone());
+        assert!(
+            !matches!(
+                controller.groups[&group_key()].status,
+                GroupStatus::Conflict
+            ),
+            "a member that publishes no contract must not conflict with one that does"
+        );
+        controller.start_queued_builds();
+        assert_eq!(
+            starts.recv().await.unwrap().video_contract,
+            None,
+            "the group must rebuild without a contract it cannot serve to every member"
+        );
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([current.key.clone(), legacy.key.clone()])
+        );
+
+        controller.apply_removed(&legacy.key);
+        controller.start_queued_builds();
+        assert_eq!(
+            starts.recv().await.unwrap().video_contract.as_deref(),
+            Some("contract-a"),
+            "draining the older worker restores exact video routing"
+        );
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(host.members(&group_key()), BTreeSet::from([current.key]));
+    }
+
+    /// Two workers of the same version can still publish different contracts,
+    /// because engine-level `--mm-processor-kwargs` changes the video token
+    /// layout. They serve as one group, without exact video routing, rather
+    /// than one being served with the other's contract.
+    #[tokio::test]
+    async fn differing_video_contracts_serve_together_without_exact_video_routing() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        let first = instance_with_contract(1, "spec", "contract-a");
+        controller.apply_added(first.clone());
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+
+        let second = instance_with_contract(2, "spec", "contract-b");
+        controller.apply_added(second.clone());
+        controller.start_queued_builds();
+        assert_eq!(starts.recv().await.unwrap().video_contract, None);
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([first.key, second.key])
+        );
+    }
+
+    /// The contract only forces a rebuild when the agreement itself changes.
+    #[tokio::test]
+    async fn an_agreeing_member_joins_without_rebuilding_the_group() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        let first = instance_with_contract(1, "spec", "contract-a");
+        controller.apply_added(first.clone());
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+
+        let second = instance_with_contract(2, "spec", "contract-a");
+        controller.apply_added(second.clone());
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([first.key, second.key])
+        );
+        assert_eq!(host.starts.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

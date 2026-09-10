@@ -36,6 +36,7 @@ use crate::{
     },
     local_model::runtime_config::{
         ModelRuntimeConfig, TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+        VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
     },
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
@@ -59,7 +60,6 @@ use crate::{
         tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
     },
     types::generic::realtime::{RealtimeClientEvent, RealtimeServerEvent},
-    utils::canonicalize_json,
     worker_type::WorkerType,
 };
 
@@ -433,6 +433,28 @@ where
             .await?;
 
         validate_selector_worker_role(card, self.require_typed_worker_role)?;
+
+        // One video-routing processor serves the whole WorkerSet, so it may
+        // only use a contract every member published. Where they disagree,
+        // withhold the contract from the card the pipeline is built from: the
+        // preprocessor then takes the same path as a worker that published no
+        // contract and leaves exact video routing off. Text serving, and every
+        // other member of the group, are untouched.
+        if spec.video_contract.is_none()
+            && card
+                .runtime_config
+                .runtime_data
+                .remove(VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY)
+                .is_some()
+        {
+            tracing::warn!(
+                target: "mm_routing",
+                model_name = card.name(),
+                group = %spec.key.id(),
+                "WorkerSet members publish different Qwen video prompt-expansion contracts; \
+                 exact video routing disabled for this group"
+            );
+        }
 
         // Use per-worker-set router config if the worker provided one in its MDC,
         // otherwise fall back to the frontend-level global config. Policy selections
@@ -1042,6 +1064,7 @@ where
         };
         let fingerprint = materialization_fingerprint(&card, &self.router_config)?;
         let projection_fingerprint = lora_projection_fingerprint(&card)?;
+        let video_contract = qwen_video_contract_digest(&card);
         Ok(Some(DesiredInstance {
             key: mcid.to_path(),
             mcid,
@@ -1050,6 +1073,7 @@ where
             group_key,
             fingerprint,
             projection_fingerprint,
+            video_contract,
         }))
     }
 
@@ -1329,6 +1353,48 @@ fn lora_projection_fingerprint(card: &ModelDeploymentCard) -> anyhow::Result<Str
     Ok(blake3::hash(&serde_json::to_vec(&value)?).to_string())
 }
 
+/// Digest of the Qwen video prompt-expansion contract this worker published, or
+/// `None` when it published none.
+///
+/// The frontend builds one video-routing processor per WorkerSet, so it may
+/// only use a contract every member agrees on. Workers derive the contract from
+/// their own packages and engine-level `--mm-processor-kwargs`, so two workers
+/// in the same deployment can legitimately publish different ones. Reducing the
+/// contract to a digest here lets the group compare members without carrying
+/// the payload around; see `discovery::controller::cohort_video_contract`.
+///
+/// The contract deliberately stays out of `mdcsum()`. Workers that predate it
+/// publish nothing, and a checksum split would put them in their own cohort,
+/// which removes the whole serving group rather than just the video routing.
+fn qwen_video_contract_digest(card: &ModelDeploymentCard) -> Option<String> {
+    let mut contract = card
+        .runtime_config
+        .runtime_data
+        .get(VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY)?
+        .clone();
+    canonicalize_json(&mut contract);
+    Some(blake3::hash(contract.to_string().as_bytes()).to_string())
+}
+
+fn canonicalize_json(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            let mut entries = std::mem::take(object).into_iter().collect::<Vec<_>>();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            for (key, mut value) in entries {
+                canonicalize_json(&mut value);
+                object.insert(key, value);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                canonicalize_json(value);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1457,6 +1523,7 @@ mod tests {
             endpoint_id,
             fingerprint: materialization_fingerprint(&card, &router_config).unwrap(),
             projection_fingerprint: lora_projection_fingerprint(&card).unwrap(),
+            video_contract: qwen_video_contract_digest(&card),
             card,
             group_key: key.clone(),
         };
@@ -1464,6 +1531,7 @@ mod tests {
             key,
             fingerprint: desired.fingerprint.clone(),
             generation: 1,
+            video_contract: desired.video_contract.clone(),
             representative: desired.clone(),
         };
         let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
@@ -1553,6 +1621,7 @@ mod tests {
             endpoint_id,
             fingerprint: materialization_fingerprint(&card, &router_config).unwrap(),
             projection_fingerprint: lora_projection_fingerprint(&card).unwrap(),
+            video_contract: qwen_video_contract_digest(&card),
             card,
             group_key: key.clone(),
         };
@@ -1560,6 +1629,7 @@ mod tests {
             key,
             fingerprint: desired.fingerprint.clone(),
             generation: 1,
+            video_contract: desired.video_contract.clone(),
             representative: desired,
         };
         let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
@@ -2180,6 +2250,49 @@ mod tests {
         assert_ne!(
             materialization_fingerprint(&round_robin, &frontend).unwrap(),
             materialization_fingerprint(&kv, &frontend).unwrap()
+        );
+    }
+
+    #[test]
+    fn qwen_video_contract_digest_identifies_the_contract_not_the_worker() {
+        use crate::local_model::runtime_config::VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY;
+
+        fn card_with_contract(contract: serde_json::Value) -> ModelDeploymentCard {
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.runtime_config.runtime_data.insert(
+                VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY.to_string(),
+                contract,
+            );
+            card
+        }
+
+        let legacy_ceil = serde_json::json!({
+            "placeholder_target": "bare_video_token",
+            "resize_mode": "legacy_ceil",
+        });
+        let round_ties_even = serde_json::json!({
+            "placeholder_target": "bare_video_token",
+            "resize_mode": "round_ties_even",
+        });
+
+        assert_eq!(
+            qwen_video_contract_digest(&ModelDeploymentCard::with_name_only("model")),
+            None,
+            "a worker that predates the contract publishes none"
+        );
+        assert_ne!(
+            qwen_video_contract_digest(&card_with_contract(legacy_ceil.clone())),
+            qwen_video_contract_digest(&card_with_contract(round_ties_even)),
+        );
+
+        // `serde_json` preserves key order in this workspace, so the same
+        // contract written in a different key order must still agree.
+        assert_eq!(
+            qwen_video_contract_digest(&card_with_contract(legacy_ceil)),
+            qwen_video_contract_digest(&card_with_contract(serde_json::json!({
+                "resize_mode": "legacy_ceil",
+                "placeholder_target": "bare_video_token",
+            }))),
         );
     }
 
