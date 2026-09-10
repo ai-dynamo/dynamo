@@ -1,0 +1,38 @@
+From: Cheng Wang <chengwa@nvidia.com>
+Subject: [PATCH] fix(k-exaone-2): pass prefix to ParallelLMHead in exaone_moe so quantization exclusions match
+
+K-EXAONE-2.0-750B-A37B-NVFP4 fails to load on vLLM 0.28.0 and 0.29.0:
+
+  vocab_parallel_embedding.py weight_loader
+  RuntimeError: The size of tensor a (3072) must match the size of tensor b
+                (6144) at non-singleton dimension 1
+
+exaone_moe.py constructs ParallelLMHead without a `prefix`, so it defaults to
+"". VocabParallelEmbedding.__init__ then calls
+quant_config.get_quant_method(self, prefix=""), and
+ModelOptNvFp4Config.is_layer_excluded("") cannot match any of the checkpoint's
+223 exclusion patterns. lm_head is therefore quantized and allocated as a
+packed NVFP4 param [vocab, hidden/2] = [.., 3072], which rejects the
+checkpoint's unquantized BF16 lm_head.weight [153600, 6144].
+
+Verified CPU-only against the checkpoint's own quantization config:
+  is_layer_excluded('lm_head') = True   is_layer_excluded('') = False
+  get_quant_method(ParallelLMHead, prefix='lm_head') -> UnquantizedLinearMethod
+  get_quant_method(ParallelLMHead, prefix='')        -> NVFP4 linear method
+
+The file already imports maybe_prefix and already uses it for "model" a few
+lines above. qwen3_moe.py and exaone4.py (same model family) both pass the
+prefix correctly; exaone_moe.py is the outlier.
+
+Only manifests for checkpoints that exclude lm_head from quantization, which is
+why BF16-validated upstream support PRs never hit it.
+
+--- a/vllm/model_executor/models/exaone_moe.py
++++ b/vllm/model_executor/models/exaone_moe.py
+@@ -521,5 +521,6 @@
+                 else lora_config.lora_vocab_padding_size,
+                 quant_config=quant_config,
++                prefix=maybe_prefix(prefix, "lm_head"),
+             )
+             if config.tie_word_embeddings:
+                 self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
