@@ -53,14 +53,14 @@ def _can_import_pil() -> bool:
     return _pil_importable
 
 
-def pytest_ignore_collect(collection_path, config):
+def can_import_deps() -> bool:
+    return _can_import_torch() and _can_import_pil()
+
+
+def pytest_ignore_collect(collection_path, config) -> bool:
     """Skip collecting multimodal test files when optional deps are missing."""
     filename = collection_path.name
-    if filename.startswith("test_") and (
-        not _can_import_torch() or not _can_import_pil()
-    ):
-        return True
-    return None
+    return filename.startswith("test_") and not can_import_deps()
 
 
 @pytest_asyncio.fixture(autouse=True)

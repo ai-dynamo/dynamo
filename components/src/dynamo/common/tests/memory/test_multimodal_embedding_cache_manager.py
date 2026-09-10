@@ -4,7 +4,8 @@
 """Unit tests for MultimodalEmbeddingCacheManager."""
 
 import pytest
-import torch
+
+torch = pytest.importorskip("torch")
 
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     CachedEmbedding,

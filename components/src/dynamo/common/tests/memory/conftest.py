@@ -30,9 +30,11 @@ def _can_import_torch() -> bool:
     return _torch_importable
 
 
-def pytest_ignore_collect(collection_path, config):
+def can_import_deps() -> bool:
+    return _can_import_torch()
+
+
+def pytest_ignore_collect(collection_path, config) -> bool:
     """Skip collecting memory test files if torch isn't installed."""
     filename = collection_path.name
-    if filename.startswith("test_") and not _can_import_torch():
-        return True
-    return None
+    return filename.startswith("test_") and not can_import_deps()

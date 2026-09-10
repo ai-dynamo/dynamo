@@ -48,14 +48,14 @@ def _can_import_tritonserver() -> bool:
     return _tritonserver_importable
 
 
-def pytest_ignore_collect(collection_path, config):
+def can_import_deps() -> bool:
+    return _can_import_tritonclient() and _can_import_tritonserver()
+
+
+def pytest_ignore_collect(collection_path, config) -> bool:
     """Skip collecting triton test files if triton deps aren't installed."""
     filename = collection_path.name
-    if filename.startswith("test_triton_"):
-        if not _can_import_tritonclient() or not _can_import_tritonserver():
-            return True
-
-    return None
+    return filename.startswith("test_triton_") and not can_import_deps()
 
 
 def make_cli_args_fixture(module_name: str):
