@@ -61,7 +61,7 @@ kubectl create namespace dynamo-lmcache
 </Step>
 <Step title="Create the HF token Secret" id="create-the-hf-token-secret">
 
-Both `Frontend` and `VllmDecodeWorker` reference `hf-token-secret` via a Secret ref.
+Both `Frontend` and `worker` reference `hf-token-secret` via a Secret ref.
 The Secret must exist or the pods fail to start with `secret "hf-token-secret" not found`.
 
 ```bash
@@ -121,7 +121,7 @@ kubectl -n dynamo-lmcache get lmcacheengine lmcache-mp
 
 Edit [`examples/backends/vllm/deploy/v1beta1/agg_lmcache.yaml`](https://github.com/ai-dynamo/dynamo/blob/fc626a5f053cdc4112d752be47eb08a303623311/examples/backends/vllm/deploy/v1beta1/agg_lmcache.yaml): replace
 `nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag` (on both `Frontend` and
-`VllmDecodeWorker`) with your Dynamo vllm-runtime image.
+`worker`) with your Dynamo vllm-runtime image.
 
 ```bash
 kubectl apply -n dynamo-lmcache -f examples/backends/vllm/deploy/v1beta1/agg_lmcache.yaml
