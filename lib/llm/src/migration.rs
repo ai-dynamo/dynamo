@@ -25,7 +25,7 @@ use crate::{
 };
 
 use dynamo_runtime::engine::Data;
-use dynamo_runtime::error::{self, DynamoError, ErrorType};
+use dynamo_runtime::error::{self, DynamoError, ErrorReason, ErrorType};
 use dynamo_runtime::metrics::prometheus_names::frontend_service;
 use dynamo_runtime::pipeline::{
     AsyncEngineContext, AsyncEngineContextProvider, Context, ManyOut, Operator, PipelineOperator,
@@ -70,15 +70,41 @@ impl HasTokenIds for LLMEngineOutput {
     }
 }
 
+fn blocks_migration(reason: &ErrorReason) -> bool {
+    matches!(
+        reason.as_str(),
+        "request.cancelled"
+            | "backend.cancelled"
+            | "capacity.exhausted"
+            | "capacity.pool_exhausted"
+    )
+}
+
+fn is_migration_eligible(reason: &ErrorReason) -> bool {
+    matches!(
+        reason.as_str(),
+        "transport.cannot_connect"
+            | "transport.disconnected"
+            | "transport.connection_timeout"
+            | "backend.cannot_connect"
+            | "backend.disconnected"
+            | "backend.connection_timeout"
+            | "backend.response_timeout"
+            | "backend.engine_shutdown"
+            | "backend.stream_incomplete"
+            | "capacity.worker_overloaded"
+    )
+}
+
 fn migratable_error_in_chain<'a>(err: &'a (dyn StdError + 'static)) -> Option<&'a DynamoError> {
     let mut migratable = None;
     let mut current = Some(err);
     while let Some(source) = current {
         if let Some(error) = source.downcast_ref::<DynamoError>() {
-            if error.reason().blocks_migration() {
+            if blocks_migration(error.reason()) {
                 return None;
             }
-            if error.reason().is_migration_eligible() {
+            if is_migration_eligible(error.reason()) {
                 migratable.get_or_insert(error);
             }
         }
