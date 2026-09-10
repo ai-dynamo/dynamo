@@ -661,15 +661,13 @@ func TestBugDGDRHubSpecAnnotationCarriesHubOnlyFields(t *testing.T) {
 		{
 			name: "kvRouter is the only feature",
 			spec: v1beta1.DynamoGraphDeploymentRequestSpec{
-				Model:          "Qwen/Qwen3-8B",
-				Backend:        v1beta1.BackendTypeVllm,
-				SearchStrategy: v1beta1.SearchStrategyRapid,
+				Model:   "Qwen/Qwen3-8B",
+				Backend: v1beta1.BackendTypeVllm,
 				Features: &v1beta1.FeaturesSpec{
 					KVRouter: &v1beta1.KVRouterSpec{Enabled: true},
 				},
 			},
 			wantSaved: &v1beta1.DynamoGraphDeploymentRequestSpec{
-				SearchStrategy: v1beta1.SearchStrategyRapid,
 				Features: &v1beta1.FeaturesSpec{
 					KVRouter: &v1beta1.KVRouterSpec{Enabled: true},
 				},
