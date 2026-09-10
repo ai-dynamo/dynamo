@@ -241,8 +241,6 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # CI; the content-hash correctness assertion lives in
             # tests/mm_router/test_router_rust_mm_frontend_decode_e2e.py.
             "agg_router_frontend_decode": TopologyConfig(
-                health_check_workers=True,
-                health_check_worker_count=2,
                 marks=[pytest.mark.post_merge],
                 timeout_s=400,
                 profiled_vram_gib=13.0,
@@ -290,8 +288,6 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 ],
             ),
             "epd_video": TopologyConfig(
-                health_check_workers=True,
-                health_check_worker_count=3,
                 # E/P/D regression gate: the decode handoff must retain both
                 # the reconstructed image placeholder and reloaded video.
                 marks=[
@@ -352,8 +348,6 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         short_name="qwen2.5-vl-3b",
         topologies={
             "agg_router": TopologyConfig(
-                health_check_workers=True,
-                health_check_worker_count=2,
                 marks=[pytest.mark.post_merge],
                 timeout_s=500,
                 profiled_vram_gib=19.0,
@@ -383,8 +377,6 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         short_name="qwen2-vl-2b",
         topologies={
             "agg_router": TopologyConfig(
-                health_check_workers=True,
-                health_check_worker_count=2,
                 marks=[pytest.mark.post_merge],
                 timeout_s=500,
                 profiled_vram_gib=16.0,
