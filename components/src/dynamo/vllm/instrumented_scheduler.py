@@ -1651,6 +1651,8 @@ class InstrumentedScheduler(AsyncScheduler):
         return super().has_requests()
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
+        if self._bench_prefix_reset_pending:
+            self._bench_retry_prefix_reset()
         if self._bench_active and self._bench_phase != _BenchPhase.IDLE:
             try:
                 output = self._bench_step()
@@ -1664,6 +1666,12 @@ class InstrumentedScheduler(AsyncScheduler):
                 raise
             if output is not None:
                 self.kv_cache_manager.new_step_starts()
+                if self.defer_block_free and output.total_num_scheduled_tokens > 0:
+                    # Mirror the parent's schedule(): the fence that guards
+                    # deferred block frees and CoW retentions advances once
+                    # per non-empty step, and update_from_output processes
+                    # this output like any other.
+                    self.sched_step_seq += 1
                 self._update_after_schedule(output)
                 try:
                     self._bench_synchronize_output(output)
@@ -2033,6 +2041,10 @@ class InstrumentedScheduler(AsyncScheduler):
 
     def _bench_init(self, vllm_config: "VllmConfig") -> None:
         """Parse benchmark config and initialise state machine."""
+        # A post-abort prefix-cache reset that found blocks still fenced is
+        # retried from schedule(); this state must outlive _bench_deactivate.
+        self._bench_prefix_reset_pending = False
+        self._bench_prefix_reset_attempts = 0
         bench_cfg = vllm_config.additional_config.get("benchmark")
         if not bench_cfg:
             self._bench_active = False
@@ -3812,42 +3824,110 @@ class InstrumentedScheduler(AsyncScheduler):
 
         return output
 
+    def _bench_frees_pending(self) -> bool:
+        """Whether blocks the benchmark released still wait behind the
+        scheduler's deferred-free fence: a step that may write them is in
+        flight, and their return to the pool follows its output (the parent
+        drains ``deferred_frees`` in ``update_from_output``). Schedulers
+        without the fence free immediately and never report pending frees."""
+        return bool(getattr(self, "deferred_frees", None))
+
+    def _bench_finish_requests(self, req_ids: Sequence[str]) -> None:
+        """Retire benchmark-owned requests through the scheduler's own abort
+        path instead of editing its bookkeeping by hand.
+
+        ``finish_requests`` removes them from every queue (waiting, skipped
+        and running -- a parked chain that is already out of ``running`` is
+        left alone) and runs ``_free_request``: the KV-connector and
+        encoder-cache callbacks, ``finished_req_ids`` for the worker, the
+        deferred-free fence for blocks a step may still write, and the
+        ``self.requests`` removal. Requests that vLLM already finished on its
+        own are skipped there, so a stale id is harmless.
+        """
+        if not req_ids:
+            return
+        self.finish_requests(list(req_ids), RequestStatus.FINISHED_ABORTED)
+
     def _bench_cleanup_requests(self) -> None:
         """Free all resources held by active benchmark requests."""
         kvwarm_borrowed: set[str] = getattr(self, "_kvwarm_borrowed_ids", set())
-        for req_id in list(self._bench_active_req_ids):
-            req = self.requests.get(req_id)
-            if req:
-                if req_id in kvwarm_borrowed:
-                    # Shadows are registered with the managers: freeing them
-                    # drops their shared-prefix references (the chain keeps
-                    # its own) and returns only the shadow-owned tail.
-                    kvwarm_borrowed.discard(req_id)
-                self._kvwarm_release_request(req)
-                self.finished_req_ids.add(req_id)
-                del self.requests[req_id]
-        running = self.running  # type: ignore[has-type]
-        self.running = [
-            r for r in running if r.request_id not in self._bench_active_req_ids
-        ]
+        # Shadows are registered with the managers like any request: freeing
+        # them drops their shared-prefix references (the chain keeps its own)
+        # and returns only the shadow-owned tail.
+        kvwarm_borrowed.difference_update(self._bench_active_req_ids)
+        self._bench_finish_requests(
+            [rid for rid in self._bench_active_req_ids if rid in self.requests]
+        )
         self._bench_active_req_ids.clear()
         self._schedule_times.clear()
         self._bench_extra_steps_left = 0
 
-    def _bench_clear_prefix_cache(self) -> None:
-        """Remove all synthetic prefix entries before normal serving starts."""
+    # Retry budget for a post-abort prefix-cache reset that found blocks still
+    # fenced. Serving traffic admitted meanwhile holds blocks of its own and
+    # keeps the reset failing, so the retries must end.
+    _BENCH_PREFIX_RESET_MAX_RETRIES = 64
+
+    def _bench_clear_prefix_cache(self, *, allow_pending: bool = False) -> bool:
+        """Remove all synthetic prefix entries before normal serving starts.
+
+        Returns True once the cache is cleared and False while blocks the
+        benchmark released still wait behind the deferred-free fence: the
+        DONE step then idles and calls again next step, whereas an abort
+        (``allow_pending``) has no later benchmark step, so it attempts the
+        reset regardless and, if that fails, hands the retry to
+        ``schedule()``. A failed reset with nothing fenced is a leak and
+        raises.
+        """
         if self._bench_prefix_cache_cleared:
-            return
+            return True
         if getattr(self, "_kvwarm_chain_ids", None):
             # KVWARM parked chains still pin blocks (timeout/exception paths skip
             # the busy chain release); return them to the pool first.
             self._kvwarm_shed_chains()
-        if not self.kv_cache_manager.reset_prefix_cache():
-            raise RuntimeError(
-                "failed to clear synthetic prefix cache after self-benchmark"
+        pending = self._bench_frees_pending()
+        if pending and not allow_pending:
+            return False
+        if self.kv_cache_manager.reset_prefix_cache():
+            self._bench_prefix_cache_cleared = True
+            self._bench_prefix_reset_pending = False
+            logger.info("Benchmark synthetic prefix cache cleared")
+            return True
+        if pending:
+            logger.warning(
+                "Synthetic prefix-cache reset postponed: released blocks are "
+                "still fenced by an in-flight step; retrying from schedule()"
             )
-        self._bench_prefix_cache_cleared = True
-        logger.info("Benchmark synthetic prefix cache cleared")
+            self._bench_prefix_reset_pending = True
+            self._bench_prefix_reset_attempts = 0
+            return False
+        raise RuntimeError(
+            "failed to clear synthetic prefix cache after self-benchmark"
+        )
+
+    def _bench_retry_prefix_reset(self) -> None:
+        """Retry a postponed post-abort prefix-cache reset (see
+        ``_bench_clear_prefix_cache``) at the top of ``schedule()`` until it
+        succeeds or the retry budget is spent."""
+        self._bench_prefix_reset_attempts += 1
+        if (
+            not self._bench_frees_pending()
+            and self.kv_cache_manager.reset_prefix_cache()
+        ):
+            self._bench_prefix_reset_pending = False
+            self._bench_prefix_cache_cleared = True
+            logger.info(
+                "Benchmark synthetic prefix cache cleared after %d retries",
+                self._bench_prefix_reset_attempts,
+            )
+            return
+        if self._bench_prefix_reset_attempts >= self._BENCH_PREFIX_RESET_MAX_RETRIES:
+            self._bench_prefix_reset_pending = False
+            logger.error(
+                "Giving up on the synthetic prefix-cache reset after %d retries; "
+                "the synthetic entries carry benchmark-only salts and stay until "
+                "evicted",
+                self._bench_prefix_reset_attempts,
+            )
 
     def _bench_synchronize_output(self, output: SchedulerOutput) -> None:
         """Release one measured point only after every ADP rank is ready."""
@@ -3944,7 +4024,7 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_grid_error = str(error)
         cleanup_error: Exception | None = None
         try:
-            self._bench_clear_prefix_cache()
+            self._bench_clear_prefix_cache(allow_pending=True)
         except Exception as prefix_error:
             cleanup_error = prefix_error
             self._bench_grid_error = (
@@ -4059,7 +4139,8 @@ class InstrumentedScheduler(AsyncScheduler):
         if self._bench_phase == _BenchPhase.DECODE_SWEEP:
             return self._bench_step_decode()
         if self._bench_phase == _BenchPhase.DONE:
-            self._bench_clear_prefix_cache()
+            if not self._bench_clear_prefix_cache():
+                return None  # released blocks still fenced: idle, retry next step
             if self._bench_synchronizer is not None:
                 self._bench_synchronizer.synchronize_cleanup()
             self._bench_finish_timing()
@@ -4911,7 +4992,13 @@ class InstrumentedScheduler(AsyncScheduler):
 
     def _kvwarm_step_busy(self) -> bool:
         """DECODE_SWEEP phase: chain-fleet build/park/turnover. True = hand this
-        step back to the real scheduler."""
+        step back to the real scheduler.
+
+        Chains shed while their last step is still in flight leave their
+        blocks behind the deferred-free fence; every shed branch then yields
+        the step (an idle pass for the real scheduler) until the in-flight
+        output has drained them, so nothing draws from a pool that is still
+        owed those blocks."""
         if not getattr(self, "_kvwarm_plan", None):
             return False
         if self._bench_active_req_ids or self._bench_current_point is not None:
@@ -4920,7 +5007,7 @@ class InstrumentedScheduler(AsyncScheduler):
         nxt = grid[0] if grid and grid[0].point_type == "decode" else None
         if nxt is None:
             self._kvwarm_shed_chains()
-            return False
+            return self._bench_frees_pending()
         if self._bench_soft_timeout_elapsed() or getattr(
             self, "_bench_stop_requested", False
         ):
@@ -4928,17 +5015,19 @@ class InstrumentedScheduler(AsyncScheduler):
             # let the decode step reach the coordinated timeout boundary.
             if self._kvwarm_chain_ids:
                 self._kvwarm_shed_chains()
-            return False
+            return self._bench_frees_pending()
         if not self._kvwarm_plan_covers(nxt):
             # Fake-fallback points need the whole pool: release the chains back
             # to the pool first, then let fake injection proceed.
             if self._kvwarm_chain_ids:
                 self._kvwarm_shed_chains()
-            return False
+            return self._bench_frees_pending()
         if self._kvwarm_building:
             return self._kvwarm_monitor_build()
         if self._kvwarm_stage_batch != nxt.batch_size:
             self._kvwarm_shed_chains()
+            if self._bench_frees_pending():
+                return True  # the next fleet would draw from blocks still fenced
             self._kvwarm_start_stage(nxt.batch_size, self._kvwarm_plan[nxt.batch_size])
             return True
         return False
@@ -5036,17 +5125,15 @@ class InstrumentedScheduler(AsyncScheduler):
         return True  # idle one more step; normal point flow resumes next tick
 
     def _kvwarm_shed_chains(self) -> None:
-        """Release every parked chain and return its blocks to the pool."""
-        for req_id in getattr(self, "_kvwarm_chain_ids", []):
-            req = self.requests.pop(req_id, None)
-            if req is not None:
-                self._kvwarm_release_request(req)
-                self.finished_req_ids.add(req_id)
-        self.running = [
-            r
-            for r in self.running
-            if r.request_id not in set(getattr(self, "_kvwarm_chain_ids", []))
-        ]
+        """Retire every chain, parked or still building, and return its blocks.
+
+        A parked chain is still RUNNING (only removed from ``self.running``);
+        a building one sits in the waiting or running queue mid chunked
+        prefill. The scheduler's abort path handles both, and blocks a step
+        may still write stay behind the deferred-free fence (callers wait on
+        ``_bench_frees_pending`` before drawing from the pool).
+        """
+        self._bench_finish_requests(list(getattr(self, "_kvwarm_chain_ids", [])))
         self._kvwarm_chain_ids = []
         self._kvwarm_chain_prompts = {}
         self._kvwarm_stage_batch = None
@@ -5078,16 +5165,6 @@ class InstrumentedScheduler(AsyncScheduler):
             injected + need <= len(self._kvwarm_chain_prompts[chains[i]])
             for i, injected in enumerate(injected_lengths)
         )
-
-    def _kvwarm_release_request(self, req) -> None:
-        """Return a benchmark request's blocks through the scheduler's own
-        free path so deferred-free fences (in-flight GPU steps) are honored;
-        older schedulers without the fence free immediately."""
-        free_fenced = getattr(self, "_free_request_blocks", None)
-        if callable(free_fenced):
-            free_fenced(req)
-        else:
-            self.kv_cache_manager.free(req)
 
     def _kvwarm_register_shadow(
         self, req_id: str, chain_id: str, ctx_len: int, headroom: int
@@ -5387,6 +5464,10 @@ class InstrumentedScheduler(AsyncScheduler):
             self._bench_drain_pending = True
             return None
 
+        if self._bench_frees_pending():
+            # The previous point's blocks are still fenced by an in-flight
+            # step; injecting now would find the pool short of them.
+            return None
         if self._bench_stop_at_timeout_boundary("decode"):
             return None
 

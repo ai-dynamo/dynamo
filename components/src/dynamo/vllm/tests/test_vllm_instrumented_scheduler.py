@@ -1267,6 +1267,7 @@ def _make_decode_sweep_stub(connector, ec_connector=None):
     """
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_active = True
+    stub._bench_prefix_reset_pending = False
     stub._bench_phase = _BenchPhase.DECODE_SWEEP
     stub._bench_active_req_ids = {"__bench_0"}
     stub.kv_cache_manager = MagicMock()
@@ -3009,10 +3010,8 @@ def test_prefill_real_seed_waits_for_each_shot_to_drain(monkeypatch):
     stub._bench_inject_prefill = inject
     stub._bench_point_deadline = 0.0
     stub._bench_stop_requested = False
-    stub.running = []
-    stub.finished_req_ids = set()
     stub._kvwarm_borrowed_ids = set()
-    stub._kvwarm_release_request = MagicMock()
+    stub.finish_requests = MagicMock()
     stub._bench_transition_to_timeout_done = lambda: False
 
     InstrumentedScheduler._bench_step_prefill(stub)  # staging injected
@@ -3328,8 +3327,8 @@ def test_benchmark_clear_prefix_cache_is_required_and_idempotent():
         reset_prefix_cache=MagicMock(return_value=True)
     )
 
-    InstrumentedScheduler._bench_clear_prefix_cache(stub)
-    InstrumentedScheduler._bench_clear_prefix_cache(stub)
+    assert InstrumentedScheduler._bench_clear_prefix_cache(stub) is True
+    assert InstrumentedScheduler._bench_clear_prefix_cache(stub) is True
 
     stub.kv_cache_manager.reset_prefix_cache.assert_called_once_with()
     assert stub._bench_prefix_cache_cleared is True
@@ -3354,7 +3353,9 @@ def test_benchmark_abort_clears_synthetic_prefix_cache_before_deactivation():
     InstrumentedScheduler._bench_abort(stub, RuntimeError("benchmark failed"))
 
     stub._bench_cleanup_requests.assert_called_once_with()
-    stub._bench_clear_prefix_cache.assert_called_once_with()
+    # An abort has no later benchmark step to retry from, so it must attempt
+    # the reset even while released blocks are still fenced.
+    stub._bench_clear_prefix_cache.assert_called_once_with(allow_pending=True)
     stub._bench_write_results.assert_called_once_with()
     stub._bench_deactivate.assert_called_once_with(resume_publisher=True)
     assert stub._bench_grid_error == "benchmark failed"
@@ -3569,7 +3570,7 @@ def test_benchmark_done_coordinates_cleanup_and_deactivates_before_publish():
     calls = MagicMock()
     stub._bench_start_timing = MagicMock()
     stub._bench_build_grid = MagicMock()
-    stub._bench_clear_prefix_cache = MagicMock()
+    stub._bench_clear_prefix_cache = MagicMock(return_value=True)  # nothing fenced
     stub._bench_synchronizer = MagicMock()
     stub._bench_finish_timing = MagicMock()
     stub._bench_deactivate = MagicMock()
@@ -4871,22 +4872,79 @@ def test_kvwarm_shadow_block_check_rejects_a_single_steady_step_margin():
         InstrumentedScheduler._kvwarm_register_shadow(stub, "shadow", "chain", 13, 3)
 
 
-def test_kvwarm_step_busy_stops_building_after_soft_timeout():
+def _fenced_frees(*, pending: bool) -> deque:
+    """``Scheduler.deferred_frees`` shape: ``(fence_seq, blocks)`` entries
+    that ``update_from_output`` drains once the fenced step is processed."""
+    return deque([(3, [])]) if pending else deque()
+
+
+def _kvwarm_busy_stub(point: BenchmarkPoint, *, chains=("chain-a",)):
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
-    stub._kvwarm_plan = {4: 64}
+    stub._kvwarm_plan = {4: 64, 2: 64}
     stub._bench_active_req_ids = set()
     stub._bench_current_point = None
-    stub._bench_grid = deque(
-        [BenchmarkPoint(point_type="decode", total_kv_read_tokens=256, batch_size=4)]
-    )
-    stub._bench_deadline_monotonic = 0.0  # already elapsed
-    stub._kvwarm_chain_ids = ["chain-a"]
-    stub._kvwarm_shed_chains = MagicMock()
-    stub._kvwarm_start_stage = MagicMock()
+    stub._bench_grid = deque([point])
+    stub._bench_deadline_monotonic = None
+    stub._bench_stop_requested = False
+    stub._kvwarm_chain_ids = list(chains)
     stub._kvwarm_building = False
+    stub._kvwarm_start_stage = MagicMock()
+    stub.deferred_frees = _fenced_frees(pending=False)
+
+    def shed():
+        # Like ``_kvwarm_shed_chains``: only a fleet that still holds chains
+        # can leave blocks behind the fence; an empty shed is a no-op.
+        if stub._kvwarm_chain_ids:
+            stub.deferred_frees = _fenced_frees(pending=True)
+        stub._kvwarm_chain_ids = []
+        stub._kvwarm_stage_batch = None
+
+    stub._kvwarm_shed_chains = MagicMock(side_effect=shed)
+    return stub
+
+
+def test_kvwarm_step_busy_stops_building_after_soft_timeout():
+    point = BenchmarkPoint(point_type="decode", total_kv_read_tokens=256, batch_size=4)
+    stub = _kvwarm_busy_stub(point)
+    stub._bench_deadline_monotonic = 0.0  # already elapsed
+    stub._kvwarm_shed_chains = MagicMock()  # parked chains: freed at once
     assert InstrumentedScheduler._kvwarm_step_busy(stub) is False
     stub._kvwarm_shed_chains.assert_called_once_with()
     stub._kvwarm_start_stage.assert_not_called()
+
+
+def test_kvwarm_step_busy_yields_one_idle_step_while_shed_blocks_are_fenced():
+    """A shed whose blocks are still behind the deferred-free fence hands the
+    step to the real scheduler (True) so the in-flight output can drain them;
+    the fake-fallback point proceeds (False) once the fence is clear."""
+    point = BenchmarkPoint(point_type="decode", total_kv_read_tokens=4096, batch_size=4)
+    stub = _kvwarm_busy_stub(point)
+    stub._kvwarm_plan_covers = lambda pt: False  # fake-fallback point
+
+    assert InstrumentedScheduler._kvwarm_step_busy(stub) is True
+    stub._kvwarm_shed_chains.assert_called_once_with()
+    stub._kvwarm_start_stage.assert_not_called()
+
+    stub.deferred_frees.clear()  # update_from_output drained the fence
+    assert InstrumentedScheduler._kvwarm_step_busy(stub) is False
+    stub._kvwarm_shed_chains.assert_called_once_with()
+
+
+def test_kvwarm_stage_switch_waits_for_fenced_frees_before_building():
+    """Switching rungs sheds the old fleet; the next fleet is launched only
+    once the old fleet's blocks have actually returned to the pool."""
+    point = BenchmarkPoint(point_type="decode", total_kv_read_tokens=64, batch_size=2)
+    stub = _kvwarm_busy_stub(point)
+    stub._kvwarm_plan_covers = lambda pt: True
+    stub._kvwarm_stage_batch = 4
+
+    assert InstrumentedScheduler._kvwarm_step_busy(stub) is True
+    stub._kvwarm_start_stage.assert_not_called()
+
+    stub.deferred_frees.clear()
+    assert InstrumentedScheduler._kvwarm_step_busy(stub) is True
+    stub._kvwarm_start_stage.assert_called_once_with(2, 64)
+    assert stub._kvwarm_shed_chains.call_count == 2
 
 
 class _FakeBlock:
@@ -5028,3 +5086,216 @@ def test_kvwarm_chain_parks_only_after_in_flight_tokens_drain():
     chain.num_output_placeholders = 0
     assert InstrumentedScheduler._kvwarm_monitor_build(stub) is True
     assert stub._kvwarm_building is False
+
+
+# ---------------------------------------------------------------------------
+# Benchmark request retirement goes through the scheduler's abort path
+# ---------------------------------------------------------------------------
+#
+# Chains and benchmark requests are retired with ``finish_requests`` +
+# ``RequestStatus.FINISHED_ABORTED`` (vllm/v1/core/sched/scheduler.py): it
+# drops them from the waiting, skipped and running queues and runs
+# ``_free_request`` (KV-connector and encoder-cache callbacks,
+# ``finished_req_ids`` for the worker, the deferred-free fence, the
+# ``self.requests`` removal). Editing those structures by hand skipped every
+# callback and left a chain still queued in ``waiting`` mid-build to be
+# re-admitted against a ``self.requests`` entry that no longer existed.
+
+
+def test_kvwarm_shed_chains_aborts_every_chain_through_finish_requests():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub.finish_requests = MagicMock()
+    stub._kvwarm_chain_ids = ["chain-a", "chain-b"]
+    stub._kvwarm_chain_prompts = {"chain-a": [1] * 8, "chain-b": [1] * 8}
+    stub._kvwarm_stage_batch = 2
+    stub._kvwarm_building = True
+
+    InstrumentedScheduler._kvwarm_shed_chains(stub)
+
+    stub.finish_requests.assert_called_once_with(
+        ["chain-a", "chain-b"], RequestStatus.FINISHED_ABORTED
+    )
+    assert stub._kvwarm_chain_ids == []
+    assert stub._kvwarm_chain_prompts == {}
+    assert stub._kvwarm_stage_batch is None
+    assert stub._kvwarm_building is False
+
+    # Nothing left to shed: the abort path is not entered at all.
+    InstrumentedScheduler._kvwarm_shed_chains(stub)
+    stub.finish_requests.assert_called_once()
+
+
+def test_bench_cleanup_finishes_live_requests_and_forgets_borrowed_shadows():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub.finish_requests = MagicMock()
+    stub._bench_active_req_ids = {"__bench_0", "__bench_1", "__bench_2"}
+    # __bench_2 already left through vLLM's own finish path.
+    stub.requests = {"__bench_0": object(), "__bench_1": object()}
+    stub._kvwarm_borrowed_ids = {"__bench_1", "__bench_9"}
+    stub._schedule_times = deque([1.0])
+    stub._bench_extra_steps_left = 2
+
+    InstrumentedScheduler._bench_cleanup_requests(stub)
+
+    ids, status = stub.finish_requests.call_args.args
+    assert sorted(ids) == ["__bench_0", "__bench_1"]
+    assert status is RequestStatus.FINISHED_ABORTED
+    assert stub._bench_active_req_ids == set()
+    assert stub._kvwarm_borrowed_ids == {"__bench_9"}
+    assert len(stub._schedule_times) == 0
+    assert stub._bench_extra_steps_left == 0
+
+
+# ---------------------------------------------------------------------------
+# Deferred-free fence: nothing draws from the pool while released blocks
+# are still owed to it
+# ---------------------------------------------------------------------------
+#
+# With ``defer_block_free`` (async scheduling on a KV consumer) the parent's
+# ``_free_request_blocks`` parks the blocks of a request whose last step is
+# still in flight in ``deferred_frees``; ``update_from_output`` returns them
+# to the pool once that step's output is processed. A shed or cleanup that
+# lands in this window must yield one idle step instead of injecting into a
+# pool that is short of those blocks, and the prefix-cache reset must wait
+# for them (a block with ref_cnt > 0 makes ``reset_prefix_cache`` fail).
+
+
+def test_bench_step_decode_waits_for_fenced_frees_before_injecting():
+    point = BenchmarkPoint(point_type="decode", total_kv_read_tokens=48, batch_size=3)
+    stub = _steady_injection_stub(point)
+    stub.deferred_frees = _fenced_frees(pending=True)
+
+    assert InstrumentedScheduler._bench_step_decode(stub) is None
+    stub._bench_inject_fake_decode.assert_not_called()
+    stub._bench_stop_at_timeout_boundary.assert_not_called()
+    assert list(stub._bench_grid) == [point]
+
+    stub.deferred_frees.clear()
+    assert InstrumentedScheduler._bench_step_decode(stub) is not None
+    stub._bench_inject_fake_decode.assert_called_once_with([15, 15, 15])
+
+
+def test_bench_done_step_idles_until_fenced_frees_drain():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_phase = _BenchPhase.DONE
+    stub._bench_start_timing = MagicMock()
+    stub._bench_build_grid = MagicMock()
+    stub._bench_clear_prefix_cache = MagicMock(return_value=False)
+    stub._bench_synchronizer = MagicMock()
+    stub._bench_finish_timing = MagicMock()
+    stub._bench_deactivate = MagicMock()
+    stub._bench_write_results = MagicMock()
+
+    assert InstrumentedScheduler._bench_step(stub) is None
+
+    stub._bench_clear_prefix_cache.assert_called_once_with()
+    stub._bench_synchronizer.synchronize_cleanup.assert_not_called()
+    stub._bench_finish_timing.assert_not_called()
+    stub._bench_deactivate.assert_not_called()
+    stub._bench_write_results.assert_not_called()
+    assert stub._bench_phase == _BenchPhase.DONE
+
+
+def test_clear_prefix_cache_waits_for_fenced_frees_and_retries_after_abort():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_prefix_cache_cleared = False
+    stub._bench_prefix_reset_pending = False
+    stub._bench_prefix_reset_attempts = 0
+    stub.kv_cache_manager = SimpleNamespace(
+        reset_prefix_cache=MagicMock(return_value=False)
+    )
+    stub.deferred_frees = _fenced_frees(pending=True)
+
+    # DONE step: no attempt while blocks are fenced; the step idles instead.
+    assert InstrumentedScheduler._bench_clear_prefix_cache(stub) is False
+    stub.kv_cache_manager.reset_prefix_cache.assert_not_called()
+    assert stub._bench_prefix_reset_pending is False
+
+    # Abort: try anyway; a failure with fenced blocks is postponed, not fatal.
+    assert (
+        InstrumentedScheduler._bench_clear_prefix_cache(stub, allow_pending=True)
+        is False
+    )
+    stub.kv_cache_manager.reset_prefix_cache.assert_called_once_with()
+    assert stub._bench_prefix_reset_pending is True
+    assert stub._bench_prefix_cache_cleared is False
+
+    # schedule() retries: still fenced, so no reset attempt is made.
+    InstrumentedScheduler._bench_retry_prefix_reset(stub)
+    stub.kv_cache_manager.reset_prefix_cache.assert_called_once_with()
+    assert stub._bench_prefix_reset_pending is True
+
+    # Drained: the retry succeeds and the cleared flag keeps its meaning.
+    stub.deferred_frees.clear()
+    stub.kv_cache_manager.reset_prefix_cache.return_value = True
+    InstrumentedScheduler._bench_retry_prefix_reset(stub)
+    assert stub.kv_cache_manager.reset_prefix_cache.call_count == 2
+    assert stub._bench_prefix_reset_pending is False
+    assert stub._bench_prefix_cache_cleared is True
+
+
+def test_clear_prefix_cache_retry_budget_is_bounded():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_prefix_cache_cleared = False
+    stub._bench_prefix_reset_pending = True
+    stub._bench_prefix_reset_attempts = 0
+    stub.deferred_frees = _fenced_frees(pending=False)
+    stub.kv_cache_manager = SimpleNamespace(
+        reset_prefix_cache=MagicMock(return_value=False)
+    )
+    budget = InstrumentedScheduler._BENCH_PREFIX_RESET_MAX_RETRIES
+
+    for _ in range(budget - 1):
+        InstrumentedScheduler._bench_retry_prefix_reset(stub)
+        assert stub._bench_prefix_reset_pending is True
+    InstrumentedScheduler._bench_retry_prefix_reset(stub)
+
+    assert stub._bench_prefix_reset_pending is False
+    assert stub._bench_prefix_cache_cleared is False
+    assert stub.kv_cache_manager.reset_prefix_cache.call_count == budget
+
+
+def test_schedule_retries_a_postponed_prefix_reset_first():
+    stub = _make_decode_sweep_stub(connector=None)
+    stub._bench_prefix_reset_pending = True
+    stub._bench_retry_prefix_reset = MagicMock()
+
+    InstrumentedScheduler.schedule(stub)
+
+    stub._bench_retry_prefix_reset.assert_called_once_with()
+
+
+def test_schedule_advances_the_deferred_free_fence_for_benchmark_steps():
+    """Benchmark-built outputs bypass the parent's ``schedule()``, which is
+    where ``sched_step_seq`` advances for every non-empty step (matched by
+    ``processed_step_seq`` in ``update_from_output``). Without the mirror a
+    request retired while its benchmark step is still in flight compares as
+    already processed and is freed at once instead of behind the fence."""
+    stub = _make_decode_sweep_stub(connector=None)
+    stub._bench_synchronize_output = MagicMock()
+    stub._schedule_times = deque()
+    stub.defer_block_free = True
+    stub.sched_step_seq = 5
+
+    stub._bench_step = MagicMock(
+        return_value=SimpleNamespace(total_num_scheduled_tokens=3)
+    )
+    InstrumentedScheduler.schedule(stub)
+    assert stub.sched_step_seq == 6
+    stub._update_after_schedule.assert_called_once()
+
+    # An empty benchmark output (injection shortfall) advances nothing, like
+    # the parent's 0-token steps.
+    stub._bench_step = MagicMock(
+        return_value=SimpleNamespace(total_num_scheduled_tokens=0)
+    )
+    InstrumentedScheduler.schedule(stub)
+    assert stub.sched_step_seq == 6
+
+    # Without the fence the counter is never touched.
+    stub.defer_block_free = False
+    stub._bench_step = MagicMock(
+        return_value=SimpleNamespace(total_num_scheduled_tokens=3)
+    )
+    InstrumentedScheduler.schedule(stub)
+    assert stub.sched_step_seq == 6
