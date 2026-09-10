@@ -135,7 +135,7 @@ opentelemetry_sdk = { version = "0.31.0", features = ["trace"] }
 tracing-subscriber = { version = "0.3", features = ["registry"] }
 
 [patch.crates-io]
-dynamo-tokenizers = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "368053eb760078fa34bf518910a20aa279c34c3d" }
+dynamo-tokenizers = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "30f723bfb2e99ead025ae07a1fe203777e761140" }
 
 [profile.profiling]
 inherits = "release"

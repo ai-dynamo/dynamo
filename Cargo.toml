@@ -201,7 +201,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rustls-pemfile = { version = "2" }
 
 [patch.crates-io]
-dynamo-tokenizers = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "368053eb760078fa34bf518910a20aa279c34c3d" }
+dynamo-tokenizers = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "30f723bfb2e99ead025ae07a1fe203777e761140" }
 
 [profile.dev.package]
 insta.opt-level = 3
