@@ -1473,3 +1473,99 @@ def test_validator_accepts_root_hook_move_after_networking_prepend(
             "value": "cluster-kv-transfer-config",
         }
         assert env[1]["name"] == "NCCL_SOCKET_IFNAME"
+
+
+def _attach_root_merge_patch(case: Path, document: dict[str, Any]) -> None:
+    (case / "patches" / "case-local.yaml").write_text(
+        yaml.safe_dump(document, sort_keys=False)
+    )
+    kustomization_path = case / "kustomization.yaml"
+    kustomization = yaml.safe_load(kustomization_path.read_text())
+    kustomization["patches"] = [
+        {
+            "target": {
+                "group": "nvidia.com",
+                "version": "v1beta1",
+                "kind": "DynamoGraphDeployment",
+            },
+            "path": "patches/case-local.yaml",
+        }
+    ]
+    kustomization_path.write_text(yaml.safe_dump(kustomization, sort_keys=False))
+
+
+def _worker_resource_patch(name: str, key: str, quantity: Any) -> dict[str, Any]:
+    return {
+        "name": name,
+        "podTemplate": {
+            "spec": {
+                "containers": [
+                    {
+                        "name": "main",
+                        "resources": {
+                            "requests": {key: quantity},
+                            "limits": {key: quantity},
+                        },
+                    }
+                ]
+            }
+        },
+    }
+
+
+def _template_gpu_quantity() -> Any:
+    template = TEMPLATE_ROOT / "trtllm" / "disagg" / "deploy-v1beta1.template.yaml"
+    dgd = next(
+        document
+        for document in yaml.safe_load_all(template.read_text())
+        if isinstance(document, dict)
+        and document.get("kind") == "DynamoGraphDeployment"
+    )
+    main = dgd["spec"]["components"][1]["podTemplate"]["spec"]["containers"][0]
+    return main["resources"]["requests"]["nvidia.com/gpu"]
+
+
+@pytest.mark.parametrize("keep_networking", (False, True))
+def test_validator_rejects_root_patch_replacing_portable_gpu_resources(
+    tmp_path: Path,
+    keep_networking: bool,
+) -> None:
+    current = _template_gpu_quantity()
+    doubled = str(int(current) * 2) if isinstance(current, str) else int(current) * 2
+    case = _root_merge_patch_case(
+        tmp_path,
+        _merge_patch(
+            [
+                {"name": "Frontend"},
+                _worker_resource_patch("PrefillWorker", "nvidia.com/gpu", doubled),
+                {"name": "DecodeWorker"},
+            ]
+        ),
+        keep_networking=keep_networking,
+    )
+    _assert_error(core._validate(case), "networking-delta")
+
+
+def test_validator_accepts_root_patch_replacing_component_added_resource(
+    tmp_path: Path,
+) -> None:
+    key = "example.com/prefill-rdma"
+    case = _filled_provider_case(tmp_path, "ib", *PROVIDER_BASES[2])
+    _attach_root_merge_patch(
+        case,
+        _merge_patch(
+            [
+                {"name": "Frontend"},
+                _worker_resource_patch("PrefillWorker", key, "4"),
+                {"name": "DecodeWorker"},
+            ]
+        ),
+    )
+
+    result = core._validate(case)
+    rendered = _components(_rendered_dgd(case))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    main = rendered["PrefillWorker"]["podTemplate"]["spec"]["containers"][0]
+    assert main["resources"]["requests"][key] == "4"
+    assert main["resources"]["limits"][key] == "4"

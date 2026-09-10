@@ -1988,6 +1988,36 @@ def _root_adds_network_shape(
     return True
 
 
+def _root_replaces_component_value(
+    layer: _PatchLayer,
+    op_index: int,
+    tokens: Tuple[str, ...],
+    kind: Optional[str],
+    env_entries: Set[Tuple[str, str]],
+    annotation_keys: Set[Tuple[str, str]],
+    resource_paths: Set[Tuple[str, str, str]],
+) -> bool:
+    """Return whether a root replace targets a value the networking Component added.
+
+    Root patches may retune what the selected networking Component introduced,
+    such as an RDMA resource quantity or a socket interface, but portable worker
+    values such as ``nvidia.com/gpu`` belong to the recipe base and stay out of
+    reach of case-local patches.
+    """
+
+    if len(tokens) < 3:
+        return False
+    component_index = tokens[2]
+    if kind == "resource":
+        return (component_index, tokens[-2], tokens[-1]) in resource_paths
+    if kind == "annotation" and len(tokens) == 7:
+        return (component_index, tokens[6]) in annotation_keys
+    if kind == "env-override":
+        name = _preceding_env_name_test(layer, op_index, tokens)
+        return name is not None and (component_index, name) in env_entries
+    return False
+
+
 def _networking_error(
     layer: _PatchLayer,
     op_index: int,
@@ -2016,6 +2046,8 @@ def _validate_networking_contract(
     mounts: Dict[Tuple[str, str], int] = {}
     volumes: Dict[Tuple[str, str], int] = {}
     component_env_entries: Set[Tuple[str, str]] = set()
+    component_annotation_keys: Set[Tuple[str, str]] = set()
+    component_resource_paths: Set[Tuple[str, str, str]] = set()
     for component_layer in layers:
         if not (
             component_layer.root_component is not None
@@ -2033,16 +2065,28 @@ def _validate_networking_contract(
                 op_index=component_op_index,
             )
             component_value = component_operation.get("value")
-            if (
-                len(component_tokens) >= 3
-                and component_tokens[-2] == "env"
-                and _is_list_slot(component_tokens[-1])
-                and isinstance(component_value, dict)
-                and isinstance(component_value.get("name"), str)
-            ):
-                component_env_entries.add(
-                    (component_tokens[2], component_value["name"])
+            if len(component_tokens) < 3:
+                continue
+            component_index = component_tokens[2]
+            component_kind = _network_operation_kind(
+                component_layer, component_op_index, component_operation
+            )
+            if component_kind == "env-append" and isinstance(component_value, dict):
+                component_env_entries.add((component_index, component_value["name"]))
+            elif component_kind == "resource":
+                component_resource_paths.add(
+                    (component_index, component_tokens[-2], component_tokens[-1])
                 )
+            elif component_kind == "annotation" and isinstance(component_value, dict):
+                if component_tokens[-1] == "metadata":
+                    added = component_value.get("annotations", {})
+                else:
+                    added = component_value
+                component_annotation_keys.update(
+                    (component_index, key) for key in added
+                )
+            elif component_kind == "annotation" and len(component_tokens) == 7:
+                component_annotation_keys.add((component_index, component_tokens[6]))
 
     for layer in layers:
         owner_is_network = bool(
@@ -2136,6 +2180,24 @@ def _validate_networking_contract(
                     operation,
                     "networking delta is nested under an unrelated root concern",
                 )
+            elif operation["op"] == "replace":
+                if not _root_replaces_component_value(
+                    layer,
+                    op_index,
+                    tokens,
+                    kind,
+                    component_env_entries,
+                    component_annotation_keys,
+                    component_resource_paths,
+                ):
+                    raise _networking_error(
+                        layer,
+                        op_index,
+                        operation,
+                        "root patches may only replace networking values that the "
+                        "selected networking Component adds; portable worker "
+                        "resources belong to the recipe base",
+                    )
             else:
                 if network_root is None:
                     raise _networking_error(
@@ -2150,16 +2212,12 @@ def _validate_networking_contract(
                     if isinstance(operation.get("value"), dict)
                     else None
                 )
-                replaces_selected_value = (
-                    kind in {"annotation", "env-override", "resource"}
-                    and operation["op"] == "replace"
-                )
                 repeats_component_env = (
                     kind == "env-append"
                     and operation["op"] == "add"
                     and (tokens[2], root_append_name) in component_env_entries
                 )
-                if not replaces_selected_value and not repeats_component_env:
+                if not repeats_component_env:
                     raise _networking_error(
                         layer,
                         op_index,

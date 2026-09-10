@@ -239,12 +239,14 @@ A selected networking Component must follow `scheduling` and precede
 `placement`; a root `patches:` entry cannot replace that Component slot. The
 validator reports more than one networking Component, mixed generic and
 provider or private networking, or a misplaced networking Component as
-`networking-slot`. A root patch may replace or move values that the canonical
-workers already carry, such as the framework hooks, but it may not add
-annotations, environment entries, extended resources, mounts, or volumes to
-`Worker`, `PrefillWorker`, or `DecodeWorker` under any name; the validator
-reports that as `networking-delta`. Optional components after the canonical
-three may still receive case-local networking patches.
+`networking-slot`. A root patch may replace the framework hook values and the
+networking values that the selected networking Component added, such as an
+RDMA resource quantity, but it may not add annotations, environment entries,
+extended resources, mounts, or volumes to `Worker`, `PrefillWorker`, or
+`DecodeWorker` under any name, and it may not replace portable worker
+resources such as `nvidia.com/gpu`; the validator reports both as
+`networking-delta`. Optional components after the canonical three may still
+receive case-local networking patches.
 
 ### Root aggregate example
 
