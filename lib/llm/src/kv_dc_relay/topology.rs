@@ -1015,8 +1015,7 @@ mod tests {
         let topology = entry(&snapshot, "llama");
 
         // Parity with the core evaluation: every role has a live endpoint, so the
-        // topology stays ready, and both duplicated roles are reported as the
-        // reason their pairing is suppressed.
+        // topology stays ready and both duplicated roles are reported.
         assert_eq!(topology.state, TopologyReadinessState::Ready);
         assert_eq!(
             topology.duplicate_role_endpoints,

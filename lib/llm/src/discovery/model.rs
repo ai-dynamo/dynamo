@@ -461,10 +461,8 @@ impl Model {
                 .collect();
             missing_vec.sort();
 
-            // A duplicated role no longer withholds the namespace from serving, so
-            // it has to be reported on the *ready* path: it is still a real
-            // misconfiguration an operator has to clear, and the pairing it
-            // disables is a capability the deployment asked for.
+            // A duplicated role is a real misconfiguration and disables that role's
+            // pairing, so report it on the ready path too, not only when unready.
             let ambiguous_reason = (!eval.ambiguous.is_empty()).then(|| {
                 let mut roles = eval
                     .ambiguous
@@ -2071,9 +2069,8 @@ mod tests {
             "a ready-but-ambiguous namespace must still name the duplicated role, got {reason:?}"
         );
 
-        // Negative control: drop the decode WorkerSet and the same namespace is
-        // genuinely incomplete (prefill-only, needs unsatisfied). It must stay
-        // unservable — relaxing ambiguity must not relax the missing-role gate.
+        // Negative control: a prefill-only namespace is genuinely incomplete —
+        // relaxing ambiguity must not relax the missing-role gate.
         model.remove_worker_set("pd");
         assert!(
             !model.is_workers_ready("pd"),

@@ -245,9 +245,8 @@ mod tests {
             unit(Some(WorkerType::Prefill), 1, vec![vec![WorkerType::Decode]]),
             unit(Some(WorkerType::Decode), 1, vec![vec![WorkerType::Prefill]]),
         ]);
-        // The duplicated role is detected and reported, and the live decode
-        // worker keeps the namespace servable: ambiguity suppresses pairing,
-        // not serving.
+        // The duplicated role is reported, and the live decode worker keeps the
+        // namespace servable: ambiguity suppresses pairing, not serving.
         assert!(evaluation.ready);
         assert_eq!(evaluation.ambiguous, HashSet::from([WorkerType::Prefill]));
 
