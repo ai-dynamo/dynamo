@@ -572,14 +572,6 @@ shared:
 # not that the owner is the right one. Ops and process both hold repo-wide
 # process authority, and under "any one approves" either can unblock a routing
 # change without a third team having to weigh in on paths it does not own.
-- glob: .github/review-prompts/frontend.md
-  owners:
-  - ops
-  - frontend
-- glob: .github/review-prompts/runtime.md
-  owners:
-  - ops
-  - runtime
 - glob: .github/codeowners/areas.yaml
   owners:
   - ops

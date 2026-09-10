@@ -11,14 +11,16 @@ CODEOWNERS groups. They guide independent reviewers toward concrete defects in t
 current change. They do not replace human codeowner review or establish new API
 contracts from historical feedback.
 
-The review bot loads both files from one fetched commit on `ai-dynamo/dynamo`'s
-`main` branch. Changes to these prompts in a pull request take effect after they
-reach `main`; the bot never uses the pull request's copies as review instructions.
-Both prompts receive the same reviewed checkout, base and head commits, architecture
-context, and complete PR history as the existing reviewers. They return only a JSON
-object containing a `findings` array, with `path`, `start_line`, `end_line`, an empty
-`test_ids` array, `body`, and `ai_fix` in each finding. Line ranges must contain only
-added RIGHT-side lines. An empty findings array means that no new defect qualifies.
+Use either prompt directly with a coding assistant and identify the change to review,
+such as a pull request, commit range, or local diff. The assistant needs access to
+the diff and surrounding source. Include existing review discussion when available
+so it can avoid repeating reported defects. The prompts describe what to investigate
+and what makes a finding actionable; they do not require a particular review tool
+or response schema.
+
+The [review bot](https://github.com/NVIDIA-dev/dynamo-review-agent) also uses these
+prompts. It loads them from one fetched commit on Dynamo main and adds its own
+execution and output instructions. Those integration details belong in the bot.
 
 Two independent research agents collected the source discussions on September 10,
 2026. The frontend sample contains 40 selected PRs and their complete 617 inline
@@ -47,7 +49,7 @@ applied. The prompts therefore require inspection of the current code and discus
 before reporting a defect, and exclude speculative, pre-existing, duplicate, stylistic,
 and missing-test-only findings.
 
-Keep these prompts in plain English and preserve the shared output contract when
-updating them. Add a concern when multiple source discussions substantiate it, retain
+Keep these prompts in plain English and usable directly when updating them. Add a
+concern when multiple source discussions substantiate it, retain
 the concrete behavioral distinction, and avoid turning a historical fix into an
 unconditional requirement for unrelated changes.
