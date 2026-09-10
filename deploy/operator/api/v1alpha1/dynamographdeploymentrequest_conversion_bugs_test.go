@@ -648,6 +648,88 @@ func TestBugDGDRLegacyUnnamedKeptDistinctWhenProfilerExists(t *testing.T) {
 	}
 }
 
+// The reported symptom was that a hub DGDR whose only hub-only content is
+// features.kvRouter reaches the v1alpha1 view with no nvidia.com/dgdr-spec
+// annotation at all, so the value has no carrier.
+func TestBugDGDRHubSpecAnnotationCarriesHubOnlyFields(t *testing.T) {
+	tests := []struct {
+		name string
+		spec v1beta1.DynamoGraphDeploymentRequestSpec
+		// wantSaved is the payload the annotation must decode to, or nil when
+		// the object has nothing hub-only and must carry no annotation.
+		wantSaved *v1beta1.DynamoGraphDeploymentRequestSpec
+	}{
+		{
+			name: "kvRouter is the only feature",
+			spec: v1beta1.DynamoGraphDeploymentRequestSpec{
+				Model:          "Qwen/Qwen3-8B",
+				Backend:        v1beta1.BackendTypeVllm,
+				SearchStrategy: v1beta1.SearchStrategyRapid,
+				Features: &v1beta1.FeaturesSpec{
+					KVRouter: &v1beta1.KVRouterSpec{Enabled: true},
+				},
+			},
+			wantSaved: &v1beta1.DynamoGraphDeploymentRequestSpec{
+				SearchStrategy: v1beta1.SearchStrategyRapid,
+				Features: &v1beta1.FeaturesSpec{
+					KVRouter: &v1beta1.KVRouterSpec{Enabled: true},
+				},
+			},
+		},
+		{
+			name: "defaulted searchStrategy without features",
+			spec: v1beta1.DynamoGraphDeploymentRequestSpec{
+				Model:          "Qwen/Qwen3-8B",
+				Backend:        v1beta1.BackendTypeVllm,
+				SearchStrategy: v1beta1.SearchStrategyRapid,
+			},
+			wantSaved: &v1beta1.DynamoGraphDeploymentRequestSpec{
+				SearchStrategy: v1beta1.SearchStrategyRapid,
+			},
+		},
+		{
+			name: "nothing hub-only",
+			spec: v1beta1.DynamoGraphDeploymentRequestSpec{
+				Model:   "Qwen/Qwen3-8B",
+				Backend: v1beta1.BackendTypeVllm,
+			},
+			wantSaved: nil,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Convert the stored hub object into the v1alpha1 view")
+			hub := &v1beta1.DynamoGraphDeploymentRequest{Spec: test.spec}
+			spoke := &DynamoGraphDeploymentRequest{}
+			if err := spoke.ConvertFrom(hub); err != nil {
+				t.Fatalf("ConvertFrom() error = %v", err)
+			}
+
+			t.Log("Check the hub-only spec annotation against the expected presence")
+			raw, ok := spoke.Annotations[annDGDRSpec]
+			if test.wantSaved == nil {
+				if ok {
+					t.Fatalf("%s = %q, want no annotation", annDGDRSpec, raw)
+				}
+				return
+			}
+			if !ok {
+				t.Fatalf("%s is absent, want a payload carrying the hub-only fields", annDGDRSpec)
+			}
+
+			t.Log("Decode the payload and compare it with the hub-only fields")
+			got, ok := restoreDGDRHubSpec(raw)
+			if !ok {
+				t.Fatalf("restoreDGDRHubSpec(%q) failed to decode", raw)
+			}
+			if diff := cmp.Diff(*test.wantSaved, got); diff != "" {
+				t.Fatalf("hub-only payload mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 func mustDGDRHubSpecAnnotation(t *testing.T, spec v1beta1.DynamoGraphDeploymentRequestSpec) string {
 	t.Helper()
 	data, err := marshalDGDRHubSpec(&spec)

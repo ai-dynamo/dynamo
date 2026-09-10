@@ -92,6 +92,44 @@ DynamoComponentDeploymentStatus.component.scheduledReplicas
 DynamoComponentDeploymentStatus.component.updatedReplicas
 DynamoComponentDeploymentStatus.conditions
 DynamoComponentDeploymentStatus.observedGeneration
+DynamoGraphDeploymentRequestSpec.autoApply
+DynamoGraphDeploymentRequestSpec.backend
+DynamoGraphDeploymentRequestSpec.features.kvRouter.enabled
+DynamoGraphDeploymentRequestSpec.features.mocker.enabled
+DynamoGraphDeploymentRequestSpec.features.planner
+DynamoGraphDeploymentRequestSpec.hardware.gpuSku
+DynamoGraphDeploymentRequestSpec.hardware.interconnect
+DynamoGraphDeploymentRequestSpec.hardware.numGpusPerNode
+DynamoGraphDeploymentRequestSpec.hardware.rdma
+DynamoGraphDeploymentRequestSpec.hardware.totalGpus
+DynamoGraphDeploymentRequestSpec.hardware.vramMb
+DynamoGraphDeploymentRequestSpec.image
+DynamoGraphDeploymentRequestSpec.model
+DynamoGraphDeploymentRequestSpec.modelCache.pvcModelPath
+DynamoGraphDeploymentRequestSpec.modelCache.pvcMountPath
+DynamoGraphDeploymentRequestSpec.modelCache.pvcName
+DynamoGraphDeploymentRequestSpec.overrides.dgd
+DynamoGraphDeploymentRequestSpec.overrides.profilingJob
+DynamoGraphDeploymentRequestSpec.runtimeVersionOverride
+DynamoGraphDeploymentRequestSpec.searchStrategy
+DynamoGraphDeploymentRequestSpec.sla.e2eLatency
+DynamoGraphDeploymentRequestSpec.sla.itl
+DynamoGraphDeploymentRequestSpec.sla.optimizationType
+DynamoGraphDeploymentRequestSpec.sla.ttft
+DynamoGraphDeploymentRequestSpec.workload.concurrency
+DynamoGraphDeploymentRequestSpec.workload.isl
+DynamoGraphDeploymentRequestSpec.workload.osl
+DynamoGraphDeploymentRequestSpec.workload.requestRate
+DynamoGraphDeploymentRequestStatus.conditions
+DynamoGraphDeploymentRequestStatus.deploymentInfo.availableReplicas
+DynamoGraphDeploymentRequestStatus.deploymentInfo.replicas
+DynamoGraphDeploymentRequestStatus.dgdName
+DynamoGraphDeploymentRequestStatus.observedGeneration
+DynamoGraphDeploymentRequestStatus.phase
+DynamoGraphDeploymentRequestStatus.profilingJobName
+DynamoGraphDeploymentRequestStatus.profilingPhase
+DynamoGraphDeploymentRequestStatus.profilingResults.pareto.config
+DynamoGraphDeploymentRequestStatus.profilingResults.selectedConfig
 DynamoGraphDeploymentScalingAdapterSpec.dgdRef.componentName
 DynamoGraphDeploymentScalingAdapterSpec.dgdRef.name
 DynamoGraphDeploymentScalingAdapterSpec.replicas
@@ -208,6 +246,8 @@ func v1beta1ConversionFieldSet() []string {
 	}{
 		{"DynamoGraphDeploymentSpec", reflect.TypeFor[v1beta1.DynamoGraphDeploymentSpec]()},
 		{"DynamoGraphDeploymentStatus", reflect.TypeFor[v1beta1.DynamoGraphDeploymentStatus]()},
+		{"DynamoGraphDeploymentRequestSpec", reflect.TypeFor[v1beta1.DynamoGraphDeploymentRequestSpec]()},
+		{"DynamoGraphDeploymentRequestStatus", reflect.TypeFor[v1beta1.DynamoGraphDeploymentRequestStatus]()},
 		{"DynamoComponentDeploymentSpec", reflect.TypeFor[v1beta1.DynamoComponentDeploymentSpec]()},
 		{"DynamoComponentDeploymentStatus", reflect.TypeFor[v1beta1.DynamoComponentDeploymentStatus]()},
 		{"DynamoGraphDeploymentScalingAdapterSpec", reflect.TypeFor[v1beta1.DynamoGraphDeploymentScalingAdapterSpec]()},
