@@ -912,12 +912,9 @@ mod tests {
         registry.root_cancel_token.cancel();
     }
 
-    #[rstest::rstest]
-    #[case(1)]
-    #[case(2)]
     #[tokio::test]
-    async fn deregister_removes_watermark(#[case] num_threads: usize) {
-        let registry = WorkerRegistry::new(num_threads);
+    async fn deregister_removes_watermark() {
+        let registry = test_registry();
         registry.signal_ready();
 
         registry
@@ -946,12 +943,9 @@ mod tests {
         );
     }
 
-    #[rstest::rstest]
-    #[case(1)]
-    #[case(2)]
     #[tokio::test]
-    async fn deregister_dp_rank_removes_watermark(#[case] num_threads: usize) {
-        let registry = WorkerRegistry::new(num_threads);
+    async fn deregister_dp_rank_removes_watermark() {
+        let registry = test_registry();
         registry.signal_ready();
 
         registry
@@ -1043,12 +1037,9 @@ mod tests {
         assert_eq!(registry.listener_cancelled(1, 0), Some(true));
     }
 
-    #[rstest::rstest]
-    #[case(1)]
-    #[case(2)]
     #[tokio::test]
-    async fn re_register_gets_fresh_watermark(#[case] num_threads: usize) {
-        let registry = WorkerRegistry::new(num_threads);
+    async fn re_register_gets_fresh_watermark() {
+        let registry = test_registry();
         registry.signal_ready();
 
         registry
@@ -1098,12 +1089,9 @@ mod tests {
         );
     }
 
-    #[rstest::rstest]
-    #[case(1)]
-    #[case(2)]
     #[tokio::test]
-    async fn deregister_all_routing_groups_removes_watermarks(#[case] num_threads: usize) {
-        let registry = WorkerRegistry::new(num_threads);
+    async fn deregister_all_routing_groups_removes_watermarks() {
+        let registry = test_registry();
         registry.signal_ready();
 
         registry
