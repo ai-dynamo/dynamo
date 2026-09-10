@@ -1275,6 +1275,9 @@ fn materialization_fingerprint(
         serde_json::to_value(effective_worker_type(card.worker_type, card.model_type))?,
     );
     object.remove("router_config");
+    // Replica-local model locations do not affect serving compatibility. Keep the
+    // original card intact for metadata resolution and its cache identity.
+    object.remove("source_path");
     let normalized: ModelDeploymentCard = serde_json::from_value(value)?;
 
     let mut bytes = normalized.mdcsum().as_bytes().to_vec();
@@ -2059,6 +2062,67 @@ mod tests {
 
         card.worker_type = Some(WorkerType::Decode);
         assert!(validate_selector_worker_role(&card, true).is_ok());
+    }
+
+    #[test]
+    fn materialization_fingerprint_ignores_source_path() {
+        let router = RouterConfig::default();
+        let mut first = ModelDeploymentCard::with_name_only("model");
+        first.source_path = Some("/models/model".to_string());
+        let mut second = first.clone();
+        second.source_path = Some("/cache/model_streamer/model".to_string());
+        let first_checksum = first.mdcsum().to_string();
+        let second_checksum = second.mdcsum().to_string();
+        assert_ne!(first_checksum, second_checksum);
+
+        let fingerprint = materialization_fingerprint(&first, &router).unwrap();
+        assert_eq!(
+            fingerprint,
+            materialization_fingerprint(&second, &router).unwrap()
+        );
+        assert_eq!(first.source_path.as_deref(), Some("/models/model"));
+        assert_eq!(
+            second.source_path.as_deref(),
+            Some("/cache/model_streamer/model")
+        );
+        assert_eq!(first.mdcsum(), first_checksum);
+        assert_eq!(second.mdcsum(), second_checksum);
+
+        let without_source = ModelDeploymentCard::with_name_only("model");
+        assert_eq!(
+            fingerprint,
+            materialization_fingerprint(&without_source, &router).unwrap()
+        );
+    }
+
+    #[test]
+    fn materialization_fingerprint_preserves_metadata_checksums() {
+        let router = RouterConfig::default();
+        let card = ModelDeploymentCard::with_name_only("model");
+        let mut value = serde_json::to_value(card).unwrap();
+        value["source_path"] = serde_json::json!("/models/model");
+        value["model_info"] = serde_json::json!({
+            "hf_config_json": {
+                "path": "/models/model/config.json",
+                "checksum": format!("blake3:{}", "0".repeat(64)),
+                "size": 2
+            }
+        });
+        let first: ModelDeploymentCard = serde_json::from_value(value.clone()).unwrap();
+        value["source_path"] = serde_json::json!("/cache/model_streamer/model");
+        let second: ModelDeploymentCard = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            materialization_fingerprint(&first, &router).unwrap(),
+            materialization_fingerprint(&second, &router).unwrap()
+        );
+
+        value["model_info"]["hf_config_json"]["checksum"] =
+            serde_json::json!(format!("blake3:{}", "1".repeat(64)));
+        let different: ModelDeploymentCard = serde_json::from_value(value).unwrap();
+        assert_ne!(
+            materialization_fingerprint(&first, &router).unwrap(),
+            materialization_fingerprint(&different, &router).unwrap()
+        );
     }
 
     #[test]
