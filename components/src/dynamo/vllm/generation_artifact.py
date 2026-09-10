@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -27,8 +28,8 @@ from dynamo.artifacts.storage import (
 
 _SUPPORTED_CONTENTS = frozenset({"moe_routes", "selected_logprobs"})
 _DEFAULT_MAX_DECODED_BYTES = 64 << 20
-_PIPELINE_CONCURRENCY = 2
-_PIPELINE_SEMAPHORE = asyncio.Semaphore(_PIPELINE_CONCURRENCY)
+_DEFAULT_PIPELINE_CONCURRENCY = 2
+_PIPELINE_SEMAPHORES: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
 
 class ArtifactCaptureError(ValueError):
@@ -75,12 +76,21 @@ def generation_artifact_contents(request: Mapping[str, Any]) -> frozenset[str]:
     return frozenset(contents)
 
 
+def _validate_generation_artifact_codec(settings: Mapping[str, Any]) -> None:
+    codec = settings.get("codec", "zstd")
+    if codec != "zstd":
+        raise ArtifactCaptureError(
+            "generation_artifact.codec must be the string 'zstd'"
+        )
+
+
 @dataclass(frozen=True)
 class _ChoiceCapture:
     prompt_token_ids: tuple[int, ...] = ()
     completion_token_ids: tuple[int, ...] = ()
     selected_logprobs: tuple[float, ...] = ()
     routed_experts: Any | None = None
+    previous: _ChoiceCapture | None = None
 
 
 class VllmGenerationArtifactSession:
@@ -116,6 +126,7 @@ class VllmGenerationArtifactSession:
             raise ArtifactCaptureError("only generation_artifact_v1 is supported")
         if choice_count != 1:
             raise ArtifactCaptureError("generation artifacts currently require n=1")
+        _validate_generation_artifact_codec(settings)
         contents = generation_artifact_contents(request)
         if "moe_routes" in contents and not enable_rl:
             raise ArtifactCaptureError(
@@ -150,6 +161,7 @@ class VllmGenerationArtifactSession:
             estimated_payload_bytes += max_tokens * np.dtype(np.float32).itemsize
         if "moe_routes" in self.contents:
             router_ids = _router_ids_from_config(self._model_config)
+            expert_count = _expert_count_from_config(self._model_config)
             experts_per_token = _config_value(
                 self._model_config,
                 ("num_experts_per_tok", "num_experts_per_token", "moe_top_k"),
@@ -166,7 +178,7 @@ class VllmGenerationArtifactSession:
                 max(0, sequence_length - 1)
                 * len(router_ids)
                 * experts_per_token
-                * np.dtype(np.int64).itemsize
+                * _canonical_integer_itemsize(expert_count - 1)
             )
         decoded_limit = _decoded_byte_limit()
         if estimated_payload_bytes > decoded_limit:
@@ -180,13 +192,12 @@ class VllmGenerationArtifactSession:
             raise ArtifactCaptureError(
                 "generation artifact may exceed presigned target max_bytes"
             )
-        await _PIPELINE_SEMAPHORE.acquire()
+        _pipeline_concurrency()
         self._admitted = True
 
     def release(self) -> None:
         if self._admitted:
             self._admitted = False
-            _PIPELINE_SEMAPHORE.release()
 
     def record_chunk(
         self,
@@ -197,19 +208,23 @@ class VllmGenerationArtifactSession:
         selected_logprobs: list[float] | None,
         routed_experts: Any | None,
     ) -> None:
-        previous = self._choices.get(choice_index, _ChoiceCapture())
-        incoming_prompt = tuple(int(token) for token in prompt_token_ids)
+        previous = self._choices.get(choice_index)
+        incoming_prompt = (
+            tuple(int(token) for token in prompt_token_ids) if prompt_token_ids else ()
+        )
         if (
             incoming_prompt
+            and previous is not None
             and previous.prompt_token_ids
             and incoming_prompt != previous.prompt_token_ids
         ):
             raise ArtifactCaptureError("prompt token IDs changed during generation")
-        prompt = previous.prompt_token_ids or incoming_prompt
-        completion = previous.completion_token_ids + tuple(
-            int(token) for token in completion_token_ids
+        prompt = (
+            previous.prompt_token_ids
+            if previous is not None and previous.prompt_token_ids
+            else incoming_prompt
         )
-        logprobs = previous.selected_logprobs
+        logprobs: tuple[float, ...] = ()
         if "selected_logprobs" in self.contents:
             if completion_token_ids and (
                 selected_logprobs is None
@@ -218,15 +233,20 @@ class VllmGenerationArtifactSession:
                 raise ArtifactCaptureError(
                     "selected logprobs are not aligned with completion tokens"
                 )
-            logprobs += tuple(float(value) for value in (selected_logprobs or ()))
+            logprobs = tuple(float(value) for value in (selected_logprobs or ()))
         routes = (
-            routed_experts if routed_experts is not None else previous.routed_experts
+            routed_experts
+            if routed_experts is not None
+            else previous.routed_experts
+            if previous is not None
+            else None
         )
         self._choices[choice_index] = _ChoiceCapture(
             prompt_token_ids=prompt,
-            completion_token_ids=completion,
+            completion_token_ids=tuple(int(token) for token in completion_token_ids),
             selected_logprobs=logprobs,
             routed_experts=routes,
+            previous=previous,
         )
 
     async def finalize_choice(
@@ -242,7 +262,16 @@ class VllmGenerationArtifactSession:
             raise ArtifactCaptureError(
                 "generation artifact is missing prompt token IDs"
             )
-        sequence = captured.prompt_token_ids + captured.completion_token_ids
+        segments: list[_ChoiceCapture] = []
+        segment: _ChoiceCapture | None = captured
+        while segment is not None:
+            segments.append(segment)
+            segment = segment.previous
+        segments.reverse()
+        completion = tuple(
+            token for segment in segments for token in segment.completion_token_ids
+        )
+        sequence = captured.prompt_token_ids + completion
         decoded_limit = _decoded_byte_limit()
         routes = None
         router_ids: tuple[int, ...] = ()
@@ -262,7 +291,10 @@ class VllmGenerationArtifactSession:
                 self._model_config, routes.shape[1]
             )
         selected = (
-            np.asarray(captured.selected_logprobs, dtype=np.float32)
+            np.asarray(
+                [value for segment in segments for value in segment.selected_logprobs],
+                dtype=np.float32,
+            )
             if "selected_logprobs" in self.contents
             else None
         )
@@ -287,15 +319,9 @@ class VllmGenerationArtifactSession:
                 ),
             )
         )
-        acquired_here = not self._admitted
-        if acquired_here:
-            await _PIPELINE_SEMAPHORE.acquire()
-        try:
+        async with _pipeline_semaphore():
             encoded = await asyncio.to_thread(encode_generation_artifact, view)
             receipt = await put_artifact(encoded.data, self._target)
-        finally:
-            if acquired_here:
-                _PIPELINE_SEMAPHORE.release()
         return {
             "format": "generation_artifact_v1",
             "contents": sorted(self.contents),
@@ -306,6 +332,46 @@ class VllmGenerationArtifactSession:
         }
 
 
+def _pipeline_concurrency() -> int:
+    try:
+        concurrency = int(
+            os.environ.get(
+                "DYN_GENERATION_ARTIFACT_PIPELINE_CONCURRENCY",
+                str(_DEFAULT_PIPELINE_CONCURRENCY),
+            )
+        )
+    except ValueError as exc:
+        raise ArtifactCaptureError(
+            "generation artifact pipeline concurrency is invalid"
+        ) from exc
+    if concurrency <= 0:
+        raise ArtifactCaptureError(
+            "generation artifact pipeline concurrency is invalid"
+        )
+    return concurrency
+
+
+def _pipeline_semaphore() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    concurrency = _pipeline_concurrency()
+    cached = _PIPELINE_SEMAPHORES.get(loop)
+    if cached is None or cached[0] != concurrency:
+        semaphore = asyncio.Semaphore(concurrency)
+        _PIPELINE_SEMAPHORES[loop] = (concurrency, semaphore)
+        return semaphore
+    return cached[1]
+
+
+def _canonical_integer_itemsize(maximum: int) -> int:
+    if maximum <= np.iinfo(np.uint8).max:
+        return np.dtype(np.uint8).itemsize
+    if maximum <= np.iinfo(np.uint16).max:
+        return np.dtype(np.uint16).itemsize
+    if maximum <= np.iinfo(np.int32).max:
+        return np.dtype(np.int32).itemsize
+    return np.dtype(np.int64).itemsize
+
+
 def _config_value(config: Any, names: tuple[str, ...]) -> Any:
     hf_config = getattr(config, "hf_config", None)
     sources = [
@@ -314,14 +380,38 @@ def _config_value(config: Any, names: tuple[str, ...]) -> Any:
         hf_config,
         getattr(hf_config, "text_config", None),
     ]
+    values: list[Any] = []
     for source in sources:
         if source is None:
             continue
         for name in names:
             value = getattr(source, name, None)
             if value is not None:
-                return value
-    return None
+                values.append(value)
+    if not values:
+        return None
+    first = values[0]
+    if any(type(value) is not type(first) or value != first for value in values[1:]):
+        raise ArtifactCaptureError(
+            f"model configuration has conflicting values for {names[0]}"
+        )
+    return first
+
+
+def _expert_count_from_config(model_config: Any) -> int:
+    expert_count = _config_value(
+        model_config, ("num_experts", "n_routed_experts", "num_local_experts")
+    )
+    if (
+        isinstance(expert_count, bool)
+        or not isinstance(expert_count, int)
+        or expert_count <= 0
+        or expert_count - 1 > np.iinfo(np.int64).max
+    ):
+        raise ArtifactCaptureError(
+            "model configuration has no trustworthy expert count"
+        )
+    return expert_count
 
 
 def _decoded_byte_limit() -> int:
@@ -344,35 +434,84 @@ def _decoded_byte_limit() -> int:
 def _router_ids_from_config(model_config: Any) -> tuple[int, ...]:
     layers = _config_value(model_config, ("num_hidden_layers", "n_layer"))
     first_dense = _config_value(model_config, ("first_k_dense_replace",)) or 0
-    frequency = _config_value(model_config, ("moe_layer_freq",))
-    if isinstance(frequency, (list, tuple)):
-        return tuple(index for index, enabled in enumerate(frequency) if enabled)
-    if not isinstance(layers, int) or layers <= 0 or not isinstance(first_dense, int):
+    if (
+        isinstance(layers, bool)
+        or not isinstance(layers, int)
+        or layers <= 0
+        or isinstance(first_dense, bool)
+        or not isinstance(first_dense, int)
+        or not 0 <= first_dense <= layers
+    ):
         raise ArtifactCaptureError(
             "model configuration has no trustworthy router layout"
         )
-    if isinstance(frequency, int) and frequency > 0:
-        return tuple(
-            layer
-            for layer in range(layers)
-            if layer >= first_dense and layer % frequency == 0
+
+    candidates: list[tuple[int, ...]] = []
+    frequency = _config_value(model_config, ("moe_layer_freq",))
+    if isinstance(frequency, (list, tuple)):
+        if len(frequency) != layers or any(
+            not (
+                isinstance(enabled, bool)
+                or isinstance(enabled, int)
+                and enabled in (0, 1)
+            )
+            for enabled in frequency
+        ):
+            raise ArtifactCaptureError(
+                "model configuration has no trustworthy router layout"
+            )
+        candidates.append(
+            tuple(index for index, enabled in enumerate(frequency) if enabled)
+        )
+    elif frequency is not None:
+        if (
+            isinstance(frequency, bool)
+            or not isinstance(frequency, int)
+            or frequency <= 0
+        ):
+            raise ArtifactCaptureError(
+                "model configuration has no trustworthy router layout"
+            )
+        candidates.append(
+            tuple(
+                layer
+                for layer in range(layers)
+                if layer >= first_dense and layer % frequency == 0
+            )
         )
     sparse_step = _config_value(model_config, ("decoder_sparse_step",))
     mlp_only_layers = _config_value(model_config, ("mlp_only_layers",)) or ()
-    if (
-        isinstance(sparse_step, int)
-        and sparse_step > 0
-        and isinstance(mlp_only_layers, (list, tuple, set))
-    ):
+    if sparse_step is not None:
+        if (
+            isinstance(sparse_step, bool)
+            or not isinstance(sparse_step, int)
+            or sparse_step <= 0
+            or not isinstance(mlp_only_layers, (list, tuple, set))
+            or any(
+                isinstance(layer, bool)
+                or not isinstance(layer, int)
+                or not 0 <= layer < layers
+                for layer in mlp_only_layers
+            )
+        ):
+            raise ArtifactCaptureError(
+                "model configuration has no trustworthy router layout"
+            )
         dense_layers = set(mlp_only_layers)
-        return tuple(
-            layer
-            for layer in range(layers)
-            if layer >= first_dense
-            and (layer + 1) % sparse_step == 0
-            and layer not in dense_layers
+        candidates.append(
+            tuple(
+                layer
+                for layer in range(layers)
+                if layer >= first_dense
+                and (layer + 1) % sparse_step == 0
+                and layer not in dense_layers
+            )
         )
-    return tuple(range(layers))
+    if not candidates:
+        return tuple(range(first_dense, layers))
+    if any(candidate != candidates[0] for candidate in candidates[1:]):
+        raise ArtifactCaptureError("model router layout metadata is ambiguous")
+    return candidates[0]
 
 
 def _resolve_router_layout(
@@ -380,19 +519,7 @@ def _resolve_router_layout(
 ) -> tuple[tuple[int, ...], tuple[int, ...]]:
     if router_count <= 0:
         raise ArtifactCaptureError("routed experts must contain at least one router")
-    expert_count = _config_value(
-        model_config,
-        ("num_experts", "n_routed_experts", "num_local_experts"),
-    )
-    if (
-        isinstance(expert_count, bool)
-        or not isinstance(expert_count, int)
-        or expert_count <= 0
-    ):
-        raise ArtifactCaptureError(
-            "model configuration has no trustworthy expert count"
-        )
-
+    expert_count = _expert_count_from_config(model_config)
     router_ids = _router_ids_from_config(model_config)
     if len(router_ids) != router_count:
         raise ArtifactCaptureError(

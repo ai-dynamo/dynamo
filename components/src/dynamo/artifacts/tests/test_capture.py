@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
+import struct
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -22,8 +24,9 @@ def _enable_managed_test_storage(monkeypatch):
     stored = {}
     session = SimpleNamespace(close=AsyncMock())
 
-    async def pipe_file(path, data, mode):
+    async def pipe_file(path, data, mode, *, chunksize):
         assert mode == "create"
+        assert chunksize > 0
         stored[path] = data
 
     filesystem = SimpleNamespace(
@@ -115,6 +118,40 @@ async def test_capture_delivers_decodable_artifact(
     assert receipt["state"] == "ready"
     assert receipt["object_id"] == "test:request-1/output.dynexp"
     assert receipt["contents"] == ["moe_routes", "selected_logprobs"]
+
+
+@pytest.mark.asyncio
+async def test_capture_accepts_documented_zstd_codec(
+    monkeypatch, _enable_managed_test_storage
+) -> None:
+    monkeypatch.setenv(
+        "DYN_GENERATION_ARTIFACT_STORAGE_PROFILES",
+        '{"test":{"url":"s3://generation-artifacts/root","allowed_prefixes":["request-1"],"create_only":true}}',
+    )
+    request = _request()
+    request["nvext"]["generation_artifact"]["codec"] = "zstd"
+    session = _session(request)
+    session.record_chunk(
+        choice_index=0,
+        prompt_token_ids=[101],
+        completion_token_ids=[201],
+        selected_logprobs=None,
+        routed_experts=None,
+    )
+
+    await session.finalize_choice(choice_index=0, token_start=0)
+
+    artifact = _enable_managed_test_storage[
+        "generation-artifacts/root/request-1/output.dynexp"
+    ]
+    assert struct.unpack_from("<H", artifact, 12)[0] == 1
+
+
+def test_capture_rejects_unknown_codec() -> None:
+    request = _request()
+    request["nvext"]["generation_artifact"]["codec"] = "snappy"
+    with pytest.raises(ArtifactCaptureError, match="codec"):
+        _session(request)
 
 
 @pytest.mark.parametrize(
@@ -282,6 +319,78 @@ async def test_capture_admission_rejects_worst_case_before_generation(
     )
     with pytest.raises(ArtifactCaptureError, match="decoded byte limit"):
         await session.admit(prompt_token_count=2, max_tokens=2)
+
+
+@pytest.mark.asyncio
+async def test_capture_admission_estimates_canonical_route_dtype(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_GENERATION_ARTIFACT_MAX_DECODED_BYTES", "64")
+    session = _session(
+        _request("moe_routes"),
+        model_config=_model_config(num_experts_per_tok=2),
+    )
+
+    await session.admit(prompt_token_count=2, max_tokens=2)
+
+
+def test_capture_appends_stream_chunks_without_copying_prior_tokens() -> None:
+    session = _session(_request("selected_logprobs"))
+    session.record_chunk(
+        choice_index=0,
+        prompt_token_ids=[101, 102],
+        completion_token_ids=[201],
+        selected_logprobs=[-0.1],
+        routed_experts=None,
+    )
+    first = session._choices[0]
+
+    session.record_chunk(
+        choice_index=0,
+        prompt_token_ids=[],
+        completion_token_ids=[202],
+        selected_logprobs=[-0.2],
+        routed_experts=None,
+    )
+
+    second = session._choices[0]
+    assert second.previous is first
+    assert second.completion_token_ids == (202,)
+    assert second.selected_logprobs == (-0.2,)
+
+
+@pytest.mark.asyncio
+async def test_capture_admission_does_not_hold_pipeline_slot(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_GENERATION_ARTIFACT_PIPELINE_CONCURRENCY", "1")
+    first = _session(_request())
+    second = _session(_request())
+    third = _session(_request())
+
+    await first.admit(prompt_token_count=1, max_tokens=1)
+    await asyncio.wait_for(
+        second.admit(prompt_token_count=1, max_tokens=1), timeout=0.1
+    )
+    await asyncio.wait_for(third.admit(prompt_token_count=1, max_tokens=1), timeout=0.1)
+
+
+def test_router_layout_rejects_conflicting_model_metadata() -> None:
+    config = SimpleNamespace(
+        num_hidden_layers=2,
+        hf_config=SimpleNamespace(num_hidden_layers=3, num_experts=4),
+    )
+    with pytest.raises(ArtifactCaptureError, match="conflicting"):
+        _resolve_router_layout(config, 2)
+
+
+def test_router_layout_rejects_conflicting_layout_formulas() -> None:
+    config = SimpleNamespace(
+        hf_config=SimpleNamespace(
+            num_hidden_layers=6,
+            num_experts=4,
+            moe_layer_freq=2,
+            decoder_sparse_step=2,
+        )
+    )
+    with pytest.raises(ArtifactCaptureError, match="ambiguous"):
+        _resolve_router_layout(config, 3)
 
 
 @pytest.mark.asyncio
