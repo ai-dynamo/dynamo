@@ -235,7 +235,6 @@ def test_persistent_tag_plan_releases_only_stale_unclaimed_kv():
     allocations = [
         SimpleNamespace(tag="kv_pool:v4:planned", claimed=False),
         SimpleNamespace(tag="kv_pool:v3:stale", claimed=False),
-        SimpleNamespace(tag="kv_pool:v3:live", claimed=True),
         SimpleNamespace(tag="weights:v1:unrelated", claimed=False),
     ]
 
@@ -269,9 +268,23 @@ def test_stale_cleanup_preserves_allocation_claimed_during_release():
         def release_persistent(self, engine_id, tag):
             raise RuntimeError("persistent allocation claimed by another session")
 
-    assert not install_vmm_ipc_kv._persistent_tag_plan_reattaches(
-        Manager(), "engine", ["kv_pool:v4:new"]
+    with pytest.raises(RuntimeError, match="incompatible layout are still claimed"):
+        install_vmm_ipc_kv._persistent_tag_plan_reattaches(
+            Manager(), "engine", ["kv_pool:v4:new"]
+        )
+
+
+def test_claimed_stale_layout_fails_closed():
+    manager = SimpleNamespace(
+        list_persistent=lambda engine_id=None, include_unclaimed=False: [
+            SimpleNamespace(tag="kv_pool:v3:live", claimed=True)
+        ]
     )
+
+    with pytest.raises(RuntimeError, match="second KV pool"):
+        install_vmm_ipc_kv._persistent_tag_plan_reattaches(
+            manager, "engine", ["kv_pool:v4:new"]
+        )
 
 
 def test_fresh_layout_reclaims_obsolete_unclaimed_kv():
