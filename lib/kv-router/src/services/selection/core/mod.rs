@@ -862,9 +862,17 @@ impl SelectionCore {
             return Ok(());
         };
         let workers = self.catalog.scheduler_configs_for_key(key);
-        entry.workers_tx.send(workers).map_err(|_| {
-            SelectionError::Internal(format!("scheduler worker watch closed for {key}"))
-        })
+        // Lifecycle transitions between non-schedulable states publish the same
+        // map; skipping them saves the scheduler a wake and a full map clone.
+        entry.workers_tx.send_if_modified(|current| {
+            if *current == workers {
+                false
+            } else {
+                *current = workers;
+                true
+            }
+        });
+        Ok(())
     }
 
     fn ready_entry(&self, key: &RoutingPartitionId) -> Result<Arc<SelectionEntry>, SelectionError> {

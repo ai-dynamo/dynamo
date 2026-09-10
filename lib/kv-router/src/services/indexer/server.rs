@@ -122,6 +122,16 @@ struct QueryRequest {
     cache_salt: Option<String>,
 }
 
+/// Server-side view of `TieredQueryByHashRequest` that also captures the
+/// `cache_salt` some `/query_by_hash` callers send, so it can be rejected here
+/// as well instead of being silently ignored.
+#[derive(Deserialize)]
+struct TieredQueryByHashBody {
+    #[serde(flatten)]
+    inner: TieredQueryByHashRequest,
+    cache_salt: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct QueryByHashRequest {
     block_hashes: Vec<i64>,
@@ -393,9 +403,23 @@ async fn query_by_hash(
 /// overlap analysis and side-indexer merge.
 async fn query_tiered_by_hash(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<TieredQueryByHashRequest>,
+    Json(TieredQueryByHashBody {
+        inner: req,
+        cache_salt,
+    }): Json<TieredQueryByHashBody>,
 ) -> Response {
     let model = req.model_name.clone();
+    if cache_salt.is_some() {
+        let mut resp = (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "cache_salt is not accepted by /query_tiered_by_hash; block_hashes must already include the intended cache salt"
+            })),
+        )
+            .into_response();
+        resp.extensions_mut().insert(AccessLogModel(model));
+        return resp;
+    }
     let key = RoutingPartitionId::new(req.model_name, req.routing_group);
     let Some(ie) = state.registry.get_indexer(&key) else {
         let mut resp = (
@@ -700,6 +724,31 @@ mod tests {
 
         body.push_str(r#"],"model_name":"model"}"#);
         body
+    }
+
+    #[tokio::test]
+    async fn query_tiered_by_hash_rejects_cache_salt() {
+        let app = create_router(Arc::new(AppState {
+            registry: Arc::new(WorkerRegistry::new(1)),
+            access_log_sink: None,
+            #[cfg(feature = "metrics")]
+            prom_registry: prometheus::Registry::new(),
+        }));
+
+        let salted = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/query_tiered_by_hash")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"block_hashes":[1],"model_name":"model","routing_group":"default","cache_salt":"s"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(salted.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
