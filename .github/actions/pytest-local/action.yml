@@ -104,10 +104,11 @@ runs:
         HF_XET_HIGH_PERFORMANCE: 1
         PYTEST_DD_FLAKY_RETRY_ENABLED: ${{ inputs.dd_flaky_retry_enabled }}
       run: |
-        # Sanitize test_type for filenames: remove commas and spaces. Exported
-        # for the per-stage upload steps' artifact names.
+        # Sanitize test_type for the filenames built below: remove commas and
+        # spaces. Keep this shell-local. A job-scoped copy in $GITHUB_ENV is
+        # shared by every stage of the job, so an upload step reading it can see
+        # a previous stage's value (or none) and collide on the artifact name.
         STR_TEST_TYPE=$(echo "${TEST_TYPE}" | tr ', ' '_')
-        echo "STR_TEST_TYPE=${STR_TEST_TYPE}" >> $GITHUB_ENV
 
         if [[ "${GPU_TESTS}" == "true" ]]; then
           # Only GPU tests require MinIO (LoRA tests). Wait for the job service.
@@ -302,7 +303,7 @@ runs:
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
       if: always() && inputs.enable_coverage == 'true'
       with:
-        name: coverage-python-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
+        name: coverage-python-${{ inputs.framework }}-${{ inputs.test_type }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
         path: test-results/
         include-hidden-files: true
         retention-days: 7
@@ -311,7 +312,7 @@ runs:
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
       if: always()
       with:
-        name: allure-results-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
+        name: allure-results-${{ inputs.framework }}-${{ inputs.test_type }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
         path: test-results/allure-results/
         retention-days: 7
         if-no-files-found: ignore
