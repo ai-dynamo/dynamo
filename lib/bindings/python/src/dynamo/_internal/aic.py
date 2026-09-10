@@ -44,8 +44,18 @@ def resolve_backend_version(
     """
     if backend_version is not None:
         return backend_version
-    from aiconfigurator_core.sdk.perf_database import get_latest_database_version
-
+    try:
+        from aiconfigurator_core.sdk.perf_database import get_latest_database_version
+    except ImportError as exc:
+        missing = exc.name or ""
+        if missing == "aiconfigurator_core" or missing.startswith(
+            "aiconfigurator_core."
+        ):
+            raise RuntimeError(
+                "aisimulate is required to resolve the AIC backend version but is "
+                "not installed"
+            ) from exc
+        raise
     version = get_latest_database_version(system, backend_name)
     if version is None:
         raise RuntimeError(

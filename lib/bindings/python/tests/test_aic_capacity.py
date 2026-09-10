@@ -293,6 +293,20 @@ def test_resolve_backend_version_rejects_missing_perf_database(monkeypatch):
         resolve_backend_version("vllm", None, "unknown_system")
 
 
+def test_resolve_backend_version_reports_unavailable_sdk(monkeypatch):
+    real_import = builtins.__import__
+
+    def missing_perf_database(name, *args, **kwargs):
+        if name == "aiconfigurator_core.sdk.perf_database":
+            raise ModuleNotFoundError(name="aiconfigurator_core")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", missing_perf_database)
+
+    with pytest.raises(RuntimeError, match=r"aisimulate.*not installed"):
+        resolve_backend_version("vllm", None, "h200_sxm")
+
+
 def test_pad_nextn_accept_rates_defaults_when_omitted():
     # Omitted/empty input preserves Dynamo's historical default, not all zeros.
     assert _pad_nextn_accept_rates(None) == _DEFAULT_NEXTN_ACCEPT_RATES
