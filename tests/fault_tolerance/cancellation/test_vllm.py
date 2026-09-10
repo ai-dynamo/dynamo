@@ -458,11 +458,13 @@ def test_request_cancellation_vllm_decode_cancel(
                     expected_count=1,
                     max_wait_ms=15000,
                 )
+                # The prefill finished before decode began, so the router has
+                # already dropped its cancellation link: a disconnect during
+                # decode reaches only the decode worker.
                 verify_runtime_cancellation_metrics(
                     worker_system_port=prefill_worker.system_port,
-                    expected_count=1,
+                    expected_count=0,
                     component="prefill",
-                    max_wait_ms=15000,
                 )
 
 
@@ -589,13 +591,16 @@ def test_request_cancellation_vllm_prefill_cancel(
                     request_type="completion",
                     expected_count=1,
                 )
+                # This test cancels before a handoff exists, so the prefill is
+                # what gets cancelled. Decode is never dispatched, which is the
+                # difference from the decode-cancel test above.
                 verify_runtime_cancellation_metrics(
-                    worker_system_port=decode_worker.system_port,
+                    worker_system_port=prefill_worker.system_port,
                     expected_count=1,
+                    component="prefill",
                     max_wait_ms=15000,
                 )
                 verify_runtime_cancellation_metrics(
-                    worker_system_port=prefill_worker.system_port,
+                    worker_system_port=decode_worker.system_port,
                     expected_count=0,
-                    component="prefill",
                 )
