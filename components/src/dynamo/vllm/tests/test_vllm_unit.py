@@ -3,11 +3,13 @@
 
 """Unit tests for vLLM backend components."""
 
+import asyncio
 import importlib
 import json
 import logging
 import os
 import re
+import signal
 import socket
 import sys
 from contextlib import asynccontextmanager
@@ -370,6 +372,35 @@ def test_headless_namespace_has_required_fields(mock_vllm_cli):
     # Core engine fields must survive the round-trip
     assert hasattr(ns, "model")
     assert hasattr(ns, "tensor_parallel_size")
+
+
+def test_cli_shadow_mode_waits_for_primary_kv_geometry(monkeypatch):
+    main = _load_vllm_main()
+    from gpu_memory_service.integrations.vllm import install_vmm_ipc_kv
+
+    for name in (
+        "DYN_GMS_FAILOVER_SHADOW_MODE",
+        "DYN_VLLM_GMS_SHADOW_MODE",
+        "DYN_VLLM_GMS_ACTIVE_LOCK_HELD",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ENGINE_ID", "1")
+    monkeypatch.setenv("DYN_GMS_FAILOVER_PRIMARY_ENGINE_ID", "0")
+    observed = []
+    monkeypatch.setattr(main, "_gms_shadow_init_geometry_wait_ms", lambda: 123)
+    monkeypatch.setattr(
+        install_vmm_ipc_kv,
+        "_existing_shared_kv_blocks",
+        lambda *, wait_ms: observed.append(wait_ms) or 42,
+    )
+    config = SimpleNamespace(
+        gms_shadow_mode=True,
+        engine_args=SimpleNamespace(load_format="gms"),
+    )
+
+    main._maybe_wait_for_gms_primary_kv_before_init(config)
+
+    assert observed == [123]
 
 
 def test_rl_logprobs_force_converts_raw_mode():
@@ -2157,3 +2188,431 @@ async def test_generate_text_mode_notifies_for_empty_decoded_token():
 
     assert chunks[0]["choices"][0]["delta"]["content"] == ""
     assert context.notifications == 1
+
+
+@pytest.fixture(autouse=True)
+def _clear_gms_failover_env_leaks(monkeypatch):
+    monkeypatch.delenv("DYN_VLLM_GMS_ACTIVE_LOCK_HELD", raising=False)
+    yield
+    monkeypatch.delenv("DYN_VLLM_GMS_ACTIVE_LOCK_HELD", raising=False)
+
+
+def test_gms_shadow_init_geometry_wait_honors_generic_timeout(monkeypatch):
+    from dynamo.vllm import main as vllm_main
+
+    monkeypatch.setenv("GMS_KV_LEASE_GEOMETRY_WAIT_MS", "123456")
+    monkeypatch.delenv("GMS_VLLM_KV_GEOMETRY_WAIT_MS", raising=False)
+    monkeypatch.delenv("DYN_VLLM_GMS_SHADOW_INIT_GEOMETRY_WAIT_MS", raising=False)
+
+    assert vllm_main._gms_shadow_init_geometry_wait_ms() == 123_456
+
+
+def test_gms_shadow_init_geometry_wait_clamps_negative_timeout(monkeypatch):
+    from dynamo.vllm import main as vllm_main
+
+    monkeypatch.setenv("DYN_VLLM_GMS_SHADOW_INIT_GEOMETRY_WAIT_MS", "-1")
+
+    assert vllm_main._gms_shadow_init_geometry_wait_ms() == 0
+
+
+def test_gms_reject_removed_private_bootstrap_options(monkeypatch):
+    from dynamo.vllm.worker_factory import WorkerFactory
+
+    for name in WorkerFactory._REMOVED_PRIVATE_BOOTSTRAP_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+    WorkerFactory._reject_removed_private_bootstrap_options()
+
+    for name in WorkerFactory._REMOVED_PRIVATE_BOOTSTRAP_ENV_VARS:
+        monkeypatch.setenv(name, "1")
+        with pytest.raises(RuntimeError, match="private-bootstrap"):
+            WorkerFactory._reject_removed_private_bootstrap_options()
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.mark.asyncio
+async def test_gms_primary_acquires_active_lock_before_registration(monkeypatch):
+    from dynamo.vllm.worker_factory import WorkerFactory
+
+    events = []
+    lock = object()
+    factory = WorkerFactory(
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+    )
+
+    async def fake_acquire():
+        events.append("lock")
+        return lock
+
+    async def fake_promotion_warmup():
+        events.append("warmup")
+
+    async def fake_post_lock_fence(*, backend_name, role):
+        events.append(("fence", backend_name, role))
+
+    class QuiesceController:
+        async def quiesce(self, *args, **kwargs):
+            raise AssertionError("primary must not quiesce before registration")
+
+    class EngineClient:
+        async def collective_rpc(self, *args, **kwargs):
+            raise AssertionError("primary must not wake_up/promote KV before serving")
+
+    class Runtime:
+        def set_health_status(self, status):
+            events.append(("health", status))
+
+    handler = SimpleNamespace(
+        _quiesce_controller=QuiesceController(),
+        engine_client=EngineClient(),
+    )
+    config = SimpleNamespace(gms_shadow_mode=True)
+
+    monkeypatch.setenv("ENGINE_ID", "0")
+    monkeypatch.setenv("DYN_GMS_FAILOVER_PRIMARY_ENGINE_ID", "0")
+    monkeypatch.setattr(factory, "_acquire_failover_lock", fake_acquire)
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.run_gms_failover_post_lock_fence",
+        fake_post_lock_fence,
+    )
+
+    await factory._maybe_wait_for_failover_lock(
+        handler,
+        Runtime(),
+        config,
+        promotion_warmup=fake_promotion_warmup,
+    )
+
+    assert getattr(handler, "_gms_failover_lock") is lock
+    assert events == [
+        "lock",
+        ("fence", "vllm", "active"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gms_shadow_sleeps_until_lock_then_wakes(monkeypatch):
+    from dynamo.vllm.worker_factory import WorkerFactory
+
+    events = []
+    lock = object()
+    factory = WorkerFactory(
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+    )
+
+    async def fake_acquire():
+        events.append("lock")
+        return lock
+
+    async def fake_post_lock_fence(*, backend_name, role):
+        events.append(("fence", backend_name, role))
+
+    class PauseController:
+        async def pause(self, *args, **kwargs):
+            events.append(("pause", args, kwargs))
+
+        async def resume(self, *args, **kwargs):
+            events.append("resume")
+
+        def mark_resumed(self):
+            events.append("mark_resumed")
+
+    class Runtime:
+        def set_health_status(self, status):
+            events.append(("health", status))
+
+    handler = SimpleNamespace(_pause_controller=PauseController())
+    config = SimpleNamespace(gms_shadow_mode=True)
+
+    monkeypatch.setenv("ENGINE_ID", "1")
+    monkeypatch.setenv("DYN_GMS_FAILOVER_PRIMARY_ENGINE_ID", "0")
+    monkeypatch.setattr(factory, "_acquire_failover_lock", fake_acquire)
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.run_gms_failover_post_lock_fence",
+        fake_post_lock_fence,
+    )
+    await factory._maybe_wait_for_failover_lock(handler, Runtime(), config)
+
+    assert getattr(handler, "_gms_failover_lock") is lock
+    assert events == [
+        ("pause", (1,), {"clear_cache": False}),
+        ("health", True),
+        "lock",
+        ("fence", "vllm", "shadow"),
+        "resume",
+        "mark_resumed",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gms_shadow_wake_timeout_requiesces_and_releases_lock(monkeypatch):
+    from dynamo.vllm.worker_factory import WorkerFactory
+
+    events = []
+
+    class Lock:
+        was_contended = True
+
+        async def release(self):
+            events.append("release")
+
+    class PauseController:
+        async def pause(self, *args, **kwargs):
+            events.append(("pause", args, kwargs))
+
+        async def resume(self):
+            events.append("resume")
+            await asyncio.Event().wait()
+
+        def mark_resumed(self):
+            events.append("mark_resumed")
+
+    class Runtime:
+        def set_health_status(self, status):
+            events.append(("health", status))
+
+    async def acquire_lock():
+        events.append("lock")
+        return Lock()
+
+    async def pass_fence(*, backend_name, role):
+        events.append(("fence", backend_name, role))
+
+    factory = WorkerFactory(
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setenv("ENGINE_ID", "1")
+    monkeypatch.setenv("DYN_GMS_FAILOVER_PRIMARY_ENGINE_ID", "0")
+    monkeypatch.setenv("DYN_GMS_FAILOVER_WAKEUP_TIMEOUT_SECS", "0.01")
+    monkeypatch.setattr(factory, "_acquire_failover_lock", acquire_lock)
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.run_gms_failover_post_lock_fence", pass_fence
+    )
+
+    handler = SimpleNamespace(_pause_controller=PauseController())
+    with pytest.raises(asyncio.TimeoutError):
+        await factory._maybe_wait_for_failover_lock(
+            handler,
+            Runtime(),
+            SimpleNamespace(gms_shadow_mode=True),
+        )
+
+    assert not hasattr(handler, "_gms_failover_lock")
+    assert events == [
+        ("pause", (1,), {"clear_cache": False}),
+        ("health", True),
+        "lock",
+        ("fence", "vllm", "shadow"),
+        "resume",
+        "mark_resumed",
+        ("pause", (1,), {"clear_cache": False}),
+        ("health", False),
+        "release",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gms_shadow_retains_lock_if_activation_cannot_requiesce(monkeypatch):
+    from dynamo.vllm.worker_factory import WorkerFactory
+
+    events = []
+
+    class Lock:
+        was_contended = True
+
+        async def release(self):
+            events.append("release")
+
+    class PauseController:
+        pause_calls = 0
+
+        async def pause(self, *args, **kwargs):
+            self.pause_calls += 1
+            events.append(("pause", self.pause_calls))
+            if self.pause_calls > 1:
+                await asyncio.Event().wait()
+
+        async def resume(self):
+            events.append("resume")
+            raise RuntimeError("resume failed")
+
+        def mark_resumed(self):
+            events.append("mark_resumed")
+
+    class Runtime:
+        def set_health_status(self, status):
+            events.append(("health", status))
+
+    lock = Lock()
+
+    async def acquire_lock():
+        events.append("lock")
+        return lock
+
+    async def pass_fence(*, backend_name, role):
+        events.append(("fence", backend_name, role))
+
+    factory = WorkerFactory(
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setenv("ENGINE_ID", "1")
+    monkeypatch.setenv("DYN_GMS_FAILOVER_PRIMARY_ENGINE_ID", "0")
+    monkeypatch.setenv("DYN_GMS_FAILOVER_REQUIESCE_TIMEOUT_SECS", "0.01")
+    monkeypatch.setattr(factory, "_acquire_failover_lock", acquire_lock)
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.run_gms_failover_post_lock_fence", pass_fence
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.os.kill",
+        lambda pid, sig: events.append(("kill", pid, sig)),
+    )
+
+    handler = SimpleNamespace(_pause_controller=PauseController())
+    with pytest.raises(RuntimeError, match="resume failed"):
+        await factory._maybe_wait_for_failover_lock(
+            handler,
+            Runtime(),
+            SimpleNamespace(gms_shadow_mode=True),
+        )
+
+    assert handler._gms_failover_lock is lock
+    assert "release" not in events
+    assert ("kill", os.getpid(), signal.SIGTERM) in events
+    assert ("health", False) in events
+
+
+@pytest.mark.asyncio
+async def test_gms_primary_releases_lock_when_post_lock_fence_fails(monkeypatch):
+    from dynamo.vllm.worker_factory import WorkerFactory
+
+    events = []
+
+    class Lock:
+        async def release(self):
+            events.append("release")
+
+    lock = Lock()
+
+    async def acquire_lock():
+        return lock
+
+    factory = WorkerFactory(
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+    )
+
+    async def fail_fence(*, backend_name, role):
+        events.append(("fence", backend_name, role))
+        raise RuntimeError("fence failed")
+
+    monkeypatch.setenv("ENGINE_ID", "0")
+    monkeypatch.setenv("DYN_GMS_FAILOVER_PRIMARY_ENGINE_ID", "0")
+    monkeypatch.setattr(factory, "_acquire_failover_lock", acquire_lock)
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.run_gms_failover_post_lock_fence", fail_fence
+    )
+
+    handler = SimpleNamespace()
+    with pytest.raises(RuntimeError, match="fence failed"):
+        await factory._maybe_wait_for_failover_lock(
+            handler,
+            SimpleNamespace(),
+            SimpleNamespace(gms_shadow_mode=True),
+        )
+
+    assert not hasattr(handler, "_gms_failover_lock")
+    assert events == [("fence", "vllm", "active"), "release"]
+
+
+@pytest.mark.asyncio
+async def test_gms_shadow_requiesces_and_releases_lock_when_warmup_fails(monkeypatch):
+    from dynamo.vllm.worker_factory import WorkerFactory
+
+    events = []
+
+    class Lock:
+        was_contended = True
+
+        async def release(self):
+            events.append("release")
+
+    class PauseController:
+        async def pause(self, *args, **kwargs):
+            events.append(("pause", args, kwargs))
+
+        async def resume(self):
+            events.append("resume")
+
+        def mark_resumed(self):
+            events.append("mark_resumed")
+
+    class Runtime:
+        def set_health_status(self, status):
+            events.append(("health", status))
+
+    factory = WorkerFactory(
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+    )
+    lock = Lock()
+
+    async def fail_warmup():
+        events.append("warmup")
+        raise RuntimeError("warmup failed")
+
+    async def pass_fence(*, backend_name, role):
+        events.append(("fence", backend_name, role))
+
+    async def acquire_lock():
+        return lock
+
+    monkeypatch.setenv("ENGINE_ID", "1")
+    monkeypatch.setenv("DYN_GMS_FAILOVER_PRIMARY_ENGINE_ID", "0")
+    monkeypatch.setattr(factory, "_acquire_failover_lock", acquire_lock)
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.run_gms_failover_post_lock_fence", pass_fence
+    )
+
+    handler = SimpleNamespace(_pause_controller=PauseController())
+    with pytest.raises(RuntimeError, match="warmup failed"):
+        await factory._maybe_wait_for_failover_lock(
+            handler,
+            Runtime(),
+            SimpleNamespace(gms_shadow_mode=True),
+            promotion_warmup=fail_warmup,
+        )
+
+    assert not hasattr(handler, "_gms_failover_lock")
+    assert events == [
+        ("pause", (1,), {"clear_cache": False}),
+        ("health", True),
+        ("fence", "vllm", "shadow"),
+        "resume",
+        "mark_resumed",
+        "warmup",
+        ("pause", (1,), {"clear_cache": False}),
+        ("health", False),
+        "release",
+    ]

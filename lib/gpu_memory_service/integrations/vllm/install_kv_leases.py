@@ -19,6 +19,9 @@ from gpu_memory_service.integrations.common.kv_lease_client import (
     log_lease_pressure,
     resolve_lease_device,
 )
+from gpu_memory_service.integrations.common.process_lifecycle import (
+    arm_parent_death_signal,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -217,6 +220,7 @@ def run_engine_core_with_gms_kv_leases(*args, **kwargs):
             raise RuntimeError("GMS EngineCore KV lease wrapper recursion detected")
         _original_run_engine_core = original
 
+    arm_parent_death_signal()
     _install_engine_core_process_hooks()
     return original(*args, **kwargs)
 
