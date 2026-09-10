@@ -212,6 +212,20 @@ def test_process_group_reports_unexpected_child_exit():
     group._stopping.set()
 
 
+def test_unpack_core_engine_launch_names_a_renamed_field():
+    """An upstream rename must say which field went missing."""
+    launch = SimpleNamespace(engine_manager=Mock(), coordinator=None, addresses=Mock())
+
+    with pytest.raises(RuntimeError) as raised:
+        processes._unpack_core_engine_launch(launch)
+
+    message = str(raised.value)
+    assert "tensor_queue" in message
+    for version in processes._VERIFIED_VLLM_VERSIONS:
+        assert version in message
+    assert isinstance(raised.value.__cause__, AttributeError)
+
+
 @pytest.mark.parametrize(
     "make_launch",
     [_core_engine_launch_object, _core_engine_launch_tuple],

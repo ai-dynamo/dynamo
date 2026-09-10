@@ -25,6 +25,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
+import vllm
 from vllm.config import VllmConfig
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -39,6 +40,10 @@ _PARENT_PID_ENV = "DYN_VLLM_EMBEDDING_PARENT_PID"
 _ENGINE_ADDRESSES_ENV = "DYN_VLLM_EMBEDDING_ENGINE_ADDRESSES"
 _CHILD_ROLE = "child"
 _RPC_BASE_PATH_ENV = "VLLM_RPC_BASE_PATH"
+# The two shapes _unpack_core_engine_launch accepts were read from these vLLM
+# releases: 0.27.1, which container/context.yaml builds the XPU images on, and
+# 0.28.0, the pin in pyproject.toml. Re-check that helper when either moves.
+_VERIFIED_VLLM_VERSIONS = ("0.27.1", "0.28.0")
 
 
 def is_embedding_process_child() -> bool:
@@ -375,21 +380,29 @@ def _short_rpc_directory() -> tempfile.TemporaryDirectory:
 def _unpack_core_engine_launch(launch: Any) -> tuple[Any, Any, Any, Any]:
     """Normalize what ``launch_core_engines`` yields across vLLM releases.
 
-    vLLM 0.28 yields a ``CoreEngineLaunch`` dataclass, which defines no
-    ``__iter__``; earlier releases, including the 0.27.1 that the XPU images
-    are built on, yield a plain 4-tuple. Duck-typing on the yielded object
-    rather than importing ``CoreEngineLaunch`` keeps both working: that name
-    does not exist before 0.28, so importing it would turn this into an
-    ``ImportError`` on the XPU images.
+    vLLM 0.28 and later yield a ``CoreEngineLaunch`` object defining no
+    ``__iter__``; earlier releases yield a plain 4-tuple. Duck-typing the
+    yielded object avoids importing ``CoreEngineLaunch``, a name that does not
+    exist before 0.28.
     """
     if isinstance(launch, tuple):
         return launch
-    return (
-        launch.engine_manager,
-        launch.coordinator,
-        launch.addresses,
-        launch.tensor_queue,
-    )
+    try:
+        return (
+            launch.engine_manager,
+            launch.coordinator,
+            launch.addresses,
+            launch.tensor_queue,
+        )
+    except AttributeError as error:
+        raise RuntimeError(
+            f"vLLM {vllm.__version__} yields {type(launch).__name__} from "
+            f"launch_core_engines with no {error.name!r} attribute. This "
+            f"unpacking was verified against vLLM "
+            f"{' and '.join(_VERIFIED_VLLM_VERSIONS)}; the field has most "
+            "likely been renamed upstream and _unpack_core_engine_launch "
+            "needs updating to match."
+        ) from error
 
 
 def create_shared_embedding_engine_client(
