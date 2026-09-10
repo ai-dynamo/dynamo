@@ -60,3 +60,10 @@ dlpark = { version = "0.5", features = ["pyo3", "half"], optional = true }
 cudarc = { version = "=0.19.8", features = ["cuda-version-from-build-system", "fallback-latest"], optional = true }
 
 [dev-dependencies]
+
+# This binding is an independent Cargo workspace. Keep the parser's protocol
+# types on the same frontend-crates revision as dynamo-llm; otherwise Cargo
+# resolves the registry dynamo-protocols alongside the git revision and the
+# tool-calling jail APIs receive incompatible identically named types.
+[patch.crates-io]
+dynamo-protocols = { git = "https://github.com/abatilo/frontend-crates.git", rev = "e4865d5c4af87918b3b939796a1e29383441b81e" }

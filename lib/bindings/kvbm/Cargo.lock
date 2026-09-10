@@ -2147,7 +2147,7 @@ dependencies = [
  "dynamo-mocker",
  "dynamo-parsers",
  "dynamo-parsers-v2",
- "dynamo-protocols 5.4.3",
+ "dynamo-protocols",
  "dynamo-renderer",
  "dynamo-rl",
  "dynamo-runtime",
@@ -2271,7 +2271,7 @@ dependencies = [
  "aho-corasick",
  "anyhow",
  "async-stream",
- "dynamo-protocols 5.4.1",
+ "dynamo-protocols",
  "futures",
  "num-traits",
  "openai-harmony",
@@ -2303,23 +2303,6 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "5.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbaf3179de1accba21fcad16eb22b5e113722084265e0315e808e32150088ee7"
-dependencies = [
- "async-openai",
- "derive_builder",
- "futures",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tracing",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "dynamo-protocols"
 version = "5.4.3"
 source = "git+https://github.com/abatilo/frontend-crates.git?rev=e4865d5c4af87918b3b939796a1e29383441b81e#e4865d5c4af87918b3b939796a1e29383441b81e"
 dependencies = [
@@ -2341,7 +2324,7 @@ source = "git+https://github.com/abatilo/frontend-crates.git?rev=e4865d5c4af8791
 dependencies = [
  "anyhow",
  "chrono",
- "dynamo-protocols 5.4.3",
+ "dynamo-protocols",
  "dynamo-tokenizers",
  "either",
  "minijinja",
