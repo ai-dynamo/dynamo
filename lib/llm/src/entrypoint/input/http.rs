@@ -84,7 +84,13 @@ impl HttpFrontend {
 
         super::initialize_input(&distributed_runtime, &engine_config).await;
 
-        match self.worker_selection_policy_factory {
+        // Callers that reach the frontend without going through `run_input`
+        // still have to drain the trace sinks before the process exits. The
+        // registration is reference counted, so arriving through `run_input`
+        // simply nests inside its guard and drains once, at the outer one.
+        let active_input = crate::request_trace::ActiveInput::register();
+
+        let result = match self.worker_selection_policy_factory {
             Some(factory) => {
                 run_with_worker_selector_factory(
                     distributed_runtime,
@@ -110,7 +116,11 @@ impl HttpFrontend {
                 )
                 .await
             }
-        }
+        };
+
+        active_input.release_and_drain().await;
+
+        result
     }
 }
 

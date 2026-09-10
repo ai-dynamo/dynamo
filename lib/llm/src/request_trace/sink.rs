@@ -4,7 +4,7 @@
 use std::io::Write;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::Duration;
 
@@ -26,6 +26,7 @@ use super::{
 
 static WORKERS_STARTED: AtomicBool = AtomicBool::new(false);
 static WORKERS: Mutex<Option<SinkWorkers>> = Mutex::new(None);
+static ACTIVE_INPUTS: AtomicUsize = AtomicUsize::new(0);
 
 /// Upper bound on how long process teardown waits for the sink workers to
 /// drain. Chosen to fit inside a default Kubernetes
@@ -315,6 +316,48 @@ pub async fn spawn_workers_from_env(shutdown: CancellationToken) -> anyhow::Resu
     Ok(())
 }
 
+/// Registers one running input for as long as it is held.
+///
+/// The sink workers are one process-wide set, but an input is not: the mocker
+/// starts one endpoint input per worker and awaits them together, and the HTTP
+/// frontend runs nested inside another input. Draining when the first of those
+/// returns would leave the rest publishing into a bus with no worker behind it,
+/// so the drain waits for the last registration to be released.
+pub struct ActiveInput(());
+
+impl ActiveInput {
+    /// Count this input as running until the guard is released or dropped.
+    pub fn register() -> Self {
+        ACTIVE_INPUTS.fetch_add(1, Ordering::AcqRel);
+        Self(())
+    }
+
+    /// Release this registration and, when it was the last one, cancel the sink
+    /// workers and wait for them to drain. Returns `None` while another input
+    /// is still running, and when no workers were started.
+    pub async fn release_and_drain(self) -> Option<TraceShutdownReport> {
+        if !self.release() {
+            return None;
+        }
+        shutdown_workers().await
+    }
+
+    /// Release the registration, reporting whether it was the last one. `Drop`
+    /// releases it too, for the cancellation and panic paths, so the guard is
+    /// forgotten here rather than released twice.
+    fn release(self) -> bool {
+        let was_last = ACTIVE_INPUTS.fetch_sub(1, Ordering::AcqRel) == 1;
+        std::mem::forget(self);
+        was_last
+    }
+}
+
+impl Drop for ActiveInput {
+    fn drop(&mut self) {
+        ACTIVE_INPUTS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 /// Cancel the retained workers and wait for them to drain, bounded by
 /// [`SHUTDOWN_TIMEOUT`]. Returns `None` when no workers were started, which is
 /// the case whenever request tracing is disabled.
@@ -523,6 +566,24 @@ mod tests {
 
         assert!(report.timed_out);
         assert_eq!(report.pending, vec![("fake", 1132)]);
+    }
+
+    /// The only test that touches `ACTIVE_INPUTS`, so its reads and writes are
+    /// not racing another test in this binary.
+    #[test]
+    fn only_the_last_input_to_finish_drains() {
+        let first = ActiveInput::register();
+        let second = ActiveInput::register();
+
+        assert!(
+            !first.release(),
+            "an input that finishes while another is still running must not drain"
+        );
+        assert!(
+            second.release(),
+            "the last input to finish is the one that drains"
+        );
+        assert_eq!(ACTIVE_INPUTS.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

@@ -121,6 +121,8 @@ pub async fn run_input_with_frontend_route_extensions(
         initialize_input(&drt, &engine_config).await;
     }
 
+    let active_input = crate::request_trace::ActiveInput::register();
+
     let result = match in_opt {
         Input::Http => {
             http::run_with_frontend_route_extensions(drt, engine_config, frontend_route_extensions)
@@ -137,8 +139,10 @@ pub async fn run_input_with_frontend_route_extensions(
     };
 
     // Nothing above this frame waits for the sinks; the caller's next step is
-    // process exit. The result is carried across so a failing input still drains.
-    crate::request_trace::shutdown_workers().await;
+    // process exit. The result is carried across so a failing input still
+    // drains, and the drain itself only happens once the last input has
+    // finished, because several can share one process.
+    active_input.release_and_drain().await;
 
     result
 }
