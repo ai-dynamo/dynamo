@@ -30,6 +30,7 @@ from gpu_memory_service.common.protocol.messages import (
     MetadataListRequest,
     MetadataPutRequest,
     ReleasePersistentAllocationRequest,
+    UnclaimPersistentAllocationRequest,
 )
 
 from .fsm import GMSFSM, Connection, ServerState, StateEvent
@@ -86,6 +87,7 @@ RW_ALLOWED: frozenset[type] = RW_REQUIRED | RO_ALLOWED
 PERSISTENT_ALLOWED: frozenset[type] = frozenset(
     {
         ClaimPersistentAllocationRequest,
+        UnclaimPersistentAllocationRequest,
         ReleasePersistentAllocationRequest,
         ExportPersistentAllocationRequest,
         ListPersistentAllocationsRequest,
