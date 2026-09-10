@@ -136,6 +136,51 @@ class PersistentAllocationManager:
         else:
             self._exclusive_claimed.add(key)
 
+    def _request_geometry(
+        self, engine_id: str, tag: str, size: int
+    ) -> tuple[tuple[str, str], int]:
+        if not engine_id:
+            raise ValueError("engine_id must be non-empty")
+        if not tag:
+            raise ValueError("tag must be non-empty")
+        if size <= 0:
+            raise ValueError(f"size must be > 0, got {size}")
+        return (engine_id, tag), align_to_granularity(size, self._granularity)
+
+    @staticmethod
+    def _validate_reattach_size(
+        key: tuple[str, str],
+        existing: PersistentAllocation,
+        aligned_size: int,
+        *,
+        shared: bool,
+    ) -> None:
+        if not shared and aligned_size != existing.aligned_size:
+            raise PersistentClaimConflictError(
+                f"persistent allocation {key!r} exclusive reattach size "
+                f"mismatch: requested aligned {aligned_size} != existing "
+                f"{existing.aligned_size}"
+            )
+        if shared and aligned_size > existing.aligned_size:
+            raise PersistentClaimConflictError(
+                f"persistent allocation {key!r} shared reattach capacity "
+                f"mismatch: requested aligned {aligned_size} > existing "
+                f"{existing.aligned_size}"
+            )
+
+    def get_compatible(
+        self,
+        engine_id: str,
+        tag: str,
+        size: int,
+        *,
+        shared: bool,
+    ) -> PersistentAllocation:
+        key, aligned_size = self._request_geometry(engine_id, tag, size)
+        existing = self.get(*key)
+        self._validate_reattach_size(key, existing, aligned_size, shared=shared)
+        return existing
+
     def claim(
         self,
         engine_id: str,
@@ -156,35 +201,12 @@ class PersistentAllocationManager:
 
         Returns ``(allocation, reattached)``.
         """
-        if not engine_id:
-            raise ValueError("engine_id must be non-empty")
-        if not tag:
-            raise ValueError("tag must be non-empty")
-        if size <= 0:
-            raise ValueError(f"size must be > 0, got {size}")
-
-        key = (engine_id, tag)
+        key, aligned_size = self._request_geometry(engine_id, tag, size)
         self._check_claim_allowed(key, shared=shared)
-        aligned_size = align_to_granularity(size, self._granularity)
 
         existing = self._allocations.get(key)
         if existing is not None:
-            # Validate size on exclusive reattach BEFORE recording the claim: a
-            # geometry change (e.g. different KV layout) must be rejected without
-            # leaving a claim the client never mapped, which would otherwise wedge
-            # the connection ("already claimed") on a corrected retry.
-            if not shared and aligned_size != existing.aligned_size:
-                raise PersistentClaimConflictError(
-                    f"persistent allocation {key!r} exclusive reattach size "
-                    f"mismatch: requested aligned {aligned_size} != existing "
-                    f"{existing.aligned_size}"
-                )
-            if shared and aligned_size > existing.aligned_size:
-                raise PersistentClaimConflictError(
-                    f"persistent allocation {key!r} shared reattach capacity "
-                    f"mismatch: requested aligned {aligned_size} > existing "
-                    f"{existing.aligned_size}"
-                )
+            self._validate_reattach_size(key, existing, aligned_size, shared=shared)
             self._mark_claimed(key, shared=shared)
             logger.info(
                 "Reattached persistent allocation %s engine_id=%s tag=%s shared=%s",
@@ -201,7 +223,11 @@ class PersistentAllocationManager:
                 f"cuMemCreate OOM for persistent ({engine_id!r}, {tag!r}) "
                 f"size={size} aligned_size={aligned_size}"
             )
-        export_fd = int(self._vmm.export_to_shareable_handle(int(handle)))
+        try:
+            export_fd = int(self._vmm.export_to_shareable_handle(int(handle)))
+        except Exception:  # noqa: BLE001
+            self._vmm.release(int(handle))
+            raise
         # Also map into the daemon's own VA so the daemon can read/write
         # the same physical pages the engine sees. Failure to map is
         # non-fatal — we still hand out the FD; va_daemon stays 0 and
@@ -307,7 +333,6 @@ class PersistentAllocationManager:
             return False
         self._exclusive_claimed.discard(key)
         self._shared_claim_counts.pop(key, None)
-        # Tear down daemon-side mapping (if it succeeded at claim time).
         if alloc.va_daemon:
             try:
                 self._vmm.unmap(alloc.va_daemon, alloc.aligned_size)
