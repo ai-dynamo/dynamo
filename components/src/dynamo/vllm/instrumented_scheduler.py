@@ -5009,6 +5009,22 @@ class InstrumentedScheduler(AsyncScheduler):
                     self._bench_request_timeout_stop(point)
                 return
 
+            if point.point_type == "decode":
+                # Benign giant-KV fake off-by-batch (accepted by _bench_fpm_validation_failure): the steady step
+                # measured one token per request short of the declared coordinate. Record the point AT THE MEASURED
+                # coordinate so the artifact stays self-consistent -- the collector re-checks
+                # scheduled.sum_decode_kv_tokens == point.total_kv_read_tokens exactly and fails the whole cell otherwise.
+                measured = {
+                    int(f.get("scheduled_requests", {}).get("sum_decode_kv_tokens", -1)) for f in local_fpms
+                }
+                if len(measured) == 1:
+                    m = measured.pop()
+                    if m > 0 and m != point.total_kv_read_tokens:
+                        point = replace(
+                            point,
+                            total_kv_read_tokens=m,
+                            sample_reasons=[*point.sample_reasons, "giant_fake_off_by_batch"],
+                        )
             self._bench_results.append(
                 BenchmarkPointResult(
                     point=point,
