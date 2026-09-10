@@ -162,6 +162,8 @@ navigation:
             path: ../pages-dev/kubernetes/kv-aware-routing/overview.md
           - page: Using the Dynamo Frontend
             path: ../pages-dev/kubernetes/kv-aware-routing/dynamo-frontend.md
+          - page: Deploy the DC KV Relay (Experimental)
+            path: ../pages-dev/kubernetes/kv-aware-routing/kv-dc-relay.md
           - page: Using GAIE with Dynamo
             path: ../pages-dev/kubernetes/kv-aware-routing/gateway-api.mdx
           - page: Using GAIE with vanilla vLLM
@@ -445,7 +447,7 @@ navigation:
                         path: ../pages-dev/developer-guide/knowledge-base/modular-components/router/topology-aware-kv-transfer.md
                       - page: Offloading Support Matrix
                         path: ../pages-dev/developer-guide/knowledge-base/modular-components/router/offloading-support-matrix.md
-                      - page: Multi-DC KV Routing (Experimental)
+                      - page: DC KV Relay Concepts (Experimental)
                         slug: multi-dc-kv-routing
                         path: ../pages-dev/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md
                   - section: Standalone Services
@@ -1058,6 +1060,9 @@ navigation:
             path: ../pages-dev/reference/components/tls-configuration.mdx
           - page: Frontend Configuration
             path: ../pages-dev/reference/components/frontend-configuration.mdx
+          - page: Multi-Datacenter KV Relay Configuration
+            path: ../pages-dev/reference/components/kv-dc-relay-configuration.md
+            slug: dc-kv-relay-configuration
           - page: Planner Configuration
             path: ../pages-dev/reference/components/planner-configuration.mdx
           - page: Profiler Configuration
