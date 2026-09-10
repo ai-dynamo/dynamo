@@ -305,11 +305,16 @@ impl
 
                     let data = output.data.as_ref().unwrap();
                     let choice_idx = data.index.unwrap_or(0);
+                    // Snapshot the choice count before borrowing a specific decoder mutably
+                    // below: that borrow stays alive until this choice's `peek_jailed()` call
+                    // near the end of this arm, so `state.decoders` can't be read again
+                    // (even just its length) in between. The count itself never changes
+                    // after `Backend::decoder()` creates the map, so this is safe to cache.
+                    let decoders_count = state.decoders.len();
 
                     let Some(decoder) = state.decoders.get_mut(&choice_idx) else {
                         tracing::error!(
-                            "engine emitted choice index {choice_idx}, but only {} choices were requested",
-                            state.decoders.len()
+                            "engine emitted choice index {choice_idx}, but only {decoders_count} choices were requested"
                         );
                         let mut output = output;
                         if let Some(data) = &mut output.data {
@@ -325,7 +330,7 @@ impl
                         Err(e) => {
                             tracing::error!("Failed to process token_ids for choice {choice_idx}: {e}");
                             state.finished_choices.insert(choice_idx);
-                            if state.finished_choices.len() >= state.decoders.len() {
+                            if state.finished_choices.len() >= decoders_count {
                                 state.stream.context().stop_generating();
                                 state.finished = true;
                             }
@@ -399,7 +404,7 @@ impl
                     // Once all expected choices are finished, stop the upstream generator.
                     if finish_reason.is_some() && data.finish_reason.is_none() {
                         state.finished_choices.insert(choice_idx);
-                        if state.finished_choices.len() >= state.decoders.len() {
+                        if state.finished_choices.len() >= decoders_count {
                             state.stream.context().stop_generating();
                             state.finished = true;
                         }
