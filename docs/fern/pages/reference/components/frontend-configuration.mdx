@@ -50,10 +50,8 @@ Every CLI argument has a corresponding environment variable. The CLI argument ta
 HTTP client authentication is configured independently of internal TCP and NATS
 mTLS. These HTTP options do not configure either internal transport.
 
-The HTTP server checks its certificate and private key files for changes every
-30 seconds and reloads valid updates automatically for subsequent TLS handshakes.
-Existing connections remain open. The trusted client CA certificates are loaded
-at startup; restart the frontend after changing the client CA file.
+For certificate rotation behavior and the HTTP TLS configuration overview,
+see the [TLS reference](tls-configuration.mdx#http-tls-and-mtls).
 
 The Rust HTTP server also reads these environment variables, which are not exposed as CLI arguments:
 

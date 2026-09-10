@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: TLS
-subtitle: Encrypt the TCP request/response streams and NATS connections
+subtitle: Configure HTTPS, HTTP mutual TLS, and internal TCP/NATS encryption
 ---
 
-Dynamo supports opt-in TLS encryption on the network transports between its
-components: the TCP request and response streams between frontends and workers,
-and connections to NATS. On the TCP transport, both the **request plane**
+NVIDIA Dynamo supports opt-in TLS encryption for the frontend HTTP API, the TCP
+request and response streams between frontends and workers, and connections to
+NATS. On the TCP transport, both the **request plane**
 (frontend → worker inference requests) and the **response stream** (worker →
 frontend inference output) are encrypted using
 [rustls](https://github.com/rustls/rustls) with the `ring` cryptographic
@@ -20,14 +20,40 @@ request and response streams; NATS traffic is encrypted separately via NATS TLS
 when it runs over ZMQ it is **not** encrypted, and when it runs over NATS it is
 encrypted only if NATS TLS is configured.
 
+## HTTP TLS and mTLS
+
+The frontend accepts HTTPS connections from external clients or an API gateway.
+Configure these options on the frontend; they are independent of the internal
+`DYN_TCP_TLS_*` and `NATS_TLS_*` settings.
+
+| Environment variable | Frontend CLI flag | Description |
+| --- | --- | --- |
+| `DYN_TLS_CERT_PATH` | `--tls-cert-path` | PEM server certificate. Set together with the server private key to enable HTTPS. |
+| `DYN_TLS_KEY_PATH` | `--tls-key-path` | PEM private key for the server certificate. |
+| `DYN_TLS_CLIENT_CA_CERT_PATH` | `--tls-client-ca-cert-path` | PEM CA certificates trusted to sign client certificates. Enables HTTP mutual TLS (mTLS). |
+
+HTTP mTLS requires both the server certificate and private key. When a client
+CA is configured, the frontend rejects TLS handshakes from clients that omit a
+certificate or present one that is not trusted by that CA. Without a client CA,
+HTTPS authenticates only the server. The client or API gateway configures its
+own client certificate/key and trust for the frontend's server certificate.
+
+The frontend loads its HTTP TLS configuration at startup. Its server
+certificate and private key hot-reload for subsequent handshakes; changing the
+trusted client CA requires a restart. See [Design notes](#design-notes) for
+rotation behavior and the [frontend configuration reference](frontend-configuration.mdx)
+for the complete frontend argument list.
+
 ## Environment variables
 
-All TLS configuration is driven by environment variables. The Rust runtime
-reads these directly at first connection (lazy initialization).
+The following variables configure internal TCP TLS. Server configuration is
+validated when the server starts; client connectors initialize lazily on the
+first outbound connection.
 
 Both frontends and workers act as TCP server and client depending on the
 stream direction (response streams: worker dials frontend; request streams:
-frontend dials worker). All TLS env vars should be set on every pod.
+frontend dials worker). Set the internal TCP TLS configuration on every
+participating pod. HTTP TLS settings apply only to the frontend HTTP server.
 
 ### Server role (accepting connections)
 
@@ -315,6 +341,7 @@ plane is not covered):
 
 | Path | Direction | Data | Transport |
 | --- | --- | --- | --- |
+| HTTP API | Client/API gateway → Frontend | API requests and responses | HTTPS; optional client-certificate authentication |
 | Request plane | Frontend → Worker | User prompts, request metadata | `egress/tcp_client` → `ingress/shared_tcp_endpoint` |
 | Response stream | Worker → Frontend | Inference output tokens | `tcp/client` → `tcp/server` |
 | Request stream | Frontend → Worker | Streaming input (bidirectional) | `tcp/client` → `tcp/server` |
@@ -322,6 +349,12 @@ plane is not covered):
 
 ## Design notes
 
+- HTTP server certificates and private keys use the shared hot-reload resolver.
+  A background thread checks for file changes every 30 seconds
+  (sooner after a failed reload). Valid updates apply to subsequent handshakes;
+  existing connections remain open, and a failed reload retains the last valid
+  certificate. The HTTP client CA is loaded at startup and requires a frontend
+  restart after rotation.
 - Server certificates hot-reload: the request-plane and response-stream servers
   serve their leaf cert/key through a resolver that re-reads the files from disk
   when their contents change (detected by a content hash, so rotations done by
