@@ -64,22 +64,17 @@ impl WorkerCatalog {
     }
 
     pub(super) fn has_schedulable_for_key(&self, key: &RoutingPartitionId) -> bool {
-        self.workers.read().values().any(|record| {
-            record.lifecycle == WorkerLifecycle::Schedulable
-                && record.model_name == key.model_name
-                && record.routing_group == key.routing_group
-        })
+        self.workers
+            .read()
+            .values()
+            .any(|record| schedulable_in(record, key))
     }
 
     pub(super) fn schedulable_worker_ids_for_key(&self, key: &RoutingPartitionId) -> Vec<WorkerId> {
         self.workers
             .read()
             .values()
-            .filter(|record| {
-                record.lifecycle == WorkerLifecycle::Schedulable
-                    && record.model_name == key.model_name
-                    && record.routing_group == key.routing_group
-            })
+            .filter(|record| schedulable_in(record, key))
             .map(|record| record.worker_id)
             .collect()
     }
@@ -120,11 +115,7 @@ impl WorkerCatalog {
         self.workers
             .read()
             .values()
-            .filter(|record| {
-                record.lifecycle == WorkerLifecycle::Schedulable
-                    && record.model_name == key.model_name
-                    && record.routing_group == key.routing_group
-            })
+            .filter(|record| schedulable_in(record, key))
             .filter_map(|record| {
                 record
                     .scheduler_config()
@@ -141,6 +132,13 @@ impl WorkerCatalog {
             .count()
     }
 
+    pub(super) fn is_schedulable(&self, worker_id: WorkerId, key: &RoutingPartitionId) -> bool {
+        self.workers
+            .read()
+            .get(&worker_id)
+            .is_some_and(|record| schedulable_in(record, key))
+    }
+
     pub(super) fn schedulable_endpoint(
         &self,
         worker_id: WorkerId,
@@ -148,10 +146,7 @@ impl WorkerCatalog {
     ) -> Option<String> {
         let workers = self.workers.read();
         let record = workers.get(&worker_id)?;
-        if record.lifecycle != WorkerLifecycle::Schedulable
-            || record.model_name != key.model_name
-            || record.routing_group != key.routing_group
-        {
+        if !schedulable_in(record, key) {
             return None;
         }
         record.endpoint.clone()
@@ -164,13 +159,15 @@ impl WorkerCatalog {
     ) -> Option<String> {
         let workers = self.workers.read();
         let record = workers.get(&worker.worker_id)?;
-        if record.lifecycle != WorkerLifecycle::Schedulable
-            || record.model_name != key.model_name
-            || record.routing_group != key.routing_group
-            || !record.dp_ranks().any(|rank| rank == worker.dp_rank)
-        {
+        if !schedulable_in(record, key) || !record.dp_ranks().any(|rank| rank == worker.dp_rank) {
             return None;
         }
         record.endpoint.clone()
     }
+}
+
+fn schedulable_in(record: &WorkerCatalogRecord, key: &RoutingPartitionId) -> bool {
+    record.lifecycle == WorkerLifecycle::Schedulable
+        && record.model_name == key.model_name
+        && record.routing_group == key.routing_group
 }

@@ -371,7 +371,9 @@ impl EmbeddedSelection {
         &self,
         ttl: std::time::Duration,
     ) -> Result<crate::session_affinity::AffinityCoordinator> {
-        let table = self.partition.session_affinity(ttl)?;
+        let table = self.partition.session_affinity(
+            dynamo_kv_router::services::selection::affinity::SessionAffinityConfig::new(ttl),
+        )?;
         Ok(self
             .affinity
             .get_or_init(|| crate::session_affinity::AffinityCoordinator::wrap(table))

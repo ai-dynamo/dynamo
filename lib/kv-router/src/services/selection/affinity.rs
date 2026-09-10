@@ -102,9 +102,36 @@ enum AffinityEntry {
     },
 }
 
+/// How a table binds sessions; see [`SessionAffinityMode`] for the
+/// dispatch-time semantics of `mode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionAffinityConfig {
+    pub ttl: Duration,
+    pub mode: SessionAffinityMode,
+    pub max_entries: usize,
+    pub max_session_id_bytes: usize,
+}
+
+impl SessionAffinityConfig {
+    pub fn new(ttl: Duration) -> Self {
+        Self {
+            ttl,
+            mode: SessionAffinityMode::default(),
+            max_entries: MAX_SESSION_AFFINITY_ENTRIES,
+            max_session_id_bytes: MAX_SESSION_AFFINITY_ID_BYTES,
+        }
+    }
+
+    pub fn with_mode(mut self, mode: SessionAffinityMode) -> Self {
+        self.mode = mode;
+        self
+    }
+}
+
 struct Inner {
     entries: DashMap<String, AffinityEntry>,
     ttl: Duration,
+    mode: SessionAffinityMode,
     max_entries: usize,
     max_session_id_bytes: usize,
     entry_count: AtomicUsize,
@@ -144,9 +171,10 @@ impl WeakSessionAffinity {
     }
 }
 
-/// A session acquired for one request.
-pub enum Acquired {
-    /// New (or expired) session: select a worker, then `commit` it.
+/// A session held for one request until [`SessionAffinity::commit`] binds it
+/// to the worker the request was dispatched to.
+pub enum Hold {
+    /// New (or expired) session: select a worker, then commit it.
     Initialize(AffinityInitialization),
     /// Bound session: route to `target`; the lease releases on drop.
     Bound {
@@ -155,26 +183,26 @@ pub enum Acquired {
     },
 }
 
+impl Hold {
+    /// The worker a bound session steers to; `None` while initializing.
+    pub fn target(&self) -> Option<AffinityTarget> {
+        match self {
+            Self::Initialize(_) => None,
+            Self::Bound { target, .. } => Some(*target),
+        }
+    }
+}
+
 /// One step of acquiring a session.
 pub enum AcquireStep {
-    /// New (or expired) session: select a worker, then `commit` it.
-    Initialize(AffinityInitialization),
-    /// Bound session: route to `target`; the lease releases on drop.
-    Bound {
-        target: AffinityTarget,
-        lease: AffinityLease,
-    },
+    Held(Hold),
     /// Another request is initializing this session; await, then retry.
     Wait(Pin<Box<OwnedNotified>>),
 }
 
 impl SessionAffinity {
     pub fn new(ttl: Duration) -> Result<Self, AffinityError> {
-        Self::new_with_limits(
-            ttl,
-            MAX_SESSION_AFFINITY_ENTRIES,
-            MAX_SESSION_AFFINITY_ID_BYTES,
-        )
+        Self::with_config(SessionAffinityConfig::new(ttl))
     }
 
     pub(crate) fn validate_ttl(ttl: Duration) -> Result<(), AffinityError> {
@@ -193,12 +221,21 @@ impl SessionAffinity {
         max_entries: usize,
         max_session_id_bytes: usize,
     ) -> Result<Self, AffinityError> {
-        Self::validate_ttl(ttl)?;
-        let inner = Arc::new(Inner {
-            entries: DashMap::new(),
-            ttl,
+        Self::with_config(SessionAffinityConfig {
             max_entries,
             max_session_id_bytes,
+            ..SessionAffinityConfig::new(ttl)
+        })
+    }
+
+    pub fn with_config(config: SessionAffinityConfig) -> Result<Self, AffinityError> {
+        Self::validate_ttl(config.ttl)?;
+        let inner = Arc::new(Inner {
+            entries: DashMap::new(),
+            ttl: config.ttl,
+            mode: config.mode,
+            max_entries: config.max_entries,
+            max_session_id_bytes: config.max_session_id_bytes,
             entry_count: AtomicUsize::new(0),
             next_revision: AtomicU64::new(1),
             next_sequence: AtomicU64::new(
@@ -217,8 +254,9 @@ impl SessionAffinity {
         });
         Self::spawn_reaper(&inner);
         tracing::info!(
-            ttl_secs = ttl.as_secs(),
-            max_entries,
+            ttl_secs = config.ttl.as_secs(),
+            mode = ?config.mode,
+            max_entries = config.max_entries,
             "session affinity enabled"
         );
         Ok(Self { inner })
@@ -277,6 +315,10 @@ impl SessionAffinity {
         self.inner.ttl
     }
 
+    pub fn mode(&self) -> SessionAffinityMode {
+        self.inner.mode
+    }
+
     /// Acquire `session_id` for a request. `requested_target` is an explicit
     /// pin the request carries; a bound session must agree with it.
     pub fn try_acquire(
@@ -299,14 +341,16 @@ impl SessionAffinity {
                     revision,
                     notify: notify.clone(),
                 });
-                Ok(AcquireStep::Initialize(AffinityInitialization {
-                    table: Arc::downgrade(&self.inner),
-                    session_id: session_id.to_string(),
-                    revision,
-                    notify,
-                    requested_target,
-                    active: true,
-                }))
+                Ok(AcquireStep::Held(Hold::Initialize(
+                    AffinityInitialization {
+                        table: Arc::downgrade(&self.inner),
+                        session_id: session_id.to_string(),
+                        revision,
+                        notify,
+                        requested_target,
+                        active: true,
+                    },
+                )))
             }
             Entry::Occupied(mut entry) => match entry.get_mut() {
                 AffinityEntry::Initializing { notify, .. } => {
@@ -333,14 +377,16 @@ impl SessionAffinity {
                         revision,
                         notify: notify.clone(),
                     };
-                    Ok(AcquireStep::Initialize(AffinityInitialization {
-                        table: Arc::downgrade(&self.inner),
-                        session_id: session_id.to_string(),
-                        revision,
-                        notify,
-                        requested_target,
-                        active: true,
-                    }))
+                    Ok(AcquireStep::Held(Hold::Initialize(
+                        AffinityInitialization {
+                            table: Arc::downgrade(&self.inner),
+                            session_id: session_id.to_string(),
+                            revision,
+                            notify,
+                            requested_target,
+                            active: true,
+                        },
+                    )))
                 }
                 AffinityEntry::Bound {
                     target,
@@ -358,7 +404,7 @@ impl SessionAffinity {
                         "session affinity hit: reusing pinned worker"
                     );
                     *active_leases += 1;
-                    Ok(AcquireStep::Bound {
+                    Ok(AcquireStep::Held(Hold::Bound {
                         target: *target,
                         lease: AffinityLease {
                             table: Arc::downgrade(&self.inner),
@@ -367,7 +413,7 @@ impl SessionAffinity {
                             version: *version,
                             active: true,
                         },
-                    })
+                    }))
                 }
             },
         }
@@ -379,14 +425,46 @@ impl SessionAffinity {
         &self,
         session_id: &str,
         requested_target: Option<AffinityTarget>,
-    ) -> Result<Acquired, AffinityError> {
+    ) -> Result<Hold, AffinityError> {
         loop {
             match self.try_acquire(session_id, requested_target)? {
                 AcquireStep::Wait(notified) => notified.await,
-                AcquireStep::Initialize(init) => return Ok(Acquired::Initialize(init)),
-                AcquireStep::Bound { target, lease } => {
-                    return Ok(Acquired::Bound { target, lease });
+                AcquireStep::Held(hold) => return Ok(hold),
+            }
+        }
+    }
+
+    /// Bind the held session to `dispatched`. A `Bound` session dispatched
+    /// elsewhere follows the dispatch in `Soft` mode and is invalidated with
+    /// an error in `Hard` mode, so its next request re-initializes.
+    pub fn commit(
+        &self,
+        hold: Hold,
+        dispatched: AffinityTarget,
+    ) -> Result<AffinityLease, AffinityError> {
+        match hold {
+            Hold::Initialize(initialization) => {
+                let lease = initialization.commit(dispatched)?;
+                lease.publish(dispatched);
+                Ok(lease)
+            }
+            Hold::Bound { target, mut lease } => {
+                if self.inner.mode == SessionAffinityMode::Soft {
+                    let rebound = AffinityLease::rebound_target(target, dispatched);
+                    if target == rebound {
+                        lease.publish(target);
+                    } else if lease.rebind(target, rebound) {
+                        lease.publish(rebound);
+                    }
+                    return Ok(lease);
                 }
+                if let Err(error) = validate_dispatch_target(lease.session_id(), target, dispatched)
+                {
+                    lease.invalidate();
+                    return Err(error);
+                }
+                lease.publish(target);
+                Ok(lease)
             }
         }
     }
@@ -791,11 +869,19 @@ impl AffinityLease {
             )
         });
         match removed {
-            Some((_, AffinityEntry::Bound { target, .. })) => {
+            Some((
+                _,
+                AffinityEntry::Bound {
+                    target,
+                    active_leases,
+                    ..
+                },
+            )) => {
                 tracing::debug!(
                     session_id = %self.session_id,
                     worker_id = target.worker_id,
                     dp_rank = ?target.dp_rank,
+                    other_holders = active_leases.saturating_sub(1),
                     "invalidated current session affinity binding"
                 );
                 self.active = false;

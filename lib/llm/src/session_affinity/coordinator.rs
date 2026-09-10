@@ -15,7 +15,7 @@ use std::{
 };
 
 use dynamo_kv_router::services::selection::affinity::{
-    AcquireStep, AffinityError, AffinityInitialization, AffinityLease, SessionAffinity,
+    AcquireStep, AffinityError, AffinityInitialization, AffinityLease, Hold, SessionAffinity,
     validate_dispatch_target,
 };
 use dynamo_runtime::{
@@ -151,10 +151,10 @@ impl AffinityCoordinator {
                 .try_acquire(session_id.as_str(), requested)
                 .map_err(affinity_error)?
             {
-                AcquireStep::Initialize(initialization) => {
+                AcquireStep::Held(Hold::Initialize(initialization)) => {
                     return Ok(AffinityAcquire::Initialize(initialization));
                 }
-                AcquireStep::Bound { target, lease } => {
+                AcquireStep::Held(Hold::Bound { target, lease }) => {
                     return Ok(AffinityAcquire::Bound {
                         target: from_table(target),
                         lease,
