@@ -31,8 +31,7 @@ use rustc_hash::{FxBuildHasher, FxHashSet};
 use super::ShardedIndexerMetrics;
 use super::shard_handle::AsyncShardHandle;
 use super::{
-    AnchorCapableSyncIndexer, AnchorRef, AnchorTask, KvIndexerInterface, KvRouterError,
-    ShardSizeSnapshot, ThreadPoolIndexer,
+    AnchorRef, AnchorTask, KvIndexerInterface, KvRouterError, ShardSizeSnapshot, ThreadPoolIndexer,
 };
 use crate::protocols::*;
 
@@ -92,12 +91,16 @@ struct BlockRoutingEntry {
     affects_router_node: bool,
 }
 
-struct StoreRouteDecision {
-    shard_idx: usize,
-    anchor: Option<AnchorRef>,
-    anchor_block_offset: usize,
-    rewrite_for_anchor: bool,
-    skip_backend: bool,
+enum StoreRouteDecision {
+    RouterOnly,
+    Direct {
+        shard_idx: usize,
+    },
+    Anchored {
+        shard_idx: usize,
+        anchor: AnchorRef,
+        block_offset: usize,
+    },
 }
 
 /// Branch-sharded wrapper over N `AsyncShardHandle` shard backends.
@@ -125,43 +128,6 @@ pub struct BranchShardedIndexer<S: AsyncShardHandle> {
 #[deprecated(note = "use BranchShardedIndexer<ThreadPoolIndexer<T>> instead")]
 pub type AnchorAwareBranchShardedIndexer<T> = BranchShardedIndexer<ThreadPoolIndexer<T>>;
 
-impl<T: AnchorCapableSyncIndexer> BranchShardedIndexer<ThreadPoolIndexer<T>> {
-    /// Source-compatibility constructor: accepts raw `T` backends and wraps
-    /// each in a [`ThreadPoolIndexer`] with 2 worker threads.
-    ///
-    /// This shim exists because the former `AnchorAwareBranchShardedIndexer`
-    /// accepted `Vec<T>` directly.  Prefer the primary
-    /// [`BranchShardedIndexer::new`] constructor with pre-built
-    /// [`ThreadPoolIndexer`] shards when you need control over thread-pool
-    /// size.
-    #[deprecated(
-        note = "build ThreadPoolIndexers explicitly (choosing num_threads) and call \
-                BranchShardedIndexer::new"
-    )]
-    pub fn new_from_backends(backends: Vec<T>, prefix_depth: usize, kv_block_size: u32) -> Self {
-        let shards = backends
-            .into_iter()
-            .map(|b| ThreadPoolIndexer::new(b, 2, kv_block_size))
-            .collect();
-        BranchShardedIndexer::new(shards, prefix_depth, kv_block_size)
-    }
-
-    /// Alias of [`Self::new_from_backends`] for drop-in replacement of the
-    /// former `new_with_options` call pattern.
-    #[deprecated(
-        note = "build ThreadPoolIndexers explicitly (choosing num_threads) and call \
-                BranchShardedIndexer::new_with_options"
-    )]
-    #[allow(deprecated)]
-    pub fn new_with_options_from_backends(
-        backends: Vec<T>,
-        prefix_depth: usize,
-        kv_block_size: u32,
-    ) -> Self {
-        Self::new_from_backends(backends, prefix_depth, kv_block_size)
-    }
-}
-
 impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
     /// Create a branch-sharded indexer from pre-built shard handles.
     pub fn new(shards: Vec<S>, prefix_depth: usize, kv_block_size: u32) -> Self {
@@ -180,11 +146,6 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
             #[cfg(feature = "bench")]
             metrics: ShardedIndexerMetrics::new(),
         }
-    }
-
-    /// Alias for [`BranchShardedIndexer::new`].
-    pub fn new_with_options(shards: Vec<S>, prefix_depth: usize, kv_block_size: u32) -> Self {
-        Self::new(shards, prefix_depth, kv_block_size)
     }
 
     fn static_divergent_shard(
@@ -206,16 +167,17 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
         if slot >= parent_shard { slot + 1 } else { slot }
     }
 
-    fn anchor_for_parent(&self, parent: &RoutingNode) -> Option<AnchorRef> {
-        if parent.depth == 0 {
-            return None;
-        }
-        let anchor_id = parent.external_hash?;
-        Some(AnchorRef {
+    fn anchor_for_parent(&self, parent: &RoutingNode) -> AnchorRef {
+        let anchor_id = parent
+            .external_hash
+            .expect("non-root routing node must have an external hash");
+        AnchorRef {
             anchor_id,
-            anchor_local_hash: parent.key.unwrap_or(LocalBlockHash(anchor_id.0)),
+            anchor_local_hash: parent
+                .key
+                .expect("non-root routing node must have a local hash"),
             anchor_depth: parent.depth,
-        })
+        }
     }
 
     fn get_or_create_child(
@@ -263,19 +225,18 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
         &self,
         worker: WorkerWithDpRank,
         store_data: &KvCacheStoreData,
-    ) -> StoreRouteDecision {
-        let mut start_depth = 0usize;
-        let mut node = self.root.clone();
-
-        let parent_entry = store_data.parent_hash.and_then(|parent_hash| {
-            self.worker_block_index
-                .get(&worker)
-                .and_then(|lookup| lookup.get(&parent_hash).map(|entry| entry.clone()))
-        });
-        if let Some(entry) = parent_entry {
-            node = entry.routing_node.clone();
-            start_depth = entry.sequence_depth;
-        }
+    ) -> Result<StoreRouteDecision, KvRouterError> {
+        let (mut node, start_depth) = match store_data.parent_hash {
+            Some(parent_hash) => {
+                let entry = self
+                    .worker_block_index
+                    .get(&worker)
+                    .and_then(|lookup| lookup.get(&parent_hash).map(|entry| entry.clone()))
+                    .ok_or(KvRouterError::BlockNotFound)?;
+                (entry.routing_node, entry.sequence_depth)
+            }
+            None => (self.root.clone(), 0),
+        };
 
         let lookup = self.worker_lookup(worker);
 
@@ -308,24 +269,21 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
             .min(store_data.blocks.len());
         let needs_boundary_anchor =
             start_depth <= self.max_routing_depth && router_owned_blocks < store_data.blocks.len();
-        let anchor = needs_boundary_anchor
-            .then(|| self.anchor_for_parent(&node))
-            .flatten();
-        let (anchor_block_offset, rewrite_for_anchor) = if anchor.is_some() {
-            (router_owned_blocks, true)
-        } else {
-            (0, false)
-        };
         let skip_backend =
             start_depth <= self.max_routing_depth && router_owned_blocks >= store_data.blocks.len();
 
-        StoreRouteDecision {
-            shard_idx,
-            anchor,
-            anchor_block_offset,
-            rewrite_for_anchor,
-            skip_backend,
+        if skip_backend {
+            return Ok(StoreRouteDecision::RouterOnly);
         }
+        if needs_boundary_anchor {
+            let anchor = self.anchor_for_parent(&node);
+            return Ok(StoreRouteDecision::Anchored {
+                shard_idx,
+                anchor,
+                block_offset: router_owned_blocks,
+            });
+        }
+        Ok(StoreRouteDecision::Direct { shard_idx })
     }
 
     fn add_active_scores(
@@ -391,14 +349,8 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
             .counters
             .find_match_dispatches
             .fetch_add(1, Ordering::Relaxed);
-        let Some(anchor) = self.anchor_for_parent(&node) else {
-            return Ok(scores);
-        };
-        let suffix: &[LocalBlockHash] = if anchor.anchor_depth <= sequence.len() {
-            &sequence[anchor.anchor_depth..]
-        } else {
-            &[]
-        };
+        let anchor = self.anchor_for_parent(&node);
+        let suffix = &sequence[anchor.anchor_depth..];
         let shard = Arc::clone(&self.shards[shard_idx]);
         let mut shard_scores = shard
             .as_ref()
@@ -414,7 +366,12 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
         Ok(scores)
     }
 
-    fn ensure_worker_anchor(&self, shard_idx: usize, worker: WorkerWithDpRank, anchor: AnchorRef) {
+    fn ensure_worker_anchor(
+        &self,
+        shard_idx: usize,
+        worker: WorkerWithDpRank,
+        anchor: AnchorRef,
+    ) -> bool {
         let anchor_key = (shard_idx, anchor.anchor_id.0);
 
         // Fast-path dedup: read lock only, no write.
@@ -428,7 +385,7 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
                 .counters
                 .anchor_reuses
                 .fetch_add(1, Ordering::Relaxed);
-            return;
+            return true;
         }
 
         let task = AnchorTask {
@@ -460,9 +417,11 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
                 }
                 #[cfg(not(feature = "bench"))]
                 let _ = newly_inserted;
+                true
             }
             Err(error) => {
                 tracing::warn!(?error, shard_idx, ?worker, "Failed to enqueue anchor");
+                false
             }
         }
     }
@@ -488,24 +447,21 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
     }
 
     fn rewritten_store_event(
-        &self,
         mut event: RouterEvent,
-        decision: &StoreRouteDecision,
-    ) -> Option<RouterEvent> {
-        let anchor = decision.anchor?;
+        anchor: AnchorRef,
+        block_offset: usize,
+    ) -> RouterEvent {
         let KvCacheEventData::Stored(store_data) = &mut event.event.data else {
-            return None;
+            unreachable!("only stored events are routed through the store path");
         };
-        if decision.anchor_block_offset > store_data.blocks.len() {
-            return None;
-        }
-        let blocks = store_data.blocks.split_off(decision.anchor_block_offset);
-        if blocks.is_empty() {
-            return None;
-        }
+        assert!(
+            block_offset < store_data.blocks.len(),
+            "anchored store must retain a non-empty backend suffix"
+        );
+        let blocks = store_data.blocks.split_off(block_offset);
         store_data.parent_hash = Some(anchor.anchor_id);
         store_data.blocks = blocks;
-        Some(event)
+        event
     }
 
     fn remove_worker_entries(&self, worker: WorkerWithDpRank) {
@@ -616,21 +572,37 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
             return;
         };
         let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
-        let decision = self.route_stored(worker, store_data);
-
-        if decision.skip_backend {
-            return;
-        }
-
-        if let (true, Some(anchor)) = (decision.rewrite_for_anchor, decision.anchor) {
-            self.ensure_worker_anchor(decision.shard_idx, worker, anchor);
-            if let Some(rewritten) = self.rewritten_store_event(event, &decision) {
-                self.shards[decision.shard_idx].apply_event(rewritten).await;
+        let decision = match self.route_stored(worker, store_data) {
+            Ok(decision) => decision,
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    worker_id = ?worker.worker_id,
+                    dp_rank = worker.dp_rank,
+                    event_id = event.event.event_id,
+                    parent_hash = ?store_data.parent_hash,
+                    "Failed to route stored event"
+                );
+                return;
             }
-            return;
-        }
+        };
 
-        self.shards[decision.shard_idx].apply_event(event).await;
+        match decision {
+            StoreRouteDecision::RouterOnly => {}
+            StoreRouteDecision::Direct { shard_idx } => {
+                self.shards[shard_idx].apply_event(event).await;
+            }
+            StoreRouteDecision::Anchored {
+                shard_idx,
+                anchor,
+                block_offset,
+            } => {
+                if self.ensure_worker_anchor(shard_idx, worker, anchor) {
+                    let rewritten = Self::rewritten_store_event(event, anchor, block_offset);
+                    self.shards[shard_idx].apply_event(rewritten).await;
+                }
+            }
+        }
     }
 
     async fn apply_removed(&self, event: RouterEvent) {
@@ -1000,7 +972,9 @@ mod tests {
     use std::sync::{Arc, Barrier};
 
     use super::*;
-    use crate::indexer::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
+    use crate::indexer::{
+        ThreadPoolIndexer, concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed,
+    };
     use crate::test_utils::{remove_event, router_event, stored_blocks_with_sequence_hashes};
     use tokio::sync::Barrier as AsyncBarrier;
 
@@ -1340,9 +1314,7 @@ mod tests {
 
         let b = child(&child(&index.root, 1), 2);
         let e = child(&b, 5);
-        let anchor = index
-            .anchor_for_parent(&e)
-            .expect("expected boundary anchor");
+        let anchor = index.anchor_for_parent(&e);
         let shard_idx = e.shard();
 
         let full = local_hashes(&[1, 2, 5, 7]);

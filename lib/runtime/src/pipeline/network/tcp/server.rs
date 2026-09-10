@@ -48,7 +48,7 @@ use crate::pipeline::{
     },
 };
 use crate::utils::ip_resolver::resolve_host_or_interface;
-use anyhow::{Context, Result, anyhow as error};
+use anyhow::{Result, anyhow as error};
 
 pub use crate::utils::ip_resolver::{DefaultIpResolver, IpResolver};
 
@@ -159,6 +159,10 @@ fn prune_tombstones(tombstones: &mut HashMap<EndpointInstanceId, Instant>, now: 
 }
 
 impl TcpStreamServer {
+    pub fn local_address(&self) -> Result<SocketAddr> {
+        Ok(SocketAddr::new(self.local_ip, self.local_port))
+    }
+
     pub fn options_builder() -> ServerOptionsBuilder {
         ServerOptionsBuilder::default()
     }
@@ -276,6 +280,27 @@ impl TcpStreamServer {
         if let Some(s) = send_subject {
             entry.insert((StreamType::Request, s.to_string()));
         }
+        true
+    }
+
+    /// Associate a request-only callback registration with a backend instance.
+    /// QUIC response mode still uses TCP for bidirectional request callbacks.
+    pub async fn associate_request_instance(&self, subject: &str, id: &EndpointInstanceId) -> bool {
+        let mut state = self.state.lock();
+        let now = Instant::now();
+        prune_tombstones(&mut state.removed_instances, now);
+        if state.removed_instances.contains_key(id) {
+            state.tx_subjects.remove(subject);
+            return false;
+        }
+        state
+            .subject_instance
+            .insert(subject.to_string(), id.clone());
+        state
+            .instance_subjects
+            .entry(id.clone())
+            .or_default()
+            .insert((StreamType::Request, subject.to_string()));
         true
     }
 
@@ -1302,25 +1327,9 @@ mod tests {
     use crate::pipeline::Context;
     use crate::pipeline::network::DEFAULT_SEND_BUFFER_COUNT;
     use crate::pipeline::network::tcp::client::TcpClient;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
+    use crate::tls_utils::test_certs::self_signed_pair;
     use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
     use tokio::net::TcpStream;
-
-    fn make_cert_files() -> (NamedTempFile, NamedTempFile) {
-        let key_pair = rcgen::KeyPair::generate().unwrap();
-        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
-            .unwrap()
-            .self_signed(&key_pair)
-            .unwrap();
-        let mut cert_file = NamedTempFile::new().unwrap();
-        cert_file.write_all(cert.pem().as_bytes()).unwrap();
-        let mut key_file = NamedTempFile::new().unwrap();
-        key_file
-            .write_all(key_pair.serialize_pem().as_bytes())
-            .unwrap();
-        (cert_file, key_file)
-    }
 
     #[test]
     fn build_tls_acceptor_no_env_vars_is_plaintext() {
@@ -1340,7 +1349,7 @@ mod tests {
 
     #[test]
     fn build_tls_acceptor_partial_config_errors() {
-        let (cert, key) = make_cert_files();
+        let (cert, key) = self_signed_pair();
         let cert_str = cert.path().to_str().unwrap();
         let key_str = key.path().to_str().unwrap();
         // only cert
@@ -1363,7 +1372,7 @@ mod tests {
 
     #[test]
     fn build_tls_acceptor_both_paths_is_tls() {
-        let (cert, key) = make_cert_files();
+        let (cert, key) = self_signed_pair();
         temp_env::with_vars(
             [
                 ("DYN_TCP_TLS_CERT_PATH", Some(cert.path().to_str().unwrap())),
@@ -1376,7 +1385,7 @@ mod tests {
     #[test]
     fn build_tls_acceptor_with_client_ca_is_mtls() {
         // A client CA turns the response-stream server into an mTLS acceptor.
-        let (cert, key) = make_cert_files();
+        let (cert, key) = self_signed_pair();
         temp_env::with_vars(
             [
                 ("DYN_TCP_TLS_CERT_PATH", Some(cert.path().to_str().unwrap())),
@@ -1392,7 +1401,7 @@ mod tests {
 
     #[test]
     fn build_tls_acceptor_client_ca_without_server_identity_errors() {
-        let (cert, _key) = make_cert_files();
+        let (cert, _key) = self_signed_pair();
         temp_env::with_vars(
             [
                 ("DYN_TCP_TLS_CERT_PATH", None),

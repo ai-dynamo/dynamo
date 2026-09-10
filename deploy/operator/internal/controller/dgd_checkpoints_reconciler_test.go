@@ -40,6 +40,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
@@ -367,6 +368,21 @@ func TestDGDCheckpointsReconciler_SnapshotJobAppliesDGDDefaults(t *testing.T) {
 		discovery.GetK8sDiscoveryServiceAccountName("test-dgd"),
 		job.Spec.PodTemplate.Spec.ServiceAccountName,
 	)
+
+	t.Log("Verify the SnapshotJob retains the default shared-memory volume")
+	sharedMemoryVolume := findVolume(job.Spec.PodTemplate.Spec.Volumes, commonconsts.KubeValueNameSharedMemory)
+	require.NotNil(t, sharedMemoryVolume)
+	require.NotNil(t, sharedMemoryVolume.EmptyDir)
+	assert.Equal(t, corev1.StorageMediumMemory, sharedMemoryVolume.EmptyDir.Medium)
+	require.NotNil(t, sharedMemoryVolume.EmptyDir.SizeLimit)
+	assert.Equal(t,
+		resource.MustParse(commonconsts.DefaultSharedMemorySize),
+		*sharedMemoryVolume.EmptyDir.SizeLimit,
+	)
+	assert.Contains(t, main.VolumeMounts, corev1.VolumeMount{
+		Name:      commonconsts.KubeValueNameSharedMemory,
+		MountPath: commonconsts.DefaultSharedMemoryMountPath,
+	})
 }
 
 func TestDGDCheckpointsReconciler_SnapshotJobUsesTargetContainer(t *testing.T) {
@@ -626,6 +642,30 @@ func TestDGDCheckpointsReconciler_ExplicitRestoreWaitsForActiveWorkerHash(t *tes
 	assert.True(t, info.Ready)
 	require.NotNil(t, info.NativeSnapshot)
 	assert.Equal(t, referenced.UID, info.NativeSnapshot.UID)
+}
+
+func TestCheckpointWorkerHashForComponent_WaitsForCommittedGeneration(t *testing.T) {
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+			}},
+		},
+	}
+
+	t.Log("No annotation: generation is uncommitted; must return empty hash")
+	hash, err := checkpointWorkerHashForComponent(dgd, "worker")
+	require.NoError(t, err)
+	assert.Empty(t, hash, "checkpointWorkerHashForComponent must return empty before the active generation is committed")
+
+	t.Log("Annotation present: generation is committed; must return the active hash")
+	workerHash := betaDGDWorkersSpecHash(t, dgd)
+	dgd.Annotations = map[string]string{commonconsts.AnnotationCurrentWorkerHashV2: workerHash}
+	hash, err = checkpointWorkerHashForComponent(dgd, "worker")
+	require.NoError(t, err)
+	assert.Equal(t, workerHash, hash)
 }
 
 func TestDGDCheckpointsReconciler_RejectsDisabledFeatureBeforeCreatingResources(t *testing.T) {

@@ -43,6 +43,10 @@ tabs:
   recipes:
     display-name: Recipes
     icon: file-code
+  agent-skills:
+    display-name: Agent Skills
+    icon: robot
+    slug: agent-skills
   reference:
     display-name: Reference
     icon: book
@@ -163,6 +167,8 @@ navigation:
             path: pages/kubernetes/kv-aware-routing/overview.md
           - page: Using the Dynamo Frontend
             path: pages/kubernetes/kv-aware-routing/dynamo-frontend.md
+          - page: Deploy the DC KV Relay (Experimental)
+            path: pages/kubernetes/kv-aware-routing/kv-dc-relay.md
           - page: Using GAIE with Dynamo
             path: pages/kubernetes/kv-aware-routing/gateway-api.mdx
           - page: Using GAIE with vanilla vLLM
@@ -460,7 +466,7 @@ navigation:
                         path: pages/developer-guide/knowledge-base/modular-components/router/topology-aware-kv-transfer.md
                       - page: Offloading Support Matrix
                         path: pages/developer-guide/knowledge-base/modular-components/router/offloading-support-matrix.md
-                      - page: Multi-DC KV Routing (Experimental)
+                      - page: DC KV Relay Concepts (Experimental)
                         slug: multi-dc-kv-routing
                         path: pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md
                   - section: Standalone Services
@@ -781,6 +787,9 @@ navigation:
           - page: Kimi-K3
             path: pages/recipes/model-recipes/kimi-k3.mdx
             slug: kimi-k3
+          - page: Qwen3.8-Flash-Next
+            path: pages/recipes/model-recipes/qwen-3-8-flash-next.mdx
+            slug: qwen-3-8-flash-next
           - page: Qwen3.8-2.4T-A95B
             path: pages/recipes/model-recipes/qwen-3-8-2-4t-a95b-fp8.mdx
             slug: qwen-3-8-2-4t-a95b-fp8
@@ -911,6 +920,29 @@ navigation:
             slug: kv-router-ab-testing
             hidden: true
 
+  # The tab slug preserves the published /dynamo/dev/agent-skills URL.
+  - tab: agent-skills
+    layout:
+      - page: Overview
+        icon: robot
+        path: pages/agent-skills/overview.mdx
+        slug: overview
+
+      - page: Deployment and Operations
+        icon: screwdriver-wrench
+        path: pages/agent-skills/deployment.mdx
+        slug: deployment
+
+      - page: Performance Optimization
+        icon: gauge-high
+        path: pages/agent-skills/optimization.mdx
+        slug: optimization
+
+      - page: Development and Documentation
+        icon: code
+        path: pages/agent-skills/development.mdx
+        slug: development
+
   - tab: reference
     layout:
       - page: Compatibility
@@ -966,11 +998,6 @@ navigation:
         icon: microchip
         path: pages/reference/general/model-early-access-builds.mdx
         slug: model-early-access-builds
-
-      - page: Agent Skills
-        icon: robot
-        path: pages/reference/general/agent-skills.mdx
-        slug: agent-skills
 
       - page: Examples
         icon: file-code
@@ -1073,6 +1100,9 @@ navigation:
             path: pages/reference/components/tls-configuration.mdx
           - page: Frontend Configuration
             path: pages/reference/components/frontend-configuration.mdx
+          - page: Multi-Datacenter KV Relay Configuration
+            path: pages/reference/components/kv-dc-relay-configuration.md
+            slug: dc-kv-relay-configuration
           - page: Planner Configuration
             path: pages/reference/components/planner-configuration.mdx
           - page: Profiler Configuration
@@ -1125,6 +1155,8 @@ navigation:
             path: pages/reference/observability/environment-variables.mdx
           - page: Metrics Catalog
             path: pages/reference/observability/metrics-catalog.mdx
+          - page: OTLP Metrics Export
+            path: pages/reference/observability/otlp-metrics-export.mdx
           - page: Metrics Comparison
             path: pages/reference/observability/metrics-comparison.md
           - page: Metric Labels

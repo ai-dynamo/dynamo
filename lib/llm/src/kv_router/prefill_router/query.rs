@@ -89,6 +89,7 @@ where
         cache_namespace: Option<String>,
         priority_jump: f64,
         strict_priority: u32,
+        policy_class: Option<String>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
     ) -> Result<PrefillReservation> {
@@ -125,6 +126,7 @@ where
                 cache_namespace,
                 priority_jump,
                 strict_priority,
+                policy_class,
                 None,
                 None,
                 allowed_worker_ids,
@@ -344,6 +346,7 @@ mod tests {
             discovery_backend: DiscoveryBackend::KvStore(kv::Selector::File(root.to_path_buf())),
             nats_config: None,
             request_plane: RequestPlaneMode::Tcp,
+            response_plane: None,
             event_transport_kind: EventTransportKind::Zmq,
         }
     }
@@ -578,6 +581,7 @@ mod tests {
                 0.0,
                 0,
                 None,
+                None,
                 RoutingConstraints::default(),
             )
             .await
@@ -593,6 +597,7 @@ mod tests {
                 None,
                 0.0,
                 0,
+                None,
                 None,
                 RoutingConstraints::default(),
             )
@@ -653,6 +658,7 @@ mod tests {
                 None,
                 0.0,
                 0,
+                None,
                 None,
                 RoutingConstraints::default(),
             )
