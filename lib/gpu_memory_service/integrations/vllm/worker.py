@@ -329,7 +329,10 @@ class GMSWorker(Worker):
         if mx_ctx is not None:
             pause_serving(mx_ctx)
 
-        for tag in ("weights", "kv_pool"):
+        tags = ["weights"]
+        if env_enabled_by_default("GMS_VLLM_VMM_IPC_KV", default=True):
+            tags.append("kv_pool")
+        for tag in tags:
             manager = get_gms_client_memory_manager(tag)
             assert manager is not None, f"GMS {tag} client is not initialized"
             assert not manager.is_unmapped, f"GMS {tag} is already unmapped"
@@ -351,9 +354,14 @@ class GMSWorker(Worker):
     def wake_up(self, tags: Optional[List[str]] = None) -> None:
         """vLLM wake implementation with GMS integration."""
         requested_tags = tags
+        persistent_kv_enabled = env_enabled_by_default(
+            "GMS_VLLM_VMM_IPC_KV", default=True
+        )
         if tags is None:
-            tags = ["weights", "kv_pool"]
-        elif "kv_cache" in tags and "kv_pool" not in tags:
+            tags = ["weights"]
+            if persistent_kv_enabled:
+                tags.append("kv_pool")
+        elif persistent_kv_enabled and "kv_cache" in tags and "kv_pool" not in tags:
             tags = list(tags) + ["kv_pool"]
 
         if "weights" in tags:
@@ -390,7 +398,7 @@ class GMSWorker(Worker):
             if mx_ctx is not None:
                 resume_serving(mx_ctx, self.model_runner.model)
 
-        if "kv_pool" in tags:
+        if persistent_kv_enabled and "kv_pool" in tags:
             kv_manager = get_gms_client_memory_manager("kv_pool")
             assert kv_manager is not None, "GMS persistent KV client is not initialized"
             assert kv_manager.is_unmapped, "GMS persistent KV is not unmapped"
@@ -408,7 +416,7 @@ class GMSWorker(Worker):
             kv_manager.remap_persistent_vas(engine_id, shared=shared_kv_enabled())
             logger.info("[GMS] vLLM KV wake_up remap done")
 
-        if (
+        if persistent_kv_enabled and (
             requested_tags is None
             or "kv_cache" in requested_tags
             or "kv_pool" in requested_tags

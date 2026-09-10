@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from gpu_memory_service.common.locks import GrantedLockType
@@ -251,3 +252,33 @@ def test_vllm_kv_disable_flag_uses_base_worker_paths(monkeypatch):
     assert instance._maybe_get_memory_pool_context("kv_cache") is sentinel
     assert calls == [config, "kv_cache"]
     assert not hasattr(instance, "_gms_kv_manager")
+
+
+def test_vllm_kv_disable_flag_skips_sleep_wake_kv_lifecycle(monkeypatch):
+    from gpu_memory_service.integrations.vllm import worker as worker_module
+
+    weights_manager = MagicMock(is_unmapped=False)
+    requested_tags = []
+
+    def get_manager(tag):
+        requested_tags.append(tag)
+        assert tag == "weights"
+        return weights_manager
+
+    device = MagicMock()
+    device.mem_get_info.side_effect = [(100, 200), (150, 200)]
+    monkeypatch.setenv("GMS_VLLM_VMM_IPC_KV", "0")
+    monkeypatch.setattr(worker_module, "get_gms_client_memory_manager", get_manager)
+    monkeypatch.setattr(worker_module, "get_mx_load_context", lambda: None)
+    monkeypatch.setattr(worker_module, "torch_device", lambda: device)
+    monkeypatch.setattr(worker_module.gc, "collect", lambda: None)
+
+    instance = object.__new__(worker_module.GMSWorker)
+    instance.sleep()
+
+    weights_manager.unmap_all_vas.assert_called_once_with()
+    weights_manager.abort.assert_called_once_with()
+    assert requested_tags == ["weights"]
+
+    instance.wake_up(tags=["kv_cache"])
+    assert requested_tags == ["weights"]
