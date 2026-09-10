@@ -675,7 +675,6 @@ def test_release_dedupes_session_claim_record(gms):
             lambda: True,
         )
     )
-    # Explicit release.
     asyncio.run(
         gms.handle_request(
             conn,
