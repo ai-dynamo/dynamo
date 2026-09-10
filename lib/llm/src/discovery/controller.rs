@@ -426,6 +426,22 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         true
     }
 
+    /// The instant an emptied group's catalog entry is withdrawn. A large enough
+    /// `GROUP_REMOVAL_GRACE_ENV` names a deadline no `Instant` can represent, and
+    /// adding it would panic the discovery task and take the whole catalog with
+    /// it, so an unrepresentable deadline falls back to the default grace.
+    fn removal_deadline(&self) -> Instant {
+        let now = Instant::now();
+        now.checked_add(self.removal_grace).unwrap_or_else(|| {
+            tracing::warn!(
+                grace_ms = self.removal_grace.as_millis(),
+                "{GROUP_REMOVAL_GRACE_ENV} is too large to express as a deadline; \
+                 using the default grace period"
+            );
+            now + DEFAULT_GROUP_REMOVAL_GRACE
+        })
+    }
+
     fn reconcile_group(&mut self, key: &GroupKey, desired_changed: bool) {
         let Some(mut group) = self.groups.remove(key) else {
             return;
@@ -441,7 +457,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             // Armed once per emptying: an empty group can be reconciled repeatedly,
             // and re-arming each time would defer removal indefinitely.
             if group.pending_removal.is_none() {
-                group.pending_removal = Some(Instant::now() + self.removal_grace);
+                group.pending_removal = Some(self.removal_deadline());
             }
             group.status = old_status;
             self.groups.insert(key.clone(), group);
@@ -1507,6 +1523,28 @@ mod tests {
         assert!(!controller.groups.contains_key(&group_key()));
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_grace_too_large_to_express_as_a_deadline_falls_back_to_the_default() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller =
+            ModelDiscoveryController::with_removal_grace(host.clone(), Duration::MAX);
+        let departing = instance(1, "spec");
+        controller.apply_added(departing.clone());
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+
+        controller.apply_removed(&departing.key);
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+
+        tokio::time::advance(DEFAULT_GROUP_REMOVAL_GRACE + Duration::from_secs(1)).await;
+        controller.release_due_retries();
+
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 1);
+        assert!(host.members(&group_key()).is_empty());
+    }
+
     #[test]
     fn group_removal_grace_falls_back_to_the_default_for_anything_unusable() {
         assert_eq!(group_removal_grace(None), DEFAULT_GROUP_REMOVAL_GRACE);
@@ -1518,6 +1556,12 @@ mod tests {
         );
         assert_eq!(group_removal_grace(Some("-1")), DEFAULT_GROUP_REMOVAL_GRACE);
         assert_eq!(group_removal_grace(Some("0")), Duration::ZERO);
+        // Accepted here and made harmless by `removal_deadline`, which is where an
+        // unrepresentable deadline would otherwise panic.
+        assert_eq!(
+            group_removal_grace(Some(&u64::MAX.to_string())),
+            Duration::from_millis(u64::MAX)
+        );
         assert_eq!(
             group_removal_grace(Some(" 30000 ")),
             Duration::from_secs(30)
