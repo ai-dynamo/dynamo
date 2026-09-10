@@ -119,24 +119,22 @@ impl EmbeddedSelection {
             DEFAULT_ROUTING_GROUP,
         );
 
-        // Replica sync rides the runtime event plane, as the runtime scheduler's
-        // did; the partition publishes and consumes through host channels.
+        // Replica sync rides the runtime event plane. Worker-origin completion
+        // marks are consumed even when router-to-router replica sync is
+        // disabled; only publishing is gated.
+        let channels = crate::kv_router::sequence::host_replica_channels(
+            &args.endpoint,
+            args.router_id,
+            args.kv_router_config.router_replica_sync,
+            cancellation_token.child_token(),
+        )
+        .await
+        .context("start replica sync for the embedded selection partition")?;
+        let slot = std::sync::Mutex::new(Some(channels));
         let replica_sync: Option<dynamo_kv_router::services::selection::HostReplicaSyncFactory> =
-            if args.kv_router_config.router_replica_sync {
-                let channels = crate::kv_router::sequence::host_replica_channels(
-                    &args.endpoint,
-                    args.router_id,
-                    cancellation_token.child_token(),
-                )
-                .await
-                .context("start replica sync for the embedded selection partition")?;
-                let slot = std::sync::Mutex::new(Some(channels));
-                Some(Arc::new(move |_partition| {
-                    slot.lock().ok().and_then(|mut s| s.take())
-                }))
-            } else {
-                None
-            };
+            Some(Arc::new(move |_partition| {
+                slot.lock().ok().and_then(|mut s| s.take())
+            }));
 
         let service = SelectionServiceBuilder::new(
             args.kv_router_config.clone(),

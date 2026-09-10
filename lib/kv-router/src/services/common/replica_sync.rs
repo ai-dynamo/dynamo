@@ -211,8 +211,11 @@ pub trait SchedulerLoadSink: Send + Sync {
 /// Dynamo runtime event plane) instead of the service's ZMQ peer mesh:
 /// events the partition emits go to `outbound`; events from peer replicas
 /// arrive on `inbound_rx` (the host also holds `inbound_tx`).
+///
+/// `outbound: None` is ingress-only: the partition publishes nothing and the
+/// tracker keeps only worker-origin completion marks from `inbound_rx`.
 pub struct HostReplicaChannels {
-    pub outbound: mpsc::Sender<ActiveSequenceEvent>,
+    pub outbound: Option<mpsc::Sender<ActiveSequenceEvent>>,
     pub inbound_tx: mpsc::Sender<ActiveSequenceEvent>,
     pub inbound_rx: mpsc::Receiver<ActiveSequenceEvent>,
     /// This replica's id; events carrying it are ignored on receipt.
@@ -423,9 +426,13 @@ pub(crate) fn setup_scoped_replica_sync(
     let Some(config) = config else {
         // No peer mesh: an embedding host may still carry replica events.
         if let Some(host) = host {
+            let enabled = host.outbound.is_some();
             return ScopedReplicaSync {
-                publisher: ScopedSequencePublisher::host(host.outbound),
-                enabled: true,
+                publisher: host
+                    .outbound
+                    .map(ScopedSequencePublisher::host)
+                    .unwrap_or_else(ScopedSequencePublisher::disabled),
+                enabled,
                 process_id: host.process_id,
                 channel: Some((
                     host.inbound_tx,
@@ -1040,5 +1047,24 @@ mod tests {
         let endpoint = format!("tcp://127.0.0.1:{}", listener.local_addr().unwrap().port());
         drop(listener);
         endpoint
+    }
+
+    #[test]
+    fn ingress_only_host_channels_keep_replica_sync_disabled() {
+        let (inbound_tx, inbound_rx) = mpsc::channel(1);
+        let scoped = setup_scoped_replica_sync(
+            None,
+            &RoutingPartitionId::new("model", "default"),
+            16,
+            Some(HostReplicaChannels {
+                outbound: None,
+                inbound_tx,
+                inbound_rx,
+                process_id: 7,
+            }),
+        );
+        assert!(!scoped.enabled);
+        assert_eq!(scoped.process_id, 7);
+        assert!(scoped.channel.is_some());
     }
 }

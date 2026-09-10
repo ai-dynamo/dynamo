@@ -33,6 +33,8 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+mod direct_zmq;
+
 use crate::kv_router::ACTIVE_SEQUENCES_SUBJECT;
 #[cfg(test)]
 use dynamo_runtime::transports::event_plane::MsgpackCodec;
@@ -462,66 +464,104 @@ impl SequenceSubscriber for RuntimeSequenceSubscriber {
 
 /// Replica-sync channels for an embedded selection partition, carried over the
 /// runtime event plane exactly like the runtime scheduler's replica sync:
-/// outbound events are published on `ACTIVE_SEQUENCES_SUBJECT`, peer events
-/// are subscribed from it and forwarded to the partition.
+/// peer and worker events on `ACTIVE_SEQUENCES_SUBJECT` are always forwarded
+/// to the partition (worker-origin completion marks are needed even without
+/// router-to-router sync); outbound events are published only when
+/// `publishes_outbound` is set.
 pub(crate) async fn host_replica_channels(
     endpoint: &Endpoint,
     router_id: u64,
+    publishes_outbound: bool,
     cancellation_token: CancellationToken,
 ) -> Result<dynamo_kv_router::services::selection::HostReplicaChannels> {
     let transport_kind = endpoint.drt().default_event_transport_kind();
-    let (outbound, outbound_rx) = mpsc::channel(REPLICA_EVENT_CHANNEL_CAPACITY);
-    let event_publisher = EventPublisher::for_endpoint_with_transport(
-        endpoint,
-        ACTIVE_SEQUENCES_SUBJECT,
-        transport_kind,
-    )
-    .await?;
-    match active_sequence_event_wire_format(transport_kind) {
-        ActiveSequenceEventWireFormat::Singleton => {
-            tokio::spawn(run_replica_singleton_publisher(
-                event_publisher,
-                outbound_rx,
-                cancellation_token.clone(),
-            ));
-        }
-        ActiveSequenceEventWireFormat::Batch => {
-            tokio::spawn(run_replica_batch_publisher(
-                event_publisher,
-                outbound_rx,
-                cancellation_token.clone(),
-            ));
-        }
-    }
-
-    let (inbound_tx, inbound_rx) = mpsc::channel(REPLICA_EVENT_CHANNEL_CAPACITY);
-    let mut subscriber = RuntimeSequenceSubscriber::for_endpoint(endpoint).await?;
-    let forward_tx = inbound_tx.clone();
-    tokio::spawn(async move {
-        loop {
-            let next = tokio::select! {
-                _ = cancellation_token.cancelled() => break,
-                next = subscriber.next_event() => next,
-            };
-            match next {
-                Some(Ok(event)) => {
-                    if forward_tx.send(event).await.is_err() {
-                        break;
-                    }
-                }
-                Some(Err(error)) => {
-                    tracing::warn!(%error, "replica-sync subscriber error; continuing");
-                }
-                None => break,
+    let outbound = if publishes_outbound {
+        let (outbound, outbound_rx) = mpsc::channel(REPLICA_EVENT_CHANNEL_CAPACITY);
+        let event_publisher = EventPublisher::for_endpoint_with_transport(
+            endpoint,
+            ACTIVE_SEQUENCES_SUBJECT,
+            transport_kind,
+        )
+        .await?;
+        match active_sequence_event_wire_format(transport_kind) {
+            ActiveSequenceEventWireFormat::Singleton => {
+                tokio::spawn(run_replica_singleton_publisher(
+                    event_publisher,
+                    outbound_rx,
+                    cancellation_token.clone(),
+                ));
+            }
+            ActiveSequenceEventWireFormat::Batch => {
+                tokio::spawn(run_replica_batch_publisher(
+                    event_publisher,
+                    outbound_rx,
+                    cancellation_token.clone(),
+                ));
             }
         }
-    });
+        Some(outbound)
+    } else {
+        None
+    };
+
+    let (inbound_tx, inbound_rx) = mpsc::channel(REPLICA_EVENT_CHANNEL_CAPACITY);
+    let direct = direct_zmq::DirectZmqSequenceConfig::from_env();
+    let ingress_result = if direct.should_use_direct(transport_kind) {
+        direct_zmq::start(
+            endpoint.clone(),
+            inbound_tx.clone(),
+            direct.rcvhwm,
+            cancellation_token,
+        )
+        .await
+        .map(|_supervisor| ())
+    } else {
+        RuntimeSequenceSubscriber::for_endpoint(endpoint)
+            .await
+            .map(|subscriber| {
+                tokio::spawn(forward_replica_events(
+                    subscriber,
+                    inbound_tx.clone(),
+                    cancellation_token,
+                ));
+            })
+    };
+    if let Err(error) = ingress_result {
+        tracing::warn!(
+            %error,
+            "active-sequence event ingress unavailable; continuing with response-side cleanup"
+        );
+    }
     Ok(dynamo_kv_router::services::selection::HostReplicaChannels {
         outbound,
         inbound_tx,
         inbound_rx,
         process_id: router_id,
     })
+}
+
+async fn forward_replica_events(
+    mut subscriber: RuntimeSequenceSubscriber,
+    forward_tx: mpsc::Sender<ActiveSequenceEvent>,
+    cancellation_token: CancellationToken,
+) {
+    loop {
+        let next = tokio::select! {
+            _ = cancellation_token.cancelled() => break,
+            next = subscriber.next_event() => next,
+        };
+        match next {
+            Some(Ok(event)) => {
+                if forward_tx.send(event).await.is_err() {
+                    break;
+                }
+            }
+            Some(Err(error)) => {
+                tracing::warn!(%error, "replica-sync subscriber error; continuing");
+            }
+            None => break,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -865,5 +905,50 @@ mod tests {
             "after-install"
         );
         assert!(!deferred.install(observer));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn worker_completion_ingress_runs_without_router_replica_sync() -> Result<()> {
+        let runtime = dynamo_runtime::Runtime::from_current()?;
+        let distributed = dynamo_runtime::DistributedRuntime::new(
+            runtime,
+            dynamo_runtime::distributed::DistributedConfig::process_local(),
+        )
+        .await?;
+        let endpoint = distributed
+            .namespace(format!(
+                "worker-completion-ingress-{}",
+                uuid::Uuid::new_v4()
+            ))?
+            .component("workers")?
+            .endpoint("generate");
+        let cancel = CancellationToken::new();
+        let mut channels =
+            host_replica_channels(&endpoint, 99, false, cancel.child_token()).await?;
+        assert!(channels.outbound.is_none());
+
+        let publisher = ActiveSequenceEventPublisher::for_endpoint(&endpoint, 16).await?;
+        let received = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                publisher.mark_prefill_completed("worker-origin-mark".to_string(), 42, 0)?;
+                tokio::select! {
+                    event = channels.inbound_rx.recv() => return Ok::<_, anyhow::Error>(event),
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+                }
+            }
+        })
+        .await??
+        .expect("inbound channel stays open");
+        assert_eq!(received.request_id, "worker-origin-mark");
+        assert!(matches!(
+            received.data,
+            ActiveSequenceEventData::MarkPrefillCompleted
+        ));
+
+        drop(publisher);
+        cancel.cancel();
+        distributed.shutdown();
+        Ok(())
     }
 }
