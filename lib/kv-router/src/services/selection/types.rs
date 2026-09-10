@@ -426,7 +426,8 @@ pub struct SelectRequest {
     /// The response then carries the chosen worker's `worker_load` snapshot
     /// and `prefill_busy` evaluation. The request never waits in the router
     /// queue; when the queue would have rejected it the call fails the same
-    /// way an admitted selection does. Rejected on `select_and_reserve`.
+    /// way an admitted selection does. Ignored on `select_and_reserve`, which
+    /// always books.
     #[serde(default)]
     pub advisory: bool,
 }

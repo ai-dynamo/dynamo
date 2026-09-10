@@ -140,9 +140,13 @@ pub struct EppStandaloneConfig {
     /// KV-cache block size; MUST equal the inference engine block size.
     #[validate(range(min = 1, message = "DYN_KV_CACHE_BLOCK_SIZE must be >= 1"))]
     pub block_size: u32,
-    /// Data-parallel ranks per worker pod. Each rank publishes KV events on
-    /// `kv_event_port + rank * kv_event_port_stride`.
-    #[validate(range(min = 1, message = "DYN_EPP_DATA_PARALLEL_SIZE must be >= 1"))]
+    /// Data-parallel ranks per worker pod. Only `1` is accepted: the EPP routes
+    /// by worker and cannot convey the selected rank to the pod.
+    #[validate(range(
+        min = 1,
+        max = 1,
+        message = "DYN_EPP_DATA_PARALLEL_SIZE must be 1; multi-rank standalone serving is unsupported"
+    ))]
     pub data_parallel_size: u32,
     /// Port distance between consecutive data-parallel ranks' KV event ports.
     #[validate(range(min = 1, message = "DYN_EPP_KV_EVENT_PORT_STRIDE must be >= 1"))]
@@ -552,6 +556,21 @@ mod tests {
                 ("DYN_EPP_TOKENIZER_SERVICE_URL", "http://vllm-render:8000"),
                 ("DYN_EPP_TOKENIZER_PROTOCOL", "vllm-render"),
                 ("DYN_KV_CACHE_BLOCK_SIZE", "0"),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn data_parallel_size_above_one_fails() {
+        assert!(
+            parse_cfg(&[
+                ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
+                ("POD_NAMESPACE", "inference"),
+                ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+                ("DYN_EPP_TOKENIZER_SERVICE_URL", "http://vllm-render:8000"),
+                ("DYN_EPP_TOKENIZER_PROTOCOL", "vllm-render"),
+                ("DYN_EPP_DATA_PARALLEL_SIZE", "2"),
             ])
             .is_err()
         );

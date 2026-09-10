@@ -69,7 +69,7 @@ APIs. Those bindings should wrap `SelectionService` rather than construct
 | `--remote-indexer-url` | none | Base URL of a [standalone indexer](standalone-indexer.md) that serves the primary KV index. The selector then does not subscribe to worker KV events; workers publish to the indexer instead. Requires `use_kv_events=true`. |
 | `--replica-sync-port` | none | Local ZMQ PUB port for active-load lifecycle events. The selector binds `tcp://*:<port>` internally. |
 | `--replica-sync-peers` | none | Comma-separated ZMQ PUB endpoints for selector peers. Requires `--replica-sync-port`. |
-| `--session-affinity-ttl-secs` | none | Pin each request `session_id` to the worker that served it for this long after its last request. Bindings replicate to peers over the replica mesh (`dynamo.session-affinity.v1` topic). |
+| `--session-affinity-ttl-secs` | none | Pin each request `session_id` to the worker that served it for this long after its last request (1 to 31,536,000 seconds). When `--replica-sync-port` is configured, bindings replicate to peers over the replica mesh (`dynamo.session-affinity.v1` topic). |
 | `--selection-cache-ttl-secs` | `120` | Seconds an unclaimed pending selection lives before eviction. |
 | `--selection-cache-max-entries` | `4096` | Maximum resident pending selections, evicting oldest first. |
 | `--selection-cache-max-bytes` | `268435456` | Approximate byte budget across resident pending selections. |
@@ -91,7 +91,7 @@ frontend uses, so the two index the same way:
 | `use_kv_events=true` (default) | Event-driven from worker ZMQ events | Not recorded |
 | `use_kv_events=true`, `DYN_ROUTER_PREDICTED_TTL_SECS` set | Event-driven | Recorded into a short-TTL side indexer merged into device scores by per-worker max |
 | `use_kv_events=false` | Approximate: no events, entries expire after `router_ttl_secs` | Recorded into the primary |
-| `--remote-indexer-url` (or `SelectionServiceBuilder::remote_indexer`) | Served by a standalone indexer, queried through `POST /query_tiered_by_hash` | Recorded into the side indexer when `DYN_ROUTER_PREDICTED_TTL_SECS` is set, else not recorded |
+| `--remote-indexer-url` (or `SelectionServiceBuilder::kv_index(KvIndexSource::Remote(..))`) | Served by a standalone indexer, queried through `POST /query_tiered_by_hash` | Recorded into the side indexer when `DYN_ROUTER_PREDICTED_TTL_SECS` is set, else not recorded |
 
 With a remote primary, worker records do not need `kv_events_endpoint(s)` to
 become schedulable, no ZMQ listener is started in the selector, and `/dump`
@@ -101,8 +101,9 @@ lookup failure is reported as an offline indexer for that selection.
 A routing decision is recorded when a reservation is booked (`select_and_reserve`,
 or `select` followed by `POST /reservations`), never for a query-only `select`.
 Hash-only reservations that supply `sequence_hashes` without `block_hashes` or
-`token_ids` are not recorded. `router_approximate_cache_policy=lru` is not yet
-supported here and falls back to TTL retention with a warning.
+`token_ids` are not recorded. `router_approximate_cache_policy=lru` is rejected at startup when
+`use_kv_events=true`; with `use_kv_events=false` it falls back to TTL retention
+with a warning.
 
 The standalone expiry guard measures absolute age from admission; output progress does not refresh
 it. Periodic cleanup therefore reclaims stale state approximately five to six minutes after
@@ -130,10 +131,13 @@ Content-Type: application/json
   "kv_events_endpoints": {
     "0": "tcp://worker:5557",
     "1": "tcp://worker:5558"
-  },
-  "replay_endpoint": "tcp://worker:5560"
+  }
 }
 ```
+
+`replay_endpoint` (KV event gap recovery) is accepted only when
+`data_parallel_size` is 1; a multi-rank worker that sets it stays `incomplete`
+because the replay protocol carries no rank.
 
 `worker_id` is service-wide, not scoped by model or routing group. `POST /workers`
 is an upsert and returns `201`: reusing an existing ID replaces its catalog
@@ -234,15 +238,28 @@ blocks. `decode_busy` compares it against the worker's `total_kv_blocks` at
 `conditional_disagg_decode_busy_threshold` and is omitted when either the
 threshold or the capacity is unknown.
 
-A booking response may also carry a `router_hint` when another worker of the
-same `router_hint_worker_type` holds a longer cached prefix than the chosen
-worker and advertises a source control endpoint for the matching DP rank:
+A booking response may also carry a `kv_hint` when another worker of the same
+`router_hint_worker_type` (the worker capability key is `router_hint`) holds a
+longer cached prefix than the chosen worker and advertises a source control
+endpoint for the matching DP rank. The hint is a versioned action envelope
+whose `message_id` is the `selection_id`:
 
 ```json
 {
-  "router_hint": {
-    "source_control_endpoint": "tcp://worker-1:5600",
-    "block_hashes": [8713492873, 1928374650]
+  "kv_hint": {
+    "protocol_version": "0.1",
+    "message_id": "select-123",
+    "actions": [
+      {
+        "action_id": "a1",
+        "action_type": "kv.fetch",
+        "action_version": "1.0",
+        "payload": {
+          "source_control_endpoint": "tcp://worker-1:5600",
+          "block_hashes": [8713492873, 1928374650]
+        }
+      }
+    ]
   }
 }
 ```
@@ -278,8 +295,8 @@ and the response adds the chosen worker's projected load:
 omitted when that threshold is unset. This is the probe a disaggregation
 coordinator uses to decide whether to bypass remote prefill: one advisory
 `select` against the prefill pool answers "would the prefill worker I'd get be
-busy?" without a separate load read. `advisory` is not accepted on
-`select_and_reserve`. All `overlap`
+busy?" without a separate load read. `advisory` is ignored by
+`select_and_reserve`, which always books. All `overlap`
 values are matched token counts. `gpu`, `cpu`, and `disk` use the cumulative
 Mooncake tier semantics documented in the standalone indexer's
 [per-instance tier breakdown](standalone-indexer.md#per-instance-tier-breakdown).

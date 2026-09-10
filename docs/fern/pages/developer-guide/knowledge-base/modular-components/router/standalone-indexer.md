@@ -415,7 +415,7 @@ Mooncake score summary, so a caller can run its own overlap analysis:
   "block_size": 16,
   "tiered": {
     "device": { "scores": [[{"worker_id": 7, "dp_rank": 0}, 2]], "frequencies": [] },
-    "lower_tier": [["HostPinned", { "hits": [[{"worker_id": 7, "dp_rank": 0}, 1]] }]]
+    "lower_tier": [["host_pinned", { "hits": [[{"worker_id": 7, "dp_rank": 0}, 1]] }]]
   }
 }
 ```

@@ -70,7 +70,7 @@ impl KvEventIngress for ZmqDirectIngress {
 
     fn missing_metadata(&self, record: &WorkerCatalogRecord) -> Vec<String> {
         let endpoints = record.listener_endpoints();
-        record
+        let mut missing: Vec<String> = record
             .dp_ranks()
             .filter(|rank| {
                 endpoints
@@ -78,7 +78,12 @@ impl KvEventIngress for ZmqDirectIngress {
                     .is_none_or(|endpoint| endpoint.is_empty())
             })
             .map(|rank| format!("kv_events endpoint is required for dp_rank {rank}"))
-            .collect()
+            .collect();
+        // The replay protocol carries no rank, and each rank opens its own socket.
+        if record.dp_size() > 1 && record.replay_endpoint.is_some() {
+            missing.push("replay_endpoint is supported only for data_parallel_size 1".to_string());
+        }
+        missing
     }
 
     async fn reconcile(

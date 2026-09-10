@@ -210,10 +210,9 @@ impl IndexerPolicy {
 
     /// Resolve the indexer shape for `config`.
     ///
-    /// Rejects the same combinations the frontend rejects. Capacity-bounded LRU
-    /// retention needs per-request acquire/release fencing the service does not
-    /// yet have, so `router_approximate_cache_policy=lru` falls back to TTL
-    /// with a warning instead of failing.
+    /// Rejects the same combinations the frontend rejects. The local side indexer
+    /// is TTL-only, so `router_approximate_cache_policy=lru` is rejected with
+    /// `use_kv_events=true` and falls back to TTL with a warning otherwise.
     pub fn from_router_config(config: &KvRouterConfig) -> Result<Self> {
         if config.use_kv_events
             && config.router_approximate_cache_policy == ApproximateCachePolicyKind::Lru

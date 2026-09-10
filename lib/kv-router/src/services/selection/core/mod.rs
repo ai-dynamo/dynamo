@@ -987,11 +987,6 @@ impl SelectionCore {
             advisory,
         } = operation;
         self.ensure_running()?;
-        if advisory && book {
-            return Err(SelectionError::BadRequest(
-                "advisory selection cannot book a reservation".to_string(),
-            ));
-        }
 
         let entry = self.ready_entry(&key)?;
 
@@ -2845,6 +2840,32 @@ mod tests {
 
         assert!(core.cancel_token.is_cancelled());
         assert!(!parent.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn multi_rank_worker_with_replay_endpoint_is_incomplete() {
+        let core = SelectionCore::try_new_local(
+            test_config(true),
+            1,
+            CancellationToken::new(),
+            SelectionCacheConfig::default(),
+        )
+        .expect("valid test config");
+
+        let record = core
+            .upsert_worker(WorkerRequest {
+                data_parallel_size: Some(2),
+                kv_events_endpoints: HashMap::from([
+                    (0, "tcp://127.0.0.1:5557".to_string()),
+                    (1, "tcp://127.0.0.1:5558".to_string()),
+                ]),
+                replay_endpoint: Some("tcp://127.0.0.1:5600".to_string()),
+                ..worker(1)
+            })
+            .await
+            .expect("worker upsert");
+        assert_eq!(record.lifecycle, WorkerLifecycle::Incomplete, "{record:?}");
+        assert!(!core.indexer_registry.has_worker(1));
     }
 
     #[tokio::test]
