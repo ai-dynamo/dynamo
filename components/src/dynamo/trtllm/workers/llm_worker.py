@@ -426,10 +426,14 @@ async def init_llm_worker(
         # and `--override-engine-args` are merged over `arg_map` below and can set
         # it back to true for custom instrumentation.
         "return_perf_metrics": False,
-        # Iteration stats feed both the Prometheus surface and the worker-load
-        # and forward-pass telemetry the router and Planner read, so either
-        # flag needs them. TensorRT backend always has this enabled.
-        "enable_iter_perf_stats": config.publish_kv_events or config.publish_metrics,
+        # Iteration stats feed the Prometheus surface and the Planner's
+        # forward-pass metrics, so either opt-in needs them. KV events do not:
+        # the engine only produces iteration stats under this flag, at a
+        # measurable per-iteration throughput cost. TensorRT backend always
+        # has this enabled.
+        "enable_iter_perf_stats": (
+            config.publish_metrics or config.publish_forward_pass_metrics
+        ),
         "kv_connector_config": kv_connector_config,
     }
 
@@ -1011,9 +1015,9 @@ async def init_llm_worker(
                 endpoint.connection_id(),
             )
 
-        # The Publisher builds nothing and starts no thread when KV events are
-        # disabled and metrics are off, so it wraps the serving path
-        # unconditionally.
+        # The Publisher builds nothing and starts no thread when KV events,
+        # metrics and forward-pass metrics are all off, so it wraps the serving
+        # path unconditionally.
         async with get_publisher(
             endpoint,
             engine,
@@ -1029,6 +1033,7 @@ async def init_llm_worker(
             kv_state_endpoint=config.kv_state_endpoint,
             image_token_id=image_token_id,
             publish_metrics=config.publish_metrics,
+            publish_forward_pass_metrics=config.publish_forward_pass_metrics,
             kv_event_publication_mode=kv_event_publication_mode,
             streaming_kv_events_config=streaming_kv_events_config,
             streaming_kv_events_gpus_per_node=gpus_per_node,

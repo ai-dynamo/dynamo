@@ -40,12 +40,26 @@ DEFAULT_ENDPOINT_NAME = "generate"
 VALID_TRTLLM_CONNECTORS = {"none", "kvbm"}
 
 
+def _forward_pass_metrics_enabled(config: DynamoRuntimeConfig) -> bool:
+    """Resolve the forward-pass metrics opt-in shared with vLLM and SGLang.
+
+    TRT-LLM publishes in-process, so the port in DYN_FORWARDPASS_METRIC_PORT
+    is unused; setting it still opts in, matching the other backends.
+    """
+    if os.environ.get("DYN_FORWARDPASS_METRIC_PORT"):
+        return True
+    return config.fpm_trace
+
+
 class Config(DynamoRuntimeConfig, DynamoTrtllmConfig):
     component: str
     # Whether this worker publishes KV events. Distinct from the router-side
     # `use_kv_events` on `router_advertisement`, which means the router
     # subscribes to them -- the reason the two live on separate objects.
     use_kv_events: bool
+    # Whether this worker streams forward-pass metrics to the Planner. Derived
+    # from the cross-backend opt-in, never from the publishing flags.
+    publish_forward_pass_metrics: bool
     # Routing this worker set advertises in its model card; None inherits the
     # frontend's configuration.
     router_advertisement: Optional[WorkerRouterConfig] = None
@@ -55,6 +69,7 @@ class Config(DynamoRuntimeConfig, DynamoTrtllmConfig):
         DynamoRuntimeConfig.validate(self)
         DynamoTrtllmConfig.validate(self)
         self.use_kv_events = self.publish_kv_events
+        self.publish_forward_pass_metrics = _forward_pass_metrics_enabled(self)
 
         # fix the connector as trtllm accepts only one connector and it should be in VALID_TRTLLM_CONNECTORS
         # while the runtime args accepts a list of connectors

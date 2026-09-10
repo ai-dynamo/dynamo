@@ -505,7 +505,9 @@ class Publisher:
 
     Retrieves KV cache events and stats from TensorRT-LLM engine and publishes them:
     - KV Events: Routes to either ZMQ (if consolidator enabled) or NATS (if no consolidator)
-    - Metrics: Always publishes to NATS via WorkerMetricsPublisher
+    - Metrics: Worker-load samples via WorkerMetricsPublisher and, when opted in,
+      forward-pass metrics via FpmDirectPublisher; both read the engine's
+      iteration stats, which KV events never need
 
     Publisher Selection Logic:
     - If zmq_endpoint provided: Uses ZmqKvEventPublisher (ZMQ PUB) → Consolidator → NATS
@@ -536,6 +538,7 @@ class Publisher:
         kv_state_endpoint: Optional[str] = None,
         image_token_id: Optional[int] = None,
         publish_metrics: bool = True,
+        publish_forward_pass_metrics: bool = False,
         kv_event_publication_mode: KvEventPublicationMode = KvEventPublicationMode.DISABLED,
         streaming_kv_events_config: Optional[dict[str, Any]] = None,
         streaming_kv_events_gpus_per_node: Optional[int] = None,
@@ -555,6 +558,7 @@ class Publisher:
         self.kv_state_endpoint = kv_state_endpoint
         self.image_token_id = image_token_id
         self.publish_metrics = publish_metrics
+        self.publish_forward_pass_metrics = publish_forward_pass_metrics
         self.kv_event_publication_mode = kv_event_publication_mode
         self.streaming_kv_events_config = streaming_kv_events_config
         self.streaming_kv_events_gpus_per_node = streaming_kv_events_gpus_per_node
@@ -615,24 +619,25 @@ class Publisher:
         await self.metrics_publisher.create_endpoint(self.endpoint)
 
     def initialize(self) -> None:
-        # The KV router consumes worker-load samples and the Planner consumes
-        # forward-pass metrics. Both are telemetry the control plane reads, so
-        # they belong with KV-event publishing rather than with the local
-        # Prometheus surface: scraping /metrics must not alter routing.
-        kv_events_enabled = (
-            self.kv_event_publication_mode is not KvEventPublicationMode.DISABLED
-        )
-        if kv_events_enabled:
+        # One stats stream feeds the Prometheus gauges, the metrics collector,
+        # the router's worker-load sample and the Planner's forward-pass
+        # metrics, so it runs when either opt-in is set. KV events never need
+        # it: the engine only produces iteration stats under
+        # enable_iter_perf_stats, at a per-iteration cost a KV-router benchmark
+        # should not pay.
+        if self.publish_metrics or self.publish_forward_pass_metrics:
             self.metrics_publisher = WorkerMetricsPublisher()
+            self._init_publish_metrics_thread()
             task = asyncio.create_task(self._create_metrics_publisher_endpoint())
             task.add_done_callback(
                 lambda _: logging.debug("metrics publisher endpoint created")
             )
 
-            # One internal channel per attention-DP rank. Non-attention-DP
-            # engines report size 1. Under attention-DP, TRT-LLM emits one
-            # IterationStats row per rank and Dynamo forwards attentionDpRank
-            # as the FPM dp_rank.
+        # Setup the ForwardPassMetrics publisher with one internal channel per
+        # attention-DP rank. Non-attention-DP engines report size 1. Under
+        # attention-DP, TRT-LLM emits one IterationStats row per rank and
+        # Dynamo forwards attentionDpRank as the FPM dp_rank.
+        if self.publish_forward_pass_metrics:
             try:
                 fpm_dp_size = max(1, int(self.attention_dp_size or 1))
                 self.fpm_publisher = FpmDirectPublisher(
@@ -652,11 +657,6 @@ class Publisher:
                     f"Failed to initialize FpmDirectPublisher; FPM emission disabled: {e}"
                 )
                 self.fpm_publisher = None
-
-        # One polling loop feeds the Prometheus gauges, the metrics collector,
-        # the worker-load publisher and FPM alike, so it runs for either path.
-        if kv_events_enabled or self.publish_metrics:
-            self._init_publish_metrics_thread()
 
         # Select exactly one KV-event path. Metrics above remain independent of
         # this choice.
@@ -737,17 +737,14 @@ class Publisher:
             assert self.kv_event_publication_mode is KvEventPublicationMode.DISABLED
 
     def _init_publish_metrics_thread(self):
-        """Zero the per-rank gauges and build the stats thread unstarted.
+        # Need to publish stats once so that worker can be selected.
+        if self.metrics_publisher is None:
+            logging.error("KV metrics publisher not initialized!")
+            return
 
-        Runs for the Prometheus-only configuration too, where there is no
-        worker-load publisher to seed.
-        """
         # Publish initial metrics with 0 active blocks for each attention-DP rank.
         for rank in range(self.attention_dp_size):
-            # Seed the router so this worker can be selected before the first
-            # iteration stats arrive. Absent when only Prometheus is enabled.
-            if self.metrics_publisher is not None:
-                self.metrics_publisher.publish(rank, kv_used_blocks=0)
+            self.metrics_publisher.publish(rank, kv_used_blocks=0)
             rank_label = str(rank)
             self.component_gauges.set_total_blocks(rank_label, 0)
             self.component_gauges.set_gpu_cache_usage(rank_label, 0.0)
@@ -877,19 +874,24 @@ class Publisher:
         self.fpm_publisher = None
 
     async def _publish_stats_task(self):
-        """Poll engine iteration stats into the Prometheus gauges and metrics
-        collector, plus the router and Planner publishers when enabled."""
+        """Poll engine iteration stats into the Prometheus gauges, the metrics
+        collector, the worker-load publisher and, when opted in, the Planner's
+        forward-pass publisher."""
         if self.engine is None:
             logging.error("LLM engine not initialized!")
             return
+
+        if self.metrics_publisher is None:
+            logging.error("KV metrics publisher not initialized!")
+            return False
 
         def handle_stat(stat):
             kv_active_blocks = stat["kvCacheStats"]["usedNumBlocks"]
             kv_total_blocks = stat["kvCacheStats"]["maxNumBlocks"]
             dp_rank = int(stat.get("attentionDpRank", 0))
             logging.debug(f"Publishing stats: kv_active_blocks: {kv_active_blocks}")
-            if self.metrics_publisher is not None:
-                self.metrics_publisher.publish(dp_rank, kv_used_blocks=kv_active_blocks)
+            assert self.metrics_publisher is not None
+            self.metrics_publisher.publish(dp_rank, kv_used_blocks=kv_active_blocks)
 
             # Publish Prometheus metrics
             dp_rank_label = str(dp_rank)
@@ -1376,6 +1378,7 @@ async def get_publisher(
     kv_state_endpoint: Optional[str] = None,
     image_token_id: Optional[int] = None,
     publish_metrics: bool = True,
+    publish_forward_pass_metrics: bool = False,
     kv_event_publication_mode: KvEventPublicationMode = KvEventPublicationMode.DISABLED,
     streaming_kv_events_config: Optional[dict[str, Any]] = None,
     streaming_kv_events_gpus_per_node: Optional[int] = None,
@@ -1395,6 +1398,7 @@ async def get_publisher(
         kv_state_endpoint=kv_state_endpoint,
         image_token_id=image_token_id,
         publish_metrics=publish_metrics,
+        publish_forward_pass_metrics=publish_forward_pass_metrics,
         kv_event_publication_mode=kv_event_publication_mode,
         streaming_kv_events_config=streaming_kv_events_config,
         streaming_kv_events_gpus_per_node=streaming_kv_events_gpus_per_node,
