@@ -379,6 +379,7 @@ impl RequestObservability {
 }
 
 struct OutputBlockUpdate {
+    num_blocks: usize,
     decay_fraction: Option<f64>,
 }
 
@@ -556,12 +557,16 @@ impl OutputBlockTracker {
             return None;
         }
 
+        let num_blocks = new_total_blocks - self.current_total_blocks;
         // Advance before returning so a failed scheduler update preserves existing no-retry behavior.
         self.current_total_blocks = new_total_blocks;
         let decay_fraction = self
             .expected_output_tokens
             .map(|expected| (1.0 - cumulative_osl as f64 / expected.max(1) as f64).max(0.0));
-        Some(OutputBlockUpdate { decay_fraction })
+        Some(OutputBlockUpdate {
+            num_blocks,
+            decay_fraction,
+        })
     }
 }
 
@@ -793,16 +798,22 @@ where
         if let RequestCleanup::Kv(cleanup) = &self.cleanup
             && let Some(lifecycle) = cleanup.lifecycle()
             && lifecycle.is_active()
-            && let Err(error) = cleanup
-                .chooser
-                .enqueue_output_block_if_booking(lifecycle.booking(), update.decay_fraction)
-                .await
         {
-            tracing::warn!(
-                request_id = %cleanup.context_id,
-                %error,
-                "Failed to add output block"
-            );
+            // A response chunk can cross more than one block boundary.
+            for _ in 0..update.num_blocks {
+                if let Err(error) = cleanup
+                    .chooser
+                    .enqueue_output_block_if_booking(lifecycle.booking(), update.decay_fraction)
+                    .await
+                {
+                    tracing::warn!(
+                        request_id = %cleanup.context_id,
+                        %error,
+                        "Failed to add output block"
+                    );
+                    break;
+                }
+            }
         }
 
         self.observability.observe_output_block_boundary();
@@ -828,6 +839,57 @@ where
         self.observability
             .record_metrics(self.record_itl_at_completion);
         // RequestCleanup drops immediately afterward and performs resource cleanup.
+    }
+}
+
+#[cfg(test)]
+mod output_block_tests {
+    use super::OutputBlockTracker;
+
+    #[test]
+    fn counts_every_crossed_boundary_once() {
+        let mut tracker = OutputBlockTracker::new(true, 16, 16, None);
+        assert!(tracker.observe(0).is_none());
+        let first = tracker.observe(1).unwrap();
+        assert_eq!(first.num_blocks, 1);
+        assert_eq!(first.decay_fraction, None);
+        assert!(tracker.observe(16).is_none());
+        assert_eq!(tracker.observe(33).unwrap().num_blocks, 2);
+        assert!(tracker.observe(33).is_none());
+        assert!(tracker.observe(48).is_none());
+        assert_eq!(tracker.observe(49).unwrap().num_blocks, 1);
+    }
+
+    #[test]
+    fn accounts_for_a_partial_prompt_block() {
+        let mut tracker = OutputBlockTracker::new(true, 15, 16, None);
+        assert!(tracker.observe(1).is_none());
+        assert_eq!(tracker.observe(34).unwrap().num_blocks, 3);
+        assert!(tracker.observe(49).is_none());
+    }
+
+    #[test]
+    fn preserves_decay_at_the_observed_output_length() {
+        let mut tracker = OutputBlockTracker::new(true, 16, 16, Some(64));
+        let update = tracker.observe(32).unwrap();
+        assert_eq!(update.num_blocks, 2);
+        assert_eq!(update.decay_fraction, Some(0.5));
+        let update = tracker.observe(64).unwrap();
+        assert_eq!(update.num_blocks, 2);
+        assert_eq!(update.decay_fraction, Some(0.0));
+        let update = tracker.observe(96).unwrap();
+        assert_eq!(update.num_blocks, 2);
+        assert_eq!(update.decay_fraction, Some(0.0));
+
+        let mut zero_expected = OutputBlockTracker::new(true, 16, 16, Some(0));
+        assert_eq!(zero_expected.observe(32).unwrap().decay_fraction, Some(0.0));
+    }
+
+    #[test]
+    fn disabled_tracking_emits_no_updates() {
+        let mut tracker = OutputBlockTracker::new(false, 16, 16, None);
+        assert!(tracker.observe(48).is_none());
+        assert_eq!(tracker.current_total_blocks, 1);
     }
 }
 
