@@ -335,9 +335,7 @@ def start_chat_completion_request(
                 response.finish_reason = choice.finish_reason
                 if resp.usage is not None:
                     response.completion_tokens = resp.usage.completion_tokens
-                response.observations.append(
-                    (choice.message.content, time.monotonic())
-                )
+                response.observations.append((choice.message.content, time.monotonic()))
         except Exception as error:
             # openai.APIError subclasses cover HTTP non-200, mid-stream
             # structured `data: {"error": {...}}` frames, connection failures,
@@ -588,9 +586,7 @@ def read_worker_generate_metrics(
     component: str = "backend",
 ) -> tuple[float, float]:
     """Read completed-request and response-byte totals for one worker endpoint."""
-    response = requests.get(
-        f"http://localhost:{worker_system_port}/metrics", timeout=1
-    )
+    response = requests.get(f"http://localhost:{worker_system_port}/metrics", timeout=1)
     response.raise_for_status()
     labels = {"dynamo_component": component, "dynamo_endpoint": "generate"}
     return (
@@ -690,10 +686,12 @@ def validate_response(
         # Content is already parsed - just collect it
         response_words.append(res)
 
-    assert any(response_words), "Request completed without any non-empty response content"
-    assert response.finish_reason is not None, (
-        "Request completed without a terminal finish reason"
-    )
+    assert any(
+        response_words
+    ), "Request completed without any non-empty response content"
+    assert (
+        response.finish_reason is not None
+    ), "Request completed without a terminal finish reason"
     if expected_completion_tokens is not None:
         assert response.finish_reason == "length", (
             "Forced-length request terminated unexpectedly: "
@@ -937,9 +935,7 @@ def run_migration_test(
         assert isinstance(
             worker_system_port, int
         ), "Replacement-worker verification requires an integer system_port"
-        replacement_generate_baseline = read_worker_generate_metrics(
-            worker_system_port
-        )
+        replacement_generate_baseline = read_worker_generate_metrics(worker_system_port)
 
     # Step 3: Optionally wait for new response before stop (for decode tests)
     if wait_for_new_response_before_stop:

@@ -222,9 +222,7 @@ KV_TRANSFER_MIGRATION_PARAMETERS = pytest.mark.parametrize(
 
 def read_trtllm_kv_transfer_metrics(worker_system_port: int) -> tuple[float, float]:
     """Read the worker's successful-transfer count and transferred-byte sum."""
-    response = requests.get(
-        f"http://localhost:{worker_system_port}/metrics", timeout=1
-    )
+    response = requests.get(f"http://localhost:{worker_system_port}/metrics", timeout=1)
     response.raise_for_status()
     return (
         sum_metric_samples(response.text, "trtllm_kv_transfer_success_total"),
@@ -339,10 +337,7 @@ class DynamoWorkerProcess(ManagedProcess):
                     f"  max_tokens_in_buffer: {max_seq_len}\n"
                 )
                 f.write("disable_overlap_scheduler: true\n")
-                f.write(
-                    "kv_cache_config:\n"
-                    f"  max_tokens: {max_seq_len}\n"
-                )
+                f.write("kv_cache_config:\n" f"  max_tokens: {max_seq_len}\n")
                 if not enable_block_reuse:
                     f.write("  enable_block_reuse: false\n")
             command += ["--extra-engine-args", str(config_file)]
