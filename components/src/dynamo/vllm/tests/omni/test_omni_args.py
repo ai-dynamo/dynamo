@@ -13,12 +13,15 @@ import pytest
 
 try:
     import vllm.platforms as vllm_platforms
+    from vllm.engine.arg_utils import _compute_kwargs
     from vllm.platforms.interface import UnspecifiedPlatform
 
     from dynamo.vllm import main as vllm_main
     from dynamo.vllm.omni.args import (
+        FlexibleArgumentParser,
         OmniConfig,
         OmniDiffusionKwargs,
+        OmniEngineArgs,
         OmniParallelKwargs,
         parse_omni_args,
     )
@@ -194,10 +197,13 @@ def _no_accelerator():
     ``vllm.platforms`` is re-armed for later tests on this worker.
     """
     previous = vllm_platforms.__dict__.get("current_platform", _PLATFORM_UNSET)
+    # Cached parser defaults include DeviceConfig from the previous platform.
+    _compute_kwargs.cache_clear()
     vllm_platforms.current_platform = UnspecifiedPlatform()
     try:
         yield
     finally:
+        _compute_kwargs.cache_clear()
         if previous is _PLATFORM_UNSET:
             del vllm_platforms.current_platform
         else:
@@ -274,7 +280,11 @@ def test_stage_router_honors_negated_flag_over_environment(monkeypatch, tmp_path
         parse_omni_args()
 
 
-def test_stage_worker_still_requires_an_accelerator(monkeypatch, tmp_path):
+@pytest.mark.parametrize("warm_cache", [False, True])
+def test_stage_worker_still_requires_an_accelerator(monkeypatch, tmp_path, warm_cache):
+    _compute_kwargs.cache_clear()
+    if warm_cache:
+        OmniEngineArgs.add_cli_args(FlexibleArgumentParser(add_help=False))
     # Negative control: --stage-id builds an engine, so it must keep failing
     # loudly here rather than being swept up by the router's reduced parser.
     monkeypatch.setattr(sys, "argv", _router_argv(tmp_path, "--stage-id", "0"))
