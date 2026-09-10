@@ -5,6 +5,14 @@
 //!
 //! Watches the EPP's Kubernetes `Service` EndpointSlices and updates its
 //! in-process [`SelectionService`] as sibling EPP replicas join or leave.
+//!
+//! # Required k8s RBAC
+//!
+//! Standalone mode only (`DYN_EPP_MODE=standalone` + `DYN_EPP_PEER_SERVICE`).
+//! Needs the following permissions granted to SA `dynamo-epp` in
+//! `examples/onramp/agg.yaml`:
+//! - `services:get`
+//! - `endpointslices:list/watch`
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
