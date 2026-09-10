@@ -30,15 +30,8 @@ import (
 	"time"
 )
 
-// TestOutputCopierScript renders sidecarScriptTemplate the way the controller does and
-// runs the result as a real process, so the assertions are about what the sidecar does
-// rather than about what the template says.
-//
-// The script is launched with bash, never /bin/sh: it starts with `set -o pipefail`,
-// which dash rejects, and under `set -e` that would make every version of the script
-// exit non-zero on its second line — turning the "kubectl missing" case green even
-// without the preflight. The profiler guide requires a pipefail-capable shell in the
-// sidecar image, so bash is also the faithful choice.
+// TestOutputCopierScript runs the rendered sidecar script as a real process. It must be
+// bash: dash rejects `set -o pipefail`, which would exit early and pass this test vacuously.
 func TestOutputCopierScript(t *testing.T) {
 	// Programs the script calls; `command`, `echo` and `[` are bash builtins.
 	utilities := []string{"bash", "date", "grep", "awk", "sed", "tr", "cat", "sleep"}
