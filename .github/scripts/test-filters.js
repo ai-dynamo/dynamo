@@ -281,6 +281,16 @@ const testCases = [
     desc: 'sglang snapshot.py gates only sglang checkpoint tests'
   },
   {
+    file: 'container/context.yaml',
+    expect: {
+      snapshot: false,
+      snapshot_vllm: false,
+      snapshot_sglang: true,
+      snapshot_trtllm: false,
+    },
+    desc: 'runtime tag changes gate the SGLang checkpoint tests'
+  },
+  {
     file: 'components/src/dynamo/trtllm/snapshot.py',
     expect: {
       trtllm: true,
