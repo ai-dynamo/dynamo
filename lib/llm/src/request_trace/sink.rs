@@ -3,7 +3,7 @@
 
 use std::io::Write;
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
@@ -25,12 +25,24 @@ use super::{
 };
 
 static WORKERS_STARTED: AtomicBool = AtomicBool::new(false);
+static WORKERS: Mutex<Option<SinkWorkers>> = Mutex::new(None);
+
+/// Upper bound on how long process teardown waits for the sink workers to
+/// drain. Chosen to fit inside a default Kubernetes
+/// `terminationGracePeriodSeconds` of 30 with room for the rest of teardown, so
+/// a wedged sink endpoint cannot turn a rollout into a `SIGKILL`.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[async_trait]
 pub trait RequestTraceSink: Send + Sync {
     fn name(&self) -> &'static str;
     async fn emit(&self, record: &RequestTraceRecord);
     async fn shutdown(&self) {}
+    /// Records this sink dropped. Read by the shutdown joiner so counts are
+    /// still reported when a sink does not finish draining in time.
+    fn dropped_records(&self) -> u64 {
+        0
+    }
 }
 
 pub struct StderrRequestTraceSink;
@@ -223,6 +235,65 @@ async fn parse_sinks_from_env() -> anyhow::Result<Vec<Arc<dyn RequestTraceSink>>
     Ok(sinks)
 }
 
+/// The sink workers, retained so that teardown can wait for them.
+pub struct SinkWorkers {
+    /// Cancelled by [`SinkWorkers::shutdown`]. A child of the token passed to
+    /// [`spawn_workers`], so a runtime-wide cancellation still stops the
+    /// workers, but teardown does not have to wait for one to arrive.
+    token: CancellationToken,
+    handles: Vec<tokio::task::JoinHandle<()>>,
+    /// Same order as `handles`, so a handle that is still running can be paired
+    /// with the sink it belongs to.
+    sinks: Vec<Arc<dyn RequestTraceSink>>,
+}
+
+/// What the bounded shutdown observed.
+#[derive(Debug)]
+pub struct TraceShutdownReport {
+    pub timed_out: bool,
+    /// (sink name, records dropped so far) for sinks that did not finish draining.
+    pub pending: Vec<(&'static str, u64)>,
+}
+
+impl SinkWorkers {
+    /// Cancel the workers and wait for them to finish draining, giving up after
+    /// `timeout`. On timeout the sink tasks are abandoned and the process is
+    /// about to exit, so no sink can report for itself; the counts are read
+    /// here instead and both logged and returned.
+    pub async fn shutdown(self, timeout: Duration) -> TraceShutdownReport {
+        self.token.cancel();
+        let Self {
+            mut handles, sinks, ..
+        } = self;
+
+        if tokio::time::timeout(timeout, futures::future::join_all(handles.iter_mut()))
+            .await
+            .is_ok()
+        {
+            return TraceShutdownReport {
+                timed_out: false,
+                pending: Vec::new(),
+            };
+        }
+
+        let pending: Vec<(&'static str, u64)> = handles
+            .iter()
+            .zip(sinks.iter())
+            .filter(|(handle, _)| !handle.is_finished())
+            .map(|(_, sink)| (sink.name(), sink.dropped_records()))
+            .collect();
+        tracing::warn!(
+            timeout_ms = timeout.as_millis() as u64,
+            pending = ?pending,
+            "request trace sinks did not finish draining before the shutdown timeout"
+        );
+        TraceShutdownReport {
+            timed_out: true,
+            pending,
+        }
+    }
+}
+
 pub async fn spawn_workers_from_env(shutdown: CancellationToken) -> anyhow::Result<()> {
     if WORKERS_STARTED
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -231,21 +302,43 @@ pub async fn spawn_workers_from_env(shutdown: CancellationToken) -> anyhow::Resu
         return Ok(());
     }
 
-    if let Err(error) = spawn_workers(shutdown).await {
-        WORKERS_STARTED.store(false, Ordering::Release);
-        return Err(error);
-    }
+    let sinks = match parse_sinks_from_env().await {
+        Ok(sinks) => sinks,
+        Err(error) => {
+            WORKERS_STARTED.store(false, Ordering::Release);
+            return Err(error);
+        }
+    };
+    *WORKERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(spawn_workers(sinks, shutdown));
     Ok(())
 }
 
-async fn spawn_workers(shutdown: CancellationToken) -> anyhow::Result<()> {
-    let sinks = parse_sinks_from_env().await?;
+/// Cancel the retained workers and wait for them to drain, bounded by
+/// [`SHUTDOWN_TIMEOUT`]. Returns `None` when no workers were started, which is
+/// the case whenever request tracing is disabled.
+pub async fn shutdown_workers() -> Option<TraceShutdownReport> {
+    let workers = WORKERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()?;
+    Some(workers.shutdown(SHUTDOWN_TIMEOUT).await)
+}
+
+fn spawn_workers(
+    sinks: Vec<Arc<dyn RequestTraceSink>>,
+    shutdown: CancellationToken,
+) -> SinkWorkers {
     let sink_count = sinks.len();
-    for sink in sinks {
+    let token = shutdown.child_token();
+    let mut handles = Vec::with_capacity(sink_count);
+    for sink in &sinks {
+        let sink = sink.clone();
         let name = sink.name();
         let mut receiver: broadcast::Receiver<RequestTraceRecord> = super::subscribe();
-        let worker_shutdown = shutdown.clone();
-        tokio::spawn(async move {
+        let worker_shutdown = token.clone();
+        handles.push(tokio::spawn(async move {
             loop {
                 tokio::select! {
                     biased;
@@ -280,19 +373,24 @@ async fn spawn_workers(shutdown: CancellationToken) -> anyhow::Result<()> {
                 }
             }
             sink.shutdown().await;
-        });
+        }));
     }
 
     if sink_count == 0 {
         tracing::warn!("request trace is enabled but no valid request trace sinks were configured");
     }
     tracing::info!(sinks = sink_count, "Request trace sinks ready");
-    Ok(())
+    SinkWorkers {
+        token,
+        handles,
+        sinks,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::io::Read;
+    use std::sync::atomic::AtomicUsize;
 
     use flate2::read::MultiGzDecoder;
     use tempfile::tempdir;
@@ -339,6 +437,92 @@ mod tests {
             tool: None,
             payload: None,
         }
+    }
+
+    /// Sink whose teardown is observable from the outside: `shutdown` only sets
+    /// `shutdown_done` after an await point, so a caller that does not wait for
+    /// the worker sees `false`.
+    struct FakeSink {
+        emitted: Arc<AtomicUsize>,
+        shutdown_done: Arc<AtomicBool>,
+        dropped: u64,
+        /// When set, `shutdown` never returns — a sink whose endpoint is wedged.
+        hang_on_shutdown: bool,
+    }
+
+    #[async_trait]
+    impl RequestTraceSink for FakeSink {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+
+        async fn emit(&self, record: &RequestTraceRecord) {
+            if record
+                .request
+                .as_ref()
+                .is_some_and(|request| request.request_id == "req-123")
+            {
+                self.emitted.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        async fn shutdown(&self) {
+            if self.hang_on_shutdown {
+                std::future::pending::<()>().await;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            self.shutdown_done.store(true, Ordering::SeqCst);
+        }
+
+        fn dropped_records(&self) -> u64 {
+            self.dropped
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_drains_the_backlog_before_returning() {
+        crate::request_trace::init_bus_for_test(64);
+        let emitted = Arc::new(AtomicUsize::new(0));
+        let shutdown_done = Arc::new(AtomicBool::new(false));
+        let sink: Arc<dyn RequestTraceSink> = Arc::new(FakeSink {
+            emitted: emitted.clone(),
+            shutdown_done: shutdown_done.clone(),
+            dropped: 0,
+            hang_on_shutdown: false,
+        });
+        let workers = spawn_workers(vec![sink], CancellationToken::new());
+
+        crate::request_trace::publish(sample_record());
+
+        let report = workers.shutdown(Duration::from_secs(5)).await;
+
+        assert!(!report.timed_out);
+        assert_eq!(
+            emitted.load(Ordering::SeqCst),
+            1,
+            "the record published before shutdown should reach the sink"
+        );
+        assert!(
+            shutdown_done.load(Ordering::SeqCst),
+            "shutdown returned before the sink worker finished"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_timeout_reports_pending_sinks_and_their_drops() {
+        crate::request_trace::init_bus_for_test(64);
+        let sink: Arc<dyn RequestTraceSink> = Arc::new(FakeSink {
+            emitted: Arc::new(AtomicUsize::new(0)),
+            shutdown_done: Arc::new(AtomicBool::new(false)),
+            dropped: 1132,
+            hang_on_shutdown: true,
+        });
+        let workers = spawn_workers(vec![sink], CancellationToken::new());
+
+        let report = workers.shutdown(Duration::from_millis(100)).await;
+
+        assert!(report.timed_out);
+        assert_eq!(report.pending, vec![("fake", 1132)]);
     }
 
     #[tokio::test]

@@ -167,6 +167,10 @@ impl RequestTraceSink for S3RequestTraceSink {
         }
     }
 
+    fn dropped_records(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+
     async fn shutdown(&self) {
         self.shutdown.cancel();
         // Recover the guard even if a prior panic poisoned the lock; it only

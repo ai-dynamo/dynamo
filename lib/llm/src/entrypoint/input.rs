@@ -121,27 +121,28 @@ pub async fn run_input_with_frontend_route_extensions(
         initialize_input(&drt, &engine_config).await;
     }
 
-    match in_opt {
+    let result = match in_opt {
         Input::Http => {
             http::run_with_frontend_route_extensions(drt, engine_config, frontend_route_extensions)
-                .await?;
+                .await
         }
-        Input::Grpc => {
-            grpc::run(drt, engine_config).await?;
-        }
-        Input::Text => {
-            text::run(drt, None, engine_config).await?;
-        }
+        Input::Grpc => grpc::run(drt, engine_config).await,
+        Input::Text => text::run(drt, None, engine_config).await,
         Input::Stdin => {
             let mut prompt = String::new();
             std::io::stdin().read_to_string(&mut prompt).unwrap();
-            text::run(drt, Some(prompt), engine_config).await?;
+            text::run(drt, Some(prompt), engine_config).await
         }
-        Input::Endpoint(path) => {
-            endpoint::run(drt, path, engine_config).await?;
-        }
-    }
-    Ok(())
+        Input::Endpoint(path) => endpoint::run(drt, path, engine_config).await,
+    };
+
+    // The input is done, but its trace records may not be. Wait for the sinks
+    // here, before returning, because nothing above this frame waits for them:
+    // the caller's next step is process exit. The result is carried across so
+    // that a failing input still drains what it captured.
+    crate::request_trace::shutdown_workers().await;
+
+    result
 }
 
 pub(crate) async fn initialize_input(
