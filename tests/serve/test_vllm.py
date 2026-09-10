@@ -9,9 +9,11 @@ import random
 from dataclasses import dataclass, field
 
 import pytest
+import requests
 
 from tests.serve.common import (
     WORKSPACE_DIR,
+    managed_serve_deployment,
     params_with_model_mark,
     run_serve_deployment,
 )
@@ -21,8 +23,9 @@ from tests.serve.multimodal_profiles.vllm import (
     VLLM_MULTIMODAL_PROFILES,
     VLLM_TOPOLOGY_SCRIPTS,
 )
-from tests.utils.constants import DefaultPort
+from tests.utils.constants import DefaultPort, DynamoPortRange
 from tests.utils.engine_process import EngineConfig
+from tests.utils.gpu_args import map_cuda_visible_devices
 from tests.utils.multimodal import make_multimodal_configs
 from tests.utils.payload_builder import (
     chat_payload,
@@ -45,6 +48,7 @@ from tests.utils.payloads import (
     EmbeddingPayload,
     ToolCallingChatPayload,
 )
+from tests.utils.port_utils import reserved_ports
 
 logger = logging.getLogger(__name__)
 
@@ -855,6 +859,86 @@ def test_serve_deployment(
         vllm_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
+
+
+@pytest.mark.vllm
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.post_merge
+@pytest.mark.core
+@pytest.mark.profiled_vram_gib(8.0)  # ~5.7 GiB observed; headroom for two engines.
+@pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.requested_vllm_kv_cache_bytes(1_119_388_000)
+@pytest.mark.timeout(600)
+@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+def test_native_sidecar_prefill_decode_handoff(
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    predownload_models,
+):
+    """Exercise NIXL metadata through the real vllm-rs gRPC receiver."""
+    import vllm
+
+    ports = dynamo_dynamic_ports
+    device = map_cuda_visible_devices([0], os.environ.get("CUDA_VISIBLE_DEVICES"))
+    with reserved_ports(4, DynamoPortRange.SERVE.value) as native_ports:
+        config = VLLMConfig(
+            name="native_sidecar_prefill_decode",
+            directory=os.path.join(WORKSPACE_DIR, "lib/sidecar/vllm"),
+            script_name="disagg.sh",
+            model="Qwen/Qwen3-0.6B",
+            marks=[],
+            request_payloads=[],
+            health_check_workers=True,
+            script_args=[
+                "--kv-transfer-config",
+                (
+                    '{"kv_connector":"NixlConnector","kv_role":"kv_both",'
+                    '"kv_load_failure_policy":"fail"}'
+                ),
+            ],
+            env={
+                # Both engines fit on one GPU; the gRPC handoff is unchanged.
+                "DYNAMO_HOME": WORKSPACE_DIR,
+                "VLLM_DECODE_GPU": device,
+                "VLLM_PREFILL_GPU": device,
+                "VLLM_PLUGINS": "",
+                "VLLM_RUST_FRONTEND_PATH": os.path.join(
+                    os.path.dirname(vllm.__file__), "vllm-rs"
+                ),
+                "DYN_HEALTH_CHECK_ENABLED": "true",
+                "VLLM_DECODE_HTTP_PORT": str(native_ports[0]),
+                "VLLM_DECODE_GRPC_PORT": str(native_ports[1]),
+                "VLLM_PREFILL_HTTP_PORT": str(native_ports[2]),
+                "VLLM_PREFILL_GRPC_PORT": str(native_ports[3]),
+                "VLLM_DECODE_NIXL_SIDE_CHANNEL_PORT": str(
+                    ports.nixl_side_channel_ports[0]
+                ),
+                "VLLM_PREFILL_NIXL_SIDE_CHANNEL_PORT": str(
+                    ports.nixl_side_channel_ports[1]
+                ),
+                "VLLM_PREFILL_KV_EVENT_PORT": str(ports.kv_event_port),
+            },
+        )
+        with managed_serve_deployment(config, request, ports=ports):
+            response = requests.post(
+                f"http://localhost:{ports.frontend_port}/v1/completions",
+                json={
+                    "model": config.model,
+                    # Span several KV blocks so decode must consume remote KV.
+                    "prompt": "The quick brown fox jumps over the lazy dog. " * 64,
+                    "max_tokens": 8,
+                    "temperature": 0,
+                    "ignore_eos": True,
+                },
+                timeout=60,
+            )
+            assert response.status_code == 200, response.text
+            result = response.json()
+            assert result["usage"]["prompt_tokens"] > 256, result
+            assert result["usage"]["completion_tokens"] == 8, result
+            assert result["choices"][0]["finish_reason"] == "length", result
 
 
 # LoRA Test Directory

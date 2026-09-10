@@ -34,6 +34,7 @@ while [[ $# -gt 0 ]]; do
             echo
             echo "Environment overrides:"
             echo "  MODEL                           Model to serve (default: Qwen/Qwen3-0.6B)"
+            echo "  VLLM_RUST_FRONTEND_PATH          Native frontend binary (default: vllm-rs on PATH)"
             echo "  DYN_HTTP_PORT                   Dynamo frontend port (default: 8000)"
             echo "  DYN_SYSTEM_PORT1                Decode sidecar system port (default: 8081)"
             echo "  DYN_SYSTEM_PORT2                Prefill sidecar system port (default: 8082)"
@@ -86,14 +87,14 @@ print_launch_banner "Launching vLLM Native-gRPC Sidecar Disaggregated Serving (2
     "Decode:      GPU ${VLLM_DECODE_GPU}, gRPC 127.0.0.1:${VLLM_DECODE_GRPC_PORT}" \
     "Prefill:     GPU ${VLLM_PREFILL_GPU}, gRPC 127.0.0.1:${VLLM_PREFILL_GRPC_PORT}"
 
-python -m dynamo.frontend &
+python3 -m dynamo.frontend &
 
 # vllm-rs manages the headless Python engines and exposes native gRPC on
 # loopback. Arguments after -- are forwarded to each managed engine.
 # shellcheck disable=SC2086 # GPU_MEM_ARGS intentionally expands into multiple flags.
 CUDA_VISIBLE_DEVICES="$VLLM_DECODE_GPU" \
 VLLM_NIXL_SIDE_CHANNEL_PORT="$VLLM_DECODE_NIXL_SIDE_CHANNEL_PORT" \
-vllm-rs serve "$MODEL" \
+"${VLLM_RUST_FRONTEND_PATH:-vllm-rs}" serve "$MODEL" \
     --host 127.0.0.1 \
     --port "$VLLM_DECODE_HTTP_PORT" \
     --grpc-port "$VLLM_DECODE_GRPC_PORT" \
@@ -108,7 +109,7 @@ vllm-rs serve "$MODEL" \
 # shellcheck disable=SC2086 # GPU_MEM_ARGS intentionally expands into multiple flags.
 CUDA_VISIBLE_DEVICES="$VLLM_PREFILL_GPU" \
 VLLM_NIXL_SIDE_CHANNEL_PORT="$VLLM_PREFILL_NIXL_SIDE_CHANNEL_PORT" \
-vllm-rs serve "$MODEL" \
+"${VLLM_RUST_FRONTEND_PATH:-vllm-rs}" serve "$MODEL" \
     --host 127.0.0.1 \
     --port "$VLLM_PREFILL_HTTP_PORT" \
     --grpc-port "$VLLM_PREFILL_GRPC_PORT" \
@@ -122,13 +123,13 @@ vllm-rs serve "$MODEL" \
     "${EXTRA_ARGS[@]}" &
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}" \
-    dynamo-vllm-sidecar \
+    python3 -m dynamo.vllm.sidecar \
     --grpc-endpoint "127.0.0.1:${VLLM_DECODE_GRPC_PORT}" \
     --disaggregation-mode decode &
 
 # Register prefill separately so the frontend routes each disaggregated stage.
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT2:-8082}" \
-    dynamo-vllm-sidecar \
+    python3 -m dynamo.vllm.sidecar \
     --grpc-endpoint "127.0.0.1:${VLLM_PREFILL_GRPC_PORT}" \
     --component prefill \
     --disaggregation-mode prefill &
