@@ -65,11 +65,6 @@ async def init_decode(
     if snapshot_engine is not None:
         engine = snapshot_engine
         load_time = 0.0
-        if getattr(server_args, "enable_forward_pass_metrics", False):
-            raise RuntimeError(
-                "Snapshot ServerArgs must disable forward-pass metrics before "
-                "engine creation"
-            )
     else:
         set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
         start_time = time.time()
@@ -77,6 +72,13 @@ async def init_decode(
         load_time = time.time() - start_time
 
     server_args = config.use_resolved_server_args(engine.server_args)
+    if snapshot_engine is not None and getattr(
+        server_args, "enable_forward_pass_metrics", False
+    ):
+        raise RuntimeError(
+            "Snapshot ServerArgs must disable forward-pass metrics before "
+            "engine creation"
+        )
 
     if server_args.enable_trace:
         set_global_trace_level(dynamo_args.sglang_trace_level)
@@ -224,11 +226,6 @@ async def init_prefill(
     if snapshot_engine is not None:
         engine = snapshot_engine
         load_time = 0.0
-        if getattr(server_args, "enable_forward_pass_metrics", False):
-            raise RuntimeError(
-                "Snapshot ServerArgs must disable forward-pass metrics before "
-                "engine creation"
-            )
     else:
         set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
         start_time = time.time()
@@ -236,6 +233,13 @@ async def init_prefill(
         load_time = time.time() - start_time
 
     server_args = config.use_resolved_server_args(engine.server_args)
+    if snapshot_engine is not None and getattr(
+        server_args, "enable_forward_pass_metrics", False
+    ):
+        raise RuntimeError(
+            "Snapshot ServerArgs must disable forward-pass metrics before "
+            "engine creation"
+        )
 
     if server_args.enable_trace:
         set_global_trace_level(dynamo_args.sglang_trace_level)
