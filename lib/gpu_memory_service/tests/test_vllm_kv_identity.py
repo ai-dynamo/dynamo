@@ -63,6 +63,18 @@ def test_preloaded_v2_runner_installs_immediately(monkeypatch):
     assert calls == ["install"]
 
 
+def test_shared_kv_install_fails_without_lease_hooks(monkeypatch):
+    monkeypatch.setattr(install_vmm_ipc_kv, "_is_enabled", lambda: True)
+    monkeypatch.setattr(install_vmm_ipc_kv, "install_geometry_patch", lambda: False)
+    monkeypatch.setattr(install_vmm_ipc_kv, "_install_kv_leases", lambda: False)
+    monkeypatch.setattr(install_vmm_ipc_kv, "_kv_lease_hooks_installed", lambda: False)
+    monkeypatch.setattr(install_vmm_ipc_kv, "_shared_kv_enabled", lambda: True)
+    monkeypatch.setattr(install_vmm_ipc_kv, "_INSTALLED", False)
+
+    with pytest.raises(RuntimeError, match="lease-aware block allocation"):
+        install_vmm_ipc_kv.install()
+
+
 def test_v3_semantic_kv_tags_include_model_layers_and_size():
     tensor_a = SimpleNamespace(
         shared_by=["model.layers.1.self_attn", "model.layers.0.self_attn"],

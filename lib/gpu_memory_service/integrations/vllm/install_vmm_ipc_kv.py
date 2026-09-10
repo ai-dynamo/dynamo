@@ -169,6 +169,16 @@ def _install_kv_leases() -> bool:
         raise
 
 
+def _kv_lease_hooks_installed() -> bool:
+    try:
+        from gpu_memory_service.integrations.vllm.install_kv_leases import (
+            lease_hooks_installed,
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(lease_hooks_installed())
+
+
 def _immutable_revision(value) -> str | None:
     resolved = getattr(value, "resolved", None)
     if resolved:
@@ -599,6 +609,10 @@ def install() -> bool:
         return False
     install_geometry_patch()
     _install_kv_leases()
+    if _shared_kv_enabled() and not _kv_lease_hooks_installed():
+        raise RuntimeError(
+            "vLLM GMS shared-KV startup requires lease-aware block allocation"
+        )
     if _INSTALLED:
         return False
 
@@ -618,9 +632,7 @@ def install() -> bool:
 
     try:
         from vllm.v1.worker.gpu import attn_utils as _gpu_attn_utils
-        from vllm.v1.worker.gpu.model_runner import (
-            GPUModelRunner as V2ModelRunner,
-        )
+        from vllm.v1.worker.gpu.model_runner import GPUModelRunner as V2ModelRunner
 
         original_v2_initialize = V2ModelRunner.initialize_kv_cache
         if not getattr(original_v2_initialize, "_gms_model_identity_context", False):
