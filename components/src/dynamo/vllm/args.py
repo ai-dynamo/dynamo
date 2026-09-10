@@ -183,6 +183,19 @@ def cross_validate_config(
             "Shadow mode depends on GMS for VA-stable weight sharing."
         )
 
+    if dynamo_config.gms_shadow_mode:
+        parallel_sizes = (
+            engine_config.tensor_parallel_size,
+            engine_config.pipeline_parallel_size,
+            engine_config.data_parallel_size,
+        )
+        if dynamo_config.headless or any(size != 1 for size in parallel_sizes):
+            raise ValueError(
+                "--gms-shadow-mode currently supports exactly one local vLLM "
+                "rank; tensor, pipeline, and data parallel failover require a "
+                "coordinated rank-activation barrier"
+            )
+
     if dynamo_config.embedding_worker_processes > 1:
         if engine_config.data_parallel_size != 1:
             raise ValueError(

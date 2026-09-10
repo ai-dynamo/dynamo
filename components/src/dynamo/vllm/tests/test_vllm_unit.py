@@ -15,7 +15,7 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -372,6 +372,25 @@ def test_headless_namespace_has_required_fields(mock_vllm_cli):
     # Core engine fields must survive the round-trip
     assert hasattr(ns, "model")
     assert hasattr(ns, "tensor_parallel_size")
+
+
+@pytest.mark.parametrize(
+    "parallel_flag",
+    ("--tensor-parallel-size", "--pipeline-parallel-size", "--data-parallel-size"),
+)
+def test_cli_shadow_mode_rejects_parallel_ranks(mock_vllm_cli, parallel_flag):
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--load-format",
+        "gms",
+        "--gms-shadow-mode",
+        parallel_flag,
+        "2",
+    )
+
+    with pytest.raises(ValueError, match="exactly one local vLLM rank"):
+        parse_args()
 
 
 def test_cli_shadow_mode_waits_for_primary_kv_geometry(monkeypatch):
@@ -2424,10 +2443,82 @@ async def test_gms_shadow_wake_timeout_requiesces_and_releases_lock(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_gms_shadow_wake_hard_timeout_retains_lock(monkeypatch):
+    from dynamo.vllm.worker_factory import WorkerFactory
+
+    events = []
+    cancellation_seen = asyncio.Event()
+    finish = asyncio.Event()
+
+    class Lock:
+        was_contended = True
+
+        async def release(self):
+            events.append("release")
+
+    class PauseController:
+        async def pause(self, *args, **kwargs):
+            events.append(("pause", args, kwargs))
+
+        async def resume(self):
+            events.append("resume")
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancellation_seen.set()
+                await finish.wait()
+
+        def mark_resumed(self):
+            events.append("mark_resumed")
+
+    class Runtime:
+        def set_health_status(self, status):
+            events.append(("health", status))
+
+    lock = Lock()
+    factory = WorkerFactory(*(lambda *args, **kwargs: None for _ in range(5)))
+    monkeypatch.setenv("ENGINE_ID", "1")
+    monkeypatch.setenv("DYN_GMS_FAILOVER_PRIMARY_ENGINE_ID", "0")
+    monkeypatch.setenv("DYN_GMS_FAILOVER_WAKEUP_TIMEOUT_SECS", "0.01")
+    monkeypatch.setattr(factory, "_acquire_failover_lock", AsyncMock(return_value=lock))
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.run_gms_failover_post_lock_fence",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.os.kill",
+        lambda pid, sig: events.append(("kill", pid, sig)),
+    )
+
+    handler = SimpleNamespace(_pause_controller=PauseController())
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(
+            factory._maybe_wait_for_failover_lock(
+                handler,
+                Runtime(),
+                SimpleNamespace(gms_shadow_mode=True),
+            ),
+            timeout=0.5,
+        )
+
+    await asyncio.wait_for(cancellation_seen.wait(), timeout=0.1)
+    assert handler._gms_failover_lock is lock
+    assert "release" not in events
+    assert ("kill", os.getpid(), signal.SIGTERM) in events
+    assert [
+        event for event in events if isinstance(event, tuple) and event[0] == "pause"
+    ] == [("pause", (1,), {"clear_cache": False})]
+    finish.set()
+    await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
 async def test_gms_shadow_retains_lock_if_activation_cannot_requiesce(monkeypatch):
     from dynamo.vllm.worker_factory import WorkerFactory
 
     events = []
+    cancellation_seen = asyncio.Event()
+    finish = asyncio.Event()
 
     class Lock:
         was_contended = True
@@ -2442,7 +2533,11 @@ async def test_gms_shadow_retains_lock_if_activation_cannot_requiesce(monkeypatc
             self.pause_calls += 1
             events.append(("pause", self.pause_calls))
             if self.pause_calls > 1:
-                await asyncio.Event().wait()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    cancellation_seen.set()
+                    await finish.wait()
 
         async def resume(self):
             events.append("resume")
@@ -2495,6 +2590,9 @@ async def test_gms_shadow_retains_lock_if_activation_cannot_requiesce(monkeypatc
     assert "release" not in events
     assert ("kill", os.getpid(), signal.SIGTERM) in events
     assert ("health", False) in events
+    await asyncio.wait_for(cancellation_seen.wait(), timeout=0.1)
+    finish.set()
+    await asyncio.sleep(0)
 
 
 @pytest.mark.asyncio

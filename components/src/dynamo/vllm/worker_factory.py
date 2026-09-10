@@ -71,6 +71,53 @@ BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS = 90
 # serving nor error propagation may hang on it.
 WORKER_GC_STOP_TIMEOUT_SECONDS = 30.0
 
+
+class _GMSHardTimeout(asyncio.TimeoutError):
+    def __init__(self, operation: str, timeout: float, *, task_still_running: bool):
+        super().__init__(f"{operation} exceeded {timeout:.1f}s hard deadline")
+        self.task_still_running = task_still_running
+
+
+def _consume_detached_task_result(task: asyncio.Task[Any]) -> None:
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        pass
+    except BaseException:
+        logger.debug("Detached GMS activation task failed", exc_info=True)
+
+
+async def _run_gms_operation_with_hard_timeout(
+    operation: Awaitable[Any], *, timeout: float, label: str
+) -> Any:
+    # Return by the deadline even when the operation suppresses cancellation.
+    task = asyncio.create_task(operation)
+    try:
+        done, _ = await asyncio.wait({task}, timeout=max(0.0, timeout))
+    except asyncio.CancelledError:
+        task.cancel()
+        task.add_done_callback(_consume_detached_task_result)
+        raise
+    if done:
+        return task.result()
+
+    task.cancel()
+    # Give an ordinary cancellation one loop turn to finish. A task that
+    # suppresses cancellation is detached; the caller must retain ownership
+    # until process death because its mutation state is unknown.
+    await asyncio.sleep(0)
+    task_still_running = not task.done()
+    if task_still_running:
+        task.add_done_callback(_consume_detached_task_result)
+    else:
+        _consume_detached_task_result(task)
+    raise _GMSHardTimeout(
+        label,
+        timeout,
+        task_still_running=task_still_running,
+    )
+
+
 # (engine_client, vllm_config, default_sampling_params, cleanup_resource, component_gauges)
 # component_gauges is None on the embedding-worker path: pooling engines
 # have no KV cache / scheduler gauges, so setup_vllm_engine() skips the
@@ -1189,14 +1236,15 @@ class WorkerFactory:
         """Bound shadow wake so a wedged remap cannot retain ownership."""
         timeout = float(os.environ.get("DYN_GMS_FAILOVER_WAKEUP_TIMEOUT_SECS", "120"))
         try:
-            await asyncio.wait_for(
+            await _run_gms_operation_with_hard_timeout(
                 handler._pause_controller.resume(),
                 timeout=timeout,
+                label="GMS wake/remap",
             )
-        except asyncio.TimeoutError:
+        except _GMSHardTimeout:
             logger.critical(
                 "[GMS failover] wake_up/remap did not complete within %.0fs; "
-                "failing closed so the failover lock is released",
+                "failing closed",
                 timeout,
             )
             raise
@@ -1316,9 +1364,15 @@ class WorkerFactory:
             handler._pause_controller.mark_resumed()
             if promotion_warmup is not None:
                 await promotion_warmup()
-        except BaseException:
+        except BaseException as activation_error:
             safe_to_release = not resume_attempted
-            if resume_attempted:
+            activation_may_still_run = isinstance(
+                activation_error, asyncio.CancelledError
+            ) or (
+                isinstance(activation_error, _GMSHardTimeout)
+                and activation_error.task_still_running
+            )
+            if resume_attempted and not activation_may_still_run:
                 try:
                     if not resumed:
                         handler._pause_controller.mark_resumed()
@@ -1334,9 +1388,10 @@ class WorkerFactory:
                         )
                     except ValueError:
                         cleanup_timeout = 30.0
-                    await asyncio.wait_for(
+                    await _run_gms_operation_with_hard_timeout(
                         handler._pause_controller.pause(1, clear_cache=False),
                         timeout=cleanup_timeout,
+                        label="GMS re-quiesce",
                     )
                     safe_to_release = True
                 except BaseException:
