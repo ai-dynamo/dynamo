@@ -36,6 +36,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang._compat import (
     ConfigArgumentMerger,
     ensure_sglang_tensor_image_size,
+    get_sglang_model_config,
     resolved_server_args,
 )
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
@@ -624,7 +625,7 @@ async def parse_args(args: list[str]) -> Config:
         # Dynamo expects disjoint output_ids; ServerArgs is read-only after resolution.
         parsed_args.incremental_streaming_output = True
         server_args = ServerArgs.from_cli_args(parsed_args)
-        if server_args.get_model_config().is_multimodal:
+        if get_sglang_model_config(server_args).is_multimodal:
             ensure_sglang_tensor_image_size()
 
     if getattr(server_args, "schedule_low_priority_values_first", False):

@@ -24,7 +24,9 @@ from typing import TYPE_CHECKING, Literal, Optional
 
 from dynamo.planner.config.planner_config import PlannerConfig, resolve_min_endpoint
 from dynamo.planner.core.budget import (
-    guard_disagg_load_budget,
+    fit_directional_budget_pair,
+    guard_disagg_scaling_budget,
+    guard_single_scaling_budget,
     proportional_clamp_pair,
     proportional_clamp_single,
 )
@@ -420,6 +422,47 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
         min_endpoint = self._min_endpoint_for(component)
         return self._budget_clamp(max(desired, min_endpoint), gpu, min_endpoint)
 
+    def _apply_single_scaling_budget(
+        self, desired: int, component: Literal["prefill", "decode"]
+    ) -> tuple[int, Optional[str]]:
+        """Apply the direction-preserving budget policy for builtin scaling."""
+        return self._guard_single_throughput_budget(
+            desired,
+            component,
+            min_gpus=self._config.min_gpu_budget,
+        )
+
+    def _fit_single_throughput_ceiling(
+        self, desired: int, component: Literal["prefill", "decode"]
+    ) -> tuple[int, Optional[str]]:
+        """Fit a throughput lower bound under the hard GPU ceiling only."""
+        return self._guard_single_throughput_budget(desired, component, min_gpus=-1)
+
+    def _guard_single_throughput_budget(
+        self,
+        desired: int,
+        component: Literal["prefill", "decode"],
+        *,
+        min_gpus: int,
+    ) -> tuple[int, Optional[str]]:
+        caps = (
+            self._capabilities.prefill
+            if component == "prefill"
+            else self._capabilities.decode
+        )
+        gpu = caps.resolved_gpu_cost_per_replica if caps is not None else None
+        if gpu is None:
+            return desired, None
+        current = self._num_p_workers if component == "prefill" else self._num_d_workers
+        return guard_single_scaling_budget(
+            current,
+            desired,
+            gpu,
+            min_gpus,
+            self._config.max_gpu_budget,
+            self._min_endpoint_for(component),
+        )
+
     def _apply_global_budget(self, num_p: int, num_d: int) -> tuple[int, int]:
         """Apply the GPU budget band (ceiling and optional floor) to
         ``(num_p, num_d)``. Delegates to ``budget.proportional_clamp_pair``
@@ -450,15 +493,94 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
             )
         return new_p, new_d
 
-    def _apply_disagg_load_budget(
-        self, num_p: int, num_d: int
+    def _fit_disagg_throughput_ceiling(self, num_p: int, num_d: int) -> tuple[int, int]:
+        """Fit a throughput-bounded pair under the hard GPU ceiling.
+
+        ``min_gpu_budget`` guards an actual scale-down; it is not demand and
+        must not inflate a persisted throughput lower bound.  The full budget
+        band is enforced later when the combined load/throughput action is
+        materialized.
+        """
+        p_gpu, d_gpu = self._resolve_disagg_gpu_costs()
+        if p_gpu is None or d_gpu is None:
+            return num_p, num_d
+
+        prefill_min = self._min_endpoint_for("prefill")
+        decode_min = self._min_endpoint_for("decode")
+        endpoint_recovery = (
+            self._num_p_workers < prefill_min or self._num_d_workers < decode_min
+        )
+        if endpoint_recovery:
+            # A runtime endpoint increase is explicit allocation policy and may
+            # select a donor to make its minimum footprint fit the hard ceiling.
+            new_p, new_d = proportional_clamp_pair(
+                max(num_p, prefill_min),
+                max(num_d, decode_min),
+                p_gpu,
+                d_gpu,
+                -1,
+                self._config.max_gpu_budget,
+                prefill_min,
+                decode_min,
+            )
+        else:
+            new_p, new_d = fit_directional_budget_pair(
+                self._num_p_workers,
+                self._num_d_workers,
+                num_p,
+                num_d,
+                p_gpu,
+                d_gpu,
+                -1,
+                self._config.max_gpu_budget,
+                prefill_min,
+                decode_min,
+            )
+        if (new_p, new_d) != (num_p, num_d):
+            logger.warning(
+                "GPU ceiling limited throughput target: current=(%sP, %sD), "
+                "proposed=(%sP, %sD), fitted=(%sP, %sD), max=%s",
+                self._num_p_workers,
+                self._num_d_workers,
+                num_p,
+                num_d,
+                new_p,
+                new_d,
+                self._config.max_gpu_budget,
+            )
+        return new_p, new_d
+
+    def _apply_disagg_scaling_budget(
+        self,
+        num_p: int,
+        num_d: int,
+        *,
+        source: Literal["load", "throughput"],
     ) -> tuple[int, int, Optional[str]]:
-        """Apply the direction-preserving budget policy for load scaling."""
+        """Apply the direction-preserving budget policy for builtin scaling."""
         p_gpu, d_gpu = self._resolve_disagg_gpu_costs()
         if p_gpu is None or d_gpu is None:
             return num_p, num_d, None
 
-        new_p, new_d, reason = guard_disagg_load_budget(
+        prefill_min = self._min_endpoint_for("prefill")
+        decode_min = self._min_endpoint_for("decode")
+        if self._num_p_workers < prefill_min or self._num_d_workers < decode_min:
+            # Endpoint floors are explicit runtime policy. Reconcile them even
+            # if doing so requires a donor that the ordinary scaling signal did
+            # not nominate; startup/runtime validation guarantees feasibility.
+            new_p, new_d = proportional_clamp_pair(
+                max(num_p, prefill_min),
+                max(num_d, decode_min),
+                p_gpu,
+                d_gpu,
+                self._config.min_gpu_budget,
+                self._config.max_gpu_budget,
+                prefill_min,
+                decode_min,
+            )
+            return new_p, new_d, "gpu_budget_reconcile"
+
+        new_p, new_d, reason = guard_disagg_scaling_budget(
             self._num_p_workers,
             self._num_d_workers,
             num_p,
@@ -467,17 +589,18 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
             d_gpu,
             self._config.min_gpu_budget,
             self._config.max_gpu_budget,
-            self._min_endpoint_for("prefill"),
-            self._min_endpoint_for("decode"),
+            prefill_min,
+            decode_min,
         )
         if reason is not None or (new_p, new_d) != (num_p, num_d):
             old_total = self._num_p_workers * p_gpu + self._num_d_workers * d_gpu
             proposed_total = num_p * p_gpu + num_d * d_gpu
             new_total = new_p * p_gpu + new_d * d_gpu
             logger.warning(
-                "GPU budget load policy %s: current=(%sP + %sD = %s), "
+                "GPU budget %s policy %s: current=(%sP + %sD = %s), "
                 "proposed=(%sP + %sD = %s), final=(%sP + %sD = %s), "
                 "band=[min=%s, max=%s]",
+                source,
                 reason or "gpu_budget_clamped",
                 self._num_p_workers,
                 self._num_d_workers,
