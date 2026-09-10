@@ -1094,11 +1094,11 @@ def test_guided_tool_choice_requires_effective_reasoning(
 def test_structured_response_requires_effective_reasoning():
     request = {"response_format": {"type": "json_schema"}}
 
-    assert _guided_output_requires_reasoning(request, True, "deepseek_v4") is True
-    assert _guided_output_requires_reasoning(request, False, "deepseek_v4") is False
-    assert _guided_output_requires_reasoning(request, True, "gpt_oss") is False
+    assert _guided_output_requires_reasoning(request, True, "deepseek-v4") is True
+    assert _guided_output_requires_reasoning(request, False, "deepseek-v4") is False
+    assert _guided_output_requires_reasoning(request, True, "gpt-oss") is False
     assert not _guided_output_requires_reasoning(
-        {"response_format": {"type": "text"}}, True, "deepseek_v4"
+        {"response_format": {"type": "text"}}, True, "deepseek-v4"
     )
 
 

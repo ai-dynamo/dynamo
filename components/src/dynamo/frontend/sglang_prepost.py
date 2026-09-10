@@ -365,7 +365,7 @@ def _guided_output_requires_reasoning(
         return False
 
     response_format = request.get("response_format")
-    if not isinstance(response_format, dict) or reasoning_parser_name == "gpt_oss":
+    if not isinstance(response_format, dict) or reasoning_parser_name == "gpt-oss":
         return False
     return response_format.get("type") != "text"
 
