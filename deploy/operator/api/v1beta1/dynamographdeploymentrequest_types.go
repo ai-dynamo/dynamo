@@ -48,18 +48,17 @@ const (
 	ConditionTypeDeploymentReady = "DeploymentReady"
 
 	// Event reasons
-	EventReasonInitialized          = "Initialized"
-	EventReasonValidationFailed     = "ValidationFailed"
-	EventReasonProfilingJobCreated  = "ProfilingJobCreated"
-	EventReasonProfilingJobFailed   = "ProfilingJobFailed"
-	EventReasonAIConfiguratorFailed = "AIConfiguratorFailed"
-	EventReasonSpecGenerated        = "SpecGenerated"
-	EventReasonSpecChangeRejected   = "SpecChangeRejected"
-	EventReasonDeploymentCreated    = "DeploymentCreated"
-	EventReasonDeploymentReady      = "DeploymentReady"
-	EventReasonDeploymentDegraded   = "DeploymentDegraded"
-	EventReasonDeploymentDeleted    = "DeploymentDeleted"
-	EventReasonImagePullFailed      = "ImagePullFailed"
+	EventReasonInitialized         = "Initialized"
+	EventReasonValidationFailed    = "ValidationFailed"
+	EventReasonProfilingJobCreated = "ProfilingJobCreated"
+	EventReasonProfilingJobFailed  = "ProfilingJobFailed"
+	EventReasonSpecGenerated       = "SpecGenerated"
+	EventReasonSpecChangeRejected  = "SpecChangeRejected"
+	EventReasonDeploymentCreated   = "DeploymentCreated"
+	EventReasonDeploymentReady     = "DeploymentReady"
+	EventReasonDeploymentDegraded  = "DeploymentDegraded"
+	EventReasonDeploymentDeleted   = "DeploymentDeleted"
+	EventReasonImagePullFailed     = "ImagePullFailed"
 
 	// Label keys
 	LabelApp           = "app"
@@ -70,7 +69,6 @@ const (
 
 	// Label values
 	LabelValueDynamoProfiler = "dynamo-profiler"
-	LabelValueAICProfiler    = "aic-profiler"
 	LabelValueDynamoOperator = "dynamo-operator"
 )
 
