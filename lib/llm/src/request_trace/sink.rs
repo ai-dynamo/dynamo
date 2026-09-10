@@ -323,6 +323,10 @@ pub async fn spawn_workers_from_env(shutdown: CancellationToken) -> anyhow::Resu
 /// frontend runs nested inside another input. Draining when the first of those
 /// returns would leave the rest publishing into a bus with no worker behind it,
 /// so the drain waits for the last registration to be released.
+///
+/// Only [`ActiveInput::release_and_drain`] gives the bounded drain. Dropping the
+/// last guard instead — a cancelled or panicking input — cancels the workers so
+/// they start draining, but cannot wait for them, and warns.
 pub struct ActiveInput(());
 
 impl ActiveInput {
@@ -343,8 +347,8 @@ impl ActiveInput {
     }
 
     /// Release the registration, reporting whether it was the last one. `Drop`
-    /// releases it too, for the cancellation and panic paths, so the guard is
-    /// forgotten here rather than released twice.
+    /// releases it too, so the guard is forgotten here rather than released
+    /// twice.
     fn release(self) -> bool {
         let was_last = ACTIVE_INPUTS.fetch_sub(1, Ordering::AcqRel) == 1;
         std::mem::forget(self);
@@ -354,7 +358,36 @@ impl ActiveInput {
 
 impl Drop for ActiveInput {
     fn drop(&mut self) {
-        ACTIVE_INPUTS.fetch_sub(1, Ordering::AcqRel);
+        if ACTIVE_INPUTS.fetch_sub(1, Ordering::AcqRel) != 1 {
+            return;
+        }
+        // The last input ended without calling `release_and_drain`, so it was
+        // cancelled or it panicked. `Drop` cannot await, and spawning a
+        // detached drain would only look like one: nothing would be left to
+        // wait on it, which is the timing guess this change exists to remove.
+        // Cancelling is the part that can be done here, and it is worth doing:
+        // each worker leaves its loop and runs the sink's own `shutdown`, so a
+        // caller that keeps the runtime alive past the cancellation still gets
+        // the backlog written. What cannot be promised is that it finishes
+        // before the process exits, so say so rather than fail quietly.
+        cancel_workers();
+        tracing::warn!(
+            "request trace sinks were cancelled without a bounded drain because the last input \
+             ended early; records still queued may be lost if the process exits immediately"
+        );
+    }
+}
+
+/// Cancel the retained workers without waiting for them, so they begin their
+/// own teardown. Unlike [`shutdown_workers`] this does not take the workers out
+/// of the static: a later bounded drain, if one happens, can still join them.
+fn cancel_workers() {
+    if let Some(workers) = WORKERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+    {
+        workers.token.cancel();
     }
 }
 
@@ -568,22 +601,54 @@ mod tests {
         assert_eq!(report.pending, vec![("fake", 1132)]);
     }
 
-    /// The only test that touches `ACTIVE_INPUTS`, so its reads and writes are
-    /// not racing another test in this binary.
-    #[test]
-    fn only_the_last_input_to_finish_drains() {
+    /// The only test that touches `ACTIVE_INPUTS` and `WORKERS`, so its reads
+    /// and writes are not racing another test in this binary.
+    #[tokio::test]
+    async fn last_input_out_drains_and_a_dropped_last_input_still_cancels() {
+        crate::request_trace::init_bus_for_test(64);
+        let shutdown_done = Arc::new(AtomicBool::new(false));
+        let sink: Arc<dyn RequestTraceSink> = Arc::new(FakeSink {
+            emitted: Arc::new(AtomicUsize::new(0)),
+            shutdown_done: shutdown_done.clone(),
+            dropped: 0,
+            hang_on_shutdown: false,
+        });
+        *WORKERS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some(spawn_workers(vec![sink], CancellationToken::new()));
+
         let first = ActiveInput::register();
         let second = ActiveInput::register();
-
         assert!(
             !first.release(),
             "an input that finishes while another is still running must not drain"
         );
-        assert!(
-            second.release(),
-            "the last input to finish is the one that drains"
-        );
+
+        // Dropping the last guard is the cancelled or panicking input. It
+        // cannot await the drain, but it must still start one.
+        drop(second);
         assert_eq!(ACTIVE_INPUTS.load(Ordering::SeqCst), 0);
+
+        let workers = WORKERS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .expect("the drop path must leave the workers joinable");
+        assert!(
+            workers.token.is_cancelled(),
+            "dropping the last input must cancel the workers"
+        );
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            futures::future::join_all(workers.handles),
+        )
+        .await
+        .expect("the cancelled workers should finish on their own");
+        assert!(
+            shutdown_done.load(Ordering::SeqCst),
+            "each sink should have run its own shutdown after the cancellation"
+        );
     }
 
     #[tokio::test]

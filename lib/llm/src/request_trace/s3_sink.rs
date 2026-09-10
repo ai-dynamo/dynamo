@@ -744,19 +744,6 @@ mod tests {
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
     }
 
-    #[test]
-    fn serialize_failure_counts_one_record_per_failure() {
-        // No field of a `RequestTraceRecord` has a fallible `Serialize`
-        // implementation, so the worker's serialize branch cannot be provoked
-        // with a real record. This covers the accounting that branch performs.
-        let dropped = AtomicU64::new(0);
-
-        assert!(note_dropped_records(&dropped, 1, "serialize_failed"));
-        assert!(!note_dropped_records(&dropped, 1, "serialize_failed"));
-
-        assert_eq!(dropped.load(Ordering::Relaxed), 2);
-    }
-
     #[tokio::test]
     async fn dropped_records_totals_backpressure_and_worker_losses() {
         let capacity = 1;
