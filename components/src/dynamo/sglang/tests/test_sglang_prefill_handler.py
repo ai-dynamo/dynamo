@@ -165,3 +165,54 @@ async def test_prefill_not_submitted_when_the_client_has_already_gone():
 
     assert not started, "the engine stream was started for a client already gone"
     assert not aborts, "aborted an rid the engine had never registered"
+
+
+@pytest.mark.asyncio
+async def test_parallel_sampling_aborts_every_sample_id():
+    """Parallel sampling replaces the submitted ID with one per sample.
+
+    ``GenerateReqInput._normalize_rid`` turns a string ``rid`` into
+    ``rid_0``, ``rid_1``, ..., and ``abort_request`` drops an ID it has not
+    registered, so aborting the ID the request was submitted under cancels
+    nothing and every sample keeps running after the client disconnects.
+    """
+    aborts: list[str] = []
+
+    class _TokenizerManager:
+        def abort_request(self, *, rid, abort_all):
+            aborts.append(rid)
+
+    handler = _handler(SimpleNamespace(tokenizer_manager=_TokenizerManager()))
+    context = _CancelableContext("request-id")
+    future: asyncio.Future = asyncio.Future()
+
+    assert handler._arm_cancellation(future, context, "request-id", 3)
+
+    monitor = asyncio.create_task(handler._handle_cancellation(future, context))
+    await asyncio.sleep(0)
+    context.cancel()
+    await asyncio.wait_for(monitor, timeout=2)
+
+    assert aborts == ["request-id_0", "request-id_1", "request-id_2"]
+
+
+@pytest.mark.asyncio
+async def test_single_sample_aborts_the_submitted_id_unchanged():
+    aborts: list[str] = []
+
+    class _TokenizerManager:
+        def abort_request(self, *, rid, abort_all):
+            aborts.append(rid)
+
+    handler = _handler(SimpleNamespace(tokenizer_manager=_TokenizerManager()))
+    context = _CancelableContext("request-id")
+    future: asyncio.Future = asyncio.Future()
+
+    assert handler._arm_cancellation(future, context, "request-id")
+
+    monitor = asyncio.create_task(handler._handle_cancellation(future, context))
+    await asyncio.sleep(0)
+    context.cancel()
+    await asyncio.wait_for(monitor, timeout=2)
+
+    assert aborts == ["request-id"]

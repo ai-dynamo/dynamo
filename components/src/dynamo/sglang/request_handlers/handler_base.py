@@ -1237,6 +1237,7 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         request_id_future: asyncio.Future,
         context: Context,
         sglang_request_id: str,
+        sample_count: int = 1,
     ) -> bool:
         """Arm the monitor for *sglang_request_id*, or report the client left.
 
@@ -1262,7 +1263,15 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
                 f"{sglang_request_id} for Context: {context.id()}"
             )
             return False
-        request_id_future.set_result(sglang_request_id)
+        # Parallel sampling replaces the submitted ID with one per sample
+        # (GenerateReqInput._normalize_rid expands "rid" into "rid_0", "rid_1",
+        # ...), and abort_request drops an ID it cannot find, so aborting the
+        # submitted one would be a no-op and every sample would keep running.
+        if sample_count > 1:
+            ids = [f"{sglang_request_id}_{i}" for i in range(sample_count)]
+        else:
+            ids = [sglang_request_id]
+        request_id_future.set_result(ids)
         return True
 
     async def _handle_cancellation(
@@ -1319,17 +1328,23 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
                 f"Cancellation or shutdown signal received for SGLang Request ID {sglang_request_id}, Context: {context.id()}"
             )
 
+            # Callers that predate parallel sampling resolve a bare ID.
+            sglang_request_ids = (
+                sglang_request_id
+                if isinstance(sglang_request_id, list)
+                else [sglang_request_id]
+            )
+
             # Call abort_request on the tokenizer_manager through the engine
             if (
                 hasattr(self.engine, "tokenizer_manager")
                 and self.engine.tokenizer_manager
             ):
-                logging.info(
-                    f"Calling SGLang abort_request for Request ID {sglang_request_id}"
-                )
-                self.engine.tokenizer_manager.abort_request(
-                    rid=sglang_request_id, abort_all=False
-                )
+                for rid in sglang_request_ids:
+                    logging.info(f"Calling SGLang abort_request for Request ID {rid}")
+                    self.engine.tokenizer_manager.abort_request(
+                        rid=rid, abort_all=False
+                    )
                 logging.info(f"Aborted Request ID: {context.id()}")
             else:
                 logging.error(

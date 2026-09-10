@@ -494,14 +494,23 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 context,
                 priority,
             )
+            # The native payload carries its own sampling params, so the
+            # sample count comes from there rather than from the Dynamo view.
+            native_sampling = native_payload.get("sampling_params")
+            native_samples = 1
+            if isinstance(native_sampling, Mapping):
+                native_samples = native_sampling.get("n") or 1
             async for output in self._process_native_generate_stream(
-                stream, context, native_rid
+                stream, context, native_rid, native_samples
             ):
                 yield output
             return
 
         priority_kwargs = self._priority_kwargs(priority)
         sampling_params = self._build_sampling_params(request)
+        # SGLang expands one submitted ID into one per sample, so the
+        # monitor has to know how many to abort.
+        sample_count = sampling_params.get("n") or 1
         logprob_kwargs = self._build_logprob_kwargs(request)
         metadata_uploader = self._metadata_uploader_from_request(request)
 
@@ -650,6 +659,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     return_tokens_as_token_ids,
                     user_stop_token_ids=user_stop_token_ids,
                     metadata_uploader=metadata_uploader,
+                    sample_count=sample_count,
                 ):
                     yield out
             else:
@@ -659,6 +669,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     request=request,
                     user_stop_token_ids=user_stop_token_ids,
                     metadata_uploader=metadata_uploader,
+                    sample_count=sample_count,
                 ):
                     yield out
 
@@ -677,6 +688,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         stream_source: AsyncGenerator[Dict[str, Any], None],
         context: Context,
         sglang_request_id: str | None = None,
+        sample_count: int = 1,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Forward opaque SGLang chunks while retaining engine cancellation."""
         request_id_future: asyncio.Future[str] = asyncio.Future()
@@ -686,7 +698,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # output stays cancellable; falling back to the first response
             # would leave a decode leg awaiting a KV handoff unabortable.
             if sglang_request_id and not self._arm_cancellation(
-                request_id_future, context, sglang_request_id
+                request_id_future, context, sglang_request_id, sample_count
             ):
                 await stream_source.aclose()
                 return
@@ -712,6 +724,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         return_tokens_as_token_ids: bool = False,
         user_stop_token_ids: set[int] | None = None,
         metadata_uploader: MetadataUploader | None = None,
+        sample_count: int = 1,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process token-based stream output.
 
@@ -733,7 +746,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         engine_id_logged = False
         async with self._cancellation_monitor(request_id_future, context):
             if not self._arm_cancellation(
-                request_id_future, context, self._submitted_request_id(context)
+                request_id_future,
+                context,
+                self._submitted_request_id(context),
+                sample_count,
             ):
                 await stream_source.aclose()
                 return
@@ -859,6 +875,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         request: Dict[str, Any] | None = None,
         user_stop_token_ids: set[int] | None = None,
         metadata_uploader: MetadataUploader | None = None,
+        sample_count: int = 1,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process text-based stream output in OpenAI format.
 
@@ -876,7 +893,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         engine_id_logged = False
         async with self._cancellation_monitor(request_id_future, context):
             if not self._arm_cancellation(
-                request_id_future, context, self._submitted_request_id(context)
+                request_id_future,
+                context,
+                self._submitted_request_id(context),
+                sample_count,
             ):
                 await stream_source.aclose()
                 return
