@@ -70,6 +70,18 @@ def test_model_identity_includes_resolved_model_revision():
     )
 
 
+def test_model_identity_is_derived_from_runner_config():
+    runner = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            model_config=SimpleNamespace(model="org/model", revision="abc")
+        )
+    )
+
+    assert install_vmm_ipc_kv._model_identity_from_runner(runner) == (
+        "model=org/model\0revision=abc"
+    )
+
+
 def test_model_identity_fails_closed_when_unavailable():
     with pytest.raises(RuntimeError, match="stable model identity"):
         install_vmm_ipc_kv._model_identity(SimpleNamespace())
