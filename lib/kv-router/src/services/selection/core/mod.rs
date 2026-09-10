@@ -321,6 +321,7 @@ pub struct SelectionCore {
     /// Serializes catalog commits and the corresponding ingress changes. Never held by selection.
     catalog_updates: tokio::sync::Mutex<()>,
     entries: Arc<SelectionEntries>,
+    /// Lock order: `entries` before `reservation_index`, never nested the other way.
     reservation_index: Arc<ReservationIndex>,
     /// Sweep task is started lazily from the first `ensure_entry`, which always
     /// runs inside the host runtime; construction itself may not.
@@ -1572,12 +1573,15 @@ impl SelectionCore {
     /// covers bookings mirrored from replica peers, which never pass through
     /// this core's booking paths.
     fn lifecycle_entries(&self, selection_id: &str) -> Vec<Arc<SelectionEntry>> {
-        let indexed = self
+        // Release the index guard before taking `entries`: the sweep takes
+        // `entries` then `reservation_index`, so nesting here would invert the
+        // lock order.
+        let indexed_partition = self
             .reservation_index
             .read()
             .get(selection_id)
-            .map(|reservation| reservation.partition.clone())
-            .and_then(|key| self.entry(&key));
+            .map(|reservation| reservation.partition.clone());
+        let indexed = indexed_partition.and_then(|key| self.entry(&key));
         let mut entries = self.initialized_entries();
         if let Some(indexed) = indexed {
             entries.retain(|entry| !Arc::ptr_eq(entry, &indexed));
@@ -1941,6 +1945,8 @@ mod tests {
     use super::*;
     use crate::protocols::StorageTier;
     use crate::services::indexer::backend::test_util::store_event;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread::sleep;
     use std::time::Duration;
 
     fn test_config(use_kv_events: bool) -> crate::config::KvRouterConfig {
@@ -3167,6 +3173,65 @@ mod tests {
         let index = core.reservation_index.read();
         assert_eq!(index.len(), 1);
         assert!(index.contains_key("live"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lifecycle_lookup_does_not_nest_reservation_index_inside_entries() {
+        // Three parties: a sweep holding `entries` and wanting `reservation_index`,
+        // a lifecycle call, and a partition creation queued on `entries.write()`.
+        let core = Arc::new(
+            SelectionCore::try_new_local(
+                test_config(false),
+                1,
+                CancellationToken::new(),
+                SelectionCacheConfig::default(),
+            )
+            .expect("valid test config"),
+        );
+        core.upsert_worker(worker(1)).await.expect("worker upsert");
+        core.select_and_reserve(reserve_request("live"))
+            .await
+            .expect("reserve live");
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        let sweep_entries = core.entries.read();
+        let writer = {
+            let core = Arc::clone(&core);
+            std::thread::spawn(move || {
+                core.entries
+                    .write()
+                    .entry(RoutingPartitionId::new("other", "default"))
+                    .or_insert_with(|| Arc::new(OnceCell::new()));
+            })
+        };
+        while core.entries.try_read().is_some() {
+            assert!(Instant::now() < deadline, "partition writer never queued");
+            std::thread::yield_now();
+        }
+        let lifecycle_started = Arc::new(AtomicBool::new(false));
+        let lifecycle = {
+            let core = Arc::clone(&core);
+            let started = Arc::clone(&lifecycle_started);
+            std::thread::spawn(move || {
+                started.store(true, Ordering::Release);
+                core.lifecycle_entries("live").len()
+            })
+        };
+        while !lifecycle_started.load(Ordering::Acquire) {
+            assert!(Instant::now() < deadline, "lifecycle thread never started");
+            std::thread::yield_now();
+        }
+        sleep(Duration::from_millis(50));
+
+        // With the index guard held across `entries.read()` this never acquires.
+        drop(
+            core.reservation_index
+                .try_write_for(Duration::from_secs(2))
+                .expect("reservation index must not be held by a blocked lifecycle call"),
+        );
+        drop(sweep_entries);
+        writer.join().expect("partition writer");
+        assert_eq!(lifecycle.join().expect("lifecycle lookup"), 1);
     }
 
     #[tokio::test(flavor = "current_thread")]
