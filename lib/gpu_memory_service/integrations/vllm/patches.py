@@ -26,7 +26,6 @@ _memory_snapshot_patched = False
 
 
 def patch_memory_snapshot() -> None:
-    """Add committed GMS bytes to MemorySnapshot.free_memory."""
     global _memory_snapshot_patched
 
     if _memory_snapshot_patched:
