@@ -594,6 +594,52 @@ async def preprocess_chat_request(
     )
 
 
+
+def _tool_calls_from_forced_choice_text(
+    text: str, tool_choice: Any = None
+) -> list[tuple[str, str]]:
+    """Recover tool calls from schema-constrained forced-tool-choice output.
+
+    get_json_schema_from_tools() constrains generation to a list of
+    {"name": ..., "parameters": ...} objects, so the model emits bare JSON with
+    none of the markers the tool parser looks for. Returns (name, arguments)
+    pairs, or an empty list if the text is not that shape.
+    """
+    import json as _json
+
+    stripped = text.strip()
+    if not stripped:
+        return []
+    try:
+        parsed = _json.loads(stripped)
+    except ValueError:
+        return []
+    # A named tool choice constrains generation to the parameters object alone:
+    # the function name is already fixed by the request, so it is not echoed.
+    named = None
+    fn = getattr(tool_choice, "function", None)
+    if fn is not None:
+        named = getattr(fn, "name", None)
+    elif isinstance(tool_choice, dict):
+        named = (tool_choice.get("function") or {}).get("name")
+    if named and isinstance(parsed, dict) and "name" not in parsed:
+        return [(named, _json.dumps(parsed))]
+
+    if isinstance(parsed, dict):
+        parsed = [parsed]
+    if not isinstance(parsed, list):
+        return []
+    calls: list[tuple[str, str]] = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        args = item.get("parameters", item.get("arguments", {}))
+        calls.append((name, _json.dumps(args if args is not None else {})))
+    return calls
+
 class StreamingPostProcessor:
     def __init__(
         self,
@@ -611,6 +657,11 @@ class StreamingPostProcessor:
         self.request_for_sampling = request_for_sampling
         self.sampling_params = sampling_params
         self.tool_parser = tool_parser
+        # Computed once: request_for_sampling is already prepared by the time
+        # this runs, and process_output() consults this per output chunk.
+        self._forced_tool_choice = _is_forced_tool_choice(
+            getattr(request_for_sampling, "tool_choice", None)
+        )
         self.stream_response = stream_response
         # See https://github.com/ai-dynamo/dynamo/issues/8636 —
         # when the chat template runs with enable_thinking=False,
@@ -654,6 +705,12 @@ class StreamingPostProcessor:
         self._tool_text_buffer: str | None = None
 
     def _should_buffer_for_non_streaming_tool_parse(self) -> bool:
+        # A forced tool choice constrains generation to a JSON schema, so the
+        # output carries none of the markers the streaming tool parser advances
+        # on. There is nothing to stream incrementally against: buffer it and
+        # parse the completed text, in streaming mode as well.
+        if self.tool_parser is not None and self._forced_tool_choice:
+            return True
         return (
             not self.stream_response
             and self.tool_parser is not None
@@ -775,6 +832,29 @@ class StreamingPostProcessor:
             return self._compose_delta_message(
                 saved_reasoning, extracted.content or None
             )
+
+        # A forced tool choice constrains generation with a JSON schema instead of
+        # letting the model emit its tool-call markers, so the marker-based parser
+        # above finds nothing and the call would fall through to content. Recover
+        # the calls from the schema-constrained text directly.
+        if self._forced_tool_choice:
+            forced = _tool_calls_from_forced_choice_text(
+                text, getattr(self.request_for_sampling, "tool_choice", None)
+            )
+            if forced:
+                for i, (name, arguments) in enumerate(forced):
+                    self.in_progress_tool_calls[i] = self._merge_tool_call(
+                        self.in_progress_tool_calls.get(i),
+                        DeltaToolCall(
+                            index=i,
+                            type="function",
+                            id=make_tool_call_id(),
+                            function=DeltaFunctionCall(
+                                name=name, arguments=arguments
+                            ),
+                        ),
+                    )
+                return self._compose_delta_message(saved_reasoning, None)
 
         return self._compose_delta_message(saved_reasoning, extracted.content or None)
 
