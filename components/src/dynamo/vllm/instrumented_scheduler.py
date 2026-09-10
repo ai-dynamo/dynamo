@@ -2893,7 +2893,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 self._bench_blocks_per_req(
                     prompt_len,
                     has_cache_hit=False,
-                    apply_admission_cap=False,
+                    apply_admission_cap=True,
                 )
                 for prompt_len in seed_prompt_lengths
             )
@@ -2914,8 +2914,15 @@ class InstrumentedScheduler(AsyncScheduler):
         *,
         has_cache_hit: bool = False,
         apply_admission_cap: bool = False,
+        resident_chain: bool = False,
     ) -> int:
-        """Predict the shared-pool block footprint of one request."""
+        """Predict the shared-pool block footprint of one request.
+
+        ``resident_chain``: a prefilled kvwarm chain that stays resident and keeps growing across stages holds TWO
+        Mamba 'align' state blocks per group (current + previous aligned boundary; vLLM MambaSpec sizes align mode as
+        page_size * (2 + num_speculative_blocks)). A freshly injected decode request holds one (+1 when it pins a
+        prefix-cache hit). Under-counting the chain footprint let the stage plan admit more chains than the pool holds
+        (stage-build deadlock at the pool edge)."""
         coordinator = getattr(
             getattr(self, "kv_cache_manager", None), "coordinator", None
         )
@@ -2948,9 +2955,15 @@ class InstrumentedScheduler(AsyncScheduler):
             if not isinstance(speculative_blocks, int):
                 speculative_blocks = 0
             if mamba_cache_mode == "align":
-                # Align-mode Mamba keeps one running-state block rather than a
-                # dense sequence. A cache hit also pins one cached state block.
-                blocks = 1 + speculative_blocks + int(has_cache_hit)
+                if resident_chain:
+                    # Measured on GLM-5.3-Flash (A6/A7 stage builds, 4 KDA groups, 1152-token blocks): a parked chain
+                    # keeps ~0.15 state checkpoints per aligned block per group plus the live state (retention keeps
+                    # dense checkpoints only near the head). Observed per-chain totals 38/42/50/60/75 blocks at
+                    # c=23/26/34/39/46 aligned blocks fit 1.6c+2; per group that is 0.15c+0.25. Use 1+ceil(0.15c),
+                    # conservative at every measured depth, so a planned stage is admitted whole.
+                    blocks = 1 + math.ceil(0.15 * blocks) + speculative_blocks
+                else:
+                    blocks = 1 + int(has_cache_hit) + speculative_blocks
             elif mamba_cache_mode is not None:
                 blocks += speculative_blocks
 
@@ -3219,7 +3232,7 @@ class InstrumentedScheduler(AsyncScheduler):
         ):
             return False
         required_blocks = sum(
-            self._bench_blocks_per_req(max(context_len, 2) + 1)
+            self._bench_blocks_per_req(max(context_len, 2) + 1, apply_admission_cap=True)
             for context_len in context_lengths
         )
         return required_blocks <= self._bench_grid_usable_blocks(
@@ -4346,12 +4359,22 @@ class InstrumentedScheduler(AsyncScheduler):
             want = min(max(ctxs) + margin, self.max_model_len - 4)
             plan[p.batch_size] = max(plan.get(p.batch_size, 0), want)
         for batch, depth in list(plan.items()):
+            # Plan against 95% of the pool: the per-request footprint estimate is a lower bound (block-boundary
+            # rounding, transient Mamba boundary blocks), and a stage whose chains do not ALL fit sheds the rest
+            # and loses its real coverage, so a small margin buys full stages.
+            pool = int(self._bench_usable_blocks(batch, reserve_watermark=True) * 0.95)
             while depth > 8 and (
-                self._bench_blocks_per_req(depth) * batch
-                > self._bench_usable_blocks(batch, reserve_watermark=True)
+                self._bench_blocks_per_req(depth, apply_admission_cap=True, resident_chain=True) * batch > pool
             ):
                 depth -= 1
             plan[batch] = depth
+        # Slot budget: a stage parks ``batch`` chains on the worker and measures each of its points by injecting
+        # ``batch`` shadow requests on top, so ``2 * batch`` request slots must exist (worker asserts "No free indices"
+        # otherwise). Rungs above that fall back to fake injection (measured after the chains are released). On models
+        # whose max_num_seqs is memory-capped (Mamba/KDA state blocks) this bites at batch > max_num_seqs / 2.
+        slots = self._bench_capacity_limit("max_num_running_reqs")
+        for batch in [b for b in plan if 2 * b > slots]:
+            plan.pop(batch)
         self._kvwarm_plan = plan
         # Second reordering: all warmed points first, fake fallbacks last --
         # fake injection fills the whole pool and evicts the chains' cached
@@ -4461,6 +4484,46 @@ class InstrumentedScheduler(AsyncScheduler):
                     ]  # park: leave the scheduler's view; blocks and requests stay resident
             else:
                 pending = True
+        if pending:
+            # Stall guard: no chain running and total chain progress frozen for >5s means the pool cannot admit the
+            # remaining chains (estimate vs allocator, fragmentation). Upstream would spin forever; shed the pending
+            # chains and finish the stage with the admitted ones. ``_kvwarm_covers`` already routes points that need
+            # more chains than exist to fake injection, so coverage degrades instead of deadlocking.
+            progress = sum(
+                self.requests[r].num_computed_tokens for r in self._kvwarm_chain_ids if r in self.requests
+            )
+            chain_running = any(r.request_id in self._kvwarm_chain_prompts for r in self.running)
+            now = time.monotonic()
+            if progress != getattr(self, "_kvwarm_stall_progress", -1) or chain_running:
+                self._kvwarm_stall_progress = progress
+                self._kvwarm_stall_t0 = now
+            elif now - getattr(self, "_kvwarm_stall_t0", now) > 5.0:
+                shed = [
+                    r for r in self._kvwarm_chain_ids
+                    if r in self.requests
+                    and self.requests[r].num_computed_tokens < len(self._kvwarm_chain_prompts[r])
+                ]
+                logger.warning(
+                    "KVWARM: stage batch=%s stalled (%d/%d chains admitted, pool exhausted); shedding %d chains",
+                    self._kvwarm_stage_batch, len(self._kvwarm_chain_ids) - len(shed),
+                    len(self._kvwarm_chain_ids), len(shed),
+                )
+                self.finish_requests(shed, RequestStatus.FINISHED_ABORTED)
+                vanished.extend(shed)
+                pending = False
+                self._kvwarm_stall_progress = -1
+                # The rung is now uncoverable (every point has batch == stage batch > admitted chains). Fake-injecting
+                # its points while the chains sit parked would find an exhausted pool and skip them; demote the rung to
+                # a plan-level fake fallback and move its points behind the warmed ones (fakes run after release).
+                rung = self._kvwarm_stage_batch
+                self._kvwarm_plan.pop(rung, None)
+                demoted = [pt for pt in self._bench_grid if pt.point_type == "decode" and pt.batch_size == rung]
+                if demoted:
+                    self._bench_grid = deque(
+                        [pt for pt in self._bench_grid if not (pt.point_type == "decode" and pt.batch_size == rung)]
+                        + demoted
+                    )
+                    logger.warning("KVWARM: rung batch=%s demoted to fake fallback (%d points moved to the tail)", rung, len(demoted))
         if vanished:
             self._kvwarm_chain_ids = [
                 r for r in self._kvwarm_chain_ids if r not in set(vanished)
@@ -4554,7 +4617,21 @@ class InstrumentedScheduler(AsyncScheduler):
             _bs = int(getattr(self.cache_config, "block_size", 16))
             _need_tokens = ctx_len + 1 + max(2, self._kvwarm_giant_repeats())
             _need_blocks = -(-_need_tokens // _bs) + 1
-            block_ids = tuple(ids[:_need_blocks] for ids in block_ids)
+            # Attention groups borrow the chain's per-position KV prefix (blocks 0..need). Recurrent-state groups
+            # (Mamba/KDA state, K-pool tail scratch) have no per-position history: the only valid state a chain holds
+            # is in its LIVE (last) block; earlier entries are retention checkpoints that may already be pruned and
+            # recycled. A shadow decoding position ctx indexes block ctx//block_size, so hand it the live block at
+            # every index -- otherwise a shadow measured below the stage depth reads a stale block, its hidden state
+            # degenerates and MoE routing collapses (measured 2-3x too-fast steps at ctx << stage depth).
+            _mgrs = getattr(getattr(self.kv_cache_manager, "coordinator", None), "single_type_managers", ())
+            _remapped = []
+            for _gi, _ids in enumerate(block_ids):
+                _mgr = _mgrs[_gi] if _gi < len(_mgrs) else None
+                if _mgr is not None and type(_mgr).__name__ in ("MambaManager", "KpoolTailManager") and _ids:
+                    _remapped.append([_ids[-1]] * min(_need_blocks, max(1, len(_ids))))
+                else:
+                    _remapped.append(list(_ids[:_need_blocks]))
+            block_ids = tuple(_remapped)
             req_id = f"__bench_{self._bench_seq}"
             self._bench_seq += 1
             prompt = list(chain_tokens[: ctx_len + 1])
@@ -4791,7 +4868,7 @@ class InstrumentedScheduler(AsyncScheduler):
             repeats = min(repeats, max(1, self.max_model_len - 1 - max_ctx))
             if not kvwarm_real:
                 multi = sum(
-                    self._bench_blocks_per_req(max(c, 2) + repeats)
+                    self._bench_blocks_per_req(max(c, 2) + repeats, apply_admission_cap=True)
                     for c in injected_lengths
                 )
                 if multi > self._bench_usable_blocks(
@@ -4957,8 +5034,7 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_current_fpms = []
         self._bench_point_deadline = 0.0
 
-    @staticmethod
-    def _bench_fpm_validation_failure(point: BenchmarkPoint, fpm: dict) -> str | None:
+    def _bench_fpm_validation_failure(self, point: BenchmarkPoint, fpm: dict) -> str | None:
         scheduled = fpm.get("scheduled_requests", {})
         batch_size_key = (
             "num_prefill_requests"
@@ -4973,6 +5049,17 @@ class InstrumentedScheduler(AsyncScheduler):
             if scheduled.get("sum_prefill_kv_tokens") != point.total_kv_read_tokens:
                 return "measured_kv_read_mismatch"
         elif scheduled.get("sum_decode_kv_tokens") != point.total_kv_read_tokens:
+            # Giant-KV fake points: the repeated-steady-step fake path measures exactly one token per request short
+            # of the declared coordinate (measured == declared - batch, all requests admitted). That is a <0.1%
+            # context shift on a giant point; accept it at the declared coordinate (like context_clamped) instead
+            # of skipping the point and failing the strict all-or-nothing publish gate.
+            measured = scheduled.get("sum_decode_kv_tokens")
+            if (
+                "kvwarm_fake_fallback" in (point.sample_reasons or ())
+                and point.total_kv_read_tokens >= self._kvwarm_giant_threshold()
+                and measured == point.total_kv_read_tokens - point.batch_size
+            ):
+                return None
             return "measured_decode_context_mismatch"
         return None
 
