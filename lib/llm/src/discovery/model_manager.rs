@@ -3582,8 +3582,11 @@ mod tests {
                         Vec::new(),
                     )
                     .unwrap();
+                // A second prefill endpoint makes the role ambiguous: the router
+                // drops its target, so requests degrade to aggregated serving,
+                // and the namespace stays ready because decode is still live.
                 assert!(
-                    !manager
+                    manager
                         .get_committed_model("topology-model")
                         .unwrap()
                         .namespace_readiness()

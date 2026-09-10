@@ -673,7 +673,7 @@ mod tests {
             vec![vec![WorkerType::Prefill]],
         );
         // A second Decode worker set serving a different surface: the request plane
-        // sees two WorkerSets of one role and gates the namespace as ambiguous.
+        // sees two WorkerSets of one role and reports the role as ambiguous.
         decode.worker_topology.insert(
             2,
             DomainWorkerTopology {
@@ -695,7 +695,9 @@ mod tests {
         let snapshot = publisher.snapshot();
         let topology = entry(&snapshot, "llama");
 
-        assert_eq!(topology.state, TopologyReadinessState::Unavailable);
+        // Parity with the core evaluation: the duplicated role is reported as a
+        // fact and the namespace keeps serving.
+        assert_eq!(topology.state, TopologyReadinessState::Ready);
         assert_eq!(topology.duplicate_role_endpoints, [WorkerRole::Decode]);
     }
 
@@ -1012,9 +1014,10 @@ mod tests {
         let snapshot = publisher.snapshot();
         let topology = entry(&snapshot, "llama");
 
-        // Parity with the core evaluation: an ambiguous role topology is not ready,
-        // and the duplicated roles explain the gate.
-        assert_eq!(topology.state, TopologyReadinessState::Unavailable);
+        // Parity with the core evaluation: every role has a live endpoint, so the
+        // topology stays ready, and both duplicated roles are reported as the
+        // reason their pairing is suppressed.
+        assert_eq!(topology.state, TopologyReadinessState::Ready);
         assert_eq!(
             topology.duplicate_role_endpoints,
             [WorkerRole::Prefill, WorkerRole::Decode]
@@ -1197,7 +1200,9 @@ mod tests {
         let snapshot = publisher.snapshot();
         let topology = entry(&snapshot, "llama");
 
-        assert_eq!(topology.state, TopologyReadinessState::Unavailable);
+        // Parity with the core evaluation: a duplicated Encode role is reported
+        // like any other, and does not withdraw the namespace from serving.
+        assert_eq!(topology.state, TopologyReadinessState::Ready);
         assert_eq!(topology.duplicate_role_endpoints, [WorkerRole::Encode]);
     }
 

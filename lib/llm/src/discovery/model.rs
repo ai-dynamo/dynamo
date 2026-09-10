@@ -461,6 +461,24 @@ impl Model {
                 .collect();
             missing_vec.sort();
 
+            // A duplicated role no longer withholds the namespace from serving, so
+            // it has to be reported on the *ready* path: it is still a real
+            // misconfiguration an operator has to clear, and the pairing it
+            // disables is a capability the deployment asked for.
+            let ambiguous_reason = (!eval.ambiguous.is_empty()).then(|| {
+                let mut roles = eval
+                    .ambiguous
+                    .iter()
+                    .map(|worker_type| worker_type.as_str())
+                    .collect::<Vec<_>>();
+                roles.sort_unstable();
+                format!(
+                    "ambiguous worker types: {}; pairing disabled for these roles, \
+                     namespace still serving",
+                    roles.join(", ")
+                )
+            });
+
             let reason = if eval.ready {
                 if eval.has_legacy {
                     let legacy_live_workers = eval.legacy_live_workers;
@@ -469,18 +487,10 @@ impl Model {
                          (ready while {legacy_live_workers} worker(s) live) — compat window only"
                     ))
                 } else {
-                    None
+                    ambiguous_reason
                 }
             } else if eval.has_legacy {
                 Some("legacy worker(s) present but no live worker".to_string())
-            } else if !eval.ambiguous.is_empty() {
-                let mut roles = eval
-                    .ambiguous
-                    .iter()
-                    .map(|worker_type| worker_type.as_str())
-                    .collect::<Vec<_>>();
-                roles.sort_unstable();
-                Some(format!("ambiguous worker types: {}", roles.join(", ")))
             } else {
                 Some(format!("missing worker types: {}", missing_vec.join(", ")))
             };
@@ -1991,5 +2001,88 @@ mod tests {
             !model.is_ready_to_serve(),
             "only an incomplete namespace remains: not ready to serve"
         );
+    }
+
+    /// Two typed prefill endpoints in one namespace (a rolling upgrade, or a
+    /// stray second prefill deployment) make the prefill role ambiguous. The
+    /// pairing cannot be resolved, so `reconcile_discovery_topology` leaves the
+    /// prefill target unset and `PrefillRouter::generate` forwards to the decode
+    /// backend — aggregated serving. The live decode WorkerSet must therefore
+    /// stay selectable through *both* admission gates, which read the same
+    /// `evaluate_namespace(..).ready`: `has_ready_workers` on the HTTP path and
+    /// the readiness filter inside `select_worker_set_with` behind every engine
+    /// accessor. Gating either on ambiguity answers 503 for the whole namespace
+    /// while a healthy decode worker sits idle.
+    #[test]
+    fn ambiguous_prefill_topology_keeps_decode_serving() {
+        let model = Model::new("llama".to_string());
+
+        // Decode is the front door: live worker plus a chat engine.
+        let (decode, _tx_d) = ws_serving_role(
+            "pd",
+            "mdc-d",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![1],
+        );
+        let (prefill, _tx_p) = ws_with_type(
+            "pd",
+            "mdc-p",
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode]],
+            vec![2],
+        );
+        let (second_prefill, _tx_p2) = ws_with_type(
+            "pd",
+            "mdc-p2",
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode]],
+            vec![3],
+        );
+        model.add_worker_set("pd".to_string(), decode);
+        model.add_worker_set("pd:prefill".to_string(), prefill);
+        model.add_worker_set("pd:prefill2".to_string(), second_prefill);
+
+        assert!(
+            model.is_workers_ready("pd"),
+            "a duplicated prefill role must not withdraw the namespace from serving"
+        );
+        assert!(
+            model.has_ready_workers(),
+            "the HTTP admission gate must admit"
+        );
+        assert!(
+            model.get_chat_engine().is_ok(),
+            "the engine accessor must still select the live decode WorkerSet"
+        );
+        assert!(
+            model.is_ready_to_serve(),
+            "KServe readiness must agree with what routing accepts"
+        );
+
+        // The ambiguity is still reported, so an operator can see the pairing is
+        // off even though traffic is being served.
+        let readiness = model.namespace_readiness();
+        let ns = readiness.namespaces.get("pd").expect("namespace reported");
+        assert!(ns.ready);
+        let reason = ns.reason.as_deref().unwrap_or_default();
+        assert!(
+            reason.contains("ambiguous worker types: prefill"),
+            "a ready-but-ambiguous namespace must still name the duplicated role, got {reason:?}"
+        );
+
+        // Negative control: drop the decode WorkerSet and the same namespace is
+        // genuinely incomplete (prefill-only, needs unsatisfied). It must stay
+        // unservable — relaxing ambiguity must not relax the missing-role gate.
+        model.remove_worker_set("pd");
+        assert!(
+            !model.is_workers_ready("pd"),
+            "prefill-only namespace is missing decode and must not be ready"
+        );
+        assert!(
+            model.get_chat_engine().is_err(),
+            "prefill-only namespace must not be selectable for serving"
+        );
+        assert!(!model.is_ready_to_serve());
     }
 }

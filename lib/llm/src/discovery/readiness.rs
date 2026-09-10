@@ -30,6 +30,13 @@ pub struct ReadinessEval {
     pub legacy_live_workers: usize,
     pub present: HashSet<WorkerType>,
     pub missing: HashSet<WorkerType>,
+    /// Non-`Aggregated` worker types with more than one live unit in the namespace.
+    ///
+    /// Reported, never gated on. A duplicated role means the topology cannot say
+    /// which endpoint of that role to pair with, so `reconcile_discovery_topology`
+    /// declines to pair it and the routers pass requests straight through; it does
+    /// not mean the namespace stopped serving. Consumers surface this as a
+    /// diagnostic, not as a reason to withhold traffic.
     pub ambiguous: HashSet<WorkerType>,
 }
 
@@ -51,6 +58,16 @@ pub fn normalize_legacy_prefill_topology(card: &mut ModelDeploymentCard) {
 }
 
 /// Whether a namespace's units are ready to serve traffic.
+///
+/// Ready means a worker is live and every registered worker type has one. A
+/// duplicated non-`Aggregated` role is an orthogonal fact: it disables the
+/// pairing for that role — `reconcile_discovery_topology` clears the prefill
+/// target, `PrefillRouter::generate` and the encoder router then forward to the
+/// decode backend — and the namespace keeps serving in aggregated mode.
+/// Ambiguity therefore stays out of the `ready` conjunction; gating on it takes a
+/// healthy decode worker's whole namespace offline for the duration of a rolling
+/// upgrade, which is the fail-closed-on-wire-evolution outcome `lib/llm/AGENTS.md`
+/// rules out.
 pub fn evaluate_readiness(units: &[ReadinessUnit]) -> ReadinessEval {
     let mut present: HashSet<WorkerType> = HashSet::new();
     let mut missing: HashSet<WorkerType> = HashSet::new();
@@ -128,7 +145,7 @@ pub fn evaluate_readiness(units: &[ReadinessUnit]) -> ReadinessEval {
     }
 
     ReadinessEval {
-        ready: has_live_worker && missing.is_empty() && ambiguous.is_empty(),
+        ready: has_live_worker && missing.is_empty(),
         has_legacy,
         legacy_live_workers,
         present,
@@ -222,13 +239,16 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_live_units_of_one_role_are_ambiguous_and_not_ready() {
+    fn duplicate_live_units_of_one_role_are_ambiguous_but_still_ready() {
         let evaluation = evaluate_readiness(&[
             unit(Some(WorkerType::Prefill), 1, vec![vec![WorkerType::Decode]]),
             unit(Some(WorkerType::Prefill), 1, vec![vec![WorkerType::Decode]]),
             unit(Some(WorkerType::Decode), 1, vec![vec![WorkerType::Prefill]]),
         ]);
-        assert!(!evaluation.ready);
+        // The duplicated role is detected and reported, and the live decode
+        // worker keeps the namespace servable: ambiguity suppresses pairing,
+        // not serving.
+        assert!(evaluation.ready);
         assert_eq!(evaluation.ambiguous, HashSet::from([WorkerType::Prefill]));
 
         let scale_out = evaluate_readiness(&[
