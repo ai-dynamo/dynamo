@@ -176,15 +176,22 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 			basePort.ContainerPort, colocatedRanks, basePort.ContainerPort, last, maxTCPPort)
 	}
 
+	// A rank port already on the pod template was written against whatever base
+	// was in effect then, so realign it rather than keep it: the PodMonitor
+	// scrapes these by name, and a stale number sends it to a port the rank
+	// never binds. Read the base once, because appending invalidates basePort.
+	base := basePort.ContainerPort
 	for rank := int64(1); rank < colocatedRanks; rank++ {
 		name := fmt.Sprintf("%s-%d", commonconsts.DynamoNixlPortName, rank)
-		if findContainerPort(container, name) != nil {
+		rankPort := base + int32(rank)
+		if declared := findContainerPort(container, name); declared != nil {
+			declared.ContainerPort = rankPort
 			continue
 		}
 		container.Ports = append(container.Ports, corev1.ContainerPort{
 			Protocol:      corev1.ProtocolTCP,
 			Name:          name,
-			ContainerPort: basePort.ContainerPort + int32(rank),
+			ContainerPort: rankPort,
 		})
 	}
 

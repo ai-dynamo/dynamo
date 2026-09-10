@@ -780,6 +780,17 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 			},
 		},
 		{
+			name: "a rank port written against another base moves with it too",
+			ports: append(slices.Clone(workerPorts),
+				corev1.ContainerPort{Protocol: corev1.ProtocolTCP, Name: "nixl-1", ContainerPort: 19091}),
+			telemetryEnable: "y",
+			telemetryPort:   "30500",
+			containerGPUs:   4,
+			expectedPorts: map[string]int32{
+				"nixl": 30500, "nixl-1": 30501, "nixl-2": 30502, "nixl-3": 30503,
+			},
+		},
+		{
 			name:            "a base with no room for the range is rejected",
 			ports:           workerPorts,
 			telemetryEnable: "y",
