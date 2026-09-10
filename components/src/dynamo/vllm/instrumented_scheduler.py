@@ -4431,6 +4431,20 @@ class InstrumentedScheduler(AsyncScheduler):
         # deepening back to full rebuilds.
         warmed_pts = [p for p in decode_pts if self._kvwarm_plan_covers(p)]
         fake_pts = [p for p in decode_pts if not self._kvwarm_plan_covers(p)]
+        if getattr(self, "_bench_dp_size", 1) > 1 and fake_pts:
+            # Attention-DP: fake injection is not rank-consistent on the small per-rank pools (TP1): points truncate or
+            # OOM on some ranks, get skipped, and the group_prepare barrier times out (observed dep4: dozens of
+            # measured_decode_context_mismatch skips then "timed out waiting for attention-DP benchmark group_prepare").
+            # Keep the grid real-KV only under DP; renumber so published ids stay contiguous and 1-based.
+            logger.warning(
+                "KVWARM: attention-DP (dp_size=%d): dropping %d fake-fallback decode points; grid is real-KV only",
+                self._bench_dp_size, len(fake_pts),
+            )
+            fake_pts = []
+            renumbered = [replace(pt, benchmark_id=i + 1) for i, pt in enumerate(other_pts + warmed_pts)]
+            other_pts = [pt for pt in renumbered if pt.point_type != "decode"]
+            warmed_pts = [pt for pt in renumbered if pt.point_type == "decode"]
+            self._bench_expected_points = len(renumbered)
         self._bench_grid = deque(other_pts + warmed_pts + fake_pts)
         self._kvwarm_chain_ids: list = []
         self._kvwarm_chain_prompts: dict = {}
