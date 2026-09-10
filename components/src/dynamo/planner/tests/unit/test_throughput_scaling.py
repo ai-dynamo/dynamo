@@ -390,8 +390,6 @@ def test_single_endpoint_recovery_overrides_cap_without_minimum_gpu_budget():
 
 
 def test_disagg_throughput_applies_min_endpoint_floor_when_perf_model_not_ready():
-    # Both components return None (the perf model cannot estimate) and decode
-    # sits one replica under its configured minimum of three.
     state = _disagg_state(
         1,
         1,
@@ -489,8 +487,6 @@ def test_agg_throughput_applies_min_endpoint_floor_when_perf_model_not_ready():
             max_num_batched_tokens=4096,
         )
     )
-    # No usable capacity estimate, which is the agg form of "perf model not
-    # ready".
     state._agg_regression = SimpleNamespace(
         find_engine_capacity_rps=lambda **_kwargs: SimpleNamespace(
             rps=0.0,
