@@ -484,6 +484,12 @@ func renderSelectedLPXRole(
 	if err != nil {
 		return nil, err
 	}
+
+	// Keep the LPX volume-permission default without changing authored security contexts.
+	if component.PodTemplate == nil || component.PodTemplate.Spec.SecurityContext == nil {
+		basePodSpec.SecurityContext.FSGroupChangePolicy = ptr.To(corev1.FSGroupChangeOnRootMismatch)
+	}
+
 	if component.IsLPX() && selectedWorkload.BuildFamily() == dynamolpx.BuildFamilyXT {
 		explicitVolumes := component.PodTemplate.Spec.Volumes
 		runtimeVolumes := []string{"config"}

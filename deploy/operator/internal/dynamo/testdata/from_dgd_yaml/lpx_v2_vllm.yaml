@@ -771,7 +771,6 @@ spec:
           restartPolicy: Always
           securityContext:
             fsGroup: 1000
-            fsGroupChangePolicy: OnRootMismatch
           terminationGracePeriodSeconds: 60
           volumes:
           - name: model-storage
@@ -948,7 +947,6 @@ spec:
           restartPolicy: Always
           securityContext:
             fsGroup: 1000
-            fsGroupChangePolicy: OnRootMismatch
           terminationGracePeriodSeconds: 60
           tolerations:
           - key: nvidia.com/gpu

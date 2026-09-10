@@ -1610,7 +1610,6 @@ func applyDefaultSecurityContext(podSpec *corev1.PodSpec) {
 	// which maintains compatibility with both root and non-root images
 	if podSpec.SecurityContext.FSGroup == nil {
 		podSpec.SecurityContext.FSGroup = ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup))
-		podSpec.SecurityContext.FSGroupChangePolicy = ptr.To(corev1.FSGroupChangeOnRootMismatch)
 	}
 }
 

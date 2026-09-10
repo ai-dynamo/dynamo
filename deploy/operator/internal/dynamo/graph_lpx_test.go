@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -31,6 +32,76 @@ func TestBackendDetectionSkipsNonWorkers(t *testing.T) {
 				[]string{"python -m dynamo.vllm; python -m dynamo.sglang"}, "trtllm")
 			require.NoError(t, err)
 			require.Equal(t, BackendFrameworkNoop, backend)
+		})
+	}
+}
+
+func TestRenderSelectedLPXRoleSecurityContext(t *testing.T) {
+	tests := []struct {
+		name     string
+		authored *corev1.PodSecurityContext
+		expected *corev1.PodSecurityContext
+	}{
+		{
+			name: "no authored security context",
+			expected: &corev1.PodSecurityContext{
+				FSGroup:             ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+				FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
+			},
+		},
+		{
+			name:     "authored fsGroup without policy",
+			authored: &corev1.PodSecurityContext{FSGroup: ptr.To(int64(2000))},
+			expected: &corev1.PodSecurityContext{FSGroup: ptr.To(int64(2000))},
+		},
+		{
+			name: "authored always policy",
+			authored: &corev1.PodSecurityContext{
+				FSGroup:             ptr.To(int64(2000)),
+				FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeAlways),
+			},
+			expected: &corev1.PodSecurityContext{
+				FSGroup:             ptr.To(int64(2000)),
+				FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeAlways),
+			},
+		},
+		{
+			name:     "authored empty security context",
+			authored: &corev1.PodSecurityContext{},
+			expected: &corev1.PodSecurityContext{},
+		},
+		{
+			name: "authored root security context",
+			authored: &corev1.PodSecurityContext{
+				RunAsUser: ptr.To(int64(0)), RunAsGroup: ptr.To(int64(0)), RunAsNonRoot: ptr.To(false),
+			},
+			expected: &corev1.PodSecurityContext{
+				RunAsUser: ptr.To(int64(0)), RunAsGroup: ptr.To(int64(0)), RunAsNonRoot: ptr.To(false),
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Author a Cyborg role using the shared LPX role base renderer")
+			source := &v1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "hybrid", Namespace: "test"},
+			}
+			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "engine", ComponentType: v1beta1.ComponentTypeDecode,
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers:      []corev1.Container{{Name: "main", Image: "cyborg:test"}},
+					SecurityContext: test.authored,
+				}},
+			}
+
+			t.Log("Render the role before runtime-specific lowering")
+			template, err := renderSelectedLPXRole(component, source, nil,
+				&configv1alpha1.OperatorConfiguration{}, &mockSecretsRetriever{}, DiscoveryContext{},
+				&lpx.SelectedWorkload{}, &imageEntrypointComponentDefaults{ComponentDefaults: NewWorkerDefaults()}, nil)
+			require.NoError(t, err)
+
+			t.Log("Retain authored security context and default only an absent one")
+			require.Equal(t, test.expected, template.Spec.SecurityContext)
 		})
 	}
 }
