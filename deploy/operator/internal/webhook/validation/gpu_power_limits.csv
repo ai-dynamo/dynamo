@@ -15,13 +15,10 @@
 # synthetic rows rather than real internal data.
 #
 # gpu_product is the exact nvidia.com/gpu.product GFD label as reported by
-# reviewed hardware; the bare B300 row is retained here as audit record even
-# though it is excluded from the map, because it is not an exact public GFD
-# label. Min_W and Max_W are the verified settable Total Graphics Power bounds
-# and are the only columns that feed the map. Default_W and Curr_W are audit
-# context only and do not affect admission.
+# reviewed hardware. Min_W and Max_W are the verified settable Total Graphics
+# Power bounds and are the only columns that feed the map. Default_W and Curr_W
+# are audit context only and do not affect admission.
 gpu_product,Min_W,Default_W,Max_W,Curr_W
-B300,200,1100,1100,1100
 NVIDIA-A10,100,150,150,150
 NVIDIA-A100-80GB-PCIe,150,300,300,300
 NVIDIA-A100-PCIE-40GB,150,250,250,250
@@ -40,7 +37,7 @@ NVIDIA-GeForce-RTX-3070,100,220,240,240
 NVIDIA-GeForce-RTX-3070-Ti,100,290,320,320
 NVIDIA-GeForce-RTX-3080,100,320,370,370
 NVIDIA-GeForce-RTX-3090,100,350,400,400
-NVIDIA-GeForce-RTX-4090,10,450,600,600
+NVIDIA-GeForce-RTX-4090,100,450,600,600
 NVIDIA-GeForce-RTX-5080,250,360,360,360
 NVIDIA-GeForce-RTX-5090,400,575,600,600
 NVIDIA-H100,200,650,700,700
