@@ -123,7 +123,9 @@ sglang:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: lmsysorg/sglang
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.5.19-cu130-runtime
+    # SGLang PR #38798 preview; dev-dsv41 currently resolves to
+    # sha256:3dbc313030a6ef2c5d7de8ecf48e9aece722694a82182cb618cc82b588816349.
+    runtime_image_tag: dev-dsv41
     # Baseline is the TRUE base of the third-party lmsysorg/sglang image,
     # nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04 (Docker Hub; CUDA_VERSION=13.0.3,
     # ubuntu24.04), NOT a self-baseline of lmsysorg/sglang.
