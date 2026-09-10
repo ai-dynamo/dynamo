@@ -64,7 +64,6 @@ def verify_kv_failover_hooks() -> None:
 
 
 def install_and_verify_kv_failover_hooks() -> None:
-    """Install all vLLM KV hooks and verify the live framework methods."""
     from gpu_memory_service.integrations.vllm import (
         install_kv_leases,
         install_vmm_ipc_kv,

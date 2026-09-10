@@ -15,6 +15,51 @@ pytestmark = [
 ]
 
 
+def test_gms_materialization_uses_vllm_preprocessed_weight_protocol(monkeypatch):
+    from contextlib import contextmanager
+
+    from gpu_memory_service.integrations.vllm import model_loader
+    from vllm.model_executor import utils as model_executor_utils
+    from vllm.model_executor.model_loader import utils as model_loader_utils
+
+    events = []
+
+    @contextmanager
+    def already_processed():
+        events.append("enter")
+        yield
+        events.append("exit")
+
+    def process(model, model_config, target_device):
+        events.append((model, model_config, target_device))
+
+    monkeypatch.setattr(
+        model_executor_utils,
+        "weights_already_processed",
+        already_processed,
+    )
+    monkeypatch.setattr(
+        model_loader_utils,
+        "process_weights_after_loading",
+        process,
+    )
+    model = object()
+    model_config = object()
+    target_device = object()
+
+    model_loader._process_weights_after_gms_materialization(
+        model,
+        model_config,
+        target_device,
+    )
+
+    assert events == [
+        "enter",
+        (model, model_config, target_device),
+        "exit",
+    ]
+
+
 def test_vllm_gms_early_device_resolution_matches_upstream_mapping(monkeypatch):
     from gpu_memory_service.integrations.vllm import worker as worker_module
     from vllm.platforms import interface
