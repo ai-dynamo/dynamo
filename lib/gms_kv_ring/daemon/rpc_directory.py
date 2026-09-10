@@ -412,6 +412,7 @@ def handle_directory_lookup_claim(
                 or (
                     entry.get("state") == "active"
                     and entry.get("_owner_writer") == writer_id
+                    and entry.get("_pending_generations") is not None
                 )
             )
             if not claimable:

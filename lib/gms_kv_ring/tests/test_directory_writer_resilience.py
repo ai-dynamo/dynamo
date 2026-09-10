@@ -17,7 +17,10 @@ from types import SimpleNamespace
 
 import pytest
 from gms_kv_ring.common.content_directory import ContentDirectory
-from gms_kv_ring.daemon.rpc_directory import handle_directory_ensure_hbm_capacity
+from gms_kv_ring.daemon.rpc_directory import (
+    handle_directory_ensure_hbm_capacity,
+    handle_directory_lookup_claim,
+)
 
 pytestmark = pytest.mark.pre_merge
 
@@ -38,13 +41,10 @@ def test_publish_worker_survives_a_failing_mutation():
                 raise RuntimeError("simulated transient publish failure")
             return len(items)
 
-        # Drive the worker through the real enqueue path with a controlled publish.
         directory.publish = flaky_publish  # type: ignore[method-assign]
         directory._defer_mutation("publish", [{"a": 1}])
         directory._defer_mutation("publish", [{"b": 2}])
 
-        # The worker must survive the first failure and process the second, and
-        # flush must return True (not raise, not block) despite the skipped one.
         assert directory.flush_deferred(timeout=5.0) is True
         assert len(calls) == 2, "worker died instead of continuing past the failure"
         assert directory._mutation_failed == 1
@@ -94,3 +94,47 @@ def test_zero_capacity_request_preserves_ready_hbm_entry():
         "rejected_stale_writer": False,
     }
     assert daemon._content_directory == {key: entry}
+
+
+@pytest.mark.parametrize(
+    ("pending_generations", "expected_hit"),
+    [(None, False), ([4], True)],
+)
+def test_active_hbm_is_claimable_only_during_adoption(
+    pending_generations, expected_hit
+):
+    content_hash = b"h" * 32
+    key = ("manifest", content_hash)
+    entry = {
+        "tier": "hbm",
+        "state": "active",
+        "engine_id": "engine",
+        "slot_ids": [7],
+        "generations": [3],
+        "_claim_count": 0,
+        "_owner_writer": "writer",
+    }
+    if pending_generations is not None:
+        entry["_pending_generations"] = pending_generations
+    daemon = SimpleNamespace(
+        _content_hash_lock=threading.Condition(),
+        _content_directory_writer_id="writer",
+        _content_directory_epoch=4,
+        _content_directory={key: entry},
+        _content_directory_claims={},
+        _content_directory_access_seq=0,
+    )
+
+    response = handle_directory_lookup_claim(
+        daemon,
+        {
+            "manifest_id": "manifest",
+            "writer_id": "writer",
+            "expected_epoch": 4,
+            "hashes": [content_hash.hex()],
+        },
+    )
+
+    assert (response["entries"][0] is not None) is expected_hit
+    assert (response["claim_token"] is not None) is expected_hit
+    assert entry["_claim_count"] == int(expected_hit)
