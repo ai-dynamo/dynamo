@@ -774,9 +774,10 @@ def _get_num_free_blocks(self, native_get_num_free_blocks) -> int:
     if client is None:
         return native_get_num_free_blocks()
     local_free = native_get_num_free_blocks()
-    directory = getattr(self, "_gms_kv_directory", None)
-    if directory is not None and directory.authoritative:
-        return local_free
+    # vLLM calls this before it touches prefix/request bookkeeping. Keep that
+    # admission check constrained by the lease ring even when this process is
+    # the authoritative directory writer; directory ownership does not imply
+    # that every locally-free block is immediately acquirable in the ring.
     return min(local_free, int(client.free_count()))
 
 
@@ -1006,18 +1007,20 @@ def _free_blocks(self, ordered_blocks):
     self.free_block_queue.append_n(reuse_last)
 
 
-def patched_allocate_slots(self, *args, **kwargs):
+def _request_is_tracked(coordinator, request_id: str) -> bool:
+    return any(
+        request_id in manager.req_to_blocks
+        or request_id in manager.num_cached_block
+        for manager in coordinator.single_type_managers
+    )
+
+
+def patched_allocate_slots(self, request, *args, **kwargs):
+    request_id = request.request_id
+    was_tracked = _request_is_tracked(self.coordinator, request_id)
     try:
-        return orig_allocate_slots(self, *args, **kwargs)
-    except GMSKVLeaseUnavailable:
-        # Lease contention must NEVER crash the engine. Returning None
-        # signals vLLM's scheduler to defer/preempt this request (normal
-        # backpressure), regardless of whether it had prefix/computed
-        # blocks. The previous code re-raised for prefix-cache-hit
-        # requests, which propagated out of EngineCore.step and killed
-        # the whole engine under routine shared-lease contention. Always
-        # backpressuring also removes the fragile positional-arg parsing
-        # that a vLLM signature change would have silently broken.
+        return orig_allocate_slots(self, request, *args, **kwargs)
+    except GMSKVLeaseUnavailable as exc:
         log_lease_pressure(
             logger,
             "vllm:allocate-slots-backpressure",
@@ -1027,6 +1030,23 @@ def patched_allocate_slots(self, *args, **kwargs):
             "[GMS-KVLease] vLLM allocation backpressured by shared leases",
             exc_info=True,
         )
+        if was_tracked:
+            # Native allocate_slots may already have removed skipped blocks or
+            # appended new ones. There is no public transaction/rollback API
+            # for an existing request, so returning None here would let the
+            # scheduler retry against a partially-mutated coordinator. The
+            # exact precheck above makes this an invariant violation rather
+            # than normal pressure; fail closed instead of silently corrupting
+            # vLLM's request state.
+            raise RuntimeError(
+                "GMS lease availability changed while allocating an existing "
+                f"vLLM request ({request_id})"
+            ) from exc
+
+        # A newly-admitted request can be rolled back through vLLM's native
+        # coordinator API. free() is idempotent for an untouched request and
+        # removes any prefix refs or blocks installed before the lease race.
+        self.coordinator.free(request_id)
         return None
 
 

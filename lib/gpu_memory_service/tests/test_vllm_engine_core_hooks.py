@@ -1,6 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
 import pytest
 from gpu_memory_service.integrations.vllm.install_kv_leases import (
     install_gms_engine_core_sleep,
@@ -336,7 +339,38 @@ def test_allocate_slots_translates_atomic_lease_race_to_backpressure(monkeypatch
         raise leases_mod.GMSKVLeaseUnavailable("lease claimed after free-count check")
 
     monkeypatch.setattr(leases_mod, "orig_allocate_slots", contend)
-    assert leases_mod.patched_allocate_slots(object(), object()) is None
+    coordinator = SimpleNamespace(
+        single_type_managers=[
+            SimpleNamespace(req_to_blocks={}, num_cached_block={})
+        ],
+        free=MagicMock(),
+    )
+    manager = SimpleNamespace(coordinator=coordinator)
+    request = SimpleNamespace(request_id="new-request")
+
+    assert leases_mod.patched_allocate_slots(manager, request) is None
+    coordinator.free.assert_called_once_with("new-request")
+
+
+def test_allocate_slots_fails_closed_for_mutated_running_request(monkeypatch):
+    import gpu_memory_service.integrations.vllm.install_kv_leases as leases_mod
+
+    def contend(*_args, **_kwargs):
+        raise leases_mod.GMSKVLeaseUnavailable("lease claimed after free-count check")
+
+    monkeypatch.setattr(leases_mod, "orig_allocate_slots", contend)
+    coordinator = SimpleNamespace(
+        single_type_managers=[
+            SimpleNamespace(req_to_blocks={"running": [object()]}, num_cached_block={})
+        ],
+        free=MagicMock(),
+    )
+    manager = SimpleNamespace(coordinator=coordinator)
+    request = SimpleNamespace(request_id="running")
+
+    with pytest.raises(RuntimeError, match="existing vLLM request"):
+        leases_mod.patched_allocate_slots(manager, request)
+    coordinator.free.assert_not_called()
 
 
 def test_allocate_slots_does_not_hide_unrelated_engine_errors(monkeypatch):
@@ -346,8 +380,17 @@ def test_allocate_slots_does_not_hide_unrelated_engine_errors(monkeypatch):
         raise RuntimeError("native allocator invariant")
 
     monkeypatch.setattr(leases_mod, "orig_allocate_slots", fail)
+    manager = SimpleNamespace(
+        coordinator=SimpleNamespace(
+            single_type_managers=[
+                SimpleNamespace(req_to_blocks={}, num_cached_block={})
+            ]
+        )
+    )
     with pytest.raises(RuntimeError, match="native allocator invariant"):
-        leases_mod.patched_allocate_slots(object(), object())
+        leases_mod.patched_allocate_slots(
+            manager, SimpleNamespace(request_id="request")
+        )
 
 
 def test_bulk_hydration_invalidates_directory_if_native_install_fails():
