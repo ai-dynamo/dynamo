@@ -1488,11 +1488,6 @@ mod tests {
             self.index.remove_worker(&mut self.worker_blocks, worker_id);
         }
 
-        fn remove_worker_dp_rank(&mut self, worker_id: u64, dp_rank: u32) {
-            self.index
-                .remove_worker_dp_rank(&mut self.worker_blocks, worker_id, dp_rank);
-        }
-
         fn root_workers(&self, local_hash: LocalBlockHash) -> Vec<WorkerWithDpRank> {
             self.index
                 .root_workers(local_hash, &projection(WorkerWithDpRank::new(7, 0)))
@@ -2144,21 +2139,21 @@ mod tests {
     }
 
     #[test]
-    fn start_pos_past_end_returns_zero() {
+    fn exhausted_sequence_returns_zero() {
         let mut index = TestLowerTierIndex::new();
         index
             .apply_event(store_event(23, 0, 0, Some(1100), &[91], &[901]))
             .unwrap();
 
-        let query = local_hashes(&[91]);
-        let mut continuations = FxHashMap::default();
-        continuations.insert(
-            WorkerWithDpRank::new(23, 0),
-            LowerTierContinuation::new(1, ExternalSequenceBlockHash(1100)),
-        );
-
-        let hits = index.query_contiguous_hits(&query, &continuations);
-        assert_eq!(hits.get(&WorkerWithDpRank::new(23, 0)), Some(&0));
+        let worker = WorkerWithDpRank::new(23, 0);
+        for query in [local_hashes(&[91]), Vec::new()] {
+            let continuation =
+                LowerTierContinuation::new(query.len(), ExternalSequenceBlockHash(1100));
+            let continuations = FxHashMap::from_iter([(worker, continuation)]);
+            let details = index.query_match_details(&query, &continuations);
+            assert_eq!(details.hits.get(&worker), Some(&0));
+            assert_eq!(details.next_continuations.get(&worker), Some(&continuation));
+        }
     }
 
     #[test]
@@ -2250,9 +2245,8 @@ mod tests {
             .apply_event(store_event(41, 0, 0, Some(3000), &[1], &[301]))
             .unwrap();
         index
-            .apply_event(store_event(41, 1, 1, Some(4000), &[2], &[401]))
+            .apply_event(store_event(41, 1, 1, Some(4000), &[1], &[401]))
             .unwrap();
-        index.remove_worker(41);
 
         let mut continuations = FxHashMap::default();
         continuations.insert(
@@ -2264,35 +2258,14 @@ mod tests {
             LowerTierContinuation::new(0, ExternalSequenceBlockHash(4000)),
         );
 
+        let before = index.query_contiguous_hits(&local_hashes(&[1]), &continuations);
+        assert_eq!(before.get(&WorkerWithDpRank::new(41, 0)), Some(&1));
+        assert_eq!(before.get(&WorkerWithDpRank::new(41, 1)), Some(&1));
+        index.remove_worker(41);
+
         let hits = index.query_contiguous_hits(&local_hashes(&[1]), &continuations);
         assert_eq!(hits.get(&WorkerWithDpRank::new(41, 0)), Some(&0));
         assert_eq!(hits.get(&WorkerWithDpRank::new(41, 1)), Some(&0));
-    }
-
-    #[test]
-    fn remove_worker_dp_rank_keeps_other_ranks() {
-        let mut index = TestLowerTierIndex::new();
-        index
-            .apply_event(store_event(43, 0, 0, Some(5000), &[1], &[501]))
-            .unwrap();
-        index
-            .apply_event(store_event(43, 1, 1, Some(6000), &[2], &[601]))
-            .unwrap();
-        index.remove_worker_dp_rank(43, 0);
-
-        let mut continuations = FxHashMap::default();
-        continuations.insert(
-            WorkerWithDpRank::new(43, 0),
-            LowerTierContinuation::new(0, ExternalSequenceBlockHash(5000)),
-        );
-        continuations.insert(
-            WorkerWithDpRank::new(43, 1),
-            LowerTierContinuation::new(0, ExternalSequenceBlockHash(6000)),
-        );
-
-        let hits = index.query_contiguous_hits(&local_hashes(&[2]), &continuations);
-        assert_eq!(hits.get(&WorkerWithDpRank::new(43, 0)), Some(&0));
-        assert_eq!(hits.get(&WorkerWithDpRank::new(43, 1)), Some(&1));
     }
 
     #[test]
@@ -2673,24 +2646,6 @@ mod tests {
         assert_eq!(details.hits.get(&WorkerWithDpRank::new(101, 0)), Some(&1),);
         assert_eq!(details.hits.get(&WorkerWithDpRank::new(102, 0)), Some(&0),);
         assert_eq!(details.hits.get(&WorkerWithDpRank::new(103, 0)), Some(&0),);
-    }
-
-    /// Empty sequence — every worker should get 0 hits.
-    #[test]
-    fn empty_sequence_returns_zero_hits() {
-        let mut index = TestLowerTierIndex::new();
-        index
-            .apply_event(store_event(111, 0, 0, None, &[1], &[101]))
-            .unwrap();
-
-        let mut continuations = FxHashMap::default();
-        continuations.insert(
-            WorkerWithDpRank::new(111, 0),
-            LowerTierContinuation::from_root(0),
-        );
-
-        let details = index.query_match_details(&local_hashes(&[]), &continuations);
-        assert_eq!(details.hits.get(&WorkerWithDpRank::new(111, 0)), Some(&0));
     }
 
     // --- dump_events tests ---

@@ -1392,30 +1392,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn shutdown_keeps_parent_alive() {
-        let parent = CancellationToken::new();
-        let core = SelectionCore::try_new_local(
-            test_config(false),
-            1,
-            parent.clone(),
-            SelectionCacheConfig::default(),
-        )
-        .expect("valid test config");
-
-        core.shutdown();
-
-        assert!(core.cancel_token.is_cancelled());
-        assert!(!parent.is_cancelled());
-    }
-
     #[tokio::test]
-    async fn shutdown_cancels_listeners() {
+    async fn shutdown_cancels_listeners_but_keeps_parent_alive() {
         let parent = CancellationToken::new();
         let core = SelectionCore::try_new_local(
             test_config(true),
             1,
-            parent,
+            parent.clone(),
             SelectionCacheConfig::default(),
         )
         .expect("valid test config");
@@ -1428,6 +1411,8 @@ mod tests {
         assert_eq!(core.indexer_registry.listener_cancelled(1, 0), Some(false));
 
         core.shutdown();
+        assert!(core.cancel_token.is_cancelled());
+        assert!(!parent.is_cancelled());
         assert_eq!(core.indexer_registry.listener_cancelled(1, 0), Some(true));
     }
 
