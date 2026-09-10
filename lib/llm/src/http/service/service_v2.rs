@@ -784,7 +784,7 @@ impl HttpService {
     }
 
     pub async fn run(&self, cancel_token: CancellationToken) -> Result<()> {
-        self.run_inner(cancel_token, None).await
+        self.run_inner(cancel_token, None, None).await
     }
 
     /// Like [`spawn`], but uses a caller-provided pre-bound listener. Closes the TOCTOU
@@ -815,13 +815,14 @@ impl HttpService {
         cancel_token: CancellationToken,
         listener: tokio::net::TcpListener,
     ) -> Result<()> {
-        self.run_inner(cancel_token, Some(listener)).await
+        self.run_inner(cancel_token, Some(listener), None).await
     }
 
     async fn run_inner(
         &self,
         cancel_token: CancellationToken,
         listener: Option<tokio::net::TcpListener>,
+        tls_handle: Option<axum_server::Handle>,
     ) -> Result<()> {
         if self.tls_client_ca_cert_path.is_some() && !self.enable_tls {
             anyhow::bail!("TLS must be enabled when a client CA certificate is configured");
@@ -856,15 +857,16 @@ impl HttpService {
                 .tls_key_path
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("TLS private key path not provided"))?;
-            let server_config = dynamo_runtime::tls_utils::server_tls_config(
+            let mut server_config = dynamo_runtime::tls_utils::server_tls_config(
                 cert_path,
                 key_path,
                 self.tls_client_ca_cert_path.as_deref(),
             )
             .context("Failed to create TLS config")?;
+            server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
             let config = RustlsConfig::from_config(Arc::new(server_config));
 
-            let handle = axum_server::Handle::new();
+            let handle = tls_handle.unwrap_or_default();
             let server = axum_server::bind_rustls(addr, config)
                 .handle(handle.clone())
                 .serve(router.into_make_service());
@@ -1627,60 +1629,86 @@ mod tests {
         }
     }
 
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
     #[tokio::test]
-    async fn test_http_mtls_rejects_missing_and_untrusted_client_certificates() {
+    async fn test_http_tls_negotiation_and_client_authentication(#[case] mtls: bool) {
         let certificates = make_mtls_test_certificates();
         let untrusted_certificates = make_mtls_test_certificates();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
 
         let service = HttpService::builder()
             .host("127.0.0.1")
-            .port(port)
+            .port(0)
             .enable_tls(true)
             .tls_cert_path(Some(certificates.server_cert.path().to_path_buf()))
             .tls_key_path(Some(certificates.server_key.path().to_path_buf()))
-            .tls_client_ca_cert_path(Some(certificates.ca.path().to_path_buf()))
+            .tls_client_ca_cert_path(mtls.then(|| certificates.ca.path().to_path_buf()))
             .build()
             .unwrap();
         let cancel = CancellationToken::new();
-        let handle = service.spawn(cancel.clone()).await;
+        let tls_handle = axum_server::Handle::new();
+        let server_handle = tls_handle.clone();
+        let server_cancel = cancel.clone();
+        let handle = tokio::spawn(async move {
+            service
+                .run_inner(server_cancel, None, Some(server_handle))
+                .await
+        });
+        let addr = tokio::time::timeout(Duration::from_secs(2), tls_handle.listening())
+            .await
+            .expect("TLS service did not start")
+            .expect("TLS service failed to bind");
 
         let root = reqwest::Certificate::from_pem(&std::fs::read(certificates.ca.path()).unwrap())
             .unwrap();
         let unauthenticated_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
             .add_root_certificate(root.clone())
             .build()
             .unwrap();
         let authenticated_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
             .add_root_certificate(root.clone())
             .identity(reqwest::Identity::from_pem(&certificates.client_identity_pem).unwrap())
             .build()
             .unwrap();
         let untrusted_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
             .add_root_certificate(root)
             .identity(
                 reqwest::Identity::from_pem(&untrusted_certificates.client_identity_pem).unwrap(),
             )
             .build()
             .unwrap();
-        let url = format!("https://127.0.0.1:{port}/live");
-
-        let response = tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                match authenticated_client.get(&url).send().await {
-                    Ok(response) => break response,
-                    Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
-                }
-            }
-        })
-        .await
-        .expect("mTLS service did not become ready");
+        let url = format!("https://{addr}/live");
+        let client = if mtls {
+            &authenticated_client
+        } else {
+            &unauthenticated_client
+        };
+        let response = client.get(&url).send().await.unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(response.version(), reqwest::Version::HTTP_2);
 
-        assert!(unauthenticated_client.get(&url).send().await.is_err());
-        assert!(untrusted_client.get(&url).send().await.is_err());
+        let http1_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .add_root_certificate(
+                reqwest::Certificate::from_pem(&std::fs::read(certificates.ca.path()).unwrap())
+                    .unwrap(),
+            )
+            .identity(reqwest::Identity::from_pem(&certificates.client_identity_pem).unwrap())
+            .http1_only()
+            .build()
+            .unwrap();
+        let response = http1_client.get(&url).send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(response.version(), reqwest::Version::HTTP_11);
+
+        if mtls {
+            assert!(unauthenticated_client.get(&url).send().await.is_err());
+            assert!(untrusted_client.get(&url).send().await.is_err());
+        }
 
         cancel.cancel();
         tokio::time::timeout(Duration::from_secs(2), handle)

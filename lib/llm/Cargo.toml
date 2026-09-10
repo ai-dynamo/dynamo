@@ -234,7 +234,7 @@ criterion = { version = "0.5", features = ["html_reports"] }
 hf-hub = { workspace = true }
 modelexpress-client = { workspace = true }
 modelexpress-common = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["http2"] }
 rcgen = { workspace = true }
 rstest = "0.18.2"
 serial_test = "3"
