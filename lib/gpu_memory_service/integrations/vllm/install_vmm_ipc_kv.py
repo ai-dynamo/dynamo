@@ -161,7 +161,6 @@ def _install_kv_leases() -> bool:
         raise
 
 
-
 def _kv_layout_fingerprint(kv_cache_config) -> str:
     """Stable digest of KV-layout-relevant parameters.
 
@@ -202,9 +201,7 @@ def _semantic_kv_tensor_tag(index: int, kv_cache_tensor, layout_fp: str) -> str:
         key = "\0".join(shared_by)
     else:
         key = f"anonymous:{index}:{getattr(kv_cache_tensor, 'size', '')}"
-    digest = hashlib.sha1(
-        (layout_fp + "\0" + key).encode("utf-8")
-    ).hexdigest()[:16]
+    digest = hashlib.sha1((layout_fp + "\0" + key).encode("utf-8")).hexdigest()[:16]
     return f"kv_pool:v2:{digest}"
 
 
@@ -540,9 +537,7 @@ def install() -> bool:
                 )
                 try:
                     with gms_use_persistent_pool("kv_pool", dev_idx):
-                        with _persistent_kv_zeros_as_empty(
-                            reattaching
-                        ):
+                        with _persistent_kv_zeros_as_empty(reattaching):
                             return _orig_v2_alloc(*original_args, **kwargs)
                 finally:
                     if tag_plan:
@@ -647,9 +642,7 @@ def install() -> bool:
         )
         try:
             with gms_use_persistent_pool("kv_pool", device):
-                with _persistent_kv_zeros_as_empty(
-                    reattaching
-                ):
+                with _persistent_kv_zeros_as_empty(reattaching):
                     return original(self, *args, **kwargs)
         finally:
             if tag_plan:
