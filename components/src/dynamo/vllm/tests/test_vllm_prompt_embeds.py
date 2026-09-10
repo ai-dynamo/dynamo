@@ -278,3 +278,19 @@ class TestUsageStatistics:
         assert BaseWorkerHandler._cache_loss_engine_data(mock_output) == {
             "complete": False
         }
+
+    def test_cache_loss_engine_data_uses_aggregate_cache_fallback(self):
+        mock_output = Mock()
+        mock_output.prompt_token_ids = [1, 2, 3, 4]
+        mock_output.num_cached_tokens = 3
+        mock_output.num_local_cached_tokens = None
+        mock_output.num_external_cached_tokens = None
+        mock_output.num_external_lookup_tokens = None
+
+        assert BaseWorkerHandler._cache_loss_engine_data(mock_output) == {
+            "complete": True,
+            "prompt_tokens": 4,
+            "gpu_hit_tokens": 3,
+            "cpu_hit_tokens": 0,
+            "cpu_lookup_tokens": 0,
+        }

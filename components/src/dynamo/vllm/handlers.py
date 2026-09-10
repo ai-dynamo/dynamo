@@ -3188,8 +3188,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         """Expose final cache counters for internal router observability."""
         prompt_tokens = getattr(request_output, "prompt_token_ids", None)
         local_hits = getattr(request_output, "num_local_cached_tokens", None)
+        if not isinstance(local_hits, int):
+            # Released vLLM builds expose only the aggregate GPU-cache counter.
+            # Prefer the split counter when present, but keep the funnel complete
+            # for workers without external-cache accounting.
+            local_hits = getattr(request_output, "num_cached_tokens", None)
         external_hits = getattr(request_output, "num_external_cached_tokens", None)
         external_lookups = getattr(request_output, "num_external_lookup_tokens", None)
+        external_hits = 0 if external_hits is None else external_hits
+        external_lookups = 0 if external_lookups is None else external_lookups
         values = (local_hits, external_hits, external_lookups)
         if prompt_tokens is None or any(not isinstance(value, int) for value in values):
             return {"complete": False}
