@@ -39,7 +39,7 @@ layouts and can generate deployment artifacts for the selected target.
 > entry points provided by AISimulate. Follow the pinned AISimulate installation in [Quick
 > Start](#quick-start); do not install a separate `aiconfigurator` or `aiconfigurator-core` package.
 
-[AISimulate](https://github.com/ai-dynamo/aisimulate) maintains the performance models, analytical
+[AISimulate](https://pypi.org/project/aisimulate/) maintains the performance models, analytical
 sizing code, and deployment-artifact generator used here. The retained command and import names
 allow existing sizing workflows and Dynamo's Profiler integration to continue working.
 
