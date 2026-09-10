@@ -133,8 +133,15 @@ def image_generation_size_from_str(
     )
 
 
-def image_generation_size_from_request(request: dict) -> tuple[int, int]:
-    """Resolve image output dimensions from OpenAI-style image or chat requests."""
+def resolve_image_dimensions(request: dict) -> tuple[Any, str, Any, str]:
+    """Resolve width/height through the request's precedence chain, uncoerced.
+
+    Returns each value paired with the field it came from. Coercion is left to
+    the caller so that callers with a further override (``nvext``) can resolve
+    the *complete* chain first: a value a later source replaces never reaches
+    the engine, so validating it here would reject a request over a number that
+    was discarded.
+    """
     extra_body = request.get("extra_body")
     if not isinstance(extra_body, dict):
         extra_body = {}
@@ -148,6 +155,12 @@ def image_generation_size_from_request(request: dict) -> tuple[int, int]:
             width, width_field = source["width"], "width"
         if source.get("height") is not None:
             height, height_field = source["height"], "height"
+    return width, width_field, height, height_field
+
+
+def image_generation_size_from_request(request: dict) -> tuple[int, int]:
+    """Resolve image output dimensions from OpenAI-style image or chat requests."""
+    width, width_field, height, height_field = resolve_image_dimensions(request)
     # One coercion covers both the size-derived dims and any explicit override,
     # and reports whichever field the surviving value actually came from.
     return _coerce_dimension(width, width_field), _coerce_dimension(
@@ -255,14 +268,22 @@ async def parse_omni_request(
         if is_video:
             width, height = parse_size(request.get("size", default_size), **size_kwargs)
         else:
-            width, height = image_generation_size_from_request(request)
-            # nvext wins over both size and extra_body, so it needs the same
-            # bound -- a bare int() here reintroduces every failure the helper
-            # above rejects.
+            # nvext is the highest-priority source, so resolve the whole chain
+            # before coercing: coercing the helper's result first would reject
+            # a size that nvext goes on to replace, and a bare int() here would
+            # reintroduce every failure the helper rejects.
+            (
+                raw_width,
+                width_field,
+                raw_height,
+                height_field,
+            ) = resolve_image_dimensions(request)
             if nvext.get("width") is not None:
-                width = _coerce_dimension(nvext["width"], "nvext.width")
+                raw_width, width_field = nvext["width"], "nvext.width"
             if nvext.get("height") is not None:
-                height = _coerce_dimension(nvext["height"], "nvext.height")
+                raw_height, height_field = nvext["height"], "nvext.height"
+            width = _coerce_dimension(raw_width, width_field)
+            height = _coerce_dimension(raw_height, height_field)
         sp: dict = {**nvext, "height": height, "width": width}
         if is_video:
             sp["num_frames"] = compute_num_frames(

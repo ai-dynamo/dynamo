@@ -708,6 +708,29 @@ class TestParseOmniRequest:
         with pytest.raises(ValueError, match=r"nvext\.height must be between"):
             asyncio.run(parse_omni_request(request, ["image"]))
 
+    def test_nvext_overrides_an_out_of_range_size(self):
+        # nvext is the highest-priority source, so the size it replaces never
+        # reaches the engine and must not be validated on the way past.
+        request = {
+            "prompt": "x",
+            "size": "99999x99999",
+            "nvext": {"width": 512, "height": 512},
+        }
+        result = asyncio.run(parse_omni_request(request, ["image"]))
+        sp = result["sampling_params_list"]
+        assert (sp["width"], sp["height"]) == (512, 512)
+        assert result["engine_inputs"]["mm_processor_kwargs"] == {
+            "target_h": 512,
+            "target_w": 512,
+        }
+
+    def test_nvext_partial_override_still_validates_the_surviving_size(self):
+        # Only width is replaced, so the height that survives from `size` is
+        # still the value that reaches the engine, and still has to be bounded.
+        request = {"prompt": "x", "size": "512x99999", "nvext": {"width": 512}}
+        with pytest.raises(ValueError, match=r"height in size='512x99999'"):
+            asyncio.run(parse_omni_request(request, ["image"]))
+
 
 class TestImageGenerationSizeValidation:
     """Client-supplied image dimensions are bounded wherever they enter."""
@@ -791,6 +814,20 @@ class TestImageEndpointSizeValidation:
             "target_h": 768,
             "target_w": 1024,
         }
+
+    @pytest.mark.asyncio
+    async def test_rejection_propagates_instead_of_yielding_a_chat_chunk(self):
+        """The images route has no failure shape, so a rejection must not be
+        yielded as a chat.completion.chunk -- it has to leave the handler as a
+        ValueError, which the bindings map to BackendError::InvalidArgument and
+        the HTTP layer answers with a 4xx."""
+        handler = _make_handler()
+        handler.config.output_modalities = ["image"]
+        request = {"prompt": "x", "size": "99999x99999"}
+
+        with pytest.raises(ValueError, match=r"width in size='99999x99999'"):
+            async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                pass
 
 
 # ---------------------------------------------------------------------------

@@ -381,6 +381,18 @@ class OmniHandler(BaseOmniHandler):
             )
         except (ValueError, NotImplementedError, RuntimeError) as e:
             logger.error(f"Invalid request {request_id}: {e}")
+            if (
+                isinstance(e, ValueError)
+                and request_type == RequestType.IMAGE_GENERATION
+            ):
+                # /v1/images/generations folds worker output into
+                # NvImagesResponse, which has no failure shape, so the
+                # chat.completion.chunk _error_chunk returns is not a rejection
+                # the client can read. Let the ValueError out instead: the
+                # bindings map ValueError to BackendError::InvalidArgument
+                # (lib/bindings/python/rust/engine.rs), aggregate_stream keeps
+                # the error type, and the client gets a 4xx carrying the reason.
+                raise
             yield self._error_chunk(request_id, str(e), request_type)
             return
 
