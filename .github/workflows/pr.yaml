@@ -378,6 +378,9 @@ jobs:
     name: sidecar-runtime # This name overlaps with other sidecar jobs to group them in the UI
     needs: [changed-files, vllm-build, sidecar-build]
     if: ${{ !cancelled() && needs.changed-files.outputs.sidecar == 'true' && needs.sidecar-build.result == 'success' }}
+    permissions:
+      actions: read
+      contents: read
     uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: vllm
@@ -398,6 +401,9 @@ jobs:
     name: sidecar-runtime # This name overlaps with other sidecar jobs to group them in the UI
     needs: [changed-files, sglang-build, sidecar-build]
     if: ${{ !cancelled() && needs.changed-files.outputs.sidecar == 'true' && needs.sidecar-build.result == 'success' }}
+    permissions:
+      actions: read
+      contents: read
     uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: sglang
@@ -418,6 +424,9 @@ jobs:
     name: sidecar-runtime # This name overlaps with other sidecar jobs to group them in the UI
     needs: [changed-files, trtllm-build, sidecar-build]
     if: ${{ !cancelled() && needs.changed-files.outputs.sidecar == 'true' && needs.sidecar-build.result == 'success' }}
+    permissions:
+      actions: read
+      contents: read
     uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: trtllm
