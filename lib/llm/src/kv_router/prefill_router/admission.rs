@@ -32,7 +32,7 @@ where
         mut prefill_response: ManyOut<Annotated<LLMEngineOutput>>,
         tracker: Option<Arc<RequestTracker>>,
         task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
-        cancel_link: Option<super::PrefillCancelLink>,
+        cancel_link: Option<std::sync::Arc<super::PrefillCancelLink>>,
     ) -> Result<PrefillCompletion, PrefillError> {
         let Some(first_output) = prefill_response.next().await else {
             return Err(PrefillError::PrefillError(
@@ -158,7 +158,7 @@ where
         prefill_stream: ManyOut<Annotated<LLMEngineOutput>>,
         tracker: Option<Arc<RequestTracker>>,
         phase_transition_permit: OwnedSemaphorePermit,
-        cancel_link: Option<super::PrefillCancelLink>,
+        cancel_link: Option<std::sync::Arc<super::PrefillCancelLink>>,
     ) {
         let span = tracing::Span::current();
         let task_guard = self.task_guard.clone();
@@ -231,7 +231,10 @@ mod tests {
 
         let client = Context::new(()).context();
         let prefill = Context::new(()).context();
-        let link = super::super::PrefillCancelLink::new(client.clone(), prefill.clone());
+        let link = Arc::new(super::super::PrefillCancelLink::new(
+            client.clone(),
+            prefill.clone(),
+        ));
 
         PrefillRouter::<DefaultWorkerSelector>::consume_prefill_stream(
             response,

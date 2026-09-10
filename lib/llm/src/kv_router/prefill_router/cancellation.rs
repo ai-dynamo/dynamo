@@ -15,6 +15,24 @@ use std::sync::Arc;
 
 use dynamo_runtime::engine::AsyncEngineContext;
 
+use crate::local_model::runtime_config::PrefillCancelUntil;
+
+/// Link client cancellation to a prefill request, if the worker allows it.
+///
+/// Returns `None` for a worker whose window is [`PrefillCancelUntil::Never`],
+/// which includes every worker that declares nothing. That case must not be
+/// expressed by linking and revoking later: the link fires the moment it
+/// exists, so a client that disconnects during prefill would already have
+/// cancelled a worker that never opted in. The policy therefore has to be known
+/// before anything is linked, which means after worker selection.
+pub(super) fn arm_for(
+    policy: PrefillCancelUntil,
+    client: Arc<dyn AsyncEngineContext>,
+    prefill: Arc<dyn AsyncEngineContext>,
+) -> Option<Arc<PrefillCancelLink>> {
+    (policy != PrefillCancelUntil::Never).then(|| Arc::new(PrefillCancelLink::new(client, prefill)))
+}
+
 /// Propagates client cancellation to a remote prefill request, revocably.
 ///
 /// `AsyncEngineContext::link_child` is permanent, but the safe window for
@@ -41,7 +59,12 @@ impl PrefillCancelLink {
     /// Stop propagating. Used once a worker's safe window has closed: past that
     /// point the KV is committed and aborting the prefill orphans it, which
     /// costs more than letting the prefill run to completion.
-    pub(super) fn revoke(self) {
+    ///
+    /// Takes `&self` because the link is shared: on the bootstrap path a drain
+    /// task holds it so cancellation still reaches the worker while the stream
+    /// is consumed, and revoking has to work from the routing side regardless
+    /// of who else is holding a reference.
+    pub(super) fn revoke(&self) {
         self.task.abort();
     }
 }
@@ -94,6 +117,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_undeclared_worker_is_never_linked() {
+        // A worker that declares nothing is Never, and Never has to mean "no
+        // link at all" rather than "link, then revoke": the link propagates as
+        // soon as it exists, so revoking after the handoff would be far too
+        // late for a client that disconnected during prefill. Getting this
+        // wrong silently makes every legacy worker cancellable.
+        let client = Context::new(()).context();
+        let prefill = Context::new(()).context();
+
+        let link = arm_for(PrefillCancelUntil::Never, client.clone(), prefill.clone());
+        assert!(link.is_none(), "a Never worker must not be linked");
+
+        client.stop_generating();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            !prefill.is_stopped(),
+            "an undeclared worker was cancelled during prefill"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_declared_window_is_linked() {
+        for policy in [PrefillCancelUntil::Anytime, PrefillCancelUntil::PreCommit] {
+            let client = Context::new(()).context();
+            let prefill = Context::new(()).context();
+
+            let _link = arm_for(policy, client.clone(), prefill.clone())
+                .unwrap_or_else(|| panic!("{policy:?} declares a window and must be linked"));
+
+            client.stop_generating();
+            tokio::time::timeout(std::time::Duration::from_secs(1), prefill.stopped())
+                .await
+                .unwrap_or_else(|_| panic!("{policy:?} did not propagate cancellation"));
+        }
+    }
+
+    #[tokio::test]
     async fn revoked_link_leaves_prefill_running() {
         // Past the handoff commitment a PreCommit worker must be left alone:
         // aborting there orphans KV that the decode leg still needs to collect.
@@ -121,7 +181,6 @@ mod tests {
         let child = Context::new(()).context();
         let link = PrefillCancelLink::new(parent.clone(), child.clone());
 
-        // The request finishes: the router drops its handle to the link.
         drop(link);
         drop(parent_ctx);
         drop(parent);
