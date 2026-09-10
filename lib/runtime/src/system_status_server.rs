@@ -588,13 +588,11 @@ async fn call_lora_endpoint(
 
     // 2. Unified-backend engine-update registry fallback. The unified Worker
     //    registers LoRA ops as engine updates under `update/<name>`, so map the
-    //    bare LoRA endpoint name onto that namespaced key. Respect the engine-route
-    //    policy here too: if the operator disabled this route, the /v1/loras shim
-    //    must not become a backdoor to it.
+    //    bare LoRA endpoint name onto that namespaced key. A policy-disabled route
+    //    is never registered, so the `get` below returns `None` and the shim can't
+    //    become a backdoor to it.
     let update_key = format!("update/{endpoint_name}");
-    if !drt.engine_routes().is_allowed(&update_key) {
-        tracing::debug!("LoRA route '{update_key}' disabled by engine-route policy");
-    } else if let Some(callback) = drt.engine_routes().get(&update_key) {
+    if let Some(callback) = drt.engine_routes().get(&update_key) {
         tracing::debug!(
             "Found '{}' in engine routes registry, invoking update callback",
             update_key
@@ -651,21 +649,9 @@ async fn engine_route_handler(
 ) -> impl IntoResponse {
     tracing::trace!("Engine route request to /engine/{path}");
 
-    // Enforce the operator engine-route policy before anything else. A policy-denied route
-    // returns 403 (distinct from the 404 returned below for a route that is not registered),
-    // so callers can tell "disabled by policy" from "does not exist".
-    if !state.drt().engine_routes().is_allowed(&path) {
-        tracing::debug!("Route /engine/{path} disabled by engine-route policy");
-        return (
-            StatusCode::FORBIDDEN,
-            json!({
-                "error": "Route disabled",
-                "message": format!("Route /engine/{} is disabled by policy", path)
-            })
-            .to_string(),
-        )
-            .into_response();
-    }
+    // The operator engine-route policy is enforced at *registration* time (the
+    // registry never wires a policy-denied route), so a disabled route simply
+    // isn't found below and returns 404 — one enforcement point, in the backend.
 
     // Parse body as JSON (empty object for GET/empty body)
     let body_json: serde_json::Value = if body.is_empty() {
@@ -1424,12 +1410,12 @@ mod integration_tests {
         .await;
     }
 
-    /// `DYN_DISABLE_ENGINE_ROUTES=1` gates every `/engine/*` route at the dispatch point.
-    /// A registered route returns **403** (disabled by policy) — distinct from the **404**
-    /// an unregistered route returns — and an unregistered route also returns 403, because
-    /// the policy is enforced before the registry lookup.
+    /// `DYN_DISABLE_ENGINE_ROUTES=1` denies every `/engine/*` route at *registration*
+    /// time: the route is never wired, so it simply **404s** — indistinguishable from a
+    /// route that was never registered. Enforcement lives in exactly one place (the
+    /// registry), so the dispatch path has no policy branch at all.
     #[tokio::test]
-    async fn test_engine_route_policy_disable_all_returns_403() {
+    async fn test_engine_route_policy_disable_all_returns_404() {
         use crate::config::environment_names::runtime::engine_routes as env_er;
         temp_env::async_with_vars(
             [
@@ -1441,7 +1427,8 @@ mod integration_tests {
             async {
                 let drt = Arc::new(create_test_drt_async().await);
 
-                // Register a route that would succeed if the policy allowed it.
+                // Attempt to register a route that would succeed if the policy allowed it.
+                // Under DisableAll the registry silently drops it.
                 let callback: crate::engine_routes::EngineRouteCallback =
                     Arc::new(|_body| Box::pin(async move { Ok(serde_json::json!({"ok": true})) }));
                 drt.engine_routes()
@@ -1453,28 +1440,23 @@ mod integration_tests {
                     .socket_addr;
                 let client = reqwest::Client::new();
 
-                // Registered-but-disabled route -> 403.
+                // Policy-denied route was never registered -> 404.
                 let url = format!("http://{}/engine/control/start_profile", addr);
                 let response = client.post(&url).send().await.unwrap();
-                let status = response.status();
-                let body = response.text().await.unwrap();
-                assert_eq!(status, 403, "Response: status={status}, body={body:?}");
-                assert!(
-                    body.contains("disabled by policy"),
-                    "Response: status={status}, body={body:?}"
-                );
+                assert_eq!(response.status(), 404);
 
-                // Unregistered route under DisableAll -> also 403 (policy before lookup).
+                // Genuinely unregistered route -> 404 as well (identical outcome).
                 let url = format!("http://{}/engine/never/registered", addr);
                 let response = client.post(&url).send().await.unwrap();
-                assert_eq!(response.status(), 403);
+                assert_eq!(response.status(), 404);
             },
         )
         .await;
     }
 
-    /// With an allowlist, only listed routes dispatch; others are 403 even when registered,
-    /// while an allowed-but-unregistered route still returns 404 (route does not exist).
+    /// With an allowlist, only listed routes are ever registered; a registered-but-not-listed
+    /// route is dropped at registration and 404s, exactly like a route that was never
+    /// registered.
     #[tokio::test]
     async fn test_engine_route_policy_allowlist_enforced_over_http() {
         use crate::config::environment_names::runtime::engine_routes as env_er;
@@ -1509,12 +1491,11 @@ mod integration_tests {
                 let url = format!("http://{}/engine/control/start_profile", addr);
                 assert_eq!(client.post(&url).send().await.unwrap().status(), 200);
 
-                // Registered but not on the allowlist -> 403.
+                // Not on the allowlist -> dropped at registration -> 404.
                 let url = format!("http://{}/engine/control/update_weights_from_disk", addr);
-                assert_eq!(client.post(&url).send().await.unwrap().status(), 403);
+                assert_eq!(client.post(&url).send().await.unwrap().status(), 404);
 
-                // On the allowlist but never registered -> 404 (route does not exist), which
-                // confirms the policy gate does not mask the "not registered" case.
+                // On the allowlist but never registered -> also 404 (route does not exist).
                 let url = format!("http://{}/engine/update/model_taints", addr);
                 assert_eq!(client.post(&url).send().await.unwrap().status(), 404);
             },

@@ -97,6 +97,56 @@ impl EngineRoutePolicy {
             EngineRoutePolicy::Denylist(set) => !set.contains(route),
         }
     }
+
+    /// The operator's *explicit* decision for `route`, or `None` if the operator
+    /// set no rule that names it (so the route's [`RouteDefault`] governs).
+    ///
+    /// - `AllowAll` — no explicit rule for any route (`None`).
+    /// - `DisableAll` — explicitly denies every route.
+    /// - `Allowlist` — explicitly decides every route: allowed iff listed.
+    /// - `Denylist` — explicitly denies the listed routes; others fall through.
+    fn explicit_decision(&self, route: &str) -> Option<bool> {
+        match self {
+            EngineRoutePolicy::AllowAll => None,
+            EngineRoutePolicy::DisableAll => Some(false),
+            EngineRoutePolicy::Allowlist(set) => Some(set.contains(route)),
+            EngineRoutePolicy::Denylist(set) => {
+                if set.contains(route) {
+                    Some(false)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+/// Baseline disposition of an `/engine` route before any operator policy — the
+/// secure default a backend declares at registration. The registry consults it
+/// together with the [`EngineRoutePolicy`] and only registers permitted routes,
+/// so a denied route is never wired (a request to it 404s, and it never appears
+/// in discovery).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RouteDefault {
+    /// Served by default (normal routes).
+    Enabled,
+    /// Off unless an operator explicitly allows it.
+    Disabled,
+    /// Off unless the caller-supplied flag is set (e.g. `enable_rl` for the
+    /// RCE-capable weight-update routes). RL never appears here — the backend
+    /// resolves its flag to a bool.
+    Gated(bool),
+}
+
+impl RouteDefault {
+    fn served_by_default(self) -> bool {
+        matches!(self, RouteDefault::Enabled | RouteDefault::Gated(true))
+    }
+
+    /// Non-`Enabled` routes ship restricted; overriding them on warrants a warning.
+    fn is_sensitive(self) -> bool {
+        !matches!(self, RouteDefault::Enabled)
+    }
 }
 
 /// Parse a comma-separated route list: trim each entry, drop empties.
@@ -169,6 +219,38 @@ impl EngineRouteRegistry {
     /// it usually signals two registration mechanisms colliding rather than an
     /// intentional replacement.
     pub fn register(&self, route: &str, callback: EngineRouteCallback) {
+        self.register_with_default(route, callback, RouteDefault::Enabled);
+    }
+
+    /// Register a callback with an explicit [`RouteDefault`], applying the operator
+    /// policy **at registration time**. A route the policy+default deny is *not
+    /// registered* — so a request to it 404s and it never appears in discovery.
+    /// An operator rule that overrides a restricted route's default is honored,
+    /// with a warning.
+    pub fn register_with_default(
+        &self,
+        route: &str,
+        callback: EngineRouteCallback,
+        default: RouteDefault,
+    ) {
+        let permitted = match self.policy.explicit_decision(route) {
+            Some(allowed) => {
+                if default.is_sensitive() && allowed != default.served_by_default() {
+                    tracing::warn!(
+                        "engine-route policy overrides the default for restricted route \
+                         /engine/{route} (serving={allowed})"
+                    );
+                }
+                allowed
+            }
+            None => default.served_by_default(),
+        };
+        if !permitted {
+            tracing::info!(
+                "Engine route /engine/{route} not registered (disabled by policy/default)"
+            );
+            return;
+        }
         let mut routes = self.routes.write().unwrap();
         if routes.insert(route.to_string(), callback).is_some() {
             tracing::warn!("Overwriting already-registered engine route: /engine/{route}");
@@ -339,17 +421,57 @@ mod tests {
         );
     }
 
-    // ---- Registry: consults policy (not just route presence), defaults from env ----
+    // ---- Registry: enforces policy at registration time, defaults from env ----
 
     #[test]
     fn test_registry_enforces_policy_and_defaults_from_env() {
-        // A registered route is still blocked when the policy denies it.
-        let callback: EngineRouteCallback =
-            Arc::new(|_| Box::pin(async { Ok(serde_json::json!({"ok": true})) }));
+        let callback = || -> EngineRouteCallback {
+            Arc::new(|_| Box::pin(async { Ok(serde_json::json!({"ok": true})) }))
+        };
+
+        // Under DisableAll a policy-denied route is dropped at registration: never wired,
+        // so `get` returns None and a request to it would 404.
         let registry = EngineRouteRegistry::with_policy(EngineRoutePolicy::DisableAll);
-        registry.register("control/start_profile", callback);
-        assert!(registry.get("control/start_profile").is_some());
-        assert!(!registry.is_allowed("control/start_profile"));
+        registry.register("control/start_profile", callback());
+        assert!(registry.get("control/start_profile").is_none());
+
+        // Allowlist: a listed route registers; an unlisted one is dropped.
+        let registry =
+            EngineRouteRegistry::with_policy(EngineRoutePolicy::Allowlist(set(&["control/keep"])));
+        registry.register("control/keep", callback());
+        registry.register("control/drop", callback());
+        assert!(registry.get("control/keep").is_some());
+        assert!(registry.get("control/drop").is_none());
+
+        // RouteDefault governs when the policy sets no explicit rule (AllowAll here):
+        //  - Enabled   -> served
+        //  - Disabled  -> dropped unless the operator explicitly allows it
+        //  - Gated(b)  -> served iff b
+        let registry = EngineRouteRegistry::with_policy(EngineRoutePolicy::AllowAll);
+        registry.register_with_default("r/enabled", callback(), RouteDefault::Enabled);
+        registry.register_with_default("r/disabled", callback(), RouteDefault::Disabled);
+        registry.register_with_default("r/gated_on", callback(), RouteDefault::Gated(true));
+        registry.register_with_default("r/gated_off", callback(), RouteDefault::Gated(false));
+        assert!(registry.get("r/enabled").is_some());
+        assert!(registry.get("r/disabled").is_none());
+        assert!(registry.get("r/gated_on").is_some());
+        assert!(registry.get("r/gated_off").is_none());
+
+        // An explicit allowlist entry overrides a Gated(false)/Disabled default (operator wins).
+        let registry = EngineRouteRegistry::with_policy(EngineRoutePolicy::Allowlist(set(&[
+            "r/gated_off",
+            "r/disabled",
+        ])));
+        registry.register_with_default("r/gated_off", callback(), RouteDefault::Gated(false));
+        registry.register_with_default("r/disabled", callback(), RouteDefault::Disabled);
+        assert!(registry.get("r/gated_off").is_some());
+        assert!(registry.get("r/disabled").is_some());
+
+        // A denylist entry overrides an Enabled/Gated(true) default the other way.
+        let registry =
+            EngineRouteRegistry::with_policy(EngineRoutePolicy::Denylist(set(&["r/gated_on"])));
+        registry.register_with_default("r/gated_on", callback(), RouteDefault::Gated(true));
+        assert!(registry.get("r/gated_on").is_none());
 
         // new()/default() resolve the policy from env; with no vars set that is AllowAll.
         temp_env::with_vars(
