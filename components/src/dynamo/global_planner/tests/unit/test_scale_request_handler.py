@@ -439,6 +439,7 @@ def _scale_req(
     decode=None,
     prefill_component_name=None,
     decode_component_name=None,
+    predicted_load=None,
 ):
     """Build a ScaleRequest with one or both pool targets set."""
     targets = []
@@ -463,6 +464,7 @@ def _scale_req(
         graph_deployment_name=dgd,
         k8s_namespace=k8s_ns,
         target_replicas=targets,
+        predicted_load=predicted_load,
     )
 
 
@@ -1883,5 +1885,110 @@ async def test_reversing_priorities_reverses_who_pays(mock_runtime):
             {"selector": "default/batch", "priority": 900},
         ],
     )
+    assert prod == {"prefill": 5, "decode": 1}
+    assert batch == {"decode": 2}
+
+
+# ---------------------------------------------------------------------------- #
+# Load-conditional priority, end to end through the scale_request endpoint     #
+# ---------------------------------------------------------------------------- #
+
+
+async def _run_conditional_transfer(mock_runtime, batch_num_requests):
+    """Same two-DGD transfer, but batch's priority depends on its own traffic.
+
+    batch publishes its pending scale-down through a real ScaleRequest carrying
+    predicted_load, so the whole path is exercised: wire DTO -> PriorityContext
+    -> intent cache -> condition evaluation at arbitration time.
+    """
+    handler = ScaleRequestHandler(
+        runtime=mock_runtime,
+        managed_namespaces=["default-prod", "default-batch"],
+        k8s_namespace="default",
+        min_total_gpus=12,
+        max_total_gpus=12,
+        priority_config=PriorityConfig(
+            pools=[
+                {"selector": "default/prod", "priority": 900},
+                {
+                    "selector": "default/batch",
+                    "rules": [
+                        # Expendable only while its own traffic is quiet.
+                        {"when": {"predicted_requests_below": 50}, "priority": 10},
+                        {"priority": 900},
+                    ],
+                },
+            ]
+        ),
+    )
+    prod = _install_connector(
+        handler,
+        "default/prod",
+        _dgd_spec(prefill_replicas=3, decode_replicas=3),
+        parent_dgd_name="prod",
+    )
+    batch = _install_connector(
+        handler,
+        "default/batch",
+        _dgd_spec(prefill_replicas=3, decode_replicas=3),
+        parent_dgd_name="batch",
+    )
+
+    # prod has a pending scale-down cached from an earlier tick.
+    handler.orchestrator._intent_cache["default/prod/decode"] = PoolIntent(
+        last_desired=1, last_seen_at=time.time()
+    )
+
+    # batch asks to scale down and is denied on the floor -- but the denied
+    # request still leaves its intent, and its predicted_load, behind.
+    denied = await _run(
+        handler,
+        _scale_req(
+            dgd="batch",
+            caller_ns="default-batch",
+            decode=1,
+            predicted_load={"num_requests": batch_num_requests, "isl": 512, "osl": 64},
+        ),
+    )
+    assert denied[0]["status"] == "rejected", denied[0]
+    batch.set_component_replicas.assert_not_called()
+
+    # prod now asks for two more prefill replicas, breaching the ceiling.
+    results = await _run(
+        handler,
+        _scale_req(
+            dgd="prod",
+            caller_ns="default-prod",
+            prefill=5,
+            predicted_load={"num_requests": 900, "isl": 4096, "osl": 512},
+        ),
+    )
+    assert results[0]["status"] == "success", results[0]
+
+    def targets(connector):
+        return {
+            t.sub_component_type.value: t.desired_replicas
+            for t in connector.set_component_replicas.call_args[0][0]
+        }
+
+    return targets(prod), targets(batch)
+
+
+@pytest.mark.asyncio
+async def test_quiet_pool_is_treated_as_expendable(mock_runtime):
+    """batch reports low traffic, so its conditional rule fires and it absorbs
+    the larger cut."""
+    prod, batch = await _run_conditional_transfer(mock_runtime, batch_num_requests=5)
+    assert prod == {"prefill": 5, "decode": 2}
+    assert batch == {"decode": 1}
+
+
+@pytest.mark.asyncio
+async def test_busy_pool_is_protected_by_its_condition(mock_runtime):
+    """batch reports high traffic, so it falls through to its unconditional
+    priority, ties with prod, and the atomic intra-DGD partner is preferred --
+    the same topology and the same request, decided differently purely by the
+    load signal batch published."""
+    prod, batch = await _run_conditional_transfer(mock_runtime, batch_num_requests=900)
     assert prod == {"prefill": 5, "decode": 1}
     assert batch == {"decode": 2}
