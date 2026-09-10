@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use axum::Json;
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
@@ -23,6 +23,11 @@ pub enum SidecarError {
         status: StatusCode,
         code: &'static str,
         message: String,
+    },
+    #[error("P/D engine rejected the request with HTTP {status}")]
+    EngineRejected {
+        status: StatusCode,
+        retry_after: Option<HeaderValue>,
     },
 }
 
@@ -67,6 +72,11 @@ impl SidecarError {
                 code,
                 message,
             } => (status, code, message),
+            Self::EngineRejected { status, .. } => (
+                status,
+                "pd_engine_rejected",
+                format!("The P/D engine rejected the request with HTTP {status}"),
+            ),
         }
     }
 }
@@ -87,9 +97,13 @@ struct ErrorBody {
 impl IntoResponse for SidecarError {
     fn into_response(self) -> Response {
         let error = self.to_string();
+        let retry_after = match &self {
+            Self::EngineRejected { retry_after, .. } => retry_after.clone(),
+            _ => None,
+        };
         let (status, code, message) = self.into_response_fields();
         tracing::warn!(%error, %status, code, "Sidecar request failed");
-        (
+        let mut response = (
             status,
             Json(ErrorEnvelope {
                 error: ErrorBody {
@@ -100,6 +114,12 @@ impl IntoResponse for SidecarError {
                 },
             }),
         )
-            .into_response()
+            .into_response();
+        if let Some(retry_after) = retry_after {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, retry_after);
+        }
+        response
     }
 }

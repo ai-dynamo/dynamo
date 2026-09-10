@@ -6,11 +6,13 @@ pub mod error;
 pub mod metadata;
 mod proxy;
 pub mod server;
+pub mod sglang;
 
-pub use config::Config;
+pub use config::{Config, PdBackend};
 pub use error::SidecarError;
 pub use metadata::{PREFILLER_HOST_PORT, PrefillEndpoint};
 pub use server::{PdAdapter, SidecarState, UnavailablePdAdapter, router};
+pub use sglang::SglangPdAdapter;
 
 use std::future::IntoFuture;
 use std::sync::Arc;
@@ -20,6 +22,12 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 pub async fn run(config: Config, adapter: Arc<dyn PdAdapter>) -> Result<()> {
+    let result = serve(config, adapter.clone()).await;
+    adapter.shutdown().await;
+    result
+}
+
+async fn serve(config: Config, adapter: Arc<dyn PdAdapter>) -> Result<()> {
     let listener = TcpListener::bind(config.listen_addr).await?;
     tracing::info!(listen_addr = %config.listen_addr, "Starting EPP decode sidecar");
     let draining = CancellationToken::new();
