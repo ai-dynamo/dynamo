@@ -2961,7 +2961,11 @@ class InstrumentedScheduler(AsyncScheduler):
                     # dense checkpoints only near the head). Observed per-chain totals 38/42/50/60/75 blocks at
                     # c=23/26/34/39/46 aligned blocks fit 1.6c+2; per group that is 0.15c+0.25. Use 1+ceil(0.15c),
                     # conservative at every measured depth, so a planned stage is admitted whole.
-                    blocks = 1 + math.ceil(0.15 * blocks) + speculative_blocks
+                    # Token-based, not block-based: the retained checkpoints scale with sequence length (~1 per 7680
+                    # tokens, measured at TP4 with 1152-token blocks: 3.6/group @26k, 7/group @53k) and the block size
+                    # changes with TP (TP1 aligns to ~4352-token blocks; measured 3/group @13k and @26k). Floor of 3
+                    # covers the shallow regime; the plan margin covers the rest.
+                    blocks = max(3, 1 + math.ceil(num_tokens / 7680)) + speculative_blocks
                 else:
                     blocks = 1 + int(has_cache_hit) + speculative_blocks
             elif mamba_cache_mode is not None:
@@ -4406,7 +4410,7 @@ class InstrumentedScheduler(AsyncScheduler):
             # and loses its real coverage, so a small margin buys full stages.
             # Under attention-DP every rank must build the same stages: leave more headroom (a per-rank stall would
             # desynchronize the ranks) -- 10% for DP>1, 5% otherwise.
-            _margin = 0.90 if getattr(self, "_bench_dp_size", 1) > 1 else 0.95
+            _margin = 0.85 if getattr(self, "_bench_dp_size", 1) > 1 else 0.95
             pool = int(self._bench_usable_blocks(batch, reserve_watermark=True) * _margin)
             while depth > 8 and (
                 self._bench_blocks_per_req(depth, apply_admission_cap=True, resident_chain=True) * batch > pool
