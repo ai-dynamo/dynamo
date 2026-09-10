@@ -102,15 +102,12 @@ async def _run_gms_operation_with_hard_timeout(
         return task.result()
 
     task.cancel()
+    task.add_done_callback(_consume_detached_task_result)
     # Give an ordinary cancellation one loop turn to finish. A task that
     # suppresses cancellation is detached; the caller must retain ownership
     # until process death because its mutation state is unknown.
     await asyncio.sleep(0)
     task_still_running = not task.done()
-    if task_still_running:
-        task.add_done_callback(_consume_detached_task_result)
-    else:
-        _consume_detached_task_result(task)
     raise _GMSHardTimeout(
         label,
         timeout,

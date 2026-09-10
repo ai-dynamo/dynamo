@@ -54,7 +54,13 @@ from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
 from dynamo.vllm.worker_factory import WorkerFactory
 
 from . import envs
-from .args import Config, _uses_dynamo_connector, configure_rl_logprobs_mode, parse_args
+from .args import (
+    Config,
+    _uses_dynamo_connector,
+    configure_rl_logprobs_mode,
+    gms_shadow_mode_enabled,
+    parse_args,
+)
 from .cache_info import get_configured_kv_event_block_size
 from .capacity import (
     get_metrics_model_name,
@@ -312,7 +318,7 @@ async def worker(argv: list[str] | None = None) -> None:
             config,
             lambda: parse_snapshot_restore_runtime_config(argv),
         )
-        config.gms_shadow_mode = env_bool("DYN_VLLM_GMS_SHADOW_MODE")
+        config.gms_shadow_mode = gms_shadow_mode_enabled()
 
     # HEADLESS MODE: bypass DistributedRuntime entirely.
     # Workers run vLLM only (no NATS, etcd, or dynamo endpoints).
