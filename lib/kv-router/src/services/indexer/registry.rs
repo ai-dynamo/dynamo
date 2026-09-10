@@ -690,6 +690,12 @@ impl WorkerRegistry {
         self.workers.contains_key(&worker_id)
     }
 
+    pub fn has_listener(&self, worker_id: WorkerId, dp_rank: u32) -> bool {
+        self.workers
+            .get(&worker_id)
+            .is_some_and(|entry| entry.listeners.contains_key(&dp_rank))
+    }
+
     pub fn list(&self) -> Vec<WorkerInfo> {
         self.list_filtered(None, None)
     }

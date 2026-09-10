@@ -117,6 +117,11 @@ impl KvEventIngress for ZmqDirectIngress {
         if let Some(previous) = previous {
             let old_endpoints = previous.listener_endpoints();
             for rank in previous.dp_ranks() {
+                // A listener can be missing for a schedulable record when an
+                // earlier update was cancelled mid-deregistration; re-register it.
+                if !registry.has_listener(record.worker_id, rank) {
+                    continue;
+                }
                 if ranks.contains(&rank)
                     && old_endpoints.get(&rank) == endpoints.get(&rank)
                     && previous.replay_endpoint == record.replay_endpoint

@@ -2934,6 +2934,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reupsert_recreates_a_listener_lost_to_a_cancelled_update() {
+        let core = SelectionCore::try_new_local(
+            test_config(true),
+            1,
+            CancellationToken::new(),
+            SelectionCacheConfig::default(),
+        )
+        .expect("valid test config");
+        core.upsert_worker(worker_with_kv_events(1))
+            .await
+            .expect("worker upsert");
+        // An endpoint update cancelled after deregistration leaves the catalog
+        // record schedulable with no listener behind it.
+        core.indexer_registry
+            .deregister_dp_rank(1, 0, "model", "default")
+            .await
+            .expect("deregister");
+        assert!(!core.indexer_registry.has_listener(1, 0));
+
+        let record = core
+            .upsert_worker(worker_with_kv_events(1))
+            .await
+            .expect("worker re-upsert");
+        assert_eq!(record.lifecycle, WorkerLifecycle::Schedulable, "{record:?}");
+        assert!(core.indexer_registry.has_listener(1, 0));
+    }
+
+    #[tokio::test]
     async fn shutdown_cancels_listeners() {
         let parent = CancellationToken::new();
         let core = SelectionCore::try_new_local(
