@@ -1807,8 +1807,6 @@ class InstrumentedScheduler(AsyncScheduler):
         return super().has_requests()
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
-        if self._bench_prefix_reset_pending:
-            self._bench_retry_prefix_reset()
         if self._bench_active and self._bench_phase != _BenchPhase.IDLE:
             try:
                 output = self._bench_step()
@@ -2197,10 +2195,6 @@ class InstrumentedScheduler(AsyncScheduler):
 
     def _bench_init(self, vllm_config: "VllmConfig") -> None:
         """Parse benchmark config and initialise state machine."""
-        # A post-abort prefix-cache reset that found blocks still fenced is
-        # retried from schedule(); this state must outlive _bench_deactivate.
-        self._bench_prefix_reset_pending = False
-        self._bench_prefix_reset_attempts = 0
         bench_cfg = vllm_config.additional_config.get("benchmark")
         if not bench_cfg:
             self._bench_active = False
@@ -4019,21 +4013,19 @@ class InstrumentedScheduler(AsyncScheduler):
         self._schedule_times.clear()
         self._bench_extra_steps_left = 0
 
-    # Retry budget for a post-abort prefix-cache reset that found blocks still
-    # fenced. Serving traffic admitted meanwhile holds blocks of its own and
-    # keeps the reset failing, so the retries must end.
-    _BENCH_PREFIX_RESET_MAX_RETRIES = 64
-
     def _bench_clear_prefix_cache(self, *, allow_pending: bool = False) -> bool:
         """Remove all synthetic prefix entries before normal serving starts.
 
         Returns True once the cache is cleared and False while blocks the
         benchmark released still wait behind the deferred-free fence: the
-        DONE step then idles and calls again next step, whereas an abort
+        DONE step then idles and calls again next step. An abort
         (``allow_pending``) has no later benchmark step, so it attempts the
-        reset regardless and, if that fails, hands the retry to
-        ``schedule()``. A failed reset with nothing fenced is a leak and
-        raises.
+        reset regardless; when fenced blocks make that attempt fail it warns
+        and returns False rather than raising -- the abort re-raises its own
+        error into the engine core, which treats it as fatal, so no retry
+        would ever run, and the entries carry benchmark-only salts, so an
+        engine that does live on merely evicts them by LRU. A failed reset
+        with nothing fenced is a leak and raises.
         """
         if self._bench_prefix_cache_cleared:
             return True
@@ -4046,45 +4038,18 @@ class InstrumentedScheduler(AsyncScheduler):
             return False
         if self.kv_cache_manager.reset_prefix_cache():
             self._bench_prefix_cache_cleared = True
-            self._bench_prefix_reset_pending = False
             logger.info("Benchmark synthetic prefix cache cleared")
             return True
         if pending:
             logger.warning(
-                "Synthetic prefix-cache reset postponed: released blocks are "
-                "still fenced by an in-flight step; retrying from schedule()"
+                "Synthetic prefix-cache reset skipped: released blocks are still "
+                "fenced by an in-flight step; the entries carry benchmark-only "
+                "salts and stay until evicted"
             )
-            self._bench_prefix_reset_pending = True
-            self._bench_prefix_reset_attempts = 0
             return False
         raise RuntimeError(
             "failed to clear synthetic prefix cache after self-benchmark"
         )
-
-    def _bench_retry_prefix_reset(self) -> None:
-        """Retry a postponed post-abort prefix-cache reset (see
-        ``_bench_clear_prefix_cache``) at the top of ``schedule()`` until it
-        succeeds or the retry budget is spent."""
-        self._bench_prefix_reset_attempts += 1
-        if (
-            not self._bench_frees_pending()
-            and self.kv_cache_manager.reset_prefix_cache()
-        ):
-            self._bench_prefix_reset_pending = False
-            self._bench_prefix_cache_cleared = True
-            logger.info(
-                "Benchmark synthetic prefix cache cleared after %d retries",
-                self._bench_prefix_reset_attempts,
-            )
-            return
-        if self._bench_prefix_reset_attempts >= self._BENCH_PREFIX_RESET_MAX_RETRIES:
-            self._bench_prefix_reset_pending = False
-            logger.error(
-                "Giving up on the synthetic prefix-cache reset after %d retries; "
-                "the synthetic entries carry benchmark-only salts and stay until "
-                "evicted",
-                self._bench_prefix_reset_attempts,
-            )
 
     def _bench_synchronize_output(self, output: SchedulerOutput) -> None:
         """Release one measured point only after every ADP rank is ready."""

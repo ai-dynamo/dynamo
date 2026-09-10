@@ -1452,7 +1452,6 @@ def _make_decode_sweep_stub(connector, ec_connector=None):
     """
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_active = True
-    stub._bench_prefix_reset_pending = False
     stub._bench_phase = _BenchPhase.DECODE_SWEEP
     stub._bench_active_req_ids = {"__bench_0"}
     stub.kv_cache_manager = MagicMock()
@@ -5787,11 +5786,9 @@ def test_bench_done_step_idles_until_fenced_frees_drain():
     assert stub._bench_phase == _BenchPhase.DONE
 
 
-def test_clear_prefix_cache_waits_for_fenced_frees_and_retries_after_abort():
+def test_clear_prefix_cache_waits_for_fenced_frees_and_tolerates_a_fenced_abort():
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_prefix_cache_cleared = False
-    stub._bench_prefix_reset_pending = False
-    stub._bench_prefix_reset_attempts = 0
     stub.kv_cache_manager = SimpleNamespace(
         reset_prefix_cache=MagicMock(return_value=False)
     )
@@ -5800,60 +5797,25 @@ def test_clear_prefix_cache_waits_for_fenced_frees_and_retries_after_abort():
     # DONE step: no attempt while blocks are fenced; the step idles instead.
     assert InstrumentedScheduler._bench_clear_prefix_cache(stub) is False
     stub.kv_cache_manager.reset_prefix_cache.assert_not_called()
-    assert stub._bench_prefix_reset_pending is False
 
-    # Abort: try anyway; a failure with fenced blocks is postponed, not fatal.
+    # Abort: try anyway; a failure with fenced blocks is reported, not fatal
+    # (the abort re-raises its own error, which ends the engine core).
     assert (
         InstrumentedScheduler._bench_clear_prefix_cache(stub, allow_pending=True)
         is False
     )
     stub.kv_cache_manager.reset_prefix_cache.assert_called_once_with()
-    assert stub._bench_prefix_reset_pending is True
     assert stub._bench_prefix_cache_cleared is False
 
-    # schedule() retries: still fenced, so no reset attempt is made.
-    InstrumentedScheduler._bench_retry_prefix_reset(stub)
-    stub.kv_cache_manager.reset_prefix_cache.assert_called_once_with()
-    assert stub._bench_prefix_reset_pending is True
-
-    # Drained: the retry succeeds and the cleared flag keeps its meaning.
+    # Nothing fenced and still failing: a leak, which raises.
     stub.deferred_frees.clear()
+    with pytest.raises(RuntimeError, match="failed to clear"):
+        InstrumentedScheduler._bench_clear_prefix_cache(stub, allow_pending=True)
+
+    # Drained and the reset succeeds: cleared, and the flag keeps its meaning.
     stub.kv_cache_manager.reset_prefix_cache.return_value = True
-    InstrumentedScheduler._bench_retry_prefix_reset(stub)
-    assert stub.kv_cache_manager.reset_prefix_cache.call_count == 2
-    assert stub._bench_prefix_reset_pending is False
+    assert InstrumentedScheduler._bench_clear_prefix_cache(stub) is True
     assert stub._bench_prefix_cache_cleared is True
-
-
-def test_clear_prefix_cache_retry_budget_is_bounded():
-    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
-    stub._bench_prefix_cache_cleared = False
-    stub._bench_prefix_reset_pending = True
-    stub._bench_prefix_reset_attempts = 0
-    stub.deferred_frees = _fenced_frees(pending=False)
-    stub.kv_cache_manager = SimpleNamespace(
-        reset_prefix_cache=MagicMock(return_value=False)
-    )
-    budget = InstrumentedScheduler._BENCH_PREFIX_RESET_MAX_RETRIES
-
-    for _ in range(budget - 1):
-        InstrumentedScheduler._bench_retry_prefix_reset(stub)
-        assert stub._bench_prefix_reset_pending is True
-    InstrumentedScheduler._bench_retry_prefix_reset(stub)
-
-    assert stub._bench_prefix_reset_pending is False
-    assert stub._bench_prefix_cache_cleared is False
-    assert stub.kv_cache_manager.reset_prefix_cache.call_count == budget
-
-
-def test_schedule_retries_a_postponed_prefix_reset_first():
-    stub = _make_decode_sweep_stub(connector=None)
-    stub._bench_prefix_reset_pending = True
-    stub._bench_retry_prefix_reset = MagicMock()
-
-    InstrumentedScheduler.schedule(stub)
-
-    stub._bench_retry_prefix_reset.assert_called_once_with()
 
 
 def test_schedule_advances_the_deferred_free_fence_for_benchmark_steps():
