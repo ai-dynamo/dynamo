@@ -72,6 +72,7 @@ class ThroughputScalingMixin:
         # Endpoint recovery is a hard invariant, not an ordinary throughput
         # movement, so it may exceed the per-observation delta cap.
         desired = max(desired, resolve_min_endpoint(self._config, component))
+        requested = desired
         desired, _ceiling_reason = self._fit_single_throughput_ceiling(
             desired,
             component,
@@ -94,11 +95,13 @@ class ThroughputScalingMixin:
             )
             return None
 
+        if (self._pending_num_p or self._pending_num_d) and requested > current:
+            return None
         desired, _budget_reason = self._apply_single_scaling_budget(
             desired,
             component,
         )
-        if desired == current:
+        if desired == current and not self._pending_startup(component):
             self._diag_throughput_reason = (
                 _budget_reason or _ceiling_reason or "no_change"
             )
@@ -165,7 +168,11 @@ class ThroughputScalingMixin:
         num_p, num_d, budget_reason = self._apply_disagg_scaling_budget(
             num_p, num_d, source="throughput"
         )
-        if num_p == self._num_p_workers and num_d == self._num_d_workers:
+        if (
+            num_p == self._num_p_workers
+            and num_d == self._num_d_workers
+            and not (self._pending_num_p or self._pending_num_d)
+        ):
             hold_reason = budget_reason or (
                 "gpu_budget_guard_hold" if budget_held else "no_change"
             )
@@ -175,6 +182,20 @@ class ThroughputScalingMixin:
             return None
 
         self._diag_throughput_reason = "scale"
+        if self._pending_num_p or self._pending_num_d:
+            target_p = self._startup_reduction(
+                num_p if bounded_p <= self._num_p_workers else None,
+                self._num_p_workers,
+                self._pending_num_p,
+            )
+            target_d = self._startup_reduction(
+                num_d if bounded_d <= self._num_d_workers else None,
+                self._num_d_workers,
+                self._pending_num_d,
+            )
+            if target_p is None and target_d is None:
+                return None
+            return ScalingDecision(num_prefill=target_p, num_decode=target_d)
         return ScalingDecision(num_prefill=num_p, num_decode=num_d)
 
     def _throughput_agg(
@@ -231,6 +252,7 @@ class ThroughputScalingMixin:
             desired, self._num_d_workers, "aggregated"
         )
         desired = max(desired, resolve_min_endpoint(self._config, "decode"))
+        requested = desired
         desired, _ceiling_reason = self._fit_single_throughput_ceiling(
             desired,
             "decode",
@@ -246,11 +268,13 @@ class ThroughputScalingMixin:
             )
             return None
 
+        if self._pending_num_d and requested > self._num_d_workers:
+            return None
         desired, _budget_reason = self._apply_single_scaling_budget(
             desired,
             "decode",
         )
-        if desired == self._num_d_workers:
+        if desired == self._num_d_workers and not self._pending_num_d:
             self._diag_throughput_reason = (
                 _budget_reason or _ceiling_reason or "no_change"
             )

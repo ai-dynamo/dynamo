@@ -325,6 +325,51 @@ class KubernetesAPI:
 
         return traffic_serving_replicas, is_stable
 
+    def pending_startup_replicas(self, deployment: dict, pods: list) -> dict[str, int]:
+        """Identify startup-only scaling; an empty result never authorizes a write.
+
+        A Ready deficit alone is ambiguous: it also occurs during drain, rollout,
+        and stale status. Require observed spec, matching updated replicas, and
+        no terminating/failed Pods before exposing pending startup capacity.
+        """
+        if not self.is_spec_generation_observed(deployment):
+            return {}
+        phase = (deployment.get("status", {}).get("rollingUpdate") or {}).get("phase")
+        if phase not in (None, "", "Completed"):
+            return {}
+        if not pods or any(
+            pod.metadata.deletion_timestamp is not None
+            or pod.status is None
+            or pod.status.phase not in ("Pending", "Running")
+            for pod in pods
+        ):
+            return {}
+        pending: dict[str, int] = {}
+        statuses = deployment.get("status", {}).get("components", {})
+        for name, spec in get_components_by_name(deployment).items():
+            if get_component_type(spec) == "planner":
+                continue
+            status = statuses.get(name, {})
+            desired = Service(name=name, service=spec).number_replicas()
+            ready, stable = self.get_service_replica_status(deployment, name)
+            replicas = status.get("replicas")
+            updated = status.get("updatedReplicas")
+            if (
+                replicas is None
+                or updated is None
+                or not (0 <= ready <= replicas <= desired)
+            ):
+                return {}
+            if updated != replicas:
+                return {}
+            if not stable:
+                if get_component_type(spec) not in ("prefill", "decode", "worker"):
+                    return {}
+                if desired <= ready:
+                    return {}
+                pending[name] = desired - ready
+        return pending
+
     def non_planner_components_stable(self, deployment: dict) -> tuple[bool, list[str]]:
         """Return ``(all_stable, unstable_names)`` for non-planner components."""
         components = get_components_by_name(deployment)
