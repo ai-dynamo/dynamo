@@ -261,6 +261,10 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         }
     }
 
+    /// Every test that advances the clock across a removal deadline must build
+    /// its controller here rather than through `new`, which would read the
+    /// grace period out of the ambient environment and make the test's timings
+    /// depend on whoever ran it.
     #[cfg(test)]
     fn with_removal_grace(host: Arc<H>, removal_grace: Duration) -> Self {
         Self {
@@ -1373,7 +1377,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn emptied_group_serves_through_a_replacement_without_rebuilding() {
         let (host, mut starts) = FakeHost::new();
-        let mut controller = ModelDiscoveryController::new(host.clone());
+        let mut controller =
+            ModelDiscoveryController::with_removal_grace(host.clone(), DEFAULT_GROUP_REMOVAL_GRACE);
         let departing = instance(1, "spec");
         controller.apply_added(departing.clone());
         controller.start_queued_builds();
@@ -1421,7 +1426,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn emptied_group_is_withdrawn_when_no_replacement_arrives() {
         let (host, mut starts) = FakeHost::new();
-        let mut controller = ModelDiscoveryController::new(host.clone());
+        let mut controller =
+            ModelDiscoveryController::with_removal_grace(host.clone(), DEFAULT_GROUP_REMOVAL_GRACE);
         let departing = instance(1, "spec");
         controller.apply_added(departing.clone());
         controller.start_queued_builds();
@@ -1549,7 +1555,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn adapter_cards_neither_start_nor_keep_worker_sets_alive() {
         let (host, mut starts) = FakeHost::new();
-        let mut controller = ModelDiscoveryController::new(host.clone());
+        let mut controller =
+            ModelDiscoveryController::with_removal_grace(host.clone(), DEFAULT_GROUP_REMOVAL_GRACE);
         let mut adapter = instance(1, "adapter-spec");
         adapter.mcid.model_suffix = Some("adapter".to_string());
         adapter.key = adapter.mcid.to_path();
