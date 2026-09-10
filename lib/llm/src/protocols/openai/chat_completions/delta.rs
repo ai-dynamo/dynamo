@@ -33,7 +33,9 @@ impl NvCreateChatCompletionRequest {
             enable_logprobs,
             self.nvext(),
         );
-        DeltaGenerator::new(self.inner.model.clone(), options, request_id)
+        let mut generator = DeltaGenerator::new(self.inner.model.clone(), options, request_id);
+        generator.suppress_top_logprobs = self.inner.top_logprobs == Some(0);
+        generator
     }
 }
 
@@ -45,6 +47,7 @@ pub struct DeltaGenerator {
     service_tier: Option<dynamo_protocols::types::ServiceTierResponse>,
     /// Choice indices for which the assistant role has already been emitted.
     emitted_role_choices: HashSet<u32>,
+    suppress_top_logprobs: bool,
 }
 
 impl DeltaGenerator {
@@ -58,6 +61,7 @@ impl DeltaGenerator {
             ),
             service_tier: None,
             emitted_role_choices: HashSet::new(),
+            suppress_top_logprobs: false,
         }
     }
 
@@ -97,31 +101,40 @@ impl DeltaGenerator {
             .collect::<Vec<f32>>();
 
         let return_as_ids = self.state.options().return_tokens_as_token_ids;
-        let content = top_logprobs.map(|top_logprobs| {
-            toks.iter()
-                .zip(tok_lps)
-                .zip(top_logprobs)
-                .map(|(((t, tid), lp), top_lps)| {
-                    let token_str = if return_as_ids {
-                        format!("token_id:{}", tid)
-                    } else {
-                        t.clone()
-                    };
-                    let converted =
-                        convert_backend_top_logprobs(&top_lps, t, *tid, lp, return_as_ids);
-                    dynamo_protocols::types::ChatCompletionTokenLogprob {
-                        token: token_str.clone(),
-                        logprob: lp,
-                        token_id: Some(*tid),
-                        bytes: token_to_utf8_bytes(&token_str),
-                        top_logprobs: converted,
-                    }
-                })
-                .collect()
-        });
+        let content = toks
+            .iter()
+            .zip(tok_lps)
+            .enumerate()
+            .map(|(index, ((t, tid), lp))| {
+                let top_lps = top_logprobs
+                    .as_ref()
+                    .and_then(|positions| positions.get(index))
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                let token_str = if return_as_ids {
+                    format!("token_id:{}", tid)
+                } else {
+                    t.clone()
+                };
+                // Only explicit zero disables alternatives. Preserve the fallback
+                // for positive or omitted counts, even if backend data is missing.
+                let converted = if self.suppress_top_logprobs {
+                    Vec::new()
+                } else {
+                    convert_backend_top_logprobs(top_lps, t, *tid, lp, return_as_ids)
+                };
+                dynamo_protocols::types::ChatCompletionTokenLogprob {
+                    token: token_str.clone(),
+                    logprob: lp,
+                    token_id: Some(*tid),
+                    bytes: token_to_utf8_bytes(&token_str),
+                    top_logprobs: converted,
+                }
+            })
+            .collect();
 
         Some(dynamo_protocols::types::ChatChoiceLogprobs {
-            content,
+            content: Some(content),
             refusal: None,
         })
     }
@@ -546,6 +559,31 @@ mod tests {
     }
 
     #[test]
+    fn test_chat_logprobs_without_top_logprobs_include_sampled_token() {
+        let mut request = create_test_request();
+        request.inner.logprobs = Some(true);
+        let mut generator = request.response_generator("req-sampled-logprob".to_string());
+        let mut output = final_backend_output();
+        output.log_probs = Some(vec![-0.5]);
+        output.top_logprobs = None;
+
+        let response = generator
+            .choice_from_postprocessor(output)
+            .expect("choice generation");
+
+        let content = response.inner.choices[0]
+            .logprobs
+            .as_ref()
+            .expect("logprobs")
+            .content
+            .as_ref()
+            .expect("logprob content");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0].token_id, Some(1));
+        assert_eq!(content[0].logprob, -0.5);
+    }
+
+    #[test]
     fn test_completion_tokens_use_backend_usage_when_higher() {
         let request = create_test_request();
         let mut generator = request.response_generator("req-backend-usage".to_string());
@@ -622,6 +660,137 @@ mod tests {
         assert_eq!(usage.prompt_tokens, 5);
         assert_eq!(usage.completion_tokens, 1);
         assert_eq!(usage.total_tokens, 6);
+    }
+
+    #[test]
+    fn test_chat_logprobs_zero_top_ignores_backend_alternatives() {
+        for return_as_ids in [false, true] {
+            let mut request = create_test_request();
+            request.inner.logprobs = Some(true);
+            request.inner.top_logprobs = Some(0);
+            request.return_tokens_as_token_ids = Some(return_as_ids);
+            let generator = request.response_generator("req-logprobs-mixed-top".to_string());
+            let candidate = common::llm_backend::TopLogprob {
+                rank: 1,
+                token_id: 1,
+                token: Some("hello".to_string()),
+                logprob: -0.5,
+                bytes: Some(b"hello".to_vec()),
+            };
+            let tokens = ["hello", " world", "!"];
+            let chosen_logprobs = [-0.5, -0.25, -0.125];
+            let content = generator
+                .create_logprobs(
+                    tokens.iter().map(|token| Some((*token).into())).collect(),
+                    &[1, 2, 3],
+                    Some(chosen_logprobs.to_vec()),
+                    Some(vec![vec![candidate], vec![]]),
+                )
+                .expect("chosen-token logprobs")
+                .content
+                .expect("chosen-token content");
+            assert_eq!(content.len(), tokens.len());
+            for (index, entry) in content.iter().enumerate() {
+                let expected_token = if return_as_ids {
+                    format!("token_id:{}", index + 1)
+                } else {
+                    tokens[index].to_string()
+                };
+                assert_eq!(entry.token, expected_token);
+                assert_eq!(entry.token_id, Some(index as u32 + 1));
+                assert_eq!(entry.logprob, chosen_logprobs[index] as f32);
+                assert_eq!(entry.bytes, token_to_utf8_bytes(&expected_token));
+                assert!(entry.top_logprobs.is_empty());
+            }
+        }
+    }
+
+    fn assert_chat_logprobs_missing_alternatives_keep_fallback(requested_top: Option<u8>) {
+        let candidate = common::llm_backend::TopLogprob {
+            rank: 1,
+            token_id: 1,
+            token: Some("hello".to_string()),
+            logprob: -0.5,
+            bytes: Some(b"hello".to_vec()),
+        };
+        for top_logprobs in [None, Some(vec![]), Some(vec![vec![candidate], vec![]])] {
+            for return_as_ids in [false, true] {
+                let mut request = create_test_request();
+                request.inner.logprobs = Some(true);
+                request.inner.top_logprobs = requested_top;
+                request.return_tokens_as_token_ids = Some(return_as_ids);
+                let generator = request.response_generator("req-logprobs-fallback".to_string());
+                let tokens = ["hello", " world", "!"];
+                let chosen_logprobs = [-0.5, -0.25, -0.125];
+                let content = generator
+                    .create_logprobs(
+                        tokens.iter().map(|token| Some((*token).into())).collect(),
+                        &[1, 2, 3],
+                        Some(chosen_logprobs.to_vec()),
+                        top_logprobs.clone(),
+                    )
+                    .expect("chosen-token logprobs")
+                    .content
+                    .expect("chosen-token content");
+                assert_eq!(content.len(), tokens.len());
+                for (index, entry) in content.iter().enumerate() {
+                    let expected_token = if return_as_ids {
+                        format!("token_id:{}", index + 1)
+                    } else {
+                        tokens[index].to_string()
+                    };
+                    assert_eq!(entry.token, expected_token);
+                    assert_eq!(entry.token_id, Some(index as u32 + 1));
+                    assert_eq!(entry.logprob, chosen_logprobs[index] as f32);
+                    assert_eq!(entry.bytes, token_to_utf8_bytes(&expected_token));
+                    assert_eq!(entry.top_logprobs.len(), 1);
+                    let fallback = &entry.top_logprobs[0];
+                    assert_eq!(fallback.token, entry.token);
+                    assert_eq!(fallback.logprob, entry.logprob);
+                    assert_eq!(fallback.bytes, entry.bytes);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_chat_logprobs_positive_top_missing_alternatives_keep_fallback() {
+        assert_chat_logprobs_missing_alternatives_keep_fallback(Some(1));
+    }
+
+    #[test]
+    fn test_chat_logprobs_omitted_top_missing_alternatives_keep_fallback() {
+        assert_chat_logprobs_missing_alternatives_keep_fallback(None);
+    }
+
+    #[test]
+    fn test_chat_logprobs_nonempty_alternatives_unchanged() {
+        let mut request = create_test_request();
+        request.inner.logprobs = Some(true);
+        request.inner.top_logprobs = Some(1);
+        let generator = request.response_generator("req-logprobs-top-control".to_string());
+        let candidates = vec![common::llm_backend::TopLogprob {
+            rank: 1,
+            token_id: 2,
+            token: Some("hi".to_string()),
+            logprob: -0.25,
+            bytes: Some(b"hi".to_vec()),
+        }];
+        let expected = convert_backend_top_logprobs(&candidates, "hello", 1, -0.5, false);
+        let logprobs = generator
+            .create_logprobs(
+                vec![Some("hello".into())],
+                &[1],
+                Some(vec![-0.5]),
+                Some(vec![candidates]),
+            )
+            .expect("chosen-token logprobs");
+        let content = logprobs.content.expect("chosen-token content");
+        assert_eq!(content.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&content[0].top_logprobs).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
     }
 
     fn create_test_request_with_extra_fields(fields: Vec<String>) -> NvCreateChatCompletionRequest {
