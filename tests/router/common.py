@@ -148,6 +148,50 @@ async def _assert_overlap_scores(
 ########################################################
 
 
+def _test_full_block_event_delivery(
+    engine_workers, model_name: str, block_size: int, request_plane: str
+):
+    """Require a worker's full KV blocks to reach the router's index."""
+    with managed_runtime(request_plane=request_plane) as runtime:
+        endpoint = runtime.endpoint(
+            f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
+        )
+
+        async def run_test():
+            router = _create_kv_router_with_timeout(
+                router_factory=lambda: KvRouter(
+                    endpoint=endpoint,
+                    block_size=block_size,
+                    kv_router_config=KvRouterConfig(use_kv_events=True),
+                ),
+                num_workers=1,
+                engine_workers=engine_workers,
+            )
+            worker_ids = await wait_for_workers_ready(endpoint, router, 1, model_name)
+            await send_request_via_python_kv_router(
+                kv_python_router=router,
+                model_name=model_name,
+                token_ids=list(range(1, 3 * block_size + 1)),
+                stop_conditions={"ignore_eos": True, "max_tokens": 2},
+                worker_id=worker_ids[0],
+            )
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                events = json.loads(await router.dump_events())
+                stored_blocks = sum(
+                    len(event["event"]["data"].get("stored", {}).get("blocks", []))
+                    for event in events
+                )
+                if stored_blocks >= 3:
+                    return
+                await asyncio.sleep(0.1)
+            raise AssertionError(
+                f"Expected three full KV blocks in the index, got {events}"
+            )
+
+        asyncio.run(run_test())
+
+
 def _test_router_basic(
     engine_workers,
     block_size: int,
