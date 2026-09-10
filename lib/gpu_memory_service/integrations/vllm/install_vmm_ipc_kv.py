@@ -24,6 +24,7 @@ Gates:
   GMS_VLLM_VMM_IPC_SOCKET=<path>   daemon UDS (default: derived from device)
   GMS_VLLM_VMM_IPC_ENGINE_ID=<id>  identifier for (engine_id, tag) keying
                                    (default: derived stable Dynamo id)
+  GMS_VLLM_MODEL_ARTIFACT_DIGEST=<id> immutable identity for local/split artifacts
 """
 
 from __future__ import annotations
@@ -762,8 +763,8 @@ def install_lazy() -> None:
     targets = {
         "vllm.v1.core.block_pool",  # Scheduler-side KV lease publication
         "vllm.v1.engine.core",  # KV sizing call-site imports get_kv_cache_configs by value
-        "vllm.v1.worker.gpu_model_runner",  # V1 path
-        "vllm.v1.worker.gpu.attn_utils",  # V2 path
+        "vllm.v1.worker.gpu_model_runner",
+        "vllm.v1.worker.gpu.attn_utils",
     }
 
     class _PatchAfterLoad:
@@ -809,12 +810,17 @@ def install_lazy() -> None:
     )
 
 
-# Eager install (when this module is imported AFTER vllm — e.g. tests
-# that import vllm first then enable the hook). The .pth file calls
-# install_lazy() instead to avoid eagerly importing vllm.
-if _is_enabled() and "vllm.v1.worker.gpu_model_runner" in sys.modules:
+def _install_or_arm() -> None:
+    if not _is_enabled():
+        return
+    if "vllm.v1.worker.gpu_model_runner" not in sys.modules:
+        install_lazy()
+        return
     try:
         install()
     except Exception:  # noqa: BLE001
         logger.exception("[GMS-VMM-IPC] Auto-install raised")
         raise
+
+
+_install_or_arm()

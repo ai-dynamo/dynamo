@@ -22,6 +22,23 @@ def _clear_dynamic_gms_role_env(monkeypatch):
     monkeypatch.delenv("DYN_VLLM_GMS_ACTIVE_LOCK_HELD", raising=False)
 
 
+def test_pre_vllm_import_arms_lazy_installer(monkeypatch):
+    calls = []
+    monkeypatch.delitem(
+        install_vmm_ipc_kv.sys.modules,
+        "vllm.v1.worker.gpu_model_runner",
+        raising=False,
+    )
+    monkeypatch.setattr(install_vmm_ipc_kv, "_is_enabled", lambda: True)
+    monkeypatch.setattr(
+        install_vmm_ipc_kv, "install_lazy", lambda: calls.append("lazy")
+    )
+
+    install_vmm_ipc_kv._install_or_arm()
+
+    assert calls == ["lazy"]
+
+
 def test_v3_semantic_kv_tags_include_model_layers_and_size():
     tensor_a = SimpleNamespace(
         shared_by=["model.layers.1.self_attn", "model.layers.0.self_attn"],
@@ -89,14 +106,19 @@ def test_model_identity_rejects_mutable_revision(monkeypatch, revision):
 
 
 def test_model_identity_is_derived_from_runner_config():
+    commit = "b" * 40
     runner = SimpleNamespace(
         vllm_config=SimpleNamespace(
-            model_config=SimpleNamespace(model="org/model", revision="abc")
+            model_config=SimpleNamespace(
+                model="org/model",
+                revision="main",
+                hf_config=SimpleNamespace(_commit_hash=commit),
+            )
         )
     )
 
     assert install_vmm_ipc_kv._model_identity_from_runner(runner) == (
-        "model=org/model\0revision=abc"
+        f"model=org/model\0artifact={commit}"
     )
 
 

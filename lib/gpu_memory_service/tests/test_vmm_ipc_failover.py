@@ -143,11 +143,6 @@ def test_vmm_ipc_engine_restart_preserves_kv_bytes(tmp_path):
             t_.fill_(pat)
         torch.cuda.synchronize(device)
 
-        # Verify the daemon sees the same bytes. The daemon's
-        # PersistentAllocationManager will have one persistent
-        # allocation (probably — Torch coalesces into one big block).
-        # Either way, every (engine_id, sub_tag) pair must be present
-        # in the daemon's claimed set.
         persistent = server._gms.persistent
         engine_a_allocs = sorted(
             persistent.list(engine_id),
