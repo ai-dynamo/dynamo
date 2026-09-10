@@ -1,0 +1,77 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# FLUX.1-schnell text-to-image serving with SGLang. This is the Kubernetes
+# equivalent of launch/image_diffusion.sh with --model-path overridden.
+# Request response_format=b64_json unless media storage is externally served.
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: flux-1-schnell-sglang-agg
+spec:
+  backendFramework: sglang
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: my-registry/sglang-runtime:my-tag
+  - name: ImageDiffusionWorker
+    type: worker
+    replicas: 1
+    sharedMemorySize: 16Gi
+    podTemplate:
+      spec:
+        # SGLang 0.5.16 in Dynamo 1.4.2 mistakes parent PID 1 for a dead parent.
+        # Share PIDs within this worker pod so the Dynamo process is not PID 1.
+        # Remove when the minimum runtime includes sgl-project/sglang#31361.
+        shareProcessNamespace: true
+        containers:
+        - name: main
+          image: my-registry/sglang-runtime:my-tag
+          command:
+          - python3
+          - -m
+          - dynamo.sglang
+          args:
+          - --model-path
+          - black-forest-labs/FLUX.1-schnell
+          - --served-model-name
+          - black-forest-labs/FLUX.1-schnell
+          - --image-diffusion-worker
+          - --media-output-fs-url
+          - file:///tmp/dynamo_media
+          - --trust-remote-code
+          - --skip-tokenizer-init
+          - --enable-metrics
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+          - name: media-output
+            mountPath: /tmp/dynamo_media
+        volumes:
+        - name: media-output
+          emptyDir:
+            sizeLimit: 20Gi
