@@ -49,37 +49,47 @@ The report must state the driver model and the skills commit it was running (for
 `claude-opus-5, skills @ abc1234`):
 
 ```bash
-git -C <repo-root> rev-parse --short HEAD
+git rev-parse --short HEAD
 ```
+
+Run that from the repository root. In every command in this skill, replace placeholders BEFORE running
+and never leave angle brackets in a shell line: `<...>` parses as redirection and can truncate files.
 
 If the pack was vendored without git history, record the release or image tag it came from. A report that cannot
 say which version it observed cannot be triaged.
 
 ## Step 3: Sanitize
 
-The issue lands in a public repository. The body must not contain: hostnames, IPs, endpoints, URLs of internal
-systems, tokens or credentials of any kind, cluster or namespace names, customer or user identifiers, workload or
-traffic specifics, proprietary model or deployment configurations, or pasted logs. Quote pack text freely; describe
-your environment only in generic terms (GPU class, backend, harness). When in doubt, leave it out — the rule file,
+The issue lands in a public repository. Nothing you emit, in the title, the body, a comment, a search term,
+or a version string, may contain: Quote pack text from the public repository freely (not from a locally modified or vendored copy, which may
+carry private details); describe your environment only in generic terms (GPU class, backend, harness). When in doubt, leave it out — the rule file,
 version, and defect class are usually enough to reproduce.
 
 ## Step 4: Check for an existing report
 
 Search titles AND bodies, with and without the label, because labels can be silently dropped at
-filing time (step 6) and secondary defects live in issue bodies:
+filing time (step 6) and secondary defects live in issue bodies. Use the bare filename as the search
+term (no backticks) and raise the result limit past the default of 30:
 
 ```bash
-gh issue list --repo ai-dynamo/dynamo --state all --search "<rule-or-skill filename> in:title,body"
-gh issue list --repo ai-dynamo/dynamo --state all --label agent-reported --search "<rule-or-skill filename> in:title,body"
+gh issue list --repo ai-dynamo/dynamo --state all --limit 100 --search 'benchmark-isolation.md in:title,body'
+gh issue list --repo ai-dynamo/dynamo --state all --limit 100 --label agent-reported --search 'benchmark-isolation.md in:title,body'
 ```
 
 Review every hit whose title starts with `[AGENT]: ` or whose body mentions the same file and
-defect class. If a matching issue exists, do not file a duplicate: draft the same body (step 5),
-show it to the operator (step 6), and on approval add it as a comment confirming the defect at
-your pack version:
+defect class, and read each candidate's comments too, because confirmations of an existing defect
+are filed as comments (below) and do not appear in title or body search:
 
 ```bash
-gh issue comment <issue number> --repo ai-dynamo/dynamo --body-file /tmp/skillpack-issue-body.md
+ISSUE_NUMBER=123
+gh issue view "$ISSUE_NUMBER" --repo ai-dynamo/dynamo --comments
+```
+
+If a matching issue exists, do not file a duplicate: draft the same body (step 5), route it through
+step 6 with the target recorded as "comment on #123", and on approval:
+
+```bash
+gh issue comment "$ISSUE_NUMBER" --repo ai-dynamo/dynamo --body-file "$BODY_FILE"
 ```
 
 File at most one new issue per session; if the session surfaced several defects, put the most
@@ -89,8 +99,11 @@ impactful one in the issue and list the rest briefly in its body.
 
 Title: `[AGENT]: <file path relative to repo root>: <one-line defect>`.
 
-Write the body to `/tmp/skillpack-issue-body.md` with a file-writing tool, never by echoing it
-through a shell, following the agent-reported template's structure:
+Write the body with a file-writing tool, never by echoing it through a shell, to a run-scoped path:
+inside an engagement `<EXP_ROOT>/analysis/skillpack-issue-drafts/NNN-body.md` (NNN increasing), otherwise
+`./skillpack-issue-drafts/NNN-body.md` under the current working directory. Never use a shared fixed path
+such as `/tmp`, where another invocation can overwrite an approved body before it is submitted. Follow the
+agent-reported template's structure:
 
 ```markdown
 ### Agent identity
@@ -112,34 +125,50 @@ did wrong, or had to route around>
 <the wording you would have needed; omit the section if unsure>
 ```
 
-## Step 6: Get operator approval, then file
+## Step 6: Who files, and how
 
-Filing a public issue is an external side effect. Show the operator the complete drafted title and body and file
-only on their approval. Quoting `"$ISSUE_TITLE"` at the call site protects nothing on its own: backticks and
-`$()` in a drafted title are interpreted when the variable is *assigned*, and the pack's own style backticks
-every flag and filename. Assign the title from a quoted heredoc in the same shell invocation as the filing
-command (harness shells do not persist variables between calls), and pass the body as the scratch file from
-step 5:
+Filing a public issue or comment is an external side effect that needs the operator's approval of the
+exact drafted text. Two cases:
+
+- **Dispatched sub-role** (interviewer, deployer, analyzer, generator, challenger): you do not talk to
+  the operator, so you never run `gh issue create` or `gh issue comment`. Record the draft in
+  `<EXP_ROOT>/analysis/skillpack-defects.md` (dated section, defect class, location, draft title,
+  draft body path, proposed target: new issue or comment on #N, status `unfiled`) and return that
+  path to your parent. The top-level agent batches every unfiled draft, presents them to the operator,
+  and on approval files at most ONE new issue per session (secondary defects go in its body) plus any
+  approved comments, then updates each draft's status to `filed` with the URL. This is what makes
+  "one issue per session" hold across roles.
+- **Standalone invocation by an operator**: the operator is present; show the complete title and body,
+  file only on approval.
+
+Whoever files: assign the title from a quoted heredoc in the same shell invocation as the command
+(harness shells do not persist variables between calls), and pass the approved body file unchanged.
+Quoting `"$ISSUE_TITLE"` at the call site protects nothing on its own: backticks and `$()` in a drafted
+title are interpreted when the variable is *assigned*, and the pack's own style backticks every flag.
+Do not edit the body between approval and filing; file the same path the operator saw.
 
 ```bash
+BODY_FILE=analysis/skillpack-issue-drafts/001-body.md
 ISSUE_TITLE=$(cat <<'EOF'
-[AGENT]: <file path relative to repo root>: <one-line defect>
+[AGENT]: agent-docs/rules/benchmarking/benchmark-isolation.md: one-line defect
 EOF
 )
-gh issue create --repo ai-dynamo/dynamo --title "$ISSUE_TITLE" \
-  --body-file /tmp/skillpack-issue-body.md --label agent-reported
+gh issue create --repo ai-dynamo/dynamo --title "$ISSUE_TITLE" --body-file "$BODY_FILE" --label agent-reported
 ```
 
-GitHub does not raise an error when the reporter may not set labels: "Only users with push access can set
-labels for new issues. Labels are silently dropped otherwise." Check after filing instead of branching on an
-error:
+Labels behave two ways depending on the client path: the REST API silently drops labels the
+reporter may not set ("Only users with push access can set labels for new issues. Labels are silently
+dropped otherwise."), while `gh` may instead fail before creating the issue when it cannot resolve a
+label. Handle both: if the command fails on the label, retry without `--label`; if it succeeds,
+verify:
 
 ```bash
-gh issue view <issue number> --repo ai-dynamo/dynamo --json labels --jq '[.labels[].name]'
+ISSUE_NUMBER=123
+gh issue view "$ISSUE_NUMBER" --repo ai-dynamo/dynamo --json labels --jq '[.labels[].name]'
 ```
 
-If `agent-reported` is absent, tell the operator so a maintainer can add it; maintainers also triage by the
-`[AGENT]: ` title prefix, and the step 4 search covers unlabeled reports.
+If `agent-reported` is absent, tell the operator so a maintainer can add it; maintainers also triage
+by the `[AGENT]: ` title prefix, and the step 4 search covers unlabeled reports.
 
 ## Fallback: no GitHub access or no approval
 

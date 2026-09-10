@@ -86,12 +86,14 @@ a maintainer comments `/nvskills-ci` on the PR.
 If these skills, instructions, role contracts, or this file misled you, blocked you, contradicted what you verified
 live, or left a component or situation uncovered, do not route around it silently: invoke the
 `report-skillpack-issue` skill (`.agents/skills/report-skillpack-issue/`), which every role contract declares and
-which owns the full procedure. If your harness cannot surface that skill, follow this minimum, which the skill
-also enforces: search existing reports by title and body first and comment on a duplicate rather than filing;
-prepare at most one issue per session with findings batched; identify yourself as an AI agent with your driver
-model and the skills commit; sanitize completely (no workload details, traffic numbers, cluster or namespace
-names, company names, or credentials); and show the operator the full draft and file only on their approval,
-using the `[AGENT]: ` title prefix.
+which owns the full procedure. Dispatched roles record drafts in `<EXP_ROOT>/analysis/skillpack-defects.md` and return
+them; only the top-level agent, with operator approval, files, at most one new issue per session with findings
+batched, plus comments on duplicates. If your harness cannot surface the skill, follow this minimum, which the skill
+also enforces: search existing reports by title, body, and comments first; identify yourself as an AI agent with
+your driver model and the skills commit; sanitize every emitted string (title, body, comment, search term: no
+workload details, traffic numbers, cluster or namespace names, company names, or credentials); keep drafts as
+run-scoped files, never in a shared temp path; and show the operator the exact draft and file only on their
+approval, using the `[AGENT]: ` title prefix and verifying the label landed.
 
 ## Optimization Role Dispatch
 
