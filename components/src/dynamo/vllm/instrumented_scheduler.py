@@ -6284,6 +6284,17 @@ class InstrumentedScheduler(AsyncScheduler):
             for result in rank_results:
                 dp_rank = result["dp_rank"]
                 fpms = result.get("fpms")
+                if isinstance(fpms, list) and not fpms:
+                    # The point deadline elapsed before this rank recorded a
+                    # single FPM (the first pass at a fresh giant shape can
+                    # outlast the deadline where a kernel JIT-compiles or the
+                    # backend is simply slower than the validation platform).
+                    # The deadline contract is a group-synchronized skip --
+                    # the same funnel an admission-only shape mismatch takes
+                    # -- not a sweep abort.
+                    if validation_failure is None:
+                        validation_failure = (dp_rank, "no_fpm_before_deadline")
+                    continue
                 if not isinstance(fpms, list) or len(fpms) != 1:
                     raise RuntimeError(
                         "each self-benchmark point must produce exactly one FPM: "
