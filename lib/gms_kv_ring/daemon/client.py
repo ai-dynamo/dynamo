@@ -250,6 +250,11 @@ class DaemonClient:
             payload_items.append(
                 {
                     "content_hash": item["content_hash"].hex(),
+                    **(
+                        {"local_key": bytes(item["local_key"]).hex()}
+                        if item.get("local_key") is not None
+                        else {}
+                    ),
                     "engine_id": str(item["engine_id"]),
                     "slot_ids": [int(slot_id) for slot_id in slot_ids],
                     "generations": [int(generation) for generation in generations],
