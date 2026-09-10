@@ -17,11 +17,12 @@ pub mod args;
 pub mod disagg;
 pub mod engine;
 pub mod error;
-mod lifecycle;
+pub mod lifecycle;
 pub mod metrics;
 mod publisher;
 mod rl;
 pub mod run;
+pub mod shutdown;
 pub mod snapshot_publisher;
 pub mod telemetry;
 #[cfg(any(test, feature = "testing"))]
@@ -43,6 +44,7 @@ pub use engine::{
     SamplingOptions, StopConditions, StopReason, TopLogprob, TopLogprobs, chunk, usage,
 };
 pub use error::{BackendError, DynamoError, ErrorType};
+pub use lifecycle::RequestTracker;
 pub use metrics::{ComponentGauges, EngineMetrics, LifecycleGauges};
 pub use rl::{RlAdminBaseUrl, RlWorkerMetadata};
 pub use run::{run, run_raw};

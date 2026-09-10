@@ -20,6 +20,7 @@ use dynamo_runtime::metrics::{
 
 use crate::engine::EngineConfig;
 use crate::error::{BackendError, DynamoError, ErrorType};
+use crate::shutdown::StageOutcome;
 
 /// Metrics handle passed to [`LLMEngine::setup_metrics`](crate::LLMEngine::setup_metrics).
 /// Not `Clone` — engines should retain returned instruments, not this object.
@@ -115,6 +116,11 @@ pub struct LifecycleGauges {
     drain_time_seconds: prometheus::Gauge,
     #[allow(dead_code)]
     model_load_time_seconds: prometheus::Gauge,
+    /// Per-stage shutdown timing, labelled by `stage` and by the `reason` the
+    /// stage ended. The reason label is the point: a 30s stage that completed
+    /// and a 30s stage that timed out are the same number and very different
+    /// events, and only one of them needs an operator.
+    shutdown_stage_seconds: prometheus::GaugeVec,
 }
 
 impl LifecycleGauges {
@@ -143,10 +149,22 @@ impl LifecycleGauges {
             "Time engine.start() took to return. Set once at Worker setup.",
         )?;
         model_load.set(model_load_time_seconds);
+        let shutdown_stage_seconds = create_metric::<prometheus::GaugeVec, _>(
+            hierarchy,
+            "shutdown_stage_seconds",
+            "Time spent in each graceful-shutdown stage, labelled by stage and \
+             by why the stage ended (completed, timed_out, skipped, cancelled, \
+             unsupported).",
+            &labels,
+            None,
+            Some(&["stage", "reason"]),
+        )
+        .map_err(|e| gauge_err("shutdown_stage_seconds", e))?;
         Ok(Self {
             cleanup_time_seconds: cleanup,
             drain_time_seconds: drain,
             model_load_time_seconds: model_load,
+            shutdown_stage_seconds,
         })
     }
 
@@ -160,6 +178,15 @@ impl LifecycleGauges {
     /// graceful shutdown after the `engine.is_quiescent()` drain loop returns.
     pub fn observe_drain_time(&self, seconds: f64) {
         self.drain_time_seconds.set(seconds);
+    }
+
+    /// Record one shutdown stage. Safe to call for every stage on every path;
+    /// stages that were skipped record their (near-zero) elapsed under the
+    /// `skipped` reason, so a dashboard can tell "did not run" from "ran fast".
+    pub fn observe_shutdown_stage(&self, outcome: &StageOutcome) {
+        self.shutdown_stage_seconds
+            .with_label_values(&[outcome.stage.name(), outcome.reason.as_str()])
+            .set(outcome.elapsed.as_secs_f64());
     }
 }
 

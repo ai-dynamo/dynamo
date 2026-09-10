@@ -61,7 +61,9 @@ fn run_worker(
     let secondary = runtime.secondary();
 
     secondary.block_on(async move {
-        let result = build(config)
+        let worker = build(config);
+        let deadline = worker.shutdown_deadline();
+        let result = worker
             .run(runtime.clone())
             .await
             .map_err(anyhow::Error::from);
@@ -78,9 +80,19 @@ fn run_worker(
         // The bound is passed *into* Phase 2 rather than wrapped around the
         // call: `tokio::time::timeout` cancels by dropping, which would skip
         // Phase 3 and defeat the point of awaiting at all.
-        runtime
-            .shutdown_and_wait(Some(dynamo_runtime::worker::graceful_shutdown_timeout()))
-            .await;
+        //
+        // It is what remains of the worker's shutdown budget, not a fresh
+        // timeout. Starting a new one here made worst-case shutdown the sum of
+        // the two, so a worker could outlive the deadline its operator
+        // configured — and `terminationGracePeriodSeconds` is sized against
+        // that deadline.
+        let teardown_bound = deadline
+            .get()
+            .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
+            // Never armed: this is not a shutdown path (serve returned on its
+            // own), so there is no budget to spend down.
+            .unwrap_or_else(crate::shutdown::graceful_shutdown_timeout);
+        runtime.shutdown_and_wait(Some(teardown_bound)).await;
 
         result
     })

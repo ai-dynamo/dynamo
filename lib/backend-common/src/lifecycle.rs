@@ -1,63 +1,42 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-// SPDX-License-Identifier: Apache-2.0
+//! Admission control and the shutdown stages built on it.
+//!
+//! [`RequestTracker`] is the admission gate and in-flight counter: one packed
+//! atomic word holding "are we accepting" plus the count, so admitting a
+//! request costs one CAS and finishing one costs one decrement.
+//!
+//! The stage functions below are the shutdown sequence, one implementation
+//! each. [`crate::worker::Worker`] drives them in order on SIGTERM. They take
+//! a [`CancellationToken`] and a [`ShutdownBudget`] that may be unbounded,
+//! because the worker Admin API's reversible `drain`/`resume` — landing
+//! separately — needs to abandon a stage in flight and has no deadline. The
+//! terminal path passes a token nothing cancels and a bounded budget.
+//!
+//! [`DiscoveryRegistration`] keeps `register` alongside `unregister` for the
+//! same reason: the reversible path re-registers on resume.
 
-//! Worker-owned drain/resume lifecycle control.
-
+use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::Result;
 use async_trait::async_trait;
 use dynamo_runtime::component::Endpoint;
-use dynamo_runtime::engine_routes::{
-    EngineRouteCallback, EngineRouteMethod, EngineRouteRegistration, EngineRouteRegistry,
-};
 use dynamo_runtime::error::{DynamoError, ErrorType};
-use parking_lot::RwLock;
-use serde::Serialize;
-use tokio::sync::{Mutex, Notify, oneshot};
-use tokio::task::JoinHandle;
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use crate::disagg::DisaggregationMode;
+use crate::shutdown::{
+    DRAIN_HEARTBEAT_INTERVAL, KvTransferFallback, ShutdownBudget, Stage, StageOutcome, StageReason,
+    kv_transfer_fallback_override,
+};
 use crate::worker::EngineKind;
 
 const QUIESCENCE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum WorkerLifecycleState {
-    Serving = 0,
-    Draining = 1,
-    Drained = 2,
-    Stopping = 3,
-}
-
-impl WorkerLifecycleState {
-    fn from_u8(value: u8) -> Self {
-        match value {
-            0 => Self::Serving,
-            1 => Self::Draining,
-            2 => Self::Drained,
-            3 => Self::Stopping,
-            _ => unreachable!("invalid worker lifecycle state {value}"),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub(crate) struct WorkerLifecycleStatus {
-    state: WorkerLifecycleState,
-    inflight_requests: u64,
-    discovery_registered: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    last_error: Option<String>,
-}
-
 #[async_trait]
-trait DiscoveryRegistration: Send + Sync {
+pub trait DiscoveryRegistration: Send + Sync {
     async fn unregister(&self) -> Result<()>;
     async fn register(&self) -> Result<()>;
 }
@@ -74,14 +53,23 @@ impl DiscoveryRegistration for Endpoint {
 }
 
 #[async_trait]
-trait QuiescenceCheck: Send + Sync {
+pub trait QuiescenceCheck: Send + Sync {
     async fn is_quiescent(&self) -> Result<Option<bool>>;
+
+    /// Declared policy for when `is_quiescent` never reports a value.
+    fn kv_transfer_fallback(&self) -> KvTransferFallback {
+        KvTransferFallback::Undeclared
+    }
 }
 
 #[async_trait]
 impl QuiescenceCheck for EngineKind {
     async fn is_quiescent(&self) -> Result<Option<bool>> {
         Ok(EngineKind::is_quiescent(self).await?)
+    }
+
+    fn kv_transfer_fallback(&self) -> KvTransferFallback {
+        EngineKind::kv_transfer_fallback(self)
     }
 }
 
@@ -90,7 +78,7 @@ impl QuiescenceCheck for EngineKind {
 /// Admission and the in-flight count share one atomic word, so closing
 /// admission is linearizable with request acquisition.
 #[derive(Debug)]
-pub(crate) struct RequestTracker {
+pub struct RequestTracker {
     state: AtomicU64,
     changed: Notify,
 }
@@ -99,14 +87,14 @@ const ACCEPTING_BIT: u64 = 1 << 63;
 const INFLIGHT_MASK: u64 = !ACCEPTING_BIT;
 
 impl RequestTracker {
-    pub(crate) fn new() -> Arc<Self> {
+    pub fn new() -> Arc<Self> {
         Arc::new(Self {
             state: AtomicU64::new(ACCEPTING_BIT),
             changed: Notify::new(),
         })
     }
 
-    pub(crate) fn try_acquire(self: &Arc<Self>) -> Result<RequestGuard> {
+    pub fn try_acquire(self: &Arc<Self>) -> Result<RequestGuard> {
         let mut current = self.state.load(Ordering::Acquire);
         loop {
             if current & ACCEPTING_BIT == 0 {
@@ -134,21 +122,12 @@ impl RequestTracker {
         })
     }
 
-    pub(crate) fn stop_accepting(&self) {
+    pub fn stop_accepting(&self) {
         self.state.fetch_and(INFLIGHT_MASK, Ordering::AcqRel);
         self.changed.notify_waiters();
     }
 
-    fn start_accepting(&self) {
-        self.state.fetch_or(ACCEPTING_BIT, Ordering::AcqRel);
-        self.changed.notify_waiters();
-    }
-
-    fn is_accepting(&self) -> bool {
-        self.state.load(Ordering::Acquire) & ACCEPTING_BIT != 0
-    }
-
-    pub(crate) fn inflight(&self) -> u64 {
+    pub fn inflight(&self) -> u64 {
         self.state.load(Ordering::Acquire) & INFLIGHT_MASK
     }
 
@@ -170,542 +149,288 @@ fn worker_draining_error(message: &'static str) -> anyhow::Error {
         .into()
 }
 
-pub(crate) struct RequestGuard {
+pub struct RequestGuard {
     tracker: Arc<RequestTracker>,
 }
 
-struct DrainTask {
-    cancel: CancellationToken,
-    handle: JoinHandle<()>,
-}
-
-pub(crate) struct AdminRouteRegistration {
-    _routes: Vec<EngineRouteRegistration>,
-}
-
+/// Releasing the guard is what decrements the in-flight count, so the shutdown
+/// barrier cannot clear while a request is still running. RAII rather than an
+/// explicit call: a request can end by completing, erroring, or having its
+/// response stream dropped, and only `Drop` covers all three.
 impl Drop for RequestGuard {
     fn drop(&mut self) {
         self.tracker.release();
     }
 }
 
-/// Coordinates the Admin API, request admission, discovery, and SIGTERM.
-pub(crate) struct WorkerLifecycleController {
-    state: AtomicU8,
-    discovery_registered: AtomicBool,
-    last_error: RwLock<Option<String>>,
-    operation_lock: Mutex<()>,
-    drain_task: Mutex<Option<DrainTask>>,
-    drain_generation: AtomicU64,
-    tracker: Arc<RequestTracker>,
-    discovery: Arc<dyn DiscoveryRegistration>,
-    quiescence: Arc<dyn QuiescenceCheck>,
-    mode: DisaggregationMode,
-    discovery_grace_period: Duration,
+// ---------------------------------------------------------------------------
+// Shutdown stages
+//
+// One implementation per stage, shared by both entry points. Each takes a
+// `CancellationToken` so the reversible Admin drain can abandon a stage in
+// flight (`resume`), and a `ShutdownBudget` so the terminal SIGTERM path can
+// bound it — `ShutdownBudget::unbounded()` makes a stage wait indefinitely,
+// which is what a pre-delete drain wants.
+//
+// Every stage reports a `StageOutcome` rather than `()`, so "we waited 30s"
+// and "we waited 30s and gave up" are distinguishable in logs and metrics.
+// ---------------------------------------------------------------------------
+
+/// Remove this worker from discovery so routers stop selecting it.
+///
+/// Unbudgeted: a single discovery RPC, and a worker that cannot unregister
+/// must still proceed with the rest of shutdown.
+pub async fn stage_unregister(
+    discovery: &dyn DiscoveryRegistration,
+    budget: &ShutdownBudget,
+) -> StageOutcome {
+    let started = Instant::now();
+    let (reason, detail) = match discovery.unregister().await {
+        Ok(()) => (StageReason::Completed, None),
+        Err(error) => {
+            tracing::warn!(%error, "discovery unregister failed");
+            (StageReason::Skipped, Some(error.to_string()))
+        }
+    };
+    let outcome =
+        StageOutcome::new(Stage::Unregister, reason, started.elapsed(), budget).with_detail(detail);
+    outcome.log();
+    outcome
 }
 
-impl WorkerLifecycleController {
-    pub(crate) fn new(
-        tracker: Arc<RequestTracker>,
-        endpoint: Endpoint,
-        engine: EngineKind,
-        mode: DisaggregationMode,
-        discovery_grace_period: Duration,
-    ) -> Arc<Self> {
-        Self::with_dependencies(
-            tracker,
-            Arc::new(endpoint),
-            Arc::new(engine),
-            mode,
-            discovery_grace_period,
-        )
-    }
-
-    fn with_dependencies(
-        tracker: Arc<RequestTracker>,
-        discovery: Arc<dyn DiscoveryRegistration>,
-        quiescence: Arc<dyn QuiescenceCheck>,
-        mode: DisaggregationMode,
-        discovery_grace_period: Duration,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            state: AtomicU8::new(WorkerLifecycleState::Serving as u8),
-            discovery_registered: AtomicBool::new(true),
-            last_error: RwLock::new(None),
-            operation_lock: Mutex::new(()),
-            drain_task: Mutex::new(None),
-            drain_generation: AtomicU64::new(0),
-            tracker,
-            discovery,
-            quiescence,
-            mode,
-            discovery_grace_period,
-        })
-    }
-
-    fn state(&self) -> WorkerLifecycleState {
-        WorkerLifecycleState::from_u8(self.state.load(Ordering::Acquire))
-    }
-
-    pub(crate) fn status(&self) -> WorkerLifecycleStatus {
-        let state = self.state();
-        WorkerLifecycleStatus {
-            state,
-            inflight_requests: self.tracker.inflight(),
-            discovery_registered: self.discovery_registered.load(Ordering::Acquire),
-            last_error: self.last_error.read().clone(),
-        }
-    }
-
-    pub(crate) fn register_admin_routes(
-        self: &Arc<Self>,
-        registry: &EngineRouteRegistry,
-    ) -> Result<AdminRouteRegistration> {
-        let routes = registry.try_register_scoped_methods(vec![
-            (
-                "drain",
-                EngineRouteMethod::Post,
-                lifecycle_callback(Arc::clone(self), LifecycleAction::Drain),
-            ),
-            (
-                "resume",
-                EngineRouteMethod::Post,
-                lifecycle_callback(Arc::clone(self), LifecycleAction::Resume),
-            ),
-            (
-                "status",
-                EngineRouteMethod::Get,
-                lifecycle_callback(Arc::clone(self), LifecycleAction::Status),
-            ),
-        ])?;
-        tracing::info!("registered worker Admin API routes under /engine");
-        Ok(AdminRouteRegistration { _routes: routes })
-    }
-
-    pub(crate) async fn drain(self: &Arc<Self>) -> Result<WorkerLifecycleStatus> {
-        let operation = self.operation_lock.lock().await;
-        let started = match self.state() {
-            WorkerLifecycleState::Serving => {
-                self.last_error.write().take();
-                self.state
-                    .store(WorkerLifecycleState::Draining as u8, Ordering::Release);
-                let generation = self.drain_generation.fetch_add(1, Ordering::AcqRel) + 1;
-                let (started_tx, started_rx) = oneshot::channel();
-                let cancel = CancellationToken::new();
-                let controller = Arc::clone(self);
-                let task_cancel = cancel.clone();
-                let handle = tokio::spawn(async move {
-                    controller
-                        .run_drain_operation(generation, started_tx, task_cancel)
-                        .await;
-                });
-                let previous = self
-                    .drain_task
-                    .lock()
-                    .await
-                    .replace(DrainTask { cancel, handle });
-                debug_assert!(
-                    previous
-                        .as_ref()
-                        .is_none_or(|task| task.handle.is_finished()),
-                    "serving worker must not have active drain work"
-                );
-                Some(started_rx)
-            }
-            WorkerLifecycleState::Draining => None,
-            WorkerLifecycleState::Drained => return Ok(self.status()),
-            WorkerLifecycleState::Stopping => bail!("worker shutdown is already in progress"),
-        };
-        drop(operation);
-
-        if let Some(started) = started {
-            started
-                .await
-                .context("drain operation ended before discovery was updated")??;
-        }
-        Ok(self.status())
-    }
-
-    /// Own the drain after the HTTP handler starts it. The task is detached
-    /// from the request so cancelling the client cannot strand `Draining`.
-    async fn run_drain_operation(
-        self: Arc<Self>,
-        generation: u64,
-        started: oneshot::Sender<Result<()>>,
-        cancel: CancellationToken,
-    ) {
-        let mut started = Some(started);
-        {
-            let _operation = tokio::select! {
-                _ = cancel.cancelled() => return,
-                operation = self.operation_lock.lock() => operation,
-            };
-            if self.state() != WorkerLifecycleState::Draining
-                || self.drain_generation.load(Ordering::Acquire) != generation
-            {
-                if let Some(started) = started.take() {
-                    let _ = started.send(Err(anyhow!(
-                        "drain operation was superseded before discovery was updated"
-                    )));
-                }
-                return;
-            }
-
-            if self.discovery_registered.load(Ordering::Acquire) {
-                if let Err(error) = self.discovery.unregister().await {
-                    let message = format!("failed to unregister worker from discovery: {error}");
-                    *self.last_error.write() = Some(message);
-                    self.drain_generation.fetch_add(1, Ordering::AcqRel);
-                    self.state
-                        .store(WorkerLifecycleState::Serving as u8, Ordering::Release);
-                    self.tracker.start_accepting();
-                    if let Some(started) = started.take() {
-                        let _ = started
-                            .send(Err(error).context("failed to unregister worker from discovery"));
-                    }
-                    return;
-                }
-                self.discovery_registered.store(false, Ordering::Release);
-            }
-
-            if let Some(started) = started.take() {
-                let _ = started.send(Ok(()));
-            }
-        }
-
-        // Keep accepting requests already selected by frontends until their
-        // discovery views have had time to observe the unregister.
+/// Keep serving while routers observe the unregister.
+///
+/// A fixed wait, not a condition: already-routed requests are still arriving,
+/// and there is no signal that says every router has caught up.
+pub async fn stage_router_grace(
+    requested: Option<Duration>,
+    budget: &ShutdownBudget,
+    cancel: &CancellationToken,
+) -> StageOutcome {
+    let started = Instant::now();
+    // `requested` lets a caller override the configured grace; the budget
+    // still caps it, so an over-long grace cannot starve the stages after it.
+    let requested = requested.unwrap_or_else(|| budget.stage_max(Stage::RouterGrace));
+    let grace = match budget.allowance(Stage::RouterGrace) {
+        // Unbounded budgets still get a bounded grace: this stage is a fixed
+        // sleep, so "wait forever" is never the intent.
+        None => requested.min(budget.stage_max(Stage::RouterGrace)),
+        Some(allowance) => requested.min(allowance),
+    };
+    let reason = if grace.is_zero() {
+        StageReason::Skipped
+    } else {
         tokio::select! {
-            _ = cancel.cancelled() => return,
-            _ = tokio::time::sleep(self.discovery_grace_period) => {}
+            _ = cancel.cancelled() => StageReason::Cancelled,
+            _ = tokio::time::sleep(grace) => StageReason::Completed,
         }
-        {
-            let _operation = tokio::select! {
-                _ = cancel.cancelled() => return,
-                operation = self.operation_lock.lock() => operation,
-            };
-            if self.state() != WorkerLifecycleState::Draining
-                || self.drain_generation.load(Ordering::Acquire) != generation
-            {
-                return;
-            }
-            self.tracker.stop_accepting();
-        }
+    };
+    let outcome = StageOutcome::new(Stage::RouterGrace, reason, started.elapsed(), budget);
+    outcome.log();
+    outcome
+}
 
-        self.monitor_drain(generation, cancel).await;
-    }
+/// Close admission. Synchronous and always completes: it flips a bit, and
+/// requests already admitted keep running.
+pub fn stage_stop_admission(tracker: &RequestTracker, budget: &ShutdownBudget) -> StageOutcome {
+    let started = Instant::now();
+    tracker.stop_accepting();
+    let outcome = StageOutcome::new(
+        Stage::StopAdmission,
+        StageReason::Completed,
+        started.elapsed(),
+        budget,
+    );
+    outcome.log();
+    outcome
+}
 
-    pub(crate) async fn resume(self: &Arc<Self>) -> Result<WorkerLifecycleStatus> {
-        let (completed_tx, completed_rx) = oneshot::channel();
-        let controller = Arc::clone(self);
-        tokio::spawn(async move {
-            let result = controller.run_resume_operation().await;
-            let _ = completed_tx.send(result);
-        });
-        completed_rx
-            .await
-            .context("resume operation ended before publishing its result")?
-    }
+/// Wait for admitted requests to finish.
+///
+/// Event-driven rather than polled: `RequestTracker` notifies on every
+/// release, so a clean drain returns as soon as the last request completes.
+pub async fn stage_await_inflight(
+    tracker: &RequestTracker,
+    budget: &ShutdownBudget,
+    cancel: &CancellationToken,
+) -> StageOutcome {
+    let started = Instant::now();
+    let allowance = budget.allowance(Stage::Inflight);
 
-    /// Resume is controller-owned so cancellation of the Admin request cannot
-    /// leave admission and discovery in different states.
-    async fn run_resume_operation(self: Arc<Self>) -> Result<WorkerLifecycleStatus> {
-        let _operation = self.operation_lock.lock().await;
-        let previous_state = match self.state() {
-            WorkerLifecycleState::Serving => return Ok(self.status()),
-            WorkerLifecycleState::Stopping => bail!("worker shutdown is already in progress"),
-            state @ (WorkerLifecycleState::Draining | WorkerLifecycleState::Drained) => state,
-        };
-
-        let generation = self.drain_generation.fetch_add(1, Ordering::AcqRel) + 1;
-        self.state
-            .store(WorkerLifecycleState::Draining as u8, Ordering::Release);
-        self.cancel_and_join_drain_task().await;
-
-        // A worker must be able to accept requests before discovery can make
-        // it visible. Roll this back if registration fails.
-        self.tracker.start_accepting();
-
-        if !self.discovery_registered.load(Ordering::Acquire) {
-            if let Err(error) = self.discovery.register().await {
-                let message = format!("failed to re-register worker in discovery: {error}");
-                *self.last_error.write() = Some(message);
-                self.tracker.stop_accepting();
-                self.state.store(previous_state as u8, Ordering::Release);
-                if previous_state == WorkerLifecycleState::Draining {
-                    self.start_monitor_task(generation).await;
-                }
-                return Err(error).context("failed to re-register worker in discovery");
-            }
-            self.discovery_registered.store(true, Ordering::Release);
-        }
-
-        self.last_error.write().take();
-        self.state
-            .store(WorkerLifecycleState::Serving as u8, Ordering::Release);
-        Ok(self.status())
-    }
-
-    /// Move into the irreversible SIGTERM path using the same discovery-first
-    /// ordering as Admin drain.
-    pub(crate) async fn begin_shutdown(&self) {
-        let needs_convergence_grace = {
-            let _operation = self.operation_lock.lock().await;
-            self.drain_generation.fetch_add(1, Ordering::AcqRel);
-            self.state
-                .store(WorkerLifecycleState::Stopping as u8, Ordering::Release);
-            self.cancel_and_join_drain_task().await;
-
-            if self.discovery_registered.load(Ordering::Acquire) {
-                if let Err(error) = self.discovery.unregister().await {
-                    tracing::warn!(%error, "discovery unregister failed during shutdown");
-                    *self.last_error.write() = Some(error.to_string());
-                } else {
-                    self.discovery_registered.store(false, Ordering::Release);
-                }
-            }
-            self.tracker.is_accepting()
-        };
-
-        if needs_convergence_grace {
-            tokio::time::sleep(self.discovery_grace_period).await;
-        }
-        self.tracker.stop_accepting();
-    }
-
-    async fn cancel_and_join_drain_task(&self) {
-        let Some(task) = self.drain_task.lock().await.take() else {
-            return;
-        };
-        task.cancel.cancel();
-        if let Err(error) = task.handle.await
-            && !error.is_cancelled()
-        {
-            tracing::warn!(%error, "drain task failed while being joined");
-        }
-    }
-
-    async fn start_monitor_task(self: &Arc<Self>, generation: u64) {
-        let cancel = CancellationToken::new();
-        let task_cancel = cancel.clone();
-        let controller = Arc::clone(self);
-        let handle = tokio::spawn(async move {
-            controller.monitor_drain(generation, task_cancel).await;
-        });
-        let previous = self
-            .drain_task
-            .lock()
-            .await
-            .replace(DrainTask { cancel, handle });
-        debug_assert!(previous.is_none(), "drain task slot must be empty");
-    }
-
-    async fn monitor_drain(self: Arc<Self>, generation: u64, cancel: CancellationToken) {
+    let wait = async {
         loop {
-            if cancel.is_cancelled() {
+            // Register for the notification before re-reading the count, so a
+            // release between the two cannot be missed.
+            let changed = tracker.changed.notified();
+            if tracker.inflight() == 0 {
                 return;
             }
-            if self.state() != WorkerLifecycleState::Draining
-                || self.drain_generation.load(Ordering::Acquire) != generation
-            {
-                return;
-            }
+            changed.await;
+        }
+    };
 
-            if self.tracker.inflight() == 0 {
-                let quiescence = if self.mode.is_prefill() {
-                    tokio::select! {
-                        _ = cancel.cancelled() => return,
-                        result = self.quiescence.is_quiescent() => result,
-                    }
-                } else {
-                    Ok(Some(true))
-                };
+    let reason = tokio::select! {
+        _ = cancel.cancelled() => StageReason::Cancelled,
+        result = maybe_timeout(allowance, wait) => match result {
+            Ok(()) => StageReason::Completed,
+            Err(()) => StageReason::TimedOut,
+        },
+    };
 
-                // Publish Drained under the same operation fence used by
-                // resume. A stale monitor may finish an engine
-                // check, but it can never publish after its generation ends.
-                let _operation = tokio::select! {
-                    _ = cancel.cancelled() => return,
-                    operation = self.operation_lock.lock() => operation,
-                };
-                if self.state() != WorkerLifecycleState::Draining
-                    || self.drain_generation.load(Ordering::Acquire) != generation
-                {
-                    return;
+    let outcome = StageOutcome::new(Stage::Inflight, reason, started.elapsed(), budget);
+    if reason == StageReason::TimedOut {
+        tracing::warn!(
+            inflight = tracker.inflight(),
+            "shutdown: requests still in flight when the stage expired"
+        );
+    }
+    outcome.log();
+    outcome
+}
+
+/// Wait for prefill KV transfers that outlive the request stream.
+///
+/// Prefill-only: an aggregated or decode worker has no transfer a peer could
+/// still be pulling from, so the stage is skipped outright.
+///
+/// An engine that returns `None` cannot report transfer state. Today that
+/// means waiting out the whole budget and reporting `Unsupported`, which is
+/// honest but is a fixed delay — engines should implement the predicate, and a
+/// declared fallback policy is the follow-up.
+pub async fn stage_kv_quiescence(
+    quiescence: &dyn QuiescenceCheck,
+    mode: DisaggregationMode,
+    budget: &ShutdownBudget,
+    cancel: &CancellationToken,
+) -> StageOutcome {
+    let started = Instant::now();
+    if !mode.is_prefill() {
+        let outcome = StageOutcome::new(
+            Stage::KvTransfer,
+            StageReason::Skipped,
+            started.elapsed(),
+            budget,
+        );
+        outcome.log();
+        return outcome;
+    }
+
+    // Operator override wins over the engine's declaration: someone who knows
+    // their deployment can overrule a conservative engine default.
+    // Precedence: programmatic config > environment > engine declaration.
+    let policy = budget
+        .kv_fallback_override()
+        .or_else(kv_transfer_fallback_override)
+        .unwrap_or_else(|| quiescence.kv_transfer_fallback());
+    if policy == KvTransferFallback::Skip {
+        tracing::info!(
+            policy = policy.as_str(),
+            "shutdown: skipping the KV-transfer stage by declared policy"
+        );
+        let outcome = StageOutcome::new(
+            Stage::KvTransfer,
+            StageReason::Skipped,
+            started.elapsed(),
+            budget,
+        );
+        outcome.log();
+        return outcome;
+    }
+
+    let allowance = budget.allowance(Stage::KvTransfer);
+
+    // Tracks whether the engine ever reported a value, so a timeout can say
+    // whether we waited on a real signal or on nothing at all.
+    let mut ever_reported = false;
+    // Surfaced on the outcome so a stalled drain is explainable: the Admin
+    // status endpoint reports it as `last_error`.
+    let mut last_error: Option<String> = None;
+    let poll = async {
+        let mut announced = false;
+        let mut last_heartbeat = Instant::now();
+        loop {
+            match quiescence.is_quiescent().await {
+                Ok(Some(true)) => return true,
+                Ok(Some(false)) => ever_reported = true,
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::debug!(%error, "is_quiescent raised; treating as not quiescent");
+                    last_error = Some(error.to_string());
                 }
-
-                match quiescence {
-                    Ok(Some(true)) => {
-                        self.state
-                            .store(WorkerLifecycleState::Drained as u8, Ordering::Release);
-                        tracing::info!("worker drained and is safe to delete");
-                        return;
-                    }
-                    Ok(Some(false)) | Ok(None) => {}
-                    Err(error) => {
-                        *self.last_error.write() = Some(error.to_string());
-                    }
-                }
             }
-
-            tokio::select! {
-                _ = cancel.cancelled() => return,
-                _ = self.tracker.changed.notified() => {}
-                _ = tokio::time::sleep(QUIESCENCE_POLL_INTERVAL) => {}
+            if !announced {
+                announced = true;
+                tracing::info!(
+                    timeout_s = allowance.map(|d| d.as_secs_f64()).unwrap_or(f64::INFINITY),
+                    "shutdown: waiting for prefill KV transfers to quiesce"
+                );
             }
+            // A drain can legitimately run for minutes; without this it would
+            // be indistinguishable from a hang.
+            if last_heartbeat.elapsed() >= DRAIN_HEARTBEAT_INTERVAL {
+                last_heartbeat = Instant::now();
+                tracing::info!(
+                    elapsed_s = started.elapsed().as_secs_f64(),
+                    "shutdown: still waiting for KV quiescence"
+                );
+            }
+            tokio::time::sleep(QUIESCENCE_POLL_INTERVAL).await;
+        }
+    };
+
+    let reason = tokio::select! {
+        _ = cancel.cancelled() => StageReason::Cancelled,
+        result = maybe_timeout(allowance, poll) => match result {
+            Ok(true) => StageReason::Completed,
+            // `poll` only returns on quiescence, so a non-timeout exit is
+            // unreachable; treat defensively as completed.
+            Ok(false) => StageReason::Completed,
+            Err(()) if ever_reported => StageReason::TimedOut,
+            Err(()) => StageReason::Unsupported,
+        },
+    };
+
+    let outcome = StageOutcome::new(Stage::KvTransfer, reason, started.elapsed(), budget)
+        .with_detail(last_error);
+    if reason == StageReason::Unsupported {
+        // Keyed on the *policy*, not the reason. An engine that declared
+        // `WaitFullBudget` made this choice deliberately and does not need to
+        // be told to declare it; only `Undeclared` is an open question. Both
+        // wait — the difference is whether anyone decided that.
+        if policy == KvTransferFallback::Undeclared {
+            tracing::warn!(
+                "shutdown: engine never reported KV-transfer state and declares no \
+                 fallback, so the full budget was spent before releasing GPU memory. \
+                 Implement LLMEngine::is_quiescent to exit as soon as transfers \
+                 finish, or declare kv_transfer_fallback to record the choice."
+            );
+        } else {
+            tracing::info!(
+                policy = policy.as_str(),
+                "shutdown: engine cannot report KV-transfer state; waited the full \
+                 budget per its declared policy"
+            );
         }
     }
+    outcome.log();
+    outcome
 }
 
-#[derive(Clone, Copy)]
-enum LifecycleAction {
-    Drain,
-    Resume,
-    Status,
-}
-
-fn lifecycle_callback(
-    controller: Arc<WorkerLifecycleController>,
-    action: LifecycleAction,
-) -> EngineRouteCallback {
-    Arc::new(move |body| {
-        let controller = Arc::clone(&controller);
-        Box::pin(async move {
-            if !body.is_object() {
-                bail!("worker Admin API request body must be a JSON object");
-            }
-            let status = match action {
-                LifecycleAction::Drain => controller.drain().await?,
-                LifecycleAction::Resume => controller.resume().await?,
-                LifecycleAction::Status => controller.status(),
-            };
-            serde_json::to_value(status).context("serialize worker lifecycle status")
-        })
-    })
+/// Run `fut` under `allowance`, or unbounded when `None`.
+/// `Err(())` means the bound expired.
+async fn maybe_timeout<T>(
+    allowance: Option<Duration>,
+    fut: impl Future<Output = T>,
+) -> Result<T, ()> {
+    match allowance {
+        None => Ok(fut.await),
+        Some(limit) => tokio::time::timeout(limit, fut).await.map_err(|_| ()),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::Semaphore;
-
-    struct MockDiscovery {
-        unregister_started: Semaphore,
-        unregister_gate: Semaphore,
-        register_started: Semaphore,
-        register_gate: Semaphore,
-        register_fails: AtomicBool,
-    }
-
-    impl MockDiscovery {
-        fn new(unregister_permits: usize) -> Arc<Self> {
-            Self::with_register_permits(unregister_permits, 1)
-        }
-
-        fn with_register_permits(unregister_permits: usize, register_permits: usize) -> Arc<Self> {
-            Arc::new(Self {
-                unregister_started: Semaphore::new(0),
-                unregister_gate: Semaphore::new(unregister_permits),
-                register_started: Semaphore::new(0),
-                register_gate: Semaphore::new(register_permits),
-                register_fails: AtomicBool::new(false),
-            })
-        }
-    }
-
-    #[async_trait]
-    impl DiscoveryRegistration for MockDiscovery {
-        async fn unregister(&self) -> Result<()> {
-            self.unregister_started.add_permits(1);
-            self.unregister_gate
-                .acquire()
-                .await
-                .expect("unregister gate should stay open")
-                .forget();
-            Ok(())
-        }
-
-        async fn register(&self) -> Result<()> {
-            self.register_started.add_permits(1);
-            self.register_gate
-                .acquire()
-                .await
-                .expect("register gate should stay open")
-                .forget();
-            if self.register_fails.load(Ordering::Acquire) {
-                bail!("injected register failure");
-            }
-            Ok(())
-        }
-    }
-
-    struct MockQuiescence {
-        result: Option<bool>,
-        check_started: Semaphore,
-        check_gate: Semaphore,
-    }
-
-    impl MockQuiescence {
-        fn new(result: Option<bool>, check_permits: usize) -> Arc<Self> {
-            Arc::new(Self {
-                result,
-                check_started: Semaphore::new(0),
-                check_gate: Semaphore::new(check_permits),
-            })
-        }
-    }
-
-    #[async_trait]
-    impl QuiescenceCheck for MockQuiescence {
-        async fn is_quiescent(&self) -> Result<Option<bool>> {
-            self.check_started.add_permits(1);
-            self.check_gate
-                .acquire()
-                .await
-                .expect("quiescence gate should stay open")
-                .forget();
-            Ok(self.result)
-        }
-    }
-
-    fn test_controller(
-        discovery: Arc<MockDiscovery>,
-        quiescence: Arc<MockQuiescence>,
-        mode: DisaggregationMode,
-        grace_period: Duration,
-    ) -> (Arc<WorkerLifecycleController>, Arc<RequestTracker>) {
-        let tracker = RequestTracker::new();
-        let controller = WorkerLifecycleController::with_dependencies(
-            Arc::clone(&tracker),
-            discovery,
-            quiescence,
-            mode,
-            grace_period,
-        );
-        (controller, tracker)
-    }
-
-    async fn yield_to_background_tasks() {
-        for _ in 0..10 {
-            tokio::task::yield_now().await;
-        }
-    }
-
-    async fn wait_for_state(
-        controller: &WorkerLifecycleController,
-        expected: WorkerLifecycleState,
-    ) {
-        for _ in 0..20 {
-            if controller.status().state == expected {
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
-        panic!(
-            "worker did not reach {expected:?}; current state is {:?}",
-            controller.status().state
-        );
-    }
 
     #[test]
     fn request_tracker_rejects_after_drain_starts() {
@@ -719,16 +444,6 @@ mod tests {
 
         drop(guard);
         assert_eq!(tracker.inflight(), 0);
-    }
-
-    #[test]
-    fn request_tracker_accepts_again_after_resume() {
-        let tracker = RequestTracker::new();
-        tracker.stop_accepting();
-        tracker.start_accepting();
-        let guard = tracker.try_acquire().unwrap();
-        assert_eq!(tracker.inflight(), 1);
-        drop(guard);
     }
 
     #[test]
@@ -779,207 +494,197 @@ mod tests {
         assert_eq!(tracker.inflight(), 0);
     }
 
-    #[test]
-    fn second_lifecycle_controller_cannot_replace_admin_routes() {
-        let registry = EngineRouteRegistry::new();
-        let (first, _) = test_controller(
-            MockDiscovery::new(1),
-            MockQuiescence::new(Some(true), 1),
-            DisaggregationMode::Aggregated,
-            Duration::ZERO,
-        );
-        let (second, _) = test_controller(
-            MockDiscovery::new(1),
-            MockQuiescence::new(Some(true), 1),
-            DisaggregationMode::Aggregated,
-            Duration::ZERO,
-        );
+    struct FlakyDiscovery {
+        fail: bool,
+    }
 
-        let first_routes = first.register_admin_routes(&registry).unwrap();
-        let error = match second.register_admin_routes(&registry) {
-            Ok(_) => panic!("a second lifecycle controller must not replace Admin API routes"),
-            Err(error) => error,
+    #[async_trait]
+    impl DiscoveryRegistration for FlakyDiscovery {
+        async fn unregister(&self) -> Result<()> {
+            if self.fail {
+                anyhow::bail!("discovery is unreachable");
+            }
+            Ok(())
+        }
+        async fn register(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The first stage: routers must stop selecting this worker.
+    #[tokio::test(start_paused = true)]
+    async fn stage_unregister_reports_completion() {
+        let outcome = stage_unregister(
+            &FlakyDiscovery { fail: false },
+            &ShutdownBudget::unbounded(),
+        )
+        .await;
+        assert_eq!(outcome.stage, Stage::Unregister);
+        assert_eq!(outcome.reason, StageReason::Completed);
+        assert!(outcome.detail.is_none());
+    }
+
+    /// A worker that cannot reach discovery must still shut down — reporting
+    /// the failure rather than aborting the sequence, since the alternative is
+    /// a worker that never releases its GPU.
+    #[tokio::test(start_paused = true)]
+    async fn stage_unregister_survives_a_discovery_failure() {
+        let outcome =
+            stage_unregister(&FlakyDiscovery { fail: true }, &ShutdownBudget::unbounded()).await;
+        assert_eq!(outcome.reason, StageReason::Skipped);
+        assert!(
+            outcome.detail.is_some(),
+            "the failure must be reported, not swallowed"
+        );
+    }
+
+    /// Closing admission is synchronous and always succeeds; what matters is
+    /// that it actually closes the gate.
+    #[tokio::test(start_paused = true)]
+    async fn stage_stop_admission_closes_the_gate() {
+        let tracker = RequestTracker::new();
+        assert!(tracker.try_acquire().is_ok());
+
+        let outcome = stage_stop_admission(&tracker, &ShutdownBudget::unbounded());
+        assert_eq!(outcome.stage, Stage::StopAdmission);
+        assert_eq!(outcome.reason, StageReason::Completed);
+        assert!(
+            tracker.try_acquire().is_err(),
+            "admission must be closed once the stage reports completion"
+        );
+    }
+
+    /// An explicit grace overrides the configured cap.
+    #[tokio::test(start_paused = true)]
+    async fn stage_router_grace_honours_an_explicit_request() {
+        let start = tokio::time::Instant::now();
+        let outcome = stage_router_grace(
+            Some(Duration::from_secs(3)),
+            &ShutdownBudget::unbounded(),
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(outcome.reason, StageReason::Completed);
+        assert_eq!(start.elapsed(), Duration::from_secs(3));
+    }
+
+    /// ...but the budget still caps it, so an over-long grace cannot starve
+    /// the stages that follow.
+    #[tokio::test(start_paused = true)]
+    async fn stage_router_grace_is_capped_by_the_budget() {
+        let budget = ShutdownBudget::starting_now(Duration::from_secs(2));
+        let start = tokio::time::Instant::now();
+        stage_router_grace(
+            Some(Duration::from_secs(3600)),
+            &budget,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            start.elapsed() <= Duration::from_secs(2),
+            "an over-long grace must be capped, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    /// A zero grace is skipped outright rather than slept for zero.
+    #[tokio::test(start_paused = true)]
+    async fn stage_router_grace_skips_when_zero() {
+        let outcome = stage_router_grace(
+            Some(Duration::ZERO),
+            &ShutdownBudget::unbounded(),
+            &CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(outcome.reason, StageReason::Skipped);
+    }
+
+    /// Give a spawned task room to reach its await point before asserting on
+    /// whether it finished.
+    async fn yield_to_background_tasks() {
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// The ordering fix for #13286: the request-plane barrier must run before
+    /// anything frees engine memory.
+    ///
+    /// Before this, `engine.cleanup()` ran while requests were still
+    /// executing, so a decode peer could read KV memory the prefill worker had
+    /// already released.
+    #[tokio::test(start_paused = true)]
+    async fn inflight_barrier_completes_before_cleanup_runs() {
+        let tracker = RequestTracker::new();
+
+        // One admitted request, still running.
+        let guard = tracker.try_acquire().expect("admission is open");
+        assert_eq!(tracker.inflight(), 1);
+
+        let budget = ShutdownBudget::unbounded();
+        let cancel = CancellationToken::new();
+        let waiter = {
+            let tracker = Arc::clone(&tracker);
+            let cancel = cancel.clone();
+            tokio::spawn(async move { stage_await_inflight(&tracker, &budget, &cancel).await })
         };
 
-        assert!(error.to_string().contains("already registered"));
-        assert!(registry.get("drain").is_some());
-        assert!(registry.get("resume").is_some());
-        assert!(registry.get("status").is_some());
-
-        drop(first_routes);
-        assert!(registry.routes().is_empty());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn drain_keeps_admission_open_during_discovery_grace_period() {
-        let discovery = MockDiscovery::new(1);
-        let quiescence = MockQuiescence::new(Some(true), 1);
-        let grace_period = Duration::from_secs(5);
-        let (controller, tracker) = test_controller(
-            discovery,
-            quiescence,
-            DisaggregationMode::Aggregated,
-            grace_period,
+        yield_to_background_tasks().await;
+        assert!(
+            !waiter.is_finished(),
+            "the barrier must not clear while a request is still in flight"
         );
 
-        let status = controller.drain().await.unwrap();
-        assert_eq!(status.state, WorkerLifecycleState::Draining);
-        let admitted_during_convergence = tracker
-            .try_acquire()
-            .expect("late frontend selections should be admitted during convergence");
+        // Request finishes.
+        drop(guard);
+        let outcome = waiter.await.expect("barrier task panicked");
+
+        assert_eq!(outcome.reason, StageReason::Completed);
+        assert_eq!(tracker.inflight(), 0);
+    }
+
+    /// A bounded budget must not let the barrier hang shutdown forever.
+    #[tokio::test(start_paused = true)]
+    async fn inflight_barrier_gives_up_when_the_budget_expires() {
+        let tracker = RequestTracker::new();
+
+        // Never released: stands in for a request that will not finish.
+        let _guard = tracker.try_acquire().expect("admission is open");
+
+        let budget = ShutdownBudget::starting_now(Duration::from_secs(3600));
+        let cancel = CancellationToken::new();
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(7200),
+            stage_await_inflight(&tracker, &budget, &cancel),
+        )
+        .await
+        .expect("the barrier must be bounded; it hung past the outer guard");
+
+        assert_eq!(outcome.reason, StageReason::TimedOut);
+        assert_eq!(tracker.inflight(), 1, "the stuck request is still counted");
+    }
+
+    /// The reversible path must be able to abandon the barrier: `resume`
+    /// cancels a drain in flight.
+    #[tokio::test(start_paused = true)]
+    async fn inflight_barrier_is_cancellable() {
+        let tracker = RequestTracker::new();
+        let _guard = tracker.try_acquire().expect("admission is open");
+
+        let budget = ShutdownBudget::unbounded();
+        let cancel = CancellationToken::new();
+        let waiter = {
+            let tracker = Arc::clone(&tracker);
+            let cancel = cancel.clone();
+            tokio::spawn(async move { stage_await_inflight(&tracker, &budget, &cancel).await })
+        };
 
         yield_to_background_tasks().await;
-        tokio::time::advance(grace_period).await;
-        yield_to_background_tasks().await;
-        assert!(tracker.try_acquire().is_err());
+        assert!(!waiter.is_finished());
 
-        drop(admitted_during_convergence);
-        tokio::time::advance(QUIESCENCE_POLL_INTERVAL).await;
-        wait_for_state(&controller, WorkerLifecycleState::Drained).await;
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn cancelled_drain_caller_does_not_strand_the_worker() {
-        let discovery = MockDiscovery::new(0);
-        let quiescence = MockQuiescence::new(Some(true), 1);
-        let (controller, _) = test_controller(
-            Arc::clone(&discovery),
-            quiescence,
-            DisaggregationMode::Aggregated,
-            Duration::ZERO,
-        );
-
-        let first_controller = Arc::clone(&controller);
-        let first_call = tokio::spawn(async move { first_controller.drain().await });
-        discovery
-            .unregister_started
-            .acquire()
-            .await
-            .unwrap()
-            .forget();
-        first_call.abort();
-        let _ = first_call.await;
-
-        let retry_controller = Arc::clone(&controller);
-        let retry = tokio::spawn(async move { retry_controller.drain().await });
-        discovery.unregister_gate.add_permits(1);
-        retry.await.unwrap().unwrap();
-        wait_for_state(&controller, WorkerLifecycleState::Drained).await;
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn stale_monitor_cannot_publish_after_resume() {
-        let discovery = MockDiscovery::new(1);
-        let quiescence = MockQuiescence::new(Some(true), 0);
-        let (controller, _) = test_controller(
-            discovery,
-            Arc::clone(&quiescence),
-            DisaggregationMode::Prefill,
-            Duration::ZERO,
-        );
-
-        controller.drain().await.unwrap();
-        quiescence.check_started.acquire().await.unwrap().forget();
-
-        let resumed = controller.resume().await.unwrap();
-        assert_eq!(resumed.state, WorkerLifecycleState::Serving);
-        quiescence.check_gate.add_permits(1);
-        yield_to_background_tasks().await;
-        assert_eq!(
-            quiescence.check_gate.available_permits(),
-            1,
-            "resume must cancel and join the blocked quiescence check"
-        );
-
-        let status = controller.status();
-        assert_eq!(status.state, WorkerLifecycleState::Serving);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn resume_opens_admission_before_registration_and_survives_caller_cancel() {
-        let discovery = MockDiscovery::with_register_permits(1, 0);
-        let quiescence = MockQuiescence::new(Some(true), 0);
-        let (controller, tracker) = test_controller(
-            Arc::clone(&discovery),
-            Arc::clone(&quiescence),
-            DisaggregationMode::Prefill,
-            Duration::ZERO,
-        );
-
-        controller.drain().await.unwrap();
-        quiescence.check_started.acquire().await.unwrap().forget();
-
-        let resume_controller = Arc::clone(&controller);
-        let resume_call = tokio::spawn(async move { resume_controller.resume().await });
-        discovery.register_started.acquire().await.unwrap().forget();
-
-        let admitted = tracker
-            .try_acquire()
-            .expect("admission must be open before discovery registration publishes");
-        drop(admitted);
-
-        resume_call.abort();
-        let _ = resume_call.await;
-        discovery.register_gate.add_permits(1);
-        wait_for_state(&controller, WorkerLifecycleState::Serving).await;
-        assert!(controller.status().discovery_registered);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn failed_resume_registration_rolls_back_admission_and_monitoring() {
-        let discovery = MockDiscovery::new(1);
-        discovery.register_fails.store(true, Ordering::Release);
-        let quiescence = MockQuiescence::new(Some(true), 0);
-        let (controller, tracker) = test_controller(
-            discovery,
-            Arc::clone(&quiescence),
-            DisaggregationMode::Prefill,
-            Duration::ZERO,
-        );
-
-        controller.drain().await.unwrap();
-        quiescence.check_started.acquire().await.unwrap().forget();
-        assert!(controller.resume().await.is_err());
-
-        assert_eq!(controller.status().state, WorkerLifecycleState::Draining);
-        assert!(tracker.try_acquire().is_err());
-        quiescence.check_started.acquire().await.unwrap().forget();
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn shutdown_unregisters_before_closing_admission() {
-        let discovery = MockDiscovery::new(0);
-        let quiescence = MockQuiescence::new(Some(true), 1);
-        let grace_period = Duration::from_secs(5);
-        let (controller, tracker) = test_controller(
-            Arc::clone(&discovery),
-            quiescence,
-            DisaggregationMode::Aggregated,
-            grace_period,
-        );
-
-        let shutdown_controller = Arc::clone(&controller);
-        let shutdown = tokio::spawn(async move { shutdown_controller.begin_shutdown().await });
-        discovery
-            .unregister_started
-            .acquire()
-            .await
-            .unwrap()
-            .forget();
-        let during_unregister = tracker
-            .try_acquire()
-            .expect("SIGTERM must keep admission open while unregistering");
-        drop(during_unregister);
-
-        discovery.unregister_gate.add_permits(1);
-        yield_to_background_tasks().await;
-        let during_convergence = tracker
-            .try_acquire()
-            .expect("SIGTERM must keep admission open during discovery convergence");
-        drop(during_convergence);
-
-        tokio::time::advance(grace_period).await;
-        shutdown.await.unwrap();
-        assert!(tracker.try_acquire().is_err());
+        cancel.cancel();
+        let outcome = waiter.await.expect("barrier task panicked");
+        assert_eq!(outcome.reason, StageReason::Cancelled);
     }
 }

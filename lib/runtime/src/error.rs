@@ -127,8 +127,16 @@ pub enum ErrorClass {
     /// other workers may. Distinct from [`Self::Unavailable`] so the request
     /// can migrate; both surface as HTTP 503.
     WorkerUnavailable,
-    /// The selected worker is intentionally draining and cannot admit this request.
-    /// Frontends may reselect another worker without consuming the user migration budget.
+    /// The selected worker is intentionally draining and cannot admit this
+    /// request. Frontends may reselect another worker.
+    ///
+    /// Raised by the admission gate and yielded as the response stream's single
+    /// item rather than returned before the stream exists — a pre-stream error
+    /// travels in the wire prologue, which carries only an opaque string, and
+    /// would arrive relabelled as `CannotConnect`.
+    ///
+    /// Migration is not free: `is_migratable` retries consume the per-request
+    /// migration budget.
     WorkerDraining,
     /// Error originating from a backend engine.
     Backend(BackendError),

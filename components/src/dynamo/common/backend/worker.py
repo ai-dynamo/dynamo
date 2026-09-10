@@ -100,6 +100,35 @@ def _coerce_disagg_mode(value) -> DisaggregationMode:
 
 
 @dataclass
+class ShutdownConfig:
+    """Shutdown timing overrides for :class:`WorkerConfig`.
+
+    Every field is optional. An unset field falls back to its environment
+    variable, then to the built-in default, so a caller only states what it
+    wants to change.
+
+    Nested rather than flattened onto ``WorkerConfig`` so a new knob costs one
+    edit per layer instead of three.
+    """
+
+    #: Total SIGTERM-to-exit budget, in seconds. Every stage draws from this.
+    total_secs: Optional[float] = None
+    #: Seconds to keep serving after unregistering from discovery.
+    router_grace_secs: Optional[float] = None
+    #: Cap on waiting for admitted requests to finish.
+    inflight_timeout_secs: Optional[float] = None
+    #: Cap on waiting for prefill KV transfers to quiesce.
+    kv_transfer_timeout_secs: Optional[float] = None
+    #: Cap on ``engine.cleanup()``.
+    cleanup_timeout_secs: Optional[float] = None
+    #: ``"wait"`` or ``"skip"`` — what a prefill worker does when the engine
+    #: cannot report KV-transfer state. Overrides the engine's own
+    #: declaration. ``"skip"`` can free GPU memory mid-transfer, so leave this
+    #: unset unless the engine holds no KV a decode peer could still read.
+    kv_transfer_fallback: Optional[str] = None
+
+
+@dataclass
 class WorkerConfig:
     namespace: str
     component: str = "backend"
@@ -146,6 +175,9 @@ class WorkerConfig:
     kv_state_endpoint: Optional[str] = None
     default_thinking_mode: Optional[str] = None
     response_plane: str = "tcp"
+    # Shutdown timing. Appended like the fields above so positional callers
+    # keep working; inserting earlier would silently shift arguments.
+    shutdown: ShutdownConfig = field(default_factory=ShutdownConfig)
 
     @classmethod
     def from_runtime_config(
@@ -277,6 +309,14 @@ class Worker:
                 self.config.disaggregation_mode
             ),
             health_check_payload=self.config.health_check_payload,
+            shutdown=_backend.ShutdownConfig(
+                total_secs=self.config.shutdown.total_secs,
+                router_grace_secs=self.config.shutdown.router_grace_secs,
+                inflight_timeout_secs=self.config.shutdown.inflight_timeout_secs,
+                kv_transfer_timeout_secs=self.config.shutdown.kv_transfer_timeout_secs,
+                cleanup_timeout_secs=self.config.shutdown.cleanup_timeout_secs,
+                kv_transfer_fallback=self.config.shutdown.kv_transfer_fallback,
+            ),
             structural_tag_mode=self.config.structural_tag_mode,
             structural_tag_scope=self.config.structural_tag_scope,
             structural_tag_schema=self.config.structural_tag_schema,

@@ -250,9 +250,9 @@ fn error_outcome(error_type: ErrorType) -> &'static str {
         ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument) => {
             "rejected"
         }
-        ErrorType::ResourceExhausted
-        | ErrorType::WorkerOverloaded
-        | ErrorType::WorkerDraining => "rejected",
+        ErrorType::ResourceExhausted | ErrorType::WorkerOverloaded | ErrorType::WorkerDraining => {
+            "rejected"
+        }
         ErrorType::Unavailable | ErrorType::WorkerUnavailable => "unavailable",
         // Deadline expiry matches the HTTP metric classification, which labels
         // deadline-exceeded 429 responses as `cancelled`.
