@@ -147,12 +147,12 @@ spec:
 ```
 
 `NIXL_TELEMETRY_ENABLE` on its own only turns collection on. A scrapeable endpoint also needs
-`NIXL_TELEMETRY_EXPORTER=prometheus` and an explicit `NIXL_TELEMETRY_PROMETHEUS_PORT`: NIXL has no
-default exporter, and its Prometheus exporter defaults to `9090`, not to Dynamo's `19090`
-convention. Leaving the port unset therefore lands the exporter on the same `9090` the
-`DYN_SYSTEM_PORT` preset already uses. The operator presets both variables on worker, prefill, and
-decode pods, so on an operator-managed deployment the snippet above is enough. Set all three
-explicitly anywhere else.
+`NIXL_TELEMETRY_EXPORTER=prometheus`, because NIXL has no default exporter.
+`NIXL_TELEMETRY_PROMETHEUS_PORT` is optional and chooses the port: unset, the exporter falls back to
+`9090` rather than to Dynamo's `19090` convention, which is the same `9090` the `DYN_SYSTEM_PORT`
+preset already uses — so set it anyway to keep the two apart. The operator presets both variables on
+worker, prefill, and decode pods, so on an operator-managed deployment the snippet above is enough.
+Set all three explicitly anywhere else.
 
 <Note>
 Enabling telemetry does not on its own make the port scrapeable from Prometheus. The

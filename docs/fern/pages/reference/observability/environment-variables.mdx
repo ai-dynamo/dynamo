@@ -91,7 +91,7 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 <ParamField path="NIXL_TELEMETRY_ENABLE" type="string" default="n">
   Enables [NIXL](https://github.com/ai-dynamo/nixl) telemetry. NIXL metrics track KV cache and embedding data transfers and are populated only during disaggregated serving or multimodal embedding transfers.
 
-  This variable alone does not produce a scrapeable endpoint. Set `NIXL_TELEMETRY_EXPORTER` and `NIXL_TELEMETRY_PROMETHEUS_PORT` as well, as described below.
+  This variable alone does not produce a scrapeable endpoint: set `NIXL_TELEMETRY_EXPORTER` as well. `NIXL_TELEMETRY_PROMETHEUS_PORT` then chooses the port, and while it is optional, leaving it unset lands the exporter on a port the operator already uses. Both are described below.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>y</Badge> <Badge intent="note" minimal>1</Badge> <Badge intent="note" minimal>yes</Badge> <Badge intent="note" minimal>on</Badge> <Badge intent="note" minimal>true</Badge> <Badge intent="note" minimal>enable</Badge> <Badge intent="note" minimal>n</Badge> <Badge intent="note" minimal>0</Badge> <Badge intent="note" minimal>no</Badge> <Badge intent="note" minimal>off</Badge> <Badge intent="note" minimal>false</Badge> <Badge intent="note" minimal>disable</Badge></span>
 
@@ -111,7 +111,7 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 <ParamField path="NIXL_TELEMETRY_PROMETHEUS_PORT" type="integer">
   Port for NIXL's Prometheus exporter — a separate port from the Dynamo metrics port. Use distinct values per worker (e.g. `19090` prefill, `19091` decode) to avoid collisions.
 
-  `19090` is Dynamo's convention rather than a NIXL default. With this variable unset, the exporter falls back to its own built-in `9090`, which collides with the `DYN_SYSTEM_PORT` operator preset — so set it explicitly. A value outside `1`-`65535` is not a fallback either: NIXL then binds no exporter at all.
+  Optional: with the exporter selected, NIXL binds a listener whether or not this is set. `19090` is Dynamo's convention rather than a NIXL default, and with this variable unset the exporter falls back to its own built-in `9090` — which is the `DYN_SYSTEM_PORT` operator preset, so set it explicitly to keep the two apart. A value outside `1`-`65535` is not a fallback: NIXL then binds no exporter at all.
 
   **Operator preset:** `19090` on worker, prefill, and decode pods.
 </ParamField>
