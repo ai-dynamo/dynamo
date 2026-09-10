@@ -70,6 +70,62 @@ func TestDynamoGraphDeploymentConversionFailureIsFatal(t *testing.T) {
 	}
 }
 
+// TestRatchetDGDGPUProductErrorsSuppressesExactMatchesOnly proves the update
+// adapter removes a ratcheted product violation from the accumulated stateless
+// result only on a one-to-one match, and otherwise fails closed. The admission
+// chain always produces exactly one stateless error per candidate, so a missing
+// or duplicated match is only reachable from here.
+func TestRatchetDGDGPUProductErrorsSuppressesExactMatchesOnly(t *testing.T) {
+	dgd := newBetaDGDForValidation()
+	worker := &dgd.Spec.Components[1]
+	worker.PodTemplate.Annotations = map[string]string{consts.KubeAnnotationGPUPowerLimit: "300"}
+	workerPath := field.NewPath("spec", "components").Index(1)
+
+	candidates := dgdComponentGPUProductRuleErrors(worker, workerPath)
+	if len(candidates) != 1 {
+		t.Fatalf("candidate errors = %v, want exactly one", candidates)
+	}
+	candidate := candidates[0]
+	unrelated := field.Invalid(workerPath.Child("replicas"), int32(2), "is immutable")
+
+	tests := []struct {
+		name         string
+		allErrs      field.ErrorList
+		wantRetained []string
+		wantWarnings int
+	}{
+		{
+			name:         "an exact match is suppressed and every other error is retained",
+			allErrs:      field.ErrorList{candidate, unrelated},
+			wantRetained: []string{unrelated.Field},
+			wantWarnings: 1,
+		},
+		{
+			name:         "a missing match retains every error",
+			allErrs:      field.ErrorList{unrelated},
+			wantRetained: []string{unrelated.Field},
+		},
+		{
+			name:         "a duplicated match retains every error",
+			allErrs:      field.ErrorList{candidate, unrelated, candidate},
+			wantRetained: []string{candidate.Field, unrelated.Field, candidate.Field},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Ratchet the GPU-product rule against the accumulated stateless result")
+			validation := &dynamoGraphDeploymentValidation{}
+			retained := validation.ratchetDGDGPUProductErrors(tt.allErrs, dgd, dgd)
+
+			t.Log("Compare the retained errors and emitted warnings with the expectations")
+			assertFieldPaths(t, retained, tt.wantRetained)
+			if len(validation.warnings) != tt.wantWarnings {
+				t.Fatalf("warnings = %v, want %d", validation.warnings, tt.wantWarnings)
+			}
+		})
+	}
+}
+
 func assertFieldPaths(t *testing.T, errs field.ErrorList, want []string) {
 	t.Helper()
 	got := make([]string, len(errs))

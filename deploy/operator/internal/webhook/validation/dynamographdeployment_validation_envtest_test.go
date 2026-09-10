@@ -1122,8 +1122,8 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				betaWorkerComponent(dgd).PodTemplate.Spec.NodeSelector = nil
 			}),
 			wantWebhookCauses: []metav1.StatusCause{
-				webhookCause(metav1.CauseTypeFieldValueInvalid, powerProductPath, `Invalid value: null: `+apivalidation.FieldImmutableErrorMsg),
 				webhookCause(metav1.CauseTypeFieldValueRequired, powerProductPath, powerSelectorRequiredMessage),
+				webhookCause(metav1.CauseTypeFieldValueInvalid, powerProductPath, `Invalid value: null: `+apivalidation.FieldImmutableErrorMsg),
 			},
 		},
 
@@ -1217,8 +1217,8 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				}
 			}),
 			wantWebhookCauses: []metav1.StatusCause{
-				webhookCause(metav1.CauseTypeFieldValueInvalid, powerProductPath, `Invalid value: "`+dgdAdmissionUnknownGPUProduct+`": `+apivalidation.FieldImmutableErrorMsg),
 				webhookCause(metav1.CauseTypeFieldValueInvalid, powerProductPath, `Invalid value: "`+dgdAdmissionUnknownGPUProduct+`": `+powerUnknownProductDetail),
+				webhookCause(metav1.CauseTypeFieldValueInvalid, powerProductPath, `Invalid value: "`+dgdAdmissionUnknownGPUProduct+`": `+apivalidation.FieldImmutableErrorMsg),
 			},
 		},
 		{
@@ -1350,8 +1350,8 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				betaWorkerComponent(dgd).PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit] = "350"
 			}),
 			wantWebhookCauses: []metav1.StatusCause{
-				webhookCause(metav1.CauseTypeFieldValueInvalid, powerWattsPath, `Invalid value: "350": `+apivalidation.FieldImmutableErrorMsg),
 				webhookCause(metav1.CauseTypeFieldValueRequired, powerProductPath, powerSelectorRequiredMessage),
+				webhookCause(metav1.CauseTypeFieldValueInvalid, powerWattsPath, `Invalid value: "350": `+apivalidation.FieldImmutableErrorMsg),
 			},
 		},
 
@@ -2822,8 +2822,8 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				})
 			}),
 			wantWebhookCauses: []metav1.StatusCause{
-				webhookCause(causeTypeFieldValueForbidden, "spec.components", "Forbidden: component topology is immutable and cannot be modified after creation: components added: [extra]"),
 				webhookCause(metav1.CauseTypeFieldValueRequired, "spec.components[2].podTemplate.spec.nodeSelector[nvidia.com/gpu.product]", powerSelectorRequiredMessage),
+				webhookCause(causeTypeFieldValueForbidden, "spec.components", "Forbidden: component topology is immutable and cannot be modified after creation: components added: [extra]"),
 			},
 		},
 		{
