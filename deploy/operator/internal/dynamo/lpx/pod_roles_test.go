@@ -348,7 +348,7 @@ func TestConfigureDirectHybridAgentRuntimePreservesCustomEntrypoint(t *testing.T
 		{
 			name:          "args",
 			container:     corev1.Container{Name: commonconsts.MainContainerName, Args: []string{"custom-agent"}},
-			wantCommand:   []string{"/bin/bash"},
+			wantCommand:   nil,
 			wantArgs:      []string{"custom-agent"},
 			wantStartup:   lpuV2StartupProbe(true),
 			wantReadiness: lpuV2ReadinessProbe(true),
@@ -368,7 +368,7 @@ func TestConfigureDirectHybridAgentRuntimePreservesCustomEntrypoint(t *testing.T
 				StartupProbe:   customStartup,
 				ReadinessProbe: customReadiness,
 			},
-			wantCommand:   []string{"/bin/bash"},
+			wantCommand:   nil,
 			wantArgs:      []string{"custom-agent"},
 			wantStartup:   customStartup,
 			wantReadiness: customReadiness,

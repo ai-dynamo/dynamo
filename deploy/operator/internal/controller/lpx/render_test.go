@@ -1449,9 +1449,6 @@ func TestGenerateGrovePodCliqueSet_V2NodeLocalPreservesImageEntrypoint(t *testin
 										require.Contains(t, main.Args[1], "GROVE_PCLQ_POD_INDEX")
 									} else {
 										wantCommand := intent.command
-										if mode.hybrid && len(wantCommand) == 0 {
-											wantCommand = []string{"/bin/bash"}
-										}
 										require.Equal(t, wantCommand, main.Command)
 										require.True(t, slices.Equal(intent.args, main.Args))
 									}

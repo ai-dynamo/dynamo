@@ -118,18 +118,18 @@ func configureDirectHybridAgentRuntime(
 	agent := findMainContainer(agentPodSpec.Containers)
 	// Drop Nova-only flags before applying the direct Agent identity and worker defaults.
 	agent.Args, _ = stripNovaOnlyArgs(agent.Args)
-	hasCustomCommand := len(agent.Command) != 0 || len(agent.Args) != 0
+	hasCustomStartup := len(agent.Command) != 0 || len(agent.Args) != 0
 	agent.Name = lpuAgentContainerName
-	applyLPUWorkerContainerBase(agent, len(agent.Command) != 0)
-	if len(agent.Args) == 0 && !hasCustomCommand {
+	applyLPUWorkerContainerBase(agent, hasCustomStartup)
+	if len(agent.Args) == 0 && !hasCustomStartup {
 		agent.Args = []string{"-c", lpuPartitionRunCommand}
 	}
 
-	if !hasCustomCommand || agent.StartupProbe == nil {
-		agent.StartupProbe = lpuV2StartupProbe(hasCustomCommand)
+	if !hasCustomStartup || agent.StartupProbe == nil {
+		agent.StartupProbe = lpuV2StartupProbe(hasCustomStartup)
 	}
-	if !hasCustomCommand || agent.ReadinessProbe == nil {
-		agent.ReadinessProbe = lpuV2ReadinessProbe(hasCustomCommand)
+	if !hasCustomStartup || agent.ReadinessProbe == nil {
+		agent.ReadinessProbe = lpuV2ReadinessProbe(hasCustomStartup)
 	}
 
 	agent.Env = append(agent.Env,

@@ -494,8 +494,6 @@ spec:
                 --nic "${NIC_NAME}" \
                 --metadata-file "$(mktemp)" \
                 --readiness-port "${READINESS_PORT}"
-            command:
-            - /bin/bash
             env:
             - name: DYN_COMPONENT
               value: lpx
