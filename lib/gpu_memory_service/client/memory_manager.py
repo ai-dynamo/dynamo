@@ -476,7 +476,6 @@ class GMSClientMemoryManager:
             size=size,
             shared=shared,
         )
-        # Check cache first (re-attach within the same process).
         cached_va = self._inverse_mapping.get(allocation_id)
         if cached_va is not None:
             mapping = self._mappings.get(cached_va)
