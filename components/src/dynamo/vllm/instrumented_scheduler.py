@@ -566,6 +566,13 @@ class _BenchmarkSynchronizer:
 
     MAX_SYNC_TIMEOUT_SECONDS = 10
     FINAL_GO_GRACE_SECONDS = 1
+    # Wait budget of the capacity phase alone. A rank reports its capacity
+    # only after proving the host-local inputs of the KV warm-up (dataset
+    # download, hash and parse, tokenizer load, content probe), and that
+    # work takes far longer on a cold host than the protocol timeout allows
+    # between ranks. The phase precedes every measurement, so a long wait
+    # costs startup time only.
+    CAPACITY_TIMEOUT_SECONDS = 300
 
     def __init__(
         self,
@@ -615,6 +622,10 @@ class _BenchmarkSynchronizer:
     def timeout_seconds(self) -> float:
         return self._timeout_ms / 1000
 
+    @property
+    def capacity_timeout_seconds(self) -> float:
+        return max(self.timeout_seconds, float(self.CAPACITY_TIMEOUT_SECONDS))
+
     def close(self) -> None:
         linger = (
             self._timeout_ms + int(self.FINAL_GO_GRACE_SECONDS * 1000)
@@ -626,7 +637,11 @@ class _BenchmarkSynchronizer:
     def negotiate_capacity(
         self, local_capacity: _BenchmarkCapacityEnvelope
     ) -> _BenchmarkCapacityEnvelope:
-        """Agree on the minimum capacity that every attention-DP rank can run."""
+        """Agree on the minimum capacity that every attention-DP rank can run.
+
+        The wait for the peers' reports (rank 0 for every follower's capacity,
+        a follower for rank 0's result) runs on the capacity budget; the
+        acknowledgement round after it keeps the protocol timeout."""
         message = {
             "type": "capacity",
             "benchmark_id": 0,
@@ -636,7 +651,7 @@ class _BenchmarkSynchronizer:
         if self.dp_rank == 0:
             return self._coordinate_capacity(message)
 
-        deadline = time.monotonic() + self.timeout_seconds
+        deadline = time.monotonic() + self.capacity_timeout_seconds
         self._socket.send_json(message)
         reply = self._recv_follower(deadline, 0, "capacity_result")
         common_capacity = _BenchmarkCapacityEnvelope.from_dict(reply.get("capacity"))
@@ -727,7 +742,7 @@ class _BenchmarkSynchronizer:
         ]
         identities: dict[int, bytes] = {}
         seen_identities: set[bytes] = set()
-        deadline = time.monotonic() + self.timeout_seconds
+        deadline = time.monotonic() + self.capacity_timeout_seconds
         try:
             while len(identities) < self.dp_size - 1:
                 identity, message = self._recv_router(deadline, 0)
@@ -2549,6 +2564,8 @@ class InstrumentedScheduler(AsyncScheduler):
             # Resolve eligibility (and the seeding dataset) here, before the
             # grid digest is negotiated, so a host-local failure demotes the
             # whole group instead of forking one rank onto a different plan.
+            # The probe's cost is why the capacity phase waits on its own
+            # budget (``_BenchmarkSynchronizer.CAPACITY_TIMEOUT_SECONDS``).
             kvwarm_eligible=(
                 self._bench_config.mode in ("decode", "agg")
                 and self._kvwarm_warm_eligible()

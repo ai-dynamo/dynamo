@@ -677,6 +677,73 @@ def test_benchmark_synchronizer_rejects_capacity_invariant_mismatch():
         rank0.close()
 
 
+def _synchronizer_pair(timeout: float):
+    endpoint = f"inproc://benchmark-sync-{uuid.uuid4().hex}"
+    ranks = []
+    for dp_rank in (0, 1):
+        ranks.append(
+            instrumented_scheduler_module._BenchmarkSynchronizer(
+                dp_rank=dp_rank,
+                dp_size=2,
+                master_ip="unused",
+                port=0,
+                timeout=timeout,
+                endpoint=endpoint,
+            )
+        )
+    return ranks
+
+
+@pytest.mark.parametrize("late_rank", [0, 1])
+def test_benchmark_synchronizer_capacity_phase_outlasts_the_protocol_timeout(
+    monkeypatch, late_rank
+):
+    """A rank reports capacity only once its host-local warm-up probe is done,
+    so the ranks' reports can be far apart; the capacity phase absorbs that
+    skew, whichever rank is the late one, while the protocol timeout the
+    later phases run on stays short."""
+    Synchronizer = instrumented_scheduler_module._BenchmarkSynchronizer
+    monkeypatch.setattr(Synchronizer, "CAPACITY_TIMEOUT_SECONDS", 5)
+    rank0, rank1 = _synchronizer_pair(timeout=0.2)
+    assert rank0.timeout_seconds == 0.2
+    assert rank0.capacity_timeout_seconds == 5.0
+    delay = 0.6  # past the protocol timeout, inside the capacity budget
+    result = {}
+
+    def run(dp_rank, synchronizer):
+        if dp_rank == late_rank:
+            time.sleep(delay)
+        result[dp_rank] = synchronizer.negotiate_capacity(_benchmark_capacity())
+
+    follower = threading.Thread(target=run, args=(1, rank1))
+    follower.start()
+    try:
+        run(0, rank0)
+        follower.join(timeout=5)
+        assert not follower.is_alive()
+        assert result[0] == result[1] == _benchmark_capacity()
+    finally:
+        rank1.close()
+        rank0.close()
+
+
+def test_benchmark_synchronizer_capacity_phase_is_still_bounded(monkeypatch):
+    """The capacity budget never drops below the protocol timeout, and a rank
+    whose peer never reports still fails at the budget instead of hanging."""
+    Synchronizer = instrumented_scheduler_module._BenchmarkSynchronizer
+    monkeypatch.setattr(Synchronizer, "CAPACITY_TIMEOUT_SECONDS", 0)
+    rank0, rank1 = _synchronizer_pair(timeout=0.2)
+    try:
+        assert rank0.capacity_timeout_seconds == 0.2
+        with pytest.raises(TimeoutError, match="attention-DP ranks"):
+            rank0.negotiate_capacity(_benchmark_capacity())
+        with pytest.raises(TimeoutError, match="capacity_result"):
+            rank1.negotiate_capacity(_benchmark_capacity())
+    finally:
+        rank1.close()
+        rank0.close()
+
+
 def _digest_stub(max_num_running_reqs: int):
     """Populate only the attributes ``_bench_grid_invariants_digest`` reads,
     mirroring the activation-time filtering of the decode capture sizes."""
