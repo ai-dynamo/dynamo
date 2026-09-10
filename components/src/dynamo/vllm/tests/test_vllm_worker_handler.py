@@ -1925,6 +1925,8 @@ class TestRLAdminRouteHardening:
                 handler.resume_generation,
                 handler.flush_cache,
                 handler.abort_request,
+                handler.get_weight_version,
+                handler.set_weight_version,
             ):
                 resp = await fn(body)
                 assert resp["status"] == "error", (fn.__name__, body, resp)
@@ -2079,28 +2081,54 @@ class TestRLAdminRouteHardening:
         assert (await handler.get_weight_version({}))["version_declared"] is False
 
     @pytest.mark.asyncio
-    async def test_update_without_a_version_declares_nothing(self):
+    @pytest.mark.parametrize("version", [None, 7, "policy-42"])
+    @pytest.mark.parametrize(
+        ("route", "body"),
+        [
+            ("set_weight_version", {}),
+            ("update_weights_from_disk", {"model_path": "/models/checkpoint-42"}),
+            ("update_weights_from_distributed", {"engine_rpc": "update_weights"}),
+        ],
+    )
+    async def test_explicit_version_is_declared(self, route, body, version):
         handler = self._make_rl_handler()
-
-        distributed = await handler.update_weights_from_distributed(
-            {
-                "allow_unpaused": True,
-                "reset_prefix_cache": False,
-                "engine_rpc": "update_weights",
-            }
-        )
         handler._paused = True
-        disk = await handler.update_weights_from_disk(
-            {"model_path": "/models/checkpoint-42"}
-        )
 
-        assert distributed == {"status": "ok", "version": "unknown"}
-        assert disk == {"status": "ok", "version": "unknown"}
+        response = await getattr(handler, route)({**body, "weight_version": version})
+
+        assert response == {"status": "ok", "version": version}
         assert await handler.get_weight_version({}) == {
             "status": "ok",
-            "version": None,
-            "version_declared": False,
+            "version": version,
+            "version_declared": True,
         }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "version",
+        [mod._WEIGHT_VERSION_UNDECLARED, None, "policy-42"],
+        ids=["undeclared", "declared-null", "declared-string"],
+    )
+    @pytest.mark.parametrize(
+        ("route", "body"),
+        [
+            ("update_weights_from_disk", {"model_path": "/models/checkpoint-43"}),
+            ("update_weights_from_distributed", {"engine_rpc": "update_weights"}),
+        ],
+    )
+    async def test_update_without_a_version_preserves_declaration(
+        self, route, body, version
+    ):
+        handler = self._make_rl_handler()
+        handler._paused = True
+        if version is not mod._WEIGHT_VERSION_UNDECLARED:
+            await handler.set_weight_version({"weight_version": version})
+        previous = await handler.get_weight_version({})
+
+        response = await getattr(handler, route)(body)
+
+        assert response == {"status": "ok", "version": "unknown"}
+        assert await handler.get_weight_version({}) == previous
 
     @pytest.mark.asyncio
     async def test_init_weights_update_group_succeeds_within_timeout(self):
