@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import sys
+import tempfile
 from abc import ABC, abstractmethod
 from contextlib import ExitStack
 
@@ -26,6 +27,20 @@ from tests.utils.port_utils import allocate_ports, deallocate_ports
 logger = logging.getLogger(__name__)
 
 
+def _replace_cli_option(args: list[str], option: str, value: str) -> list[str]:
+    """Replace one two-token CLI option while retaining unrelated caps."""
+    out = list(args)
+    try:
+        index = out.index(option)
+    except ValueError:
+        out.extend([option, value])
+    else:
+        if index + 1 >= len(out):
+            raise ValueError(f"missing value for {option}")
+        out[index + 1] = value
+    return out
+
+
 class GMSProcessManager:
     """Start the shared GMS daemons and frontend for one test scenario."""
 
@@ -36,11 +51,16 @@ class GMSProcessManager:
         *,
         read_only_weights: bool = False,
         tags: tuple[str, ...] = ("weights", "kv_cache"),
+        kv_directory: bool = False,
     ):
         self._request = request
         self._engine_cls = engine_cls
         self._read_only_weights = read_only_weights
         self._tags = tags
+        self._kv_directory = kv_directory
+        self._directory_env: dict[str, str] = {}
+        self.kv_directory_socket: str | None = None
+        self.kv_directory_manifest: str | None = None
         self._stack: ExitStack | None = None
         self.frontend_port: int | None = None
         self.weights_gms = None
@@ -51,13 +71,37 @@ class GMSProcessManager:
     def __enter__(self):
         stack = ExitStack()
         try:
+            if self._kv_directory:
+                shared_dir = stack.enter_context(
+                    tempfile.TemporaryDirectory(prefix="gms-local-failover-")
+                )
+                self.kv_directory_socket = os.path.join(shared_dir, "directory.sock")
+                self.kv_directory_manifest = f"local-{self._request.node.name}-v1"
+                lease_dir = os.path.join(shared_dir, "leases")
+                os.makedirs(lease_dir)
+                self._directory_env = {
+                    "FAILOVER_LOCK_PATH": os.path.join(shared_dir, "failover.lock"),
+                    "GMS_KV_DIRECTORY_MODE": "authoritative",
+                    "GMS_KV_DIRECTORY_SOCKET": self.kv_directory_socket,
+                    "GMS_KV_DIRECTORY_MANIFEST": self.kv_directory_manifest,
+                    "GMS_KV_DIRECTORY_DIAGNOSTICS": "1",
+                    "GMS_KV_DIRECTORY_ASYNC_READ": "1",
+                    "GMS_KV_DIRECTORY_ASYNC_PUBLISH": "1",
+                    "GMS_KV_LEASES": "1",
+                    "GMS_KV_LEASE_SHM_DIR": lease_dir,
+                    "GMS_VLLM_SHARED_KV": "1",
+                }
             if "weights" in self._tags:
                 self.weights_gms = stack.enter_context(
                     GMSServer(device=0, tag="weights")
                 )
             if "kv_cache" in self._tags:
                 self.kv_cache_gms = stack.enter_context(
-                    GMSServer(device=0, tag="kv_cache")
+                    GMSServer(
+                        device=0,
+                        tag="kv_cache",
+                        directory_socket_path=self.kv_directory_socket,
+                    )
                 )
             frontend = stack.enter_context(
                 DynamoFrontendProcess(
@@ -81,6 +125,9 @@ class GMSProcessManager:
         self.weights_gms = None
         self.kv_cache_gms = None
         self._engine_ids.clear()
+        self.kv_directory_socket = None
+        self.kv_directory_manifest = None
+        self._directory_env = {}
         self.engines.clear()
         if stack is None:
             return False
@@ -108,6 +155,9 @@ class GMSProcessManager:
             engine_id=engine_id,
             read_only_weights=read_only_weights,
         )
+        assert engine.env is not None
+        engine.env.update(self._directory_env)
+        engine.env["ENGINE_ID"] = engine_id
         self._engine_ids.add(engine_id)
         return engine
 
@@ -269,6 +319,15 @@ class VLLMWithGMSProcess(GMSEngineProcess):
                 "enable_kv_cache_events": True,
             }
         )
+        gpu_mem_args = build_gpu_mem_args("build_vllm_gpu_mem_args") or [
+            "--gpu-memory-utilization",
+            "0.8",
+        ]
+        gpu_mem_util = os.environ.get("VLLM_GMS_GPU_MEM_UTIL")
+        if gpu_mem_util is not None:
+            gpu_mem_args = _replace_cli_option(
+                gpu_mem_args, "--gpu-memory-utilization", gpu_mem_util
+            )
         command = [
             sys.executable,
             "-m",
@@ -284,10 +343,7 @@ class VLLMWithGMSProcess(GMSEngineProcess):
             "--kv-events-config",
             kv_events_cfg,
         ]
-        command.extend(
-            build_gpu_mem_args("build_vllm_gpu_mem_args")
-            or ["--gpu-memory-utilization", "0.8"]
-        )
+        command.extend(gpu_mem_args)
         extra_config = self.model_loader_extra_config()
         if extra_config is not None:
             command.extend(
