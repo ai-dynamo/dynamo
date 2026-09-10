@@ -267,7 +267,7 @@ spec:
     lpx:
       buildId: my-model/build
     roles:
-    - name: worker
+    - name: agent
       podTemplate:
         spec:
           containers:
@@ -282,9 +282,9 @@ spec:
               claimName: model-storage
 ```
 
-Create the `model-storage` PVC in the DGD's namespace with storage accessible to all LPX Pods. Replace `my-model/build` with a build available through the configured LPX model registry and `<lpu-runtime-image>` with its compatible runtime image. The `worker` role configures Agent Pods; the optional `leader` role configures the conductor. With one LPX component, the conductor reuses the worker template unless the leader supplies a separate `podTemplate`. For a hybrid engine, configure the hybrid runtime template on the leader role.
+Create the `model-storage` PVC in the DGD's namespace with storage accessible to all LPX Pods. Replace `my-model/build` with a build available through the configured LPX model registry and `<lpu-runtime-image>` with its compatible runtime image. The `agent` role configures Agent Pods; the optional `conductor` role configures the conductor. With one LPX component, the conductor reuses the agent template unless the conductor supplies a separate `podTemplate`. For a hybrid engine, configure the hybrid runtime template on the conductor role.
 
-For LPU+LPU speculative decoding, declare separate draft and target LPX components: the draft has only a `worker` role; the target has `leader` and `worker` roles. All LPX components share one LPX deployment and PodCliqueSet, separate from ordinary components. See [LPX component fields](../../reference/kubernetes-api/dynamo-component-deployment.mdx#spec-reference) for replica counts and template requirements.
+For LPU+LPU speculative decoding, declare separate draft and target LPX components: the draft has only an `agent` role; the target has `conductor` and `agent` roles. All LPX components share one LPX deployment and PodCliqueSet, separate from ordinary components. See [LPX component fields](../../reference/kubernetes-api/dynamo-component-deployment.mdx#spec-reference) for replica counts and template requirements.
 
 For per-backend setup and tuning, see [vLLM](../../developer-guide/knowledge-base/modular-components/backends/vllm/overview.md), [SGLang](../../developer-guide/knowledge-base/modular-components/backends/sglang/overview.md), and [TensorRT-LLM](../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/overview.md).
 

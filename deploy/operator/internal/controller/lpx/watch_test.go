@@ -258,7 +258,7 @@ func TestLPXSourceWatchIgnoresOrdinaryChurn(t *testing.T) {
 	require.True(t, predicate.Update(event.UpdateEvent{ObjectOld: ordinary, ObjectNew: source}))
 
 	t.Log("LPX input changes and persisted restart selection wake the child")
-	changed.Spec.Components[0].ComponentRole(nvidiacomv1beta1.ComponentRoleWorker).PodTemplate.Spec.Containers[0].Image = "new-runtime"
+	changed.Spec.Components[0].ComponentRole(nvidiacomv1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.Containers[0].Image = "new-runtime"
 	require.True(t, predicate.Update(event.UpdateEvent{ObjectOld: source, ObjectNew: changed}))
 	changed = source.DeepCopy()
 	changed.Spec.Restart = &nvidiacomv1beta1.Restart{ID: "restart"}
@@ -285,8 +285,8 @@ func BenchmarkLPXSourceWatchStatusChurn(b *testing.B) {
 			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{
 				ComponentName: "lpx", ComponentType: nvidiacomv1beta1.ComponentTypeLPX,
 				LPX: &nvidiacomv1beta1.LPXConfig{BuildID: "model/build"},
-				Roles: []nvidiacomv1beta1.ComponentRoleSpec{{Name: nvidiacomv1beta1.ComponentRoleLeader}, {
-					Name: nvidiacomv1beta1.ComponentRoleWorker, PodTemplate: &corev1.PodTemplateSpec{
+				Roles: []nvidiacomv1beta1.ComponentRoleSpec{{Name: nvidiacomv1beta1.ComponentRoleLPXConductor}, {
+					Name: nvidiacomv1beta1.ComponentRoleLPXAgent, PodTemplate: &corev1.PodTemplateSpec{
 						Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "lpu-runtime:test"}}},
 					},
 				}},
@@ -309,7 +309,7 @@ func TestLPXDRAWatchMapsIndexedConsumers(t *testing.T) {
 	t.Log("Index consumed regular and init-container references, deduplicating shared aliases")
 	source := newLPXTestSource(dynamolpx.PipelineLPX, "build-v2")
 	child := newLPXTestDeployment(t, source)
-	pod := &dynamolpx.ServingComponent(source).ComponentRole(nvidiacomv1beta1.ComponentRoleLeader).PodTemplate.Spec
+	pod := &dynamolpx.ServingComponent(source).ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor).PodTemplate.Spec
 	pod.Containers[0].Resources.Claims = []corev1.ResourceClaim{{Name: "direct"}, {Name: "template"}}
 	pod.Containers = append(pod.Containers, corev1.Container{Name: "sidecar", Resources: corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: "direct"}}}})
 	pod.InitContainers = []corev1.Container{
@@ -331,7 +331,7 @@ func TestLPXDRAWatchMapsIndexedConsumers(t *testing.T) {
 	foreign.Name, foreign.Namespace = "foreign", "other-namespace"
 	unused := source.DeepCopy()
 	unused.Name = "unused"
-	unusedPod := &dynamolpx.ServingComponent(unused).ComponentRole(nvidiacomv1beta1.ComponentRoleLeader).PodTemplate.Spec
+	unusedPod := &dynamolpx.ServingComponent(unused).ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor).PodTemplate.Spec
 	unusedPod.Containers = unusedPod.Containers[:1]
 	unusedPod.Containers[0].Resources.Claims, unusedPod.InitContainers = nil, nil
 	claim := &resourcev1.ResourceClaim{

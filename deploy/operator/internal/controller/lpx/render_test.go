@@ -217,11 +217,11 @@ func TestLPXRenderingPreservesInputs(t *testing.T) {
 			if hybrid {
 				component.Replicas = ptr.To(int32(3))
 				component.MinAvailable = ptr.To(int32(3))
-				component.ComponentRole(v1beta1.ComponentRoleLeader).Replicas = ptr.To(int32(2))
+				component.ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas = ptr.To(int32(2))
 			}
 			if singleXT {
 				t.Log("Keep XT's authored readonly mount at the canonical config path")
-				main := &component.ComponentRole(v1beta1.ComponentRoleWorker).PodTemplate.Spec.Containers[0]
+				main := &component.ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.Containers[0]
 				main.VolumeMounts = append(main.VolumeMounts,
 					corev1.VolumeMount{Name: "config", MountPath: "/configs", ReadOnly: true})
 			}
@@ -426,14 +426,14 @@ func TestLPXSpecDecodeConductorTemplate(t *testing.T) {
 			source := &v1beta1.DynamoGraphDeployment{}
 			require.NoError(t, yaml.Unmarshal(payload, source))
 			for _, component := range lpx.Components(source) {
-				agent := component.ComponentRole(v1beta1.ComponentRoleWorker).PodTemplate
+				agent := component.ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate
 				agent.Spec.Containers[0].Image = component.ComponentName + "-runtime"
 				agent.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "AGENT_ONLY", Value: "kept"}}
 			}
 			target := lpx.ServingComponent(source)
 			wantImage := target.ComponentName + "-runtime"
 			if explicit {
-				template := target.ComponentRole(v1beta1.ComponentRoleWorker).PodTemplate.DeepCopy()
+				template := target.ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.DeepCopy()
 				wantImage = "independent-conductor-runtime"
 				template.Spec.Containers[0].Image = wantImage
 				template.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "CONDUCTOR_ONLY", Value: "kept"}}
@@ -444,7 +444,7 @@ func TestLPXSpecDecodeConductorTemplate(t *testing.T) {
 						MatchExpressions: []corev1.NodeSelectorRequirement{{Key: "pool", Operator: corev1.NodeSelectorOpIn, Values: []string{"conductor"}}},
 					}}},
 				}}
-				target.ComponentRole(v1beta1.ComponentRoleLeader).PodTemplate = template
+				target.ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate = template
 			}
 			before := source.DeepCopy()
 			selected, err := lpx.ResolveSelectedWorkload(t.Context(), source, registry)
@@ -472,7 +472,7 @@ func TestLPXSpecDecodeConductorTemplate(t *testing.T) {
 					require.Contains(t, container.Args[1], `; exec /bin/nova "$@"`)
 					require.Equal(t, "--", container.Args[2])
 					if explicit {
-						template := target.ComponentRole(v1beta1.ComponentRoleLeader).PodTemplate
+						template := target.ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate
 						require.Equal(t, "explicit-conductor", clique.Labels["owner"])
 						require.Equal(t, template.Spec.NodeSelector, clique.Spec.PodSpec.NodeSelector)
 						require.Equal(t, template.Spec.Affinity, clique.Spec.PodSpec.Affinity)
@@ -1075,7 +1075,7 @@ func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *test
 	lpxComponent.ModelRef = &v1beta1.ModelReference{Name: "test/model"}
 
 	t.Log("Customize the independent Cyborg batch while keeping its sidecar separate")
-	cyborgRole := lpxComponent.ComponentRole(v1beta1.ComponentRoleLeader)
+	cyborgRole := lpxComponent.ComponentRole(v1beta1.ComponentRoleLPXConductor)
 	require.NotNil(t, cyborgRole)
 	authoredCyborgMain := &cyborgRole.PodTemplate.Spec.Containers[0]
 	require.Equal(t, commonconsts.MainContainerName, authoredCyborgMain.Name)
@@ -1090,7 +1090,7 @@ func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *test
 	cyborgRole.PodTemplate.Spec.Containers = append(cyborgRole.PodTemplate.Spec.Containers, sidecar)
 
 	t.Log("Customize Agent metadata and placement while leaving its launch to the runtime")
-	agentTemplate := lpxComponent.ComponentRole(v1beta1.ComponentRoleWorker).PodTemplate
+	agentTemplate := lpxComponent.ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate
 	agentMain := &agentTemplate.Spec.Containers[0]
 	require.NotEmpty(t, agentMain.Command)
 	require.NotEmpty(t, agentMain.Args)
@@ -1390,12 +1390,12 @@ func TestGenerateGrovePodCliqueSet_V2NodeLocalPreservesImageEntrypoint(t *testin
 							component := dgd.GetComponentByName("lpu")
 							require.NotNil(t, component)
 							component.ExtraPodSpecMergeStrategy = strategy.componentStrategy
-							agent := component.ComponentRole(v1beta1.ComponentRoleWorker)
+							agent := component.ComponentRole(v1beta1.ComponentRoleLPXAgent)
 							lpxMain := &agent.PodTemplate.Spec.Containers[0]
 							lpxMain.VolumeMounts = append(lpxMain.VolumeMounts, corev1.VolumeMount{Name: "tmp", MountPath: "/tmp"})
 							templates := []*corev1.PodTemplateSpec{agent.PodTemplate}
 							if mode.hybrid {
-								templates = append(templates, component.ComponentRole(v1beta1.ComponentRoleLeader).PodTemplate)
+								templates = append(templates, component.ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate)
 							}
 							for roleIndex, template := range templates {
 								main := &template.Spec.Containers[0]
@@ -1530,7 +1530,7 @@ func TestLPXRenderingPreservesStrategicCyborgOverrides(t *testing.T) {
 	require.NoError(t, err)
 	source := &v1beta1.DynamoGraphDeployment{}
 	require.NoError(t, yaml.Unmarshal(payload, source))
-	leader := lpx.ServingComponent(source).ComponentRole(v1beta1.ComponentRoleLeader).PodTemplate
+	leader := lpx.ServingComponent(source).ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate
 	leader.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{
 		{Name: "config", MountPath: "/custom-config", ReadOnly: true},
 		{Name: "infiniband", MountPath: "/custom-infiniband", ReadOnly: true},

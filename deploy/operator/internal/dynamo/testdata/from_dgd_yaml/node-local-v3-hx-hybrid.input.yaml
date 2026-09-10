@@ -15,7 +15,7 @@ spec:
       lpx:
         buildId: node-local-v3-hx-connected-lpx
       roles:
-      - name: leader
+      - name: conductor
         replicas: 1
         podTemplate:
           spec:
@@ -32,7 +32,7 @@ spec:
               resources:
                 claims:
                 - name: gpu
-      - name: worker
+      - name: agent
         podTemplate:
           spec:
             containers:

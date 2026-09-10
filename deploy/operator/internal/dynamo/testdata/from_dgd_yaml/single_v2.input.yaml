@@ -27,8 +27,8 @@ spec:
           tokenizer_path: llama3.1
           vocab_size: 128256
       roles:
-      - name: leader
-      - name: worker
+      - name: conductor
+      - name: agent
         podTemplate:
           spec:
             containers:

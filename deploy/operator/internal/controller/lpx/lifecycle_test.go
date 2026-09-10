@@ -278,7 +278,7 @@ func TestLPXPublicationWitnessReadsOnlyNamedChildrenAndNoPods(t *testing.T) {
 	ctx := t.Context()
 	dgd, source, registry := newLPXTestDGD(t, lpx.PipelineLPX)
 	source.Spec.Components[0].Replicas = ptr.To(int32(2))
-	source.Spec.Components[0].ComponentRole(nvidiacomv1beta1.ComponentRoleLeader).Replicas = ptr.To(int32(2))
+	source.Spec.Components[0].ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor).Replicas = ptr.To(int32(2))
 	reconciler, desired := newPreparedLPXTestReconciler(t, registry, ctx, dgd, source)
 	require.Equal(t, int32(2), desired.plan.Replicas)
 	require.Len(t, desired.requests, 2)
@@ -449,7 +449,7 @@ func TestLPXPublicationWitnessReadsOnlyNamedChildrenAndNoPods(t *testing.T) {
 func TestSelectedLPXObservesLimitsOnlyCyborgGPUIntent(t *testing.T) {
 	t.Log("Materialize a hybrid Cyborg whose classic GPU intent exists only in limits")
 	dgd, source, registry := newLPXTestDGD(t, lpx.PipelineLPX)
-	cyborgPodSpec := &source.Spec.Components[0].ComponentRole(nvidiacomv1beta1.ComponentRoleLeader).PodTemplate.Spec
+	cyborgPodSpec := &source.Spec.Components[0].ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor).PodTemplate.Spec
 	cyborgPodSpec.ResourceClaims = nil
 	cyborgPodSpec.Containers[0].Resources = corev1.ResourceRequirements{
 		Limits: corev1.ResourceList{
@@ -1177,7 +1177,7 @@ func TestSelectedNodeLocalLPXReadinessUsesOneFixedScalingGroup(t *testing.T) {
 			deployment, source, registry := newLPXTestDGD(t, pipeline)
 			if pipeline == lpx.PipelineLPX {
 				source.Spec.Components[0].Replicas = ptr.To(int32(1))
-				source.Spec.Components[0].ComponentRole(nvidiacomv1beta1.ComponentRoleLeader).Replicas = ptr.To(int32(2))
+				source.Spec.Components[0].ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor).Replicas = ptr.To(int32(2))
 			}
 			reconciler, desired := newPreparedLPXTestReconciler(t, registry, ctx, deployment, source)
 			objects := lpxMaterializedObjects(t, reconciler, deployment, source, desired)
@@ -1808,7 +1808,7 @@ func TestLPXSchedulerScopedGangAndStartupWitnessesAreDisjoint(t *testing.T) {
 			dgd, source, registry := newLPXTestDGD(t, lpx.PipelineLPX)
 			if test.name == crossReplicaAgent {
 				source.Spec.Components[0].Replicas = ptr.To(int32(2))
-				source.Spec.Components[0].ComponentRole(nvidiacomv1beta1.ComponentRoleLeader).Replicas = ptr.To(int32(1))
+				source.Spec.Components[0].ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor).Replicas = ptr.To(int32(1))
 			}
 			reconciler, desired := newPreparedLPXTestReconciler(t, registry, ctx, dgd, source)
 			objects := lpxMaterializedObjects(t, reconciler, dgd, source, desired)
@@ -2136,8 +2136,8 @@ func newLPXTestSource(pipeline lpx.Pipeline, buildID string) *nvidiacomv1beta1.D
 					BuildID:  buildID,
 					Settings: &apiextensionsv1.JSON{Raw: []byte(`{"prop_sync":true}`)},
 				},
-				Roles: []nvidiacomv1beta1.ComponentRoleSpec{{Name: nvidiacomv1beta1.ComponentRoleLeader}, {
-					Name: nvidiacomv1beta1.ComponentRoleWorker,
+				Roles: []nvidiacomv1beta1.ComponentRoleSpec{{Name: nvidiacomv1beta1.ComponentRoleLPXConductor}, {
+					Name: nvidiacomv1beta1.ComponentRoleLPXAgent,
 					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{
 							Name: consts.MainContainerName, Image: "lpu-runtime",
@@ -2157,8 +2157,8 @@ func newLPXTestSource(pipeline lpx.Pipeline, buildID string) *nvidiacomv1beta1.D
 		},
 	}
 	if pipeline == lpx.PipelineLPX {
-		*source.Spec.Components[0].ComponentRole(nvidiacomv1beta1.ComponentRoleLeader) = nvidiacomv1beta1.ComponentRoleSpec{
-			Name:     nvidiacomv1beta1.ComponentRoleLeader,
+		*source.Spec.Components[0].ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor) = nvidiacomv1beta1.ComponentRoleSpec{
+			Name:     nvidiacomv1beta1.ComponentRoleLPXConductor,
 			Replicas: &one,
 			PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 				ResourceClaims: []corev1.PodResourceClaim{{Name: "gpu", ResourceClaimTemplateName: ptr.To("gpu")}},
@@ -2186,7 +2186,7 @@ func newLPXSpecDecodeTestSource() *nvidiacomv1beta1.DynamoGraphDeployment {
 	target := &source.Spec.Components[0]
 	draft := target.DeepCopy()
 	draft.ComponentName, draft.LPX.BuildID, draft.Replicas = "draft", "draft-build", ptr.To(int32(2))
-	draft.Roles = []nvidiacomv1beta1.ComponentRoleSpec{*draft.ComponentRole(nvidiacomv1beta1.ComponentRoleWorker)}
+	draft.Roles = []nvidiacomv1beta1.ComponentRoleSpec{*draft.ComponentRole(nvidiacomv1beta1.ComponentRoleLPXAgent)}
 	source.Spec.Components = append(source.Spec.Components, *draft)
 	return source
 }

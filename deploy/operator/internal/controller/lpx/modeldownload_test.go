@@ -340,12 +340,12 @@ func newModelDownloadDGD(buildIDs ...string) *v1beta1.DynamoGraphDeployment {
 		component := v1beta1.DynamoComponentDeploymentSharedSpec{
 			ComponentName: "lpx-worker", ComponentType: v1beta1.ComponentTypeLPX, Replicas: ptr.To(int32(1)),
 			LPX: &v1beta1.LPXConfig{BuildID: buildID},
-			Roles: []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleWorker, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Roles: []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 				Containers: []corev1.Container{{Name: "main", Image: "lpu-runtime"}},
 			}}}},
 		}
 		if i == len(buildIDs)-1 {
-			component.Roles = append(component.Roles, v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLeader})
+			component.Roles = append(component.Roles, v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor})
 		} else {
 			component.ComponentName = "draft"
 		}

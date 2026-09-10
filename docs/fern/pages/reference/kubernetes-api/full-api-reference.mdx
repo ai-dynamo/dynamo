@@ -477,7 +477,7 @@ See [MultinodeSpec](#multinodespec).
 </ParamField>
 
 <ParamField path="roles" type="ComponentRoleSpec array">
-Roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Admission defaults omitted replicas to 1 for leader and multinode.nodeCount minus 1 for worker. Omitting the roles list preserves the implicit multinode role layout. LPX components require a worker role and may declare a leader role.
+Roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Admission defaults omitted replicas to 1 for leader and multinode.nodeCount minus 1 for worker. Omitting the roles list preserves the implicit multinode role layout. LPX components require an agent role and may declare a conductor role.
 See [ComponentRoleSpec](#componentrolespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -656,7 +656,7 @@ See [MultinodeSpec](#multinodespec).
 </ParamField>
 
 <ParamField path="roles" type="object array">
-Roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Admission defaults omitted replicas to 1 for leader and multinode.nodeCount minus 1 for worker. Omitting the roles list preserves the implicit multinode role layout. LPX components require a worker role and may declare a leader role. Standalone DCD roles accept only `name` and `replicas`; `providerOverride` is a DGD-only provider context.
+Roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Admission defaults omitted replicas to 1 for leader and multinode.nodeCount minus 1 for worker. Omitting the roles list preserves the implicit multinode role layout. LPX components require an agent role and may declare a conductor role. Standalone DCD roles accept only `name` and `replicas`; `providerOverride` is a DGD-only provider context.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2777,7 +2777,7 @@ See [MultinodeSpec](#v1beta1-multinodespec).
 </ParamField>
 
 <ParamField path="roles" type="ComponentRoleSpec array">
-roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Admission defaults omitted replicas to 1 for leader and multinode.nodeCount minus 1 for worker. Omitting the roles list preserves the implicit multinode role layout. LPX components require a worker role and may declare a leader role.
+roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Admission defaults omitted replicas to 1 for leader and multinode.nodeCount minus 1 for worker. Omitting the roles list preserves the implicit multinode role layout. LPX components require an agent role and may declare a conductor role.
 See [ComponentRoleSpec](#v1beta1-componentrolespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -2898,7 +2898,7 @@ See [MultinodeSpec](#v1beta1-multinodespec).
 </ParamField>
 
 <ParamField path="roles" type="object array">
-roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Admission defaults omitted replicas to 1 for leader and multinode.nodeCount minus 1 for worker. Omitting the roles list preserves the implicit multinode role layout. LPX components require a worker role and may declare a leader role. Standalone DCD roles accept only `name` and `replicas`; `providerOverride` is a DGD-only provider context.
+roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Admission defaults omitted replicas to 1 for leader and multinode.nodeCount minus 1 for worker. Omitting the roles list preserves the implicit multinode role layout. LPX components require an agent role and may declare a conductor role. Standalone DCD roles accept only `name` and `replicas`; `providerOverride` is a DGD-only provider context.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 

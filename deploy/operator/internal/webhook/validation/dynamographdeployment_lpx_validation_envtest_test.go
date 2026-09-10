@@ -145,7 +145,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Components[0].Roles[1].Name = "unknown"
 			}),
-			wantWebhookErrs: []string{`spec.components[0].roles[1].name: Unsupported value: "unknown": supported values: "leader", "worker"`},
+			wantWebhookErrs: []string{`spec.components[0].roles[1].name: Unsupported value: "unknown": supported values: "conductor", "agent"`},
 		},
 		{
 			name: "v1alpha1 LPX image errors aggregate at the authored role indices",
@@ -167,7 +167,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 				component := &dgd.Spec.Components[0]
 				component.Roles[1] = *component.Roles[0].DeepCopy()
 			}),
-			wantSchemaErr: `spec.components[0].roles[1]: Duplicate value: map[string]interface {}{"name":"worker"}`,
+			wantSchemaErr: `spec.components[0].roles[1]: Duplicate value: map[string]interface {}{"name":"agent"}`,
 		},
 		{
 			name: "physical LPU rejects Grove opt out",
@@ -196,7 +196,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Components[0].Roles[0].PodTemplate = nil
 			}),
-			wantWebhookErrs: []string{"spec.components[0].roles[0].podTemplate: Required value: the LPX worker role requires a podTemplate"},
+			wantWebhookErrs: []string{"spec.components[0].roles[0].podTemplate: Required value: the LPX agent role requires a podTemplate"},
 		},
 		{
 			name: "LPX requires a build for an LPU engine",
@@ -231,7 +231,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			wantWebhookErrs: []string{"spec.components[0].roles[0].providerOverride: Forbidden: LPX roles do not support provider overrides"},
 		},
 		{
-			name:          "LPX can remove an explicit leader and retain its implicit fallback",
+			name:          "LPX can remove an explicit conductor and retain its implicit fallback",
 			oldDeployment: betaLPXDGDForAdmission(nil),
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Components[0].Roles = dgd.Spec.Components[0].Roles[:1]
@@ -314,18 +314,18 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			}),
 		},
 		{
-			name: "lpx requires a worker role",
+			name: "lpx requires a agent role",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Components[0].Roles = nil
 			}),
-			wantWebhookErrs: []string{`spec.components[0].roles: Required value: must contain the "worker" role`},
+			wantWebhookErrs: []string{`spec.components[0].roles: Required value: must contain the "agent" role`},
 		},
 		{
-			name: "v1alpha1 lpx requires a worker role",
+			name: "v1alpha1 lpx requires an agent role",
 			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["lpx"].Roles = nil
 			}),
-			wantWebhookErrs: []string{`spec.components[0].roles: Required value: must contain the "worker" role`},
+			wantWebhookErrs: []string{`spec.components[0].roles: Required value: must contain the "agent" role`},
 		},
 		{
 			name: "v1alpha1 lpx requires lpx",
@@ -413,10 +413,10 @@ func betaLPXDGDForAdmission(
 				Replicas:      k8sptr.To(int32(1)),
 				LPX:           &nvidiacomv1beta1.LPXConfig{BuildID: "test/build"},
 				Roles: []nvidiacomv1beta1.ComponentRoleSpec{
-					{Name: nvidiacomv1beta1.ComponentRoleWorker, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					{Name: nvidiacomv1beta1.ComponentRoleLPXAgent, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "lpu-runtime"}},
 					}}},
-					{Name: nvidiacomv1beta1.ComponentRoleLeader},
+					{Name: nvidiacomv1beta1.ComponentRoleLPXConductor},
 				},
 			},
 		}
@@ -437,10 +437,10 @@ func alphaLPXDGDForAdmission(
 				Replicas:      k8sptr.To(int32(1)),
 				LPX:           &nvidiacomv1beta1.LPXConfig{BuildID: "test/build"},
 				Roles: []nvidiacomv1alpha1.ComponentRoleSpec{
-					{Name: nvidiacomv1alpha1.ComponentRoleWorker, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					{Name: nvidiacomv1alpha1.ComponentRoleLPXAgent, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "lpu-runtime"}},
 					}}},
-					{Name: nvidiacomv1alpha1.ComponentRoleLeader},
+					{Name: nvidiacomv1alpha1.ComponentRoleLPXConductor},
 				},
 			},
 		}

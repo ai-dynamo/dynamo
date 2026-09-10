@@ -42,7 +42,7 @@ func TestLPXSchedulerSelectionUsesComponents(t *testing.T) {
 			components: canonicalLPX,
 			want:       true,
 		},
-		{name: "non-LPX", components: []dynamov1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "worker"}}},
+		{name: "non-LPX", components: []dynamov1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: dynamov1beta1.ComponentRoleLPXAgent}}},
 	}
 
 	for _, test := range tests {
@@ -68,8 +68,8 @@ func TestSelectedModelNames(t *testing.T) {
 	draftReplicas := int32(3)
 	dgd := &dynamov1beta1.DynamoGraphDeployment{Spec: dynamov1beta1.DynamoGraphDeploymentSpec{
 		Components: []dynamov1beta1.DynamoComponentDeploymentSharedSpec{
-			testLPXComponent("small", "draft-build", dynamov1beta1.ComponentRoleSpec{Name: "worker", PodTemplate: testLPXPodTemplate("draft")}),
-			testLPXComponent("large", "target-build", dynamov1beta1.ComponentRoleSpec{Name: "leader"}, dynamov1beta1.ComponentRoleSpec{Name: "worker", PodTemplate: testLPXPodTemplate("target")}),
+			testLPXComponent("small", "draft-build", dynamov1beta1.ComponentRoleSpec{Name: dynamov1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("draft")}),
+			testLPXComponent("large", "target-build", dynamov1beta1.ComponentRoleSpec{Name: dynamov1beta1.ComponentRoleLPXConductor}, dynamov1beta1.ComponentRoleSpec{Name: dynamov1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("target")}),
 		},
 	}}
 	dgd.Spec.Components[0].Replicas = &draftReplicas
@@ -103,8 +103,8 @@ func TestSelectedModelNames(t *testing.T) {
 func TestSelectedModelNamesRequiresSharedConductorOwner(t *testing.T) {
 	t.Log("Read two agent-only components without a shared conductor owner")
 	dgd := newSelectedTestDGD(t, "missing-conductor",
-		testLPXComponent("small", "build", dynamov1beta1.ComponentRoleSpec{Name: "worker", PodTemplate: testLPXPodTemplate("agent")}),
-		testLPXComponent("large", "build", dynamov1beta1.ComponentRoleSpec{Name: "worker", PodTemplate: testLPXPodTemplate("agent")}),
+		testLPXComponent("small", "build", dynamov1beta1.ComponentRoleSpec{Name: dynamov1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("agent")}),
+		testLPXComponent("large", "build", dynamov1beta1.ComponentRoleSpec{Name: dynamov1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("agent")}),
 	)
 	before := dgd.DeepCopy()
 

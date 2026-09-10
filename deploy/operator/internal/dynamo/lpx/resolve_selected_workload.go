@@ -107,7 +107,7 @@ func ResolveSelectedWorkload(
 
 		// Component geometry fixes the Agent count independently of draft fanout.
 		componentProjections := projected[len(projections):]
-		if count := stage.ComponentRole(dynamov1beta1.ComponentRoleWorker).Replicas; count != nil && int(*count) != componentProjections[0].agentReplicas {
+		if count := stage.ComponentRole(dynamov1beta1.ComponentRoleLPXAgent).Replicas; count != nil && int(*count) != componentProjections[0].agentReplicas {
 			return nil, fmt.Errorf("component %q agent replicas %d must match the compiled count %d", configuredModel, *count, componentProjections[0].agentReplicas)
 		}
 
@@ -145,13 +145,13 @@ func validateSelectedConductor(
 	pipeline Pipeline,
 	compilationMode BuildCompilationMode,
 ) error {
-	conductor := component.ComponentRole(dynamov1beta1.ComponentRoleLeader)
+	conductor := component.ComponentRole(dynamov1beta1.ComponentRoleLPXConductor)
 	// Hybrid execution is selected by immutable build metadata, not template presence.
 	if compilationMode == BuildCompilationModeHybrid {
 		if pipeline == PipelineSpecDecode {
 			return fmt.Errorf("%w: the shared speculative runtime requires LPU-only builds", ErrUnsupportedRuntime)
 		}
-		template := component.ComponentRole(dynamov1beta1.ComponentRoleWorker).PodTemplate
+		template := component.ComponentRole(dynamov1beta1.ComponentRoleLPXAgent).PodTemplate
 		if conductor != nil && conductor.PodTemplate != nil {
 			template = conductor.PodTemplate
 		}
@@ -178,7 +178,9 @@ func validateSelectedConductor(
 	componentIndex := slices.IndexFunc(dgd.Spec.Components, func(candidate dynamov1beta1.DynamoComponentDeploymentSharedSpec) bool {
 		return candidate.ComponentName == component.ComponentName
 	})
-	roleIndex := slices.IndexFunc(component.Roles, func(role dynamov1beta1.ComponentRoleSpec) bool { return role.Name == dynamov1beta1.ComponentRoleLeader })
+	roleIndex := slices.IndexFunc(component.Roles, func(role dynamov1beta1.ComponentRoleSpec) bool {
+		return role.Name == dynamov1beta1.ComponentRoleLPXConductor
+	})
 	for containerIndex := range conductor.PodTemplate.Spec.Containers {
 		container := &conductor.PodTemplate.Spec.Containers[containerIndex]
 		if container.Name != commonconsts.MainContainerName {

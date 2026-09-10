@@ -16,8 +16,8 @@ spec:
       lpx:
         buildId: single-v2-manifest-defaults/build_manifest_defaults
       roles:
-      - name: leader
-      - name: worker
+      - name: conductor
+      - name: agent
         podTemplate:
           spec:
             containers:

@@ -11476,7 +11476,7 @@ spec:
                     leader and one worker role. Admission defaults omitted replicas to 1 for
                     leader and multinode.nodeCount minus 1 for worker. Omitting the roles list
                     preserves the implicit multinode role layout.
-                    LPX components require a worker role and may declare a leader role.
+                    LPX components require an agent role and may declare a conductor role.
                   items:
                     description: |-
                       ComponentRoleSpec configures one named Pod-producing role inside a compound component.
@@ -28679,7 +28679,7 @@ spec:
                     leader and one worker role. Admission defaults omitted replicas to 1 for
                     leader and multinode.nodeCount minus 1 for worker. Omitting the roles list
                     preserves the implicit multinode role layout.
-                    LPX components require a worker role and may declare a leader role.
+                    LPX components require an agent role and may declare a conductor role.
                   items:
                     description: |-
                       ComponentRoleSpec configures one named Pod-producing role inside a compound component.

@@ -15,7 +15,7 @@ spec:
       lpx:
         buildId: node-local-v2-connected
       roles:
-      - name: worker
+      - name: agent
         podTemplate:
           spec:
             containers:

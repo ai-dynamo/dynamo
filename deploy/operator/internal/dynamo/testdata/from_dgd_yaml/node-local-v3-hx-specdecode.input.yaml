@@ -15,7 +15,7 @@ spec:
       lpx:
         buildId: node-local-v3-hx-sd-draft
       roles:
-      - name: worker
+      - name: agent
         podTemplate:
           spec:
             containers:
@@ -40,8 +40,8 @@ spec:
       lpx:
         buildId: node-local-v3-hx-sd-target
       roles:
-      - name: leader
-      - name: worker
+      - name: conductor
+      - name: agent
         podTemplate:
           spec:
             containers:

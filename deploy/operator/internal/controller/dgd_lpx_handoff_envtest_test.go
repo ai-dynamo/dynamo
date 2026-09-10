@@ -163,8 +163,8 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
 			ComponentName: "lpx", ComponentType: v1beta1.ComponentTypeLPX,
 			LPX: &v1beta1.LPXConfig{BuildID: (&url.URL{Scheme: "file", Path: buildDir}).String()},
-			Roles: []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleLeader}, {
-				Name: v1beta1.ComponentRoleWorker,
+			Roles: []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleLPXConductor}, {
+				Name: v1beta1.ComponentRoleLPXAgent,
 				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{
 						Name: consts.MainContainerName, Image: "example/lpu-runtime:1.4.0",
@@ -188,7 +188,7 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 	}, 20*time.Second, 50*time.Millisecond)
 
 	t.Log("Change LPX intent so the failing child generation is newer than its completed observation")
-	source.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleWorker).PodTemplate.Spec.Containers[0].Image = "example/lpu-runtime:1.4.1"
+	source.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.Containers[0].Image = "example/lpu-runtime:1.4.1"
 	require.NoError(t, env.Client().Update(t.Context(), source))
 	child := &v1alpha1.LPXGraphDeployment{}
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
@@ -222,7 +222,7 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 	require.Empty(t, requests.Items)
 
 	t.Log("Accept an LPX runtime-invalid edit and report its exact rejection on the public DGD")
-	source.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleWorker).PodTemplate.Spec.NodeName = "manual-placement"
+	source.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.NodeName = "manual-placement"
 	require.NoError(t, env.Client().Update(t.Context(), source))
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		if !assert.NoError(c, env.Client().Get(t.Context(), key, source)) || !assert.NoError(c, env.Client().Get(t.Context(), key, child)) {
@@ -245,7 +245,7 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 	}, 20*time.Second, 50*time.Millisecond)
 
 	t.Log("Repair the accepted configuration so the same DGD and child can reconcile again")
-	source.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleWorker).PodTemplate.Spec.NodeName = ""
+	source.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.NodeName = ""
 	require.NoError(t, env.Client().Update(t.Context(), source))
 
 	t.Log("Release quota and observe alpha LGD ownership of the published PCS and runtime resources without waiting for scheduling")

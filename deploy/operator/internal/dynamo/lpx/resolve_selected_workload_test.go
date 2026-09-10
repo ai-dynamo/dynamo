@@ -22,7 +22,7 @@ import (
 
 func TestResolveSelectedWorkloadDerivesRuntimeShapeFromCompilationMode(t *testing.T) {
 	t.Log("Create one LPX component beside an unrelated conventional decode")
-	dgd := newSelectedTestDGD(t, "graph", testLPXComponent("LPX", "build", v1beta1.ComponentRoleSpec{Name: "worker", PodTemplate: testLPXPodTemplate("lpu-runtime")}))
+	dgd := newSelectedTestDGD(t, "graph", testLPXComponent("LPX", "build", v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("lpu-runtime")}))
 	dgd.Annotations = nil
 	dgd.Spec.Components = append(dgd.Spec.Components, v1beta1.DynamoComponentDeploymentSharedSpec{
 		ComponentName: "ordinary-decode", ComponentType: v1beta1.ComponentTypeDecode,
@@ -54,8 +54,8 @@ func TestResolveSelectedWorkloadDerivesRuntimeShapeFromCompilationMode(t *testin
 	source := staticBuildSnapshotSource{"build": snapshot}
 	_, err = ResolveSelectedWorkload(t.Context(), dgd, source)
 	require.ErrorContains(t, err, "requires resourceClaims or a positive nvidia.com/gpu request")
-	dgd.Spec.Components[0].Roles = append(dgd.Spec.Components[0].Roles, v1beta1.ComponentRoleSpec{Name: "leader"})
-	conductor := dgd.Spec.Components[0].ComponentRole("leader")
+	dgd.Spec.Components[0].Roles = append(dgd.Spec.Components[0].Roles, v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor})
+	conductor := dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor)
 	conductor.PodTemplate = testLPXPodTemplate("cyborg-runtime")
 	_, err = ResolveSelectedWorkload(t.Context(), dgd, source)
 	require.ErrorContains(t, err, "requires resourceClaims or a positive nvidia.com/gpu request")
@@ -90,7 +90,7 @@ func TestResolveSelectedWorkloadDerivesRuntimeShapeFromCompilationMode(t *testin
 	require.Empty(t, scheduledPlan.ConductorTemplate)
 
 	t.Log("Use the same agent template when the standalone conductor role is omitted")
-	agent := *dgd.Spec.Components[0].ComponentRole("worker")
+	agent := *dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXAgent)
 	agent.PodTemplate = conductor.PodTemplate.DeepCopy()
 	dgd.Spec.Components[0].Roles = []v1beta1.ComponentRoleSpec{agent}
 	before := dgd.DeepCopy()
@@ -134,8 +134,8 @@ func TestResolveSelectedWorkloadSpecDecodeV2AndV3(t *testing.T) {
 
 			t.Log("Build a selected SpecDecode DGD for the fixture's manifest generation")
 			dgd := newSelectedTestDGD(t, "specdecode",
-				testLPXComponent("lpx", "target-build", v1beta1.ComponentRoleSpec{Name: "leader"}, v1beta1.ComponentRoleSpec{Name: "worker", PodTemplate: testLPXPodTemplate("lpu-runtime")}),
-				testLPXComponent("small", "draft-build", v1beta1.ComponentRoleSpec{Name: "worker", PodTemplate: testLPXPodTemplate("lpu-runtime")}),
+				testLPXComponent("lpx", "target-build", v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor}, v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("lpu-runtime")}),
+				testLPXComponent("small", "draft-build", v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("lpu-runtime")}),
 			)
 			dgd.Spec.Components[0].LPX.Settings = settings
 			dgd.Spec.Components[1].LPX.Settings = settings.DeepCopy()
@@ -144,7 +144,7 @@ func TestResolveSelectedWorkloadSpecDecodeV2AndV3(t *testing.T) {
 			if test.family == BuildFamilyXT {
 				compiledAgentCount = 4
 			}
-			dgd.Spec.Components[1].ComponentRole("worker").Replicas = ptr.To(compiledAgentCount)
+			dgd.Spec.Components[1].ComponentRole(v1beta1.ComponentRoleLPXAgent).Replicas = ptr.To(compiledAgentCount)
 			source := staticBuildSnapshotSource{
 				"draft-build":  draftSnapshot,
 				"target-build": targetSnapshot,
@@ -198,7 +198,7 @@ func TestResolveSelectedWorkloadSpecDecodeV2AndV3(t *testing.T) {
 
 			t.Log("Agent replica assertions count one compiled model instance, not draft fanout")
 			invalidCount := dgd.DeepCopy()
-			invalidCount.Spec.Components[1].ComponentRole("worker").Replicas = ptr.To(compiledAgentCount * 2)
+			invalidCount.Spec.Components[1].ComponentRole(v1beta1.ComponentRoleLPXAgent).Replicas = ptr.To(compiledAgentCount * 2)
 			_, err = ResolveSelectedWorkload(t.Context(), invalidCount, source)
 			require.ErrorContains(t, err, "must match the compiled count")
 
@@ -272,8 +272,8 @@ func TestResolveConductorLaunchErrorUsesAuthoredRolePath(t *testing.T) {
 	conductor := testLPXPodTemplate("conductor-runtime")
 	conductor.Spec.Containers[0].Args = []string{"--allocation=forged"}
 	dgd := newSelectedTestDGD(t, "specdecode",
-		testLPXComponent("large", "build", v1beta1.ComponentRoleSpec{Name: "worker", PodTemplate: testLPXPodTemplate("target-runtime")}, v1beta1.ComponentRoleSpec{Name: "leader", PodTemplate: conductor}),
-		testLPXComponent("small", "build", v1beta1.ComponentRoleSpec{Name: "worker", PodTemplate: testLPXPodTemplate("draft-runtime")}),
+		testLPXComponent("large", "build", v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("target-runtime")}, v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: conductor}),
+		testLPXComponent("small", "build", v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("draft-runtime")}),
 	)
 	snapshot := acquireTestSnapshot(t, writeV3CompilerFixture(t))
 	before := dgd.DeepCopy()
@@ -296,8 +296,8 @@ func TestResolveSelectedWorkloadRejectsInvalidRolesBeforeBuildAcquisition(t *tes
 		MaxSkew: 1, TopologyKey: "zone", WhenUnsatisfiable: corev1.DoNotSchedule,
 	}}
 	dgd := newSelectedTestDGD(t, "selected", testLPXComponent("lpx", "build",
-		v1beta1.ComponentRoleSpec{Name: "worker", PodTemplate: agent},
-		v1beta1.ComponentRoleSpec{Name: "leader", PodTemplate: conductor},
+		v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: agent},
+		v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: conductor},
 	))
 
 	t.Log("Aggregate every actionable error at its authored path before acquiring a build")
@@ -316,6 +316,6 @@ func TestResolveSelectedWorkloadRejectsInvalidRolesBeforeBuildAcquisition(t *tes
 	t.Log("Reject missing main containers for both roles before acquiring a build")
 	agent.Spec.Containers, conductor.Spec.Containers = nil, nil
 	_, err = ResolveSelectedWorkload(t.Context(), dgd, unreachableBuildSnapshotSource{})
-	require.ErrorContains(t, err, `spec.components[0].roles[0].podTemplate.spec.containers: Required value: LPX worker component requires a "main" runtime container`)
-	require.ErrorContains(t, err, `spec.components[0].roles[1].podTemplate.spec.containers: Required value: LPX leader component requires a "main" runtime container`)
+	require.ErrorContains(t, err, `spec.components[0].roles[0].podTemplate.spec.containers: Required value: LPX agent component requires a "main" runtime container`)
+	require.ErrorContains(t, err, `spec.components[0].roles[1].podTemplate.spec.containers: Required value: LPX conductor component requires a "main" runtime container`)
 }

@@ -125,8 +125,8 @@ func TestLPXGPUCapacityReportsTheCompleteEngine(t *testing.T) {
 			case "hybrid":
 				child, source, registry = newLPXTestDGD(t, lpx.PipelineLPX)
 				source.Spec.Components[0].Replicas = ptr.To(int32(3))
-				source.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLeader).Replicas = ptr.To(int32(2))
-				pod := &lpx.ServingComponent(source).ComponentRole(v1beta1.ComponentRoleLeader).PodTemplate.Spec
+				source.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas = ptr.To(int32(2))
+				pod := &lpx.ServingComponent(source).ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Spec
 				pod.ResourceClaims = nil
 				pod.Containers[0].Resources.Limits = corev1.ResourceList{consts.KubeResourceGPUNvidia: resource.MustParse("4")}
 				want = 8
@@ -201,7 +201,7 @@ func TestLPXTerminalFailureRetiresUnpublishedWorkload(t *testing.T) {
 			case "selected workload":
 				component.Replicas = ptr.To(int32(2))
 			case "render":
-				component.ComponentRole(v1beta1.ComponentRoleWorker).PodTemplate.Spec.Containers[0].VolumeMounts = nil
+				component.ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.Containers[0].VolumeMounts = nil
 			case "invalid source":
 				child.OwnerReferences[0].UID = "replaced-source"
 			case "transient snapshot", "inconsistent snapshot":
@@ -498,7 +498,7 @@ func TestLPXValidatesIntentBeforeDownloadsOrPublication(t *testing.T) {
 		{name: "invalid intent", messages: []string{
 			"spec.providerOverride: Forbidden:",
 			"spec.components[0].providerOverride: Forbidden:",
-			`LPX worker component requires a "main" runtime container`,
+			`LPX agent component requires a "main" runtime container`,
 			"does not support checkpointing",
 			"spec.topologyConstraint: Forbidden:",
 			"spec.components[0].topologyConstraint: Forbidden:",
@@ -541,7 +541,7 @@ func TestLPXValidatesIntentBeforeDownloadsOrPublication(t *testing.T) {
 					APIVersion: grovev1alpha1.SchemeGroupVersion.String(), Target: "PodCliqueTemplateSpec",
 				}
 				component.ProviderOverride.Value.Raw = []byte(`{"topologyConstraint":{"topologyName":"fabric","pack":{"required":"rack"}}}`)
-				component.ComponentRole(v1beta1.ComponentRoleWorker).PodTemplate = &corev1.PodTemplateSpec{}
+				component.ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate = &corev1.PodTemplateSpec{}
 				component.Experimental = &v1beta1.ExperimentalSpec{Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true}}
 				source.Spec.TopologyConstraint = &v1beta1.SpecTopologyConstraint{ClusterTopologyName: "fabric"}
 				component.TopologyConstraint = &v1beta1.TopologyConstraint{PackDomain: "rack"}

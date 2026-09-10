@@ -111,7 +111,7 @@ func TestLPXPCSNameUsesStableSourceIdentity(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "chat", Namespace: "workloads", UID: "chat-uid"},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
 			{ComponentName: "engine", ComponentType: v1beta1.ComponentTypeLPX,
-				Roles: []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleLeader}, {Name: v1beta1.ComponentRoleWorker}}},
+				Roles: []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleLPXConductor}, {Name: v1beta1.ComponentRoleLPXAgent}}},
 		}},
 	}
 	name := PCSNameForLPX(source)
@@ -141,7 +141,7 @@ func TestLPXPCSNameUsesStableSourceIdentity(t *testing.T) {
 	t.Log("A draft name cannot change the target-owned resource name budget")
 	source.Spec.Components = append(source.Spec.Components, v1beta1.DynamoComponentDeploymentSharedSpec{
 		ComponentName: strings.Repeat("d", 30), ComponentType: v1beta1.ComponentTypeLPX,
-		Roles: []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleWorker}},
+		Roles: []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleLPXAgent}},
 	})
 	require.Equal(t, name, PCSNameForLPX(source))
 
@@ -172,8 +172,8 @@ func TestLPXInputRevision(t *testing.T) {
 			{ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill, Replicas: ptr.To(int32(1))},
 			{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeLPX, Replicas: ptr.To(int32(2)), LPX: &v1beta1.LPXConfig{BuildID: "hybrid-build"},
 				Roles: []v1beta1.ComponentRoleSpec{
-					{Name: v1beta1.ComponentRoleWorker, PodTemplate: &corev1.PodTemplateSpec{}},
-					{Name: v1beta1.ComponentRoleLeader, PodTemplate: &corev1.PodTemplateSpec{}},
+					{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: &corev1.PodTemplateSpec{}},
+					{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: &corev1.PodTemplateSpec{}},
 				}},
 		}},
 	}
@@ -227,28 +227,28 @@ func TestLPXInputRevision(t *testing.T) {
 			lpx.ServingComponent(d).LPX.Settings = &apiextensionsv1.JSON{Raw: []byte(`{"prop_sync":false}`)}
 		}},
 		{"agent/replicas", true, func(d *v1beta1.DynamoGraphDeployment) {
-			lpx.ServingComponent(d).ComponentRole(v1beta1.ComponentRoleWorker).Replicas = ptr.To(int32(4))
+			lpx.ServingComponent(d).ComponentRole(v1beta1.ComponentRoleLPXAgent).Replicas = ptr.To(int32(4))
 		}},
 		{"conductor/replicas", true, func(d *v1beta1.DynamoGraphDeployment) {
-			lpx.ServingComponent(d).ComponentRole(v1beta1.ComponentRoleLeader).Replicas = ptr.To(int32(2))
+			lpx.ServingComponent(d).ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas = ptr.To(int32(2))
 		}},
 		{"agent/image", true, func(d *v1beta1.DynamoGraphDeployment) {
-			lpx.ServingComponent(d).ComponentRole(v1beta1.ComponentRoleWorker).PodTemplate.Spec.Containers = []corev1.Container{{Name: "main", Image: "agent:next"}}
+			lpx.ServingComponent(d).ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.Containers = []corev1.Container{{Name: "main", Image: "agent:next"}}
 		}},
 		{"conductor/image", true, func(d *v1beta1.DynamoGraphDeployment) {
-			lpx.ServingComponent(d).ComponentRole(v1beta1.ComponentRoleLeader).PodTemplate.Spec.Containers = []corev1.Container{{Name: "main", Image: "conductor:next"}}
+			lpx.ServingComponent(d).ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Spec.Containers = []corev1.Container{{Name: "main", Image: "conductor:next"}}
 		}},
 		{"agent/placement", true, func(d *v1beta1.DynamoGraphDeployment) {
-			lpx.ServingComponent(d).ComponentRole(v1beta1.ComponentRoleWorker).PodTemplate.Spec.NodeSelector = map[string]string{"lpu": "new"}
+			lpx.ServingComponent(d).ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.NodeSelector = map[string]string{"lpu": "new"}
 		}},
 		{"conductor/placement", true, func(d *v1beta1.DynamoGraphDeployment) {
-			lpx.ServingComponent(d).ComponentRole(v1beta1.ComponentRoleLeader).PodTemplate.Spec.NodeSelector = map[string]string{"gpu": "new"}
+			lpx.ServingComponent(d).ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Spec.NodeSelector = map[string]string{"gpu": "new"}
 		}},
 		{"agent/metadata", true, func(d *v1beta1.DynamoGraphDeployment) {
-			lpx.ServingComponent(d).ComponentRole(v1beta1.ComponentRoleWorker).PodTemplate.Labels = map[string]string{"role": "new"}
+			lpx.ServingComponent(d).ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Labels = map[string]string{"role": "new"}
 		}},
 		{"conductor/metadata", true, func(d *v1beta1.DynamoGraphDeployment) {
-			lpx.ServingComponent(d).ComponentRole(v1beta1.ComponentRoleLeader).PodTemplate.Annotations = map[string]string{"role": "new"}
+			lpx.ServingComponent(d).ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Annotations = map[string]string{"role": "new"}
 		}},
 		{"scheduling/deadline", true, func(d *v1beta1.DynamoGraphDeployment) {
 			d.Spec.Scheduling.AttemptDeadlineSeconds = ptr.To(int64(60))
@@ -331,7 +331,7 @@ func TestLPXInputRevision(t *testing.T) {
 	target.Replicas = ptr.To(int32(1))
 	draft := target.DeepCopy()
 	draft.ComponentName = "small-model"
-	draft.Roles = []v1beta1.ComponentRoleSpec{*draft.ComponentRole(v1beta1.ComponentRoleWorker)}
+	draft.Roles = []v1beta1.ComponentRoleSpec{*draft.ComponentRole(v1beta1.ComponentRoleLPXAgent)}
 	pair.Spec.Components = append(pair.Spec.Components, *draft)
 	pairRevision, err := LPXInputRevision(pair, "")
 	require.NoError(t, err)
@@ -356,7 +356,7 @@ func TestLPXInputRevisionTracksIndirectRenderMetadata(t *testing.T) {
 			source := &v1beta1.DynamoGraphDeployment{}
 			require.NoError(t, yaml.Unmarshal(payload, source))
 			component := lpx.ServingComponent(source)
-			role := lpxRoleComponent(component, component.ComponentRole(v1beta1.ComponentRoleLeader).PodTemplate, source, "")
+			role := lpxRoleComponent(component, component.ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate, source, "")
 			role.ComponentType = v1beta1.ComponentTypeDecode
 			metadata := generatePodMetadata(role, source, getDGDAlphaComponent(source, component.ComponentName), component.ComponentName, DiscoveryContext{})
 			before, err := LPXInputRevision(source, "")

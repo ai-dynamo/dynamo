@@ -47,17 +47,17 @@ func TestDynamoGraphDeploymentRoleShapesRoundTrip(t *testing.T) {
 		{
 			name: "native fields",
 			alpha: []ComponentRoleSpec{
-				{Name: v1beta1.ComponentRoleLeader},
+				{Name: v1beta1.ComponentRoleLPXConductor},
 				{
-					Name:        v1beta1.ComponentRoleWorker,
+					Name:        v1beta1.ComponentRoleLPXAgent,
 					Replicas:    ptr.To[int32](3),
 					PodTemplate: ptr.To(testLPXRoleTemplate("agent")),
 				},
 			},
 			beta: []v1beta1.ComponentRoleSpec{
-				{Name: v1beta1.ComponentRoleLeader},
+				{Name: v1beta1.ComponentRoleLPXConductor},
 				{
-					Name:        v1beta1.ComponentRoleWorker,
+					Name:        v1beta1.ComponentRoleLPXAgent,
 					Replicas:    ptr.To[int32](3),
 					PodTemplate: ptr.To(testLPXRoleTemplate("agent")),
 				},
@@ -108,8 +108,8 @@ func TestDynamoGraphDeploymentLPXRoundTrip(t *testing.T) {
 				ComponentType: v1beta1.ComponentTypeLPX,
 				LPX:           testCanonicalLPXConfig(),
 				Roles: []v1beta1.ComponentRoleSpec{
-					{Name: v1beta1.ComponentRoleLeader, Replicas: ptr.To[int32](2)},
-					{Name: v1beta1.ComponentRoleWorker, PodTemplate: ptr.To(testLPXRoleTemplate("agent"))},
+					{Name: v1beta1.ComponentRoleLPXConductor, Replicas: ptr.To[int32](2)},
+					{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: ptr.To(testLPXRoleTemplate("agent"))},
 				},
 			}},
 		},
@@ -145,8 +145,8 @@ func TestDynamoGraphDeploymentLPXRoundTrip(t *testing.T) {
 		t.Fatalf("LPX config conversion mismatch (-want +got):\n%s", diff)
 	}
 	wantAlphaRoles := []ComponentRoleSpec{
-		{Name: v1beta1.ComponentRoleLeader, Replicas: ptr.To[int32](2)},
-		{Name: v1beta1.ComponentRoleWorker, PodTemplate: ptr.To(testLPXRoleTemplate("agent"))},
+		{Name: v1beta1.ComponentRoleLPXConductor, Replicas: ptr.To[int32](2)},
+		{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: ptr.To(testLPXRoleTemplate("agent"))},
 	}
 	if diff := cmp.Diff(wantAlphaRoles, service.Roles); diff != "" {
 		t.Fatalf("LPX role order or optional fields changed in alpha (-want +got):\n%s", diff)
@@ -178,7 +178,7 @@ func TestDynamoGraphDeploymentLPXRoundTrip(t *testing.T) {
 	service.LPX.BuildID = editedThroughAlphaBuildID
 	service.Roles = []ComponentRoleSpec{
 		*service.Roles[1].DeepCopy(),
-		{Name: v1beta1.ComponentRoleLeader, PodTemplate: ptr.To(testLPXRoleTemplate("conductor"))},
+		{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: ptr.To(testLPXRoleTemplate("conductor"))},
 	}
 
 	got := &v1beta1.DynamoGraphDeployment{}
@@ -190,8 +190,8 @@ func TestDynamoGraphDeploymentLPXRoundTrip(t *testing.T) {
 		t.Fatalf("alpha LPX edit was lost: %#v", component)
 	}
 	wantBetaRoles := []v1beta1.ComponentRoleSpec{
-		{Name: v1beta1.ComponentRoleWorker, PodTemplate: ptr.To(testLPXRoleTemplate("agent"))},
-		{Name: v1beta1.ComponentRoleLeader, PodTemplate: ptr.To(testLPXRoleTemplate("conductor"))},
+		{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: ptr.To(testLPXRoleTemplate("agent"))},
+		{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: ptr.To(testLPXRoleTemplate("conductor"))},
 	}
 	if diff := cmp.Diff(wantBetaRoles, component.Roles); diff != "" {
 		t.Fatalf("authored alpha role edits did not survive conversion (-want +got):\n%s", diff)

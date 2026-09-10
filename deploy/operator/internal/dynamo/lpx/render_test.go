@@ -220,7 +220,7 @@ func TestRenderSpecDecodeRoleOwnershipAndSharedSettings(t *testing.T) {
 
 	t.Log("Keep independent draft and target templates, with the conductor seeded by target")
 	draft := testLPXComponent(draftStageName, "draft-build",
-		v1beta1.ComponentRoleSpec{Name: "worker", PodTemplate: &corev1.PodTemplateSpec{Spec: renderTestPodSpec()}},
+		v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: &corev1.PodTemplateSpec{Spec: renderTestPodSpec()}},
 	)
 	draft.Replicas = ptr.To(int32(2))
 	draft.LPX.Settings = &apiextensionsv1.JSON{Raw: []byte(`{
@@ -228,13 +228,13 @@ func TestRenderSpecDecodeRoleOwnershipAndSharedSettings(t *testing.T) {
 		"setup":{"agent_connect_timeout":"30s","agent_setup_timeout":"180s"}
 	}`)}
 	target := testLPXComponent(testTargetStageName, "target-build",
-		v1beta1.ComponentRoleSpec{Name: "leader"},
-		v1beta1.ComponentRoleSpec{Name: "worker", PodTemplate: &corev1.PodTemplateSpec{Spec: renderTestPodSpec()}},
+		v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor},
+		v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: &corev1.PodTemplateSpec{Spec: renderTestPodSpec()}},
 	)
 	source := newSelectedTestDGD(t, "specdecode", draft, target)
 	stages := make(map[string]corev1.PodTemplateSpec)
 	for _, component := range source.Spec.Components {
-		template := component.ComponentRole("worker").PodTemplate
+		template := component.ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate
 		template.Labels = map[string]string{"owner": component.ComponentName}
 		template.Annotations = map[string]string{"owner": component.ComponentName}
 		template.Spec.Containers[0].Image = component.ComponentName + "-runtime"

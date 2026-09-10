@@ -22,18 +22,18 @@ func TestLPXRoleDependenciesIncludeDraftAndConductorFallback(t *testing.T) {
 	t.Log("Give both components consumed Agent claims while the target conductor uses its Agent fallback")
 	source := newLPXSpecDecodeTestSource()
 	for _, component := range lpx.Components(source) {
-		pod := &component.ComponentRole(v1beta1.ComponentRoleWorker).PodTemplate.Spec
+		pod := &component.ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec
 		pod.ResourceClaims = []corev1.PodResourceClaim{{Name: "gpu", ResourceClaimTemplateName: ptr.To(component.ComponentName + "-gpu")}}
 		pod.Containers[0].Resources.Claims = []corev1.ResourceClaim{{Name: "gpu"}}
 	}
-	require.Nil(t, lpx.ServingComponent(source).ComponentRole(v1beta1.ComponentRoleLeader).PodTemplate)
+	require.Nil(t, lpx.ServingComponent(source).ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate)
 	before := source.DeepCopy()
 	require.ElementsMatch(t, []string{"draft-gpu", "lpx-gpu"}, lpxDRAClaimReferences(true)(source))
 	require.Equal(t, before, source)
 
 	t.Log("An independent conductor template contributes its own consumed dependency")
-	conductor := lpx.ServingComponent(source).ComponentRole(v1beta1.ComponentRoleLeader)
-	conductor.PodTemplate = lpx.ServingComponent(source).ComponentRole(v1beta1.ComponentRoleWorker).PodTemplate.DeepCopy()
+	conductor := lpx.ServingComponent(source).ComponentRole(v1beta1.ComponentRoleLPXConductor)
+	conductor.PodTemplate = lpx.ServingComponent(source).ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.DeepCopy()
 	conductor.PodTemplate.Spec.ResourceClaims[0].ResourceClaimTemplateName = ptr.To("conductor-gpu")
 	require.ElementsMatch(t, []string{"draft-gpu", "lpx-gpu", "conductor-gpu"}, lpxDRAClaimReferences(true)(source))
 }

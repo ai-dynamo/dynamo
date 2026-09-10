@@ -305,7 +305,7 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.SelectedWorkload) (
 	gpuCliques := make([]*grovev1alpha1.PodCliqueTemplateSpec, 0, 1)
 	for _, component := range dynamolpx.Components(p.dynamoDeployment) {
 		alphaComponent := alphaComponents[component.ComponentName]
-		agent := component.ComponentRole(v1beta1.ComponentRoleWorker)
+		agent := component.ComponentRole(v1beta1.ComponentRoleLPXAgent)
 		lpuRole := lpxRoleComponent(component, agent.PodTemplate, p.dynamoDeployment, p.discoveryBackend)
 		lpuDefaults := &imageEntrypointComponentDefaults{ComponentDefaults: &BaseComponentDefaults{}}
 		lpuTemplate, err := renderSelectedLPXRole(lpuRole, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
@@ -316,7 +316,7 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.SelectedWorkload) (
 		lpuTemplate.Labels[dynamolpx.StageLabel] = component.ComponentName
 		lpuTemplate.Labels[dynamolpx.ExecutionRoleLabel] = "lpu"
 		input.Stages[component.ComponentName] = *lpuTemplate
-		conductor := component.ComponentRole(v1beta1.ComponentRoleLeader)
+		conductor := component.ComponentRole(v1beta1.ComponentRoleLPXConductor)
 		if component != p.component {
 			continue
 		}

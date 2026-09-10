@@ -75,7 +75,7 @@ func validateLPXComposition(dgd *dynamov1beta1.DynamoGraphDeployment, componentC
 			continue
 		}
 		componentPath := componentsPath.Index(index)
-		conductor := component.ComponentRole(dynamov1beta1.ComponentRoleLeader)
+		conductor := component.ComponentRole(dynamov1beta1.ComponentRoleLPXConductor)
 		if conductor != nil {
 			conductorCount++
 		}
@@ -96,7 +96,7 @@ func validateLPXComposition(dgd *dynamov1beta1.DynamoGraphDeployment, componentC
 		}
 	}
 	if componentCount == 2 && conductorCount != 1 {
-		allErrs = append(allErrs, field.Forbidden(componentsPath, "LPX components must declare exactly one leader role"))
+		allErrs = append(allErrs, field.Forbidden(componentsPath, "LPX components must declare exactly one conductor role"))
 	}
 	return allErrs
 }
@@ -131,10 +131,10 @@ func validateSelectedLPXComponent(component *dynamov1beta1.DynamoComponentDeploy
 		rolePath := componentPath.Child("roles").Index(index)
 		main, mainPath, errs := validateSelectedRuntimeContainer(role.PodTemplate, "LPX "+role.Name, rolePath)
 		allErrs = append(allErrs, errs...)
-		if main != nil && role.Name == dynamov1beta1.ComponentRoleWorker {
+		if main != nil && role.Name == dynamov1beta1.ComponentRoleLPXAgent {
 			allErrs = append(allErrs, validateAllocationInjectionTargetFields(main, mainPath)...)
 		}
-		allErrs = append(allErrs, validateLPXRolePlacement(&role.PodTemplate.Spec, rolePath.Child("podTemplate", "spec"), role.Name == dynamov1beta1.ComponentRoleWorker)...)
+		allErrs = append(allErrs, validateLPXRolePlacement(&role.PodTemplate.Spec, rolePath.Child("podTemplate", "spec"), role.Name == dynamov1beta1.ComponentRoleLPXAgent)...)
 	}
 	return allErrs
 }

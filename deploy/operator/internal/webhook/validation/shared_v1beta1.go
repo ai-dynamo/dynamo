@@ -20,6 +20,7 @@ package validation
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -380,7 +381,8 @@ func (v *sharedValidation) validateComponentRoles(
 	supportedRoles := []string{nvidiacomv1beta1.ComponentRoleLeader, nvidiacomv1beta1.ComponentRoleWorker}
 	requiredRoles := supportedRoles
 	if component.IsLPX() {
-		requiredRoles = []string{nvidiacomv1beta1.ComponentRoleWorker}
+		supportedRoles = []string{nvidiacomv1beta1.ComponentRoleLPXConductor, nvidiacomv1beta1.ComponentRoleLPXAgent}
+		requiredRoles = []string{nvidiacomv1beta1.ComponentRoleLPXAgent}
 	}
 
 	// Validate each authored role once, preserving its index in every error path.
@@ -389,6 +391,9 @@ func (v *sharedValidation) validateComponentRoles(
 		role := &component.Roles[i]
 		rolePath := fldPath.Index(i)
 		scope, knownRole := provideroverride.ScopeForComponentRole(role.Name)
+		if component.IsLPX() {
+			knownRole = slices.Contains(supportedRoles, role.Name)
+		}
 		if !knownRole {
 			allErrs = append(allErrs, field.NotSupported(
 				rolePath.Child("name"),
@@ -468,8 +473,8 @@ func (v *sharedValidation) validateComponentRoleSpec(
 	if options.component != nil && options.component.IsLPX() {
 		if role.PodTemplate != nil {
 			allErrs = append(allErrs, v.validateLPXPodTemplateSpec(role.PodTemplate, fldPath.Child("podTemplate"))...)
-		} else if role.Name == nvidiacomv1beta1.ComponentRoleWorker {
-			allErrs = append(allErrs, field.Required(fldPath.Child("podTemplate"), "the LPX worker role requires a podTemplate"))
+		} else if role.Name == nvidiacomv1beta1.ComponentRoleLPXAgent {
+			allErrs = append(allErrs, field.Required(fldPath.Child("podTemplate"), "the LPX agent role requires a podTemplate"))
 		}
 		if role.ProviderOverride != nil {
 			allErrs = append(allErrs, field.Forbidden(fldPath.Child("providerOverride"), "LPX roles do not support provider overrides"))

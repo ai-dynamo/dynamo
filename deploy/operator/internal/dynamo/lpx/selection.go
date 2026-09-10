@@ -29,14 +29,14 @@ func Components(dgd *dynamov1beta1.DynamoGraphDeployment) []*dynamov1beta1.Dynam
 			components = append(components, component)
 		}
 	}
-	if len(components) == 2 && components[0].ComponentRole(dynamov1beta1.ComponentRoleLeader) != nil {
+	if len(components) == 2 && components[0].ComponentRole(dynamov1beta1.ComponentRoleLPXConductor) != nil {
 		components[0], components[1] = components[1], components[0]
 	}
 	return components
 }
 
 // ServingComponent returns the sole LPX component or the component declaring
-// the shared leader role. It returns nil when a pair has no leader owner.
+// the shared conductor role. It returns nil when a pair has no conductor owner.
 // dgd is non-nil and the returned component is read-only.
 func ServingComponent(dgd *dynamov1beta1.DynamoGraphDeployment) *dynamov1beta1.DynamoComponentDeploymentSharedSpec {
 	var soleComponent *dynamov1beta1.DynamoComponentDeploymentSharedSpec
@@ -46,7 +46,7 @@ func ServingComponent(dgd *dynamov1beta1.DynamoGraphDeployment) *dynamov1beta1.D
 		if !component.IsLPX() {
 			continue
 		}
-		if component.ComponentRole(dynamov1beta1.ComponentRoleLeader) != nil {
+		if component.ComponentRole(dynamov1beta1.ComponentRoleLPXConductor) != nil {
 			return component
 		}
 		soleComponent = component

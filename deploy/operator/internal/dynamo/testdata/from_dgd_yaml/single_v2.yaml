@@ -124,7 +124,7 @@ metadata:
   annotations:
     lpx.nvidia.com/deployment-generation: "1"
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-    lpx.nvidia.com/input-revision: sha256:4e222502b627cc59e427f91734b8b8b1e869b36c37942ae30bcae2dab56c25aa
+    lpx.nvidia.com/input-revision: sha256:726009979980e74ba17dbdff96de4f43e56a74de84b2f930efe1b2b7adaae550
     scheduling.lpu.nvidia.com/dgd-generation: "1"
     scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
   name: dgd-single-v2-lpu
@@ -134,7 +134,7 @@ metadata:
   annotations:
     lpx.nvidia.com/deployment-generation: "1"
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-    lpx.nvidia.com/input-revision: sha256:4e222502b627cc59e427f91734b8b8b1e869b36c37942ae30bcae2dab56c25aa
+    lpx.nvidia.com/input-revision: sha256:726009979980e74ba17dbdff96de4f43e56a74de84b2f930efe1b2b7adaae550
     scheduling.lpu.nvidia.com/dgd-generation: "1"
     scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
     scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:f41776b5eeefee5dab35cb81c9d4c052c88b10ac1025b0f408d690dec65d0ea1
@@ -150,7 +150,7 @@ spec:
     - annotations:
         lpx.nvidia.com/deployment-generation: "1"
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        lpx.nvidia.com/input-revision: sha256:4e222502b627cc59e427f91734b8b8b1e869b36c37942ae30bcae2dab56c25aa
+        lpx.nvidia.com/input-revision: sha256:726009979980e74ba17dbdff96de4f43e56a74de84b2f930efe1b2b7adaae550
         nvidia.com/extra-resources-hash: b1b416f11c06242b55f1a64835b60ada9eb806c05a29a814f953d2f53b99a18a
         scheduling.lpu.nvidia.com/dgd-generation: "1"
         scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
@@ -349,7 +349,7 @@ spec:
     - annotations:
         lpx.nvidia.com/deployment-generation: "1"
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        lpx.nvidia.com/input-revision: sha256:4e222502b627cc59e427f91734b8b8b1e869b36c37942ae30bcae2dab56c25aa
+        lpx.nvidia.com/input-revision: sha256:726009979980e74ba17dbdff96de4f43e56a74de84b2f930efe1b2b7adaae550
         nvidia.com/extra-resources-hash: b1b416f11c06242b55f1a64835b60ada9eb806c05a29a814f953d2f53b99a18a
         scheduling.lpu.nvidia.com/dgd-generation: "1"
         scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
@@ -588,7 +588,7 @@ spec:
     - annotations:
         lpx.nvidia.com/deployment-generation: "1"
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        lpx.nvidia.com/input-revision: sha256:4e222502b627cc59e427f91734b8b8b1e869b36c37942ae30bcae2dab56c25aa
+        lpx.nvidia.com/input-revision: sha256:726009979980e74ba17dbdff96de4f43e56a74de84b2f930efe1b2b7adaae550
         scheduling.lpu.nvidia.com/dgd-generation: "1"
         scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:f41776b5eeefee5dab35cb81c9d4c052c88b10ac1025b0f408d690dec65d0ea1

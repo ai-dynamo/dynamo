@@ -41,7 +41,7 @@ spec:
       lpx:
         buildId: llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c
       roles:
-      - name: leader
+      - name: conductor
         replicas: 1
         podTemplate:
           spec:
@@ -87,7 +87,7 @@ spec:
             - configMap:
                 name: dgd-lpx-v2-vllm-cyborg-model-card
               name: cyborg-model-card
-      - name: worker
+      - name: agent
         podTemplate:
           spec:
             affinity:
