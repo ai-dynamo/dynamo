@@ -54,6 +54,8 @@ from gpu_memory_service.common.protocol.messages import (
     PersistentAllocationInfo,
     ReleasePersistentAllocationRequest,
     ReleasePersistentAllocationResponse,
+    UnclaimPersistentAllocationRequest,
+    UnclaimPersistentAllocationResponse,
 )
 
 from .allocations import AllocationInfo, GMSAllocationManager
@@ -584,6 +586,18 @@ class GMS:
                 -1,
                 False,
             )
+
+        if msg_type is UnclaimPersistentAllocationRequest:
+            claims = self._persistent_claims_by_session.get(conn.session_id)
+            key = (msg.engine_id, msg.tag)
+            if claims is None or key not in claims:
+                return UnclaimPersistentAllocationResponse(unclaimed=False), -1, False
+            unclaimed = self._persistent.unclaim(msg.engine_id, msg.tag)
+            claims.discard(key)
+            if not claims:
+                self._persistent_claims_by_session.pop(conn.session_id, None)
+            self._sync_persistent_layout_events()
+            return UnclaimPersistentAllocationResponse(unclaimed=unclaimed), -1, False
 
         if msg_type is ReleasePersistentAllocationRequest:
             if not self._has_persistent_claim(conn, msg.engine_id, msg.tag):
