@@ -136,25 +136,24 @@ impl RequestTraceSink for JsonlRequestTraceSink {
 
     async fn emit(&self, record: &RequestTraceRecord) {
         let guard = self.writer.lock().await;
-        let sent = match guard.as_ref() {
-            Some(writer) => writer.send(record.clone()).await.is_ok(),
-            None => false,
-        };
-        if !sent {
-            tracing::warn!("request trace file sink closed; dropping record");
+        match guard.as_ref() {
+            Some(writer) => {
+                if writer.send(record.clone()).await.is_err() {
+                    tracing::warn!("request trace file writer channel closed; dropping record");
+                }
+            }
+            None => tracing::warn!("request trace file sink shut down; dropping record"),
         }
     }
 
     async fn shutdown(&self) {
-        // Taking the writer makes shutdown idempotent without holding the lock while draining.
-        let writer = {
-            let mut guard = self.writer.lock().await;
-            guard.take()
-        };
-        if let Some(writer) = writer
-            && let Err(error) = writer.close().await
-        {
-            tracing::warn!(%error, "request trace file sink shutdown failed");
+        // Serialize callers until the drain finishes, including concurrent shutdowns.
+        let mut guard = self.writer.lock().await;
+        if let Some(writer) = guard.as_mut() {
+            if let Err(error) = writer.shutdown().await {
+                tracing::warn!(%error, "request trace file sink shutdown failed");
+            }
+            guard.take();
         }
     }
 }

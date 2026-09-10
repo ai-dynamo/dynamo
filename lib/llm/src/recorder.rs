@@ -27,7 +27,9 @@ where
 #[derive(Debug, Clone)]
 pub struct RecorderOptions {
     pub max_lines_per_file: Option<usize>,
+    /// Stop admission at this count, then drain events already accepted.
     pub max_count: Option<usize>,
+    /// Stop admission at this time, then drain events already accepted.
     pub max_time: Option<f64>,
     pub buffer_bytes: usize,
     pub flush_interval: Option<Duration>,
@@ -50,8 +52,8 @@ impl Default for RecorderOptions {
 /// A generic recorder for events that streams directly to a JSONL file
 #[derive(Debug)]
 pub struct Recorder<T> {
-    /// Taken only by the consuming [`Recorder::close`] path.
-    event_tx: Option<mpsc::Sender<T>>,
+    /// Closing the receiver rejects this sender and all producer clones.
+    event_tx: mpsc::Sender<T>,
     /// A cancellation token for managing shutdown
     cancel: CancellationToken,
     /// Prevents abrupt cancellation from interrupting a graceful drain.
@@ -60,7 +62,7 @@ pub struct Recorder<T> {
     event_count: Arc<Mutex<usize>>,
     /// Time when the first event was received
     first_event_time: Arc<Mutex<Option<Instant>>>,
-    writer_task: Option<tokio::task::JoinHandle<()>>,
+    writer_task: Option<tokio::task::JoinHandle<io::Result<()>>>,
 }
 
 impl<T> Recorder<T>
@@ -75,9 +77,9 @@ where
     /// * `output_path` - Path to the JSONL file to write events to
     /// * `max_lines_per_file` - Maximum number of lines per file before rotating to a new file.
     ///   If None, no rotation will occur.
-    /// * `max_count` - Maximum number of events to record before shutting down.
-    ///   If None, no limit will be applied.
-    /// * `max_time` - Maximum duration in seconds to record before shutting down.
+    /// * `max_count` - Event count at which to stop admission and drain the accepted backlog.
+    ///   If None, no count limit will be applied.
+    /// * `max_time` - Duration in seconds before stopping admission and draining the backlog.
     ///   If None, no time limit will be applied.
     ///
     /// ### Returns
@@ -150,57 +152,54 @@ where
                 tokio::time::interval(flush_interval.unwrap_or(Duration::from_secs(1)));
             flush_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-            // Set up max time deadline if specified
-            let max_time_deadline = options.max_time.map(|secs| {
-                let duration = Duration::from_secs_f64(secs);
-                start_time + duration
-            });
+            let max_time_deadline = options
+                .max_time
+                .map(|secs| tokio::time::Instant::now() + Duration::from_secs_f64(secs));
+            let mut draining = false;
 
             loop {
-                if !closing_clone.is_cancelled()
-                    && let Some(deadline) = max_time_deadline
-                    && Instant::now() >= deadline
-                {
-                    tracing::info!("Recorder reached max time limit, shutting down");
-                    if let Err(e) = writer.flush().await {
-                        tracing::error!("Failed to flush on time limit shutdown: {}", e);
-                    }
-                    cancel_clone.cancel();
-                    return;
-                }
-
                 tokio::select! {
                     biased;
 
-                    _ = cancel_clone.cancelled(), if !closing_clone.is_cancelled() => {
+                    _ = closing_clone.cancelled(), if !draining => {
+                        event_rx.close();
+                        draining = true;
+                    }
+
+                    _ = cancel_clone.cancelled(), if !draining => {
                         // Select guards are evaluated once, so close must be checked again here.
+                        event_rx.close();
                         if closing_clone.is_cancelled() {
+                            draining = true;
                             continue;
                         }
+                        writer.flush().await?;
+                        return Err(io::Error::new(
+                            io::ErrorKind::Interrupted,
+                            "recorder cancelled before graceful shutdown; queued events may be lost",
+                        ));
+                    }
 
-                        if let Err(e) = writer.flush().await {
-                            tracing::error!("Failed to flush on shutdown: {}", e);
+                    _ = async {
+                        if let Some(deadline) = max_time_deadline {
+                            tokio::time::sleep_until(deadline).await;
+                        } else {
+                            std::future::pending::<()>().await;
                         }
-
-                        tracing::debug!("Recorder task shutting down");
-                        return;
+                    }, if !draining => {
+                        event_rx.close();
+                        draining = true;
+                        cancel_clone.cancel();
+                        tracing::info!("Recorder reached max time limit, draining accepted events");
                     }
 
                     _ = flush_tick.tick(), if flush_interval.is_some() => {
-                        if let Err(e) = writer.flush().await {
-                            tracing::error!("Failed to flush on interval: {}", e);
-                        }
+                        writer.flush().await?;
                     }
 
                     event = event_rx.recv() => {
-                        // An explicit `None` arm lets close await the final flush.
                         let Some(event) = event else {
-                            if let Err(e) = writer.flush().await {
-                                tracing::error!("Failed to flush on channel close: {}", e);
-                            }
-
-                            tracing::debug!("Recorder task shutting down after channel close");
-                            return;
+                            return writer.flush().await;
                         };
 
                         // Update first_event_time if this is the first event
@@ -219,26 +218,10 @@ where
                             event,
                         };
 
-                        // Serialize to JSON string
-                        let json = match serde_json::to_string(&entry) {
-                            Ok(json) => json,
-                            Err(e) => {
-                                tracing::error!("Failed to serialize event: {}", e);
-                                continue;
-                            }
-                        };
-
-                        // Write JSON line
-                        if let Err(e) = writer.write_all(json.as_bytes()).await {
-                            tracing::error!("Failed to write event: {}", e);
-                            continue;
-                        }
-
-                        // Add a newline
-                        if let Err(e) = writer.write_all(b"\n").await {
-                            tracing::error!("Failed to write newline: {}", e);
-                            continue;
-                        }
+                        let json = serde_json::to_string(&entry)
+                            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                        writer.write_all(json.as_bytes()).await?;
+                        writer.write_all(b"\n").await?;
 
                         // Increment line count
                         line_count += 1;
@@ -247,9 +230,7 @@ where
                         if let Some(max_lines) = options.max_lines_per_file
                             && line_count >= max_lines {
                                 // Flush the current file
-                                if let Err(e) = writer.flush().await {
-                                    tracing::error!("Failed to flush file before rotation: {}", e);
-                                }
+                                writer.flush().await?;
 
                                 // Create new filename with suffix
                                 file_index += 1;
@@ -280,15 +261,13 @@ where
 
                         if let Some(max) = options.max_count
                             && *count >= max
-                            && !closing_clone.is_cancelled()
+                            && !draining
                         {
-                            tracing::info!("Recorder reached max event count ({}), shutting down", max);
-                            if let Err(e) = writer.flush().await {
-                                tracing::error!("Failed to flush on count limit shutdown: {}", e);
-                            }
+                            event_rx.close();
+                            draining = true;
                             drop(count);
                             cancel_clone.cancel();
-                            return;
+                            tracing::info!("Recorder reached max event count ({}), draining accepted events", max);
                         }
                     }
                 }
@@ -296,7 +275,7 @@ where
         });
 
         Ok(Self {
-            event_tx: Some(event_tx),
+            event_tx,
             cancel: token,
             closing,
             event_count,
@@ -307,10 +286,7 @@ where
 
     /// Get a sender that can be used to send events to the recorder
     pub fn event_sender(&self) -> mpsc::Sender<T> {
-        self.event_tx
-            .as_ref()
-            .expect("event_tx is only taken by close(), which consumes the recorder")
-            .clone()
+        self.event_tx.clone()
     }
 
     /// Get the count of recorded events
@@ -334,30 +310,31 @@ where
         self.cancel.cancel();
     }
 
-    /// Drains queued events and flushes the writer.
+    /// Stops admission, drains accepted events, and waits for the final flush.
     ///
-    /// Sender clones must be dropped first. Cancellation after close begins does
-    /// not interrupt the drain.
+    /// Sender clones may remain alive. Cancelling this future does not detach the
+    /// writer task; another call can await the same drain. A configured limit
+    /// stops admission but does not discard the accepted backlog.
     ///
     /// # Errors
     ///
-    /// Returns an error if the writer task panicked or cancellation preceded close.
-    pub async fn close(mut self) -> anyhow::Result<()> {
-        // Disable abrupt cancellation before closing the channel.
+    /// Returns writer I/O errors, task panics, or an abrupt cancellation that
+    /// stopped the writer before graceful shutdown took effect.
+    pub async fn shutdown_drain(&mut self) -> anyhow::Result<()> {
         self.closing.cancel();
-        let cancelled_before_close = self.cancel.is_cancelled();
-
-        drop(self.event_tx.take());
-        if let Some(writer_task) = self.writer_task.take() {
-            writer_task.await.context("recorder writer task panicked")?;
+        if let Some(writer_task) = self.writer_task.as_mut() {
+            let result = writer_task.await;
+            self.writer_task.take();
+            result
+                .context("recorder writer task panicked")?
+                .context("recorder writer failed")?;
         }
-
-        anyhow::ensure!(
-            !cancelled_before_close,
-            "recorder was already cancelled when close was called; \
-             events still queued at that point were abandoned"
-        );
         Ok(())
+    }
+
+    /// Drains accepted events, flushes, and consumes the recorder.
+    pub async fn close(mut self) -> anyhow::Result<()> {
+        self.shutdown_drain().await
     }
 
     /// Send events from a JSONL file to the provided event sender
@@ -884,10 +861,117 @@ mod tests {
             .unwrap();
 
         token.cancel();
+        // Let abrupt cancellation commit its terminal outcome before close starts.
+        tokio::time::timeout(Duration::from_secs(5), recorder.event_sender().closed())
+            .await
+            .expect("abrupt cancellation must close admission");
 
         recorder
             .close()
             .await
             .expect_err("close must not claim success after an earlier cancellation");
+    }
+
+    async fn limit_closes_admission_and_drains_permits(options: RecorderOptions) {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("limit.jsonl");
+        let recorder: Recorder<BarrierEvent> =
+            Recorder::new_with_options(CancellationToken::new(), &path, options)
+                .await
+                .unwrap();
+        let sender = recorder.event_sender();
+        let permit = sender.reserve().await.unwrap();
+        sender
+            .send(BarrierEvent { id: 1, gate: None })
+            .await
+            .unwrap();
+
+        // A terminal limit must reject ordinary sends before the final flush.
+        tokio::time::timeout(Duration::from_secs(5), sender.closed())
+            .await
+            .expect("the configured limit must close admission");
+        assert!(
+            sender
+                .send(BarrierEvent { id: 3, gate: None })
+                .await
+                .is_err()
+        );
+        let mut close = Box::pin(recorder.close());
+        assert!(futures::poll!(close.as_mut()).is_pending());
+
+        // A permit issued before close is still an accepted channel reservation.
+        permit.send(BarrierEvent { id: 2, gate: None });
+        close.await.unwrap();
+        assert_eq!(recorded_ids(&path), vec![1, 2]);
+        // The sender deliberately remains alive throughout close.
+        drop(sender);
+    }
+
+    #[tokio::test]
+    async fn max_count_rejects_new_sends_and_drains_accepted_permits() {
+        limit_closes_admission_and_drains_permits(RecorderOptions {
+            max_count: Some(1),
+            ..Default::default()
+        })
+        .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn max_time_rejects_new_sends_and_drains_accepted_permits() {
+        limit_closes_admission_and_drains_permits(RecorderOptions {
+            max_time: Some(1.0),
+            ..Default::default()
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_shutdown_wait_can_be_resumed_with_live_senders() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("resume.jsonl");
+        let mut recorder: Recorder<BarrierEvent> =
+            Recorder::new_with_options(CancellationToken::new(), &path, RecorderOptions::default())
+                .await
+                .unwrap();
+        let sender = recorder.event_sender();
+        let permit = sender.reserve().await.unwrap();
+        {
+            let mut shutdown = Box::pin(recorder.shutdown_drain());
+            assert!(futures::poll!(shutdown.as_mut()).is_pending());
+            tokio::time::timeout(Duration::from_secs(5), sender.closed())
+                .await
+                .expect("graceful shutdown must close admission");
+        }
+        let mut shutdown = Box::pin(recorder.shutdown_drain());
+        assert!(futures::poll!(shutdown.as_mut()).is_pending());
+        permit.send(BarrierEvent { id: 1, gate: None });
+        shutdown.await.unwrap();
+        assert!(recorder.event_sender().is_closed());
+        assert_eq!(recorded_ids(&path), vec![1]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn close_propagates_final_flush_failure() {
+        let recorder: Recorder<BarrierEvent> = Recorder::new_with_options(
+            CancellationToken::new(),
+            "/dev/full",
+            RecorderOptions {
+                buffer_bytes: 1024 * 1024,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        recorder
+            .event_sender()
+            .send(BarrierEvent { id: 1, gate: None })
+            .await
+            .unwrap();
+        let error = recorder.close().await.unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<io::Error>().unwrap().raw_os_error(),
+            Some(28)
+        );
     }
 }

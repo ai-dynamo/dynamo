@@ -66,10 +66,13 @@ where
     }
 
     /// Stops accepting records, drains the queue, and flushes. Calls are idempotent.
+    /// The writer remains closed if draining fails; subsequent sends fail.
     pub async fn shutdown(&mut self) -> anyhow::Result<()> {
         self.tx.take();
-        if let Some(recorder) = self.recorder.take() {
-            recorder.close().await?;
+        if let Some(recorder) = self.recorder.as_mut() {
+            let result = recorder.shutdown_drain().await;
+            self.recorder.take();
+            result?;
         }
         Ok(())
     }
@@ -225,5 +228,48 @@ mod tests {
             (1..=RECORDS).collect::<Vec<_>>(),
             "every accepted record must be written exactly once, in order"
         );
+    }
+
+    #[tokio::test]
+    async fn cancelled_shutdown_retains_the_pending_drain() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("resume.jsonl");
+        let mut writer: JsonlWriter<TestRecord> =
+            JsonlWriter::new(path.display().to_string(), JsonlSinkOptions::default())
+                .await
+                .unwrap();
+        let sender = writer.tx.as_ref().unwrap().clone();
+        let permit = sender.reserve().await.unwrap();
+        {
+            let mut shutdown = Box::pin(writer.shutdown());
+            assert!(futures::poll!(shutdown.as_mut()).is_pending());
+            tokio::time::timeout(Duration::from_secs(5), sender.closed())
+                .await
+                .expect("graceful shutdown must close admission");
+        }
+        assert!(
+            writer
+                .send(TestRecord {
+                    id: 2,
+                    name: "late".into()
+                })
+                .await
+                .is_err()
+        );
+        let mut shutdown = Box::pin(writer.shutdown());
+        assert!(futures::poll!(shutdown.as_mut()).is_pending());
+        permit.send(TestRecord {
+            id: 1,
+            name: "accepted".into(),
+        });
+        shutdown.await.unwrap();
+        writer.shutdown().await.unwrap();
+        let lines = std::fs::read_to_string(path).unwrap();
+        let records: Vec<serde_json::Value> = lines
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["event"]["id"], 1);
     }
 }
