@@ -391,6 +391,27 @@ class _SnapshotLogDeployment(ManagedDeployment):
                         container=container,
                         timestamps=True,
                     ):
+                        # Watch yields an unbuffered API error as a log line.
+                        # Real container logs carry the requested timestamp;
+                        # an unprefixed Status failure means attachment failed.
+                        if line.startswith("{"):
+                            try:
+                                status = json.loads(line)
+                            except json.JSONDecodeError:
+                                status = None
+                            if (
+                                isinstance(status, dict)
+                                and status.get("kind") == "Status"
+                                and status.get("apiVersion") == "v1"
+                                and status.get("status") == "Failure"
+                            ):
+                                logger.warning(
+                                    "Could not attach capture source %s/%s: %s",
+                                    pod_name,
+                                    container,
+                                    status.get("message", status),
+                                )
+                                return False
                         output.write(line)
                         output.flush()
             return True
@@ -439,7 +460,27 @@ class _SnapshotLogDeployment(ManagedDeployment):
                                 json.dumps(serialized, indent=2) + "\n",
                                 encoding="utf-8",
                             )
+                            container_statuses = {
+                                status.name: status
+                                for status in (
+                                    (
+                                        pod.status.container_statuses
+                                        if pod.status
+                                        else None
+                                    )
+                                    or []
+                                )
+                            }
                             for container in pod.spec.containers:
+                                status = container_statuses.get(container.name)
+                                if (
+                                    status is None
+                                    or status.state is None
+                                    or not (
+                                        status.state.running or status.state.terminated
+                                    )
+                                ):
+                                    continue
                                 key = (pod_name, container.name)
                                 task = streams.get(key)
                                 if task is None or (task.done() and not task.result()):
