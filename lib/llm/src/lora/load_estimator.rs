@@ -4,7 +4,7 @@
 //! LORA Load Estimator
 //!
 //! Tracks LORA adapter usage over time to estimate load for allocation decisions.
-//! Supports single-router (polling) and multi-router (event-based) modes.
+//! Event-based: routers report arrivals and completions as they happen.
 //!
 //! The primary load signal is **arrival count in a sliding window**, tracked by
 //! a lock-free [`BucketedRateCounter`] per LoRA. An optional [`LoadPredictor`]
@@ -230,7 +230,6 @@ impl std::fmt::Debug for LoraLoadData {
 
 #[derive(Debug, Clone)]
 pub struct LoadEstimatorConfig {
-    pub poll_interval: Duration,
     /// Sliding window size for request-rate calculation.
     pub rate_window: Duration,
     pub buckets_per_second: u64,
@@ -241,7 +240,6 @@ pub struct LoadEstimatorConfig {
 impl Default for LoadEstimatorConfig {
     fn default() -> Self {
         Self {
-            poll_interval: Duration::from_secs(5),
             rate_window: Duration::from_secs(30),
             buckets_per_second: 1,
             predictor_type: PredictorType::Ema,
@@ -597,15 +595,8 @@ impl LoadEstimator {
         }
     }
 
-    /// Update active counts from a polled snapshot.
-    ///
-    /// **Polling-mode caveat**: arrivals are approximated as the per-poll
-    /// delta `max(0, current - prev)`, since worker snapshots do not expose
-    /// request-start events. This is a *lower bound* on real arrivals:
-    /// in-interval churn (e.g., 10 requests finishing while 10 new ones start
-    /// — net delta 0) is invisible, and sub-interval oscillation is lost.
-    /// Event-based mode (`handle_event` / `increment_load`) gives accurate
-    /// arrival rates; prefer it when arrival precision matters.
+    /// Update active counts from a snapshot; arrivals are approximated as the
+    /// positive delta since the previous snapshot.
     #[cfg(test)]
     fn update_from_counts(&self, lora_counts: HashMap<String, usize>) {
         let now = Instant::now();

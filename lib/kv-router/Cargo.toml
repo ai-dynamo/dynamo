@@ -21,6 +21,8 @@ profile = []
 standalone-indexer = ["dep:axum", "dep:reqwest", "dep:zmq", "dep:chrono", "dep:tracing-appender"]
 standalone-slot-tracker = ["dep:axum", "dep:zmq"]
 standalone-selection = ["standalone-indexer", "dep:once_cell"]
+# Test-only hooks consumed by dependent crates' tests; never enable in release.
+testing = []
 
 [dependencies]
 # repo

@@ -5,16 +5,7 @@
 //! partition of an embedded selection service (`kv_router::embedded`); these
 //! re-exports are the runtime-free scheduling vocabulary it speaks.
 
-pub use dynamo_kv_router::scheduling::overlap_refresh::{
-    NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap,
-};
 pub use dynamo_kv_router::scheduling::queue::{
     SchedulerBookingCleanup, SchedulerBookingDescriptor,
 };
-pub use dynamo_kv_router::scheduling::{
-    AdmittedSchedulingResponse, AdvisorySchedulingResponse, AttemptId, KvSchedulerError,
-    LocalScheduler, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, PotentialLoad,
-    ScheduleRequest, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
-    WorkerAvailabilityProvider,
-};
-pub use dynamo_kv_router::selector::DefaultWorkerSelector;
+pub use dynamo_kv_router::scheduling::{KvSchedulerError, PotentialLoad};

@@ -2275,7 +2275,6 @@ impl ModelManager {
                 buckets_per_second: config.buckets_per_second,
                 predictor_type: config.predictor_type,
                 ema_alpha: config.ema_alpha,
-                ..Default::default()
             });
         let domain_cancel = cancel_token.child_token();
         *domain.controller_cancel.lock() = Some(domain_cancel.clone());

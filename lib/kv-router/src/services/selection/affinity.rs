@@ -113,8 +113,10 @@ struct Inner {
     writer_id: AtomicU64,
     cancel: CancellationToken,
     replica: OnceLock<Arc<dyn AffinityReplicaSink>>,
+    #[cfg(any(test, feature = "testing"))]
     reaper_started: Arc<Notify>,
-    waiter_observed: Arc<Notify>,
+    #[cfg(any(test, feature = "testing"))]
+    waiter_observed: Notify,
 }
 
 impl Drop for Inner {
@@ -208,8 +210,10 @@ impl SessionAffinity {
             writer_id: AtomicU64::new(0),
             cancel: CancellationToken::new(),
             replica: OnceLock::new(),
+            #[cfg(any(test, feature = "testing"))]
             reaper_started: Arc::new(Notify::new()),
-            waiter_observed: Arc::new(Notify::new()),
+            #[cfg(any(test, feature = "testing"))]
+            waiter_observed: Notify::new(),
         });
         Self::spawn_reaper(&inner);
         tracing::info!(
@@ -224,8 +228,10 @@ impl SessionAffinity {
         let weak = Arc::downgrade(inner);
         let cancel = inner.cancel.clone();
         let period = inner.ttl.min(Duration::from_secs(30));
+        #[cfg(any(test, feature = "testing"))]
         let reaper_started = inner.reaper_started.clone();
         tokio::spawn(async move {
+            #[cfg(any(test, feature = "testing"))]
             reaper_started.notify_one();
             loop {
                 tokio::select! {
@@ -304,6 +310,7 @@ impl SessionAffinity {
             }
             Entry::Occupied(mut entry) => match entry.get_mut() {
                 AffinityEntry::Initializing { notify, .. } => {
+                    #[cfg(any(test, feature = "testing"))]
                     self.inner.waiter_observed.notify_one();
                     // Register before releasing the entry so a commit or a
                     // dropped initialization between the two cannot be missed.
@@ -431,6 +438,7 @@ impl SessionAffinity {
         self.inner.apply_replica_update(session_id, target, version)
     }
 
+    #[cfg(any(test, feature = "testing"))]
     pub fn entry_count(&self) -> usize {
         self.inner.entry_count.load(Ordering::Relaxed)
     }
@@ -440,17 +448,17 @@ impl SessionAffinity {
         self.inner.cancel.clone()
     }
 
-    /// Test hook: the reaper task has started.
+    #[cfg(any(test, feature = "testing"))]
     pub async fn wait_for_reaper(&self) {
         self.inner.reaper_started.notified().await;
     }
 
-    /// Test hook: a request observed an initializing session and is waiting.
+    #[cfg(any(test, feature = "testing"))]
     pub async fn wait_for_initializing_waiter(&self) {
         self.inner.waiter_observed.notified().await;
     }
 
-    /// Test hook: expire an idle bound session now.
+    #[cfg(any(test, feature = "testing"))]
     pub fn expire_for_test(&self, session_id: &str) {
         let Some(mut entry) = self.inner.entries.get_mut(session_id) else {
             panic!("session affinity entry missing");
