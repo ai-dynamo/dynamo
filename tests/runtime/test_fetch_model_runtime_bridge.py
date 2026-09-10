@@ -262,7 +262,6 @@ def _isolated_child_env(cache: Path, scenario: str, system_port: int) -> dict[st
 
 
 def _parse_jsonl_logs(output: str) -> list[dict[str, Any]]:
-    """Extract structured log records while ignoring non-JSON diagnostic lines."""
     records = []
     for raw_line in output.splitlines():
         json_start = raw_line.find("{")
