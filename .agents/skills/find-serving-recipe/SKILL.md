@@ -100,24 +100,36 @@ Consult in this order when Tier 0 yields no candidate meeting the required verdi
 
 1. **`vllm-project/recipes`** (vLLM engine). Consume the JSON API, not the YAML files:
    `https://recipes.vllm.ai/models.json`, then `/<hf_org>/<hf_repo>.json`, then
-   `/<hf_org>/<hf_repo>/hw/<hardware>.json`. The per-hardware endpoint returns `argv`,
-   `docker_image`, `env`, and `hardware_profile.gpu_count` directly. Respect
-   `min_vllm_version` and the per-hardware `verified` flag. Two caveats: most recipes fall back
-   to a mutable `latest` image (the tag gate then classifies them ceiling-only unless the
-   engagement pins its own image), and the exported JSON drops the prefill/decode
-   `strategy_overrides`; for disaggregated topology, read the recipe's YAML from the git repo
-   and compose against its `strategies.json`.
+   `/<hf_org>/<hf_repo>/hw/<hardware>.json`. Branch on the per-hardware response's
+   `deploy_type`: for `single_node` it returns `argv`, `docker_image`, `env`, and a
+   `hardware_profile` whose `gpu_count` is the total; for `multi_node` it returns `head_argv`,
+   `worker_argvs`, `node_count`, and a `hardware_profile` whose `gpu_count` is PER NODE, so the
+   total requirement is `node_count` times `gpu_count` (the `strategy_spec` names the
+   interconnect assumption, for example InfiniBand for multi-node TP). Never read the flat
+   single-node fields from a multi-node response; a missing `argv` is a schema branch, not an
+   absent recipe. Respect `min_vllm_version` and the per-hardware `verified` flag. Two caveats:
+   most recipes fall back to a mutable `latest` image (the tag gate then classifies them
+   ceiling-only unless the engagement pins its own image), and the exported JSON drops the
+   prefill/decode `strategy_overrides`; for disaggregated topology, read the recipe's YAML from
+   the git repo and compose against its `strategies.json`.
 2. **`NVIDIA/srt-slurm-recipes`** for frontier models on Blackwell-class hardware, especially
    disaggregated and multi-node. Recipes are SLURM-shaped but carry the full engine
    configuration, worker split, and image. **Exclude `**/agentic/` and `*-sa/` paths from
    deployable candidates**: those port externally tuned benchmark configs and are quarantined to
    ceiling-only (see Tier 4). Expect a meaningful fraction of container tags to fail the gate.
 3. **`llm-d/llm-d` `guides/`** ("well-lit paths"). Tested, benchmarked, Kubernetes-native
-   recipes: Kustomize patches whose `args:` arrays are literal engine invocations with sized
-   prefill/decode Deployments, on stock centrally pinned upstream images. Model coverage is
-   narrow per guide; when the target model is covered, this is the best public source of sized
-   disaggregation topology, and its manifests translate near-mechanically into a
-   DynamoGraphDeployment.
+   recipes with sized prefill/decode Deployments; when the target model is covered, the best
+   public source of sized disaggregation topology. Two checks before any llm-d candidate is
+   graded above `hypothesis`: (a) IMAGE CAPABILITY: the guide's image component may select a
+   stock upstream image or an `llm-d`-hosted variant (`ghcr.io/llm-d/llm-d-*`) that carries
+   patches upstream lacks, such as the NVSHMEM fix for RoCE; record which, and treat a
+   patched-variant dependency as a prerequisite the target must satisfy, not a stock image;
+   (b) COORDINATION TRANSLATION: guides that use LeaderWorkerSet (`LWS_WORKER_INDEX`,
+   `LWS_GROUP_SIZE`, `LWS_LEADER_ADDRESS`) compute ranks and addresses in shell at start-up,
+   which has no literal DGD equivalent; those manifests are not a mechanical translation and
+   stay `hypothesis` until the multi-node coordination is re-expressed in Dynamo's own terms
+   and verified. Only single-pod-per-worker guides with literal `args:` arrays on stock images
+   translate near-mechanically.
 
 ## Tier 2: engine-native catalogs
 
@@ -200,11 +212,15 @@ would promote it.
 
 ## Output: the recipe dossier
 
-Write the dossier to `<EXP_ROOT>/analysis/recipe-dossier.md`, one file per engagement, in both
-invocation contexts (the interviewer establishes `EXP_ROOT` before running the ladder). A later
-invocation appends a dated section rather than replacing the file. Return the path and its
-SHA256 to the caller; callers cite both, and later iterations reuse the file by that path. The
-dossier contains:
+Write the dossier as an IMMUTABLE snapshot at
+`<EXP_ROOT>/analysis/recipe-dossier/<NNN>-<UTC timestamp>.md` (NNN zero-padded, increasing per
+invocation), in both invocation contexts (the interviewer establishes `EXP_ROOT` before the
+ladder runs). Never modify a snapshot after writing it; a later invocation writes the next
+snapshot and may summarize deltas against the previous one. Maintain
+`<EXP_ROOT>/analysis/recipe-dossier/index.md` listing every snapshot with its SHA256. Return the
+snapshot path and its SHA256 to the caller; callers cite exactly that pair, so an evidence record
+written against snapshot 001 still verifies after snapshot 002 exists. Later iterations reuse
+the latest snapshot by reading the index. Each snapshot contains:
 
 - the question (model, hardware, GPU budget, workload, topology preference);
 - the model card's correctness settings (sampling, context, parsers) and minimum engine version;

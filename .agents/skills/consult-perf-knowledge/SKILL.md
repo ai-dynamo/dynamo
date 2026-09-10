@@ -179,8 +179,9 @@ Follow `agent-docs/guides/knob-tuning/tuning-hierarchy.md`:
 
 1. Classify the exact model and compute memory fit, minimum parallelism, and headroom.
 2. Complete the exploration-versus-exploitation calibration and full broad-lever scan above. As part of the broad
-   scan, invoke `find-serving-recipe` once per engagement, reusing `EXP_ROOT/analysis/recipe-dossier.md` on later
-   iterations when it exists, and record the dossier's path and SHA256 in `knowledge-consult.md`, so that every
+   scan, invoke `find-serving-recipe` once per engagement, reusing the latest snapshot listed in
+   `EXP_ROOT/analysis/recipe-dossier/index.md` on later iterations when one exists, and record the snapshot's
+   path and SHA256 in `knowledge-consult.md`, so that every
    recipe-shaped candidate under consideration carries a provenance verdict: a `deployable` or `hypothesis` grade
    candidate enters the lever shortlist with its dossier entry attached, and a `ceiling-only` candidate may inform
    expected-performance headroom but is never shortlisted for deployment. A recipe-sourced candidate goes through
