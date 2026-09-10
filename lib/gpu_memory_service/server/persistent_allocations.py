@@ -93,6 +93,10 @@ class PersistentAllocationManager:
         return self._device
 
     @property
+    def allocation_count(self) -> int:
+        return len(self._allocations)
+
+    @property
     def active_claim_count(self) -> int:
         """Number of distinct (engine_id, tag) keys currently claimed.
 
@@ -427,12 +431,6 @@ class PersistentAllocationManager:
     # ------------------------------------------------------------------
     # Daemon-side direct access
     # ------------------------------------------------------------------
-    #
-    # These methods read/write the SAME PHYSICAL PAGES the engine sees,
-    # via the daemon's own VA mapping. They do NOT memcpy across
-    # processes — the engine and daemon both see the same bytes.
-    # Synchronization against engine writes is the CALLER's job (use
-    # the existing CUDA event / ring-counter protocol).
 
     def daemon_va(self, engine_id: str, tag: str) -> int:
         """Return the daemon-side VA for ``(engine_id, tag)``. Raises
