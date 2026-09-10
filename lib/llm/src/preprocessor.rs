@@ -3236,12 +3236,6 @@ impl OpenAIPreprocessor {
                     continue;
                 };
 
-                if type_str != "image_url" && uuid.is_some() {
-                    return Err(invalid_argument_error(
-                        "multimodal cache UUIDs are supported only for image_url parts with vLLM",
-                    ));
-                }
-
                 #[cfg(feature = "mm-routing")]
                 if type_str == "image_url" {
                     total_image_count += 1;
@@ -3265,12 +3259,10 @@ impl OpenAIPreprocessor {
                 let slots = media_map.entry(type_str.to_string()).or_default();
                 let slot_idx = slots.len();
                 has_user_uuid |= uuid.is_some();
-                if type_str == "image_url" {
-                    uuid_map
-                        .entry(type_str.to_string())
-                        .or_default()
-                        .push(uuid.clone());
-                }
+                uuid_map
+                    .entry(type_str.to_string())
+                    .or_default()
+                    .push(uuid.clone());
 
                 match (url, uuid) {
                     (Some(url), _) => {
@@ -3289,8 +3281,13 @@ impl OpenAIPreprocessor {
                         }
                         slots.push(MultimodalData::Url(url));
                     }
-                    (None, Some(uuid)) => {
+                    (None, Some(uuid)) if type_str == "image_url" => {
                         slots.push(MultimodalData::UuidOnly(uuid));
+                    }
+                    (None, Some(_)) => {
+                        return Err(invalid_argument_error(format!(
+                            "UUID-only cache reuse is not supported for media modality `{type_str}`; provide a media URL"
+                        )));
                     }
                     (None, None) => {
                         return Err(invalid_argument_error(format!(
@@ -9819,6 +9816,14 @@ mod tests {
         {% if not ns.has_user %}{{ raise_exception('No user query found in messages.') }}{% endif %}\
         {{ messages[0]['content'] }}";
 
+    const REQUIRES_LEADING_SYSTEM_TEMPLATE: &str = "\
+        {%- for message in messages -%}\
+            {%- if message['role'] == 'system' and not loop.first -%}\
+                {{- raise_exception('System message must be at the beginning.') -}}\
+            {%- endif -%}\
+            {{- message['role'] }}:{{ message['content'] }}\n\
+        {%- endfor -%}";
+
     fn render_through_preprocessor(
         formatter: &dyn OAIPromptFormatter,
         request: &dyn OAIChatLikeRequest,
@@ -9872,6 +9877,43 @@ mod tests {
         let rendered = render_through_preprocessor(formatter.as_ref(), &request).unwrap();
 
         assert_eq!(rendered.as_str(), "hello");
+    }
+
+    #[test]
+    fn test_nonleading_system_message_normalized_for_strict_template() {
+        let formatter = test_prompt_formatter(REQUIRES_LEADING_SYSTEM_TEMPLATE);
+        let anthropic_request: crate::protocols::anthropic::AnthropicCreateMessageRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "max_tokens": 100,
+                "system": "You are Claude Code.",
+                "messages": [
+                    {"role": "user", "content": "Run make test."},
+                    {"role": "system", "content": "Available agent types and skills."}
+                ],
+                "tools": [{
+                    "name": "Bash",
+                    "description": "Run a shell command",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "command": {"type": "string"}
+                        },
+                        "required": ["command"]
+                    }
+                }]
+            }))
+            .unwrap();
+        let request: NvCreateChatCompletionRequest = anthropic_request.try_into().unwrap();
+
+        let rendered = render_through_preprocessor(formatter.as_ref(), &request).unwrap();
+
+        assert_eq!(
+            rendered.as_str(),
+            "system:You are Claude Code.\
+             user:Run make test.\
+             user:Available agent types and skills."
+        );
     }
 
     #[test]

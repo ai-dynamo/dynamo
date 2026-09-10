@@ -2095,6 +2095,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-custom-policy-builtin"
+version = "1.5.0"
+dependencies = [
+ "dynamo-kv-router",
+ "serde",
+]
+
+[[package]]
 name = "dynamo-data-gen"
 version = "1.5.0"
 dependencies = [
@@ -2252,6 +2260,8 @@ dependencies = [
  "tokio-util",
  "tonic 0.13.1",
  "tonic-build 0.13.1",
+ "tonic-health",
+ "tonic-reflection",
  "tower-http",
  "tracing",
  "url",
@@ -2381,6 +2391,7 @@ dependencies = [
  "clap",
  "dashmap",
  "dynamo-backend-common",
+ "dynamo-custom-policy-builtin",
  "dynamo-kv-router",
  "dynamo-llm",
  "dynamo-mocker",
@@ -2416,9 +2427,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-renderer"
-version = "5.1.0"
+version = "5.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0a5b79eefdfd2bb2c01f3a187f9367db598db58a4cf17550d20f79c97656b66"
+checksum = "3ae2eaa139651c535aeaad8856c5546709608931ccd4d24d3a529f6c5233c4b6"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2489,6 +2500,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
+ "opentelemetry-proto",
  "opentelemetry_sdk",
  "parking_lot",
  "percent-encoding",
@@ -2513,6 +2525,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-stream",
  "tokio-util",
+ "tonic 0.14.6",
  "tower-http",
  "tracing",
  "tracing-opentelemetry",
@@ -2562,9 +2575,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokenizers"
-version = "1.8.0"
+version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "821c767e896f1f225b6411a5ce41dba7f114c2c97db862a13fd962195665075e"
+checksum = "ed232a9d254149a4e2e14f0a7d77f59bd64161964c0ba55267beea3955650faa"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -8760,6 +8773,7 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+ "zstd",
 ]
 
 [[package]]
@@ -8856,6 +8870,19 @@ dependencies = [
  "syn 2.0.118",
  "tempfile",
  "tonic-build 0.14.6",
+]
+
+[[package]]
+name = "tonic-reflection"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9687bd5bfeafebdded2356950f278bba8226f0b32109537c4253406e09aafe1"
+dependencies = [
+ "prost 0.13.5",
+ "prost-types 0.13.5",
+ "tokio",
+ "tokio-stream",
+ "tonic 0.13.1",
 ]
 
 [[package]]

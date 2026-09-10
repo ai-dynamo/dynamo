@@ -93,8 +93,7 @@ examples:
   - 'tests/test_generate_kustomize_openapi.py'
   - 'tests/test_kustomize_matrix.py'
   - 'docs/tests/**'
-  - 'deploy/operator/config/crd/bases/nvidia.com_dynamographdeployment.yaml'
-  - 'deploy/operator/config/crd/bases/nvidia.com_dynamographdeploymentrequests.yaml'
+  - 'deploy/operator/config/crd/bases/**'
 
 ignore:
   # Classification-only, moved out of `docs`: these match files anywhere in the
@@ -262,7 +261,7 @@ snapshot:
   - 'deploy/operator/api/v1beta1/dynamographdeployment_conversion.go'
   - 'deploy/operator/config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml'
   - 'deploy/operator/config/crd/bases/nvidia.com_dynamographdeployments.yaml'
-  - 'deploy/operator/config/rbac/role.yaml'
+  - 'deploy/helm/charts/platform/components/operator/files/role.yaml'
   - 'deploy/operator/go.mod'
   - 'deploy/operator/go.sum'
   - 'deploy/helm/charts/platform/components/operator/**'
@@ -286,7 +285,11 @@ snapshot_vllm:
   - 'deploy/operator/internal/dynamo/backend_vllm.go'
 
 snapshot_sglang:
+  - 'components/src/dynamo/sglang/args.py'
   - 'components/src/dynamo/sglang/snapshot.py'
+  # The SGLang runtime tag controls the engine version exercised by this suite,
+  # so engine bumps must trigger it. Deliberately omit broad pyproject.toml.
+  - 'container/context.yaml'
   - 'deploy/operator/internal/dynamo/backend_sglang.go'
 
 snapshot_trtllm:
@@ -344,6 +347,8 @@ sidecar:
   # acceptable CI fan-out is agreed. Keep the remaining scope narrow for now.
   - 'lib/sidecar/**'
   - '.github/workflows/shared-build-sidecar.yml'
+  - 'Cargo.toml'
+  - 'Cargo.lock'
   # Compliance policy and baseline changes can fail the sidecar image build.
   - 'container/compliance/**'
   - '!**/*.md'
