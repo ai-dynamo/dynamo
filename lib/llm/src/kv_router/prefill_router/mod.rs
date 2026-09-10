@@ -490,7 +490,7 @@ where
             let topology_constraints = prepared.topology_constraints;
             let outcome = if let Some(bootstrap_info) = prepared.bootstrap_info {
                 // The drain gets its own reference rather than ownership: a
-                // PreCommit worker still has to be revocable from the routing
+                // PreHandoff worker still has to be revocable from the routing
                 // side once the handoff parameters come back.
                 self.spawn_prefill_task(prefill_stream, tracker, prefill_phase_barrier, link);
                 PrefillOutcome::Bootstrap {
@@ -499,11 +499,16 @@ where
                 }
             } else {
                 drop(prefill_phase_barrier);
+                // The link goes to the drain too: when bootstrap is detected
+                // from the first response rather than at dispatch,
+                // consume_prefill_stream spawns a background drain that
+                // outlives this call, and cancellation has to keep reaching
+                // prefill for as long as that runs.
                 let completion = Self::consume_prefill_stream(
                     prefill_stream,
                     tracker,
                     self.task_guard.clone(),
-                    None,
+                    link,
                 )
                 .await?;
 
@@ -556,7 +561,7 @@ where
 
         // The prefill request has now returned its handoff parameters, so the
         // worker has committed KV for the decode leg to collect. Workers that
-        // declare PreCommit stop being cancellable here: aborting past this
+        // declare PreHandoff stop being cancellable here: aborting past this
         // point orphans that KV until a transfer timeout reclaims it, which
         // costs far more than letting the prefill finish. Revoking works even
         // though a drain task may hold the same link, which is why it is shared
