@@ -505,11 +505,10 @@ pub mod llm {
 
         /// Deprecated prefix for the histogram bucket variables above.
         ///
-        /// PR #4083 centralized environment constants and began prepending this
-        /// to prefixes that already started with `DYN_METRICS_`, so the variables
-        /// silently became doubled names such as
-        /// `DYN_HISTOGRAM_DYN_METRICS_ITL_MAX`. The doubled form is still read as
-        /// a fallback, with a warning, and will be removed in a future release.
+        /// This was once prepended to prefixes that already started with
+        /// `DYN_METRICS_`, so the variables were read under doubled names such as
+        /// `DYN_HISTOGRAM_DYN_METRICS_ITL_MAX`. The doubled form is still accepted
+        /// as a fallback, with a warning, and will be removed in a future release.
         pub const DEPRECATED_HISTOGRAM_PREFIX: &str = "DYN_HISTOGRAM_";
 
         /// Former name of [`DEPRECATED_HISTOGRAM_PREFIX`], kept so that code outside

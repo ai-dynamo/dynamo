@@ -423,8 +423,8 @@ fn system_env(name: &str) -> Option<String> {
 
 /// Read one histogram bucket setting, e.g. `DYN_METRICS_ITL_MAX`, from the environment.
 ///
-/// Falls back to the deprecated doubled form (`DYN_HISTOGRAM_DYN_METRICS_ITL_MAX`)
-/// that PR #4083 introduced by accident, warning so operators can migrate.
+/// Falls back to the deprecated doubled form (`DYN_HISTOGRAM_DYN_METRICS_ITL_MAX`),
+/// warning so operators can migrate off it.
 ///
 /// Returns `default` when neither name is set. A name that *is* set but cannot be
 /// parsed also returns `default`, but warns first: silently ignoring a typo makes
@@ -2618,8 +2618,8 @@ mod tests {
 
     #[test]
     fn bucket_config_reads_the_documented_env_var_names() {
-        // PR #4083 prepended DYN_HISTOGRAM_ to a prefix that already started with
-        // DYN_METRICS_, so these names silently stopped working.
+        // These names were once read under an extra DYN_HISTOGRAM_ prefix, which
+        // silently stopped them working; they must resolve as documented.
         let env = fake_env(&[
             ("DYN_METRICS_ITL_MIN", "0.002"),
             ("DYN_METRICS_ITL_MAX", "80"),
@@ -2631,8 +2631,8 @@ mod tests {
 
     #[test]
     fn bucket_config_falls_back_to_the_deprecated_doubled_name() {
-        // The doubled form was the only working name between #4083 and this fix, so it
-        // stays supported for one release rather than silently reverting to defaults.
+        // The doubled form was the only name that worked for several releases, so it
+        // stays supported for one more rather than silently reverting to defaults.
         let env = fake_env(&[("DYN_HISTOGRAM_DYN_METRICS_ITL_MAX", "80")]);
         let (_, max, _) = parse_bucket_config(&env, env_metrics::DYN_METRICS_ITL, 0.001, 2.0, 13);
         assert_eq!(max, 80.0);
