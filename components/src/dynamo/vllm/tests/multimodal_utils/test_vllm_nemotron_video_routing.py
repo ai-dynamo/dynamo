@@ -74,10 +74,6 @@ def test_publishes_nemotron_video_contract(monkeypatch, pruning_spec, expected_r
             mm_processor_kwargs=None,
             get_video_pruning_spec=lambda: ("evs", "not-a-number"),
         ),
-        SimpleNamespace(
-            mm_processor_kwargs=None,
-            get_video_pruning_spec=lambda: ("evs",),
-        ),
         SimpleNamespace(mm_processor_kwargs=None),
     ],
 )

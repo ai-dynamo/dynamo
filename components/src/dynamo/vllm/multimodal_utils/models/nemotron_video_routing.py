@@ -53,9 +53,11 @@ def _load_nemotron_processor_contract() -> tuple[Any, Any, Any]:
 def _installed_processor_matches_contract() -> bool:
     """Probe the vLLM helpers whose behavior the Rust adapter mirrors."""
     try:
-        processor, geometry_helper, retention_helper = (
-            _load_nemotron_processor_contract()
-        )
+        (
+            processor,
+            geometry_helper,
+            retention_helper,
+        ) = _load_nemotron_processor_contract()
         geometry = geometry_helper(
             orig_w=640,
             orig_h=360,
