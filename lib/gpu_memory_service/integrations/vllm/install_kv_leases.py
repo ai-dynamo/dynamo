@@ -36,6 +36,11 @@ class GMSKVLeaseUnavailable(ValueError):
 _DIRECTORY_KEY_DOMAIN = b"dynamo:gms:vllm-native-hbm-v1\x00"
 
 
+def _successor_generation(generation: int) -> int:
+    """Match the native lease ring's wrapping u32 adoption generation."""
+    return (int(generation) + 1) & 0xFFFFFFFF
+
+
 def _directory_key(block_hash) -> bytes:
     """Map vLLM's opaque native key onto the directory's 32-byte key ABI.
 
@@ -481,35 +486,59 @@ def _hydrate_hbm_directory(self, exclude: set[bytes]) -> int:
         if not selected or token is None:
             return 0
 
-        # Lease adoption is intentionally atomic for each batch. A stale
-        # generation in the read snapshot must not discard every other
-        # valid recovery candidate, so retain the one-call fast path and
-        # bisect only failed groups. The directory claim fences all entries
-        # throughout this bounded recovery operation.
-        pending = [selected]
+        # Stage the successor generations in the durable directory BEFORE
+        # changing the native rings. If this process dies between the two, the
+        # entry is ACTIVE and the next fenced promotion drops it, allowing the
+        # orphan lease to be reclaimed instead of protecting an obsolete
+        # generation forever. Failed atomic groups are bisected; ACTIVE entries
+        # remain claimable by this fenced writer during that retry.
+        pending = [(selected, token)]
+        token = None
         adopted_pairs = []
         stale = []
         while pending:
-            group = pending.pop()
+            group, group_token = pending.pop()
+            if group_token is None:
+                group_entries, group_token = directory.lookup_and_claim(
+                    [key for key, _native_key, _entry, _old in group]
+                )
+                if group_token is None or any(entry is None for entry in group_entries):
+                    stale.extend(group)
+                    continue
+            expected = [
+                KVLease(old.block_id, _successor_generation(old.generation))
+                for _key, _native_key, _entry, old in group
+            ]
+            claimed_entries.extend(
+                (key, entry) for key, _native_key, entry, _old in group
+            )
+            staged = directory.adopt_claim(
+                group_token,
+                [
+                    {
+                        "content_hash": selected_item[0],
+                        "generations": [int(lease.generation)],
+                    }
+                    for selected_item, lease in zip(group, expected)
+                ],
+            )
+            if staged != len(group):
+                raise RuntimeError("bulk HBM directory adoption was incomplete")
+
             group_leases = client.adopt(
                 [old for _key, _native_key, _entry, old in group]
             )
             if group_leases:
-                expected_ids = [
-                    old.block_id for _key, _native_key, _entry, old in group
-                ]
-                if [lease.block_id for lease in group_leases] != expected_ids:
-                    raise RuntimeError("bulk HBM adoption returned different slots")
+                if group_leases != expected:
+                    raise RuntimeError("bulk HBM adoption returned unexpected leases")
                 adopted_pairs.extend(zip(group, group_leases))
             elif len(group) == 1:
                 stale.extend(group)
             else:
                 middle = len(group) // 2
-                pending.extend((group[middle:], group[:middle]))
+                pending.extend(((group[middle:], None), (group[:middle], None)))
 
         if not adopted_pairs:
-            directory.release_claim(token)
-            token = None
             _drop_directory_hashes(
                 directory,
                 [(key, entry) for key, _native_key, entry, _old in stale],
@@ -517,26 +546,6 @@ def _hydrate_hbm_directory(self, exclude: set[bytes]) -> int:
             return 0
 
         acquired = [lease for _selected, lease in adopted_pairs]
-        # Record rollback targets before the RPC. If its reply is lost after
-        # the daemon commits, the old public generation still names the active
-        # entry while the successor generation remains private/pending.
-        claimed_entries = [
-            (selected_item[0], selected_item[2])
-            for selected_item, _lease in adopted_pairs
-        ]
-        adopted = directory.adopt_claim(
-            token,
-            [
-                {
-                    "content_hash": selected_item[0],
-                    "generations": [int(lease.generation)],
-                }
-                for selected_item, lease in adopted_pairs
-            ],
-        )
-        token = None
-        if adopted != len(adopted_pairs):
-            raise RuntimeError("bulk HBM directory adoption was incomplete")
         if stale:
             _drop_directory_hashes(
                 directory,
@@ -650,12 +659,13 @@ def _get_cached_block(self, native_get_cached_block, block_hash, kv_cache_group_
         if len(set(slot_ids)) != len(slot_ids):
             return None
 
-        # The failover lock and directory claim fence the former owner.
-        # Atomic adoption changes owner/generation without a FREE window,
-        # so the preserved HBM bytes cannot be reused between operations.
-        acquired = client.adopt(old_leases)
-        if [int(lease.block_id) for lease in acquired] != slot_ids:
-            raise RuntimeError("GMS HBM adoption returned different slots")
+        # Stage the successor before mutating the native lease ring. Promotion
+        # drops a staged ACTIVE entry after a crash, so its now-unadvertised slot
+        # can be reclaimed instead of being pinned by the obsolete generation.
+        expected = [
+            KVLease(lease.block_id, _successor_generation(lease.generation))
+            for lease in old_leases
+        ]
         adopted = directory.adopt_claim(
             token,
             [
@@ -663,12 +673,16 @@ def _get_cached_block(self, native_get_cached_block, block_hash, kv_cache_group_
                     "content_hash": key,
                     "generations": [int(lease.generation)],
                 }
-                for key, lease in zip(keys, acquired)
+                for key, lease in zip(keys, expected)
             ],
         )
         token = None
         if adopted != len(keys):
             raise RuntimeError("GMS HBM directory adoption was incomplete")
+
+        acquired = client.adopt(old_leases)
+        if acquired != expected:
+            raise RuntimeError("GMS HBM adoption returned unexpected leases")
 
         out = []
         for native_key, lease in zip(native_keys, acquired):
