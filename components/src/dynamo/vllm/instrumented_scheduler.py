@@ -3206,6 +3206,43 @@ class InstrumentedScheduler(AsyncScheduler):
         )
         return sum(max(1, ctx - 1) for ctx in context_lengths) + batch_size
 
+    def _bench_fresh_request_blocks(self, num_tokens: int) -> int:
+        """Blocks a freshly injected request of ``num_tokens`` allocates, per the allocator itself.
+
+        Uses ``KVCacheCoordinator.get_num_blocks_to_allocate`` (what ``allocate_slots`` calls) with a throw-away request
+        id pre-registered in every manager (the Mamba manager indexes ``req_to_blocks[request_id]``). Exact for the fake
+        injection path, whose requests never grow; falls back to the formula if the API differs. Under-estimating here let
+        fake points that only fit on paper truncate at injection on small per-rank pools (attention-DP, TP1), skipping them.
+        """
+        coordinator = getattr(getattr(self, "kv_cache_manager", None), "coordinator", None)
+        managers = list(getattr(coordinator, "single_type_managers", None) or ())
+        if coordinator is None or not managers:
+            return self._bench_blocks_per_req(num_tokens, apply_admission_cap=True)
+        pid = "__fpm_feasibility_probe__"
+        try:
+            for mgr in managers:
+                rtb = getattr(mgr, "req_to_blocks", None)
+                if isinstance(rtb, dict):
+                    rtb.setdefault(pid, [])
+            blocks = coordinator.get_num_blocks_to_allocate(
+                pid, num_tokens, tuple([] for _ in managers), 0, 0, 0, num_tokens, apply_admission_cap=True
+            )
+            if isinstance(blocks, int) and blocks > 0:
+                return blocks
+        except Exception as exc:  # defensive: any signature drift falls back to the formula
+            if not getattr(self, "_bench_probe_warned", False):
+                self._bench_probe_warned = True
+                logger.warning("FPM: allocator feasibility probe unavailable (%s); using the block formula", exc)
+        finally:
+            for mgr in managers:
+                rtb = getattr(mgr, "req_to_blocks", None)
+                if isinstance(rtb, dict):
+                    rtb.pop(pid, None)
+                ph = getattr(mgr, "_partial_hit_reqs", None)
+                if isinstance(ph, set):
+                    ph.discard(pid)
+        return self._bench_blocks_per_req(num_tokens, apply_admission_cap=True)
+
     def _bench_decode_point_feasible(
         self, batch_size: int, total_kv_read_tokens: int
     ) -> bool:
@@ -3231,10 +3268,15 @@ class InstrumentedScheduler(AsyncScheduler):
             max(context_len, 2) + 2 > max_model_len for context_len in context_lengths
         ):
             return False
-        required_blocks = sum(
-            self._bench_blocks_per_req(max(context_len, 2) + 1, apply_admission_cap=True)
-            for context_len in context_lengths
-        )
+        # Every decode point must at least be fake-injectable (a fresh request per row); real points borrow chains and
+        # allocate nothing, so this is the stricter of the two and the allocator's own count is the source of truth.
+        _cache: dict = {}
+        required_blocks = 0
+        for context_len in context_lengths:
+            n = max(context_len, 2) + 1
+            if n not in _cache:
+                _cache[n] = self._bench_fresh_request_blocks(n)
+            required_blocks += _cache[n]
         return required_blocks <= self._bench_grid_usable_blocks(
             batch_size, reserve_watermark=True
         )
@@ -4362,7 +4404,10 @@ class InstrumentedScheduler(AsyncScheduler):
             # Plan against 95% of the pool: the per-request footprint estimate is a lower bound (block-boundary
             # rounding, transient Mamba boundary blocks), and a stage whose chains do not ALL fit sheds the rest
             # and loses its real coverage, so a small margin buys full stages.
-            pool = int(self._bench_usable_blocks(batch, reserve_watermark=True) * 0.95)
+            # Under attention-DP every rank must build the same stages: leave more headroom (a per-rank stall would
+            # desynchronize the ranks) -- 10% for DP>1, 5% otherwise.
+            _margin = 0.90 if getattr(self, "_bench_dp_size", 1) > 1 else 0.95
+            pool = int(self._bench_usable_blocks(batch, reserve_watermark=True) * _margin)
             while depth > 8 and (
                 self._bench_blocks_per_req(depth, apply_admission_cap=True, resident_chain=True) * batch > pool
             ):
@@ -4498,6 +4543,14 @@ class InstrumentedScheduler(AsyncScheduler):
                 self._kvwarm_stall_progress = progress
                 self._kvwarm_stall_t0 = now
             elif now - getattr(self, "_kvwarm_stall_t0", now) > 5.0:
+                if getattr(self, "_bench_dp_size", 1) > 1:
+                    # Shedding/demoting is a per-rank decision; under attention-DP it would leave the ranks measuring
+                    # different points (observed: "timed out waiting for attention-DP ranks"). Fail loudly instead: the
+                    # stage plan (footprint law + DP margin) is what must be fixed, not silently diverged from.
+                    raise RuntimeError(
+                        f"KVWARM: stage batch={self._kvwarm_stage_batch} stalled under attention-DP "
+                        f"(dp_size={self._bench_dp_size}); refusing to shed per rank -- plan margin too small"
+                    )
                 shed = [
                     r for r in self._kvwarm_chain_ids
                     if r in self.requests
