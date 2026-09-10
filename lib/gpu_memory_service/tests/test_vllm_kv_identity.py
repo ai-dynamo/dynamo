@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import threading
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -246,6 +247,55 @@ def test_persistent_tag_plan_rejects_partial_reattach():
         install_vmm_ipc_kv._persistent_tag_plan_reattaches(
             manager, "engine", ["kv:a", "kv:b"]
         )
+
+
+@pytest.mark.parametrize(
+    ("reattaching", "released"),
+    [(False, [("engine", "kv:a"), ("engine", "kv:b")]), (True, [])],
+)
+def test_failed_kv_allocation_rolls_back_only_fresh_plan(
+    monkeypatch, reattaching, released
+):
+    from gpu_memory_service.client.torch import allocator
+
+    events = []
+
+    @contextmanager
+    def passthrough(*_args):
+        yield
+
+    manager = SimpleNamespace(
+        release_persistent=lambda engine_id, tag: (
+            events.append((engine_id, tag)) or True
+        )
+    )
+    monkeypatch.setattr(
+        install_vmm_ipc_kv,
+        "_semantic_kv_tensor_tag_plan",
+        lambda *_args: ["kv:a", "kv:b"],
+    )
+    monkeypatch.setattr(install_vmm_ipc_kv, "_model_identity", lambda *_: "model")
+    monkeypatch.setattr(
+        install_vmm_ipc_kv,
+        "_persistent_tag_plan_reattaches",
+        lambda *_args: reattaching,
+    )
+    monkeypatch.setattr(allocator, "set_persistent_allocator_tag_plan", lambda *_: None)
+    monkeypatch.setattr(
+        allocator, "clear_persistent_allocator_tag_plan", lambda *_: None
+    )
+    monkeypatch.setattr(allocator, "gms_use_persistent_pool", passthrough)
+    monkeypatch.setattr(
+        install_vmm_ipc_kv, "_persistent_kv_zeros_as_empty", passthrough
+    )
+
+    with pytest.raises(RuntimeError, match="allocation failed"):
+        with install_vmm_ipc_kv.persistent_kv_allocation_context(
+            manager, "engine", SimpleNamespace(), SimpleNamespace(), 0
+        ):
+            raise RuntimeError("allocation failed")
+
+    assert events == released
 
 
 def test_persistent_kv_zeros_as_empty_is_context_local(monkeypatch):

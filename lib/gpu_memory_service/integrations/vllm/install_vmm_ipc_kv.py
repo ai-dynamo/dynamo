@@ -355,6 +355,30 @@ def _persistent_tag_plan_reattaches(
     return True
 
 
+def _release_new_persistent_kv_allocations(
+    manager, engine_id: str, tag_plan: list[str]
+) -> None:
+    """Best-effort rollback for a fresh KV pool that failed during creation."""
+    for tag in tag_plan:
+        try:
+            if manager.release_persistent(engine_id, tag):
+                logger.info(
+                    "[GMS-VMM-IPC] released partial KV allocation: "
+                    "engine_id=%s tag=%s",
+                    engine_id,
+                    tag,
+                )
+        except Exception:  # noqa: BLE001
+            # Preserve the allocation error that triggered rollback. A claimed
+            # entry cannot be destroyed safely and will fail closed on restart.
+            logger.exception(
+                "[GMS-VMM-IPC] failed to release partial KV allocation: "
+                "engine_id=%s tag=%s",
+                engine_id,
+                tag,
+            )
+
+
 @contextmanager
 def persistent_kv_allocation_context(
     manager, engine_id: str, kv_cache_config, model_config, device
@@ -390,6 +414,10 @@ def persistent_kv_allocation_context(
         with gms_use_persistent_pool("kv_pool", device):
             with _persistent_kv_zeros_as_empty(reattaching):
                 yield
+    except BaseException:
+        if not reattaching:
+            _release_new_persistent_kv_allocations(manager, engine_id, tag_plan)
+        raise
     finally:
         if tag_plan:
             clear_persistent_allocator_tag_plan("kv_pool")
