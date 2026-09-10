@@ -577,8 +577,6 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # Qwen3-VL-2B / Qwen2.5-VL-3B / Qwen2-VL-2B
             # profiles above without the LLaVA flake.
             "agg_router": TopologyConfig(
-                health_check_workers=True,
-                health_check_worker_count=2,
                 marks=[
                     pytest.mark.skip(
                         reason="LLaVA-1.5 flake on vLLM 0.20 (see PR #9336); "
@@ -705,8 +703,6 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         short_name="llava-next-mistral-7b",
         topologies={
             "agg_router": TopologyConfig(
-                health_check_workers=True,
-                health_check_worker_count=2,
                 marks=[
                     pytest.mark.skip(
                         reason="LLaVA-NeXT inherits LLaVA-1.5 flake on vLLM 0.20 "
