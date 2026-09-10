@@ -454,7 +454,6 @@ def install_geometry_patch() -> bool:
 
 
 def geometry_hook_installed() -> bool:
-    """Verify the live sizing helper and its imported EngineCore alias."""
     try:
         from vllm.v1.core import kv_cache_utils
     except Exception:  # noqa: BLE001
@@ -515,7 +514,6 @@ def native_kv_allocation_hook_available() -> bool:
 
 
 def install() -> bool:
-    """Install scheduler hooks; KV allocation uses GMSWorker's native hook."""
     if not _is_enabled():
         logger.debug(
             "[GMS-VMM-IPC] GMS_VLLM_VMM_IPC_KV not set; skipping install",
@@ -527,7 +525,6 @@ def install() -> bool:
 
 
 def persistent_kv_hooks_installed() -> bool:
-    """Verify vLLM's native worker allocation path and GMS geometry hook."""
     return native_kv_allocation_hook_available() and geometry_hook_installed()
 
 
