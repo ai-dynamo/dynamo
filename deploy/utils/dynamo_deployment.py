@@ -142,11 +142,8 @@ class DynamoDeploymentClient:
         self.service_name = service_name or f"{self.deployment_name}-frontend"
         self.components: List[str] = []  # Will store component names from CR
         self._original_components: List[str] = []
-        # Version segment of the DynamoGraphDeployment apiVersion this client
-        # talks to. `create_deployment` overwrites it with the version the
-        # supplied manifest declares; both nvidia.com/v1alpha1 and
-        # nvidia.com/v1beta1 are served, and the request path has to agree
-        # with the body or the API server rejects it.
+        # Version segment of the DynamoGraphDeployment apiVersion, reset from the
+        # manifest in create_deployment: the request path must match the body.
         self.api_version: str = "v1beta1"
         self.deployment_spec: Optional[
             Dict[str, Any]
@@ -272,11 +269,9 @@ class DynamoDeploymentClient:
             self.deployment_spec.get("apiVersion") or "nvidia.com/v1beta1"
         ).split("/")[-1]
 
-        # Extract component names (original case for label queries, lowercase for directories).
+        # Extract component names (original case for label queries, lowercase for directories)
         # v1beta1 spells this `spec.components`, a list of objects each with a
         # `name`; v1alpha1 spelled it `spec.services`, a mapping keyed by name.
-        # Both shapes reach this client, so branch on the shape rather than on
-        # the declared version.
         spec = self.deployment_spec["spec"]
         components = spec.get("components")
         if isinstance(components, list):
