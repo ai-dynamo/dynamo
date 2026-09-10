@@ -3461,7 +3461,7 @@ GroveSpec groups experimental Grove-specific rendering options.
 **Appears in:** [ExperimentalSpec](#experimentalspec)
 
 <ParamField path="forceScalingGroup" type="boolean">
-forceScalingGroup opts a single-node component into rendering as a PodCliqueScalingGroup with one single-pod PodClique per replica. Scaling changes the scaling-group replica count. The first `minAvailable` replicas join the deployment's base PodGang together with its other base workloads; each replica beyond `minAvailable` gets its own PodGang, gang-scheduled separately from the rest of the deployment. `false` or omitted means automatic selection (multi-node and inter-pod GMS components use a scaling group, other single-node components a standalone PodClique), not "force PodClique". Immutable after creation.
+forceScalingGroup opts a single-node component into rendering as a PodCliqueScalingGroup with one single-pod PodClique per replica. Scaling changes the scaling-group replica count. The first `minAvailable` replicas join the deployment's base PodGang together with its other base workloads; each replica beyond `minAvailable` gets its own PodGang, gang-scheduled separately from the rest of the deployment. `false` or omitted means automatic selection (multi-node and inter-pod GMS components use a scaling group, other single-node components a standalone PodClique), not "force PodClique". The pointer preserves field presence on the wire: `nil` and `false` are semantically identical, and consumers must dereference with `false`. Immutable after creation.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>

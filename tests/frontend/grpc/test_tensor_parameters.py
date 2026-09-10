@@ -12,7 +12,6 @@
 
 import logging
 import os
-import shutil
 from pathlib import Path
 
 import numpy as np
@@ -30,7 +29,7 @@ try:
 except ImportError:
     grpcclient = service_pb2 = None
 
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.managed_process import ManagedProcess, check_health_ready
 
 logger = logging.getLogger(__name__)
 
@@ -112,16 +111,11 @@ class EchoTensorWorkerProcess(ManagedProcess):
         # so no namespace conflicts - use default "tensor" namespace
 
         log_dir = f"{request.node.name}_worker"
-        shutil.rmtree(log_dir, ignore_errors=True)
-
         super().__init__(
             command=command,
             env=env,
             health_check_urls=[
-                (
-                    f"http://localhost:{system_port}/health",
-                    lambda r: r.json().get("status") == "ready",
-                )
+                (f"http://localhost:{system_port}/health", check_health_ready)
             ],
             timeout=300,
             display_output=True,

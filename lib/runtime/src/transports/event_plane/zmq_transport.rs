@@ -14,12 +14,14 @@
 //! - Frame 2: sequence (8 bytes, u64 big-endian) - for fast deduplication
 //! - Frame 3: Binary frame (5-byte header + EventEnvelope payload)
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context as _, Result, anyhow};
 use async_stream::stream;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
-use std::sync::{Arc, OnceLock};
+use once_cell::sync::OnceCell;
+use std::ffi::OsStr;
+use std::sync::Arc;
 use thiserror::Error;
 use tmq::{
     AsZmqSocket, Context, Message, Multipart, SocketBuilder,
@@ -33,9 +35,34 @@ use tokio_util::task::AbortOnDropHandle;
 ///
 /// libzmq spawns background I/O threads per `Context`, so all PUB/SUB sockets
 /// share one. `zmq::Context` is reference-counted; clones drive the same context.
-fn shared_zmq_context() -> Context {
-    static CONTEXT: OnceLock<Context> = OnceLock::new();
-    CONTEXT.get_or_init(Context::new).clone()
+fn shared_zmq_context() -> Result<Context> {
+    static CONTEXT: OnceCell<Context> = OnceCell::new();
+    CONTEXT
+        .get_or_try_init(|| {
+            let value = std::env::var_os("DYN_ZMQ_IO_THREADS");
+            configured_zmq_context(value.as_deref())
+        })
+        .cloned()
+}
+
+fn configured_zmq_context(value: Option<&OsStr>) -> Result<Context> {
+    let io_threads = value
+        .unwrap_or_else(|| OsStr::new("4"))
+        .to_str()
+        .context("DYN_ZMQ_IO_THREADS must be valid UTF-8")?
+        .parse::<i32>()
+        .context("DYN_ZMQ_IO_THREADS must be a positive integer")?;
+    anyhow::ensure!(
+        io_threads > 0,
+        "DYN_ZMQ_IO_THREADS must be a positive integer"
+    );
+    let context = Context::new();
+    // Configure the process-wide context before creating any PUB/SUB sockets.
+    context
+        .set_io_threads(io_threads)
+        .context("failed to apply DYN_ZMQ_IO_THREADS to the event-plane ZMQ context")?;
+    tracing::info!(io_threads, "Configured shared event-plane ZMQ context");
+    Ok(context)
 }
 
 /// High Water Mark (HWM) for ZMQ sockets.
@@ -169,7 +196,7 @@ impl ZmqPubTransport {
             endpoint.to_string()
         };
 
-        let ctx = shared_zmq_context();
+        let ctx = shared_zmq_context()?;
         let socket = bind_tmq_socket(configure_publish_builder(publish(&ctx)), &actual_endpoint)?;
 
         tracing::info!(
@@ -194,7 +221,7 @@ impl ZmqPubTransport {
 
     /// Connect to single broker XSUB endpoint (broker mode)
     pub async fn connect(xsub_endpoint: &str, topic: &str) -> Result<Self> {
-        let ctx = shared_zmq_context();
+        let ctx = shared_zmq_context()?;
         let socket = connect_tmq_socket(configure_publish_builder(publish(&ctx)), xsub_endpoint)?;
 
         tracing::info!(
@@ -217,7 +244,7 @@ impl ZmqPubTransport {
             anyhow::bail!("Cannot connect to zero endpoints");
         };
 
-        let ctx = shared_zmq_context();
+        let ctx = shared_zmq_context()?;
         let socket = connect_tmq_socket(configure_publish_builder(publish(&ctx)), first_endpoint)?;
 
         for endpoint in endpoints {
@@ -441,7 +468,7 @@ impl ZmqSubTransport {
 
     fn connect_socket_with_rcvhwm(endpoint: &str, topic: &str, rcvhwm: i32) -> Result<Subscribe> {
         anyhow::ensure!(rcvhwm > 0, "ZMQ receive HWM must be greater than zero");
-        let ctx = shared_zmq_context();
+        let ctx = shared_zmq_context()?;
         let socket = connect_tmq_socket(
             configure_subscribe_builder_with_hwm(subscribe(&ctx), rcvhwm),
             endpoint,
@@ -565,7 +592,7 @@ impl ZmqSubTransport {
             anyhow::bail!("Cannot connect to zero endpoints");
         };
 
-        let ctx = shared_zmq_context();
+        let ctx = shared_zmq_context()?;
         let socket =
             connect_tmq_socket(configure_subscribe_builder(subscribe(&ctx)), first_endpoint)?
                 .subscribe(topic.as_bytes())?;
@@ -705,6 +732,22 @@ impl EventTransportRx for ZmqSubTransport {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn configures_zmq_io_threads() {
+        for (value, expected) in [(None, 4), (Some("1"), 1)] {
+            let context = super::configured_zmq_context(value.map(OsStr::new)).unwrap();
+            assert_eq!(context.get_io_threads().unwrap(), expected);
+        }
+        for value in ["0", "invalid", "2147483648"] {
+            assert!(super::configured_zmq_context(Some(OsStr::new(value))).is_err());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            assert!(super::configured_zmq_context(Some(OsStr::from_bytes(b"\xff"))).is_err());
+        }
+    }
+
     use super::*;
     use crate::transports::event_plane::{EventEnvelope, MsgpackCodec};
     use std::collections::HashSet;
