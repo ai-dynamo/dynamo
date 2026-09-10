@@ -110,25 +110,31 @@ async def test_create_deployment_reads_v1beta1_components():
     assert delete_kwargs["version"] == "v1beta1"
 
 
-async def test_create_deployment_reads_v1alpha1_services():
-    """Negative control: v1alpha1 manifests still work.
+async def test_create_deployment_owner_reference_targets_v1beta1_dgdr(monkeypatch):
+    """The owner reference must name a DGDR version the API server serves.
 
-    ``create_deployment`` accepts any DynamoGraphDeployment YAML, and the
-    repository still carries v1alpha1 manifests using ``spec.services``.
+    Profiling DGDs are garbage-collected through this reference when the
+    owning DynamoGraphDeploymentRequest is deleted. The DGDR CRD stores
+    v1beta1, so a reference declaring v1alpha1 would leak every profiling
+    deployment once v1alpha1 stops being served.
     """
+    monkeypatch.setenv("DGDR_NAME", "dgdr-test")
+    monkeypatch.setenv("DGDR_NAMESPACE", "ns")
+    monkeypatch.setenv("DGDR_UID", "8f0b0f4e-0000-4000-8000-000000000000")
+
     client = _mocked_client()
 
     await client.create_deployment(
         {
-            "apiVersion": "nvidia.com/v1alpha1",
+            "apiVersion": "nvidia.com/v1beta1",
             "kind": "DynamoGraphDeployment",
             "metadata": {"name": "candidate", "namespace": "ns"},
-            "spec": {"services": {"Frontend": {}, "VllmPrefillWorker": {}}},
+            "spec": {"components": [{"name": "Frontend"}]},
         }
     )
 
-    assert client._original_components == ["Frontend", "VllmPrefillWorker"]
-    assert client.components == ["frontend", "vllmprefillworker"]
-
     create_kwargs = client.custom_api.create_namespaced_custom_object.await_args.kwargs
-    assert create_kwargs["version"] == "v1alpha1"
+    owner_references = create_kwargs["body"]["metadata"]["ownerReferences"]
+    assert owner_references[0]["apiVersion"] == "nvidia.com/v1beta1"
+    assert owner_references[0]["kind"] == "DynamoGraphDeploymentRequest"
+    assert owner_references[0]["name"] == "dgdr-test"
