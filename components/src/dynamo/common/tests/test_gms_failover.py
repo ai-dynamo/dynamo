@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
+
 import pytest
 
 from dynamo.common.gms_failover import (
@@ -509,6 +511,39 @@ async def test_gms_failover_promotes_directory_before_lease_reclaim(monkeypatch)
         ("promote", "vllm", "shadow"),
         ("reclaim", "vllm", "shadow", {7, 9}),
     ]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_fence_drains_directory_promotion(monkeypatch):
+    monkeypatch.setenv("GMS_KV_DIRECTORY_MODE", "shadow")
+    monkeypatch.setenv("DYN_GMS_FAILOVER_POST_LOCK_FENCE_MS", "0")
+    promotion_started = asyncio.Event()
+    allow_promotion = asyncio.Event()
+    reclaimed = []
+
+    async def to_thread(fn, *args):
+        promotion_started.set()
+        await allow_promotion.wait()
+        return {7}
+
+    monkeypatch.setattr("dynamo.common.gms_failover.asyncio.to_thread", to_thread)
+    monkeypatch.setattr(
+        "dynamo.common.gms_failover._reclaim_foreign_kv_leases_after_fence",
+        lambda *args, **kwargs: reclaimed.append((args, kwargs)),
+    )
+
+    fence = asyncio.create_task(
+        run_gms_failover_post_lock_fence(backend_name="vllm", role="shadow")
+    )
+    await promotion_started.wait()
+    fence.cancel()
+    await asyncio.sleep(0)
+    assert not fence.done()
+
+    allow_promotion.set()
+    with pytest.raises(asyncio.CancelledError):
+        await fence
+    assert reclaimed == []
 
 
 def test_post_fence_reclaim_uses_allocator_namespace(monkeypatch):

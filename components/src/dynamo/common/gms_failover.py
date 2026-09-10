@@ -431,10 +431,27 @@ async def run_gms_failover_post_lock_fence(
         await asyncio.sleep(fence_ms / 1000.0)
     protected_blocks: set[int] = set()
     if os.environ.get("GMS_KV_DIRECTORY_MODE", "off").strip().lower() != "off":
-        # Blocking socket I/O -- run off the event loop.
-        protected_blocks = await asyncio.to_thread(
-            _promote_content_directory_after_fence, backend_name, role
+        # The lock holder must not release ownership while its blocking promotion
+        # thread can still publish a generation. Shield it from task cancellation,
+        # then drain it before propagating cancellation to the lock owner.
+        promotion = asyncio.create_task(
+            asyncio.to_thread(
+                _promote_content_directory_after_fence, backend_name, role
+            )
         )
+        try:
+            protected_blocks = await asyncio.shield(promotion)
+        except asyncio.CancelledError:
+            try:
+                await promotion
+            except Exception:
+                logger.exception(
+                    "[GMS failover] %s %s directory promotion failed while "
+                    "draining cancellation",
+                    backend_name,
+                    role,
+                )
+            raise
     _reclaim_foreign_kv_leases_after_fence(
         backend_name, role, protected_blocks=protected_blocks
     )
