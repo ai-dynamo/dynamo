@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from aiohttp import web
+
 from dynamo.artifacts.storage import (
     ArtifactStorageError,
     ManagedFsspecTarget,

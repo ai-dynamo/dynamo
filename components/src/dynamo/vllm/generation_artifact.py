@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+
 from dynamo.artifacts.format_v1 import (
     GenerationArtifactChoice,
     GenerationArtifactView,

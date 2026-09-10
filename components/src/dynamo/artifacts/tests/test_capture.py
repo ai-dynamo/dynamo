@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import numpy as np
 import pytest
+
 from dynamo.artifacts.format_v1 import decode_generation_artifact
 from dynamo.vllm.generation_artifact import (
     ArtifactCaptureError,
