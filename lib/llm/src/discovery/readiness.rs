@@ -7,6 +7,10 @@
 //! card normalization and the readiness evaluation live here as pure functions over
 //! [`ReadinessUnit`]s; `Model::evaluate_namespace` and the relay topology projection are
 //! adapters that build units from their own liveness sources.
+//!
+//! The shared answer is [`ReadinessEval::ready`]. A consumer may layer an extra
+//! condition on top of it — the relay additionally requires an unambiguous
+//! topology — but never a different notion of "serving".
 
 use std::collections::HashSet;
 
@@ -51,6 +55,14 @@ pub fn normalize_legacy_prefill_topology(card: &mut ModelDeploymentCard) {
 }
 
 /// Whether a namespace's units are ready to serve traffic.
+///
+/// `ready` answers only "can this namespace serve a request". `ambiguous` — a
+/// non-Aggregated role carrying more than one live WorkerSet — is reported
+/// alongside it but does not clear `ready`: ambiguity disables the P/D (or
+/// encode) *pairing* for that role and serving degrades to aggregated, which is
+/// the pre-v1.5 contract. A consumer that genuinely cannot act on an ambiguous
+/// topology, such as the KV DC Relay picking a remote KV source, must compose
+/// `ready && ambiguous.is_empty()` itself.
 pub fn evaluate_readiness(units: &[ReadinessUnit]) -> ReadinessEval {
     let mut present: HashSet<WorkerType> = HashSet::new();
     let mut missing: HashSet<WorkerType> = HashSet::new();
@@ -127,8 +139,13 @@ pub fn evaluate_readiness(units: &[ReadinessUnit]) -> ReadinessEval {
         }
     }
 
+    // `ambiguous` deliberately does not gate `ready`. A duplicated role only
+    // costs us the ability to *pair* that role — `reconcile_discovery_topology`
+    // withholds the prefill/encode target, and both routers then pass the
+    // request through to the decode backend. Failing the whole namespace here
+    // would 503 that healthy backend before it ever reaches the degrade path.
     ReadinessEval {
-        ready: has_live_worker && missing.is_empty() && ambiguous.is_empty(),
+        ready: has_live_worker && missing.is_empty(),
         has_legacy,
         legacy_live_workers,
         present,
@@ -222,14 +239,35 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_live_units_of_one_role_are_ambiguous_and_not_ready() {
+    fn duplicate_live_units_of_one_role_are_ambiguous_but_still_serve() {
+        // Two typed Prefill WorkerSets alongside a healthy Decode. The
+        // duplication is reported so the topology reconciler can withhold the
+        // prefill target, but the namespace keeps serving — the decode worker
+        // falls back to aggregated rather than the model going 503.
         let evaluation = evaluate_readiness(&[
             unit(Some(WorkerType::Prefill), 1, vec![vec![WorkerType::Decode]]),
             unit(Some(WorkerType::Prefill), 1, vec![vec![WorkerType::Decode]]),
             unit(Some(WorkerType::Decode), 1, vec![vec![WorkerType::Prefill]]),
         ]);
-        assert!(!evaluation.ready);
+        assert!(evaluation.ready);
         assert_eq!(evaluation.ambiguous, HashSet::from([WorkerType::Prefill]));
+        assert!(evaluation.missing.is_empty());
+
+        // A duplicated role still can't paper over a genuinely absent peer.
+        let ambiguous_and_missing = evaluate_readiness(&[
+            unit(Some(WorkerType::Prefill), 1, vec![vec![WorkerType::Decode]]),
+            unit(Some(WorkerType::Prefill), 1, vec![vec![WorkerType::Decode]]),
+            unit(Some(WorkerType::Decode), 0, vec![vec![WorkerType::Prefill]]),
+        ]);
+        assert!(!ambiguous_and_missing.ready);
+        assert_eq!(
+            ambiguous_and_missing.ambiguous,
+            HashSet::from([WorkerType::Prefill])
+        );
+        assert_eq!(
+            ambiguous_and_missing.missing,
+            HashSet::from([WorkerType::Decode])
+        );
 
         let scale_out = evaluate_readiness(&[
             unit(Some(WorkerType::Aggregated), 1, vec![]),
@@ -237,6 +275,33 @@ mod tests {
         ]);
         assert!(scale_out.ready);
         assert!(scale_out.ambiguous.is_empty());
+    }
+
+    #[test]
+    fn duplicate_encode_units_are_ambiguous_but_still_serve() {
+        // The `ready` change applies to every non-Aggregated role, not just
+        // Prefill, so pin the Encode case explicitly. `reconcile_discovery_topology`
+        // withholds `unique_encode` when there is more than one encode provider, and
+        // `EncoderRouter::generate` then passes the request through to `next`
+        // (encoder_router.rs) exactly as the prefill router does. The relay keeps
+        // the strict view of this — see
+        // `kv_dc_relay::topology::duplicate_encode_endpoints_stay_unavailable_for_remote_kv_sourcing`.
+        let evaluation = evaluate_readiness(&[
+            unit(
+                Some(WorkerType::Encode),
+                1,
+                vec![vec![WorkerType::Aggregated]],
+            ),
+            unit(
+                Some(WorkerType::Encode),
+                1,
+                vec![vec![WorkerType::Aggregated]],
+            ),
+            unit(Some(WorkerType::Aggregated), 1, vec![]),
+        ]);
+        assert!(evaluation.ready);
+        assert_eq!(evaluation.ambiguous, HashSet::from([WorkerType::Encode]));
+        assert!(evaluation.missing.is_empty());
     }
 
     #[test]

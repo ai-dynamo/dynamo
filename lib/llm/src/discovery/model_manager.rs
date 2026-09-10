@@ -3582,8 +3582,11 @@ mod tests {
                         Vec::new(),
                     )
                     .unwrap();
+                // The duplicate withholds the prefill target, so P/D
+                // pairing stops — but the namespace keeps serving aggregated
+                // rather than 503-ing the healthy decode worker.
                 assert!(
-                    !manager
+                    manager
                         .get_committed_model("topology-model")
                         .unwrap()
                         .namespace_readiness()

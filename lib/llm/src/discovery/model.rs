@@ -461,6 +461,16 @@ impl Model {
                 .collect();
             missing_vec.sort();
 
+            let ambiguous_roles = || {
+                let mut roles = eval
+                    .ambiguous
+                    .iter()
+                    .map(|worker_type| worker_type.as_str())
+                    .collect::<Vec<_>>();
+                roles.sort_unstable();
+                roles.join(", ")
+            };
+
             let reason = if eval.ready {
                 if eval.has_legacy {
                     let legacy_live_workers = eval.legacy_live_workers;
@@ -468,19 +478,25 @@ impl Model {
                         "legacy worker(s) present (no worker_type); readiness gating bypassed \
                          (ready while {legacy_live_workers} worker(s) live) — compat window only"
                     ))
+                } else if !eval.ambiguous.is_empty() {
+                    // Serving, but degraded: the duplicated role can't be
+                    // paired, so requests run aggregated on the decode worker.
+                    Some(format!(
+                        "serving in degraded mode: ambiguous worker types: {} \
+                         (role pairing disabled; requests served aggregated)",
+                        ambiguous_roles()
+                    ))
                 } else {
                     None
                 }
             } else if eval.has_legacy {
                 Some("legacy worker(s) present but no live worker".to_string())
             } else if !eval.ambiguous.is_empty() {
-                let mut roles = eval
-                    .ambiguous
-                    .iter()
-                    .map(|worker_type| worker_type.as_str())
-                    .collect::<Vec<_>>();
-                roles.sort_unstable();
-                Some(format!("ambiguous worker types: {}", roles.join(", ")))
+                Some(format!(
+                    "missing worker types: {}; ambiguous worker types: {}",
+                    missing_vec.join(", "),
+                    ambiguous_roles()
+                ))
             } else {
                 Some(format!("missing worker types: {}", missing_vec.join(", ")))
             };
@@ -1631,6 +1647,172 @@ mod tests {
         );
         // Endpoint must agree with the gate.
         assert_eq!(ns.ready, model.is_workers_ready("ns1"));
+    }
+
+    /// A second typed Prefill endpoint in one namespace must not take
+    /// the healthy decode worker down with it. Ambiguity disables the P/D
+    /// pairing (`reconcile_discovery_topology` withholds the prefill target);
+    /// the model keeps serving aggregated instead of returning a blanket 503.
+    #[test]
+    fn readiness_duplicate_prefill_keeps_serving_and_reports_degraded() {
+        let model = Model::new("llama".to_string());
+        let (decode, _td) = ws_with_type(
+            "ns1",
+            "mdc-d",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![1],
+        );
+        let (prefill, _tp) = ws_with_type(
+            "ns1",
+            "mdc-p",
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode]],
+            vec![2],
+        );
+        model.add_worker_set("ns1".to_string(), decode);
+        model.add_worker_set("ns1:prefill".to_string(), prefill);
+        assert!(
+            model.is_workers_ready("ns1"),
+            "baseline P/D pair must serve"
+        );
+
+        // Second typed prefill endpoint, same namespace, different component.
+        let (prefill2, _tp2) = ws_with_type(
+            "ns1",
+            "mdc-p2",
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode]],
+            vec![3],
+        );
+        model.add_worker_set("ns1:prefill2".to_string(), prefill2);
+
+        // The serving gate behind check_model_serving_ready() must stay open.
+        assert!(
+            model.is_workers_ready("ns1"),
+            "ambiguous prefill must not make the namespace unservable"
+        );
+        assert!(model.has_ready_workers());
+        assert_eq!(model.first_ready_workers(), Some("ns1".to_string()));
+
+        // ...and the ambiguity is still surfaced on /v1/models/{model}/ready.
+        let topo = model.namespace_readiness();
+        assert!(topo.ready);
+        let ns = &topo.namespaces["ns1"];
+        assert!(ns.ready);
+        assert_eq!(ns.worker_types["decode"].workers, 1);
+        assert_eq!(ns.worker_types["prefill"].workers, 2);
+        let reason = ns.reason.as_deref().expect("degraded reason");
+        assert!(
+            reason.contains("ambiguous worker types: prefill"),
+            "reason must name the duplicated role, got: {reason}"
+        );
+        assert!(
+            reason.contains("degraded"),
+            "reason must flag degradation, got: {reason}"
+        );
+
+        // Removing the duplicate returns the namespace to undegraded serving.
+        model.remove_worker_set("ns1:prefill2");
+        let recovered = model.namespace_readiness();
+        assert!(recovered.ready);
+        assert_eq!(recovered.namespaces["ns1"].reason, None);
+    }
+
+    /// N-2 compat: a rolling upgrade can split one endpoint into two
+    /// WorkerSets of the same role, because `worker_set_key` embeds the card's
+    /// `model_type` surface list verbatim (watcher.rs). A release where a decode
+    /// worker starts advertising one more surface — `ModelType` has grown
+    /// `Realtime`, `Classify` and `Pooling` bits over time — therefore produces an
+    /// old-card bucket and a new-card bucket on the *same* endpoint for the
+    /// duration of the rollout. Prefill is exempt: new prefill workers dual-emit
+    /// `ModelType::Prefill` so they share the legacy bucket
+    /// (`ws_key_new_and_legacy_prefill_share_a_bucket`); decode has no such
+    /// guarantee.
+    ///
+    /// `lib/llm/AGENTS.md` requires that differences caused only by supported wire
+    /// evolution "must not split otherwise compatible workers, fail discovery
+    /// closed, or remove healthy serving state". Splitting the bucket is tolerable;
+    /// 503-ing every request for the length of the rollout is not.
+    #[test]
+    fn readiness_mixed_version_decode_rollout_keeps_serving() {
+        let model = Model::new("llama".to_string());
+        // Old decode pods, still draining.
+        let (old_decode, _to) = ws_with_type(
+            "ns1",
+            "mdc-d-v14",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![1, 2],
+        );
+        // New decode pods, already admitted; different surface list => different
+        // WorkerSet bucket for the same endpoint.
+        let (new_decode, _tn) = ws_with_type(
+            "ns1",
+            "mdc-d-v15",
+            WorkerType::Decode,
+            vec![vec![WorkerType::Prefill]],
+            vec![3],
+        );
+        let (prefill, _tp) = ws_with_type(
+            "ns1",
+            "mdc-p",
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode]],
+            vec![4],
+        );
+        model.add_worker_set("ns1:decode:chat|completions".to_string(), old_decode);
+        model.add_worker_set(
+            "ns1:decode:chat|completions|realtime".to_string(),
+            new_decode,
+        );
+        model.add_worker_set("ns1:prefill".to_string(), prefill);
+
+        assert!(
+            model.is_workers_ready("ns1"),
+            "a mixed-version decode rollout must keep serving, not 503 until it drains"
+        );
+        let ns = &model.namespace_readiness().namespaces["ns1"];
+        assert!(ns.ready);
+        // Both buckets are counted, and the degradation is visible.
+        assert_eq!(ns.worker_types["decode"].workers, 3);
+        let reason = ns.reason.as_deref().expect("degraded reason");
+        assert!(
+            reason.contains("ambiguous worker types: decode"),
+            "{reason}"
+        );
+    }
+
+    /// Ambiguity must not mask a genuinely absent peer: two prefill WorkerSets
+    /// with no live decode is still unservable, and the reason names both.
+    #[test]
+    fn readiness_duplicate_prefill_without_decode_is_not_ready() {
+        let model = Model::new("llama".to_string());
+        let (p1, _t1) = ws_with_type(
+            "ns1",
+            "mdc-p",
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode]],
+            vec![1],
+        );
+        let (p2, _t2) = ws_with_type(
+            "ns1",
+            "mdc-p2",
+            WorkerType::Prefill,
+            vec![vec![WorkerType::Decode]],
+            vec![2],
+        );
+        model.add_worker_set("ns1:prefill".to_string(), p1);
+        model.add_worker_set("ns1:prefill2".to_string(), p2);
+
+        assert!(!model.is_workers_ready("ns1"));
+        let ns = &model.namespace_readiness().namespaces["ns1"];
+        let reason = ns.reason.as_deref().expect("reason");
+        assert!(reason.contains("missing worker types: decode"), "{reason}");
+        assert!(
+            reason.contains("ambiguous worker types: prefill"),
+            "{reason}"
+        );
     }
 
     #[test]

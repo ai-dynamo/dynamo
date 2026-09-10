@@ -332,9 +332,15 @@ fn derive_topology(
             let evaluation = evaluate_readiness(&group.units);
             let state = if !group.availability_authoritative {
                 TopologyReadinessState::Unknown
-            } else if evaluation.ready {
+            } else if evaluation.ready && evaluation.ambiguous.is_empty() {
                 TopologyReadinessState::Ready
             } else {
+                // Stricter than the local serving gate on purpose. Serving
+                // degrades to aggregated under a duplicated role, but a remote
+                // peer choosing a KV source has no such fallback: it cannot
+                // tell which of the duplicate endpoints owns the blocks, so the
+                // pool stays unadvertised. `duplicate_role_endpoints` below
+                // carries the reason.
                 TopologyReadinessState::Unavailable
             };
             let adapters = derive_adapters(&group.adapters);
@@ -464,9 +470,11 @@ fn derive_adapters(
             let evaluation = evaluate_readiness(&aggregate.units);
             let state = if !aggregate.availability_authoritative {
                 TopologyReadinessState::Unknown
-            } else if evaluation.ready {
+            } else if evaluation.ready && evaluation.ambiguous.is_empty() {
                 TopologyReadinessState::Ready
             } else {
+                // See `derive_topology`: remote KV sourcing has no aggregated
+                // fallback, so an ambiguous adapter topology stays unavailable.
                 TopologyReadinessState::Unavailable
             };
             AdapterReadiness {
@@ -672,8 +680,9 @@ mod tests {
             Some(WorkerType::Decode),
             vec![vec![WorkerType::Prefill]],
         );
-        // A second Decode worker set serving a different surface: the request plane
-        // sees two WorkerSets of one role and gates the namespace as ambiguous.
+        // A second Decode worker set serving a different surface: one endpoint yields
+        // two WorkerSets of one role. The core marks this ambiguous but keeps
+        // serving; the relay additionally refuses to advertise the pool.
         decode.worker_topology.insert(
             2,
             DomainWorkerTopology {
@@ -1012,8 +1021,11 @@ mod tests {
         let snapshot = publisher.snapshot();
         let topology = entry(&snapshot, "llama");
 
-        // Parity with the core evaluation: an ambiguous role topology is not ready,
-        // and the duplicated roles explain the gate.
+        // The relay is deliberately stricter than the core serving gate: the core
+        // keeps an ambiguous namespace servable (it degrades to aggregated), but a
+        // remote peer picking a KV source has no such fallback, so the pool stays
+        // unadvertised and the duplicated roles explain the gate. See
+        // `derive_topology`.
         assert_eq!(topology.state, TopologyReadinessState::Unavailable);
         assert_eq!(
             topology.duplicate_role_endpoints,
@@ -1161,7 +1173,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_encode_endpoints_are_ambiguous_like_the_core_evaluation() {
+    fn duplicate_encode_endpoints_stay_unavailable_for_remote_kv_sourcing() {
         let view = view(vec![
             endpoint(
                 "production.encode-a.generate",
