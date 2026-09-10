@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -55,19 +56,36 @@ def test_v3_semantic_kv_tags_include_model_layers_and_size():
 
 
 def test_model_identity_includes_resolved_model_revision():
+    commit = "a" * 40
     identity = install_vmm_ipc_kv._model_identity(
         SimpleNamespace(
             model="org/model",
             revision="main",
             code_revision=None,
             quantization="fp8",
-            hf_config=SimpleNamespace(_commit_hash="abcdef"),
+            hf_config=SimpleNamespace(_commit_hash=commit),
         )
     )
 
-    assert identity == (
-        "model=org/model\0revision=main\0quantization=fp8\0hf_commit=abcdef"
+    assert identity == f"model=org/model\0artifact={commit}\0quantization=fp8"
+
+
+def test_model_identity_accepts_explicit_artifact_digest(monkeypatch):
+    monkeypatch.setenv("GMS_VLLM_MODEL_ARTIFACT_DIGEST", "image-sha256:abc")
+    identity = install_vmm_ipc_kv._model_identity(
+        SimpleNamespace(model="/models/current", revision=None, code_revision="main")
     )
+
+    assert identity == "model=/models/current\0artifact=image-sha256:abc"
+
+
+@pytest.mark.parametrize("revision", [None, "main", "refs/pr/1", "/models/current"])
+def test_model_identity_rejects_mutable_revision(monkeypatch, revision):
+    monkeypatch.delenv("GMS_VLLM_MODEL_ARTIFACT_DIGEST", raising=False)
+    with pytest.raises(RuntimeError, match="immutable resolved model revision"):
+        install_vmm_ipc_kv._model_identity(
+            SimpleNamespace(model="org/model", revision=revision)
+        )
 
 
 def test_model_identity_is_derived_from_runner_config():
@@ -83,7 +101,7 @@ def test_model_identity_is_derived_from_runner_config():
 
 
 def test_model_identity_fails_closed_when_unavailable():
-    with pytest.raises(RuntimeError, match="stable model identity"):
+    with pytest.raises(RuntimeError, match="immutable resolved model revision"):
         install_vmm_ipc_kv._model_identity(SimpleNamespace())
 
 
@@ -148,9 +166,8 @@ def test_persistent_tag_plan_rejects_partial_reattach():
         )
 
 
-def test_persistent_kv_zeros_as_empty_only_rewrites_int8(monkeypatch):
+def test_persistent_kv_zeros_as_empty_is_context_local(monkeypatch):
     import sys
-    from types import SimpleNamespace
 
     int8_marker = object()
     fp16_marker = object()
@@ -172,24 +189,27 @@ def test_persistent_kv_zeros_as_empty_only_rewrites_int8(monkeypatch):
     )
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
 
+    other_thread_result = []
     with install_vmm_ipc_kv._persistent_kv_zeros_as_empty(True):
         assert fake_torch.zeros((16,), dtype=int8_marker, device="cuda") == (
             "empty",
             int8_marker,
         )
+        thread = threading.Thread(
+            target=lambda: other_thread_result.append(
+                fake_torch.zeros((16,), dtype=int8_marker)
+            )
+        )
+        thread.start()
+        thread.join()
         assert fake_torch.zeros((16,), dtype=fp16_marker) == (
             "zeros",
             fp16_marker,
         )
 
-    assert fake_torch.zeros is fake_zeros
-    assert calls[0][0] == "empty"
-    assert calls[1][0] == "zeros"
-
-    calls.clear()
-    with install_vmm_ipc_kv._persistent_kv_zeros_as_empty(False):
-        assert fake_torch.zeros((16,), dtype=int8_marker) == ("zeros", int8_marker)
-    assert calls == [("zeros", ((16,),), {"dtype": int8_marker})]
+    assert other_thread_result == [("zeros", int8_marker)]
+    assert fake_torch.zeros((16,), dtype=int8_marker) == ("zeros", int8_marker)
+    assert [kind for kind, _, _ in calls] == ["empty", "zeros", "zeros", "zeros"]
 
 
 def test_generic_failover_shadow_mode_enables_shared_geometry(monkeypatch):

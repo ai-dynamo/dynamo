@@ -31,6 +31,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 import sys
 import time
 from collections import Counter
@@ -58,46 +59,49 @@ _KV_CACHE_PROFILING: ContextVar[bool] = ContextVar(
 _KV_CACHE_MODEL_IDENTITY: ContextVar[str | None] = ContextVar(
     "gms_vllm_kv_cache_model_identity", default=None
 )
+_PRESERVE_KV_ZERO_FILL: ContextVar[list[int] | None] = ContextVar(
+    "gms_preserve_kv_zero_fill", default=None
+)
+_IMMUTABLE_REVISION = re.compile(r"[0-9a-fA-F]{40,64}").fullmatch
+
+
+def _install_contextual_zeros_hook(torch):
+    current_zeros = torch.zeros
+    if getattr(current_zeros, "_gms_contextual_zeros", False):
+        return
+
+    def contextual_zeros(*args, **kwargs):
+        replacements = _PRESERVE_KV_ZERO_FILL.get()
+        if replacements is not None and kwargs.get("dtype") is torch.int8:
+            replacements[0] += 1
+            return torch.empty(*args, **kwargs)
+        return current_zeros(*args, **kwargs)
+
+    contextual_zeros._gms_contextual_zeros = True
+    contextual_zeros._gms_original = current_zeros
+    torch.zeros = contextual_zeros
 
 
 @contextmanager
 def _persistent_kv_zeros_as_empty(enabled: bool):
-    """Avoid touching reserve-only or reattached persistent KV pages.
-
-    vLLM allocates KV buffers with ``torch.zeros``. Private-bootstrap mode
-    has reserve-only VAs, while a cold replacement maps the primary's existing
-    physical pages. Zero-filling either would respectively poison the CUDA
-    context or silently destroy the KV being recovered. During those allocation
-    windows, replace only int8 zero allocations with ``torch.empty`` so vLLM
-    can build tensor views without writing to KV. A genuinely new shared pool
-    keeps vLLM's normal zero initialization.
-    """
     if not enabled:
         yield
         return
 
     import torch
 
-    original_zeros = torch.zeros
-    replacements = 0
-
-    def zeros_as_empty(*args, **kwargs):
-        nonlocal replacements
-        if kwargs.get("dtype") is torch.int8:
-            replacements += 1
-            return torch.empty(*args, **kwargs)
-        return original_zeros(*args, **kwargs)
-
-    torch.zeros = zeros_as_empty
+    _install_contextual_zeros_hook(torch)
+    replacements = [0]
+    token = _PRESERVE_KV_ZERO_FILL.set(replacements)
     try:
         yield
     finally:
-        torch.zeros = original_zeros
-        if replacements:
+        _PRESERVE_KV_ZERO_FILL.reset(token)
+        if replacements[0]:
             logger.info(
                 "[GMS-VMM-IPC] allocated %d persistent KV tensors with "
-                "torch.empty to preserve existing or reserve-only pages",
-                replacements,
+                "torch.empty to preserve existing pages",
+                replacements[0],
             )
 
 
@@ -164,23 +168,57 @@ def _install_kv_leases() -> bool:
         raise
 
 
+def _immutable_revision(value) -> str | None:
+    resolved = getattr(value, "resolved", None)
+    if resolved:
+        return str(resolved)
+    text = str(value) if value is not None else ""
+    return text if _IMMUTABLE_REVISION(text) else None
+
+
 def _model_identity(model_config) -> str:
-    """Return a stable identity for the model that produced KV bytes."""
-    parts: list[str] = []
-    for attr in ("model", "revision", "code_revision", "quantization"):
-        value = getattr(model_config, attr, None)
-        if value is not None:
-            parts.append(f"{attr}={value}")
-
-    hf_config = getattr(model_config, "hf_config", None)
-    commit = getattr(hf_config, "_commit_hash", None)
-    if commit:
-        parts.append(f"hf_commit={commit}")
-
-    if not parts:
-        raise RuntimeError(
-            "Cannot derive a stable model identity for persistent GMS KV"
+    override = os.environ.get("GMS_VLLM_MODEL_ARTIFACT_DIGEST", "").strip()
+    model = str(getattr(model_config, "model", "") or "")
+    if override:
+        artifact = override
+    else:
+        model_weights = getattr(model_config, "model_weights", None)
+        hf_config_path = getattr(model_config, "hf_config_path", None)
+        if (model_weights and str(model_weights) != model) or (
+            hf_config_path and str(hf_config_path) != model
+        ):
+            raise RuntimeError(
+                "Persistent GMS KV with split model artifacts requires "
+                "GMS_VLLM_MODEL_ARTIFACT_DIGEST"
+            )
+        revision = getattr(model_config, "revision", None)
+        hf_config = getattr(model_config, "hf_config", None)
+        artifact = _immutable_revision(revision) or _immutable_revision(
+            getattr(hf_config, "_commit_hash", None)
         )
+        if artifact is None:
+            raise RuntimeError(
+                "Persistent GMS KV requires an immutable resolved model revision "
+                "or GMS_VLLM_MODEL_ARTIFACT_DIGEST"
+            )
+
+    code_revision = getattr(model_config, "code_revision", None)
+    if code_revision is not None and not override:
+        resolved_code_revision = _immutable_revision(code_revision)
+        if resolved_code_revision is None:
+            raise RuntimeError(
+                "Persistent GMS KV with custom model code requires an immutable "
+                "code revision or GMS_VLLM_MODEL_ARTIFACT_DIGEST"
+            )
+    else:
+        resolved_code_revision = None
+
+    parts = [f"model={model}", f"artifact={artifact}"]
+    quantization = getattr(model_config, "quantization", None)
+    if quantization is not None:
+        parts.append(f"quantization={quantization}")
+    if resolved_code_revision is not None:
+        parts.append(f"code_revision={resolved_code_revision}")
     return "\0".join(parts)
 
 
