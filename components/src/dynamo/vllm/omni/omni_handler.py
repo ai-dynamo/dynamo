@@ -44,7 +44,7 @@ from dynamo.llm import (
     WorkerType,
     register_model,
 )
-from dynamo.llm.exceptions import EngineShutdown
+from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
 from dynamo.vllm.handlers import get_lora_manager
 from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
@@ -388,11 +388,13 @@ class OmniHandler(BaseOmniHandler):
                 # /v1/images/generations folds worker output into
                 # NvImagesResponse, which has no failure shape, so the
                 # chat.completion.chunk _error_chunk returns is not a rejection
-                # the client can read. Let the ValueError out instead: the
-                # bindings map ValueError to BackendError::InvalidArgument
-                # (lib/bindings/python/rust/engine.rs), aggregate_stream keeps
-                # the error type, and the client gets a 4xx carrying the reason.
-                raise
+                # the client can read. Re-raise as InvalidArgument instead: it is
+                # a registered binding exception, so errors.rs takes its message
+                # via .value(py).str() and the client sees the reason alone. A
+                # bare ValueError reaches the same 400 through engine.rs's
+                # fallback, but that path uses PyErr::to_string() and renders as
+                # "ValueError: <reason>", leaking the Python type to the API.
+                raise InvalidArgument(str(e)) from e
             yield self._error_chunk(request_id, str(e), request_type)
             return
 

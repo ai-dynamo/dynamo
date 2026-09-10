@@ -18,6 +18,7 @@ try:
     from dynamo.common.protocols.image_protocol import NvCreateImageRequest
     from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
     from dynamo.common.utils.output_modalities import RequestType
+    from dynamo.llm.exceptions import InvalidArgument
     from dynamo.vllm.lora_state import LoRAState
     from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
     from dynamo.vllm.omni.main import _register_lora_engine_routes
@@ -818,16 +819,22 @@ class TestImageEndpointSizeValidation:
     @pytest.mark.asyncio
     async def test_rejection_propagates_instead_of_yielding_a_chat_chunk(self):
         """The images route has no failure shape, so a rejection must not be
-        yielded as a chat.completion.chunk -- it has to leave the handler as a
-        ValueError, which the bindings map to BackendError::InvalidArgument and
-        the HTTP layer answers with a 4xx."""
+        yielded as a chat.completion.chunk. It leaves the handler as
+        InvalidArgument, the registered binding exception the HTTP layer answers
+        with a 400."""
         handler = _make_handler()
         handler.config.output_modalities = ["image"]
         request = {"prompt": "x", "size": "99999x99999"}
 
-        with pytest.raises(ValueError, match=r"width in size='99999x99999'"):
+        with pytest.raises(InvalidArgument) as excinfo:
             async for _ in handler._generate_openai_mode(request, None, "req-1"):
                 pass
+
+        # The client-facing message is the reason alone: errors.rs reads a
+        # registered exception's .value(py).str(), so no "ValueError: " prefix.
+        assert str(excinfo.value) == (
+            "width in size='99999x99999' must be between 1 and 4096"
+        )
 
 
 # ---------------------------------------------------------------------------

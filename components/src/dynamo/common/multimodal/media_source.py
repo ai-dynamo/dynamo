@@ -76,9 +76,6 @@ def decode_data_uri(url: str) -> bytes:
     Only base64 payloads are accepted: a percent-encoded body would have to be
     re-encoded to bytes by guessing a charset, and media data URIs are base64
     in practice.
-
-    Public because every caller taking a ``data:`` URI from a client needs this
-    exact handling, and a second implementation drifts from this one.
     """
     _, _, remainder = url.partition(":")
     meta, sep, payload = remainder.partition(",")
