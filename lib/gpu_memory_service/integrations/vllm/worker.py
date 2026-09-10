@@ -250,7 +250,6 @@ class GMSWorker(Worker):
         return result
 
     def initialize_from_config(self, kv_cache_config) -> None:
-        """Register persistent KV backing, then use vLLM's native hook."""
         if not env_enabled_by_default("GMS_VLLM_VMM_IPC_KV", default=True):
             return super().initialize_from_config(kv_cache_config)
         # EngineCore can skip determine_available_memory for models with no

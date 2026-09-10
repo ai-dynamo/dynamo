@@ -338,13 +338,7 @@ def _load_read_mode(
         logger.info("[GMS] Read mode: materializing tensors")
         materialize_module_from_gms(gms_client, model, device_index=device_index)
 
-        _refresh_fused_moe_router_tensors_after_gms_materialization(model)
-        _process_fused_moe_kernels_after_gms_materialization(
-            model,
-            model_config,
-            target_device,
-        )
-        _process_mla_weights_after_gms_materialization(
+        _process_weights_after_gms_materialization(
             model,
             model_config,
             target_device,
@@ -367,6 +361,34 @@ def _load_read_mode(
         logger.exception("[GMS] Read mode failed while importing weights")
         gms_client.close(best_effort=True)
         raise
+
+
+def _process_weights_after_gms_materialization(
+    model: torch.nn.Module,
+    model_config,
+    target_device: torch.device,
+) -> None:
+    try:
+        from vllm.model_executor.model_loader.utils import (
+            process_weights_after_loading,
+        )
+        from vllm.model_executor.utils import weights_already_processed
+    except ImportError:
+        _refresh_fused_moe_router_tensors_after_gms_materialization(model)
+        _process_fused_moe_kernels_after_gms_materialization(
+            model,
+            model_config,
+            target_device,
+        )
+        _process_mla_weights_after_gms_materialization(
+            model,
+            model_config,
+            target_device,
+        )
+        return
+
+    with weights_already_processed():
+        process_weights_after_loading(model, model_config, target_device)
 
 
 def _is_mla_post_load_module(module: torch.nn.Module) -> bool:

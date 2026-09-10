@@ -22,7 +22,6 @@ def shared_kv_enabled() -> bool:
 
 
 def failover_hooks_required() -> bool:
-    """Return whether startup must provide the complete persistent-KV path."""
     return (
         shared_kv_enabled()
         or os.environ.get("GMS_KV_DIRECTORY_MODE", "off").strip().lower()
