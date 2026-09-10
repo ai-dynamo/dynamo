@@ -75,8 +75,6 @@ class PersistentAllocationManager:
     """
 
     def __init__(self, device: int = 0):
-        # Route all CUDA VMM ops through the upstream VMM abstraction (adopted
-        # during the rebase), matching GMSAllocationManager.
         self._vmm = get_vmm()
         self._vmm.ensure_initialized()
         self._device = device
