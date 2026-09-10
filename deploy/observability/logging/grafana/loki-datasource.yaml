@@ -13,6 +13,7 @@ data:
       - name: Loki
         type: loki
         access: proxy
-        url: http://loki-gateway.$MONITORING_NAMESPACE.svc.cluster.local
+        # The documented stack installs Grafana and Loki in the same namespace.
+        url: http://loki-gateway
         jsonData:
           maxLines: 1000

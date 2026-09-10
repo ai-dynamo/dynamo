@@ -2,23 +2,32 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Observability
-subtitle: Install the monitoring stack and enable metrics, logging, and tracing for Dynamo deployments
+subtitle: Install Prometheus, Grafana, DCGM exporter, Loki, and Alloy for Dynamo deployments
 ---
 
-Dynamo emits three signals — **metrics** (Prometheus), **logs** (structured text or JSONL, exportable to Loki), and **traces** (OpenTelemetry, exportable to Tempo). This page installs the backends that collect them. Enabling each signal is a matter of setting a few environment variables per process or deployment.
+Dynamo emits three signals: **metrics** for Prometheus, **logs** as structured text or JSONL, and
+**traces** over OpenTelemetry Protocol (OTLP). This page installs the metrics and logging backends.
+To collect traces, provide an OTLP collector and trace backend that the Dynamo pods can reach; this
+reference stack does not install them.
 
 ## Signals at a glance
 
 | Signal | Turn it on with | Collected by |
 |--------|-----------------|--------------|
 | Metrics | `DYN_SYSTEM_PORT` (workers/router); the frontend serves metrics on its HTTP port | Prometheus |
-| Traces | `OTEL_EXPORT_ENABLED=true` + an OTLP endpoint | Tempo |
-| Logs | `DYN_LOGGING_CONSOLE_FORMAT=jsonl` for console JSONL; `OTEL_EXPORT_ENABLED=true` to export | Loki |
+| Traces | `OTEL_EXPORT_ENABLED=true` + an OTLP endpoint | User-provided collector and trace backend |
+| Logs | `DYN_LOGGING_CONSOLE_FORMAT=jsonl` for console JSONL; `OTEL_EXPORT_ENABLED=true` for OTLP export | Alloy and Loki for stdout; user-provided collector and backend for OTLP |
 | FPM traces | `DYN_FPM_TRACE=1` or `--fpm-trace` | Rotating gzip JSONL files |
 | Health status | `/live` and `/health` endpoints | Supervisors or Kubernetes probes |
 | Request traces | `DYN_REQUEST_TRACE=1` or `DYN_REQUEST_TRACE_RECORDS` | Files, NATS, stderr, or OTLP logs |
 
-`OTEL_EXPORT_ENABLED` is the master switch for both traces and logs — without it, neither leaves the process even when Tempo and Loki are healthy. Dynamo supports OTLP over `grpc` and `http/protobuf`. Use `OTEL_EXPORTER_OTLP_ENDPOINT` for a shared collector or signal-specific endpoint variables for separate destinations. For the full variable catalog — defaults, per-signal grouping, and the Kubernetes operator presets — see [Environment Variables](../../reference/observability/environment-variables.mdx).
+`OTEL_EXPORT_ENABLED` is the master switch for OTLP-exported traces and log records. It does not
+control console output: the reference logging stack collects JSONL from pod stdout with Alloy and
+sends it to Loki. Dynamo supports OTLP over `grpc` and `http/protobuf`. Use
+`OTEL_EXPORTER_OTLP_ENDPOINT` for a shared collector or signal-specific endpoint variables for
+separate destinations. For the full variable catalog, including defaults and Kubernetes operator
+presets, see
+[Environment Variables](../../reference/observability/environment-variables.mdx).
 
 For scheduler telemetry, see [Observe a Local Deployment](../../cli/operations/observability.mdx#capture-forward-pass-metrics). For replay metadata or request payload capture, see [Observe a Local Deployment](../../cli/operations/observability.mdx#capture-and-replay-requests).
 
@@ -27,11 +36,20 @@ For scheduler telemetry, see [Observe a Local Deployment](../../cli/operations/o
 
 ## Kubernetes stack
 
-On Kubernetes, install the monitoring backends once, then enable signals per deployment — see [Observability](../operations/observability.mdx) under Operations for the per-deployment steps. The Dynamo operator wires metrics scraping automatically (it adds a `PodMonitor` to every managed pod), so the only one-time work is installing Prometheus, the exporters, and the logging stack.
+On Kubernetes, install the monitoring backends once, then enable signals per deployment. See
+[Observability](../operations/observability.mdx) under Operations for the per-deployment steps. The
+Dynamo platform chart creates `PodMonitor` resources that select operator-managed pods, so the
+one-time work is installing Prometheus, the exporters, and the logging stack.
+
+If your platform already provides an OTLP collector and trace backend, use the
+[distributed trace export workflow](../operations/observability.mdx#export-distributed-traces-and-logs)
+to connect Dynamo to them.
 
 ### kube-prometheus-stack
 
-Install Prometheus, Grafana, and the Prometheus Operator. The selector flags let Prometheus discover `PodMonitor` and `ServiceMonitor` resources created outside its own Helm release (such as the ones the Dynamo operator creates):
+Install Prometheus, Grafana, and the Prometheus Operator. The selector flags let Prometheus discover
+`PodMonitor` and `ServiceMonitor` resources created outside its own Helm release, including the
+ones created by the Dynamo platform chart:
 
 ```bash
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
@@ -45,9 +63,28 @@ helm install prometheus prometheus-community/kube-prometheus-stack \
 ```
 
 > [!NOTE]
-> The Dynamo install command in the [Installation Guide](install-dynamo.md#kube-prometheus-stack) sets `dynamo-operator.dynamo.metrics.prometheusEndpoint` to point the operator at this Prometheus. Set it there, in one pass, rather than here.
+> Install Prometheus before Dynamo when possible. The Dynamo install command in the
+> [Installation Guide](install-dynamo.md#kube-prometheus-stack) sets
+> `dynamo-operator.dynamo.metrics.prometheusEndpoint`, and the platform chart detects the Prometheus
+> Operator CRDs and creates its `PodMonitor` resources in that same install.
 >
 > An older form of the discovery flags used `--set ...podMonitorNamespaceSelector.matchLabels=null` (and the same for `probeNamespaceSelector`). The `--set-json '...={}'` form above is equivalent and preferred; use one form or the other consistently, not both.
+
+If Dynamo is already installed, installing Prometheus does not retroactively create the monitors or
+configure the endpoint. Upgrade the existing platform release with the same chart version and any
+other values from its original install, adding these settings:
+
+```bash
+helm upgrade dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
+  --namespace $NAMESPACE \
+  --reuse-values \
+  --set "dynamo-operator.dynamo.metrics.prometheusEndpoint=http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090" \
+  --set "dynamo-operator.dynamo.metrics.podMonitors.enabled=true"
+```
+
+This command uses `RELEASE_VERSION` and `NAMESPACE` from the
+[Installation Guide](install-dynamo.md#install-the-dynamo-platform). Setting `podMonitors.enabled`
+to `true` makes the upgrade explicit instead of relying on chart auto-detection.
 
 kube-prometheus-stack bundles **node-exporter** by default, which supplies the node CPU, system load, and container resource panels on the Dynamo dashboard. Verify it is running:
 
@@ -97,10 +134,11 @@ If the output is empty, install it via the GPU Operator or the standalone dcgm-e
 
 To collect pod logs into Grafana Loki, install Loki and the Grafana Alloy collector. This reference setup suits development and testing clusters (including Minikube and MicroK8s); use a high-availability configuration for production.
 
-Set the namespaces once:
+Set the namespaces once. The supplied Grafana datasource uses the in-namespace service name
+`loki-gateway`, so this reference setup keeps Grafana and Loki together in `monitoring`:
 
 ```bash
-export MONITORING_NAMESPACE=monitoring    # where Loki is installed
+export MONITORING_NAMESPACE=monitoring    # where Prometheus, Grafana, and Loki are installed
 export DYN_NAMESPACE=dynamo-system        # where Dynamo is installed
 ```
 
