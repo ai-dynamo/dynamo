@@ -89,7 +89,7 @@
 //! Consumers apply their own policy to the validated semantic identity:
 //!
 //! - Protocol renderers map [`DynamoError::class`] to a status or legal terminal stream event and expose only approved [`PublicDetails`].
-//! - Retry and migration code combines the reason with locally owned budget, deadline, routing, replay, and continuation state. [`ErrorReason::is_migration_eligible`] indicates semantic eligibility, not permission to retry.
+//! - Retry and migration code owns its reason policy and combines it with locally owned budget, deadline, routing, replay, and continuation state.
 //! - Worker-health code combines the reason with local worker and pool observations rather than inferring health from an HTTP status.
 //! - Metrics use the normalized class and registered reason. Diagnostics, request identifiers, exception types, URLs, and user-controlled values must not become labels.
 //!
@@ -397,35 +397,6 @@ impl ErrorReason {
 
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-
-    /// Returns whether this reason makes the enclosing request ineligible for migration.
-    pub fn blocks_migration(&self) -> bool {
-        matches!(
-            self.as_str(),
-            "request.cancelled"
-                | "backend.cancelled"
-                | "capacity.exhausted"
-                | "capacity.pool_exhausted"
-        )
-    }
-
-    /// Returns whether this reason permits retrying the request on another worker.
-    pub fn is_migration_eligible(&self) -> bool {
-        matches!(
-            self.as_str(),
-            "transport.cannot_connect"
-                | "transport.disconnected"
-                | "transport.connection_timeout"
-                | "backend.cannot_connect"
-                | "backend.disconnected"
-                | "backend.connection_timeout"
-                | "backend.response_timeout"
-                | "backend.engine_shutdown"
-                | "backend.stream_incomplete"
-                | "backend.worker_unavailable"
-                | "capacity.worker_overloaded"
-        )
     }
 
     fn catalog_class(value: &str) -> Option<ErrorClass> {
@@ -1375,20 +1346,6 @@ mod tests {
                 .is_char_boundary(diagnostic.as_str().len())
         );
         assert!(diagnostic.as_str().ends_with(Diagnostic::TRUNCATION_SUFFIX));
-    }
-
-    #[test]
-    fn migration_reason_helpers_preserve_the_reason_policy() {
-        let retryable = ErrorReason::new("backend.disconnected").unwrap();
-        let blocked = ErrorReason::new("capacity.exhausted").unwrap();
-        let unrelated = ErrorReason::new("request.invalid").unwrap();
-
-        assert!(retryable.is_migration_eligible());
-        assert!(!retryable.blocks_migration());
-        assert!(blocked.blocks_migration());
-        assert!(!blocked.is_migration_eligible());
-        assert!(!unrelated.blocks_migration());
-        assert!(!unrelated.is_migration_eligible());
     }
 
     #[test]
