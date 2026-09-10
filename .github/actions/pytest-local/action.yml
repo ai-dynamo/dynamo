@@ -104,10 +104,8 @@ runs:
         HF_XET_HIGH_PERFORMANCE: 1
         PYTEST_DD_FLAKY_RETRY_ENABLED: ${{ inputs.dd_flaky_retry_enabled }}
       run: |
-        # Sanitize test_type for the filenames built below: remove commas and
-        # spaces. Keep this shell-local. A job-scoped copy in $GITHUB_ENV is
-        # shared by every stage of the job, so an upload step reading it can see
-        # a previous stage's value (or none) and collide on the artifact name.
+        # Sanitize test_type for the filenames below. Keep it shell-local: a
+        # $GITHUB_ENV copy is job-scoped, so stages would share one stale value.
         STR_TEST_TYPE=$(echo "${TEST_TYPE}" | tr ', ' '_')
 
         if [[ "${GPU_TESTS}" == "true" ]]; then
