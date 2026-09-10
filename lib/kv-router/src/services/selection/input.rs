@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::time::{Duration, Instant};
+
 use dynamo_tokens::SequenceHash;
 use serde::Deserialize;
 
@@ -197,20 +199,27 @@ fn normalize_tokens_for_selection(
         cache_namespace,
         is_eagle: Some(is_eagle),
     };
-    let block_hashes = compute_block_hash_for_seq(token_ids, block_size, hash_options);
-    let sequence_hashes = tracking.map_or_else(Vec::new, |tracking| {
-        tracking.context.compute_sequence_hashes_for_tracking(
-            tracking.scope,
-            token_ids,
-            hash_options,
-            tracking.assume_kv_reuse,
-            Some(&block_hashes),
-        )
+    let started = Instant::now();
+    let block_hashes = tracing::info_span!("kv_router.compute_block_hashes")
+        .in_scope(|| compute_block_hash_for_seq(token_ids, block_size, hash_options));
+    let block_hashing = started.elapsed();
+    let sequence_hashes = tracing::info_span!("kv_router.compute_seq_hashes").in_scope(|| {
+        tracking.map_or_else(Vec::new, |tracking| {
+            tracking.context.compute_sequence_hashes_for_tracking(
+                tracking.scope,
+                token_ids,
+                hash_options,
+                tracking.assume_kv_reuse,
+                Some(&block_hashes),
+            )
+        })
     });
     NormalizedPrompt {
         block_hashes,
         sequence_hashes,
         isl_tokens: token_ids.len(),
+        block_hashing,
+        seq_hashing: started.elapsed().saturating_sub(block_hashing),
     }
 }
 
@@ -265,6 +274,8 @@ fn normalize_hashes(
             .collect(),
         sequence_hashes: signed_sequence_hashes(sequence_hashes),
         isl_tokens,
+        block_hashing: Duration::ZERO,
+        seq_hashing: Duration::ZERO,
     })
 }
 
@@ -276,6 +287,9 @@ pub(super) struct NormalizedPrompt {
     pub(super) block_hashes: Vec<LocalBlockHash>,
     pub(super) sequence_hashes: Vec<SequenceHash>,
     pub(super) isl_tokens: usize,
+    /// Zero for hash-only inputs.
+    pub(super) block_hashing: Duration,
+    pub(super) seq_hashing: Duration,
 }
 
 pub(super) struct NormalizedReservation {

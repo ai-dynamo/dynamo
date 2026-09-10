@@ -10,6 +10,7 @@ use once_cell::sync::OnceCell;
 use parking_lot::RwLock;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 use crate::identity::RoutingPartitionId;
 use crate::indexer::{
@@ -51,7 +52,8 @@ use crate::tracking_hash::{TrackingHashContext, TrackingHashScope};
 mod operation;
 
 pub use operation::{
-    Selected, SelectionAdmission, SelectionOperation, SelectionOutcome, SessionBinding,
+    LookupTimings, Selected, SelectionAdmission, SelectionOperation, SelectionOutcome,
+    SelectionRun, SessionBinding,
 };
 
 use super::affinity::{
@@ -1014,7 +1016,7 @@ impl SelectionCore {
                 request_id: req.selection_id.clone(),
             }
         };
-        let selected = self
+        let (selected, endpoint) = self
             .select_or_reject(SelectionOperation {
                 key: RoutingPartitionId::new(req.model_name, req.routing_group),
                 prompt: req.prompt.view(),
@@ -1035,7 +1037,7 @@ impl SelectionCore {
                 replay_id: req.selection_id.clone(),
             })
             .await?;
-        Ok(self.select_response(selected, req.selection_id))
+        Ok(self.select_response(selected, endpoint, req.selection_id))
     }
 
     pub async fn select_and_reserve(
@@ -1056,7 +1058,7 @@ impl SelectionCore {
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let is_steerable = req.affinity_target.is_none() && req.pinned_worker.is_none();
         let session = session_binding(session_context.as_ref(), is_steerable, true);
-        let selected = self
+        let (selected, endpoint) = self
             .select_or_reject(SelectionOperation {
                 key: RoutingPartitionId::new(req.model_name, req.routing_group),
                 prompt: req.prompt.view(),
@@ -1079,29 +1081,44 @@ impl SelectionCore {
                 replay_id: None,
             })
             .await?;
-        Ok(self.select_response(selected, Some(selection_id)))
+        Ok(self.select_response(selected, endpoint, Some(selection_id)))
     }
 
     /// The wire shape of a selection; a queue rejection keeps its 503 body.
     async fn select_or_reject(
         &self,
         operation: SelectionOperation<'_>,
-    ) -> Result<Selected, SelectionError> {
-        match self.run_selection(operation).await? {
-            SelectionOutcome::Selected(selected) => Ok(selected),
-            SelectionOutcome::QueueRejected { rejection } => Err(SelectionError::Scheduler(
-                KvSchedulerError::QueueRejected(rejection),
-            )),
-        }
+    ) -> Result<(Selected, String), SelectionError> {
+        let mut selected = match self.run_selection(operation).await.result? {
+            SelectionOutcome::Selected(selected) => selected,
+            SelectionOutcome::QueueRejected { rejection } => {
+                return Err(SelectionError::Scheduler(KvSchedulerError::QueueRejected(
+                    rejection,
+                )));
+            }
+        };
+        // Wire admissions never book without an endpoint; see `Selected::endpoint`.
+        let endpoint = selected.endpoint.take().ok_or_else(|| {
+            SelectionError::Internal(format!(
+                "selected worker {} is no longer schedulable",
+                selected.response.best_worker.worker_id
+            ))
+        })?;
+        Ok((selected, endpoint))
     }
 
-    fn select_response(&self, selected: Selected, selection_id: Option<String>) -> SelectResponse {
+    fn select_response(
+        &self,
+        selected: Selected,
+        endpoint: String,
+        selection_id: Option<String>,
+    ) -> SelectResponse {
         let Selected {
             key,
             response,
             advisory_load,
             total_kv_blocks,
-            endpoint,
+            endpoint: _,
             block_size,
             isl_tokens,
             sequence_hashes,
@@ -1109,6 +1126,7 @@ impl SelectionCore {
             effective_prefill_tokens,
             kv_hint,
             routing_hashes: _,
+            shared_cache_hits: _,
             lease: _,
         } = selected;
         let booked = sequence_hashes.is_some();
@@ -1156,9 +1174,16 @@ impl SelectionCore {
     /// Run one selection: resolve the session, look the prompt up, schedule,
     /// and (for `Book`) install the reservation. Every host's selection goes
     /// through here.
-    pub async fn run_selection(
+    pub async fn run_selection(&self, operation: SelectionOperation<'_>) -> SelectionRun {
+        let mut lookup = None;
+        let result = self.run_selection_inner(operation, &mut lookup).await;
+        SelectionRun { result, lookup }
+    }
+
+    async fn run_selection_inner(
         &self,
         operation: SelectionOperation<'_>,
+        lookup: &mut Option<LookupTimings>,
     ) -> Result<SelectionOutcome, SelectionError> {
         let SelectionOperation {
             key,
@@ -1217,9 +1242,17 @@ impl SelectionCore {
         // Router hints are attached to bookings only, and only when a worker in
         // this partition can consume them and the indexer can retain the
         // matched chain (local, event-driven, no approximate writes).
-        let retain_kv_transfer_chain = book
-            && entry.indexer.supports_kv_transfer_chain_retention()
-            && self.catalog.has_router_hint_capable_workers(&key);
+        let hint_capable_workers = book && self.catalog.has_router_hint_capable_workers(&key);
+        let retain_kv_transfer_chain =
+            hint_capable_workers && entry.indexer.supports_kv_transfer_chain_retention();
+        if hint_capable_workers && !retain_kv_transfer_chain {
+            static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+            WARN_ONCE.call_once(|| {
+                tracing::warn!(
+                    "router hints need a local event-driven indexer with no approximate side indexer; workers advertise hint capability but no hints will be attached"
+                );
+            });
+        }
         let PreparedSelectionInputs {
             block_hashes,
             sequence_hashes,
@@ -1237,8 +1270,21 @@ impl SelectionCore {
                 }),
                 true,
                 retain_kv_transfer_chain,
+                lookup,
             )
             .await?;
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let local_hashes: Vec<u64> = block_hashes.iter().map(|hash| hash.0).collect();
+            tracing::debug!(
+                request_id = admission.request_id().unwrap_or_default(),
+                isl_tokens,
+                block_size = entry.block_size,
+                num_blocks = local_hashes.len(),
+                ?local_hashes,
+                "[ROUTING_INPUT] request local hashes"
+            );
+        }
+        let host_shared_cache_hits = shared_cache_hits.clone();
         // The queue lease frees a booking whose response is never consumed
         // (the caller dropped this future after the actor booked).
         let mode = match &admission {
@@ -1323,6 +1369,7 @@ impl SelectionCore {
                     entry
                         .scheduler
                         .select_without_admission(schedule_request)
+                        .instrument(tracing::info_span!("kv_router.select_without_admission"))
                         .await
                         .map(|advisory| {
                             (advisory.response, Some(advisory.selected_worker_load), None)
@@ -1331,6 +1378,7 @@ impl SelectionCore {
                     entry
                         .scheduler
                         .schedule_request_with_lease(schedule_request)
+                        .instrument(tracing::info_span!("kv_router.schedule"))
                         .await
                         .map(|(admitted, lease)| (admitted.response, None, lease))
                 }
@@ -1343,15 +1391,15 @@ impl SelectionCore {
             }
             Err(error) => return Err(error.into()),
         };
-        let Some(endpoint) = self
+        let endpoint = self
             .catalog
-            .schedulable_endpoint(response.best_worker.worker_id, &key)
-        else {
+            .schedulable_endpoint(response.best_worker.worker_id, &key);
+        if endpoint.is_none() && !matches!(admission, SelectionAdmission::Lease { .. }) {
             return Err(SelectionError::Internal(format!(
                 "selected worker {} is no longer schedulable",
                 response.best_worker.worker_id
             )));
-        };
+        }
         let effective_prefill = effective_prefill_tokens(isl_tokens, response.cached_tokens);
         let total_kv_blocks = advisory_load
             .and_then(|load| load.total_kv_blocks.map(|blocks| blocks as u64))
@@ -1376,8 +1424,6 @@ impl SelectionCore {
             None
         };
 
-        // The routing hashes go to exactly one of: the booking recorded now, or
-        // the cached inputs a later replay records.
         // The routing hashes go to exactly one of: the reservation recorded
         // now, or the replay cache a later reservation records from.
         let mut routing_hashes = routing_hashes;
@@ -1442,6 +1488,7 @@ impl SelectionCore {
             effective_prefill_tokens: effective_prefill,
             kv_hint,
             routing_hashes: returned_routing_hashes,
+            shared_cache_hits: host_shared_cache_hits,
             lease,
         }))
     }
@@ -1993,6 +2040,7 @@ impl SelectionCore {
                 ),
                 false,
                 false,
+                &mut None,
             )
             .await?;
         let track_prefill_tokens = req
@@ -2051,6 +2099,7 @@ impl SelectionCore {
         tracking_assume_kv_reuse: Option<bool>,
         query_shared_cache: bool,
         retain_kv_transfer_chain: bool,
+        lookup: &mut Option<LookupTimings>,
     ) -> Result<PreparedSelectionInputs, SelectionError> {
         let normalized = prompt.normalize_for_selection(
             entry.block_size,
@@ -2062,7 +2111,8 @@ impl SelectionCore {
             }),
         )?;
         let indexer_lookup = async {
-            if normalized.block_hashes.is_empty() {
+            let started = Instant::now();
+            let tiered = if normalized.block_hashes.is_empty() {
                 Ok(TieredMatchDetails::default())
             } else {
                 entry
@@ -2073,28 +2123,49 @@ impl SelectionCore {
                             retain_kv_transfer_chain,
                         },
                     )
+                    .instrument(tracing::info_span!("kv_router.find_matches"))
                     .await
                     .map_err(SelectionError::Indexer)
-            }
+            };
+            (tiered, started.elapsed())
         };
         let shared_cache = query_shared_cache
             .then_some(self.host.cache.shared.as_deref())
             .flatten()
             .zip(prompt.token_ids);
+        // `(hits, duration, failed)`; all `None`/`false` without a shared cache.
         let shared_cache_lookup = async {
-            let (shared_cache, tokens) = shared_cache?;
-            match shared_cache
+            let Some((shared_cache, tokens)) = shared_cache else {
+                return (None, None, false);
+            };
+            let started = Instant::now();
+            let result = shared_cache
                 .check_blocks(tokens, entry.block_size, prompt.cache_namespace)
-                .await
-            {
-                Ok(hits) => Some(hits),
+                .instrument(tracing::info_span!("kv_router.shared_cache_check"))
+                .await;
+            let elapsed = started.elapsed();
+            match result {
+                Ok(hits) => (Some(hits), Some(elapsed), false),
                 Err(error) => {
                     tracing::warn!(%error, "Shared cache query failed, ignoring");
-                    None
+                    (None, Some(elapsed), true)
                 }
             }
         };
-        let (tiered, shared_cache_hits) = tokio::join!(indexer_lookup, shared_cache_lookup);
+        let lookups_started = Instant::now();
+        let ((tiered, indexer), (shared_cache_hits, shared_cache, shared_cache_error)) =
+            tokio::join!(indexer_lookup, shared_cache_lookup);
+        let timings = LookupTimings {
+            block_hashing: normalized.block_hashing,
+            seq_hashing: normalized.seq_hashing,
+            lookups: lookups_started.elapsed(),
+            indexer,
+            shared_cache,
+            shared_cache_error,
+        };
+        // Recorded before `?` so a shared-cache failure is still accounted
+        // when the index lookup fails.
+        *lookup = Some(timings);
         let tiered = tiered?;
         let overlap =
             OverlapAnalysis::new(&self.kv_router_config, entry.block_size, &tiered).signals();
@@ -3464,6 +3535,82 @@ mod tests {
             matches!(&err, SelectionError::Internal(m) if m.contains("no longer schedulable")),
             "{err:?}"
         );
+        wait_until("booking release", || !entry.scheduler.has_request("queued")).await;
+    }
+
+    /// The embedded host dispatches by worker id, so a worker that drains
+    /// while the request queues still comes back selected: the transport
+    /// reports the departure and migration takes over. The endpoint is the
+    /// only thing missing.
+    #[tokio::test]
+    async fn lease_admission_keeps_a_selection_whose_worker_drained_while_queued() {
+        let mut config = test_config(false);
+        config.router_queue_threshold = Some(0.0);
+        let core = Arc::new(
+            SelectionCore::try_new_local(
+                config,
+                1,
+                CancellationToken::new(),
+                SelectionCacheConfig::default(),
+            )
+            .expect("valid test config"),
+        );
+        core.upsert_worker(worker(1)).await.expect("worker upsert");
+        let key = RoutingPartitionId::new("model", "default");
+        let entry = core.entry(&key).expect("entry");
+        core.select_and_reserve(reserve_request("res-a"))
+            .await
+            .expect("initial reservation");
+
+        let queued_core = core.clone();
+        let queued = tokio::spawn(async move {
+            let req = reserve_request("queued");
+            let run = queued_core
+                .run_selection(SelectionOperation {
+                    key: RoutingPartitionId::new("model", "default"),
+                    prompt: req.prompt.view(),
+                    router_config_override: None,
+                    expected_output_tokens: None,
+                    priority_jump: 0.0,
+                    strict_priority: 0,
+                    policy_class: None,
+                    session_context: None,
+                    session: SessionBinding::None,
+                    affinity_target: None,
+                    pinned_worker: None,
+                    allowed_worker_ids: None,
+                    routing_constraints: RoutingConstraints::default(),
+                    admission: SelectionAdmission::Lease {
+                        request_id: "queued".to_string(),
+                    },
+                    track_active_blocks: false,
+                    return_routing_hashes: false,
+                    replay_id: None,
+                })
+                .await;
+            match run.result {
+                Ok(SelectionOutcome::Selected(selected)) => (
+                    selected.response.best_worker.worker_id,
+                    selected.endpoint,
+                    selected.lease.is_some(),
+                ),
+                Ok(SelectionOutcome::QueueRejected { .. }) => panic!("queue rejected"),
+                Err(error) => panic!("lease selection failed: {error:?}"),
+            }
+        });
+        wait_for_pending_selection(&core).await;
+        core.catalog
+            .set_lifecycle(1, WorkerLifecycle::Draining, Vec::new());
+        core.free_reservation("res-a").await.expect("free res-a");
+
+        let (worker_id, endpoint, leased) = tokio::time::timeout(Duration::from_secs(2), queued)
+            .await
+            .expect("queued selection timed out")
+            .expect("task panicked");
+        assert_eq!(worker_id, 1);
+        assert_eq!(endpoint, None);
+        assert!(leased, "lease admission returns the booking's lease");
+        // The lease was dropped with the selection, so the booking is gone.
         wait_until("booking release", || !entry.scheduler.has_request("queued")).await;
     }
 
@@ -4848,5 +4995,159 @@ mod tests {
             partition.session_affinity(SessionAffinityConfig::new(Duration::from_secs(20))),
             Err(SelectionError::Conflict(_))
         ));
+    }
+
+    fn hint_config(worker_type: &str, endpoints: &[(u32, &str)]) -> SelectionWorkerConfig {
+        SelectionWorkerConfig {
+            endpoint: "http://worker:8000".to_string(),
+            data_parallel_start_rank: 0,
+            data_parallel_size: endpoints.len().max(1) as u32,
+            max_num_batched_tokens: None,
+            total_kv_blocks: None,
+            stable_routing_id: None,
+            is_eagle: None,
+            taints: HashSet::new(),
+            topology_domains: HashMap::new(),
+            kv_transfer_domain: None,
+            kv_transfer_enforcement: None,
+            kv_transfer_preferred_weight: None,
+            router_hint_worker_type: Some(worker_type.to_string()),
+            router_hint_source_control_endpoints: endpoints
+                .iter()
+                .map(|(rank, endpoint)| (*rank, endpoint.to_string()))
+                .collect(),
+            kv_event_source_mode: None,
+        }
+    }
+
+    fn hint_candidates(
+        hashes: &[u64],
+        owners: Vec<(KvTransferCandidateSource, usize)>,
+    ) -> KvTransferCandidates {
+        KvTransferCandidates {
+            block_hashes: hashes
+                .iter()
+                .map(|h| crate::protocols::ExternalSequenceBlockHash(*h))
+                .collect(),
+            owner_prefix_blocks: owners,
+            routing_snapshot: None,
+        }
+    }
+
+    #[test]
+    fn hint_source_endpoint_follows_the_source_dp_rank() {
+        let configs = HashMap::from([(
+            7,
+            hint_config(
+                "prefill",
+                &[(0, "tcp://127.0.0.1:23280"), (1, "tcp://127.0.0.1:23281")],
+            ),
+        )]);
+        let candidates =
+            hint_candidates(&[101, 102], vec![(WorkerWithDpRank::new(7, 1).into(), 2)]);
+        let hint = transfer_hint_for_selection(
+            &configs,
+            WorkerWithDpRank::new(7, 0),
+            0,
+            Some(&candidates),
+        );
+        assert_eq!(
+            hint.map(|payload| payload.source_control_endpoint),
+            Some("tcp://127.0.0.1:23281".to_string())
+        );
+    }
+
+    #[test]
+    fn hint_source_must_share_the_target_worker_type() {
+        let configs = HashMap::from([
+            (7, hint_config("prefill", &[(0, "tcp://127.0.0.1:23280")])),
+            (8, hint_config("prefill", &[(0, "tcp://127.0.0.1:23281")])),
+            (9, hint_config("decode", &[(0, "tcp://127.0.0.1:23282")])),
+            (10, hint_config("decode", &[(0, "tcp://127.0.0.1:23283")])),
+        ]);
+        let candidates = hint_candidates(
+            &[101, 102, 103],
+            vec![
+                (WorkerWithDpRank::new(8, 0).into(), 2),
+                (WorkerWithDpRank::new(9, 0).into(), 3),
+            ],
+        );
+        // The longer decode prefix is skipped for a prefill target.
+        let prefill = transfer_hint_for_selection(
+            &configs,
+            WorkerWithDpRank::new(7, 0),
+            0,
+            Some(&candidates),
+        )
+        .expect("prefill hint");
+        assert_eq!(prefill.source_control_endpoint, "tcp://127.0.0.1:23281");
+        assert_eq!(prefill.block_hashes.len(), 2);
+        let decode = transfer_hint_for_selection(
+            &configs,
+            WorkerWithDpRank::new(10, 0),
+            0,
+            Some(&candidates),
+        )
+        .expect("decode hint");
+        assert_eq!(decode.source_control_endpoint, "tcp://127.0.0.1:23282");
+        assert_eq!(decode.block_hashes.len(), 3);
+    }
+
+    #[test]
+    fn hint_resolves_a_persistent_cache_owner_over_a_state_agent_worker() {
+        use crate::identity::{
+            CacheOwnerId, CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId,
+            RoutingScopeId, StableDpSlotId,
+        };
+        use crate::protocols::{
+            ResidencyOwner, ResidencyProjection, ResidencyRoutingSnapshot, RouterHintSourceMetadata,
+        };
+        let mut stale = hint_config("prefill", &[(0, "tcp://stale-worker:23280")]);
+        stale.kv_event_source_mode = Some("state_agent_v2".to_string());
+        let configs = HashMap::from([(7, hint_config("prefill", &[])), (8, stale)]);
+        let owner = CacheOwnerId::new(
+            PoolId::new(
+                IndexerDomainId::new(
+                    CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
+                    RoutingScopeId::new([2; 16], IdentitySource::Explicit),
+                ),
+                DcId::new(3),
+            ),
+            StableDpSlotId::new([4; 16], IdentitySource::Explicit),
+        );
+        let mut candidates = hint_candidates(
+            &[101, 102],
+            vec![
+                (
+                    KvTransferCandidateSource::Worker(WorkerWithDpRank::new(8, 0)),
+                    2,
+                ),
+                (
+                    KvTransferCandidateSource::CacheOwner(
+                        ResidencyOwner::cache_owner(owner).compact_key(),
+                    ),
+                    2,
+                ),
+            ],
+        );
+        candidates.routing_snapshot = Some(Arc::new(ResidencyRoutingSnapshot::new(
+            ResidencyProjection::default(),
+            [(
+                owner,
+                RouterHintSourceMetadata {
+                    source_control_endpoint: "tcp://persistent-owner:23280".to_string(),
+                    worker_type: "prefill".to_string(),
+                },
+                None,
+            )],
+        )));
+        let hint = transfer_hint_for_selection(
+            &configs,
+            WorkerWithDpRank::new(7, 0),
+            0,
+            Some(&candidates),
+        )
+        .expect("hint");
+        assert_eq!(hint.source_control_endpoint, "tcp://persistent-owner:23280");
     }
 }

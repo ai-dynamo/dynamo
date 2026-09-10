@@ -10,7 +10,9 @@ use dynamo_kv_router::{
     protocols::{
         BlockExtraInfo, RoutingConstraints, WorkerAffinityTarget, WorkerId, WorkerWithDpRank,
     },
-    scheduling::{AdmissionAttempt, AdvisoryWorkerLoad, QueueRejection, RoutingEligibility},
+    scheduling::{
+        AdvisoryWorkerLoad, QueueRejection, RoutingEligibility, queue::RequestLifecycleLease,
+    },
 };
 use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
 
@@ -29,7 +31,8 @@ use crate::{
 
 pub(super) struct WorkerSelection {
     pub(super) worker: WorkerWithDpRank,
-    pub(super) attempt: AdmissionAttempt,
+    /// The booking's lifecycle lease until the request's cleanup takes it over.
+    pub(super) lease: Option<Box<RequestLifecycleLease>>,
     pub(super) overlap_amount: u32,
     pub(super) effective_overlap_blocks: f64,
     pub(super) cached_tokens: usize,
@@ -135,7 +138,7 @@ impl RoutingHost {
                     kv_hint,
                 } => Ok(SelectionOutcome::Routed(WorkerSelection {
                     worker,
-                    attempt: admitted.attempt,
+                    lease: admitted.lease,
                     overlap_amount: overlap_blocks,
                     effective_overlap_blocks,
                     cached_tokens,
@@ -159,7 +162,7 @@ impl RoutingHost {
                     routing_hashes,
                 } => Ok(SelectionOutcome::Routed(WorkerSelection {
                     worker,
-                    attempt: AdmissionAttempt::Untracked,
+                    lease: None,
                     overlap_amount: overlap_blocks,
                     effective_overlap_blocks,
                     cached_tokens,

@@ -6,10 +6,7 @@ use std::collections::HashSet;
 use anyhow::Result;
 use dynamo_kv_router::{
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId, WorkerWithDpRank},
-    scheduling::{
-        AdmissionAttempt,
-        queue::{SchedulerBookingCleanup, SchedulerBookingDescriptor},
-    },
+    scheduling::queue::{SchedulerBookingCleanup, SchedulerBookingDescriptor},
 };
 
 use super::{PrefillError, PrefillLifecycleState, PrefillQueryOutcome, PrefillRouter};
@@ -128,22 +125,18 @@ impl PrefillRouter {
                 routing_constraints,
             )
             .await?;
-        let (outcome, attempt) = admitted.into_parts();
+        let (outcome, lease) = admitted.into_parts();
         match outcome {
             crate::kv_router::FindBestMatchOutcome::Routed { worker, .. } => {
-                let AdmissionAttempt::Tracked(attempt_id) = attempt else {
-                    anyhow::bail!("prefill reservation admission did not return a tracked attempt");
+                let Some(booking) = lease.and_then(|lease| lease.commit()) else {
+                    anyhow::bail!("prefill reservation admission did not return a booking");
                 };
                 Ok(PrefillReservation {
                     worker,
                     dp_rank: Some(worker.dp_rank),
                     release: ReservationRelease::Kv {
                         cleanup: chooser.booking_cleanup(),
-                        booking: Some(SchedulerBookingDescriptor {
-                            request_id: reservation_id.to_string(),
-                            worker,
-                            attempt_id,
-                        }),
+                        booking: Some(booking),
                     },
                 })
             }

@@ -21,17 +21,15 @@ use dynamo_kv_router::scheduling::queue::{
     SchedulerBookingDescriptor,
 };
 use dynamo_kv_router::scheduling::{
-    AdmittedSchedulingResponse, AdvisorySchedulingResponse, AttemptId, KvSchedulerError,
-    NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, PotentialLoad, QueueLimitKind,
-    QueueRejection, ScheduleRequest, WorkerAvailabilityProvider,
+    AttemptId, KvSchedulerError, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider,
+    PotentialLoad, QueueLimitKind, QueueRejection, WorkerAvailabilityProvider,
 };
 use dynamo_kv_router::sequences::{SequenceError, SequenceRequest};
 use dynamo_kv_router::services::selection::{
     CatalogObserver, CatalogReconciler, HostCache, HostEligibility, HostLoad, HostReplication,
-    HostTelemetry, KvEventIngress, KvIndexSource, SelectionError, SelectionHost,
-    SelectionOperation, SelectionOutcome, SelectionPartition, SelectionService,
-    SelectionServiceBuilder, WorkerCatalogRecord, WorkerCatalogSource, WorkerRequest,
-    WorkerSelectionPolicyRegistry,
+    HostTelemetry, KvEventIngress, KvIndexSource, SelectionHost, SelectionOperation,
+    SelectionOutcome, SelectionPartition, SelectionRun, SelectionService, SelectionServiceBuilder,
+    WorkerCatalogRecord, WorkerCatalogSource, WorkerRequest, WorkerSelectionPolicyRegistry,
 };
 use dynamo_kv_router::{DEFAULT_ROUTING_GROUP, PrefillLoadEstimator, WorkerSelectionPolicyFactory};
 use dynamo_tokens::SequenceHash;
@@ -361,15 +359,6 @@ impl EmbeddedSelection {
         })
     }
 
-    /// Queue changes are not observable through the scheduler's update watch,
-    /// so every schedule result refreshes the gauges.
-    fn observe_schedule_result<T>(&self, result: &Result<T, KvSchedulerError>) {
-        self.observe_queue(match result {
-            Err(KvSchedulerError::QueueRejected(rejection)) => Some(rejection),
-            _ => None,
-        });
-    }
-
     fn observe_queue(&self, rejection: Option<&QueueRejection>) {
         if let Some(rejection) = rejection {
             record_queue_rejection(&self.queue_metrics, &self.queue_metric_indices, rejection);
@@ -401,42 +390,13 @@ impl EmbeddedSelection {
     }
 
     /// Run one selection through the shared core.
-    pub(crate) async fn run_selection(
-        &self,
-        operation: SelectionOperation<'_>,
-    ) -> Result<SelectionOutcome, SelectionError> {
-        let outcome = self.service.core().run_selection(operation).await;
-        self.observe_queue(match &outcome {
+    pub(crate) async fn run_selection(&self, operation: SelectionOperation<'_>) -> SelectionRun {
+        let run = self.service.core().run_selection(operation).await;
+        self.observe_queue(match &run.result {
             Ok(SelectionOutcome::QueueRejected { rejection }) => Some(rejection),
             _ => None,
         });
-        outcome
-    }
-
-    pub(crate) async fn schedule_request_admitted(
-        &self,
-        request: ScheduleRequest,
-    ) -> Result<AdmittedSchedulingResponse, KvSchedulerError> {
-        let result = self
-            .partition
-            .scheduler()
-            .schedule_request_admitted(request)
-            .await;
-        self.observe_schedule_result(&result);
-        result
-    }
-
-    pub(crate) async fn select_without_admission(
-        &self,
-        request: ScheduleRequest,
-    ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
-        let result = self
-            .partition
-            .scheduler()
-            .select_without_admission(request)
-            .await;
-        self.observe_schedule_result(&result);
-        result
+        run
     }
 
     pub(crate) async fn add_request_admitted(
@@ -486,6 +446,11 @@ impl EmbeddedSelection {
             .map(|_| ())
     }
 
+    #[cfg(test)]
+    pub(crate) fn has_request(&self, request_id: &str) -> bool {
+        self.partition.scheduler().has_request(request_id)
+    }
+
     pub(crate) fn pending_count(&self) -> usize {
         self.partition.scheduler().pending_count()
     }
@@ -532,10 +497,6 @@ impl EmbeddedSelection {
             effective_cached_tokens,
             track_prefill_tokens,
         )
-    }
-
-    pub(crate) fn supports_overlap_refresh(&self) -> bool {
-        self.partition.scheduler().supports_overlap_refresh()
     }
 }
 

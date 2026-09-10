@@ -696,7 +696,7 @@ async fn terminal_item_does_not_skip_transport_eof() {
         Arc::clone(&router.request_metrics),
         "terminal-drain".to_string(),
         WorkerWithDpRank::from_worker_id(0),
-        dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
+        None,
         &request(),
     );
     let monitored = monitor_response_stream(source, context, guard);
@@ -765,7 +765,7 @@ async fn shutdown_cancellation_drains_trailing_engine_shutdown_error() {
         Arc::clone(&router.request_metrics),
         "shutdown-drain".to_string(),
         WorkerWithDpRank::from_worker_id(0),
-        dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
+        None,
         &request(),
     );
     let monitored = monitor_response_stream(source, context, guard);
@@ -811,7 +811,7 @@ async fn client_cancellation_still_ends_stream_without_draining() {
         Arc::clone(&router.request_metrics),
         "client-cancelled-drain".to_string(),
         WorkerWithDpRank::from_worker_id(0),
-        dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
+        None,
         &request(),
     );
     let monitored = monitor_response_stream(source, context, guard);
@@ -849,7 +849,7 @@ async fn drain_without_trailing_error_gives_up_at_the_deadline() {
         Arc::clone(&router.request_metrics),
         "shutdown-drain-deadline".to_string(),
         WorkerWithDpRank::from_worker_id(0),
-        dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
+        None,
         &request(),
     );
     let monitored = monitor_response_stream(source, context, guard);
@@ -904,7 +904,7 @@ async fn trailing_error_within_the_drain_window_still_reaches_migration() {
         Arc::clone(&router.request_metrics),
         "drain-window-armed".to_string(),
         WorkerWithDpRank::from_worker_id(0),
-        dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
+        None,
         &request(),
     );
     let monitored = monitor_response_stream(source, context, guard);
@@ -950,7 +950,7 @@ async fn always_ready_terminals_cannot_starve_the_drain_deadline() {
         Arc::clone(&router.request_metrics),
         "starvation-guard".to_string(),
         WorkerWithDpRank::from_worker_id(0),
-        dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
+        None,
         &request(),
     );
     let monitored = monitor_response_stream(source, context, guard);

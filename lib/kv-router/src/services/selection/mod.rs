@@ -28,9 +28,10 @@ pub use crate::services::common::replica_sync::{
     ScopedSequencePublisher,
 };
 pub use core::{
-    HostCache, HostEligibility, HostLoad, HostReplication, HostTelemetry, KvIndexSource, Selected,
-    SelectionAdmission, SelectionCore, SelectionHost, SelectionOperation, SelectionOutcome,
-    SelectionPartition, SelectionScheduler, SelectionServiceConfig, SessionBinding,
+    HostCache, HostEligibility, HostLoad, HostReplication, HostTelemetry, KvIndexSource,
+    LookupTimings, Selected, SelectionAdmission, SelectionCore, SelectionHost, SelectionOperation,
+    SelectionOutcome, SelectionPartition, SelectionRun, SelectionScheduler, SelectionServiceConfig,
+    SessionBinding,
 };
 pub use error::SelectionError;
 pub use ingress::{KvEventIngress, ZmqDirectIngress};

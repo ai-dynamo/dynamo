@@ -7,7 +7,6 @@ use crate::{
     kv_router::{
         KvRouter, indexer::ApproximateRequestLease, metrics::RouterRequestMetrics,
         prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION, request_lease::RequestAttemptLease,
-        scheduler::SchedulerBookingDescriptor,
     },
     lora::LoadEstimator,
     preprocessor::PreprocessedRequest,
@@ -23,7 +22,7 @@ use dynamo_kv_router::{
         BlockExtraInfo, BlockHashOptions, WorkerWithDpRank, compute_block_hash_for_seq,
         compute_next_seq_hash,
     },
-    scheduling::AdmissionAttempt,
+    scheduling::queue::RequestLifecycleLease,
 };
 use dynamo_runtime::{
     error::DynamoError,
@@ -397,34 +396,27 @@ pub(super) struct KvRequestCleanup {
 }
 
 impl KvRequestCleanup {
+    /// Takes the booking over from `lease`: from here the request's cleanup
+    /// owns it.
     pub(super) fn new(
         chooser: Arc<KvRouter>,
         context_id: String,
         worker: WorkerWithDpRank,
-        attempt: AdmissionAttempt,
+        lease: Option<Box<RequestLifecycleLease>>,
     ) -> Self {
-        let attempt_id = match attempt {
-            AdmissionAttempt::Untracked => None,
-            AdmissionAttempt::Tracked(attempt_id) => Some(attempt_id),
-        };
-        let approximate_lru = attempt_id
-            .and_then(|_| chooser.approximate_lru_rank_registration(worker))
-            .and_then(|registration| {
-                chooser.indexer().begin_approximate_lru_request(
-                    worker,
-                    registration.incarnation,
-                    attempt_id?,
-                )
-            });
-        let lifecycle = attempt_id.map(|attempt_id| {
-            chooser.request_lease_manager().register_local(
-                SchedulerBookingDescriptor {
-                    request_id: context_id.clone(),
-                    worker,
-                    attempt_id,
-                },
-                approximate_lru.clone(),
+        let booking = lease.and_then(|lease| lease.commit());
+        let approximate_lru = booking.as_ref().and_then(|booking| {
+            let registration = chooser.approximate_lru_rank_registration(worker)?;
+            chooser.indexer().begin_approximate_lru_request(
+                worker,
+                registration.incarnation,
+                booking.attempt_id,
             )
+        });
+        let lifecycle = booking.map(|booking| {
+            chooser
+                .request_lease_manager()
+                .register_local(booking, approximate_lru.clone())
         });
         Self {
             chooser,
@@ -570,12 +562,12 @@ impl RequestGuard {
         request_metrics: Arc<RouterRequestMetrics>,
         context_id: String,
         worker: WorkerWithDpRank,
-        attempt: AdmissionAttempt,
+        lease: Option<Box<RequestLifecycleLease>>,
         request: &PreprocessedRequest,
     ) -> Self {
         Self::new_kv_with_cleanup(
             request_metrics,
-            KvRequestCleanup::new(chooser, context_id, worker, attempt),
+            KvRequestCleanup::new(chooser, context_id, worker, lease),
             request,
         )
     }

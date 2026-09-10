@@ -74,9 +74,7 @@ impl RoutingHost {
             is_query_only,
             affinity_target,
             None,
-            FindBestMatchAdmission::WithAdmission {
-                track_lifecycle: true,
-            },
+            FindBestMatchAdmission::WithAdmission,
             budget,
         )
         .await?
@@ -179,7 +177,7 @@ impl RoutingHost {
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let planned_worker = preview.signals.worker;
-        let (selection, affinity) = self
+        let (mut selection, affinity) = self
             .select_with_session_affinity(request, phase, false, &budget, |target| {
                 let budget = &budget;
                 async move {
@@ -189,9 +187,7 @@ impl RoutingHost {
                         false,
                         target,
                         Some(planned_worker),
-                        FindBestMatchAdmission::WithAdmission {
-                            track_lifecycle: true,
-                        },
+                        FindBestMatchAdmission::WithAdmission,
                         budget,
                     )
                     .await?
@@ -207,7 +203,7 @@ impl RoutingHost {
                 Arc::clone(self.kv_router()),
                 request.context().id().to_string(),
                 selection.worker,
-                selection.attempt,
+                selection.lease.take(),
             ),
             selection,
             affinity,
@@ -346,7 +342,7 @@ impl RoutingHost {
                 self.request_metrics.clone(),
                 context_id.clone(),
                 selected_worker,
-                selection.attempt,
+                selection.lease.take(),
                 request,
             ),
         };

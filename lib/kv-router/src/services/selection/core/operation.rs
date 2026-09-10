@@ -5,18 +5,21 @@
 //! hosts build a [`SelectionOperation`] and consume a [`SelectionOutcome`].
 
 use std::collections::HashSet;
+use std::time::Duration;
 
 use dynamo_tokens::SequenceHash;
 
 use crate::identity::RoutingPartitionId;
 use crate::kv_hints::KvHint;
 use crate::protocols::{
-    LocalBlockHash, RoutingConstraints, WorkerAffinityTarget, WorkerId, WorkerWithDpRank,
+    LocalBlockHash, RoutingConstraints, SharedCacheHits, WorkerAffinityTarget, WorkerId,
+    WorkerWithDpRank,
 };
 use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::queue::RequestLifecycleLease;
 use crate::scheduling::{AdvisoryWorkerLoad, QueueRejection, SchedulingResponse, SessionContext};
 
+use super::super::error::SelectionError;
 use super::super::input::PromptView;
 
 /// Every input to one selection. Fields are independent: `session_context`
@@ -89,6 +92,27 @@ pub enum SessionBinding {
     },
 }
 
+/// One selection's result together with how long its lookups took. The
+/// timings ride with errors too, so a host can account a shared-cache failure
+/// even when scheduling then fails.
+pub struct SelectionRun {
+    pub result: Result<SelectionOutcome, SelectionError>,
+    /// `None` when selection failed before the lookups started.
+    pub lookup: Option<LookupTimings>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LookupTimings {
+    pub block_hashing: Duration,
+    pub seq_hashing: Duration,
+    /// Wall time of the index and shared-cache lookups together.
+    pub lookups: Duration,
+    pub indexer: Duration,
+    /// `None` when no shared cache was queried.
+    pub shared_cache: Option<Duration>,
+    pub shared_cache_error: bool,
+}
+
 // Every caller matches this immediately; boxing the common variant to shrink
 // the rare one would put an allocation on the hot path.
 #[allow(clippy::large_enum_variant)]
@@ -105,7 +129,10 @@ pub struct Selected {
     pub advisory_load: Option<AdvisoryWorkerLoad>,
     /// The chosen worker's KV capacity as known when it was selected.
     pub total_kv_blocks: Option<u64>,
-    pub endpoint: String,
+    /// `None` only for `Lease` admission when the worker left the catalog
+    /// after it was booked: the host dispatches by worker id and lets the
+    /// transport report the departure, which is what drives migration.
+    pub endpoint: Option<String>,
     pub block_size: u32,
     pub isl_tokens: usize,
     /// The hashes the booking tracks; `Book` only.
@@ -114,6 +141,7 @@ pub struct Selected {
     pub effective_prefill_tokens: usize,
     pub kv_hint: Option<KvHint>,
     pub routing_hashes: Option<Vec<LocalBlockHash>>,
+    pub shared_cache_hits: Option<SharedCacheHits>,
     /// The booking's lifecycle lease; `Lease` admission only. Dropping it frees
     /// the booking, `commit` hands it to the caller's own cleanup.
     pub lease: Option<Box<RequestLifecycleLease>>,

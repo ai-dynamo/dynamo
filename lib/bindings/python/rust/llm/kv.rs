@@ -26,7 +26,6 @@ use dynamo_kv_router::config::try_kv_router_config_from_dynamo_env;
 use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
 use dynamo_kv_router::protocols::compute_block_hash_for_seq;
 use dynamo_kv_router::protocols::*;
-use dynamo_kv_router::scheduling::AdmissionAttempt;
 #[cfg(feature = "kv-indexer")]
 use dynamo_kv_router::services::indexer::{self, IndexerConfig};
 #[cfg(feature = "select-service")]
@@ -2522,7 +2521,7 @@ impl KvRouter {
                 )
                 .await
                 .map_err(to_pyerr)?;
-            let (outcome, attempt) = admitted.into_parts();
+            let (outcome, lease) = admitted.into_parts();
             let (best_worker, overlap_blocks) = match outcome {
                 llm_rs::kv_router::FindBestMatchOutcome::Routed {
                     worker,
@@ -2558,19 +2557,9 @@ impl KvRouter {
                 None
             };
 
-            if let Some(request_id) = request_id {
-                let AdmissionAttempt::Tracked(attempt_id) = attempt else {
-                    return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                        "tracked admission returned no attempt identity",
-                    ));
-                };
+            if let Some(lease) = lease {
                 chooser
-                    .enroll_public_request_attempt(
-                        request_id,
-                        best_worker,
-                        attempt_id,
-                        routing_decision,
-                    )
+                    .enroll_public_request_attempt(lease, routing_decision)
                     .await
                     .map_err(to_pyerr)?;
             } else if let Some(tokens_with_hashes) = routing_decision {
