@@ -970,12 +970,8 @@ impl ExtProcError {
                 status_code: StatusCode::ServiceUnavailable,
                 message: e.to_string(),
             },
-            // Router-reported rejections. Status classes mirror
-            // `scheduler_error_status` in
-            // `lib/kv-router/src/services/selection/error.rs` so a rejection
-            // means the same thing regardless of which host surfaced it. Every
-            // message below is the client-safe variant text; the router's own
-            // detail is logged at the classification site, never returned.
+            // Keep these statuses aligned with `scheduler_error_status` in
+            // `lib/kv-router/src/services/selection/error.rs`.
             PickError::RouterOverloaded => Self {
                 status_code: StatusCode::TooManyRequests,
                 message: e.to_string(),
