@@ -19,6 +19,8 @@ from gpu_memory_service.common.protocol.messages import (
     PersistentAllocationInfo,
     ReleasePersistentAllocationRequest,
     ReleasePersistentAllocationResponse,
+    UnclaimPersistentAllocationRequest,
+    UnclaimPersistentAllocationResponse,
     decode_message,
     encode_message,
 )
@@ -50,6 +52,8 @@ pytestmark = [
             aligned_size=65536,
             reattached=False,
         ),
+        UnclaimPersistentAllocationRequest(engine_id="engine-0", tag="kv"),
+        UnclaimPersistentAllocationResponse(unclaimed=True),
         ReleasePersistentAllocationRequest(engine_id="engine-0", tag="kv"),
         ReleasePersistentAllocationResponse(released=True),
         ExportPersistentAllocationRequest(engine_id="engine-0", tag="kv"),
