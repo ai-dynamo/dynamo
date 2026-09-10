@@ -2147,7 +2147,7 @@ dependencies = [
  "dynamo-mocker",
  "dynamo-parsers",
  "dynamo-parsers-v2",
- "dynamo-protocols",
+ "dynamo-protocols 5.4.3",
  "dynamo-renderer",
  "dynamo-rl",
  "dynamo-runtime",
@@ -2271,7 +2271,7 @@ dependencies = [
  "aho-corasick",
  "anyhow",
  "async-stream",
- "dynamo-protocols",
+ "dynamo-protocols 5.4.1",
  "futures",
  "num-traits",
  "openai-harmony",
@@ -2287,9 +2287,8 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers-v2"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e2277648c57af9f41943c1c6abf573ed42ddbad9d05f2e4053e9d66e9a41182"
+version = "0.5.3"
+source = "git+https://github.com/abatilo/frontend-crates.git?rev=e4865d5c4af87918b3b939796a1e29383441b81e#e4865d5c4af87918b3b939796a1e29383441b81e"
 dependencies = [
  "anyhow",
  "num-traits",
@@ -2320,14 +2319,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-protocols"
+version = "5.4.3"
+source = "git+https://github.com/abatilo/frontend-crates.git?rev=e4865d5c4af87918b3b939796a1e29383441b81e#e4865d5c4af87918b3b939796a1e29383441b81e"
+dependencies = [
+ "async-openai",
+ "derive_builder",
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "dynamo-renderer"
 version = "5.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ae2eaa139651c535aeaad8856c5546709608931ccd4d24d3a529f6c5233c4b6"
+source = "git+https://github.com/abatilo/frontend-crates.git?rev=e4865d5c4af87918b3b939796a1e29383441b81e#e4865d5c4af87918b3b939796a1e29383441b81e"
 dependencies = [
  "anyhow",
  "chrono",
- "dynamo-protocols",
+ "dynamo-protocols 5.4.3",
  "dynamo-tokenizers",
  "either",
  "minijinja",
@@ -2432,8 +2446,7 @@ dependencies = [
 [[package]]
 name = "dynamo-tokenizers"
 version = "1.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed232a9d254149a4e2e14f0a7d77f59bd64161964c0ba55267beea3955650faa"
+source = "git+https://github.com/abatilo/frontend-crates.git?rev=e4865d5c4af87918b3b939796a1e29383441b81e#e4865d5c4af87918b3b939796a1e29383441b81e"
 dependencies = [
  "aho-corasick",
  "anyhow",
