@@ -8,7 +8,11 @@ import os
 import threading
 import time
 
-from gpu_memory_service.failover_lock.interface import FailoverLock, FailoverLockError
+from gpu_memory_service.failover_lock.interface import (
+    FailoverLock,
+    FailoverLockContended,
+    FailoverLockError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +78,7 @@ class FlockFailoverLock(FailoverLock):
                     if timeout is not None:
                         elapsed = time.monotonic() - start
                         if elapsed >= timeout:
-                            raise FailoverLockError(
+                            raise FailoverLockContended(
                                 f"Timed out acquiring flock at {self._lock_path} "
                                 f"for engine {engine_id} after {elapsed:.1f}s"
                             )

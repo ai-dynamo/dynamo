@@ -521,9 +521,9 @@ async def _try_acquire_active_lock(lock: Any, engine_name: str) -> bool:
     """
 
     try:
-        from gpu_memory_service.failover_lock.interface import FailoverLockError
+        from gpu_memory_service.failover_lock.interface import FailoverLockContended
     except ImportError:  # pragma: no cover - default lock import would also fail.
-        FailoverLockError = RuntimeError  # type: ignore[assignment]
+        FailoverLockContended = RuntimeError  # type: ignore[assignment]
 
     try:
         await lock.acquire(engine_id=engine_name, timeout=0.0)
@@ -533,7 +533,7 @@ async def _try_acquire_active_lock(lock: Any, engine_name: str) -> bool:
         # uncontended locks so existing unit fakes keep the simple acquire path.
         await lock.acquire(engine_name)
         return True
-    except FailoverLockError:
+    except FailoverLockContended:
         return False
 
 

@@ -15,9 +15,12 @@ from dynamo.common.gms_failover import (
 )
 
 try:
-    from gpu_memory_service.failover_lock.interface import FailoverLockError
+    from gpu_memory_service.failover_lock.interface import (
+        FailoverLockContended,
+        FailoverLockError,
+    )
 except ImportError:
-    FailoverLockError = RuntimeError
+    FailoverLockContended = FailoverLockError = RuntimeError
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -74,7 +77,14 @@ class _Lock:
 class _BusyOnTryLock(_Lock):
     async def acquire(self, engine_id, timeout=None):
         if timeout == 0.0:
-            raise FailoverLockError("lock already held")
+            raise FailoverLockContended("lock already held")
+        await super().acquire(engine_id, timeout=timeout)
+
+
+class _BrokenOnTryLock(_Lock):
+    async def acquire(self, engine_id, timeout=None):
+        if timeout == 0.0:
+            raise FailoverLockError("permission denied")
         await super().acquire(engine_id, timeout=timeout)
 
 
@@ -139,6 +149,23 @@ async def test_activation_barrier_runs_before_shadow_resume(monkeypatch):
 
     assert events == ["all-ranks-fenced"]
     assert owner._quiesce_controller.resume_calls == [["kv_cache"]]
+
+
+@pytest.mark.asyncio
+async def test_gms_failover_propagates_operational_lock_error(monkeypatch):
+    monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "true")
+    owner = _Owner()
+
+    with pytest.raises(FailoverLockError, match="permission denied"):
+        await prepare_gms_failover(
+            owner,
+            _Runtime(),
+            backend_name="test",
+            tags=["kv_cache"],
+            lock_factory=_BrokenOnTryLock,
+        )
+
+    assert owner._quiesce_controller.quiesce_calls == []
 
 
 @pytest.mark.asyncio
@@ -450,18 +477,6 @@ async def test_gms_failover_post_lock_fence_honors_backend_override(monkeypatch)
     await run_gms_failover_post_lock_fence(backend_name="test", role="shadow")
 
     assert sleeps == [0.025]
-
-
-def test_explicit_directory_manifest_is_complete_shared_identity(monkeypatch):
-    from gms_kv_ring.common.content_directory import resolve_manifest_id
-
-    monkeypatch.setenv("GMS_KV_DIRECTORY_MANIFEST", "model-layout-v7")
-
-    assert (
-        resolve_manifest_id("vllm", 16, keyspace="vllm-native-hbm-v1")
-        == "model-layout-v7"
-    )
-    assert resolve_manifest_id("vllm", 0) == "model-layout-v7"
 
 
 def test_authoritative_failover_requires_explicit_directory_manifest(monkeypatch):

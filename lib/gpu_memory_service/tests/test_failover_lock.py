@@ -24,7 +24,10 @@ if not HAS_GMS:
     )
 
 from gpu_memory_service.failover_lock.flock import FlockFailoverLock
-from gpu_memory_service.failover_lock.interface import FailoverLockError
+from gpu_memory_service.failover_lock.interface import (
+    FailoverLockContended,
+    FailoverLockError,
+)
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -245,6 +248,18 @@ async def test_cross_process_race(lock_path):
 
     # Both finished — both eventually acquired
     assert {r["engine_id"] for r in results} == {"p1", "p2"}
+
+
+@pytest.mark.asyncio
+async def test_bounded_busy_acquire_raises_contended(lock_path):
+    holder = FlockFailoverLock(lock_path)
+    contender = FlockFailoverLock(lock_path)
+    await holder.acquire("holder")
+    try:
+        with pytest.raises(FailoverLockContended, match="Timed out acquiring"):
+            await contender.acquire("contender", timeout=0.0)
+    finally:
+        await holder.release()
 
 
 @pytest.mark.asyncio
