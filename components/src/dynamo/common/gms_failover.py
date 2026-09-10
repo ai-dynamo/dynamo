@@ -520,6 +520,16 @@ async def _try_acquire_active_lock(lock: Any, engine_name: str) -> bool:
         return False
 
 
+async def _release_lock_after_activation_error(lock: Any, *, backend_name: str) -> None:
+    try:
+        await lock.release()
+    except BaseException:
+        logger.exception(
+            "[GMS failover] %s failed to release lock after activation error",
+            backend_name,
+        )
+
+
 async def acquire_gms_failover_lock_before_init(
     *,
     backend_name: str,
@@ -549,7 +559,11 @@ async def acquire_gms_failover_lock_before_init(
         backend_name,
         role,
     )
-    await run_gms_failover_post_lock_fence(backend_name=backend_name, role=role)
+    try:
+        await run_gms_failover_post_lock_fence(backend_name=backend_name, role=role)
+    except BaseException:
+        await _release_lock_after_activation_error(lock, backend_name=backend_name)
+        raise
     return GmsFailoverActivation(
         enabled=True,
         lock=lock,
@@ -587,12 +601,16 @@ async def prepare_gms_failover(
     )
     if await _try_acquire_active_lock(lock, engine_name):
         logger.info("[GMS failover] %s active", backend_name)
-        await run_gms_failover_post_lock_fence(
-            backend_name=backend_name,
-            role="active",
-        )
-        if activation_barrier is not None:
-            await activation_barrier()
+        try:
+            await run_gms_failover_post_lock_fence(
+                backend_name=backend_name,
+                role="active",
+            )
+            if activation_barrier is not None:
+                await activation_barrier()
+        except BaseException:
+            await _release_lock_after_activation_error(lock, backend_name=backend_name)
+            raise
         return GmsFailoverActivation(
             enabled=True,
             lock=lock,
@@ -680,13 +698,7 @@ async def prepare_gms_failover(
                     "[GMS failover] %s failed to mark activation unhealthy",
                     backend_name,
                 )
-        try:
-            await lock.release()
-        except BaseException:
-            logger.exception(
-                "[GMS failover] %s failed to release lock after activation error",
-                backend_name,
-            )
+        await _release_lock_after_activation_error(lock, backend_name=backend_name)
         raise
 
     logger.info(
