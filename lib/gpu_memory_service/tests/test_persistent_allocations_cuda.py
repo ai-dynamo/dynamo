@@ -143,7 +143,7 @@ def test_reattach_returns_same_physical_pages():
     try:
         assert reattached is True
         assert alloc2.allocation_id == alloc1.allocation_id
-        assert alloc2.va_daemon == alloc1.va_daemon  # unchanged VA
+        assert alloc2.va_daemon == alloc1.va_daemon
         got = m.read_block("eng-restart", "kv_pool", offset=0, size=512)
         assert got == pattern, (
             "reattached persistent allocation must contain the bytes "
