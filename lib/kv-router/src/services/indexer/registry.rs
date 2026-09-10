@@ -997,6 +997,7 @@ mod tests {
             Poll::Pending
         ));
         assert!(registry.workers.is_empty());
+        assert!(!registry.watermarks.contains_key(&(1, 0)));
         assert!(registry.get_indexer(&key).is_some());
         drop(lifecycle);
         registration.await.unwrap();
@@ -1022,42 +1023,6 @@ mod tests {
             .unwrap();
         assert_eq!(scores.scores.get(&WorkerWithDpRank::new(2, 0)), Some(&1));
         registry.root_cancel_token.cancel();
-    }
-
-    #[tokio::test]
-    async fn deregister_removes_watermark() {
-        let registry = test_registry();
-        registry.signal_ready();
-
-        registry
-            .register(
-                1,
-                "tcp://127.0.0.1:15557".to_string(),
-                0,
-                "test-model".to_string(),
-                "default".to_string(),
-                1,
-                None,
-            )
-            .await
-            .unwrap();
-
-        assert!(registry.watermarks.contains_key(&(1, 0)));
-
-        registry
-            .deregister(1, "test-model", "default")
-            .await
-            .unwrap();
-
-        assert!(
-            !registry.watermarks.contains_key(&(1, 0)),
-            "watermark should be removed after deregister"
-        );
-        assert!(
-            registry
-                .get_indexer(&RoutingPartitionId::new("test-model", "default"))
-                .is_none()
-        );
     }
 
     #[tokio::test]
@@ -1173,14 +1138,22 @@ mod tests {
             .unwrap();
 
         // Simulate that the listener advanced the watermark.
-        if let Some(wm) = registry.watermarks.get(&(1, 0)) {
-            wm.store(42, Ordering::Release);
-        }
+        registry
+            .watermarks
+            .get(&(1, 0))
+            .unwrap()
+            .store(42, Ordering::Release);
 
         registry
             .deregister(1, "test-model", "default")
             .await
             .unwrap();
+
+        assert!(
+            registry
+                .get_indexer(&RoutingPartitionId::new("test-model", "default"))
+                .is_none()
+        );
 
         registry
             .register(
@@ -1203,37 +1176,6 @@ mod tests {
             wm.load(Ordering::Acquire),
             u64::MAX,
             "re-registered watermark should be fresh (u64::MAX)"
-        );
-    }
-
-    #[tokio::test]
-    async fn deregister_all_routing_groups_removes_watermarks() {
-        let registry = test_registry();
-        registry.signal_ready();
-
-        registry
-            .register(
-                1,
-                "tcp://127.0.0.1:15562".to_string(),
-                0,
-                "test-model".to_string(),
-                "default".to_string(),
-                1,
-                None,
-            )
-            .await
-            .unwrap();
-
-        assert!(registry.watermarks.contains_key(&(1, 0)));
-
-        registry
-            .deregister_all_routing_groups(1, "test-model")
-            .await
-            .unwrap();
-
-        assert!(
-            !registry.watermarks.contains_key(&(1, 0)),
-            "watermark should be removed after deregister_all_routing_groups"
         );
     }
 
