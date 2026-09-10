@@ -36,6 +36,9 @@ from gpu_memory_service.integrations.common.utils import (
     get_gms_ro_connect_timeout_ms,
     torch_device,
 )
+from gpu_memory_service.integrations.vllm.install_kv_leases import (
+    install_gms_engine_core_sleep,
+)
 from gpu_memory_service.integrations.vllm.install_vmm_ipc_kv import (
     persistent_kv_allocation_context,
 )
@@ -76,10 +79,6 @@ patch_empty_cache()
 patch_memory_snapshot()
 install_and_verify_kv_failover_hooks()
 
-# Register the KV-cache GDS-direct connector under the short name so
-# users can wire it via vLLM's standard --kv-transfer-config flag.
-# Opt-in: the connector is only constructed if the user names it.
-
 logger.info("[GMS] Worker module loaded - model loader registered, all patches applied")
 
 
@@ -100,53 +99,7 @@ if os.environ.get("MX_ENABLED", "0") == "1":
         ) from e
 
 
-def _install_gms_engine_core_sleep() -> None:
-    """Install a GMS-only sleep utility that skips prefix-cache clearing.
-
-    Bulwark startup quiesce has no user traffic to discard, and vLLM can have
-    initialized internal KV blocks that make reset_prefix_cache() fail before
-    the engine ever serves. This utility keeps the scheduler pause semantics
-    but delegates directly to model_executor.sleep(level).
-    """
-    try:
-        from concurrent.futures import Future
-
-        from vllm.v1.engine.core import EngineCore
-    except Exception:
-        logger.debug("[GMS] EngineCore sleep utility patch skipped", exc_info=True)
-        return
-
-    if hasattr(EngineCore, "gms_sleep_no_clear"):
-        return
-
-    def gms_sleep_no_clear(self, level: int = 1, mode: str = "abort"):
-        pause_future = self.pause_scheduler(mode=mode, clear_cache=False)
-        if level < 1:
-            return pause_future
-
-        model_executor = self.model_executor
-        if pause_future is None:
-            model_executor.sleep(level)
-            return None
-
-        future = Future()
-
-        def pause_complete(f):
-            try:
-                f.result()
-                future.set_result(model_executor.sleep(level))
-            except Exception as exc:  # noqa: BLE001
-                future.set_exception(exc)
-
-        logger.info("[GMS] Waiting for in-flight requests before no-clear sleep")
-        pause_future.add_done_callback(pause_complete)
-        return future
-
-    EngineCore.gms_sleep_no_clear = gms_sleep_no_clear
-    logger.info("[GMS] Installed EngineCore.gms_sleep_no_clear utility")
-
-
-_install_gms_engine_core_sleep()
+install_gms_engine_core_sleep()
 
 # Import Worker after patches are applied
 from vllm.v1.worker.gpu_worker import Worker  # noqa: E402
@@ -298,6 +251,8 @@ class GMSWorker(Worker):
 
     def initialize_from_config(self, kv_cache_config) -> None:
         """Register persistent KV backing, then use vLLM's native hook."""
+        if not env_enabled_by_default("GMS_VLLM_VMM_IPC_KV", default=True):
+            return super().initialize_from_config(kv_cache_config)
         # EngineCore can skip determine_available_memory for models with no
         # KV cache. Publish before connector setup, allocation, or warm-up.
         publish_pending_gms_write()
@@ -486,7 +441,9 @@ class GMSWorker(Worker):
         if tag == "weights":
             logger.debug("[GMS] Skipping CuMemAllocator for weights")
             return nullcontext()
-        if tag == "kv_cache":
+        if tag == "kv_cache" and env_enabled_by_default(
+            "GMS_VLLM_VMM_IPC_KV", default=True
+        ):
             return persistent_kv_allocation_context(
                 self._gms_kv_manager,
                 self._gms_kv_engine_id,
