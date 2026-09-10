@@ -36,15 +36,6 @@ from gpu_memory_service.integrations.common.utils import (
     get_gms_ro_connect_timeout_ms,
     torch_device,
 )
-from gpu_memory_service.integrations.vllm.install_kv_leases import (
-    install as install_kv_leases,
-)
-from gpu_memory_service.integrations.vllm.install_kv_leases import (
-    install_engine_core_hook,
-)
-from gpu_memory_service.integrations.vllm.install_vmm_ipc_kv import (
-    install as install_vmm_ipc_kv,
-)
 from gpu_memory_service.integrations.vllm.install_vmm_ipc_kv import (
     persistent_kv_allocation_context,
 )
@@ -61,6 +52,9 @@ from gpu_memory_service.integrations.vllm.model_loader import (
     register_gms_loader,
 )
 from gpu_memory_service.integrations.vllm.patches import patch_memory_snapshot
+from gpu_memory_service.integrations.vllm.startup import (
+    install_and_verify_kv_failover_hooks,
+)
 from gpu_memory_service.integrations.vllm.utils import configure_gms_worker_logging
 
 logger = logging.getLogger(__name__)
@@ -74,9 +68,7 @@ register_gms_loader()
 # Apply core utility patches (always needed for GMS)
 patch_empty_cache()
 patch_memory_snapshot()
-install_kv_leases()
-install_engine_core_hook()
-install_vmm_ipc_kv()
+install_and_verify_kv_failover_hooks()
 
 # Register the KV-cache GDS-direct connector under the short name so
 # users can wire it via vLLM's standard --kv-transfer-config flag.
