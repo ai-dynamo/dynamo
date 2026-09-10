@@ -85,6 +85,9 @@ class _PromotionWarmupContext:
     def trace_headers(self) -> dict[str, str]:
         return {}
 
+    def notify_first_token(self) -> None:
+        """Satisfy the request-context protocol used by token generation."""
+
     def async_killed_or_stopped(self) -> asyncio.Future[Any]:
         return asyncio.get_running_loop().create_future()
 

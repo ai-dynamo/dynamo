@@ -377,6 +377,7 @@ async def test_gms_failover_promotion_warmup_drains_non_error_stream(monkeypatch
 
     async def generate(request, context):
         seen.append((request, context.id(), context.trace_headers()))
+        context.notify_first_token()
         yield {"token_ids": [1], "finish_reason": None}
         seen.append("after-first-chunk")
         yield {"token_ids": [], "finish_reason": "stop"}
