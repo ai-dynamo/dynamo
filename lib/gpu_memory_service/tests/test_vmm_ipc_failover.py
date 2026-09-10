@@ -118,7 +118,7 @@ def test_vmm_ipc_engine_restart_preserves_kv_bytes(tmp_path):
     try:
         engine_id = "failover-test-engine"
         N_LAYERS = 8
-        N_ELEMS = 64 * 1024  # 256 KiB per layer at int32
+        N_ELEMS = 64 * 1024
         # The first allocation will be rounded up to the VMM
         # granularity (typically 2 MiB) but Torch's mempool block
         # size is much larger. To keep this test fast we use a
