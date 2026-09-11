@@ -422,7 +422,6 @@ impl LiveRuntime {
     pub(super) async fn run_workload(
         self,
         driver: WorkloadDriver,
-        _total_turns: usize,
     ) -> Result<(TraceSimulationReport, LiveRuntimeStats)> {
         let LiveRuntime {
             engines,

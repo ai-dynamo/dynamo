@@ -57,14 +57,6 @@ impl OnlineReplayConfig {
     }
 }
 
-fn total_turns(trace: &Trace) -> usize {
-    trace
-        .sessions
-        .iter()
-        .map(|session| session.turns.len())
-        .sum()
-}
-
 fn run_live_runtime(
     config: OnlineReplayConfig,
     pending: VecDeque<DirectRequest>,
@@ -82,7 +74,6 @@ fn run_live_runtime(
 fn run_live_workload_runtime(
     config: OnlineReplayConfig,
     driver: WorkloadDriver,
-    total_turns: usize,
     mode: LiveReplayMode,
     cancel: CancellationToken,
 ) -> Result<(TraceSimulationReport, LiveRuntimeStats)> {
@@ -93,7 +84,7 @@ fn run_live_workload_runtime(
 
     runtime.block_on(async move {
         LiveRuntime::new(config, VecDeque::new(), mode, cancel)?
-            .run_workload(driver, total_turns)
+            .run_workload(driver)
             .await
     })
 }
@@ -141,7 +132,6 @@ pub(crate) fn simulate_trace_workload(
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
     let engine_block_size = config.args.block_size;
-    let total_turns = total_turns(&trace);
     let mut driver = trace.into_trace_driver_with_block_size(engine_block_size)?;
     if !emit_session_metadata {
         driver = driver.without_session_metadata();
@@ -149,7 +139,6 @@ pub(crate) fn simulate_trace_workload(
     let (report, _) = run_live_workload_runtime(
         config,
         driver,
-        total_turns,
         LiveReplayMode::Trace,
         CancellationToken::new(),
     )?;
@@ -163,11 +152,9 @@ pub(crate) fn simulate_concurrency_workload(
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
     let engine_block_size = config.args.block_size;
-    let total_turns = total_turns(&trace);
     let (report, _) = run_live_workload_runtime(
         config,
         trace.into_concurrency_driver_with_block_size(engine_block_size, max_in_flight)?,
-        total_turns,
         LiveReplayMode::Concurrency { max_in_flight },
         CancellationToken::new(),
     )?;
@@ -182,7 +169,6 @@ pub(crate) fn simulate_agentic_trace_workload(
     let config = config.normalized()?;
     let engine_block_size = config.args.block_size;
     let include_replay_hashes = config.router_mode == ReplayRouterMode::KvRouter;
-    let total_turns = trace.node_count();
     let agentic_lanes = effective_agentic_lanes(agentic_lanes, trace.play_count());
     let (report, _) = run_live_workload_runtime(
         config,
@@ -191,7 +177,6 @@ pub(crate) fn simulate_agentic_trace_workload(
             include_replay_hashes,
             agentic_lanes,
         )?,
-        total_turns,
         LiveReplayMode::Trace,
         CancellationToken::new(),
     )?;
@@ -259,11 +244,9 @@ pub(super) fn simulate_trace_workload_with_stats(
 ) -> Result<(TraceSimulationReport, LiveRuntimeStats)> {
     let args = args.normalized()?;
     let engine_block_size = args.block_size;
-    let total_turns = total_turns(&trace);
     run_live_workload_runtime(
         default_test_config(args, num_workers, router_mode),
         trace.into_trace_driver_with_block_size(engine_block_size)?,
-        total_turns,
         LiveReplayMode::Trace,
         CancellationToken::new(),
     )
@@ -279,11 +262,9 @@ pub(super) fn simulate_concurrency_workload_with_stats(
 ) -> Result<(TraceSimulationReport, LiveRuntimeStats)> {
     let args = args.normalized()?;
     let engine_block_size = args.block_size;
-    let total_turns = total_turns(&trace);
     run_live_workload_runtime(
         default_test_config(args, num_workers, router_mode),
         trace.into_concurrency_driver_with_block_size(engine_block_size, max_in_flight)?,
-        total_turns,
         LiveReplayMode::Concurrency { max_in_flight },
         CancellationToken::new(),
     )
