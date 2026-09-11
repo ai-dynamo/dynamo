@@ -990,6 +990,42 @@ pub struct LoraInfo {
 }
 
 impl ModelDeploymentCard {
+    pub(crate) fn frontend_runtime_config(&self) -> Result<ModelRuntimeConfig> {
+        let mut config = self.runtime_config.clone();
+        let parsers = [
+            config.tool_call_parser.as_deref(),
+            config.reasoning_parser.as_deref(),
+        ];
+        anyhow::ensure!(
+            !parsers.contains(&Some("deepseek_v41")) || parsers == [Some("deepseek_v41"); 2],
+            "deepseek_v41 requires both tool_call_parser and reasoning_parser to be deepseek_v41"
+        );
+        if parsers == [None; 2]
+            && (self.model_type.supports_chat() || self.model_type.supports_completions())
+            && let Some(info) = &self.model_info
+        {
+            match info.model_type_hint() {
+                Ok(Some(model_type)) if model_type == "deepseek_v41" => {
+                    config.tool_call_parser = Some("deepseek_v41".into());
+                    config.reasoning_parser = Some("deepseek_v41".into());
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    // Parser selection is an optional discovery enhancement. In
+                    // particular, text-input workers may use model configs that
+                    // their backend accepts but the full Rust HFConfig projection
+                    // does not. Keep those workers discoverable and let explicit
+                    // runtime configuration remain the fallback.
+                    tracing::warn!(
+                        %error,
+                        "could not inspect model_type for automatic frontend parser selection"
+                    );
+                }
+            }
+        }
+        Ok(config)
+    }
+
     /// Number of typed metadata slots (`model_info`, `tokenizer`,
     /// `prompt_formatter`, `chat_template_file`, `gen_config`). Used as
     /// a capacity hint for [`Self::iter_metadata_files`].
@@ -1919,6 +1955,19 @@ pub trait ModelInfo: Send + Sync {
 }
 
 impl ModelInfoType {
+    fn model_type_hint(&self) -> Result<Option<String>> {
+        match self {
+            Self::HfConfigJson(checked_file) => {
+                let Some(path) = checked_file.path() else {
+                    anyhow::bail!("model info is not a local path: {checked_file:?}");
+                };
+                let contents = std::fs::read_to_string(path)?;
+                let config: HFModelTypeProjection = json_five::from_str(&contents)?;
+                Ok(config.model_type)
+            }
+        }
+    }
+
     pub fn get_model_info(&self) -> Result<Arc<dyn ModelInfo>> {
         match self {
             Self::HfConfigJson(checked_file) => {
@@ -1929,6 +1978,11 @@ impl ModelInfoType {
             }
         }
     }
+}
+
+#[derive(Deserialize)]
+struct HFModelTypeProjection {
+    model_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2387,8 +2441,89 @@ fn check_valid_local_repo_path(path: impl AsRef<Path>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{HFConfig, ModelDeploymentCard};
+    use crate::model_type::{ModelInput, ModelType};
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn frontend_v41_parser_pairs_validate_without_model_files() {
+        for (tool, reasoning, valid) in [
+            (None, None, true),
+            (Some("qwen3_coder"), Some("qwen3"), true),
+            (Some("deepseek_v41"), Some("deepseek_v41"), true),
+            (Some("deepseek_v41"), None, false),
+            (None, Some("deepseek_v41"), false),
+            (Some("deepseek_v41"), Some("qwen3"), false),
+        ] {
+            let mut card = ModelDeploymentCard::with_name_only("test");
+            card.runtime_config.tool_call_parser = tool.map(str::to_string);
+            card.runtime_config.reasoning_parser = reasoning.map(str::to_string);
+            let result = card.frontend_runtime_config();
+            assert_eq!(result.is_ok(), valid);
+            if let Ok(config) = result {
+                assert_eq!(config.tool_call_parser.as_deref(), tool);
+                assert_eq!(config.reasoning_parser.as_deref(), reasoning);
+            }
+        }
+    }
+
+    #[test]
+    fn frontend_v41_options_survive_metadata_removal_without_changing_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"architectures":[],"model_type":"deepseek_v41","eos_token_id":2}"#,
+        )
+        .unwrap();
+        let mut original = ModelDeploymentCard::with_name_only("v41");
+        original.model_type = crate::model_type::ModelType::Chat;
+        original.model_info = Some(super::ModelInfoType::from_disk(dir.path()).unwrap());
+        let mut prepared = original.clone();
+        prepared.runtime_config = prepared.frontend_runtime_config().unwrap();
+        assert!(original.runtime_config.tool_call_parser.is_none());
+        assert!(original.runtime_config.reasoning_parser.is_none());
+        assert_eq!(prepared.mdcsum(), original.mdcsum());
+        let set =
+            crate::discovery::WorkerSet::new("test".into(), prepared.mdcsum().into(), prepared);
+        dir.close().unwrap();
+        let mut embedding = original;
+        embedding.model_type = crate::model_type::ModelType::Embedding;
+        assert!(
+            embedding
+                .frontend_runtime_config()
+                .unwrap()
+                .tool_call_parser
+                .is_none()
+        );
+        let options = set.parsing_options();
+        assert_eq!(options.tool_call_parser.as_deref(), Some("deepseek_v41"));
+        assert_eq!(options.reasoning_parser.as_deref(), Some("deepseek_v41"));
+    }
+
+    #[test]
+    fn frontend_runtime_config_only_requires_model_type_for_text_workers() {
+        for (model_type, expected_parser) in [
+            ("deepseek_v41", Some("deepseek_v41")),
+            ("custom_text_model", None),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                dir.path().join("config.json"),
+                format!(r#"{{"model_type":"{model_type}"}}"#),
+            )
+            .unwrap();
+            let mut card = ModelDeploymentCard::with_name_only(model_type);
+            card.model_type = ModelType::Chat;
+            card.model_input = ModelInput::Text;
+            card.model_info = Some(super::ModelInfoType::from_disk(dir.path()).unwrap());
+
+            let config = card
+                .frontend_runtime_config()
+                .expect("text-worker parser detection should not require full HFConfig fields");
+            assert_eq!(config.tool_call_parser.as_deref(), expected_parser);
+            assert_eq!(config.reasoning_parser.as_deref(), expected_parser);
+        }
+    }
 
     #[test]
     fn tokenizer_cache_token_observer_records_per_model_totals() {

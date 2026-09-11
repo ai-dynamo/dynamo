@@ -64,6 +64,14 @@ def _has_locality(event_cls):
     return "locality" in event_cls.__struct_fields__
 
 
+def _has_ownership(event_cls):
+    return "ownership" in event_cls.__struct_fields__
+
+
+def _has_session_id(event_cls):
+    return "session_id" in event_cls.__struct_fields__
+
+
 class TestVllmKvEventsApi:
     """Test vLLM KV events API compatibility."""
 
@@ -83,6 +91,8 @@ class TestVllmKvEventsApi:
         10. kv_cache_spec_kind (semantic cache type; optional for older vLLM)
         11. kv_cache_spec_sliding_window (semantic cache window; optional for older vLLM)
         12. locality (per-tier storage locality; optional for older vLLM)
+        13. ownership (tier owner; optional for older vLLM)
+        14. session_id (request context; optional for older vLLM)
 
         If vLLM adds/removes/reorders fields, this test will fail.
         """
@@ -104,6 +114,10 @@ class TestVllmKvEventsApi:
             expected_fields.append("kv_cache_spec_sliding_window")
         if _has_locality(BlockStored):
             expected_fields.append("locality")
+        if _has_ownership(BlockStored):
+            expected_fields.append("ownership")
+        if _has_session_id(BlockStored):
+            expected_fields.append("session_id")
         expected_fields = tuple(expected_fields)
 
         actual_fields = BlockStored.__struct_fields__
@@ -112,9 +126,8 @@ class TestVllmKvEventsApi:
             f"Expected: {expected_fields}\n"
             f"Actual:   {actual_fields}\n"
             f"Required follow-up:\n"
-            f"  - Update lib/kv-router/src/zmq_wire.rs to match the new BlockStored wire format.\n"
+            f"  - Confirm lib/kv-router/src/zmq_wire still accepts the new fields.\n"
             f"  - Update this test's expected_fields and msgpack shape checks.\n"
-            f"  - If needed, add or update a regression test in lib/llm/src/kv_router/publisher.rs."
         )
 
     def test_block_removed_fields(self):
@@ -131,6 +144,8 @@ class TestVllmKvEventsApi:
             expected_fields.append("kv_cache_spec_sliding_window")
         if _has_locality(BlockRemoved):
             expected_fields.append("locality")
+        if _has_ownership(BlockRemoved):
+            expected_fields.append("ownership")
         expected_fields = tuple(expected_fields)
 
         actual_fields = BlockRemoved.__struct_fields__
@@ -139,7 +154,7 @@ class TestVllmKvEventsApi:
             f"Expected: {expected_fields}\n"
             f"Actual:   {actual_fields}\n"
             f"Required follow-up:\n"
-            f"  - Update lib/kv-router/src/zmq_wire.rs RawKvEvent::BlockRemoved seq deserializer.\n"
+            f"  - Confirm lib/kv-router/src/zmq_wire still accepts the new fields.\n"
             f"  - Update this test's expected_fields."
         )
 
@@ -211,6 +226,10 @@ class TestVllmKvEventsApi:
             event_kwargs["kv_cache_spec_sliding_window"] = 128
         if _has_locality(BlockStored):
             event_kwargs["locality"] = "LOCAL"
+        if _has_ownership(BlockStored):
+            event_kwargs["ownership"] = "framework"
+        if _has_session_id(BlockStored):
+            event_kwargs["session_id"] = "session-123"
         event = BlockStored(**event_kwargs)
 
         encoded = msgspec.msgpack.encode(event)
@@ -234,6 +253,10 @@ class TestVllmKvEventsApi:
             assert decoded["kv_cache_spec_sliding_window"] == 128
         if _has_locality(BlockStored):
             assert decoded["locality"] == "LOCAL"
+        if _has_ownership(BlockStored):
+            assert decoded["ownership"] == "framework"
+        if _has_session_id(BlockStored):
+            assert decoded["session_id"] == "session-123"
 
     def test_block_stored_tuple_extra_keys_serialization_format(self):
         """Verify multimodal tuple extra_keys keep the vLLM 0.19 wire shape."""
@@ -288,6 +311,8 @@ class TestVllmKvEventsApi:
             event_kwargs["kv_cache_spec_sliding_window"] = 128
         if _has_locality(BlockRemoved):
             event_kwargs["locality"] = "REMOTE"
+        if _has_ownership(BlockRemoved):
+            event_kwargs["ownership"] = "framework"
         event = BlockRemoved(**event_kwargs)
 
         decoded = msgspec.msgpack.decode(msgspec.msgpack.encode(event))
@@ -305,3 +330,5 @@ class TestVllmKvEventsApi:
             ), "kv_cache_spec_sliding_window has wrong value"
         if _has_locality(BlockRemoved):
             assert decoded["locality"] == "REMOTE"
+        if _has_ownership(BlockRemoved):
+            assert decoded["ownership"] == "framework"

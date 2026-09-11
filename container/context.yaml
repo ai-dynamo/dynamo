@@ -77,7 +77,15 @@ vllm:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.28.0-ubuntu2404
+    # DeepSeek V4.1 Flash requires vLLM's model-preview runtime. Keep the
+    # Dynamo wheel-builder on the standard CUDA 13.0 development image above.
+    # Pin the OCI index, rather than one architecture's child manifest, so
+    # Buildx selects the matching vendor image for each target platform.
+    runtime_image_tag: deepseekv41-flash-0909@sha256:00d577a6a63281e15336029d5bcee4e9a2cf182214a4f20ba6111b1c8e79893d
+    # This day-0 model image serves the language-model-only recipe. vLLM-Omni
+    # is not on that request path, and its 0.28.0rc1 dependency constraints
+    # conflict with the preview image's tokenizers 0.23.2.
+    enable_vllm_omni: "false"
     # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
     # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
     # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM
@@ -102,6 +110,7 @@ vllm:
     runtime_image_tag: v0.28.0
     # No baseline_sbom: cpu images are unshipped and skip the compliance stages.
   vllm_omni_ref: "v0.28.0rc1"
+  enable_vllm_omni: "true"
   # vLLM-Omni 0.28.0rc1 requires transformers>=5.10.1,<5.15, while vLLM's own
   # unbounded transformers>=5.5.3 lets the release images resolve to 5.15.1.
   # Omni is layered against the installed Transformers version, so without
@@ -123,7 +132,11 @@ sglang:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: lmsysorg/sglang
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.5.19-cu130-runtime
+    # DeepSeek V4.1 Flash has not shipped in a numbered SGLang release yet;
+    # use the CUDA 13 multi-arch preview published for this model.
+    # Pin the OCI index, rather than one architecture's child manifest, so
+    # Buildx selects the matching vendor image for each target platform.
+    runtime_image_tag: dev-dsv41@sha256:4a5d132a06a77c8331e15845f2e925adc788b00105097ad55409afa3f4fa4860
     # Baseline is the TRUE base of the third-party lmsysorg/sglang image,
     # nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04 (Docker Hub; CUDA_VERSION=13.0.3,
     # ubuntu24.04), NOT a self-baseline of lmsysorg/sglang.
@@ -135,6 +148,10 @@ sglang:
     # ffmpeg is copied in (CUDA, for the video-generation encode path) and the
     # Dynamo Rust wheel is built without media-ffmpeg.
     baseline_sbom: cuda@0230b7f2
+    # dev-dsv41 is an upstream development image. Trim its measured
+    # build/debug/desktop payload before compliance runs so the day-0 runtime
+    # remains subject to the standard license policy.
+    prune_dev_dsv41_packages: "true"
   xpu:
     base_image: intel/deep-learning-essentials
     base_image_tag: 2025.3.2-0-devel-ubuntu24.04
