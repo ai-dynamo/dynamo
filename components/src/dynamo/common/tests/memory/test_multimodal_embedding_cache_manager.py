@@ -7,7 +7,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from dynamo.common.memory.multimodal_embedding_cache_manager import (
+from dynamo.common.memory.multimodal_embedding_cache_manager import (  # noqa: E402
     CachedEmbedding,
     CacheMutation,
     MultimodalEmbeddingCacheManager,

@@ -34,7 +34,14 @@ def can_import_deps() -> bool:
     return _can_import_torch()
 
 
-def pytest_ignore_collect(collection_path, config) -> bool:
-    """Skip collecting memory test files if torch isn't installed."""
+def pytest_ignore_collect(collection_path, config) -> bool | None:
+    """Skip collecting memory test files if torch isn't installed.
+
+    ``pytest_ignore_collect`` is a firstresult hook: returning ``False`` vetoes
+    all other implementations, including pytest's own ``--ignore-glob`` and
+    ``norecursedirs`` handling. Return ``None`` when this hook has no opinion.
+    """
     filename = collection_path.name
-    return filename.startswith("test_") and not can_import_deps()
+    if filename.startswith("test_") and not can_import_deps():
+        return True
+    return None

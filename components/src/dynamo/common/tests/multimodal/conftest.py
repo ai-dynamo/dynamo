@@ -57,10 +57,17 @@ def can_import_deps() -> bool:
     return _can_import_torch() and _can_import_pil()
 
 
-def pytest_ignore_collect(collection_path, config) -> bool:
-    """Skip collecting multimodal test files when optional deps are missing."""
+def pytest_ignore_collect(collection_path, config) -> bool | None:
+    """Skip collecting multimodal test files when optional deps are missing.
+
+    ``pytest_ignore_collect`` is a firstresult hook: returning ``False`` vetoes
+    all other implementations, including pytest's own ``--ignore-glob`` and
+    ``norecursedirs`` handling. Return ``None`` when this hook has no opinion.
+    """
     filename = collection_path.name
-    return filename.startswith("test_") and not can_import_deps()
+    if filename.startswith("test_") and not can_import_deps():
+        return True
+    return None
 
 
 @pytest_asyncio.fixture(autouse=True)
