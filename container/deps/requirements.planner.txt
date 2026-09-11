@@ -19,6 +19,6 @@ plotly>=6.0.1
 pmdarima==2.1.1
 prometheus-api-client==0.6.0
 prophet==1.2.1
-protobuf>=5.29.5,<7.0.0
+protobuf==6.33.6
 scikit-learn==1.7.2
 scipy>=1.14.0,<2.0

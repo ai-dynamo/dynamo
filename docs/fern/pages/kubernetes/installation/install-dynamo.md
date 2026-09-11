@@ -139,6 +139,7 @@ helm install dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
   # Option A (install=true): Dynamo installs and manages Grove/KAI as bundled subcharts (dev/testing):
   # --set "global.grove.install=true" \
   # --set "global.kai-scheduler.install=true" \
+  # --set-string "kai-scheduler.scheduler.args.default-staleness-grace-period=-1" \
   # Option B (enabled=true): Grove/KAI are already installed externally (production):
   # --set "global.grove.enabled=true" \
   # --set "global.kai-scheduler.enabled=true" \
@@ -203,6 +204,7 @@ For the `enabled=true` path, install Grove and KAI Scheduler separately first. S
 > | 1.1.x           | >= v0.13.4    | >= v0.1.0-alpha.8 |
 > | 1.3.x           | >= v0.13.4    | >= v0.1.0-alpha.8, < v0.1.0-alpha.9 |
 > | 1.4.x           | >= v0.13.4    | >= v0.1.0-alpha.10 |
+> | 1.5.x           | >= v0.17.0    | >= v0.1.0-alpha.13 |
 >
 > Upgrade Grove in lockstep with Dynamo while the Grove APIs remain unstable. Dynamo 1.3.x expects
 > Grove's earlier `ClusterTopology` API and is incompatible with the newer

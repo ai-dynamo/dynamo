@@ -285,7 +285,11 @@ snapshot_vllm:
   - 'deploy/operator/internal/dynamo/backend_vllm.go'
 
 snapshot_sglang:
+  - 'components/src/dynamo/sglang/args.py'
   - 'components/src/dynamo/sglang/snapshot.py'
+  # The SGLang runtime tag controls the engine version exercised by this suite,
+  # so engine bumps must trigger it. Deliberately omit broad pyproject.toml.
+  - 'container/context.yaml'
   - 'deploy/operator/internal/dynamo/backend_sglang.go'
 
 snapshot_trtllm:

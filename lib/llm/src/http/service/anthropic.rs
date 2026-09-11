@@ -544,6 +544,7 @@ async fn anthropic_messages(
             request.chat_template_args.as_ref(),
         );
     let parsing_options = parsing_options
+        .with_parallel_tool_calls(request.inner.parallel_tool_calls)
         .with_move_reasoning_to_content_when_empty(move_reasoning_to_content_when_empty);
 
     // Computed before `request` moves into `generate`. Only a stream that can
