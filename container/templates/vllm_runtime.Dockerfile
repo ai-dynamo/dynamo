@@ -262,6 +262,7 @@ RUN set -eux; \
 
 # Layer the released vLLM-Omni package matching the pinned upstream ref while
 # constraining packages already solved in the upstream vLLM image.
+{% if context.vllm[device_key].get("install_vllm_omni", "true") == "true" %}
 RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target=/tmp/vllm_omni_protected_packages.txt \
     --mount=type=bind,source=./container/deps/vllm/install_vllm_omni.sh,target=/tmp/install_vllm_omni.sh \
     --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
@@ -269,6 +270,7 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     export UV_CACHE_DIR=/root/.cache/uv; \
     export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
     bash /tmp/install_vllm_omni.sh
+{% endif %}
 
 {% if device == "xpu" %}
 # Remove conflicting standard triton package for XPU and reinstall triton-xpu
@@ -515,10 +517,8 @@ assert eps, 'modelexpress vllm.general_plugins entry point not found'; \
 [ep.load()() for ep in eps]"
 {% endif %}
 
-# vLLM-Omni is installed with the current Transformers version in its protected
-# constraints file, so an incompatible Omni requirement fails during dependency
-# resolution. Check the completed image as well so a later package layer cannot
-# silently replace the vLLM-Omni-compatible Transformers release. A global
+# Check the completed image so a later package layer cannot silently replace
+# the selected Transformers release. A global
 # `uv pip check` is not appropriate here: the upstream runtime and Dynamo's
 # deliberate --no-deps layers contain unrelated package-metadata conflicts.
 RUN {{ python_executable }} - "${TRANSFORMERS_VERSION}" <<'PY'
