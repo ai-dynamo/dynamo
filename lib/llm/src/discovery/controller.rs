@@ -120,6 +120,14 @@ pub(crate) trait ControllerHost: Send + Sync + 'static {
         adapters: &[DesiredInstance],
     ) -> anyhow::Result<()>;
 
+    fn replace_prepared_group(
+        &self,
+        spec: &GroupSpec,
+        prepared: Self::Prepared,
+        members: &[DesiredInstance],
+        adapters: &[DesiredInstance],
+    ) -> anyhow::Result<()>;
+
     fn remove_group(&self, key: &GroupKey);
 
     fn discard_prepared(&self, prepared: Self::Prepared);
@@ -820,10 +828,14 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 let members = self.members(&member_keys);
                 let adapters = self.adapters_for_members(&member_keys);
                 group.admission_tx.send_replace(admitted_ids(&members));
-                match self
-                    .host
-                    .commit_group(&result.spec, prepared, &members, &adapters)
-                {
+                let commit_result = if committed_members.is_some() {
+                    self.host
+                        .replace_prepared_group(&result.spec, prepared, &members, &adapters)
+                } else {
+                    self.host
+                        .commit_group(&result.spec, prepared, &members, &adapters)
+                };
+                match commit_result {
                     Ok(()) => {
                         group.retry_attempt = 0;
                         group.status = GroupStatus::Ready {
@@ -1294,6 +1306,17 @@ mod tests {
             );
             self.store_adapters(key, adapters);
             Ok(())
+        }
+
+        fn replace_prepared_group(
+            &self,
+            spec: &GroupSpec,
+            prepared: Self::Prepared,
+            members: &[DesiredInstance],
+            adapters: &[DesiredInstance],
+        ) -> anyhow::Result<()> {
+            let Prepared(_build) = prepared;
+            self.replace_group(&spec.key, members, adapters)
         }
 
         fn remove_group(&self, key: &GroupKey) {
