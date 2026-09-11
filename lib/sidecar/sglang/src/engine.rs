@@ -245,6 +245,19 @@ impl LLMEngine for SglangSidecarEngine {
         request: PreprocessedRequest,
         ctx: GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
+        if request
+            .extra_args
+            .as_ref()
+            .and_then(|extra| extra.get("sampling_options"))
+            .and_then(|sampling| sampling.get("allowed_token_ids"))
+            .is_some_and(|ids| !ids.is_null())
+        {
+            let error =
+                client::invalid_arg("allowed_token_ids is not supported by the SGLang sidecar");
+            // A stream error preserves the client error classification across
+            // Dynamo's request plane, before either native transport can run.
+            return Ok(Box::pin(futures::stream::once(async move { Err(error) })));
+        }
         let state = self
             .state
             .get()
@@ -956,14 +969,103 @@ fn build_engine_config(
 
 #[cfg(test)]
 mod tests {
+    use dynamo_backend_common::{
+        BackendError, ErrorType, GenerateContext, LLMEngine, OutputOptions, PreprocessedRequest,
+        SamplingOptions, StopConditions, testing::mock_context,
+    };
     use dynamo_sidecar_common::GrpcEndpoint;
+    use futures::StreamExt;
     use serde_json::json;
+    use tokio::sync::OnceCell;
+    use tokio_util::sync::CancellationToken;
 
     use super::{
-        DisaggregationMode, DiscoveredKvEventSource, Discovery, build_engine_config,
-        discover_kv_event_sources, hicache_native_offloading_capacity,
+        DisaggregationMode, DiscoveredKvEventSource, Discovery, SglangSidecarEngine,
+        build_engine_config, discover_kv_event_sources, hicache_native_offloading_capacity,
         resolve_bootstrap_host_with_local, sglang_eagle_enabled,
     };
+
+    #[tokio::test]
+    async fn unsupported_allowlists_are_typed_stream_errors_before_native_dispatch() {
+        for mode in [
+            DisaggregationMode::Aggregated,
+            DisaggregationMode::Prefill,
+            DisaggregationMode::Decode,
+        ] {
+            // Leave the engine unstarted: validation must not depend on native
+            // connectivity, and unrestricted controls retain the lifecycle error.
+            let engine = SglangSidecarEngine {
+                endpoint: GrpcEndpoint::parse("127.0.0.1:30001", "test").unwrap(),
+                transport: Default::default(),
+                disaggregation_mode: mode,
+                bootstrap_host: None,
+                bootstrap_port: None,
+                state: OnceCell::new(),
+                cancel: CancellationToken::new(),
+            };
+            for native_http in [false, true] {
+                for (extra, unrestricted) in [
+                    (None, true),
+                    (
+                        Some(json!({"sampling_options": {"allowed_token_ids": null}})),
+                        true,
+                    ),
+                    (
+                        Some(json!({"sampling_options": {"unrelated": [198]}})),
+                        true,
+                    ),
+                    (
+                        Some(json!({"sampling_options": {"allowed_token_ids": [198]}})),
+                        false,
+                    ),
+                    (
+                        Some(json!({"sampling_options": {"allowed_token_ids": []}})),
+                        false,
+                    ),
+                    (
+                        Some(json!({"sampling_options": {"allowed_token_ids": 198}})),
+                        false,
+                    ),
+                ] {
+                    let mut request = PreprocessedRequest::builder()
+                        .model("model".to_string())
+                        .token_ids(vec![1, 2, 3])
+                        .sampling_options(SamplingOptions::default())
+                        .output_options(OutputOptions::default())
+                        .stop_conditions(StopConditions::default())
+                        .build()
+                        .unwrap();
+                    request.extra_args = extra;
+                    if native_http {
+                        request.extra_args.get_or_insert_with(|| json!({}))["sglang_tito"] =
+                            json!({});
+                    }
+                    let result = engine
+                        .generate(request, GenerateContext::new(mock_context(), None))
+                        .await;
+                    if unrestricted {
+                        assert_eq!(
+                            result
+                                .err()
+                                .expect("unstarted engine must fail")
+                                .error_type(),
+                            ErrorType::Backend(BackendError::EngineShutdown)
+                        );
+                    } else {
+                        let mut stream =
+                            result.expect("client errors must survive the response stream");
+                        let error = stream.next().await.unwrap().unwrap_err();
+                        assert_eq!(
+                            error.error_type(),
+                            ErrorType::Backend(BackendError::InvalidArgument)
+                        );
+                        assert!(error.to_string().contains("allowed_token_ids"));
+                        assert!(stream.next().await.is_none());
+                    }
+                }
+            }
+        }
+    }
 
     fn discovery(server_info: serde_json::Value) -> Discovery {
         Discovery {
