@@ -113,11 +113,26 @@ func TestOutputCopierScript(t *testing.T) {
 				t.Fatalf("executing the sidecar script template: %v", err)
 			}
 
+			t.Log("Redirect the script's scratch files out of the shared temporary directory")
+			// The sidecar owns /tmp inside its own container, but here the script runs on
+			// the host, where those fixed paths race with concurrent `go test` processes
+			// and clobber unrelated files. Give each subtest its own directory instead.
+			// Only these exact paths are rewritten; the template also renders OutputPath,
+			// which is itself a t.TempDir() under the shared directory and must survive.
+			scratchDir := t.TempDir()
+			rendered := script.String()
+			for _, scratchPath := range []string{"/tmp/progress.yaml", "/tmp/cm.yaml"} {
+				if !strings.Contains(rendered, scratchPath) {
+					t.Fatalf("the rendered sidecar script no longer writes %s; point this redirect at the path it uses now, so the script keeps out of the shared temporary directory", scratchPath)
+				}
+				rendered = strings.ReplaceAll(rendered, scratchPath, filepath.Join(scratchDir, filepath.Base(scratchPath)))
+			}
+
 			t.Log("Run the rendered script as a real process and observe how it terminates")
 			ctx, cancel := context.WithTimeout(context.Background(), scriptTimeout)
 			defer cancel()
 
-			cmd := exec.CommandContext(ctx, bashPath, "-c", script.String())
+			cmd := exec.CommandContext(ctx, bashPath, "-c", rendered)
 			cmd.Env = []string{"PATH=" + binDir, "HOSTNAME=profile-test-pod"}
 			// Killing the shell does not close the pipes its `sleep` child inherited, so
 			// bound the wait instead of blocking on that child.
