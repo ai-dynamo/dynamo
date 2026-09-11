@@ -15,10 +15,12 @@ torch = pytest.importorskip("torch", reason="torch is required")
 
 import gpu_memory_service.integrations.sglang as gms_sglang  # noqa: E402
 import gpu_memory_service.integrations.sglang.memory_saver as gms_memory_saver  # noqa: E402
+from gpu_memory_service.client.torch import allocator as torch_allocator  # noqa: E402
 from gpu_memory_service.common.locks import (  # noqa: E402
     GrantedLockType,
     RequestedLockType,
 )
+from gpu_memory_service.integrations.sglang import install_vmm_ipc_kv  # noqa: E402
 from gpu_memory_service.integrations.sglang.memory_saver import (  # noqa: E402
     GMSMemorySaverImpl,
 )
@@ -155,6 +157,9 @@ def build_impl(monkeypatch, tmp_path):
             }[tag],
         )
         monkeypatch.setattr(gms_memory_saver, "gms_use_mem_pool", fake_use_mem_pool)
+        monkeypatch.setattr(
+            gms_memory_saver, "gms_use_persistent_pool", fake_use_mem_pool
+        )
         return (
             GMSMemorySaverImpl(device_index=0, mode=None),
             weights,
@@ -189,6 +194,43 @@ def test_region_uses_gms_pool_only_for_rw_managed_tags(
         pass
 
     assert pool_calls == expected_pool_calls
+
+
+def test_native_pool_wrapper_routes_allocations_to_persistent_pool(
+    build_impl, monkeypatch
+):
+    impl, _, _, pool_calls = build_impl()
+    registrations = []
+
+    class NativePool:
+        def __init__(self, device="cuda:0"):
+            with impl.region("kv_cache", enable_cpu_backup=False):
+                pass
+
+    monkeypatch.setattr(
+        torch_allocator,
+        "get_or_create_persistent_allocator",
+        lambda socket, device, engine_id, tag, shared: registrations.append(
+            (socket, device, engine_id, tag, shared)
+        ),
+    )
+    monkeypatch.setattr(install_vmm_ipc_kv, "_resolve_socket", lambda device: "socket")
+    monkeypatch.setattr(install_vmm_ipc_kv, "_engine_id", lambda device: "engine")
+    monkeypatch.setattr(
+        install_vmm_ipc_kv, "allocator_tag", lambda device: f"kv_pool:cuda{device}"
+    )
+    monkeypatch.setattr(install_vmm_ipc_kv, "allocation_shared", lambda: True)
+
+    install_vmm_ipc_kv._wrap_init(NativePool, "NativePool")
+    NativePool()
+
+    assert registrations == [("socket", 0, "engine", "kv_pool:cuda0", True)]
+    with impl.region("kv_cache", enable_cpu_backup=False):
+        pass
+    assert pool_calls == [
+        ("kv_pool:cuda0", torch.device("cuda", 0)),
+        ("kv_cache", torch.device("cuda", 0)),
+    ]
 
 
 def test_pause_resume_routes_only_managed_tags(build_impl):
