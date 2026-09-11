@@ -27,6 +27,7 @@ pub trait LoraWorkerFilter: Send + Sync {
 ///   universe is not re-added: the caller's constraint stands.
 /// - An empty narrowing falls back to the caller's allow-set rather than
 ///   producing an unroutable request.
+#[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
 pub fn narrow_allowed_worker_ids_by_lora(
     filter: &dyn LoraWorkerFilter,
     lora_name: Option<&str>,

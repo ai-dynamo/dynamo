@@ -21,6 +21,7 @@ mod types;
 pub use filter::*;
 pub use local::LocalScheduler;
 pub use lora_filter::LoraWorkerFilter;
+#[cfg(feature = "standalone-selection")]
 pub(crate) use lora_filter::narrow_allowed_worker_ids_by_lora;
 pub use overlap::{
     CacheHitEstimates, OverlapAnalysis, OverlapScoresResponse, OverlapSignals,
