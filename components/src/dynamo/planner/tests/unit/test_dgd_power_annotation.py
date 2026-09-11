@@ -122,20 +122,20 @@ def test_watts_per_replica_multiplies_gpus():
 
 def test_resolves_disagg_prefill_and_decode():
     dgd = _dgd(
-        _worker("VllmPrefillWorker", comp_type="prefill", watts="350", gpus="2"),
-        _worker("VllmDecodeWorker", comp_type="decode", watts="300", gpus="4"),
+        _worker("prefill", comp_type="prefill", watts="350", gpus="2"),
+        _worker("decode", comp_type="decode", watts="300", gpus="4"),
     )
     prefill, decode = resolve_component_power_configs(
         dgd, require_prefill=True, require_decode=True
     )
     assert prefill == ComponentPowerConfig(
-        component_name="VllmPrefillWorker",
+        component_name="prefill",
         role="prefill",
         gpu_power_limit_watts=350,
         gpus_per_replica=2,
     )
     assert decode == ComponentPowerConfig(
-        component_name="VllmDecodeWorker",
+        component_name="decode",
         role="decode",
         gpu_power_limit_watts=300,
         gpus_per_replica=4,
@@ -169,20 +169,20 @@ def test_asymmetric_caps_are_independent():
 
 
 def test_agg_generic_worker_resolves_decode_only():
-    dgd = _dgd(_worker("VllmWorker", comp_type="worker", watts="300", gpus="4"))
+    dgd = _dgd(_worker("worker", comp_type="worker", watts="300", gpus="4"))
     prefill, decode = resolve_component_power_configs(
         dgd, require_prefill=False, require_decode=True
     )
     assert prefill is None
     assert decode is not None
-    assert decode.component_name == "VllmWorker"
+    assert decode.component_name == "worker"
     # role reflects the DGD component's actual generic type.
     assert decode.role == "worker"
     assert decode.watts_per_replica == 1200
 
 
 def test_agg_does_not_manufacture_prefill_config():
-    dgd = _dgd(_worker("VllmWorker", comp_type="worker", watts="300", gpus="4"))
+    dgd = _dgd(_worker("worker", comp_type="worker", watts="300", gpus="4"))
     prefill, decode = resolve_component_power_configs(
         dgd, require_prefill=False, require_decode=True
     )
