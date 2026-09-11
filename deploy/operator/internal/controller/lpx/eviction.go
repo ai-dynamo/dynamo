@@ -9,11 +9,11 @@ import (
 	"context"
 	"fmt"
 	"slices"
-	"strconv"
-	"strings"
 
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/thirdparty/lpxscheduler/v1alpha1"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
+	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -42,7 +42,6 @@ type lpuEvictionReconciler struct {
 }
 
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;delete;deletecollection
-// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get
 func (r *lpuEvictionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var pod corev1.Pod
 	if err := r.Get(ctx, req.NamespacedName, &pod); err != nil {
@@ -75,6 +74,19 @@ func setupLPUEviction(mgr ctrl.Manager) error {
 }
 
 func (r *lpuEvictionReconciler) podsForTrigger(ctx context.Context, trigger *corev1.Pod) ([]corev1.Pod, error) {
+	owner := metav1.GetControllerOf(trigger)
+	if owner == nil || owner.APIVersion != grovev1alpha1.SchemeGroupVersion.String() ||
+		owner.Kind != groveconstants.KindPodClique || owner.Name == "" || owner.UID == "" {
+		return nil, nil
+	}
+	clique := &grovev1alpha1.PodClique{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: trigger.Namespace, Name: owner.Name}, clique); err != nil {
+		return nil, err
+	}
+	if clique.UID != owner.UID || !dynamolpx.OwnsPodClique(ctx, r.Client, clique) {
+		return nil, fmt.Errorf("cannot verify ownership of LPU eviction trigger pod %s/%s", trigger.Namespace, trigger.Name)
+	}
+
 	mode := lpxv1alpha1.WorkloadMode(trigger.Annotations[dynamolpx.WorkloadModeAnnotation])
 	if mode == "" {
 		return nil, nil
@@ -86,29 +98,18 @@ func (r *lpuEvictionReconciler) podsForTrigger(ctx context.Context, trigger *cor
 	switch mode {
 	case lpxv1alpha1.WorkloadModeV2LPUOnly, lpxv1alpha1.WorkloadModeV3HxLPUOnly:
 	case lpxv1alpha1.WorkloadModeV2StrictHybrid, lpxv1alpha1.WorkloadModeV3HxStrictHybrid:
-		// Resolve the trigger's runtime partition from Dynamo's generated ConfigMap.
-		partitionByPodIndex, err := r.runtimePartitionByPodIndex(ctx, trigger)
+		triggerRow, err := lpxv1alpha1.ParsePodLogicalRow(trigger.Annotations)
 		if err != nil {
-			return nil, err
-		}
-		triggerPartition, ok := partitionByPodIndex[trigger.Labels[grovecommon.LabelPodCliquePodIndex]]
-		if !ok {
-			return nil, fmt.Errorf("LPU-GPU eviction trigger pod %s/%s has no runtime partition for Grove pod index %q", trigger.Namespace, trigger.Name, trigger.Labels[grovecommon.LabelPodCliquePodIndex])
+			return nil, fmt.Errorf("parse LPU-GPU eviction trigger pod %s/%s: %w", trigger.Namespace, trigger.Name, err)
 		}
 
-		// Keep only Agent Pods in the trigger's Dynamo-authored runtime partition.
 		selected := pods[:0]
-		triggerConfigHash := trigger.Annotations[commonconsts.AnnotationExtraResourcesHash]
 		for _, pod := range pods {
-			// Ignore Pods from a concurrent rollout with a different runtime table.
-			if pod.Annotations[commonconsts.AnnotationExtraResourcesHash] != triggerConfigHash {
-				continue
+			row, err := lpxv1alpha1.ParsePodLogicalRow(pod.Annotations)
+			if err != nil {
+				return nil, fmt.Errorf("parse LPU-GPU eviction candidate pod %s/%s: %w", pod.Namespace, pod.Name, err)
 			}
-			partition, ok := partitionByPodIndex[pod.Labels[grovecommon.LabelPodCliquePodIndex]]
-			if !ok {
-				return nil, fmt.Errorf("LPU-GPU eviction candidate pod %s/%s has no runtime partition for Grove pod index %q", pod.Namespace, pod.Name, pod.Labels[grovecommon.LabelPodCliquePodIndex])
-			}
-			if partition == triggerPartition {
+			if row.ModelPartitionID == triggerRow.ModelPartitionID {
 				selected = append(selected, pod)
 			}
 		}
@@ -116,60 +117,7 @@ func (r *lpuEvictionReconciler) podsForTrigger(ctx context.Context, trigger *cor
 	default:
 		return nil, nil
 	}
-	if len(pods) == 0 {
-		return nil, fmt.Errorf("matched LPU eviction mode returned no pods for %s/%s", trigger.Namespace, trigger.Name)
-	}
 	return pods, nil
-}
-
-func (r *lpuEvictionReconciler) runtimePartitionByPodIndex(ctx context.Context, trigger *corev1.Pod) (map[string]int, error) {
-	// Require the immutable runtime-table identity stamped on the trigger Pod.
-	triggerConfigHash := trigger.Annotations[commonconsts.AnnotationExtraResourcesHash]
-	if triggerConfigHash == "" {
-		return nil, fmt.Errorf("LPU-GPU eviction trigger pod %s/%s has no runtime ConfigMap hash", trigger.Namespace, trigger.Name)
-	}
-
-	// Read the generated runtime partition table independently of authored volume overrides.
-	pcsName := trigger.Labels[grovecommon.LabelPartOfKey]
-	if pcsName == "" {
-		return nil, fmt.Errorf("LPU-GPU eviction trigger pod %s/%s has no PodCliqueSet identity", trigger.Namespace, trigger.Name)
-	}
-	configName := dynamolpx.LPUConfigMapName(pcsName, triggerConfigHash)
-	var config corev1.ConfigMap
-	if err := r.Get(ctx, client.ObjectKey{Namespace: trigger.Namespace, Name: configName}, &config); err != nil {
-		return nil, fmt.Errorf("get LPU runtime ConfigMap %s/%s: %w", trigger.Namespace, configName, err)
-	}
-
-	// Fail closed when a rollout has already replaced the trigger's runtime table.
-	configHash := dynamolpx.LPUConfigMapHash(&config)
-	if configHash != triggerConfigHash {
-		return nil, fmt.Errorf("LPU runtime ConfigMap %s/%s does not match trigger pod %s/%s", config.Namespace, config.Name, trigger.Namespace, trigger.Name)
-	}
-
-	// Require one node count and offset for every runtime partition row.
-	counts := strings.Fields(config.Data["nodes_per_partition"])
-	offsets := strings.Fields(config.Data["partition_node_offsets"])
-	if len(counts) == 0 || len(counts) != len(offsets) {
-		return nil, fmt.Errorf("LPU runtime ConfigMap %s/%s has inconsistent partition node counts and offsets", config.Namespace, config.Name)
-	}
-
-	// Expand each non-overlapping row into the Grove pod indexes it owns.
-	partitionByPodIndex := make(map[string]int)
-	for partition := range counts {
-		count, countErr := strconv.Atoi(counts[partition])
-		offset, offsetErr := strconv.Atoi(offsets[partition])
-		if countErr != nil || count < 1 || offsetErr != nil || offset < 0 {
-			return nil, fmt.Errorf("LPU runtime ConfigMap %s/%s has invalid partition row %d", config.Namespace, config.Name, partition)
-		}
-		for rank := 0; rank < count; rank++ {
-			podIndex := strconv.Itoa(offset + rank)
-			if _, duplicate := partitionByPodIndex[podIndex]; duplicate {
-				return nil, fmt.Errorf("LPU runtime ConfigMap %s/%s maps Grove pod index %s more than once", config.Namespace, config.Name, podIndex)
-			}
-			partitionByPodIndex[podIndex] = partition
-		}
-	}
-	return partitionByPodIndex, nil
 }
 
 func (r *lpuEvictionReconciler) allModelPods(ctx context.Context, trigger *corev1.Pod) ([]corev1.Pod, error) {
@@ -198,8 +146,10 @@ func (r *lpuEvictionReconciler) allModelPods(ctx context.Context, trigger *corev
 	return slices.DeleteFunc(pods.Items, func(pod corev1.Pod) bool {
 		// Native updates can replace the clique or individual Pods within it.
 		candidateOwner := metav1.GetControllerOf(&pod)
-		return !r.isLPUAgentPod(&pod) ||
-			owner == nil || owner.UID == "" || candidateOwner == nil || owner.UID != candidateOwner.UID ||
+		return pod.DeletionTimestamp != nil || !r.isLPUAgentPod(&pod) ||
+			owner == nil || candidateOwner == nil ||
+			owner.APIVersion != candidateOwner.APIVersion || owner.Kind != candidateOwner.Kind ||
+			owner.Name != candidateOwner.Name || owner.UID != candidateOwner.UID ||
 			pod.Labels[grovecommon.LabelPodTemplateHash] != trigger.Labels[grovecommon.LabelPodTemplateHash] ||
 			model != "" && pod.Annotations[lpxv1alpha1.PodModelAnnotation] != model
 	}), nil
@@ -209,11 +159,8 @@ func (r *lpuEvictionReconciler) deletePods(ctx context.Context, trigger *corev1.
 	deleted := 0
 	for i := range pods {
 		pod := &pods[i]
-		if pod.DeletionTimestamp != nil {
-			continue
-		}
-		uid := pod.UID
-		if err := r.Delete(ctx, pod, client.GracePeriodSeconds(0), client.Preconditions{UID: &uid}); err != nil {
+		uid, resourceVersion := pod.UID, pod.ResourceVersion
+		if err := r.Delete(ctx, pod, client.GracePeriodSeconds(0), client.Preconditions{UID: &uid, ResourceVersion: &resourceVersion}); err != nil {
 			if errors.IsNotFound(err) {
 				continue
 			}

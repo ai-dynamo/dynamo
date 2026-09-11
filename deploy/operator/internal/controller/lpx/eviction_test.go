@@ -8,18 +8,18 @@ package lpx
 import (
 	"context"
 	"sort"
-	"strings"
 	"testing"
 
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/thirdparty/lpxscheduler/v1alpha1"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -35,6 +35,7 @@ import (
 const (
 	lpuEvictionTestNamespace = "test-ns"
 	lpuEvictionTestDGD       = "test-dgd"
+	lpuEvictionTestLGD       = "test-lgd"
 	lpuEvictionTestPCS       = "materialization-12345678"
 	lpuEvictionTestComponent = "lpx-worker"
 	lpuEvictionTestPCSG      = "lpx-worker"
@@ -44,30 +45,41 @@ const (
 func newLPUEvictionReconciler(objs ...client.Object) (*lpuEvictionReconciler, client.Client) {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
+	_ = nvidiacomv1alpha1.AddToScheme(scheme)
+	_ = grovev1alpha1.AddToScheme(scheme)
+
+	deployment := &nvidiacomv1alpha1.LPXGraphDeployment{ObjectMeta: metav1.ObjectMeta{
+		Name: lpuEvictionTestLGD, Namespace: lpuEvictionTestNamespace, UID: "test-lgd-uid",
+	}}
+	pcs := &grovev1alpha1.PodCliqueSet{ObjectMeta: metav1.ObjectMeta{
+		Name: lpuEvictionTestPCS, Namespace: lpuEvictionTestNamespace, UID: "test-pcs-uid",
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(deployment, nvidiacomv1alpha1.LPXGraphDeploymentGVK)},
+	}}
+	group := &grovev1alpha1.PodCliqueScalingGroup{ObjectMeta: metav1.ObjectMeta{
+		Name: lpuEvictionTestPCSG, Namespace: lpuEvictionTestNamespace, UID: "test-pcsg-uid",
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(pcs, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueSet"))},
+	}}
+	clique := &grovev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{
+		Name: "agents", Namespace: lpuEvictionTestNamespace, UID: "agents-uid",
+		Annotations: map[string]string{
+			dynamolpx.DeploymentNameAnnotation: lpuEvictionTestLGD,
+			dynamolpx.DeploymentUIDAnnotation:  "test-lgd-uid",
+			dynamolpx.WorkloadDigestAnnotation: "test-digest",
+			lpxv1alpha1.PodRoleAnnotation:      lpxv1alpha1.PodRoleAgent,
+		},
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(group, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueScalingGroup"))},
+	}}
 
 	cb := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1.Pod{}).
-		WithObjects(newLPUEvictionConfigMap())
+		WithObjects(deployment, pcs, group, clique)
 	for _, o := range objs {
 		cb = cb.WithObjects(o)
 	}
 	c := cb.Build()
 
 	return &lpuEvictionReconciler{Client: c, Recorder: events.NewFakeRecorder(16)}, c
-}
-
-func newLPUEvictionConfigMap() *corev1.ConfigMap {
-	config := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Namespace: lpuEvictionTestNamespace},
-		Immutable:  ptr.To(true),
-		Data: map[string]string{
-			"nodes_per_partition":    "2\n1",
-			"partition_node_offsets": "0\n2",
-		},
-	}
-	config.Name = dynamolpx.LPUConfigMapName(lpuEvictionTestPCS, dynamolpx.LPUConfigMapHash(config))
-	return config
 }
 
 func newLPUEvictionPod(name string, replicaIdx string, podIndex string, deleting bool, conditionReason string) *corev1.Pod {
@@ -86,9 +98,10 @@ func newLPUEvictionPod(name string, replicaIdx string, podIndex string, deleting
 				grovecommon.LabelPodCliqueScalingGroupReplicaIndex: replicaIdx,
 			},
 			Annotations: map[string]string{
-				commonconsts.AnnotationExtraResourcesHash: dynamolpx.LPUConfigMapHash(newLPUEvictionConfigMap()),
-				lpxv1alpha1.PodRoleAnnotation:             lpxv1alpha1.PodRoleAgent,
-				dynamolpx.WorkloadModeAnnotation:          string(lpxv1alpha1.WorkloadModeV2LPUOnly),
+				lpxv1alpha1.PodRoleAnnotation:            lpxv1alpha1.PodRoleAgent,
+				lpxv1alpha1.PodPartitionIDAnnotation:     "0",
+				lpxv1alpha1.PodRankInPartitionAnnotation: podIndex,
+				dynamolpx.WorkloadModeAnnotation:         string(lpxv1alpha1.WorkloadModeV2LPUOnly),
 			},
 		},
 		Spec:   corev1.PodSpec{SchedulerName: dynamolpx.SchedulerName},
@@ -96,6 +109,9 @@ func newLPUEvictionPod(name string, replicaIdx string, podIndex string, deleting
 	}
 	if podIndex != "" {
 		pod.Labels[grovecommon.LabelPodCliquePodIndex] = podIndex
+	}
+	if podIndex == "2" {
+		pod.Annotations[lpxv1alpha1.PodPartitionIDAnnotation] = "1"
 	}
 	pod.Annotations[lpxv1alpha1.PodModelAnnotation] = lpuEvictionTestModel
 	if conditionReason != "" {
@@ -156,35 +172,10 @@ func lpuEvictionPodNames(pods []corev1.Pod) []string {
 }
 
 func TestLPUEviction_PodsForTrigger(t *testing.T) {
-	t.Run("lpu-gpu rejects a runtime table newer than the trigger", func(t *testing.T) {
+	t.Run("lpu-gpu pod without partition returns error", func(t *testing.T) {
 		trigger := newLPUEvictionPod("agent-0", "0", "0", false, "")
 		trigger.Annotations[dynamolpx.WorkloadModeAnnotation] = string(lpxv1alpha1.WorkloadModeV2StrictHybrid)
-		trigger.Annotations[commonconsts.AnnotationExtraResourcesHash] = "missing-config-version"
-		sibling := newLPUEvictionPod("agent-1", "0", "1", false, "")
-		r, _ := newLPUEvictionReconciler(trigger, sibling)
-
-		pods, err := r.podsForTrigger(context.Background(), trigger)
-
-		require.ErrorContains(t, err, "not found")
-		assert.Nil(t, pods)
-	})
-
-	t.Run("lpu-gpu excludes Pods from a concurrent rollout", func(t *testing.T) {
-		trigger := newLPUEvictionPod("agent-0", "0", "0", false, "")
-		trigger.Annotations[dynamolpx.WorkloadModeAnnotation] = string(lpxv1alpha1.WorkloadModeV2StrictHybrid)
-		samePartition := newLPUEvictionPod("agent-1", "0", "1", false, "")
-		samePartition.Annotations[commonconsts.AnnotationExtraResourcesHash] = "other"
-		r, _ := newLPUEvictionReconciler(trigger, samePartition)
-
-		pods, err := r.podsForTrigger(context.Background(), trigger)
-
-		require.NoError(t, err)
-		assert.Equal(t, []string{"agent-0"}, lpuEvictionPodNames(pods))
-	})
-
-	t.Run("lpu-gpu pod without Grove index returns error", func(t *testing.T) {
-		trigger := newLPUEvictionPod("agent-0", "0", "", false, "")
-		trigger.Annotations[dynamolpx.WorkloadModeAnnotation] = string(lpxv1alpha1.WorkloadModeV2StrictHybrid)
+		delete(trigger.Annotations, lpxv1alpha1.PodPartitionIDAnnotation)
 		sibling := newLPUEvictionPod("agent-1", "0", "1", false, "")
 		r, _ := newLPUEvictionReconciler(trigger, sibling)
 
@@ -193,63 +184,15 @@ func TestLPUEviction_PodsForTrigger(t *testing.T) {
 		require.Error(t, err)
 		assert.Nil(t, pods)
 	})
-
-	t.Run("lpu-gpu pod without model filters only by partition", func(t *testing.T) {
-		trigger := newLPUEvictionPod("agent-0", "0", "0", false, "")
-		trigger.Annotations[dynamolpx.WorkloadModeAnnotation] = string(lpxv1alpha1.WorkloadModeV2StrictHybrid)
-		delete(trigger.Annotations, lpxv1alpha1.PodModelAnnotation)
-		sibling := newLPUEvictionPod("agent-1", "0", "0", false, "")
-		r, _ := newLPUEvictionReconciler(trigger, sibling)
-
-		pods, err := r.podsForTrigger(context.Background(), trigger)
-
-		require.NoError(t, err)
-		require.NotNil(t, pods)
-		assert.Equal(t, []string{"agent-0", "agent-1"}, lpuEvictionPodNames(pods))
-	})
-}
-
-func TestLPUEviction_RuntimePartitionTableUsesBoundedGeneratedName(t *testing.T) {
-	t.Log("Create the generated runtime table for a bounded materialization name unrelated to the source DGD")
-	pcsName := strings.Repeat("a", validation.DNS1123SubdomainMaxLength)
-	config := newLPUEvictionConfigMap()
-	config.Name = dynamolpx.LPUConfigMapName(pcsName, dynamolpx.LPUConfigMapHash(config))
-
-	t.Log("Override the Agent config volume without replacing its generated partition table")
-	trigger := newLPUEvictionPod("agent-0", "0", "0", false, "")
-	trigger.Labels[grovecommon.LabelPartOfKey] = pcsName
-	trigger.Annotations[dynamolpx.WorkloadModeAnnotation] = string(lpxv1alpha1.WorkloadModeV2StrictHybrid)
-	trigger.Annotations[commonconsts.AnnotationExtraResourcesHash] = dynamolpx.LPUConfigMapHash(config)
-	trigger.Spec.Volumes = []corev1.Volume{{
-		Name: "config", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
-	}}
-	r, _ := newLPUEvictionReconciler(trigger, config)
-
-	t.Log("Read the bounded generated ConfigMap despite the non-ConfigMap volume override")
-	partitions, err := r.runtimePartitionByPodIndex(t.Context(), trigger)
-	require.NoError(t, err)
-	require.Equal(t, map[string]int{"0": 0, "1": 0, "2": 1}, partitions)
-
-	t.Log("Reject a missing materialization identity instead of falling back to the source DGD name")
-	delete(trigger.Labels, grovecommon.LabelPartOfKey)
-	_, err = r.runtimePartitionByPodIndex(t.Context(), trigger)
-	require.ErrorContains(t, err, "has no PodCliqueSet identity")
 }
 
 func TestLPUEvictionPreservesNativeReplacement(t *testing.T) {
-	t.Log("Keep the original snapshot while a new configuration and native clique coexist")
+	t.Log("Keep the original snapshot while a new native clique coexists")
 	trigger := newLPUEvictionPod("agent-0", "0", "0", false, "")
 	trigger.Annotations[dynamolpx.WorkloadModeAnnotation] = string(lpxv1alpha1.WorkloadModeV2StrictHybrid)
 	replacement := newLPUEvictionPod("agent-1", "0", "1", false, "")
 	replacement.OwnerReferences[0].UID = "replacement-clique"
-	newConfig := newLPUEvictionConfigMap()
-	newConfig.Data["nodes_per_partition"] = "1\n2"
-	newConfig.Data["partition_node_offsets"] = "0\n1"
-	newConfig.Name = dynamolpx.LPUConfigMapName(lpuEvictionTestPCS, dynamolpx.LPUConfigMapHash(newConfig))
-	r, _ := newLPUEvictionReconciler(trigger, replacement, newConfig)
-	partitions, err := r.runtimePartitionByPodIndex(t.Context(), trigger)
-	require.NoError(t, err)
-	require.Equal(t, map[string]int{"0": 0, "1": 0, "2": 1}, partitions)
+	r, _ := newLPUEvictionReconciler(trigger, replacement)
 	pods, err := r.podsForTrigger(t.Context(), trigger)
 	require.NoError(t, err)
 	require.Equal(t, []string{"agent-0"}, lpuEvictionPodNames(pods))
@@ -261,7 +204,7 @@ func TestLPUEvictionPreservesNewPodTemplateRevision(t *testing.T) {
 		lpxv1alpha1.WorkloadModeV2StrictHybrid, lpxv1alpha1.WorkloadModeV3HxStrictHybrid,
 	} {
 		t.Run(string(mode), func(t *testing.T) {
-			t.Log("OnDelete can retain old Pods and replace others under the same clique and ConfigMap")
+			t.Log("OnDelete can retain old Pods and replace others under the same clique")
 			trigger := newLPUEvictionPod("agent-old-0", "0", "0", true, podDisruptionReasonTaintManagerDeletion)
 			trigger.Annotations[dynamolpx.WorkloadModeAnnotation] = string(mode)
 			sibling := newLPUEvictionPod("agent-old-1", "0", "1", false, "")
@@ -273,7 +216,6 @@ func TestLPUEvictionPreservesNewPodTemplateRevision(t *testing.T) {
 			sibling.Spec.Containers = trigger.Spec.Containers
 			replacement.Spec.Containers = []corev1.Container{{Name: "agent", Image: "agent:new"}}
 			require.Equal(t, trigger.OwnerReferences, replacement.OwnerReferences)
-			require.Equal(t, trigger.Annotations[commonconsts.AnnotationExtraResourcesHash], replacement.Annotations[commonconsts.AnnotationExtraResourcesHash])
 			r, c := newLPUEvictionReconciler(trigger, sibling, replacement)
 
 			t.Log("Evict the old revision's sibling without deleting the replacement")
@@ -337,7 +279,50 @@ func TestLPUEviction_LPUOnlyDeletesSamePCSGReplica(t *testing.T) {
 	}
 }
 
+func TestLPUEviction_RejectsStaleLGDOwner(t *testing.T) {
+	t.Log("Observe an ownership snapshot with a stale LGD UID")
+	trigger := newLPUEvictionPod("agent-0", "0", "0", true, podDisruptionReasonTaintManagerDeletion)
+	sibling := newLPUEvictionPod("agent-1", "0", "1", false, "")
+	r, c := newLPUEvictionReconciler(trigger, sibling)
+
+	clique := &grovev1alpha1.PodClique{}
+	require.NoError(t, c.Get(t.Context(), client.ObjectKey{Namespace: lpuEvictionTestNamespace, Name: "agents"}, clique))
+	clique.Annotations[dynamolpx.DeploymentUIDAnnotation] = "stale-lgd-uid"
+	require.NoError(t, c.Update(t.Context(), clique))
+
+	t.Log("Return a retryable error without deleting the sibling")
+	_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(trigger)})
+	require.ErrorContains(t, err, "cannot verify ownership")
+	assert.Equal(t, []string{sibling.Name}, remainingLPUEvictionPods(t, c))
+
+	t.Log("Evict the sibling when the owner snapshot catches up")
+	clique.Annotations[dynamolpx.DeploymentUIDAnnotation] = "test-lgd-uid"
+	require.NoError(t, c.Update(t.Context(), clique))
+	reconcileLPUEviction(t, r, trigger.Name)
+	assert.Empty(t, remainingLPUEvictionPods(t, c))
+}
+
+func TestLPUEviction_ResourceVersionFencesDeletion(t *testing.T) {
+	trigger := newLPUEvictionPod("agent-0", "0", "0", true, podDisruptionReasonTaintManagerDeletion)
+	sibling := newLPUEvictionPod("agent-1", "0", "1", false, "")
+	r, c := newLPUEvictionReconciler(trigger, sibling)
+	r.Client = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
+		Delete: func(ctx context.Context, delegated client.WithWatch, object client.Object, opts ...client.DeleteOption) error {
+			current := &corev1.Pod{}
+			require.NoError(t, delegated.Get(ctx, client.ObjectKeyFromObject(object), current))
+			current.Labels["changed"] = "true"
+			require.NoError(t, delegated.Update(ctx, current))
+			return delegated.Delete(ctx, object, opts...)
+		},
+	})
+
+	_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(trigger)})
+	require.Error(t, err)
+	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(sibling), &corev1.Pod{}))
+}
+
 func TestLPUEviction_LPUGPUDeletesSamePartitionOnly(t *testing.T) {
+	t.Log("Observe live neighbors alongside a terminating Agent without scheduler partition metadata")
 	trigger := newLPUEvictionPod("stage-0-partition-3", "0", "0", true, podDisruptionReasonTaintManagerDeletion)
 	samePartition := newLPUEvictionPod("stage-1-partition-3", "0", "1", false, "")
 	otherPartition := newLPUEvictionPod("stage-0-partition-4", "0", "2", false, "")
@@ -346,7 +331,9 @@ func TestLPUEviction_LPUGPUDeletesSamePartitionOnly(t *testing.T) {
 	noPartition := newLPUOnlyConductor()
 	otherReplica := newLPUEvictionPod("replica-1-partition-3", "1", "0", false, "")
 	trigger.Annotations[dynamolpx.WorkloadModeAnnotation] = string(lpxv1alpha1.WorkloadModeV2StrictHybrid)
-	require.NotContains(t, trigger.Annotations, lpxv1alpha1.PodPartitionIDAnnotation)
+	terminating := newLPUEvictionPod("terminating-agent", "0", "", true, "")
+	delete(terminating.Annotations, lpxv1alpha1.PodPartitionIDAnnotation)
+	delete(terminating.Annotations, lpxv1alpha1.PodRankInPartitionAnnotation)
 
 	r, c := newLPUEvictionReconciler(
 		trigger,
@@ -355,11 +342,16 @@ func TestLPUEviction_LPUGPUDeletesSamePartitionOnly(t *testing.T) {
 		otherModel,
 		noPartition,
 		otherReplica,
+		terminating,
 	)
 
+	t.Log("Evict the live neighbor in the trigger's partition")
 	result := reconcileLPUEviction(t, r, "stage-0-partition-3")
 	assert.Equal(t, ctrl.Result{}, result)
 	assert.Equal(t, []string{"conductor-0", "replica-1-partition-3", "stage-0-draft-partition-3", "stage-0-partition-4"}, remainingLPUEvictionPods(t, c))
+
+	t.Log("Reconcile successfully after the partition's live neighbors are gone")
+	reconcileLPUEviction(t, r, trigger.Name)
 }
 
 func TestLPUEviction_DisruptionConditionWithoutDeletionTimestampDoesNotCascade(t *testing.T) {
