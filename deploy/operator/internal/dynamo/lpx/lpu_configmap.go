@@ -97,6 +97,11 @@ func renderLPUConfigMap(
 	}
 	data["model_config.toml"] = modelTOML.String()
 	data["datacenter.toml"] = datacenterTOML.String()
+	return renderRuntimeConfigMap(namespace, materializationName+"-lpu", data)
+}
+
+func renderRuntimeConfigMap(namespace, namePrefix string, data map[string]string) (*corev1.ConfigMap, error) {
+	// Name immutable configuration from the content hash used by Pod templates.
 	configMap := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: namespace,
@@ -104,7 +109,21 @@ func renderLPUConfigMap(
 		Immutable: ptr.To(true),
 		Data:      data,
 	}
-	configMap.Name = LPUConfigMapName(materializationName, LPUConfigMapHash(configMap))
+	configMap.Name = boundedAuxiliaryName(namePrefix, fmt.Sprintf("-%.16s", LPUConfigMapHash(configMap)))
+
+	// Reject oversized configuration before any caller can publish it.
+	totalSize := 0
+	for _, value := range data {
+		totalSize += len(value)
+	}
+	if totalSize > corev1.MaxSecretSize {
+		return nil, fmt.Errorf(
+			"rendered LPX ConfigMap %q data is %d bytes; maximum is %d",
+			configMap.Name,
+			totalSize,
+			corev1.MaxSecretSize,
+		)
+	}
 	return configMap, nil
 }
 

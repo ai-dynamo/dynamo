@@ -11,8 +11,26 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
+
+func TestRenderRuntimeConfigMapSizeLimit(t *testing.T) {
+	t.Log("Accept exactly 1 MiB of UTF-8 bytes across data values, excluding keys")
+	data := map[string]string{
+		"text":   strings.Repeat("é", corev1.MaxSecretSize/2-1),
+		"suffix": "é",
+	}
+	_, err := renderRuntimeConfigMap("test-namespace", "test-lpu", data)
+	require.NoError(t, err)
+
+	t.Log("Reject one extra byte with a named error and no usable ConfigMap")
+	data["suffix"] += "x"
+	configMap, err := renderRuntimeConfigMap("test-namespace", "test-lpu", data)
+	require.Nil(t, configMap)
+	require.ErrorContains(t, err, `rendered LPX ConfigMap "test-lpu-`)
+	require.ErrorContains(t, err, "data is 1048577 bytes; maximum is 1048576")
+}
 
 func TestLPXAuxiliaryNamesAreBounded(t *testing.T) {
 	t.Log("Use a source name already at the Kubernetes length limit")
@@ -97,6 +115,19 @@ func TestRenderLPUConfigMapPreservesV2HybridGasDir(t *testing.T) {
 	require.Equal(t, "/models/model-build", configMap.Data["gas_dir"])
 	require.True(t, *configMap.Immutable)
 	require.Equal(t, LPUConfigMapName("test-dgd", LPUConfigMapHash(configMap)), configMap.Name)
+
+	t.Log("Reject an LPX setting that makes the rendered ConfigMap exceed the API limit")
+	projection.configuredBuild.runtimeSettings["oversized"] = strings.Repeat("x", corev1.MaxSecretSize)
+	_, err = renderLPUConfigMap(
+		"test-namespace",
+		"test-dgd",
+		"/models",
+		[]*ModelProjection{projection},
+		nil,
+	)
+	require.ErrorContains(t, err, "rendered LPX ConfigMap")
+	require.ErrorContains(t, err, "maximum is 1048576")
+	delete(projection.configuredBuild.runtimeSettings, "oversized")
 
 	t.Log("Render the preserved runtime with an invalid snapshot build reference")
 	projection.configuredBuild.Path = "relative-build"

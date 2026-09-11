@@ -14,7 +14,6 @@ import (
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 )
 
@@ -143,13 +142,8 @@ func (w *SelectedWorkload) RenderCyborgConfigMap(
 		offset += partition.effectiveNodeCount()
 	}
 
-	configMap := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: namespace,
-		},
-		Immutable: ptr.To(true),
-		Data:      map[string]string{"tokenizer_dir": tokenizerDir, "lpu_servers": strings.Join(servers, "\n")},
-	}
-	configMap.Name = boundedAuxiliaryName(root, fmt.Sprintf("-decode-%.16s", LPUConfigMapHash(configMap)))
-	return configMap, nil
+	return renderRuntimeConfigMap(namespace, root+"-decode", map[string]string{
+		"tokenizer_dir": tokenizerDir,
+		"lpu_servers":   strings.Join(servers, "\n"),
+	})
 }

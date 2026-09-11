@@ -9,10 +9,12 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	manifestcapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/thirdparty/capnp/gbuild_manifest/v2"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 )
 
 func TestRenderSelectedCyborgConfigMapServerNames(t *testing.T) {
@@ -69,6 +71,12 @@ func TestRenderSelectedCyborgConfigMapServerNames(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, filepath.Join(runtimePath, "metadata/tokenizer"), configMap.Data["tokenizer_dir"])
 	require.NotEqual(t, initial.Name, configMap.Name)
+
+	t.Log("Reject oversized rendered Cyborg configuration before publication")
+	projection.configuredBuild.RuntimeTokenizerPath = strings.Repeat("x", corev1.MaxSecretSize)
+	_, err = workload.RenderCyborgConfigMap("test-namespace", "test-dgd", podSpec)
+	require.ErrorContains(t, err, "rendered LPX ConfigMap")
+	require.ErrorContains(t, err, "maximum is 1048576")
 
 	t.Log("Render a Cap'n Proto build without tokenizer metadata")
 	projection.configuredBuild.RuntimeTokenizerPath = ""
