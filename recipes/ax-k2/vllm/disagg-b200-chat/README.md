@@ -24,8 +24,7 @@ CUDA buffers and UCX; each worker requests one `rdma/shared_ib` resource.
 ## Deploy
 
 The namespace must contain the `model-cache` PVC with both pinned
-model snapshots and a `runtime-imagepullsecret` that can pull the pinned runtime
-from `dynamoci.azurecr.io`.
+model snapshots and a `runtime-imagepullsecret` that can pull the pinned runtime.
 At least three groups of four B200 GPUs and 400 GiB of host memory per worker
 must be schedulable. Set `CONTEXT` and `NAMESPACE` to your cluster context and
 namespace, then run from this directory:
