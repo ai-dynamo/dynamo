@@ -9,9 +9,12 @@ torchaudio
 triton
 vllm
 transformers
-tokenizers
-# vLLM-Omni (v0.28.0) may require a newer safetensors than the upstream
-# vLLM 0.28.0 image ships, so safetensors is intentionally left unfrozen here.
+# Let the joint vLLM/vLLM-Omni solve select tokenizers. vLLM 0.29 accepts
+# tokenizers>=0.21.1, while Transformers 5.14 requires tokenizers<=0.23.0;
+# freezing the base image's 0.23.2 makes the otherwise-supported pair
+# unsatisfiable.
+# vLLM-Omni may require a newer safetensors than the upstream vLLM image
+# ships, so safetensors is intentionally left unfrozen here.
 # safetensors
 msgspec
 flashinfer-python
