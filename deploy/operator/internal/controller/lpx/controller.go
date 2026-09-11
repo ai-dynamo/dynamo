@@ -25,6 +25,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -305,6 +306,9 @@ func (r *graphReconciler) reconcileWorkload(ctx context.Context, deployment *v1a
 	deployment.Status.Components[name] = component
 	state.Reason, state.Message = readiness.Classification, readiness.Message
 	if readiness.Ready && !changed {
+		if err := r.deleteStaleLPXConfigMaps(ctx, deployment, resources); err != nil {
+			return state, ctrl.Result{}, err
+		}
 		state.State = v1beta1.DGDStateSuccessful
 	}
 	classification, err := r.reconcileSelectedLPX(ctx, deployment, selected)
@@ -417,6 +421,52 @@ func (r *graphReconciler) syncLPXResource(ctx context.Context, deployment *v1alp
 		return err
 	}
 	return r.Update(ctx, synced)
+}
+
+func (r *graphReconciler) deleteStaleLPXConfigMaps(ctx context.Context, deployment *v1alpha1.LPXGraphDeployment, resources []client.Object) error {
+	// Retain every ConfigMap rendered for the current workload.
+	desiredNames := make(map[string]struct{}, len(resources))
+	for _, resource := range resources {
+		if _, ok := resource.(*corev1.ConfigMap); ok {
+			desiredNames[resource.GetName()] = struct{}{}
+		}
+	}
+
+	// Discover obsolete ConfigMaps rooted in this exact LPX child.
+	stale := make([]client.Object, 0)
+	if err := visitLifecycleObjectPages(ctx, r.apiReader, &corev1.ConfigMapList{}, func(object k8sruntime.Object) error {
+		configMap := object.(client.Object)
+		if metav1.IsControlledBy(configMap, deployment) {
+			if _, desired := desiredNames[configMap.GetName()]; !desired {
+				stale = append(stale, configMap)
+			}
+		}
+		return nil
+	}, client.InNamespace(deployment.Namespace)); err != nil {
+		return err
+	}
+	if len(stale) == 0 {
+		return nil
+	}
+
+	// Revalidate publication authority before deleting the discovered objects.
+	if err := r.validateLPXPublicationSource(ctx, deployment); err != nil {
+		return err
+	}
+
+	// Preconditions prevent stale observations from deleting replacements.
+	for _, configMap := range stale {
+		if !configMap.GetDeletionTimestamp().IsZero() {
+			continue
+		}
+		uid, resourceVersion := configMap.GetUID(), configMap.GetResourceVersion()
+		if err := r.Delete(ctx, configMap, &client.DeleteOptions{Preconditions: &metav1.Preconditions{
+			UID: &uid, ResourceVersion: &resourceVersion,
+		}}); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *graphReconciler) reconcileEndpoint(ctx context.Context, deployment *v1alpha1.LPXGraphDeployment, source *v1beta1.DynamoGraphDeployment) error {

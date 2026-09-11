@@ -260,20 +260,27 @@ func TestLPXTerminalCleanupPreservesForeignObjectsAndNewerAuthority(t *testing.T
 			endpoint := &corev1.Service{ObjectMeta: metav1.ObjectMeta{
 				Name: "obsolete-endpoint", Namespace: child.Namespace, UID: "old-endpoint", OwnerReferences: owner,
 			}}
+			runtimeConfig := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+				Name: "obsolete-runtime", Namespace: child.Namespace, UID: "old-runtime", OwnerReferences: owner,
+			}}
 			ordinary := &corev1.Service{ObjectMeta: metav1.ObjectMeta{
 				Name: "ordinary-model", Namespace: child.Namespace, UID: "ordinary-service",
 				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(source, v1beta1.DynamoGraphDeploymentGVK)},
 			}}
 			foreignPCS, foreignEndpoint := pcs.DeepCopy(), endpoint.DeepCopy()
+			foreignRuntime := runtimeConfig.DeepCopy()
 			foreignPCS.UID, foreignEndpoint.UID = "foreign-pcs", "foreign-endpoint"
+			foreignRuntime.UID = "foreign-runtime"
 			foreignPCS.Name = dynamo.PCSNameForLPX(child)
 			foreignEndpoint.Name = foreignPCS.Name + "-lpx"
+			foreignRuntime.Name = foreignPCS.Name + "-runtime"
 			foreignPCS.OwnerReferences, foreignEndpoint.OwnerReferences = ordinary.OwnerReferences, ordinary.OwnerReferences
+			foreignRuntime.OwnerReferences = ordinary.OwnerReferences
 			if scenario == "pending finalizer" {
 				pcs.Finalizers = []string{"example.com/staged-cleanup"}
 			}
-			r := newLPXTestReconciler(t, nil, child, source, pcs, endpoint, ordinary, foreignPCS, foreignEndpoint)
-			for _, object := range []client.Object{ordinary, foreignPCS, foreignEndpoint} {
+			r := newLPXTestReconciler(t, nil, child, source, pcs, endpoint, runtimeConfig, ordinary, foreignPCS, foreignEndpoint, foreignRuntime)
+			for _, object := range []client.Object{ordinary, foreignPCS, foreignEndpoint, foreignRuntime} {
 				require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(object), object))
 			}
 
@@ -341,11 +348,11 @@ func TestLPXTerminalCleanupPreservesForeignObjectsAndNewerAuthority(t *testing.T
 				retiring, err = r.retireInvalidLPXWorkload(t.Context(), child, "invalid runtime")
 				require.NoError(t, err)
 				require.Nil(t, retiring)
-				require.Equal(t, 2, deletes, "cleanup must not repeat deletes after they are accepted")
+				require.Equal(t, 3, deletes, "cleanup must not repeat deletes after they are accepted")
 			}
 
 			t.Log("Ordinary DGD resources and foreign same-name objects remain byte-for-byte unchanged")
-			for _, object := range []client.Object{ordinary, foreignPCS, foreignEndpoint} {
+			for _, object := range []client.Object{ordinary, foreignPCS, foreignEndpoint, foreignRuntime} {
 				before := object.DeepCopyObject().(client.Object)
 				require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(object), object))
 				require.Equal(t, before, object)
@@ -534,6 +541,32 @@ func TestLPXResourceSyncConvergesContentAndMetadataWithoutAdoption(t *testing.T)
 	require.NoError(t, r.Get(t.Context(), key, unchanged))
 	require.Equal(t, updated.ResourceVersion, unchanged.ResourceVersion)
 	require.Equal(t, updated.Data, unchanged.Data)
+}
+
+func TestLPXDeletesOnlyStaleOwnedRuntimeConfigMaps(t *testing.T) {
+	t.Log("Create current, stale, and foreign runtime ConfigMaps")
+	source := newLPXTestSource(lpx.PipelineSingle, "test-build")
+	child := newLPXTestDeployment(t, source)
+	owner := []metav1.OwnerReference{*metav1.NewControllerRef(child, v1alpha1.LPXGraphDeploymentGVK)}
+	current := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+		Name: "runtime-current", Namespace: child.Namespace, UID: "current", OwnerReferences: owner,
+	}}
+	stale := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+		Name: "runtime-stale", Namespace: child.Namespace, UID: "stale", OwnerReferences: owner,
+	}}
+	foreign := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+		Name: "runtime-foreign", Namespace: child.Namespace, UID: "foreign",
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(source, v1beta1.DynamoGraphDeploymentGVK)},
+	}}
+	r := newLPXTestReconciler(t, nil, child, source, current, stale, foreign)
+
+	t.Log("Delete only the stale ConfigMap owned by the current LPX child")
+	require.NoError(t, r.deleteStaleLPXConfigMaps(t.Context(), child, []client.Object{current}))
+
+	t.Log("Preserve the current and foreign ConfigMaps")
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(current), &corev1.ConfigMap{}))
+	require.True(t, apierrors.IsNotFound(r.Get(t.Context(), client.ObjectKeyFromObject(stale), &corev1.ConfigMap{})))
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(foreign), &corev1.ConfigMap{}))
 }
 
 func TestLPXValidatesIntentBeforeDownloadsOrPublication(t *testing.T) {

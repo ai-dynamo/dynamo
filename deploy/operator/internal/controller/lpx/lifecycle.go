@@ -400,9 +400,9 @@ func (r *graphReconciler) retireInvalidLPXWorkload(
 		return r.retireLPXRequest(ctx, deployment, "", &requests[0], reason)
 	}
 
-	// Source edits can rename both resources; discover only this exact child's old objects.
+	// Source edits can rename resources; discover only this exact child's old objects.
 	owned := make([]client.Object, 0)
-	for _, list := range []client.ObjectList{&corev1.ServiceList{}, &grovev1alpha1.PodCliqueSetList{}} {
+	for _, list := range []client.ObjectList{&corev1.ServiceList{}, &grovev1alpha1.PodCliqueSetList{}, &corev1.ConfigMapList{}} {
 		if err := visitLifecycleObjectPages(ctx, r.apiReader, list, func(object k8sruntime.Object) error {
 			resource := object.(client.Object)
 			if metav1.IsControlledBy(resource, deployment) {
