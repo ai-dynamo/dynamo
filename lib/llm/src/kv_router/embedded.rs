@@ -8,7 +8,7 @@
 //! and request constraints before scheduling directly on that partition. The
 //! frontend retains transport, stream leases, and request-expiry ownership.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -406,10 +406,6 @@ impl EmbeddedSelection {
             .get_or_init(|| crate::session_affinity::AffinityCoordinator::wrap(table))
             .clone())
     }
-
-    /// Membership is catalog-driven (runtime-config watch); explicit worker
-    /// registration is a no-op here.
-    pub(crate) fn register_workers(&self, _worker_ids: &HashSet<WorkerId>) {}
 
     pub(crate) fn partition_key(&self) -> &RoutingPartitionId {
         self.partition.key()

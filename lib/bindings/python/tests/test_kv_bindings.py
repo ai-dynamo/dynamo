@@ -220,6 +220,7 @@ def test_selection_service_rejects_invalid_affinity_ttl(ttl):
     reason="SelectionService requires the select-service Cargo feature",
 )
 @pytest.mark.parametrize("ttl", ["-1", "NaN", "31536001"])
+@pytest.mark.timeout(60)  # subprocess wait is capped at 15 s per case
 def test_selection_service_cli_rejects_invalid_affinity_ttl(ttl):
     result = subprocess.run(
         [

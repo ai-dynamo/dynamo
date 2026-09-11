@@ -216,14 +216,6 @@ impl PrefillRouter {
             }
         }
     }
-
-    pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {
-        if let Some(binding) = self.binding.load_full()
-            && let Some(kv_router) = binding.router.kv_router_if_enabled()
-        {
-            kv_router.register_workers(worker_ids);
-        }
-    }
 }
 
 #[cfg(test)]

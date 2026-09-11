@@ -1515,11 +1515,6 @@ impl KvRouter {
         }
     }
 
-    /// Register externally-provided workers in the slot tracker.
-    pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {
-        self.scheduler.register_workers(worker_ids);
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub async fn add_request(
         &self,

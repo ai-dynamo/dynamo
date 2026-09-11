@@ -130,11 +130,16 @@ fn forget_reservation_if(
     booking: &SchedulerBookingDescriptor,
 ) {
     let mut index = index.write();
-    if index.get(&booking.request_id).is_some_and(|reservation| {
-        reservation.partition == *partition && reservation.booking.as_ref() == Some(booking)
-    }) {
-        index.remove(&booking.request_id);
-    }
+    let removed = index
+        .get(&booking.request_id)
+        .is_some_and(|reservation| {
+            reservation.partition == *partition && reservation.booking.as_ref() == Some(booking)
+        })
+        .then(|| index.remove(&booking.request_id));
+    drop(index);
+    // The reservation's session binding releases on drop (shard lock, replica
+    // publish); keep that work outside the index write lock.
+    drop(removed);
 }
 
 impl SelectionCore {
@@ -512,16 +517,27 @@ pub(super) fn sweep_reservation_index(
     let entries = entries.read();
     let mut index = index.write();
     let before = index.len();
+    let mut removed = Vec::new();
     index.retain(|_, reservation| {
         let Some(booking) = &reservation.booking else {
             return true;
         };
-        entries
+        let live = entries
             .get(&reservation.partition)
             .and_then(|cell| cell.get())
-            .is_some_and(|entry| entry.scheduler.has_booking(booking))
+            .is_some_and(|entry| entry.scheduler.has_booking(booking));
+        if !live {
+            removed.push(reservation._affinity_lease.take());
+        }
+        live
     });
-    before - index.len()
+    let swept = before - index.len();
+    drop(index);
+    drop(entries);
+    // Session bindings release on drop (shard lock, replica publish); do that
+    // after both locks are gone.
+    drop(removed);
+    swept
 }
 
 pub(super) fn missing_booking() -> SelectionError {

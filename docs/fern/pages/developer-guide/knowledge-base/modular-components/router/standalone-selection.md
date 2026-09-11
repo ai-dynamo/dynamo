@@ -329,7 +329,7 @@ Both `POST /select` and `POST /select_and_reserve` accept an optional `session_i
 
 Bindings replicate over the configured replica mesh. An explicit `affinity_target` or `pinned_worker` takes precedence over the session binding. Without a configured TTL, `session_id` is only policy input: custom policies can read it through `WorkerSelectionContext::session_id()`, while the built-in selector ignores it. See [Write Custom Routing Strategies](custom-worker-selection.mdx).
 
-The pending-selection cache does not retain session metadata, so a later `POST /reservations` does not create a session binding. Use `/select_and_reserve` when the service should manage affinity. The frontend uses the same table implementation for request-header affinity; see [Configuration and Tuning](configuration-and-tuning.md).
+The pending-selection cache keeps the session metadata, so a later `POST /reservations` for that selection binds the session to the booked worker, the same as `/select_and_reserve` does. The frontend uses the same table implementation for request-header affinity; see [Configuration and Tuning](configuration-and-tuning.md).
 
 ### `session_context`
 

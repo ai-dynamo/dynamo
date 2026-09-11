@@ -704,8 +704,10 @@ impl WorkerRegistry {
         dp_rank: u32,
         key: &RoutingPartitionId,
     ) {
-        if let Some(ie) = self.indexers.get(key) {
-            ie.indexer.remove_worker_dp_rank(worker_id, dp_rank).await;
+        // Clone the handle so the shard guard drops before the await.
+        let indexer = self.indexers.get(key).map(|ie| ie.indexer.clone());
+        if let Some(indexer) = indexer {
+            indexer.remove_worker_dp_rank(worker_id, dp_rank).await;
         }
     }
 

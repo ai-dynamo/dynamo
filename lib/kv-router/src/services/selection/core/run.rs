@@ -357,7 +357,10 @@ impl SelectionCore {
         let routing_hashes = (entry.indexer.records_routing_decisions()
             && (claim.is_some() || cached_inputs.is_some()))
         .then(|| block_hashes.clone());
-        let booked_sequence_hashes = book.then(|| sequence_hashes.clone());
+        // Only `Book` callers read the hashes back (the reservation response);
+        // the frontend's `Lease` path discards them.
+        let booked_sequence_hashes =
+            matches!(admission, SelectionAdmission::Book { .. }).then(|| sequence_hashes.clone());
         let returned_routing_hashes = return_routing_hashes.then(|| block_hashes.clone());
         let schedule_request = ScheduleRequest {
             mode,

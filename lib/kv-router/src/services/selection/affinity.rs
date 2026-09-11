@@ -303,8 +303,12 @@ impl SessionAffinity {
     /// Install the replica sink and this replica's writer id. Returns `false`
     /// when a sink is already installed.
     pub fn enable_replication(&self, writer_id: u64, sink: Arc<dyn AffinityReplicaSink>) -> bool {
-        self.inner.writer_id.store(writer_id, Ordering::Relaxed);
-        self.inner.replica.set(sink).is_ok()
+        // Record the id only for the sink that actually got installed.
+        let installed = self.inner.replica.set(sink).is_ok();
+        if installed {
+            self.inner.writer_id.store(writer_id, Ordering::Relaxed);
+        }
+        installed
     }
 
     pub fn ttl(&self) -> Duration {

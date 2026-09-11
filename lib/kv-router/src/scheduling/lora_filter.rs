@@ -44,9 +44,11 @@ pub fn narrow_allowed_worker_ids_by_lora(
     if base.is_empty() {
         return allowed_worker_ids;
     }
+    // A filter may only narrow: ids it returns from outside `base` are dropped.
     let mut narrowed: HashSet<WorkerId> = filter
         .filter_worker_ids_for_lora(lora_name, &base)
         .into_iter()
+        .filter(|id| base.contains(id))
         .collect();
     if let Some(pinned) = pinned_worker
         && base.contains(&pinned.worker_id)
@@ -123,6 +125,34 @@ mod tests {
         assert_eq!(
             narrow(&OnlyWorker(2), Some("a"), allowed, Some(pinned)),
             Some(HashSet::from([2]))
+        );
+    }
+
+    /// A filter that answers with ids outside the caller's universe.
+    struct Widening(Vec<WorkerId>);
+
+    impl LoraWorkerFilter for Widening {
+        fn filter_worker_ids_for_lora(
+            &self,
+            _lora_name: &str,
+            _available: &[WorkerId],
+        ) -> Vec<WorkerId> {
+            self.0.clone()
+        }
+    }
+
+    #[test]
+    fn filter_output_outside_the_universe_is_dropped() {
+        // 9 is in neither the allow-set nor the worker list: it must not appear.
+        let allowed = Some(HashSet::from([1, 2]));
+        assert_eq!(
+            narrow(&Widening(vec![2, 9]), Some("a"), allowed, None),
+            Some(HashSet::from([2]))
+        );
+        assert_eq!(
+            narrow(&Widening(vec![9]), Some("a"), None, None),
+            None,
+            "only out-of-universe ids: nothing survives, so the allow-set is unchanged"
         );
     }
 
