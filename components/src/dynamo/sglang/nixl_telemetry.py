@@ -116,15 +116,12 @@ def _assign_nixl_prometheus_port(target: Any, args: tuple, kwargs: dict) -> None
     pp_rank = arguments.get("pp_rank") or 0
     dp_rank = arguments.get("dp_rank")
 
-    # The supported SGLang releases keep raw input on ``ServerArgs`` and publish
-    # the effective configuration separately, and resolution is where attention
-    # data parallelism is turned on: ``--tp-size 8 --dwdp-size 8`` launches one
-    # group of eight schedulers while the raw values still read ``dp_size=1``
-    # and ``enable_dp_attention=False``. Numbering from the raw values would
-    # fold ``dp_rank`` in a second time and send later ranks past the reserved
-    # range. Imported here because the module is imported to reach
-    # ``install_per_rank_nixl_prometheus_ports()``, which must stay a no-op
-    # without SGLang when telemetry is off.
+    # Number from the resolved configuration, not from the raw ``ServerArgs``
+    # the scheduler is handed: resolution is where attention data parallelism is
+    # turned on, so the raw values would fold ``dp_rank`` in a second time and
+    # send later ranks past the reserved range. Imported here because the module
+    # is imported to reach ``install_per_rank_nixl_prometheus_ports()``, which
+    # must stay a no-op without SGLang when telemetry is off.
     from dynamo.sglang._compat import resolved_server_args
 
     server_args = resolved_server_args(arguments["server_args"])
