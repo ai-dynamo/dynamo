@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     panic::AssertUnwindSafe,
     sync::Arc,
     time::Duration,
@@ -24,14 +24,16 @@ use crate::{model_card::ModelDeploymentCard, namespace::NamespaceFilter};
 
 const DEFAULT_MAX_CONCURRENT_BUILDS: usize = 8;
 const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(30);
-/// How long a committed group that has lost every member keeps its serving state
+/// How long a committed group that has lost every member keeps its catalog entry
 /// before it is withdrawn, unless [`GROUP_REMOVAL_GRACE_ENV`] overrides it. Sized
 /// for the gap between one worker's card being withdrawn and its replacement's
-/// card being published during a rolling update.
+/// card being published during a rolling update. The entry has no admitted
+/// workers for that window, so requests get a retryable failure rather than a
+/// 404; it does not keep the departed pipeline serving.
 const DEFAULT_GROUP_REMOVAL_GRACE: Duration = Duration::from_secs(2);
 /// Overrides [`DEFAULT_GROUP_REMOVAL_GRACE`], in milliseconds. A deployment whose
 /// replacement worker takes longer than the default to publish its card needs a
-/// larger value, since a group withdrawn before the replacement arrives is the
+/// larger value, since an entry withdrawn before the replacement arrives is the
 /// 404 the grace period exists to avoid. `0` withdraws an emptied group
 /// immediately. Read once, when the controller is constructed.
 const GROUP_REMOVAL_GRACE_ENV: &str = "DYN_DISCOVERY_GROUP_REMOVAL_GRACE_MS";
@@ -77,7 +79,7 @@ pub(crate) struct DesiredInstance {
     pub(crate) endpoint_id: EndpointId,
     pub(crate) card: ModelDeploymentCard,
     pub(crate) group_key: GroupKey,
-    pub(crate) fingerprint: String,
+    pub(crate) mdc_checksum: String,
     pub(crate) projection_fingerprint: String,
 }
 
@@ -90,7 +92,7 @@ impl DesiredInstance {
 #[derive(Clone, Debug)]
 pub(crate) struct GroupSpec {
     pub(crate) key: GroupKey,
-    pub(crate) fingerprint: String,
+    pub(crate) mdc_checksum: String,
     pub(crate) generation: u64,
     pub(crate) representative: DesiredInstance,
 }
@@ -138,42 +140,43 @@ pub(crate) trait ControllerHost: Send + Sync + 'static {
 enum GroupStatus {
     Idle,
     Queued {
-        fingerprint: String,
+        mdc_checksum: String,
     },
     Building {
-        fingerprint: String,
+        mdc_checksum: String,
         generation: u64,
         cancellation: CancellationToken,
     },
     Ready {
-        fingerprint: String,
+        mdc_checksum: String,
         committed_members: BTreeSet<String>,
     },
     Retrying {
-        fingerprint: String,
+        mdc_checksum: String,
         deadline: Instant,
     },
-    Conflict,
     Blocked {
-        fingerprint: String,
+        mdc_checksum: String,
         deadline: Instant,
     },
     BlockedReady {
-        fingerprint: String,
+        mdc_checksum: String,
         committed_members: BTreeSet<String>,
         deadline: Instant,
     },
 }
 
 struct DesiredGroup {
-    generation: u64,
     retry_attempt: u32,
     cohorts: HashMap<String, BTreeSet<String>>,
+    cohort_order: VecDeque<String>,
+    reported_rejections: HashSet<String>,
     admission_tx: watch::Sender<Vec<u64>>,
     status: GroupStatus,
-    /// When a committed group emptied out, the instant after which its catalog
-    /// entry is withdrawn. A member joining the same key before then takes the
-    /// group over in place; nothing removes it early.
+    /// Set while the host still holds the catalog entry of a group that has lost
+    /// every member: the instant the entry is withdrawn if nothing has taken the
+    /// key over by then. A successor withdraws it as part of committing its own
+    /// build, so the entry never outlives the group it describes.
     pending_removal: Option<Instant>,
 }
 
@@ -181,9 +184,10 @@ impl DesiredGroup {
     fn new() -> Self {
         let (admission_tx, _) = watch::channel(Vec::new());
         Self {
-            generation: 0,
             retry_attempt: 0,
             cohorts: HashMap::new(),
+            cohort_order: VecDeque::new(),
+            reported_rejections: HashSet::new(),
             admission_tx,
             status: GroupStatus::Idle,
             pending_removal: None,
@@ -191,19 +195,48 @@ impl DesiredGroup {
     }
 
     fn insert(&mut self, instance: &DesiredInstance) {
+        if !self.cohorts.contains_key(&instance.mdc_checksum) {
+            self.cohort_order.push_back(instance.mdc_checksum.clone());
+        }
         self.cohorts
-            .entry(instance.fingerprint.clone())
+            .entry(instance.mdc_checksum.clone())
             .or_default()
             .insert(instance.key.clone());
     }
 
     fn remove(&mut self, instance: &DesiredInstance) {
-        let Some(cohort) = self.cohorts.get_mut(&instance.fingerprint) else {
+        let Some(cohort) = self.cohorts.get_mut(&instance.mdc_checksum) else {
             return;
         };
         cohort.remove(&instance.key);
         if cohort.is_empty() {
-            self.cohorts.remove(&instance.fingerprint);
+            self.cohorts.remove(&instance.mdc_checksum);
+            self.cohort_order
+                .retain(|checksum| checksum != &instance.mdc_checksum);
+            self.reported_rejections.remove(&instance.mdc_checksum);
+        }
+    }
+
+    fn selected_checksum(&self) -> Option<&str> {
+        self.cohort_order.front().map(String::as_str)
+    }
+
+    fn report_rejections(&mut self, key: &GroupKey) {
+        let Some(incumbent) = self.cohort_order.front() else {
+            return;
+        };
+        for checksum in self.cohort_order.iter().skip(1) {
+            if !self.reported_rejections.insert(checksum.clone()) {
+                continue;
+            }
+            tracing::error!(
+                model = %key.model_name,
+                worker_set = %key.worker_set_key,
+                incumbent_checksum = %incumbent,
+                rejected_checksum = %checksum,
+                instance = ?self.cohorts.get(checksum).and_then(|members| members.first()),
+                "Rejected incompatible workers; the first accepted configuration retains the WorkerSet"
+            );
         }
     }
 }
@@ -361,14 +394,16 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
 
     fn apply_added(&mut self, instance: DesiredInstance) -> bool {
         if let Some(existing) = self.desired.get(&instance.key) {
-            if existing.fingerprint == instance.fingerprint
+            if existing.mdc_checksum == instance.mdc_checksum
                 && existing.projection_fingerprint == instance.projection_fingerprint
             {
+                // A repeated registration still confirms liveness after an older snapshot.
+                self.record_mutation(instance.key.clone());
                 return false;
             }
             if existing.materializes_worker_set()
                 && (existing.group_key != instance.group_key
-                    || existing.fingerprint != instance.fingerprint)
+                    || existing.mdc_checksum != instance.mdc_checksum)
             {
                 tracing::error!(
                     instance = instance.key,
@@ -376,6 +411,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     candidate_group = %instance.group_key.id(),
                     "Rejected an in-place materialization change; worker instance paths identify immutable incarnations"
                 );
+                self.record_mutation(instance.key.clone());
                 return false;
             }
         }
@@ -385,17 +421,23 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         let instance_id = instance.mcid.instance_id;
         let instance_key = instance.key.clone();
         let materializes_worker_set = instance.materializes_worker_set();
+        let mut affects_selected = false;
         if materializes_worker_set {
-            self.groups
+            let group = self
+                .groups
                 .entry(group_key.clone())
-                .or_insert_with(DesiredGroup::new)
-                .insert(&instance);
+                .or_insert_with(DesiredGroup::new);
+            group.insert(&instance);
+            affects_selected = group.selected_checksum() == Some(instance.mdc_checksum.as_str());
+            group.report_rejections(&group_key);
         }
         self.desired.insert(instance.key.clone(), instance);
         self.record_mutation(instance_key);
 
         if materializes_worker_set {
-            self.reconcile_group(&group_key, true);
+            if affects_selected {
+                self.reconcile_group(&group_key, true);
+            }
         } else {
             for key in self.materialization_groups_for(&endpoint_id, instance_id) {
                 self.reconcile_group(&key, true);
@@ -411,7 +453,11 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             return false;
         };
         let affected_groups = if instance.materializes_worker_set() {
-            vec![instance.group_key.clone()]
+            self.groups
+                .get(&instance.group_key)
+                .filter(|group| group.selected_checksum() == Some(instance.mdc_checksum.as_str()))
+                .map(|_| vec![instance.group_key.clone()])
+                .unwrap_or_default()
         } else {
             self.materialization_groups_for(&instance.endpoint_id, instance.mcid.instance_id)
         };
@@ -454,38 +500,43 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             if !status_has_commit(&old_status) {
                 return;
             }
+            // A complete drain is a succession, so everything a succession retires
+            // is retired now: the admissions are cleared above, the build is
+            // cancelled above, and the channel is replaced here. Retained pipeline
+            // clients keep an empty receiver and can never observe a successor's
+            // IDs. Only the committed catalog entry is held back, so the model
+            // answers `ModelUnavailable` rather than disappearing.
+            let (admission_tx, _) = watch::channel(Vec::new());
+            group.admission_tx = admission_tx;
+            group.reported_rejections.clear();
+            group.retry_attempt = 0;
             // Armed once per emptying: an empty group can be reconciled repeatedly,
-            // and re-arming each time would defer removal indefinitely.
+            // and re-arming each time would defer the withdrawal indefinitely.
             if group.pending_removal.is_none() {
                 group.pending_removal = Some(self.removal_deadline());
             }
-            group.status = old_status;
             self.groups.insert(key.clone(), group);
             return;
         }
-        group.pending_removal = None;
 
-        if group.cohorts.len() > 1 {
+        let mdc_checksum = group
+            .selected_checksum()
+            .expect("non-empty group has a cohort")
+            .to_string();
+        if status_checksum(&old_status).is_some_and(|previous| previous != mdc_checksum) {
             group.admission_tx.send_replace(Vec::new());
             cancel_build(&old_status);
             if status_has_commit(&old_status) {
                 self.host.remove_group(key);
             }
-            if !matches!(old_status, GroupStatus::Conflict) {
-                group.generation = group.generation.wrapping_add(1);
-                group.retry_attempt = 0;
-            }
-            group.status = GroupStatus::Conflict;
-            self.groups.insert(key.clone(), group);
-            return;
+            // Retained pipeline clients must never observe the successor's IDs.
+            let (admission_tx, _) = watch::channel(Vec::new());
+            group.admission_tx = admission_tx;
+            group.reported_rejections.clear();
+            group.retry_attempt = 0;
         }
-
-        let (fingerprint, member_keys) = group
-            .cohorts
-            .iter()
-            .next()
-            .map(|(fingerprint, members)| (fingerprint.clone(), members.clone()))
-            .expect("non-empty group has one cohort");
+        group.report_rejections(key);
+        let member_keys = group.cohorts[&mdc_checksum].clone();
         let members = self.members(&member_keys);
         let admitted = admitted_ids(&members);
         if !matches!(
@@ -497,14 +548,14 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
 
         group.status = match old_status {
             GroupStatus::Ready {
-                fingerprint: ready_fingerprint,
+                mdc_checksum: ready_checksum,
                 committed_members,
             }
             | GroupStatus::BlockedReady {
-                fingerprint: ready_fingerprint,
+                mdc_checksum: ready_checksum,
                 committed_members,
                 ..
-            } if ready_fingerprint == fingerprint => {
+            } if ready_checksum == mdc_checksum => {
                 let current_members = member_keys;
                 let old_admitted = group.admission_tx.borrow().clone();
                 let new_admitted = admitted_ids(&members);
@@ -522,7 +573,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                         group.admission_tx.send_replace(new_admitted);
                         group.retry_attempt = 0;
                         GroupStatus::Ready {
-                            fingerprint,
+                            mdc_checksum,
                             committed_members: current_members,
                         }
                     }
@@ -537,7 +588,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                             "Discovery-group replacement blocked; retaining the last safe commit"
                         );
                         GroupStatus::BlockedReady {
-                            fingerprint,
+                            mdc_checksum,
                             committed_members,
                             deadline: Instant::now() + delay,
                         }
@@ -545,7 +596,6 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     Err(error) => {
                         group.admission_tx.send_replace(Vec::new());
                         self.host.remove_group(key);
-                        group.generation = group.generation.wrapping_add(1);
                         group.retry_attempt = group.retry_attempt.saturating_add(1);
                         tracing::warn!(
                             group = %key.id(),
@@ -553,48 +603,43 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                             "Discovery-group membership replacement failed; withdrawing stale commit"
                         );
                         GroupStatus::Blocked {
-                            fingerprint,
+                            mdc_checksum,
                             deadline: Instant::now() + retry_delay(group.retry_attempt),
                         }
                     }
                 }
             }
             GroupStatus::Building {
-                fingerprint: building_fingerprint,
+                mdc_checksum: building_checksum,
                 generation,
                 cancellation,
-            } if building_fingerprint == fingerprint => GroupStatus::Building {
-                fingerprint,
+            } if building_checksum == mdc_checksum => GroupStatus::Building {
+                mdc_checksum,
                 generation,
                 cancellation,
             },
             GroupStatus::Queued {
-                fingerprint: queued_fingerprint,
-            } if queued_fingerprint == fingerprint => GroupStatus::Queued { fingerprint },
+                mdc_checksum: queued_checksum,
+            } if queued_checksum == mdc_checksum => GroupStatus::Queued { mdc_checksum },
             GroupStatus::Retrying {
-                fingerprint: retry_fingerprint,
+                mdc_checksum: retry_checksum,
                 deadline,
-            } if retry_fingerprint == fingerprint && !desired_changed => GroupStatus::Retrying {
-                fingerprint,
+            } if retry_checksum == mdc_checksum && !desired_changed => GroupStatus::Retrying {
+                mdc_checksum,
                 deadline,
             },
             GroupStatus::Blocked {
-                fingerprint: blocked_fingerprint,
+                mdc_checksum: blocked_checksum,
                 deadline,
-            } if blocked_fingerprint == fingerprint && !desired_changed => GroupStatus::Blocked {
-                fingerprint,
+            } if blocked_checksum == mdc_checksum && !desired_changed => GroupStatus::Blocked {
+                mdc_checksum,
                 deadline,
             },
             previous => {
                 cancel_build(&previous);
-                if status_has_commit(&previous) {
-                    group.admission_tx.send_replace(Vec::new());
-                    self.host.remove_group(key);
-                    group.admission_tx.send_replace(admitted_ids(&members));
-                }
-                group.generation = group.generation.wrapping_add(1);
+                group.admission_tx.send_replace(admitted_ids(&members));
                 group.retry_attempt = 0;
-                GroupStatus::Queued { fingerprint }
+                GroupStatus::Queued { mdc_checksum }
             }
         };
         self.groups.insert(key.clone(), group);
@@ -638,6 +683,9 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 instance.materializes_worker_set()
                     && &instance.endpoint_id == endpoint_id
                     && instance.mcid.instance_id == instance_id
+                    && self.groups.get(&instance.group_key).is_some_and(|group| {
+                        group.selected_checksum() == Some(instance.mdc_checksum.as_str())
+                    })
             })
             .map(|instance| instance.group_key.clone())
             .collect::<HashSet<_>>()
@@ -670,13 +718,13 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             let Some(group) = self.groups.get_mut(&key) else {
                 continue;
             };
-            let GroupStatus::Queued { fingerprint } = &group.status else {
+            let GroupStatus::Queued { mdc_checksum } = &group.status else {
                 continue;
             };
-            let fingerprint = fingerprint.clone();
+            let mdc_checksum = mdc_checksum.clone();
             let Some(member_key) = group
                 .cohorts
-                .get(&fingerprint)
+                .get(&mdc_checksum)
                 .and_then(|members| members.first())
             else {
                 continue;
@@ -690,12 +738,12 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             self.next_build_generation = self.next_build_generation.wrapping_add(1).max(1);
             let spec = GroupSpec {
                 key: key.clone(),
-                fingerprint: fingerprint.clone(),
+                mdc_checksum: mdc_checksum.clone(),
                 generation,
                 representative,
             };
             group.status = GroupStatus::Building {
-                fingerprint,
+                mdc_checksum,
                 generation,
                 cancellation: cancellation.clone(),
             };
@@ -741,12 +789,12 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         let is_current = matches!(
             &group.status,
             GroupStatus::Building {
-                fingerprint,
+                mdc_checksum,
                 generation,
                 ..
-            } if fingerprint == &result.spec.fingerprint && *generation == result.spec.generation
-        ) && group.cohorts.len() == 1
-            && group.cohorts.contains_key(&result.spec.fingerprint);
+            } if mdc_checksum == &result.spec.mdc_checksum && *generation == result.spec.generation
+        ) && group.selected_checksum() == Some(result.spec.mdc_checksum.as_str())
+            && group.cohorts.contains_key(&result.spec.mdc_checksum);
         if !is_current {
             if let BuildOutcome::Prepared(prepared) = result.outcome {
                 self.host.discard_prepared(prepared);
@@ -759,12 +807,18 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             BuildOutcome::Prepared(prepared) => {
                 let member_keys = group
                     .cohorts
-                    .get(&result.spec.fingerprint)
+                    .get(&result.spec.mdc_checksum)
                     .cloned()
                     .unwrap_or_default();
                 let members = self.members(&member_keys);
                 let adapters = self.adapters_for_members(&member_keys);
                 group.admission_tx.send_replace(admitted_ids(&members));
+                // The predecessor's catalog entry was held past its drain to keep
+                // the model listed. This build is its successor, and a group id
+                // can only be committed once, so withdraw the retired entry first.
+                if group.pending_removal.take().is_some() {
+                    self.host.remove_group(&result.spec.key);
+                }
                 match self
                     .host
                     .commit_group(&result.spec, prepared, &members, &adapters)
@@ -772,7 +826,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     Ok(()) => {
                         group.retry_attempt = 0;
                         group.status = GroupStatus::Ready {
-                            fingerprint: result.spec.fingerprint,
+                            mdc_checksum: result.spec.mdc_checksum,
                             committed_members: member_keys,
                         };
                     }
@@ -785,7 +839,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                         );
                         group.retry_attempt = group.retry_attempt.saturating_add(1);
                         group.status = GroupStatus::Blocked {
-                            fingerprint: result.spec.fingerprint,
+                            mdc_checksum: result.spec.mdc_checksum,
                             deadline: Instant::now() + retry_delay(group.retry_attempt),
                         };
                     }
@@ -802,13 +856,13 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     "Model materialization failed; scheduling retry"
                 );
                 group.status = GroupStatus::Retrying {
-                    fingerprint: result.spec.fingerprint,
+                    mdc_checksum: result.spec.mdc_checksum,
                     deadline: Instant::now() + delay,
                 };
             }
             BuildOutcome::Cancelled => {
                 group.status = GroupStatus::Queued {
-                    fingerprint: result.spec.fingerprint,
+                    mdc_checksum: result.spec.mdc_checksum,
                 };
             }
         }
@@ -836,30 +890,29 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         let mut retained_retries = Vec::new();
         let mut due_removals = Vec::new();
         for (key, group) in &mut self.groups {
-            if group.cohorts.is_empty()
-                && group
-                    .pending_removal
-                    .is_some_and(|deadline| deadline <= now)
+            if group
+                .pending_removal
+                .is_some_and(|deadline| deadline <= now)
             {
+                group.pending_removal = None;
                 due_removals.push(key.clone());
-                continue;
             }
-            let (fingerprint, deadline) = match &group.status {
+            let (mdc_checksum, deadline) = match &group.status {
                 GroupStatus::Retrying {
-                    fingerprint,
+                    mdc_checksum,
                     deadline,
                 }
                 | GroupStatus::Blocked {
-                    fingerprint,
+                    mdc_checksum,
                     deadline,
-                } => (fingerprint, deadline),
+                } => (mdc_checksum, deadline),
                 GroupStatus::BlockedReady {
-                    fingerprint,
+                    mdc_checksum,
                     committed_members,
                     deadline,
                 } if *deadline <= now => {
                     group.status = GroupStatus::Ready {
-                        fingerprint: fingerprint.clone(),
+                        mdc_checksum: mdc_checksum.clone(),
                         committed_members: committed_members.clone(),
                     };
                     retained_retries.push(key.clone());
@@ -869,7 +922,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             };
             if *deadline <= now {
                 group.status = GroupStatus::Queued {
-                    fingerprint: fingerprint.clone(),
+                    mdc_checksum: mdc_checksum.clone(),
                 };
             }
         }
@@ -878,7 +931,15 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         }
         for key in due_removals {
             self.host.remove_group(&key);
-            self.groups.remove(&key);
+            // A successor may already be building under this key, in which case
+            // only the retired catalog entry went away.
+            if self
+                .groups
+                .get(&key)
+                .is_some_and(|group| group.cohorts.is_empty())
+            {
+                self.groups.remove(&key);
+            }
         }
     }
 
@@ -982,6 +1043,18 @@ fn cancel_build(status: &GroupStatus) {
     }
 }
 
+fn status_checksum(status: &GroupStatus) -> Option<&str> {
+    match status {
+        GroupStatus::Idle => None,
+        GroupStatus::Queued { mdc_checksum }
+        | GroupStatus::Building { mdc_checksum, .. }
+        | GroupStatus::Ready { mdc_checksum, .. }
+        | GroupStatus::Retrying { mdc_checksum, .. }
+        | GroupStatus::Blocked { mdc_checksum, .. }
+        | GroupStatus::BlockedReady { mdc_checksum, .. } => Some(mdc_checksum),
+    }
+}
+
 fn status_has_commit(status: &GroupStatus) -> bool {
     matches!(
         status,
@@ -1029,6 +1102,7 @@ mod tests {
         committed: Mutex<HashMap<String, BTreeSet<String>>>,
         adapters: Mutex<HashMap<String, BTreeSet<String>>>,
         adapter_projections: Mutex<HashMap<String, HashMap<String, String>>>,
+        admissions: Mutex<Vec<watch::Receiver<Vec<u64>>>>,
         removed_groups: AtomicUsize,
         discarded: AtomicUsize,
     }
@@ -1047,6 +1121,7 @@ mod tests {
                     committed: Mutex::new(HashMap::new()),
                     adapters: Mutex::new(HashMap::new()),
                     adapter_projections: Mutex::new(HashMap::new()),
+                    admissions: Mutex::new(Vec::new()),
                     removed_groups: AtomicUsize::new(0),
                     discarded: AtomicUsize::new(0),
                 }),
@@ -1136,19 +1211,20 @@ mod tests {
                     name: endpoint,
                 },
                 group_key: group_key(),
+                mdc_checksum: card.mdcsum().to_string(),
+                projection_fingerprint: card.source_path.clone().unwrap(),
                 card,
-                fingerprint: "spec".to_string(),
-                projection_fingerprint: "projection".to_string(),
             }))
         }
 
         async fn prepare(
             &self,
             spec: GroupSpec,
-            _admitted_ids: watch::Receiver<Vec<u64>>,
+            admitted_ids: watch::Receiver<Vec<u64>>,
             _cancellation: CancellationToken,
         ) -> anyhow::Result<Self::Prepared> {
             let build = self.starts.fetch_add(1, Ordering::SeqCst) as u64;
+            self.admissions.lock().unwrap().push(admitted_ids);
             self.start_tx.send(spec).unwrap();
             self.release.acquire().await.unwrap().forget();
             if self
@@ -1180,10 +1256,20 @@ mod tests {
             {
                 anyhow::bail!("injected commit conflict");
             }
-            self.committed.lock().unwrap().insert(
+            let mut committed = self.committed.lock().unwrap();
+            // `ModelManager::commit_discovery_group` refuses a group id it already
+            // holds, so a caller that commits over a live entry must withdraw it
+            // first.
+            anyhow::ensure!(
+                !committed.contains_key(&spec.key.id()),
+                "discovery group {:?} is already committed",
+                spec.key.id()
+            );
+            committed.insert(
                 spec.key.id(),
                 members.iter().map(|member| member.key.clone()).collect(),
             );
+            drop(committed);
             self.store_adapters(&spec.key, adapters);
             Ok(())
         }
@@ -1235,7 +1321,9 @@ mod tests {
         }
     }
 
-    fn instance(id: u64, fingerprint: &str) -> DesiredInstance {
+    fn instance(id: u64, mdc_checksum: &str) -> DesiredInstance {
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        card.source_path = Some(mdc_checksum.to_string());
         let mcid = ModelCardInstanceId {
             namespace: "namespace".to_string(),
             component: "worker".to_string(),
@@ -1251,10 +1339,10 @@ mod tests {
                 component: "worker".to_string(),
                 name: "generate".to_string(),
             },
-            card: ModelDeploymentCard::with_name_only("model"),
             group_key: group_key(),
-            fingerprint: fingerprint.to_string(),
-            projection_fingerprint: fingerprint.to_string(),
+            mdc_checksum: card.mdcsum().to_string(),
+            card,
+            projection_fingerprint: mdc_checksum.to_string(),
         }
     }
 
@@ -1328,7 +1416,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conflict_fails_ready_group_closed_and_recovers_after_clear() {
+    async fn competing_cohorts_preserve_serving_until_complete_incumbent_drain() {
         let (host, mut starts) = FakeHost::new();
         let mut controller = ModelDiscoveryController::new(host.clone());
         let compatible = instance(1, "first-spec");
@@ -1341,34 +1429,44 @@ mod tests {
 
         let conflicting = instance(2, "second-spec");
         controller.apply_added(conflicting.clone());
-        assert!(host.members(&group_key()).is_empty());
-        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 1);
+        controller.apply_added(instance(3, "second-spec"));
+        controller.apply_added(instance(4, "third-spec"));
+        let old_admissions = host.admissions.lock().unwrap()[0].clone();
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([compatible.key.clone()])
+        );
+        assert_eq!(*old_admissions.borrow(), vec![1]);
 
-        controller.apply_removed(&conflicting.key);
+        controller.apply_removed(&compatible.key);
+        assert!(host.members(&group_key()).is_empty());
+        assert!(old_admissions.borrow().is_empty());
+        assert!(old_admissions.has_changed().is_err());
         controller.start_queued_builds();
         starts.recv().await.unwrap();
         host.release.add_permits(1);
         finish_build(&mut controller).await;
-        assert_eq!(host.members(&group_key()), BTreeSet::from([compatible.key]));
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([conflicting.key, instance(3, "second-spec").key])
+        );
+        assert_eq!(*host.admissions.lock().unwrap()[1].borrow(), vec![2, 3]);
+        assert!(old_admissions.borrow().is_empty());
     }
 
     #[tokio::test]
-    async fn conflict_during_build_cancels_without_publishing_either_cohort() {
+    async fn first_cohort_reserves_queued_and_active_construction() {
         let (host, mut starts) = FakeHost::new();
         let mut controller = ModelDiscoveryController::new(host.clone());
         let first = instance(1, "first-spec");
         let conflicting = instance(2, "second-spec");
         controller.apply_added(first.clone());
-        controller.start_queued_builds();
-        starts.recv().await.unwrap();
-
         controller.apply_added(conflicting.clone());
-        finish_build(&mut controller).await;
-        assert!(host.members(&group_key()).is_empty());
-
-        controller.apply_removed(&conflicting.key);
         controller.start_queued_builds();
         starts.recv().await.unwrap();
+
+        controller.apply_added(instance(3, "second-spec"));
+        controller.apply_added(instance(4, "third-spec"));
         host.release.add_permits(1);
         finish_build(&mut controller).await;
         assert_eq!(host.members(&group_key()), BTreeSet::from([first.key]));
@@ -1391,26 +1489,31 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn emptied_group_serves_through_a_replacement_without_rebuilding() {
+    async fn emptied_group_keeps_its_catalog_entry_while_a_replacement_rebuilds() {
         let (host, mut starts) = FakeHost::new();
         let mut controller =
             ModelDiscoveryController::with_removal_grace(host.clone(), DEFAULT_GROUP_REMOVAL_GRACE);
         let departing = instance(1, "spec");
         controller.apply_added(departing.clone());
         controller.start_queued_builds();
-        starts.recv().await.unwrap();
+        let departing_spec = starts.recv().await.unwrap();
         host.release.add_permits(1);
         finish_build(&mut controller).await;
         assert_eq!(
             host.members(&group_key()),
             BTreeSet::from([departing.key.clone()])
         );
+        let admissions = controller.groups[&group_key()].admission_tx.subscribe();
 
         controller.apply_removed(&departing.key);
         assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
         assert_eq!(
             host.members(&group_key()),
             BTreeSet::from([departing.key.clone()])
+        );
+        assert!(
+            admissions.borrow().is_empty(),
+            "the drained group admits nobody while its entry is held"
         );
 
         tokio::time::advance(Duration::from_millis(500)).await;
@@ -1423,12 +1526,31 @@ mod tests {
 
         let replacement = instance(2, "spec");
         controller.apply_added(replacement.clone());
+        controller.start_queued_builds();
+        let replacement_spec = starts.recv().await.unwrap();
+        assert_eq!(host.starts.load(Ordering::SeqCst), 2);
+        assert_ne!(departing_spec.generation, replacement_spec.generation);
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([departing.key.clone()]),
+            "the entry stays listed while the successor builds"
+        );
+        assert!(
+            admissions.borrow().is_empty(),
+            "a retained client never sees the successor's worker IDs"
+        );
+
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
         assert_eq!(
             host.members(&group_key()),
             BTreeSet::from([replacement.key.clone()])
         );
-        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
-        assert_eq!(host.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            host.removed_groups.load(Ordering::SeqCst),
+            1,
+            "the successor withdraws the retired entry as it commits its own"
+        );
 
         tokio::time::advance(Duration::from_secs(5)).await;
         controller.release_due_retries();
@@ -1436,7 +1558,7 @@ mod tests {
             host.members(&group_key()),
             BTreeSet::from([replacement.key])
         );
-        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1465,7 +1587,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_configured_grace_holds_the_group_for_a_slow_replacement() {
+    async fn a_configured_grace_holds_the_entry_for_a_slow_replacement() {
         let (host, mut starts) = FakeHost::new();
         let mut controller =
             ModelDiscoveryController::with_removal_grace(host.clone(), Duration::from_secs(30));
@@ -1487,12 +1609,16 @@ mod tests {
 
         let replacement = instance(2, "spec");
         controller.apply_added(replacement.clone());
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
         assert_eq!(
             host.members(&group_key()),
             BTreeSet::from([replacement.key.clone()])
         );
-        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
-        assert_eq!(host.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 1);
+        assert_eq!(host.starts.load(Ordering::SeqCst), 2);
 
         tokio::time::advance(Duration::from_secs(60)).await;
         controller.release_due_retries();
@@ -1500,7 +1626,46 @@ mod tests {
             host.members(&group_key()),
             BTreeSet::from([replacement.key])
         );
-        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 1);
+    }
+
+    /// A replacement that is still building when the window closes loses the
+    /// catalog entry, which is the whole point of bounding the window: a model
+    /// whose workers are gone must not stay listed indefinitely.
+    #[tokio::test(start_paused = true)]
+    async fn a_replacement_that_misses_the_deadline_loses_the_retained_entry() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller =
+            ModelDiscoveryController::with_removal_grace(host.clone(), DEFAULT_GROUP_REMOVAL_GRACE);
+        let departing = instance(1, "spec");
+        controller.apply_added(departing.clone());
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+
+        controller.apply_removed(&departing.key);
+        let replacement = instance(2, "spec");
+        controller.apply_added(replacement.clone());
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+
+        tokio::time::advance(DEFAULT_GROUP_REMOVAL_GRACE + Duration::from_secs(1)).await;
+        controller.release_due_retries();
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 1);
+        assert!(host.members(&group_key()).is_empty());
+        assert!(
+            controller.groups.contains_key(&group_key()),
+            "the successor is still building and keeps its group"
+        );
+
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([replacement.key])
+        );
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1717,68 +1882,139 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn failed_build_remains_unpublished_until_its_retry_succeeds() {
+    async fn snapshots_preserve_priority_and_recreated_cohorts_join_the_end() {
         let (host, mut starts) = FakeHost::new();
-        host.failures.store(1, Ordering::SeqCst);
-        let mut controller = ModelDiscoveryController::new(host.clone());
-        let desired = instance(1, "spec");
-        controller.apply_added(desired.clone());
-        controller.start_queued_builds();
-        starts.recv().await.unwrap();
-        host.release.add_permits(1);
-        finish_build(&mut controller).await;
+        let mut controller =
+            ModelDiscoveryController::with_removal_grace(host.clone(), DEFAULT_GROUP_REMOVAL_GRACE);
+        let first = instance(1, "first");
+        let second = instance(2, "second");
+        let third = instance(3, "third");
+        for member in [&first, &second, &third] {
+            controller.apply_added(member.clone());
+        }
+        controller.apply_removed(&second.key);
+        controller.apply_added(second.clone());
+        controller.apply_reconciliation(
+            ReconciliationResult {
+                revision: controller.revision,
+                instances: Ok([&second, &third, &first].map(discovery_instance).to_vec()),
+            },
+            &NamespaceFilter::Global,
+        );
+
+        // Snapshot order cannot promote a newcomer; disappearance resets priority.
+        for incumbent in [&first, &third, &second] {
+            controller.start_queued_builds();
+            starts.recv().await.unwrap();
+            host.release.add_permits(1);
+            finish_build(&mut controller).await;
+            assert_eq!(
+                host.members(&group_key()),
+                BTreeSet::from([incumbent.key.clone()])
+            );
+            controller.apply_removed(&incumbent.key);
+        }
+        // The last cohort's departure empties the group, so its catalog entry is
+        // held for the removal grace before it goes.
+        tokio::time::advance(DEFAULT_GROUP_REMOVAL_GRACE + Duration::from_secs(1)).await;
+        controller.release_due_retries();
         assert!(host.members(&group_key()).is_empty());
-
-        tokio::time::advance(Duration::from_millis(999)).await;
-        controller.release_due_retries();
-        controller.start_queued_builds();
-        assert!(starts.try_recv().is_err());
-
-        tokio::time::advance(Duration::from_millis(1)).await;
-        controller.release_due_retries();
-        controller.start_queued_builds();
-        starts.recv().await.unwrap();
-        host.release.add_permits(1);
-        finish_build(&mut controller).await;
-        assert_eq!(host.members(&group_key()), BTreeSet::from([desired.key]));
     }
 
     #[tokio::test(start_paused = true)]
-    async fn blocked_group_retries_on_its_deadline_not_unrelated_churn() {
-        let (host, mut starts) = FakeHost::new();
-        host.commit_failures.store(1, Ordering::SeqCst);
-        let mut controller = ModelDiscoveryController::new(host.clone());
-        let desired = instance(1, "spec");
-        controller.apply_added(desired.clone());
-        controller.start_queued_builds();
-        starts.recv().await.unwrap();
-        host.release.add_permits(1);
-        finish_build(&mut controller).await;
+    async fn rejected_workers_and_adapters_cannot_reset_retry_or_change_publication() {
+        for fail_at_commit in [false, true] {
+            let (host, mut starts) = FakeHost::new();
+            if fail_at_commit {
+                host.commit_failures.store(1, Ordering::SeqCst);
+            } else {
+                host.failures.store(1, Ordering::SeqCst);
+            }
+            let mut controller = ModelDiscoveryController::new(host.clone());
+            let incumbent = instance(1, "incumbent");
+            let rejected = instance(2, "rejected");
+            let mut adapter = instance(2, "adapter");
+            adapter.mcid.model_suffix = Some("adapter".to_string());
+            adapter.key = adapter.mcid.to_path();
+            controller.apply_added(incumbent.clone());
+            controller.start_queued_builds();
+            starts.recv().await.unwrap();
+            host.release.add_permits(1);
+            finish_build(&mut controller).await;
+            assert!(host.members(&group_key()).is_empty());
 
-        let mut unrelated_adapter = instance(99, "spec");
-        unrelated_adapter.mcid.model_suffix = Some("unrelated-adapter".to_string());
-        unrelated_adapter.key = unrelated_adapter.mcid.to_path();
-        controller.apply_added(unrelated_adapter);
-        controller.start_queued_builds();
-        assert!(starts.try_recv().is_err());
+            tokio::time::advance(Duration::from_millis(500)).await;
+            controller.apply_added(rejected.clone());
+            controller.apply_added(adapter.clone());
+            controller.apply_removed(&rejected.key);
+            controller.apply_added(rejected);
+            adapter.projection_fingerprint = "updated".to_string();
+            controller.apply_added(adapter.clone());
+            let mut unrelated_adapter = instance(99, "adapter");
+            unrelated_adapter.mcid.model_suffix = Some("unrelated-adapter".to_string());
+            unrelated_adapter.key = unrelated_adapter.mcid.to_path();
+            controller.apply_added(unrelated_adapter);
+            controller.start_queued_builds();
+            assert!(starts.try_recv().is_err());
 
-        tokio::time::advance(Duration::from_secs(1)).await;
-        controller.release_due_retries();
-        controller.start_queued_builds();
-        starts.recv().await.unwrap();
-        host.release.add_permits(1);
-        finish_build(&mut controller).await;
-        assert_eq!(host.members(&group_key()), BTreeSet::from([desired.key]));
+            tokio::time::advance(Duration::from_millis(499)).await;
+            controller.release_due_retries();
+            controller.start_queued_builds();
+            assert!(starts.try_recv().is_err());
+            assert!(host.members(&group_key()).is_empty());
+
+            tokio::time::advance(Duration::from_millis(1)).await;
+            controller.release_due_retries();
+            controller.start_queued_builds();
+            starts.recv().await.unwrap();
+            host.release.add_permits(1);
+            finish_build(&mut controller).await;
+            assert_eq!(
+                host.members(&group_key()),
+                BTreeSet::from([incumbent.key.clone()])
+            );
+            assert!(host.adapters(&group_key()).is_empty());
+
+            let mut admissions = host.admissions.lock().unwrap().last().unwrap().clone();
+            admissions.borrow_and_update();
+            // A publication attempt here would fail and withdraw the safe membership.
+            host.replace_failures.store(1, Ordering::SeqCst);
+            controller.apply_removed(&adapter.key);
+            controller.apply_added(adapter);
+            controller.apply_added(instance(3, "another-rejected"));
+            controller.apply_removed(&instance(3, "another-rejected").key);
+            assert_eq!(host.members(&group_key()), BTreeSet::from([incumbent.key]));
+            assert!(!admissions.has_changed().unwrap());
+            assert!(host.adapters(&group_key()).is_empty());
+        }
     }
 
     #[tokio::test]
     async fn reconciliation_repairs_missed_state_without_undoing_newer_events() {
-        let (host, _starts) = FakeHost::new();
-        let mut controller = ModelDiscoveryController::new(host);
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
         let first = instance(1, "spec");
         let second = instance(2, "spec");
 
         controller.apply_added(first.clone());
+        let duplicate_revision = controller.revision;
+        controller.apply_added(first.clone());
+        controller.apply_reconciliation(
+            ReconciliationResult {
+                revision: duplicate_revision,
+                instances: Ok(Vec::new()),
+            },
+            &NamespaceFilter::Global,
+        );
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([first.key.clone()])
+        );
+
         let snapshot_revision = controller.revision;
         controller.apply_removed(&first.key);
         controller.apply_added(second.clone());
@@ -1790,8 +2026,14 @@ mod tests {
             &NamespaceFilter::Global,
         );
 
-        assert!(!controller.desired.contains_key(&first.key));
-        assert!(controller.desired.contains_key(&second.key));
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([second.key.clone()])
+        );
 
         let repair_revision = controller.revision;
         controller.apply_reconciliation(
@@ -1801,13 +2043,6 @@ mod tests {
             },
             &NamespaceFilter::Global,
         );
-        assert!(controller.desired.contains_key(&first.key));
-        assert!(!controller.desired.contains_key(&second.key));
-    }
-
-    #[test]
-    fn retry_delay_follows_the_capped_schedule() {
-        let delays = (1..=7).map(retry_delay).collect::<Vec<_>>();
-        assert_eq!(delays, [1, 2, 4, 8, 16, 30, 30].map(Duration::from_secs));
+        assert_eq!(host.members(&group_key()), BTreeSet::from([first.key]));
     }
 }
