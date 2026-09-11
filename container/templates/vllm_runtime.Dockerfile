@@ -182,19 +182,8 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 {# Inline expression, not a block tag: render.py leaves trim_blocks off, so a tag
    on its own line inside the RUN breaks the backslash continuation. #}
 {% set vllm_rs_required = "1" if device == "cuda" else "0" %}
-{# EngineCore msgpack is positional, so any auto-loaded plugin that extends
-   vllm.v1.engine.EngineCoreOutput makes every engine output the wrong length for
-   the strict Rust decoder in `vllm-rs`. vLLM-Omni appends three fields and is
-   installed in this image, so the wrapper below pins VLLM_PLUGINS.
-   The allowlist is deliberately minimal: it names only the plugin this image
-   installs on purpose, so it also excludes vLLM's own in-tree general plugins
-   (lora_filesystem_resolver, lora_hf_hub_resolver), which the decoder does
-   tolerate but which the sidecar protocol has no LoRA support to use. The same
-   variable is the shared gate for vllm.platform_plugins, vllm.io_processor_plugins,
-   vllm.stat_logger_plugins, and vllm.endpoint_plugins. Without ModelExpress this
-   renders the empty string, which vLLM reads as an allowlist matching no plugin
-   at all rather than as unset. A caller who wants any of them back exports
-   VLLM_PLUGINS itself. #}
+{# EngineCore msgpack is positional: an auto-loaded plugin that extends
+   EngineCoreOutput breaks the `vllm-rs` decoder. See lib/sidecar/vllm/README.md. #}
 {% set vllm_rs_plugins = "modelexpress" if context.vllm.enable_modelexpress == "true" else "" %}
 
 # The vLLM 0.28.0 release images resolve the unbounded `transformers>=5.5.3`
@@ -545,11 +534,8 @@ if actual != expected:
     raise RuntimeError(f"expected transformers {expected}, found {actual}")
 PY
 
-# `vllm-rs` ships inside the installed `vllm` package, not as a console script.
-# The PATH entry is a wrapper rather than a symlink: it still resolves the binary
-# out of the installed package, so it stays at that package's vLLM revision, and
-# it additionally pins VLLM_PLUGINS for the engine processes `vllm-rs` manages.
-# Fatal on cuda only.
+# `vllm-rs` ships inside the installed `vllm` package, not as a console script; the
+# wrapper keeps the binary at that package's vLLM revision. Fatal on cuda only.
 RUN set -eu; \
     pkg="$({{ python_executable }} -c 'import os, vllm; print(os.path.dirname(vllm.__file__))')"; \
     if [ -f "${pkg}/vllm-rs" ] && [ -x "${pkg}/vllm-rs" ]; then \
