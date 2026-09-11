@@ -69,8 +69,7 @@ libfabric sees only those 4 devices, even though all 32 node EFAs are visible in
 lets an EFA NIC DMA directly into and out of GPU HBM without staging through CPU memory.
 When the NIC and GPU share a PCIe root complex, this path is direct. When they do not,
 the DMA must traverse the inter-root or inter-NUMA interconnect, adding latency and
-reducing effective bandwidth. On p5.48xlarge the penalty for a cross-NUMA GPU-to-NIC
-assignment is roughly 25–40% bandwidth reduction on that path. More importantly, when
+reducing effective bandwidth. More importantly, when
 all eight GPU workers transfer KV cache simultaneously, co-location guarantees eight
 non-contending PCIe paths. Random assignment from the device plugin can serialize
 transfers that should be parallel, with the effect compounding at high request concurrency
