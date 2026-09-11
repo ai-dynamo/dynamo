@@ -247,6 +247,7 @@ async fn dropping_sidecar_stream_cancels_mocker_work() {
     .expect("dropping the gRPC stream should cancel scheduler work promptly");
 }
 
+#[path = "../../tests/common/mod.rs"]
 mod common;
 
 #[tokio::test]

@@ -88,8 +88,7 @@ fn load_engine_args(value: Option<&str>) -> anyhow::Result<MockEngineArgs> {
     }
 
     MockEngineArgs::from_json_str(&Value::Object(object).to_string())
-        .map_err(anyhow::Error::msg)?
-        .normalized()
+        .map_err(anyhow::Error::msg)
         .context("invalid Mocker engine arguments")
 }
 
@@ -115,7 +114,8 @@ async fn main() -> anyhow::Result<()> {
             bootstrap_port: args.bootstrap_port,
         },
         engine_args,
-    )?;
+    )
+    .await?;
 
     tracing::info!(
         listen = %args.listen,

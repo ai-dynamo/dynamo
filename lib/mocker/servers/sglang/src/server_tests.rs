@@ -9,6 +9,7 @@ fn engine_args() -> MockEngineArgs {
     MockEngineArgs::builder()
         .engine_type(EngineType::Sglang)
         .block_size(4)
+        .enable_prefix_caching(false)
         .num_gpu_blocks(128)
         .max_num_seqs(Some(8))
         .max_num_batched_tokens(Some(64))
@@ -36,7 +37,9 @@ fn request(request_id: &str) -> pb::GenerateRequest {
 
 #[tokio::test]
 async fn generate_rejects_invalid_requests() {
-    let service = SglangMockerService::new(MockerServerConfig::default(), engine_args()).unwrap();
+    let service = SglangMockerService::new(MockerServerConfig::default(), engine_args())
+        .await
+        .unwrap();
     let mut negative = request("negative");
     negative.input_ids = vec![-1];
     assert_eq!(
@@ -80,6 +83,7 @@ async fn generate_rejects_invalid_requests() {
         },
         engine_args(),
     )
+    .await
     .unwrap();
     assert_eq!(
         short_context
@@ -98,6 +102,7 @@ async fn generate_rejects_invalid_requests() {
         },
         engine_args(),
     )
+    .await
     .unwrap();
     assert_eq!(
         prefill_service
@@ -112,7 +117,9 @@ async fn generate_rejects_invalid_requests() {
 
 #[tokio::test]
 async fn zero_top_logprobs_omits_top_logprob_metadata() {
-    let service = SglangMockerService::new(MockerServerConfig::default(), engine_args()).unwrap();
+    let service = SglangMockerService::new(MockerServerConfig::default(), engine_args())
+        .await
+        .unwrap();
     let mut selected_only = request("selected-only-logprobs");
     selected_only.top_logprobs_num = Some(0);
     let mut stream = service
@@ -136,7 +143,9 @@ async fn zero_top_logprobs_omits_top_logprob_metadata() {
 
 #[tokio::test]
 async fn streaming_survives_a_producer_that_outruns_a_stalled_consumer() {
-    let service = SglangMockerService::new(MockerServerConfig::default(), engine_args()).unwrap();
+    let service = SglangMockerService::new(MockerServerConfig::default(), engine_args())
+        .await
+        .unwrap();
     let mut bursty = request("bursty");
     bursty.sampling_params.as_mut().unwrap().max_new_tokens = Some(50);
     let mut stream = service
@@ -160,7 +169,9 @@ async fn streaming_survives_a_producer_that_outruns_a_stalled_consumer() {
 
 #[tokio::test]
 async fn missing_abort_is_idempotent() {
-    let service = SglangMockerService::new(MockerServerConfig::default(), engine_args()).unwrap();
+    let service = SglangMockerService::new(MockerServerConfig::default(), engine_args())
+        .await
+        .unwrap();
     for _ in 0..2 {
         let response = service
             .abort(Request::new(pb::AbortRequest {
@@ -172,4 +183,72 @@ async fn missing_abort_is_idempotent() {
             .into_inner();
         assert!(response.success);
     }
+}
+
+#[tokio::test]
+async fn kv_event_discovery_follows_regular_mocker_rules() {
+    for (mode, prefix_caching, publishes) in [
+        (ServerMode::Aggregated, true, true),
+        (ServerMode::Prefill, true, true),
+        (ServerMode::Decode, true, false),
+        (ServerMode::Aggregated, false, false),
+    ] {
+        let mut args = engine_args();
+        args.enable_prefix_caching = prefix_caching;
+        let service = SglangMockerService::new(
+            MockerServerConfig {
+                mode,
+                ..Default::default()
+            },
+            args,
+        )
+        .await
+        .unwrap();
+        let info: serde_json::Value = serde_json::from_str(
+            &service
+                .get_server_info(Request::new(pb::GetServerInfoRequest {}))
+                .await
+                .unwrap()
+                .into_inner()
+                .json_info,
+        )
+        .unwrap();
+        let events = &info["kv_events"];
+        assert_eq!(!events.is_null(), publishes);
+        if publishes {
+            assert_eq!(events["publisher"], "zmq");
+            assert_eq!(events["endpoint_host"], "0.0.0.0");
+            assert!(events["endpoint_port_base"].as_u64().unwrap() > 0);
+            assert_eq!(events["block_size"], 4);
+            assert_eq!(events["dp_size"], 1);
+            assert_eq!(events["topic"], "");
+        }
+    }
+}
+
+#[tokio::test]
+async fn failed_kv_publisher_is_not_advertised() {
+    let occupied = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let mut args = engine_args();
+    args.enable_prefix_caching = true;
+    args.zmq_kv_events_port = Some(occupied.local_addr().unwrap().port());
+    let service = SglangMockerService::new(MockerServerConfig::default(), args)
+        .await
+        .unwrap();
+    let info: serde_json::Value = serde_json::from_str(
+        &service
+            .get_server_info(Request::new(pb::GetServerInfoRequest {}))
+            .await
+            .unwrap()
+            .into_inner()
+            .json_info,
+    )
+    .unwrap();
+    assert!(info["kv_events"].is_null());
+    assert!(
+        service
+            .generate(Request::new(request("no-publisher")))
+            .await
+            .is_ok()
+    );
 }

@@ -32,6 +32,7 @@ impl RunningServer {
             },
             engine_args,
         )
+        .await
         .unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -66,6 +67,7 @@ fn fast_engine_args() -> MockEngineArgs {
     MockEngineArgs::builder()
         .engine_type(EngineType::Sglang)
         .block_size(4)
+        .enable_prefix_caching(false)
         .num_gpu_blocks(4_096)
         .max_num_seqs(Some(64))
         .max_num_batched_tokens(Some(1_024))
@@ -267,4 +269,19 @@ async fn sidecar_abort_releases_mocker_work() {
     .await
     .expect("Abort should release scheduler work promptly");
     consumer.abort();
+}
+
+#[path = "../../tests/common/mod.rs"]
+mod common;
+
+#[tokio::test]
+async fn sidecar_relays_stored_and_evicted_blocks() {
+    let mut args = fast_engine_args();
+    args.enable_prefix_caching = true;
+    args.num_gpu_blocks = 8;
+    let block_size = u32::try_from(args.block_size).unwrap();
+    let server = RunningServer::start(ServerMode::Aggregated, args).await;
+    let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
+    engine.start(0).await.unwrap();
+    common::check_kv_events(&engine, block_size).await;
 }
