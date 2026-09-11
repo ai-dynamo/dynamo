@@ -569,9 +569,22 @@ def test_python_worker_config_forwards_shutdown_to_the_rust_config(monkeypatch):
 
     forwarded = captured["shutdown"]
     assert forwarded is not None, "the nested shutdown config was dropped"
-    # It is a Rust pyclass by this point, so assert on what we can observe:
-    # that it was constructed from our values rather than defaulted.
     assert isinstance(forwarded, core.backend.ShutdownConfig)
+    # Assert the values, not just the type. Asserting `isinstance` alone passed
+    # identically when the forwarding kwargs were replaced by a bare
+    # `ShutdownConfig()` — so the test could not catch a dropped setting, which
+    # is the only thing it exists to catch.
+    assert (
+        forwarded.total_secs == 30.0
+    ), f"total_secs was not forwarded; got {forwarded.total_secs!r}"
+    assert forwarded.kv_transfer_fallback == "skip", (
+        f"kv_transfer_fallback was not forwarded; got "
+        f"{forwarded.kv_transfer_fallback!r}"
+    )
+    # Unset fields must stay unset rather than being filled with defaults on
+    # the way across — an unset field means "use the environment".
+    assert forwarded.router_grace_secs is None
+    assert forwarded.cleanup_timeout_secs is None
 
 
 class _StopBeforeRuntime(Exception):

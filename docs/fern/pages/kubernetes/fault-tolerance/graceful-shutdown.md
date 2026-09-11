@@ -46,8 +46,8 @@ Six environment variables control Dynamo's internal draining. Set the HTTP timeo
 |----------|---------|---------|
 | `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` | `5` | How long the Frontend waits for admitted HTTP and WebSocket inference requests to finish before it cancels runtime state. |
 | `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS` | `5` | How long workers keep serving after endpoints unregister from discovery, before endpoints are invalidated. |
-| `DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` | `900` | Upper bound on waiting for in-flight requests to finish. If draining exceeds this, Dynamo logs the remaining endpoint count and tears down anyway. |
-| `DYN_WORKER_SHUTDOWN_INFLIGHT_TIMEOUT_SECS` | `900` | Upper bound on a worker waiting for admitted requests to finish, before it releases engine resources. |
+| `DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` | `900` | Upper bound on waiting for in-flight requests to finish, for a process that is *not* a backend worker (the frontend, an embedded runtime). A backend worker's drain is bounded by `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT` instead — the same deadline its stages spend against, so the drain and the wait for it cannot disagree. |
+| `DYN_WORKER_SHUTDOWN_INFLIGHT_TIMEOUT_SECS` | uncapped | Cap on a worker waiting for admitted requests to finish, *within* the total budget. Unset means the stage is bounded only by what is left of `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT`; set it to make the barrier give up sooner and leave more of the budget for KV drain and cleanup. Raising it past the total has no effect — raise the total instead. |
 | `DYN_WORKER_SHUTDOWN_KV_TRANSFER_FALLBACK` | engine's choice | `wait` or `skip`. What a prefill worker does when its engine cannot report KV-transfer state. Overrides the engine's own declaration. Leave unset unless you know the engine holds no KV a decode peer could still be reading — `skip` can free GPU memory mid-transfer. |
 | `DYN_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECS` | `30` | Upper bound on a worker's `engine.cleanup()` (both Rust and Python engines run under the same Rust worker). If teardown exceeds this, Dynamo abandons the call — it keeps running until the process exits — and continues with transport teardown rather than hanging. Defaults to `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT` (30s release, 5s debug). |
 
@@ -56,8 +56,10 @@ The defaults are sound for most deployments. Raise the relevant timeout only for
 > **Rust backend workers spend one total budget, not a sum.** Each per-stage
 > timeout is a cap, and every stage draws from the same
 > `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT` deadline measured from SIGTERM: a
-> stage gets `min(its cap, what is left)`, with a reserve held back so cleanup
-> is always funded. Size `terminationGracePeriodSeconds` against that total
+> stage gets `min(its cap, what is left)`. No reserve is held back from the
+> earlier stages — cleanup is funded by its own floor, and the force-exit
+> watchdog is extended by that floor so it cannot fire mid-cleanup. Size
+> `terminationGracePeriodSeconds` against that total plus the cleanup floor
 > plus a margin, not against the sum of the individual caps.
 >
 > The frontend's `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` is separate — it

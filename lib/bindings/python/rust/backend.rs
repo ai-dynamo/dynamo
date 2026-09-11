@@ -477,6 +477,52 @@ impl ShutdownConfig {
             },
         })
     }
+
+    // Getters exist so Python can observe what was actually forwarded across
+    // the boundary. Without them the only assertion a test could make was
+    // `isinstance(forwarded, ShutdownConfig)`, which passes just as well when
+    // the forwarding code is replaced by a bare `ShutdownConfig()` — i.e. it
+    // could not catch a silently dropped setting, the one failure it existed
+    // to catch.
+    #[getter]
+    fn total_secs(&self) -> Option<f64> {
+        self.inner.total_secs
+    }
+
+    #[getter]
+    fn router_grace_secs(&self) -> Option<f64> {
+        self.inner.router_grace_secs
+    }
+
+    #[getter]
+    fn inflight_timeout_secs(&self) -> Option<f64> {
+        self.inner.inflight_timeout_secs
+    }
+
+    #[getter]
+    fn kv_transfer_timeout_secs(&self) -> Option<f64> {
+        self.inner.kv_transfer_timeout_secs
+    }
+
+    #[getter]
+    fn cleanup_timeout_secs(&self) -> Option<f64> {
+        self.inner.cleanup_timeout_secs
+    }
+
+    #[getter]
+    fn kv_transfer_fallback(&self) -> Option<&'static str> {
+        match self.inner.kv_transfer_fallback {
+            Some(RsKvTransferFallback::WaitFullBudget) => Some("wait"),
+            Some(RsKvTransferFallback::Skip) => Some("skip"),
+            // `Undeclared` is the engine's own default, never something a
+            // caller can construct here, so it maps to "unset" like `None`.
+            Some(RsKvTransferFallback::Undeclared) | None => None,
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("{:?}", self.inner)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -759,6 +805,10 @@ impl Worker {
                 RsWorker::new(Arc::new(py_engine), config)
             };
 
+            // Captured before `run` consumes the worker: the trailing teardown
+            // below must spend what is left of the worker's budget, not open a
+            // second one.
+            let deadline = worker.shutdown_deadline();
             let result = worker.run(runtime.clone()).await.map_err(to_pyerr);
 
             // runtime_from_existing() shares Tokio but creates independent
@@ -769,9 +819,21 @@ impl Worker {
             // Awaited, not fire-and-forget: `shutdown` only spawns the
             // teardown, so returning here lets the interpreter exit before the
             // endpoint in-flight drain runs.
-            runtime
-                .shutdown_and_wait(Some(rs::worker::graceful_shutdown_timeout()))
-                .await;
+            //
+            // Bounded by what remains of the worker's budget, matching
+            // `backend_common::run`. A fresh `graceful_shutdown_timeout()` here
+            // made worst-case shutdown the sum of two full budgets — and this
+            // runs *after* `Worker::run` returns, so it is outside the
+            // force-exit watchdog and nothing would have cut it short. An
+            // operator sizing `terminationGracePeriodSeconds` against the
+            // configured deadline would have been SIGKILLed mid-teardown.
+            let teardown_bound = deadline
+                .get()
+                .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
+                // Never armed: the worker exited without a shutdown signal, so
+                // there is no budget to spend down.
+                .unwrap_or_else(rs::worker::graceful_shutdown_timeout);
+            runtime.shutdown_and_wait(Some(teardown_bound)).await;
 
             result
         })

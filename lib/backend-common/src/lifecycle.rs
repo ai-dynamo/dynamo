@@ -178,18 +178,39 @@ impl Drop for RequestGuard {
 
 /// Remove this worker from discovery so routers stop selecting it.
 ///
-/// Unbudgeted: a single discovery RPC, and a worker that cannot unregister
-/// must still proceed with the rest of shutdown.
+/// Bounded by the remaining total, like every other stage. "A worker that
+/// cannot unregister must still proceed with the rest of shutdown" only holds
+/// if `unregister()` *returns*: it is a CR write against the API server on the
+/// kube backend and a JetStream delete on the KV-store backend, and neither has
+/// a bound this worker controls. Left unbudgeted, a partitioned API server
+/// wedged shutdown here — force-exiting at 70 with the engine never cleaned up
+/// on the signal path, and hanging forever holding the GPUs on the paths that
+/// never arm the watchdog.
+///
+/// `Stage::Unregister`'s cap is already `Duration::MAX`, so this costs no new
+/// knob: the remaining total is the only bound that applies.
 pub async fn stage_unregister(
     discovery: &dyn DiscoveryRegistration,
     budget: &ShutdownBudget,
 ) -> StageOutcome {
     let started = Instant::now();
-    let (reason, detail) = match discovery.unregister().await {
-        Ok(()) => (StageReason::Completed, None),
-        Err(error) => {
+    let (reason, detail) = match maybe_timeout(
+        budget.allowance(Stage::Unregister),
+        discovery.unregister(),
+    )
+    .await
+    {
+        Ok(Ok(())) => (StageReason::Completed, None),
+        Ok(Err(error)) => {
             tracing::warn!(%error, "discovery unregister failed");
             (StageReason::Skipped, Some(error.to_string()))
+        }
+        Err(()) => {
+            tracing::warn!(
+                "discovery unregister exceeded the remaining shutdown budget; \
+                 continuing so engine cleanup still runs"
+            );
+            (StageReason::TimedOut, None)
         }
     };
     let outcome =
@@ -386,6 +407,14 @@ pub async fn stage_kv_quiescence(
             // unreachable; treat defensively as completed.
             Ok(false) => StageReason::Completed,
             Err(()) if ever_reported => StageReason::TimedOut,
+            // A zero allowance grants exactly one poll, and a real
+            // `is_quiescent` — a PyO3 call, an RPC — is `Pending` on that poll,
+            // so `ever_reported` stays false through no fault of the engine.
+            // Reporting `Unsupported` there told authors to implement a
+            // predicate they had already implemented, and put the wrong
+            // `reason` on `dynamo_component_shutdown_stage_seconds`, which
+            // could then not distinguish "no introspection" from "no budget".
+            Err(()) if allowance.is_some_and(|limit| limit.is_zero()) => StageReason::Skipped,
             Err(()) => StageReason::Unsupported,
         },
     };
@@ -522,6 +551,31 @@ mod tests {
         assert_eq!(outcome.stage, Stage::Unregister);
         assert_eq!(outcome.reason, StageReason::Completed);
         assert!(outcome.detail.is_none());
+    }
+
+    struct HangingDiscovery;
+
+    #[async_trait]
+    impl DiscoveryRegistration for HangingDiscovery {
+        async fn unregister(&self) -> Result<()> {
+            std::future::pending::<()>().await;
+            unreachable!("pending never resolves")
+        }
+        async fn register(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Regression: this stage used to ignore the budget entirely. A discovery
+    /// backend that never answers — an unreachable API server, a NATS client
+    /// stuck reconnecting — wedged the whole sequence here, so `engine.cleanup()`
+    /// never ran and the GPUs were never released. It must give up and let the
+    /// rest of shutdown proceed.
+    #[tokio::test(start_paused = true)]
+    async fn stage_unregister_gives_up_when_discovery_never_answers() {
+        let budget = ShutdownBudget::starting_now(Duration::from_secs(10));
+        let outcome = stage_unregister(&HangingDiscovery, &budget).await;
+        assert_eq!(outcome.reason, StageReason::TimedOut);
     }
 
     /// A worker that cannot reach discovery must still shut down — reporting
