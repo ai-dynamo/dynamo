@@ -11,9 +11,9 @@ use crate::config::environment_names::runtime::engine_routes as env_engine_route
 /// Operator policy governing which `/engine/*` control routes are served.
 ///
 /// Resolved once from the environment when the [`EngineRouteRegistry`] is constructed and
-/// enforced at the single `/engine/*` dispatch point, so it applies uniformly across every
-/// backend. The default is [`AllowAll`](EngineRoutePolicy::AllowAll), so behavior is
-/// unchanged unless an operator opts in.
+/// enforced at **registration time** (a denied route is never wired), so it applies
+/// uniformly across every backend. The default is [`AllowAll`](EngineRoutePolicy::AllowAll),
+/// so behavior is unchanged unless an operator opts in.
 ///
 /// Matching is on the **full route string** (the path after `/engine/`, e.g.
 /// `control/start_profile` or `update/model_taints`) — some routes have no `control/`
@@ -270,7 +270,10 @@ mod tests {
     #[test]
     fn test_policy_explicit_decision() {
         // None = no explicit rule, so the route's RouteDefault governs.
-        assert_eq!(EngineRoutePolicy::AllowAll.explicit_decision("anything"), None);
+        assert_eq!(
+            EngineRoutePolicy::AllowAll.explicit_decision("anything"),
+            None
+        );
         assert_eq!(
             EngineRoutePolicy::DisableAll.explicit_decision("control/start_profile"),
             Some(false)
