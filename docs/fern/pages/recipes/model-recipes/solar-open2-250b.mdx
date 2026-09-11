@@ -114,9 +114,12 @@ ls -l "$TRACE"
 # Whichever profile you deployed:
 DGD=solar-open2-250b-vllm-b200-agg-chat      # or solar-open2-250b-vllm-b200-disagg-chat
 
-# Any component except the frontend mounts the cache PVC; the frontend does not.
+# The workers mount the cache PVC; the frontend does not. Match the worker
+# components by name rather than excluding the frontend, so that pods carrying no
+# component-type label are not selected either.
 POD=$(kubectl get pods \
-  -l nvidia.com/dynamo-graph-deployment-name=$DGD,nvidia.com/dynamo-component-type!=frontend \
+  -l "nvidia.com/dynamo-graph-deployment-name=$DGD,nvidia.com/dynamo-component-type in (worker,prefill,decode)" \
+  --field-selector status.phase=Running \
   -o jsonpath='{.items[0].metadata.name}')
 
 kubectl exec "$POD" -- mkdir -p /shared-model-cache/traces
