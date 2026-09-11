@@ -1,39 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Forward agent session identity to the SGLang engine.
+"""Forward ``agent_context`` session ids to ``Engine.async_generate``.
 
-The frontend derives agent identity at the HTTP boundary -- from
-``x-dynamo-session-id`` / ``x-dynamo-parent-session-id``, or from the Claude Code,
-Codex and OpenCode header families -- and serializes it on
-``PreprocessedRequest.agent_context``. This module lifts the two session ids back
-out and passes them to ``Engine.async_generate``. No routing plumbing is added on
-the Rust side; the same field feeds TensorRT-LLM's conversation affinity (see
-``dynamo/trtllm/conversation_affinity.py``, which reads ``session_id`` from the same
-place).
+``session_id`` and ``parent_session_id`` are passed as top-level kwargs of the same
+name, filtered against the installed engine's signature so a build receives only
+the kwargs it declares.
 
-``session_id`` is SGLang's passive session-aware radix ownership key (sglang >= 0.5.15).
-It is deliberately *not* ``session_params.id``: the two fields have opposite
-registration rules. ``session_params.id`` is an explicit lifecycle handle and is
-rejected unless ``open_session`` created it, whereas the top-level ``session_id``
-self-registers -- the scheduler calls ``ensure_session_generation``, which opens the
-session the first time it sees the id. So forwarding an arbitrary agent session id
-cannot produce an "unknown session" failure. The scheduler acts on it only under
-``--enable-session-radix-cache`` (off by default); with the flag off the id is stored on
-the request and nothing reads it.
-
-``parent_session_id`` names the session that is blocked waiting on this one. An
-engine that consumes it can keep the parent's prefix hot while it is parked on a
-subagent it spawned, instead of letting it age out and be re-prefilled when the
-subagent returns.
-
-Both are optional ``async_generate`` kwargs, filtered against the installed
-engine's signature: a build declaring neither receives neither, and a build
-declaring only ``session_id`` receives only that.
-
-``GenerateReqInput`` rejects ``session_id`` and ``session_params`` set together. Nothing
-in this backend sends ``session_params``, so the two never collide -- but anything that
-starts sending it must suppress ``session_id`` for those requests.
+Never send them as ``session_params.id``: that field is an explicit lifecycle
+handle SGLang rejects unless ``open_session`` created it, whereas the top-level
+``session_id`` self-registers. ``GenerateReqInput`` also rejects ``session_id``
+together with ``session_params``, so anything in this backend that starts sending
+``session_params`` must suppress ``session_id`` on those requests. The full
+behavior is documented under "Session identity" in ``AGENTS.md``.
 """
 
 from __future__ import annotations
