@@ -986,7 +986,7 @@ fn init_standalone_logging() {
 #[pyfunction]
 #[pyo3(name = "compute_block_hash_for_seq", signature = (tokens, kv_block_size, block_mm_infos=None, lora_name=None, is_eagle=None, cache_namespace=None))]
 pub fn compute_block_hash_for_seq_py(
-    _py: Python,
+    py: Python,
     tokens: Vec<u32>,
     kv_block_size: usize,
     block_mm_infos: Option<Bound<PyAny>>,
@@ -1005,18 +1005,23 @@ pub fn compute_block_hash_for_seq_py(
         .map(depythonize_block_mm_infos)
         .transpose()?;
 
-    let hashes = compute_block_hash_for_seq(
-        &tokens,
-        kv_block_size as u32,
-        BlockHashOptions {
-            block_mm_infos: mm_infos.as_deref(),
-            lora_name: lora_name.as_deref(),
-            cache_namespace: cache_namespace.as_deref(),
-            is_eagle,
-        },
-    );
+    let hashes = py.allow_threads(|| {
+        compute_block_hash_for_seq(
+            &tokens,
+            kv_block_size as u32,
+            BlockHashOptions {
+                block_mm_infos: mm_infos.as_deref(),
+                lora_name: lora_name.as_deref(),
+                cache_namespace: cache_namespace.as_deref(),
+                is_eagle,
+            },
+        )
+        .into_iter()
+        .map(|hash| hash.0)
+        .collect()
+    });
 
-    Ok(hashes.into_iter().map(|h| h.0).collect())
+    Ok(hashes)
 }
 
 #[pyclass]
