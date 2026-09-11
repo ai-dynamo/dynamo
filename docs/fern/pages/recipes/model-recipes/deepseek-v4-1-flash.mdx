@@ -151,6 +151,8 @@ curl http://localhost:8000/v1/chat/completions \
   -d '{"model":"deepseek-ai/DeepSeek-V4.1-Flash","messages":[{"role":"user","content":"Reply with exactly: READY"}],"temperature":0,"max_tokens":64}'
 ```
 
+Read the response body, not the status code. On the disaggregated target a KV transfer failure still returns HTTP 200, with `content: null` and zero completion tokens. Readiness does not exercise the KV path. The Notes explain what to read in the worker log.
+
 The model reasons before it answers, and the reasoning text arrives in `reasoning_content`. Both targets support streaming chat, tool calls, and schema-constrained output. The `deepseek_v41` reasoning and tool-call parsers build the response.
 
 ## Compare All Targets
@@ -189,6 +191,7 @@ No feature benchmark is linked to this recipe. Browse the [Feature Benchmarks](.
 The NVLink fabric KV path needs both workers in one NVLink clique. A fabric memory handle cannot be imported across cliques, and a split gives no error: the deployment reports Ready, and chat completions return HTTP 200 with `content: null` and zero completion tokens. The workers log `cuMemImportFromShareableHandle failed: 400`. Readiness does not exercise the KV path. Pin both workers to one clique with a `nvidia.com/gpu.clique` nodeSelector, read from `kubectl get nodes -L nvidia.com/gpu.clique`, and send one request to confirm the answer is not empty.
 </Warning>
 
+- If completions come back empty on the disaggregated target, read the worker log. `cuMemImportFromShareableHandle failed: 400` means prefill and decode landed in different NVLink cliques, and only the fabric KV path fails this way. `Failed to register memory: Bad address [14]` means GPU memory did not register for RDMA, because the nodes load no `nvidia_peermem` module. The GKE target sets `WITH_NVIDIA_PEERMEM=0` for that reason, which selects the DMA-BUF path instead.
 - Both targets set the router to KV-aware. On the disaggregated target this is a no-op today, because one decode worker gives the router nothing to choose between. To make it count, raise the decode replicas and add `--kv-events-config` to the decode worker.
 - Both targets set `SGLANG_DEFAULT_THINKING=true`. Thinking is off by default for this model, and then `reasoning_content` is empty.
 - Both targets keep `--enable-metrics` on and set `DYN_FORWARDPASS_METRIC_PORT` to an empty value. The forward-pass publisher crashes this model on a null `seq_lens_cpu`.
