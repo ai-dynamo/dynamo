@@ -33,12 +33,14 @@ spec:
               value: /shared-model-cache
             - name: HF_XET_HIGH_PERFORMANCE
               value: "1"
+            - name: MODEL_REVISION
+              value: dba1be0a40aa45a94ad051997016db3960a90277
           # 510 GB over 48 shards. The Job can run for hours on a cold PVC.
           args:
             - |
               set -eux
               pip install --no-cache-dir huggingface_hub==1.16.4
-              hf download deepseek-ai/DeepSeek-V4.1-Flash
+              hf download deepseek-ai/DeepSeek-V4.1-Flash --revision $MODEL_REVISION
           volumeMounts:
             - name: shared-model-cache
               mountPath: /shared-model-cache

@@ -32,6 +32,7 @@ data:
     trust-remote-code: true
     tp-size: 4
     ep-size: 4
+    page-size: 256
     mem-fraction-static: 0.8
     max-running-requests: 256
     reasoning-parser: auto
@@ -48,6 +49,7 @@ data:
     trust-remote-code: true
     tp-size: 4
     ep-size: 4
+    page-size: 256
     mem-fraction-static: 0.8
     max-running-requests: 256
     max-prefill-tokens: 16384

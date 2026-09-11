@@ -48,6 +48,8 @@ Day-0 recipe. Both targets pass a functional probe. Neither is benchmarked, and 
 
 DeepSeek-V4.1-Flash is a Mixture-of-Experts model. SGLang picks its attention, MoE, and GEMM backends from the checkpoint. Do not set those backend flags. A hand-set backend flag selects a slower fallback.
 
+The checkpoint also accepts images. Both targets serve text only, and neither enables multimodal input.
+
 The aggregated target caps the decode CUDA graph batch at 64. DSpark verify graphs run out of memory at batch 256.
 
 ## Prerequisites

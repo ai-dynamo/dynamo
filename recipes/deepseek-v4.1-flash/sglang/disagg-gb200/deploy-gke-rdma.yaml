@@ -32,6 +32,7 @@ data:
     trust-remote-code: true
     tp-size: 4
     ep-size: 4
+    page-size: 256
     mem-fraction-static: 0.8
     max-running-requests: 256
     reasoning-parser: auto
@@ -48,6 +49,7 @@ data:
     trust-remote-code: true
     tp-size: 4
     ep-size: 4
+    page-size: 256
     mem-fraction-static: 0.8
     max-running-requests: 256
     max-prefill-tokens: 16384
@@ -117,6 +119,10 @@ spec:
     type: frontend
   - name: PrefillWorker
     podTemplate:
+      metadata:
+        annotations:
+          networking.gke.io/default-interface: eth0
+          networking.gke.io/interfaces: '[{"interfaceName":"eth0","network":"default"},{"interfaceName":"rdma0","network":"rdma-0"},{"interfaceName":"rdma1","network":"rdma-1"},{"interfaceName":"rdma2","network":"rdma-2"},{"interfaceName":"rdma3","network":"rdma-3"}]'
       spec:
         containers:
         - args:
@@ -218,6 +224,10 @@ spec:
     type: prefill
   - name: DecodeWorker
     podTemplate:
+      metadata:
+        annotations:
+          networking.gke.io/default-interface: eth0
+          networking.gke.io/interfaces: '[{"interfaceName":"eth0","network":"default"},{"interfaceName":"rdma0","network":"rdma-0"},{"interfaceName":"rdma1","network":"rdma-1"},{"interfaceName":"rdma2","network":"rdma-2"},{"interfaceName":"rdma3","network":"rdma-3"}]'
       spec:
         containers:
         - args:

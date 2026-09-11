@@ -11,6 +11,10 @@ spec:
     - name: Frontend
     - name: PrefillWorker
       podTemplate:
+        metadata:
+          annotations: &gkeAnnotations
+            networking.gke.io/default-interface: eth0
+            networking.gke.io/interfaces: '[{"interfaceName":"eth0","network":"default"},{"interfaceName":"rdma0","network":"rdma-0"},{"interfaceName":"rdma1","network":"rdma-1"},{"interfaceName":"rdma2","network":"rdma-2"},{"interfaceName":"rdma3","network":"rdma-3"}]'
         spec:
           containers:
             - name: main
@@ -29,6 +33,8 @@ spec:
                   networking.gke.io.networks/rdma-3: "1"
     - name: DecodeWorker
       podTemplate:
+        metadata:
+          annotations: *gkeAnnotations
         spec:
           containers:
             - name: main
