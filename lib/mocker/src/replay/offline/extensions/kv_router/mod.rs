@@ -29,7 +29,7 @@ use dynamo_kv_router::{
     ActiveSequencesMultiWorker, DefaultWorkerSelector, RadixTree, RoutingPartitionRef,
     SchedulingRequest, SequenceRequest, SessionContext, TrackingHashAlgorithm, TrackingHashContext,
     TrackingHashScope, WorkerLoadProjection, WorkerSelectionInput, WorkerSelector,
-    scheduling::TierOverlapBlocks,
+    scheduling::TierOverlapBlocks, sequences::LifecycleMutationOutcome,
 };
 use dynamo_tokens::SequenceHash;
 use rustc_hash::FxHashMap;
@@ -732,9 +732,21 @@ impl OfflineReplayRouter {
         now_ms: f64,
     ) -> Result<RouterEffects> {
         let decay_now = self.decay_now(now_ms);
-        self.slots
+        let outcome = self
+            .slots
             .mark_prefill_completed(&uuid.to_string(), decay_now)
             .map_err(anyhow::Error::from)?;
+        // `NoChange` means the router never admitted this request id -- either
+        // a duplicate completion signal, or the engine and router have
+        // already desynchronized. Either way there is no capacity to free and
+        // draining the pending queue against phantom capacity would silently
+        // admit a queued request the router has no evidence there is room
+        // for. Fail loudly instead of proceeding as if nothing were wrong.
+        anyhow::ensure!(
+            outcome == LifecycleMutationOutcome::Applied,
+            "on_prefill_completed({uuid}): router has no record of this request \
+             (duplicate signal or engine/router desync)"
+        );
         Ok(RouterEffects {
             admissions: self.drain_pending(decay_now)?,
         })
@@ -746,9 +758,18 @@ impl OfflineReplayRouter {
         now_ms: f64,
     ) -> Result<RouterEffects> {
         let decay_now = self.decay_now(now_ms);
-        self.slots
+        let outcome = self
+            .slots
             .free(&uuid.to_string(), decay_now)
             .map_err(anyhow::Error::from)?;
+        // See on_prefill_completed: NoChange means this request was never
+        // admitted, so nothing was actually freed. Draining the pending
+        // queue here would admit against capacity that was never released.
+        anyhow::ensure!(
+            outcome == LifecycleMutationOutcome::Applied,
+            "on_request_completed({uuid}): router has no record of this request \
+             (duplicate signal or engine/router desync)"
+        );
         Ok(RouterEffects {
             admissions: self.drain_pending(decay_now)?,
         })
@@ -1280,6 +1301,36 @@ mod tests {
             policy_class: None,
             replay_context: None,
         }
+    }
+
+    /// A completion signal for a request the router never admitted (a
+    /// duplicate signal, or an engine/router desync) must fail loudly
+    /// instead of silently draining the pending queue against capacity
+    /// that was never actually freed.
+    #[test]
+    fn on_request_completed_refuses_an_unknown_request_id() {
+        let mut router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
+        let error = match router.on_request_completed(Uuid::from_u128(404), 0.0) {
+            Ok(_) => panic!("an unadmitted request id must be refused"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("no record of this request"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn on_prefill_completed_refuses_an_unknown_request_id() {
+        let mut router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
+        let error = match router.on_prefill_completed(Uuid::from_u128(404), 0.0) {
+            Ok(_) => panic!("an unadmitted request id must be refused"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("no record of this request"),
+            "{error}"
+        );
     }
 
     /// `now_ms` arrives as a bare `f64` through the public `PlacementPolicy`
