@@ -153,6 +153,15 @@ async def test_deployment(
         deployment_spec.add_arg_to_service(
             worker_service.name, "--gpu-memory-utilization", "0.7"
         )
+        # The preview vLLM image derives a 40,960-token native context window
+        # from Qwen3-0.6B.  On the CI MIG slice, the deliberately conservative
+        # 0.7 allocation leaves room for 40,848 tokens, so the native default
+        # fails startup before this smoke test can make its short request.
+        # Keep a material buffer for allocator variation; this is an in-test
+        # override, not a change to the example or a shipped recipe.
+        deployment_spec.add_arg_to_service(
+            worker_service.name, "--max-model-len", "40000"
+        )
 
     model = model_service.model
     assert model is not None

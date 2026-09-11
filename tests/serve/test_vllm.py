@@ -48,6 +48,12 @@ from tests.utils.payloads import (
 
 logger = logging.getLogger(__name__)
 
+# The runtime CI lane selects tests by framework as well as hardware.  The
+# parametrized scenarios below already declare their GPU and lifecycle marks;
+# make their framework ownership explicit so they are selected by the vLLM
+# image lane.
+pytestmark = pytest.mark.vllm
+
 
 def _is_cuda12() -> bool:
     v = os.environ.get("CUDA_VERSION", "")
