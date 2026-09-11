@@ -26,6 +26,9 @@ use super::{
 
 static WORKERS_STARTED: AtomicBool = AtomicBool::new(false);
 static WORKERS: Mutex<Option<SinkWorkers>> = Mutex::new(None);
+// Serializes worker creation against shutdown. The worker slot alone cannot do
+// that because shutdown removes a generation before awaiting its final drain.
+static WORKER_LIFECYCLE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static ACTIVE_INPUTS: AtomicUsize = AtomicUsize::new(0);
 
 /// Upper bound on how long process teardown waits for the sink workers to
@@ -307,9 +310,8 @@ pub struct TraceShutdownReport {
 
 impl SinkWorkers {
     /// Cancel the workers and wait for them to finish draining, giving up after
-    /// `timeout`. On timeout the sink tasks are abandoned and the process is
-    /// about to exit, so no sink can report for itself; the counts are read
-    /// here instead and both logged and returned.
+    /// `timeout`. On timeout the sink tasks are aborted after their counts are
+    /// captured, so the next worker generation cannot overlap them.
     pub async fn shutdown(self, timeout: Duration) -> TraceShutdownReport {
         self.token.cancel();
         let Self {
@@ -337,6 +339,13 @@ impl SinkWorkers {
             pending = ?pending,
             "request trace sinks did not finish draining before the shutdown timeout"
         );
+        for handle in &handles {
+            handle.abort();
+        }
+        // Wait for cancellation to complete before reopening the start gate.
+        // Dropping a JoinHandle would detach its task and let it consume new
+        // broadcast records alongside the next worker generation.
+        let _ = futures::future::join_all(handles.iter_mut()).await;
         TraceShutdownReport {
             timed_out: true,
             pending,
@@ -345,6 +354,7 @@ impl SinkWorkers {
 }
 
 pub async fn spawn_workers_from_env(shutdown: CancellationToken) -> anyhow::Result<()> {
+    let _lifecycle = WORKER_LIFECYCLE.lock().await;
     if WORKERS_STARTED
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
@@ -452,19 +462,19 @@ fn cancel_workers() -> bool {
 /// [`SHUTDOWN_TIMEOUT`]. Returns `None` when no workers were started, which is
 /// the case whenever request tracing is disabled.
 pub async fn shutdown_workers() -> Option<TraceShutdownReport> {
+    let _lifecycle = WORKER_LIFECYCLE.lock().await;
     let workers = {
         let mut slot = WORKERS
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let workers = slot.take()?;
-        // Reopen the start gate while the slot is still held. These workers are
-        // gone, so an input that starts afterwards has to be able to spawn a new
-        // set; leaving the gate closed would let it publish into a bus that
-        // nothing is subscribed to.
-        WORKERS_STARTED.store(false, Ordering::Release);
-        workers
+        slot.take()?
     };
-    Some(workers.shutdown(SHUTDOWN_TIMEOUT).await)
+    let report = workers.shutdown(SHUTDOWN_TIMEOUT).await;
+    // Keep the gate closed until the retired generation is fully stopped. This
+    // prevents a new subscription from receiving records that the old workers
+    // are still draining.
+    WORKERS_STARTED.store(false, Ordering::Release);
+    Some(report)
 }
 
 fn spawn_workers(
