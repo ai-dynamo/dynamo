@@ -67,13 +67,14 @@ version, and defect class are usually enough to reproduce.
 
 ## Step 4: Check for an existing report
 
-Search titles AND bodies, with and without the label, because labels can be silently dropped at
-filing time (step 6) and secondary defects live in issue bodies. Use the bare filename as the search
-term (no backticks) and raise the result limit past the default of 30:
+Search titles AND bodies in one bounded, body-inclusive query. A labeled query adds nothing (`--label`
+ANDs into the search, so it is a strict subset of the unlabeled one), the default limit of 30 hides real
+matches for common keys such as `README.md`, and `--json` returns bodies inline instead of costing one
+`gh issue view` per hit. Use the bare filename as the search term (no backticks):
 
 ```bash
-gh issue list --repo ai-dynamo/dynamo --state all --limit 100 --search 'benchmark-isolation.md in:title,body'
-gh issue list --repo ai-dynamo/dynamo --state all --limit 100 --label agent-reported --search 'benchmark-isolation.md in:title,body'
+gh issue list --repo ai-dynamo/dynamo --state all --limit 100 --json number,title,body \
+  --search 'benchmark-isolation.md in:title,body'
 ```
 
 Review every hit whose title starts with `[AGENT]: ` or whose body mentions the same file and
@@ -86,9 +87,12 @@ gh issue view "$ISSUE_NUMBER" --repo ai-dynamo/dynamo --comments
 ```
 
 If a matching issue exists, do not file a duplicate: draft the same body (step 5), route it through
-step 6 with the target recorded as "comment on #123", and on approval:
+step 6 with the target recorded as "comment on #123", and on approval run the command with BOTH
+variables assigned in the same shell invocation (nothing persists between harness shell calls):
 
 ```bash
+ISSUE_NUMBER=123
+BODY_FILE=$EXP_ROOT/analysis/skillpack-issue-drafts/001-perf-analyzer-body.md
 gh issue comment "$ISSUE_NUMBER" --repo ai-dynamo/dynamo --body-file "$BODY_FILE"
 ```
 
@@ -99,10 +103,13 @@ impactful one in the issue and list the rest briefly in its body.
 
 Title: `[AGENT]: <file path relative to repo root>: <one-line defect>`.
 
-Write the body with a file-writing tool, never by echoing it through a shell, to a run-scoped path:
-inside an engagement `<EXP_ROOT>/analysis/skillpack-issue-drafts/NNN-body.md` (NNN increasing), otherwise
-`./skillpack-issue-drafts/NNN-body.md` under the current working directory. Never use a shared fixed path
-such as `/tmp`, where another invocation can overwrite an approved body before it is submitted. Follow the
+Write the body with a file-writing tool, never by echoing it through a shell, to a run-scoped path that
+names the invoking role, because several roles can hit defects in the same engagement window: inside an
+engagement `<EXP_ROOT>/analysis/skillpack-issue-drafts/NNN-<role>-body.md` (NNN increasing), otherwise
+`./skillpack-issue-drafts/NNN-<role>-body.md` under the current working directory. Never use a shared
+fixed path such as `/tmp`, where another role's write can replace an approved body before it is
+submitted. Delete the draft file once its issue or comment is filed, so a later invocation cannot inherit
+a stale body. Follow the
 agent-reported template's structure:
 
 ```markdown
@@ -148,7 +155,7 @@ title are interpreted when the variable is *assigned*, and the pack's own style 
 Do not edit the body between approval and filing; file the same path the operator saw.
 
 ```bash
-BODY_FILE=analysis/skillpack-issue-drafts/001-body.md
+BODY_FILE=$EXP_ROOT/analysis/skillpack-issue-drafts/001-perf-analyzer-body.md
 ISSUE_TITLE=$(cat <<'EOF'
 [AGENT]: agent-docs/rules/benchmarking/benchmark-isolation.md: one-line defect
 EOF
