@@ -66,19 +66,16 @@ control surface does not expose the primitives they need:
   request arrives because it forwards an adapter path in its internal `LoRARequest`.
   `GenerateRequest` carries only `lora_name`, and vLLM rejects names it has not already
   loaded, so every worker that may receive the adapter must load it up front.
-- **Hot swap is not supported.** The Python worker removes, reloads, resets the prefix cache,
-  and rolls back atomically. The gRPC API has no atomic replace and no cache-reset operation;
-  emulating it with `UnloadLora` followed by `LoadLora` would open a routing outage and leave
-  rollback unsafe. Loading a name that is already loaded is idempotent and returns the
-  existing ID, and `hot_swap` is reported as `false`.
+- **Hot swap is not supported.** Loading a name that is already loaded is idempotent
+  and returns the existing ID, and `hot_swap` is reported as `false`. The gRPC API
+  has no atomic adapter replacement. Its pause-and-clear operation affects the
+  whole worker and is not coordinated with adapter lifecycle operations here.
 
 Custom Python-only LoRA source schemes are not available in the sidecar implementation.
 
-LoRA requests bypass local prefix-cache reads because native unload does not invalidate
-KV cached under the adapter name. This prevents stale KV reuse after reloading different
-weights under that name, including after a sidecar restart. Base-model prefix caching and
-NIXL prefill/decode transfers remain available. Repeated LoRA prompts therefore recompute
-their prefill until the native gRPC API supports safe cache invalidation.
+LoRA requests retain normal prefix caching. Use a new adapter name for different weights:
+unloading an adapter does not invalidate KV cached under its name, so reusing that name
+for different weights can reuse stale results. Safe same-name replacement is not supported.
 
 LoRA lifecycle mutations are serialized per worker, including source resolution. Requests
 using other loaded adapters can continue during a load or unload. Multiple workers can

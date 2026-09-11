@@ -2124,7 +2124,7 @@ async fn lora_lifecycle_preserves_identity_and_routing_metadata() {
         let requests = server.service.requests.lock().await;
         let sent = requests.last().unwrap();
         assert_eq!(sent.lora_name, "math-r8");
-        assert!(sent.kv.as_ref().unwrap().bypass_prefix_cache);
+        assert!(!sent.kv.as_ref().unwrap().bypass_prefix_cache);
     }
     let listed = engine
         .engine_update("list_loras".into(), json!({}))

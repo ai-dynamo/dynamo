@@ -680,8 +680,6 @@ impl LLMEngine for VllmSidecarEngine {
             let _admission = if proto_request.lora_name.is_empty() {
                 None
             } else {
-                // Native unload leaves KV cached under the reusable adapter name.
-                proto_request.kv.get_or_insert_default().bypass_prefix_cache = true;
                 Some(self.admit_lora_request(&proto_request.lora_name).await?)
             };
             client
