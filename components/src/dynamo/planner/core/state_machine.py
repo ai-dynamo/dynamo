@@ -248,6 +248,71 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
             return None
         return target
 
+    def _startup_disagg_decision(
+        self,
+        num_p: Optional[int],
+        num_d: Optional[int],
+        *,
+        source: Literal["load", "throughput"],
+    ) -> Optional[ScalingDecision]:
+        """Budget startup reductions against the unchanged peer's desired count.
+
+        Serving counts remain the input to load/consolidation prediction. Only
+        allocation accounting includes pending replicas, and an omitted or up
+        recommendation preserves that role's entire allocation.
+        """
+        targets = (
+            self._startup_reduction(num_p, self._num_p_workers, self._pending_num_p),
+            self._startup_reduction(num_d, self._num_d_workers, self._pending_num_d),
+        )
+        if targets == (None, None):
+            return None
+        p_gpu, d_gpu = self._resolve_disagg_gpu_costs()
+        if p_gpu is not None and d_gpu is not None:
+            # Adjustable roles may retain their serving replicas to respect the
+            # floor; fixed peers retain both serving and pending replicas.
+            current_p = self._num_p_workers + (
+                self._pending_num_p if targets[0] is None else 0
+            )
+            current_d = self._num_d_workers + (
+                self._pending_num_d if targets[1] is None else 0
+            )
+            fitted_p, fitted_d = fit_directional_budget_pair(
+                current_p,
+                current_d,
+                targets[0] if targets[0] is not None else current_p,
+                targets[1] if targets[1] is not None else current_d,
+                p_gpu,
+                d_gpu,
+                self._config.min_gpu_budget,
+                # Reductions cannot need a larger ceiling. The final startup
+                # projection checks the hard ceiling and power budget against
+                # the actual applied pair; using a floor-only fit here keeps
+                # its strict floor (no integer-step tolerance) intact.
+                -1,
+                self._min_endpoint_for("prefill"),
+                self._min_endpoint_for("decode"),
+            )
+            targets = (
+                self._startup_reduction(
+                    fitted_p, self._num_p_workers, self._pending_num_p
+                )
+                if targets[0] is not None
+                else None,
+                self._startup_reduction(
+                    fitted_d, self._num_d_workers, self._pending_num_d
+                )
+                if targets[1] is not None
+                else None,
+            )
+        if targets == (None, None):
+            return None
+        if source == "load":
+            self._diag_load_reason = "scale_down"
+        else:
+            self._diag_throughput_reason = "scale"
+        return ScalingDecision(num_prefill=targets[0], num_decode=targets[1])
+
     def advance_throughput_from_prediction(
         self,
         traffic: TrafficObservation,

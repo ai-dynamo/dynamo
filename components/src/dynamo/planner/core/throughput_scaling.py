@@ -143,6 +143,10 @@ class ThroughputScalingMixin:
         num_p = max(num_p, resolve_min_endpoint(self._config, "prefill"))
         num_d = max(num_d, resolve_min_endpoint(self._config, "decode"))
         bounded_p, bounded_d = num_p, num_d
+        if (
+            self._pending_num_p or self._pending_num_d
+        ) and not self._config.enable_load_scaling:
+            return self._startup_disagg_decision(num_p, num_d, source="throughput")
         num_p, num_d = self._fit_disagg_throughput_ceiling(num_p, num_d)
         budget_held = (num_p, num_d) == (self._num_p_workers, self._num_d_workers) and (
             bounded_p,
@@ -182,20 +186,6 @@ class ThroughputScalingMixin:
             return None
 
         self._diag_throughput_reason = "scale"
-        if self._pending_num_p or self._pending_num_d:
-            target_p = self._startup_reduction(
-                num_p if bounded_p <= self._num_p_workers else None,
-                self._num_p_workers,
-                self._pending_num_p,
-            )
-            target_d = self._startup_reduction(
-                num_d if bounded_d <= self._num_d_workers else None,
-                self._num_d_workers,
-                self._pending_num_d,
-            )
-            if target_p is None and target_d is None:
-                return None
-            return ScalingDecision(num_prefill=target_p, num_decode=target_d)
         return ScalingDecision(num_prefill=num_p, num_decode=num_d)
 
     def _throughput_agg(

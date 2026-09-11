@@ -218,6 +218,12 @@ class LoadScalingMixin:
 
         final_p = max(final_p, resolve_min_endpoint(self._config, "prefill"))
         final_d = max(final_d, resolve_min_endpoint(self._config, "decode"))
+        if self._pending_num_p or self._pending_num_d:
+            return self._startup_disagg_decision(
+                final_p if p_desired is not None else None,
+                final_d if d_desired is not None else None,
+                source="load",
+            )
         throughput_lifted_proposal = self._config.enable_throughput_scaling and (
             post_floor_p > original_p or post_floor_d > original_d
         )
@@ -262,21 +268,7 @@ class LoadScalingMixin:
         if budget_reason is not None:
             self._diag_load_reason = budget_reason
 
-        cancel_p = (
-            self._pending_num_p > 0
-            and p_desired is not None
-            and final_p <= self._num_p_workers
-        )
-        cancel_d = (
-            self._pending_num_d > 0
-            and d_desired is not None
-            and final_d <= self._num_d_workers
-        )
-        if (
-            final_p == self._num_p_workers
-            and final_d == self._num_d_workers
-            and not (cancel_p or cancel_d)
-        ):
+        if final_p == self._num_p_workers and final_d == self._num_d_workers:
             logger.info("Load-based scaling: no scaling needed")
             # Restore per-component sub-decision reasons that the
             # aggregation step overwrote with "no_change", so operators
@@ -299,11 +291,6 @@ class LoadScalingMixin:
             f"Load-based disagg scaling: prefill {self._num_p_workers}->{final_p}, "
             f"decode {self._num_d_workers}->{final_d}"
         )
-        if self._pending_num_p or self._pending_num_d:
-            return ScalingDecision(
-                num_prefill=final_p if p_desired is not None else None,
-                num_decode=final_d if d_desired is not None else None,
-            )
         return ScalingDecision(num_prefill=final_p, num_decode=final_d)
 
     def _advance_load_agg(self, obs: FpmObservations) -> Optional[ScalingDecision]:

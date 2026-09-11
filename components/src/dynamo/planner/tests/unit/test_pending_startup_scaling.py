@@ -221,6 +221,9 @@ def _connector(deployment, pods):
     api.get_graph_deployment = Mock(side_effect=lambda _: deepcopy(deployment))
     api.list_pods_for_graph = Mock(return_value=pods)
     api.update_graph_replicas = Mock()
+    api.get_service_replica_target = Mock(
+        side_effect=lambda _, name: connector._startup_scale_down_targets[name]
+    )
     connector = KubernetesConnector.__new__(KubernetesConnector)
     connector.graph_deployment_name = "qwen"
     connector.kube_api = api

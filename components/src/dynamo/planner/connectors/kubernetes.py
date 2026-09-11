@@ -793,16 +793,30 @@ class KubernetesConnector(PlannerConnector):
             return True
         if self.kube_api.has_terminating_pods(pods):
             return True
+        if not self.kube_api.pcsg_pods_within_desired_replicas(deployment, pods):
+            return True
         components = get_components_by_name(deployment)
+        startup = self.kube_api.pending_startup_replicas(deployment, pods)
+        remaining: dict[str, int] = {}
         for name, target in self._startup_scale_down_targets.items():
             desired = Service(
                 name=name, service=components.get(name, {})
             ).number_replicas()
-            ready, stable = self.kube_api.get_service_replica_status(deployment, name)
-            if desired != target or ready != target or not stable:
-                return True
-        self._startup_scale_down_targets.clear()
-        return False
+            _, stable = self.kube_api.get_service_replica_status(deployment, name)
+            if desired != target:
+                authoritative_target = self.kube_api.get_service_replica_target(
+                    self.graph_deployment_name, name
+                )
+                if authoritative_target == target or desired != authoritative_target:
+                    remaining[name] = target
+                # A superseding DGDSA target has reached the observed DGD spec.
+                # Retire our old request; ordinary inventory guards its state.
+            elif not stable and name not in startup:
+                remaining[name] = target
+            # Once excess/terminating replicas are gone, a survivor becoming
+            # unready is startup capacity again, not an unfinished drain.
+        self._startup_scale_down_targets = remaining
+        return bool(remaining)
 
     async def get_worker_inventory(
         self,
@@ -821,7 +835,9 @@ class KubernetesConnector(PlannerConnector):
         decode_component_name: Optional[str],
     ) -> WorkerCounts:
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
-        pods = self.kube_api.list_pods_for_graph(self.graph_deployment_name)
+        pods = KubernetesAPI.exclude_checkpoint_capture_pods(
+            self.kube_api.list_pods_for_graph(self.graph_deployment_name)
+        )
         p, d, stable = self._worker_counts_from_snapshot(
             deployment,
             prefill_component_name=prefill_component_name,
@@ -829,7 +845,11 @@ class KubernetesConnector(PlannerConnector):
             pods_by_component=self.kube_api.partition_pods_by_component(pods),
             power_aware=True,
         )
-        stable = stable and self.kube_api.is_spec_generation_observed(deployment)
+        stable = (
+            stable
+            and self.kube_api.is_spec_generation_observed(deployment)
+            and self.kube_api.pcsg_pods_within_desired_replicas(deployment, pods)
+        )
         pending = self.kube_api.pending_startup_replicas(deployment, pods)
         if self._startup_scale_down_in_progress(deployment, pods):
             stable, pending = False, {}
@@ -980,12 +1000,37 @@ class KubernetesConnector(PlannerConnector):
 
         ready = self.kube_api.is_deployment_ready(deployment)
         startup_reduction = False
-        if not ready or self._startup_scale_down_targets:
-            pods = self.kube_api.list_pods_for_graph(self.graph_deployment_name)
+        reducing = any(
+            target.desired_replicas
+            < get_component_from_type_or_name(
+                deployment,
+                target.sub_component_type,
+                component_name=target.component_name,
+            ).number_replicas()
+            for target in target_replicas
+        )
+        if not ready or self._startup_scale_down_targets or reducing:
+            pods = KubernetesAPI.exclude_checkpoint_capture_pods(
+                self.kube_api.list_pods_for_graph(self.graph_deployment_name)
+            )
             if self._startup_scale_down_in_progress(deployment, pods):
                 logger.info("Startup scale-down still converging, ignoring scaling")
                 return
             pending = self.kube_api.pending_startup_replicas(deployment, pods)
+            # Ready can still describe the state before a Pod deletion or the
+            # latest spec change. Recheck lifecycle before issuing a reduction.
+            phase = (deployment.get("status", {}).get("rollingUpdate") or {}).get(
+                "phase"
+            )
+            ready = (
+                ready
+                and self.kube_api.is_spec_generation_observed(deployment)
+                and not self.kube_api.has_terminating_pods(pods)
+                and self.kube_api.pcsg_pods_within_desired_replicas(deployment, pods)
+                and self.kube_api.non_planner_components_stable(deployment)[0]
+                and phase in (None, "", "Completed")
+                and not pending
+            )
             startup_reduction = bool(pending)
             any_reduction = False
             for target in target_replicas:
