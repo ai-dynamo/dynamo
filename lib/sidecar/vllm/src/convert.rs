@@ -82,6 +82,7 @@ pub(crate) fn build_generate_request(
     let encoder_result = request.encoder_result;
     let mut extra_args = request.extra_args;
     consume_redundant_nvext(&mut extra_args, cache_salt.as_deref())?;
+    let allowed_token_ids = consume_sampling_passthrough(&mut extra_args)?;
     if has_media && let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() {
         // These fields are already represented by token_ids and media.
         extra.remove("messages");
@@ -109,7 +110,7 @@ pub(crate) fn build_generate_request(
             frequency_penalty: sampling.frequency_penalty.unwrap_or(0.0),
             repetition_penalty: sampling.repetition_penalty.unwrap_or(0.0),
             logit_bias: Default::default(),
-            allowed_token_ids: Vec::new(),
+            allowed_token_ids,
             structured_output: structured_output(sampling.guided_decoding)?,
         }),
         stopping: Some(pb::StoppingCriteria {
@@ -149,6 +150,45 @@ pub(crate) fn data_parallel_rank(
         DisaggregationMode::Prefill => routing.prefill_dp_rank.or(routing.dp_rank),
         DisaggregationMode::Aggregated | DisaggregationMode::Decode => routing.dp_rank,
     })
+}
+
+fn consume_sampling_passthrough(
+    extra_args: &mut Option<serde_json::Value>,
+) -> Result<Vec<u32>, DynamoError> {
+    let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() else {
+        return Ok(Vec::new());
+    };
+    let Some(sampling) = extra.remove("sampling_options") else {
+        return Ok(Vec::new());
+    };
+    let serde_json::Value::Object(mut sampling) = sampling else {
+        return Err(client::invalid_argument(
+            "extra_args.sampling_options must be a JSON object",
+        ));
+    };
+    for key in sampling.keys() {
+        if key != "allowed_token_ids" {
+            return Err(client::invalid_argument(format!(
+                "extra_args.sampling_options.{key} is not supported by vLLM gRPC"
+            )));
+        }
+    }
+    match sampling.remove("allowed_token_ids") {
+        None | Some(serde_json::Value::Null) => Ok(Vec::new()),
+        Some(value) => {
+            let ids: Vec<u32> = serde_json::from_value(value).map_err(|error| {
+                client::invalid_argument(format!(
+                    "extra_args.sampling_options.allowed_token_ids must be an array of unsigned 32-bit token IDs: {error}"
+                ))
+            })?;
+            if ids.is_empty() {
+                return Err(client::invalid_argument(
+                    "extra_args.sampling_options.allowed_token_ids must not be empty",
+                ));
+            }
+            Ok(ids)
+        }
+    }
 }
 
 fn consume_redundant_nvext(

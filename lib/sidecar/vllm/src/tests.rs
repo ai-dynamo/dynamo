@@ -1104,6 +1104,9 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
 
     let mut routed_request = serde_json::to_value(request()).expect("serialize request");
     routed_request["routing"] = json!({"dp_rank": 1, "cache_salt": "cache-salt"});
+    // The frontend carries backend-native sampling controls in this envelope.
+    // They must reach gRPC without discarding adjacent routing/KV options.
+    routed_request["extra_args"]["sampling_options"] = json!({"allowed_token_ids": [42, 43]});
     let outputs = collect(
         &engine,
         serde_json::from_value(routed_request).expect("deserialize routed request"),
@@ -1135,6 +1138,7 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     );
     assert_eq!(sampling.seed, Some(123));
     let decoding = sent.decoding.as_ref().unwrap();
+    assert_eq!(decoding.allowed_token_ids, [42, 43]);
     assert_eq!(
         (
             decoding.presence_penalty,
@@ -2138,6 +2142,19 @@ async fn unsupported_features_fail_before_rpc_submission() {
     mismatched_cache_salt.extra_args.as_mut().unwrap()["nvext"]["cache_salt"] =
         json!("different-cache-salt");
     requests.push(mismatched_cache_salt);
+
+    // An empty allowlist cannot become the protobuf default (no constraint),
+    // and consuming the envelope must not silently drop unsupported siblings.
+    for sampling in [
+        json!({"allowed_token_ids": []}),
+        json!({"allowed_token_ids": [42], "bad_words_token_ids": [[43]]}),
+        json!({"allowed_token_ids": [42], "detokenize": false}),
+        json!({"allowed_token_ids": [42], "logprob_token_ids": [43]}),
+    ] {
+        let mut unsupported = request();
+        unsupported.extra_args.as_mut().unwrap()["sampling_options"] = sampling;
+        requests.push(unsupported);
+    }
 
     for unsupported in requests {
         let context = dynamo_backend_common::testing::mock_context();

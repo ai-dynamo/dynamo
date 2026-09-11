@@ -156,8 +156,14 @@ fn validate_no_unsupported_fields_with_ignore(
         anyhow::bail!("`detokenize` must be a boolean");
     }
     if let Some(value) = unsupported_fields.get("allowed_token_ids") {
-        serde_json::from_value::<Vec<crate::types::TokenIdType>>(value.clone())
-            .map_err(|_| anyhow::anyhow!("`allowed_token_ids` must be an array of token IDs"))?;
+        // Match vLLM's Python API: null is unrestricted, but an empty list is invalid.
+        let ids: Option<Vec<crate::types::TokenIdType>> = serde_json::from_value(value.clone())
+            .map_err(|_| {
+                anyhow::anyhow!("`allowed_token_ids` must be an array of token IDs or null")
+            })?;
+        if ids.is_some_and(|ids| ids.is_empty()) {
+            anyhow::bail!("`allowed_token_ids` must not be empty");
+        }
     }
     if let Some(value) = unsupported_fields.get("bad_words_token_ids") {
         serde_json::from_value::<Vec<Vec<crate::types::TokenIdType>>>(value.clone()).map_err(
