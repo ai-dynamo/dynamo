@@ -819,6 +819,13 @@ fn test_online_trace_replay_kv_router_marks_prefill_and_free_once() {
     assert_eq!(stats.freed_count, 1);
 }
 
+// Observed flaky in fresh-agent review (one failure in ~215 invocations
+// across several batches, on a tree with no changes to this test's code
+// path). Confirmed unrelated to the kv-router-placement injection work:
+// the failure predates that branch and this test's own logic is untouched
+// by it. Left as a normal test -- ignoring it would silently drop coverage
+// -- but a "213/215 passing" report should not be read as proof this test
+// is unconditionally deterministic.
 #[test]
 fn test_online_replay_crosses_a_bounded_preemption_edge_and_drains() {
     let args = MockEngineArgs::builder()

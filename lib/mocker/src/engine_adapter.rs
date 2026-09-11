@@ -125,7 +125,7 @@ pub(crate) fn engine_components(
         preemption_mode,
         emit_kv_events,
         emit_kv_token_ids,
-        kv_bytes_per_token: args.kv_bytes_per_token,
+        kv_transfer_bytes_per_token: args.kv_bytes_per_token,
         kv_transfer_bandwidth: args.kv_transfer_bandwidth,
         kv_transfer_timing_mode,
         timing_model,
@@ -157,6 +157,10 @@ pub(crate) fn aggregated_replay_setup(
 ) -> Result<(ReplayEngineConfig, ReplayEngineFactory)> {
     let components = engine_components(args.clone(), false, false)?;
     let config = ReplayEngineConfig {
+        // `None` everywhere in this file: the mocker never overrides the
+        // upstream capacity estimator's block count, so it has no explicit
+        // value to author here.
+        num_gpu_blocks_is_explicit: None,
         dp_size: components.args.dp_size,
         tensor_parallel_size: replay_tensor_parallel_size(&components.args)?,
         rank: components.rank,
@@ -179,16 +183,19 @@ pub(crate) fn disaggregated_replay_setup(
     let prefill = engine_components(prefill_args.clone(), false, false)?;
     let decode = engine_components(decode_args.clone(), false, false)?;
     let prefill_role = ReplayRoleConfig {
+        num_gpu_blocks_is_explicit: None,
         dp_size: prefill.args.dp_size,
         tensor_parallel_size: replay_tensor_parallel_size(&prefill.args)?,
         rank: prefill.rank,
     };
     let decode_role = ReplayRoleConfig {
+        num_gpu_blocks_is_explicit: None,
         dp_size: decode.args.dp_size,
         tensor_parallel_size: replay_tensor_parallel_size(&decode.args)?,
         rank: decode.rank,
     };
     let config = ReplayEngineConfig {
+        num_gpu_blocks_is_explicit: None,
         dp_size: prefill_role.dp_size,
         tensor_parallel_size: prefill_role.tensor_parallel_size,
         rank: prefill_role.rank.clone(),
