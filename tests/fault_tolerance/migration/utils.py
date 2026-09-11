@@ -478,11 +478,17 @@ def graceful_worker_shutdown(
     """Send SIGTERM only, and keep the worker alive until the outcome is known.
 
     `terminate_process_tree` escalates to SIGKILL a fixed number of seconds
-    after SIGTERM, so a worker that is still draining a generation is killed
-    mid-stream and the request migrates instead. This context sends SIGTERM,
-    waits for the worker to leave frontend discovery, yields while the request
-    outcome is observed, and only then force-kills the worker's process groups.
-    Teardown still cannot leak engine processes that pin the GPU.
+    after SIGTERM, which severs the worker's streams before its own shutdown
+    path can report anything. A migration observed that way shows only that the
+    frontend reacts to a dead connection, not that the backend interrupted the
+    request at grace expiry and reported a migratable error. Sending SIGTERM
+    alone leaves the backend's shutdown event, abort monitor and error
+    propagation as the only thing that can produce the migration.
+
+    This context sends SIGTERM, waits for the worker to leave frontend
+    discovery, yields while the request outcome is observed, and only then
+    force-kills the worker's process groups, so teardown still cannot leak
+    engine processes that pin the GPU.
 
     Args:
         frontend: Frontend whose `/health` view reports endpoint instances
@@ -787,7 +793,6 @@ def run_migration_test(
     long_prompt_repetitions: int = 8_000,
     wait_for_new_response_before_stop: bool = False,
     expected_ongoing_request_count: int | None = None,
-    expect_drain: bool = False,
     graceful_shutdown: Callable[[ManagedProcess], AbstractContextManager[None]]
     | None = None,
     verify_replacement_worker: bool = False,
@@ -814,9 +819,6 @@ def run_migration_test(
         expected_ongoing_request_count: Exact expected count for callers that
             opt into strict metric validation. When omitted, preserve the
             shared helper's historical backend-agnostic lower-bound behavior.
-        expect_drain: Assert the graceful-shutdown contract instead of the
-            migration contract: a SIGTERM'd worker finishes the request it has
-            already admitted, so the request succeeds and nothing migrates.
         graceful_shutdown: Optional backend-specific context that initiates
             graceful shutdown before response validation and performs final
             cleanup after the request outcome is known.
@@ -830,23 +832,6 @@ def run_migration_test(
             max_tokens budget so state-based fault synchronization cannot race
             an early EOS.
     """
-    if expect_drain:
-        if immediate_kill:
-            raise ValueError(
-                "expect_drain asserts the graceful-shutdown drain contract and "
-                "is incompatible with immediate_kill=True"
-            )
-        if graceful_shutdown is None:
-            raise ValueError(
-                "expect_drain requires a graceful_shutdown context; the default "
-                "shutdown path escalates to SIGKILL and cuts the drain short"
-            )
-        if expected_ongoing_request_count is not None:
-            raise ValueError(
-                "expect_drain already pins both migration counters to zero; "
-                "pass expected_ongoing_request_count only without it"
-            )
-
     # Step 1: Send the request
     if use_chat_completion:
         request_thread, response_list = start_chat_completion_request(
@@ -906,12 +891,11 @@ def run_migration_test(
             shutdown_context = graceful_shutdown(worker)
 
     # Step 5: Validate the request outcome via its response (the user-facing
-    # contract). A drained worker completes its admitted request; otherwise
-    # migration succeeds only when enabled and under the seq-len cap, else fails.
+    # contract). Migration is expected to succeed only when it is enabled and the
+    # request does not exceed the migration seq-len cap; otherwise the in-flight
+    # request must fail.
     with shutdown_context:
-        if expect_drain:
-            validate_response(request_thread, response_list)
-        elif migration_limit > 0 and migration_max_seq_len != 1:
+        if migration_limit > 0 and migration_max_seq_len != 1:
             if verify_replacement_worker:
                 wait_for_worker_request_id(
                     replacement_worker,
@@ -936,22 +920,8 @@ def run_migration_test(
     # log strings. `ongoing_request` counts an error from an established
     # stream, including an attempt that cannot retry because migration_limit is
     # zero. It is the structured equivalent of the old "Stream disconnected,
-    # recreating stream" log assertion. `max_seq_len_exceeded` records the
-    # seq-len cap from token accounting, not migration, so both arms share it.
-    expected_max_seq_len_exceeded_count = 1 if migration_max_seq_len == 1 else 0
-
-    if expect_drain:
-        # A drain migrates nothing. Under the default lower-bound mode a zero
-        # expectation asserts nothing, hence exact_counts=True.
-        verify_migration_metrics(
-            frontend.frontend_port,
-            expected_ongoing_request_count=0,
-            expected_new_request_count=0,
-            expected_max_seq_len_exceeded_count=expected_max_seq_len_exceeded_count,
-            exact_counts=True,
-        )
-        return
-
+    # recreating stream" log assertion. `max_seq_len_exceeded` records hitting
+    # the migration seq-len cap.
     exact_metric_counts = expected_ongoing_request_count is not None
     if expected_ongoing_request_count is None:
         expected_ongoing_request_count = 1 if migration_limit > 0 else 0
@@ -959,6 +929,6 @@ def run_migration_test(
     verify_migration_metrics(
         frontend.frontend_port,
         expected_ongoing_request_count=expected_ongoing_request_count,
-        expected_max_seq_len_exceeded_count=expected_max_seq_len_exceeded_count,
+        expected_max_seq_len_exceeded_count=1 if migration_max_seq_len == 1 else 0,
         exact_counts=exact_metric_counts,
     )

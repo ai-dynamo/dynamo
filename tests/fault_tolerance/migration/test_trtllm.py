@@ -250,7 +250,6 @@ def test_request_migration_trtllm_aggregated(
                     immediate_kill=immediate_kill,
                     use_chat_completion=(request_api == "chat"),
                     stream=stream,
-                    expect_drain=not immediate_kill,
                     graceful_shutdown=lambda worker: graceful_worker_shutdown(
                         frontend, worker
                     ),
@@ -484,7 +483,6 @@ def test_request_migration_trtllm_decode(
                         use_chat_completion=(request_api == "chat"),
                         stream=stream,
                         wait_for_new_response_before_stop=True,
-                        expect_drain=not immediate_kill,
                         graceful_shutdown=lambda worker: graceful_worker_shutdown(
                             frontend, worker
                         ),
