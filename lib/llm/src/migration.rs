@@ -91,6 +91,9 @@ fn is_migratable(err: &(dyn StdError + 'static)) -> bool {
         // One overloaded worker: another may have room. Pool-wide exhaustion is
         // ResourceExhausted below and stays non-migratable.
         ErrorType::WorkerOverloaded,
+        // One worker answered that it no longer serves this instance: another
+        // may. Pool-wide absence is Unavailable and is not a worker fault.
+        ErrorType::WorkerUnavailable,
     ];
     error::match_error_chain(err, MIGRATABLE, NON_MIGRATABLE)
 }
@@ -860,6 +863,14 @@ mod tests {
              {missing_from_router:?}; missing from NON_MIGRATABLE here: \
              {missing_from_here:?}"
         );
+    }
+
+    #[test]
+    fn worker_unavailable_is_migratable_but_pool_unavailable_is_not() {
+        assert!(is_migratable(&migratable_error(
+            ErrorType::WorkerUnavailable
+        )));
+        assert!(!is_migratable(&migratable_error(ErrorType::Unavailable)));
     }
 
     // Guard: genuinely non-migratable errors stay non-migratable.
