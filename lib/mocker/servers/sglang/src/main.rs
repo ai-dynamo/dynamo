@@ -114,8 +114,7 @@ async fn main() -> anyhow::Result<()> {
             bootstrap_port: args.bootstrap_port,
         },
         engine_args,
-    )
-    .await?;
+    )?;
 
     tracing::info!(
         listen = %args.listen,
