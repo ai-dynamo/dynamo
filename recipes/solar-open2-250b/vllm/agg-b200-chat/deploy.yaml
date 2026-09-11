@@ -43,15 +43,12 @@ spec:
     minAvailable: 1
     podTemplate:
       spec:
-        # TODO: remove before merge, once the runtime image is published to a
-        # public registry. The image is currently hosted privately, so this
-        # secret is required to pull it.
+        # TODO: remove before merge. While the runtime image is hosted privately,
+        # two things here are pre-release: the image reference above, and this
+        # imagePullSecrets block. Replace the image with the published public
+        # tag and delete this block once the container patches land upstream.
         imagePullSecrets:
         - name: nvcr-secret
-        # TODO: remove before merge. Internal B200 nodes carry the taint
-        # nvidia.com/gpu=true:NoSchedule; without this the pods never schedule and
-        # the DynamoGraphDeployment reports insufficient_capacity even when GPUs
-        # are free. Not needed on clusters whose GPU nodes are untainted.
         tolerations:
         - key: nvidia.com/gpu
           operator: Equal
@@ -103,15 +100,12 @@ spec:
     sharedMemorySize: 64Gi
     podTemplate:
       spec:
-        # TODO: remove before merge, once the runtime image is published to a
-        # public registry. The image is currently hosted privately, so this
-        # secret is required to pull it.
+        # TODO: remove before merge. While the runtime image is hosted privately,
+        # two things here are pre-release: the image reference above, and this
+        # imagePullSecrets block. Replace the image with the published public
+        # tag and delete this block once the container patches land upstream.
         imagePullSecrets:
         - name: nvcr-secret
-        # TODO: remove before merge. Internal B200 nodes carry the taint
-        # nvidia.com/gpu=true:NoSchedule; without this the pods never schedule and
-        # the DynamoGraphDeployment reports insufficient_capacity even when GPUs
-        # are free. Not needed on clusters whose GPU nodes are untainted.
         tolerations:
         - key: nvidia.com/gpu
           operator: Equal

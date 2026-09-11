@@ -66,8 +66,8 @@ spec:
   template:
     spec:
       restartPolicy: Never
-      # TODO: remove before merge, once the AIPerf image is published to a
-      # public registry.
+      # TODO: remove before merge. Delete this imagePullSecrets block once the
+      # AIPerf image is pulled from a public registry.
       imagePullSecrets:
         - name: nvcr-secret
 
@@ -105,8 +105,7 @@ spec:
               value: "/model-cache/traces/nim_turbo_8k_1k_70kv_chat_new_noschedule_short_15perc.jsonl"
 
             # Concurrency 44 is the operating point the published numbers were
-            # measured at for the 1P:2D disaggregated topology. Averaged over three
-            # runs it clears both gates; individual runs vary.
+            # measured at for the 1P:2D disaggregated topology.
             - name: CONCURRENCY
               value: "44"
 

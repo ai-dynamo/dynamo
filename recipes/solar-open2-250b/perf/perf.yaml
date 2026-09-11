@@ -66,8 +66,8 @@ spec:
   template:
     spec:
       restartPolicy: Never
-      # TODO: remove before merge, once the AIPerf image is published to a
-      # public registry.
+      # TODO: remove before merge. Delete this imagePullSecrets block once the
+      # AIPerf image is pulled from a public registry.
       imagePullSecrets:
         - name: nvcr-secret
 

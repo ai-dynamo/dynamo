@@ -88,18 +88,28 @@ final answer in `content`.
 
 ## Benchmark
 
-Both performance Jobs read a mooncake trace from `/model-cache/traces/` on the
-`shared-model-cache` PVC. The trace is not part of the model download, so stage it
-before running:
+Both performance Jobs read a mooncake trace from the `shared-model-cache` PVC. The
+trace is not part of the model download, so stage it first. The published figures use
+`nim_turbo_8k_1k_70kv_chat_new_noschedule_short_15perc.jsonl` (1805 requests, mean
+ISL 37.4k, mean OSL 1008), which ships in this repository under
+`recipes/nemotron-3-ultra/perf/traces/`.
+
+Copy it in through any running pod that mounts the PVC. Note that the worker pods
+mount that volume at `/shared-model-cache`, while the benchmark Job mounts the same
+volume at `/model-cache`, so the file staged below is what `TRACE_FILE` refers to:
 
 ```bash
-kubectl exec deploy/<any-pod-with-the-pvc> -- mkdir -p /model-cache/traces
-kubectl cp <trace>.jsonl <namespace>/<pod>:/model-cache/traces/
+TRACE=recipes/nemotron-3-ultra/perf/traces/nim_turbo_8k_1k_70kv_chat_new_noschedule_short_15perc.jsonl
+
+# Whichever profile you deployed:
+DGD=solar-open2-250b-vllm-b200-agg-chat      # or solar-open2-250b-vllm-b200-disagg-chat
+POD=$(kubectl get pods -l nvidia.com/dynamo-graph-deployment-name=$DGD -o jsonpath='{.items[0].metadata.name}')
+
+kubectl exec "$POD" -- mkdir -p /shared-model-cache/traces
+kubectl cp "$TRACE" "$POD:/shared-model-cache/traces/"
 ```
 
-The published figures use `nim_turbo_8k_1k_70kv_chat_new_noschedule_short_15perc.jsonl`
-(1805 requests, mean ISL 37.4k, mean OSL 1008). Set `TRACE_FILE` in the Job to match
-whichever trace you stage.
+Set `TRACE_FILE` in the Job to match whichever trace you stage.
 
 Then run the Job for the profile under test:
 
@@ -156,8 +166,7 @@ Pin by digest, not by tag.
   `kv_role: kv_producer` on prefill and `kv_role: kv_consumer` on decode.
 - **The topology is one prefill worker and two decode workers** — TP4 with
   expert parallelism for prefill (4 GPUs), TP2 for each decode worker (4 GPUs),
-  8 GPUs in total. This is deliberately *not* the rate-matched 1:3 ratio; see
-  the measured comparison below.
+  8 GPUs in total.
 - **`VLLM_SSM_CONV_STATE_LAYOUT=DS` is required.** Solar Open2's KDA layers
   register as SSM layers, and their convolution state must cross the KV-transfer
   boundary. Without this variable the engine asserts during initialization and
@@ -193,7 +202,6 @@ Pin by digest, not by tag.
 
 Some OpenAI-compatible surfaces do not behave as advertised. These originate in the
 Dynamo frontend, are not specific to this model, and no recipe setting affects them.
-Tracked as NVBug 6481604.
 
 - **Logprobs.** Requesting `logprobs` on `/v1/chat/completions` returns HTTP 500.
 - **Responses API.** `store=true` succeeds but the response is not retrievable
@@ -225,7 +233,8 @@ below 5 s and p50 user output throughput at or above 50 tok/s.
 | Chat (15% subset) | Aggregated, 2 replicas, KV-aware routing | vLLM | B200 | 20 | 216.88 | 52.02 | 308 |
 | Chat (15% subset) | Disaggregated 1P:2D, round-robin | vLLM | B200 | 44 | 206.20 | 51.69 | 2277 |
 
-Figures are measured with the profile's `perf.yaml`. That configuration isolates the
+Figures are measured with the profile's benchmark manifest (`perf.yaml` for
+aggregated, `perf-disagg.yaml` for disaggregated). That configuration isolates the
 warmup phase from profiling; it does not clear server-side KV cache. For runs that
 must start from a cold cache, restart the worker pods between them.
 
