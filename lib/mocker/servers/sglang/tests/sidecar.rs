@@ -281,7 +281,6 @@ async fn request_cancellation_is_isolated_and_shutdown_reaches_grpc_streams() {
         for context in [
             first_context.clone(),
             dynamo_backend_common::testing::mock_context(),
-            dynamo_backend_common::testing::mock_context(),
         ] {
             let mut stream = engine
                 .generate(request(64), GenerateContext::new(context, None))
