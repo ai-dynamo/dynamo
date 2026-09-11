@@ -396,13 +396,14 @@ func TestXTSSHSecretNameIsNotUsedAsVolumeName(t *testing.T) {
 	}
 }
 
-func TestConfigureDirectHybridAgentRuntimePreservesCustomEntrypoint(t *testing.T) {
-	t.Log("Define custom entrypoint and probe preservation cases")
+func TestConfigureDirectHybridAgentRuntimePreservesPodOverrides(t *testing.T) {
+	t.Log("Define custom entrypoint, probe and Pod security preservation cases")
 	customStartup := testExecProbe("custom-startup")
 	customReadiness := testExecProbe("custom-ready")
 	tests := []struct {
 		name          string
 		container     corev1.Container
+		podSecurity   *corev1.PodSecurityContext
 		wantCommand   []string
 		wantArgs      []string
 		wantStartup   *corev1.Probe
@@ -417,8 +418,18 @@ func TestConfigureDirectHybridAgentRuntimePreservesCustomEntrypoint(t *testing.T
 			wantReadiness: lpuV2ReadinessProbe(true),
 		},
 		{
-			name:          "command",
-			container:     corev1.Container{Name: commonconsts.MainContainerName, Command: []string{"custom-entrypoint"}},
+			name:      "command",
+			container: corev1.Container{Name: commonconsts.MainContainerName, Command: []string{"custom-entrypoint"}},
+			podSecurity: &corev1.PodSecurityContext{
+				RunAsUser:           ptr.To(int64(1000)),
+				RunAsGroup:          ptr.To(int64(1000)),
+				RunAsNonRoot:        ptr.To(true),
+				FSGroup:             ptr.To(int64(1000)),
+				FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
+				SupplementalGroups:  []int64{2000},
+				Sysctls:             []corev1.Sysctl{{Name: "net.ipv4.tcp_keepalive_time", Value: "600"}},
+				SeccompProfile:      &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+			},
 			wantCommand:   []string{"custom-entrypoint"},
 			wantStartup:   lpuV2StartupProbe(true),
 			wantReadiness: lpuV2ReadinessProbe(true),
@@ -441,7 +452,10 @@ func TestConfigureDirectHybridAgentRuntimePreservesCustomEntrypoint(t *testing.T
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Configure the direct LPU agent runtime from a user-owned entrypoint")
-			podSpec := corev1.PodSpec{Containers: []corev1.Container{*test.container.DeepCopy()}}
+			podSpec := corev1.PodSpec{
+				Containers:      []corev1.Container{*test.container.DeepCopy()},
+				SecurityContext: test.podSecurity.DeepCopy(),
+			}
 			configureAgentScheduling(&podSpec, BuildFamilyXT)
 			err := configureDirectHybridAgentRuntime(&podSpec, "graph-lpu", "ssh-secret")
 			require.NoError(t, err)
@@ -452,6 +466,16 @@ func TestConfigureDirectHybridAgentRuntimePreservesCustomEntrypoint(t *testing.T
 			require.Equal(t, test.wantArgs, agent.Args)
 			require.Equal(t, test.wantStartup, agent.StartupProbe)
 			require.Equal(t, test.wantReadiness, agent.ReadinessProbe)
+
+			t.Log("Preserve orthogonal Pod security settings while using the root runtime identity")
+			wantSecurity := test.podSecurity.DeepCopy()
+			if wantSecurity == nil {
+				wantSecurity = &corev1.PodSecurityContext{}
+			}
+			wantSecurity.RunAsUser = ptr.To(int64(0))
+			wantSecurity.RunAsGroup = ptr.To(int64(0))
+			wantSecurity.RunAsNonRoot = ptr.To(false)
+			require.Equal(t, wantSecurity, podSpec.SecurityContext)
 		})
 	}
 }

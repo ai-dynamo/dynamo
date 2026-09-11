@@ -162,10 +162,15 @@ func configureDirectHybridAgentRuntime(
 	setNodeLocalPodIPEnv(agent, true)
 	addRuntimeTemporaryStorage(agentPodSpec, agent, false)
 	updateWorkerPodSpec(agentPodSpec)
-	agentPodSpec.SecurityContext = &corev1.PodSecurityContext{
-		RunAsUser:  ptr.To(int64(0)),
-		RunAsGroup: ptr.To(int64(0)),
+
+	// Keep volume permissions and other Pod settings while forcing the Agent's root identity.
+	if agentPodSpec.SecurityContext == nil {
+		agentPodSpec.SecurityContext = &corev1.PodSecurityContext{}
 	}
+	agentPodSpec.SecurityContext.RunAsUser = ptr.To(int64(0))
+	agentPodSpec.SecurityContext.RunAsGroup = ptr.To(int64(0))
+	agentPodSpec.SecurityContext.RunAsNonRoot = ptr.To(false)
+
 	if err := addSSHVolume(agentPodSpec, sshSecretName, 0644); err != nil {
 		return err
 	}

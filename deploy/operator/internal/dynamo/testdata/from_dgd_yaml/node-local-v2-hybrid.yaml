@@ -380,7 +380,10 @@ spec:
           restartPolicy: Always
           schedulerName: lpx-scheduler
           securityContext:
+            fsGroup: 1000
+            fsGroupChangePolicy: OnRootMismatch
             runAsGroup: 0
+            runAsNonRoot: false
             runAsUser: 0
           terminationGracePeriodSeconds: 60
           tolerations:
