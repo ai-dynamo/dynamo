@@ -22,7 +22,7 @@ import pytest
 
 from dynamo.common import http as mm_http
 from dynamo.common.http import HttpxClient
-from dynamo.common.http.url_validator import UrlValidationPolicy
+from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 
 pytestmark = [
     pytest.mark.asyncio,
@@ -48,6 +48,29 @@ def _async_raising(exc):
     return _coro
 
 
+def _streaming(body: bytes):
+    """``aiter_bytes`` stand-in — the seam the download cap reads through."""
+
+    async def _iter(*args, **kwargs):
+        yield body
+
+    return _iter
+
+
+def _inner_sending(response_or_exc) -> MagicMock:
+    """AsyncClient stand-in for the streaming path (``build_request`` + ``send``)."""
+    inner = MagicMock(spec=httpx.AsyncClient)
+    inner.is_closed = False
+    inner.build_request = MagicMock(
+        side_effect=lambda method, url, **kw: MagicMock(url=httpx.URL(url))
+    )
+    if isinstance(response_or_exc, BaseException):
+        inner.send = MagicMock(side_effect=_async_raising(response_or_exc))
+    else:
+        inner.send = MagicMock(side_effect=_async_returning(response_or_exc))
+    return inner
+
+
 def _make_client_with_inner(inner) -> HttpxClient:
     client = HttpxClient()
     client._client = inner
@@ -59,21 +82,26 @@ _PERMISSIVE = UrlValidationPolicy(allow_http=True, allow_private_ips=True)
 
 async def test_fetch_bytes_returns_body_on_200() -> None:
     response = MagicMock(spec=httpx.Response)
-    response.content = b"hello"
     response.raise_for_status = MagicMock(return_value=None)
-    inner = MagicMock(spec=httpx.AsyncClient)
-    inner.is_closed = False
-    inner.get = MagicMock(side_effect=_async_returning(response))
-    client = _make_client_with_inner(inner)
+    response.aiter_bytes = _streaming(b"hello")
+    response.aclose = AsyncMock(return_value=None)
+    client = _make_client_with_inner(_inner_sending(response))
     result = await client.fetch_bytes("https://h/x", 30.0)
     assert result == b"hello"
 
 
+async def test_fetch_bytes_refuses_a_body_over_the_cap() -> None:
+    response = MagicMock(spec=httpx.Response)
+    response.raise_for_status = MagicMock(return_value=None)
+    response.aiter_bytes = _streaming(b"x" * 2048)
+    response.aclose = AsyncMock(return_value=None)
+    client = _make_client_with_inner(_inner_sending(response))
+    with pytest.raises(UrlValidationError, match="download limit"):
+        await client.fetch_bytes("https://h/x", 30.0, max_bytes=512)
+
+
 async def test_fetch_bytes_maps_timeout() -> None:
-    inner = MagicMock(spec=httpx.AsyncClient)
-    inner.is_closed = False
-    inner.get = MagicMock(side_effect=_async_raising(httpx.ConnectTimeout("timeout")))
-    client = _make_client_with_inner(inner)
+    client = _make_client_with_inner(_inner_sending(httpx.ConnectTimeout("timeout")))
     with pytest.raises(mm_http.HttpTimeoutError) as exc:
         await client.fetch_bytes("https://h/x", 30.0)
     assert isinstance(exc.value.__cause__, httpx.ConnectTimeout)
@@ -87,20 +115,15 @@ async def test_fetch_bytes_maps_status() -> None:
             "404 Not Found", request=MagicMock(), response=response
         )
     )
-    inner = MagicMock(spec=httpx.AsyncClient)
-    inner.is_closed = False
-    inner.get = MagicMock(side_effect=_async_returning(response))
-    client = _make_client_with_inner(inner)
+    response.aclose = AsyncMock(return_value=None)
+    client = _make_client_with_inner(_inner_sending(response))
     with pytest.raises(mm_http.HttpStatusError) as exc:
         await client.fetch_bytes("https://h/x", 30.0)
     assert exc.value.status == 404
 
 
 async def test_fetch_bytes_maps_connection_error() -> None:
-    inner = MagicMock(spec=httpx.AsyncClient)
-    inner.is_closed = False
-    inner.get = MagicMock(side_effect=_async_raising(httpx.ConnectError("refused")))
-    client = _make_client_with_inner(inner)
+    client = _make_client_with_inner(_inner_sending(httpx.ConnectError("refused")))
     with pytest.raises(mm_http.HttpConnectionError):
         await client.fetch_bytes("https://h/x", 30.0)
 
@@ -117,7 +140,7 @@ async def test_redirect_resolved_through_policy_path() -> None:
 
     final_response = MagicMock(spec=httpx.Response)
     final_response.is_redirect = False
-    final_response.content = b"final"
+    final_response.aiter_bytes = _streaming(b"final")
     final_response.raise_for_status = MagicMock(return_value=None)
     final_response.aclose = AsyncMock(return_value=None)
 

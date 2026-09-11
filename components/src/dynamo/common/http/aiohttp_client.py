@@ -17,12 +17,22 @@ from typing import Optional
 import aiohttp
 from yarl import URL
 
-from .base import HttpClient, HttpConnectionError, HttpStatusError, HttpTimeoutError
+from .base import (
+    HttpClient,
+    HttpConnectionError,
+    HttpStatusError,
+    HttpTimeoutError,
+    collect_capped,
+)
 
 logger = logging.getLogger(__name__)
 
 
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+
+# Read granularity for the capped reader. Chunks are joined, so this only
+# bounds how far past the limit a single read can carry.
+_READ_CHUNK = 64 * 1024
 
 
 class AiohttpClient(HttpClient):
@@ -73,7 +83,9 @@ class AiohttpClient(HttpClient):
                 )
         return self._session
 
-    async def _fetch_simple(self, url: str, timeout: float) -> bytes:
+    async def _fetch_simple(
+        self, url: str, timeout: float, *, max_bytes: Optional[int] = None
+    ) -> bytes:
         session = await self._get_session()
         client_timeout = self._effective_timeout(timeout)
         try:
@@ -81,7 +93,9 @@ class AiohttpClient(HttpClient):
                 url, timeout=client_timeout, allow_redirects=True
             ) as response:
                 response.raise_for_status()
-                return await response.read()
+                return await collect_capped(
+                    response.content.iter_chunked(_READ_CHUNK), url, max_bytes
+                )
         except aiohttp.ClientResponseError as e:
             raise HttpStatusError(e.status, e.message or "", url) from e
         except (asyncio.TimeoutError, aiohttp.ServerTimeoutError) as e:
@@ -96,7 +110,7 @@ class AiohttpClient(HttpClient):
             raise HttpConnectionError(f"HTTP error loading {url}: {e}") from e
 
     async def _fetch_body_or_redirect(
-        self, url: str, timeout: float
+        self, url: str, timeout: float, *, max_bytes: Optional[int] = None
     ) -> tuple[bytes | None, str | None]:
         session = await self._get_session()
         client_timeout = self._effective_timeout(timeout)
@@ -109,13 +123,23 @@ class AiohttpClient(HttpClient):
                     if location:
                         next_url = str(response.url.join(URL(location)))
                         return None, next_url
-                    return await response.read(), None
+                    return (
+                        await collect_capped(
+                            response.content.iter_chunked(_READ_CHUNK), url, max_bytes
+                        ),
+                        None,
+                    )
 
                 try:
                     response.raise_for_status()
                 except aiohttp.ClientResponseError as e:
                     raise HttpStatusError(e.status, e.message or "", url) from e
-                return await response.read(), None
+                return (
+                    await collect_capped(
+                        response.content.iter_chunked(_READ_CHUNK), url, max_bytes
+                    ),
+                    None,
+                )
         except (asyncio.TimeoutError, aiohttp.ServerTimeoutError) as e:
             raise HttpTimeoutError(f"Timeout loading {url}") from e
         except (

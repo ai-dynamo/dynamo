@@ -14,7 +14,7 @@ from unittest.mock import patch
 import pytest
 
 from dynamo.common import http as mm_http
-from dynamo.common.http import AiohttpClient, HttpxClient, from_env
+from dynamo.common.http import AiohttpClient, HttpxClient, base, from_env
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 
 pytestmark = [
@@ -94,7 +94,7 @@ async def test_fetch_with_policy_returns_first_response(
 
     call_count = {"n": 0}
 
-    async def _fake(url, timeout):
+    async def _fake(url, timeout, *, max_bytes=None):
         call_count["n"] += 1
         return b"body-bytes", None
 
@@ -115,7 +115,7 @@ async def test_fetch_with_policy_follows_safe_redirect(
 
     hops: list[str] = []
 
-    async def _fake(url, timeout):
+    async def _fake(url, timeout, *, max_bytes=None):
         hops.append(url)
         if url == "https://example.com/x.png":
             return None, "https://example.com/final.png"
@@ -138,7 +138,7 @@ async def test_fetch_with_policy_blocks_redirect_to_private_ip(
 
     strict = UrlValidationPolicy(allow_private_ips=False)
 
-    async def _fake(url, timeout):
+    async def _fake(url, timeout, *, max_bytes=None):
         return None, "http://169.254.169.254/latest/meta-data/"
 
     with patch.object(client, "_fetch_body_or_redirect", _fake):
@@ -161,9 +161,52 @@ async def test_fetch_with_policy_enforces_redirect_limit(
         "https://example.com/d": "https://example.com/e",
     }
 
-    async def _fake(url, timeout):
+    async def _fake(url, timeout, *, max_bytes=None):
         return None, chain[url]
 
     with patch.object(client, "_fetch_body_or_redirect", _fake):
         with pytest.raises(UrlValidationError, match="Too many redirects"):
             await mm_http.fetch_bytes("https://example.com/a", 30.0, policy=_PERMISSIVE)
+
+
+# --- Download cap (collect_capped) ---
+#
+# The cap exists because moving the diffusion download out of SGLang left its
+# media_url_max_file_size_mb behind. It has to hold while the body streams: a
+# declared Content-Length is attacker-controlled and absent when chunked.
+
+
+async def _chunks(*sizes: int):
+    for n in sizes:
+        yield b"x" * n
+
+
+async def test_collect_capped_joins_a_body_under_the_limit() -> None:
+    assert await base.collect_capped(_chunks(4, 4, 2), "u", 100) == b"x" * 10
+
+
+async def test_collect_capped_without_a_limit_reads_everything() -> None:
+    assert len(await base.collect_capped(_chunks(50, 50), "u", None)) == 100
+
+
+async def test_collect_capped_refuses_a_body_over_the_limit() -> None:
+    with pytest.raises(UrlValidationError, match="download limit"):
+        await base.collect_capped(_chunks(60, 60), "u", 100)
+
+
+async def test_collect_capped_counts_across_short_chunks() -> None:
+    """Each chunk is well under the limit; only the running total exceeds it.
+
+    aiohttp's ``read(n)`` returns at most n bytes and in practice returns far
+    fewer, so a single capped read would let this body through.
+    """
+    with pytest.raises(UrlValidationError, match="download limit"):
+        await base.collect_capped(_chunks(*([10] * 20)), "u", 100)
+
+
+async def test_collect_capped_does_not_echo_an_unbounded_url() -> None:
+    url = "https://example.com/" + "a" * 200_000
+    with pytest.raises(UrlValidationError) as excinfo:
+        await base.collect_capped(_chunks(200), url, 100)
+
+    assert len(str(excinfo.value)) < 500

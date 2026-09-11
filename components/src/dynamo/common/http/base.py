@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import abc
 import asyncio
-from typing import Optional
+from typing import AsyncIterator, Optional
 
 from dynamo.common.configuration.groups.http_args import HttpConfigBase, from_env
 
@@ -21,6 +21,7 @@ from .url_validator import (
     _MAX_REDIRECTS,
     UrlValidationError,
     UrlValidationPolicy,
+    describe_media_source,
     validate_url,
 )
 
@@ -47,6 +48,29 @@ class HttpStatusError(HttpError):
         self.url = url
 
 
+async def collect_capped(
+    chunks: AsyncIterator[bytes], url: str, max_bytes: Optional[int]
+) -> bytes:
+    """Join ``chunks`` into one body, refusing to buffer past ``max_bytes``.
+
+    The check is per chunk rather than on the finished body: a declared
+    Content-Length is attacker-controlled and absent on a chunked response, and
+    a single capped read is not enough either — aiohttp's ``read(n)`` returns
+    *at most* n bytes, so a short read would look like a body under the limit.
+    """
+    out: list[bytes] = []
+    total = 0
+    async for chunk in chunks:
+        total += len(chunk)
+        if max_bytes is not None and total > max_bytes:
+            raise UrlValidationError(
+                f"Media exceeds the {max_bytes} byte download limit: "
+                f"{describe_media_source(url)}"
+            )
+        out.append(chunk)
+    return b"".join(out)
+
+
 class HttpClient(abc.ABC):
     """Backend-neutral HTTP client.
 
@@ -66,6 +90,7 @@ class HttpClient(abc.ABC):
         timeout: float,
         *,
         policy: Optional[UrlValidationPolicy] = None,
+        max_bytes: Optional[int] = None,
     ) -> bytes:
         """Fetch ``url`` and return the response body.
 
@@ -74,20 +99,29 @@ class HttpClient(abc.ABC):
 
         ``policy=None``: use the backend's built-in redirect handling.
 
+        ``max_bytes`` set: refuse a body larger than that while it is being
+        read, so an attacker-chosen URL cannot buffer an unbounded response.
+        Raises :class:`UrlValidationError` — it is a verdict on a
+        client-supplied source, like the redirect cap below.
+
         ``policy`` set: follow redirects manually and revalidate each
         hop against the policy via :func:`url_validator.validate_url`.
         This is the SSRF-safe path; raises :class:`UrlValidationError`
         if any hop fails or the chain exceeds ``_MAX_REDIRECTS``.
         """
         if policy is None:
-            return await self._fetch_simple(url, timeout)
-        return await self._fetch_with_revalidation(url, timeout, policy)
+            return await self._fetch_simple(url, timeout, max_bytes=max_bytes)
+        return await self._fetch_with_revalidation(
+            url, timeout, policy, max_bytes=max_bytes
+        )
 
     async def _fetch_with_revalidation(
         self,
         url: str,
         timeout: float,
         policy: UrlValidationPolicy,
+        *,
+        max_bytes: Optional[int] = None,
     ) -> bytes:
         """Manual redirect loop with per-hop SSRF validation (backend-neutral)."""
         current = url
@@ -97,7 +131,9 @@ class HttpClient(abc.ABC):
             await validate_url(current, policy)
             visited.append(current)
 
-            body, redirect_to = await self._fetch_body_or_redirect(current, timeout)
+            body, redirect_to = await self._fetch_body_or_redirect(
+                current, timeout, max_bytes=max_bytes
+            )
 
             if redirect_to is None:
                 if body is None:
@@ -115,12 +151,14 @@ class HttpClient(abc.ABC):
             current = redirect_to
 
     @abc.abstractmethod
-    async def _fetch_simple(self, url: str, timeout: float) -> bytes:
+    async def _fetch_simple(
+        self, url: str, timeout: float, *, max_bytes: Optional[int] = None
+    ) -> bytes:
         """Backend's native redirect-following GET (no SSRF policy applied)."""
 
     @abc.abstractmethod
     async def _fetch_body_or_redirect(
-        self, url: str, timeout: float
+        self, url: str, timeout: float, *, max_bytes: Optional[int] = None
     ) -> tuple[bytes | None, str | None]:
         """Single hop with redirects disabled.
 
