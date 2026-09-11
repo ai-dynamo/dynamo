@@ -132,7 +132,6 @@ class LlmRegistration:
     bootstrap_host: Optional[str] = None
     bootstrap_port: Optional[int] = None
     enable_eagle: bool = False
-    # Keep new fields after existing positional arguments.
     max_gpu_lora_count: Optional[int] = None
 
 

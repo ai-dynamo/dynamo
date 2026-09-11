@@ -74,6 +74,12 @@ control surface does not expose the primitives they need:
 
 Custom Python-only LoRA source schemes are not available in the sidecar implementation.
 
+LoRA requests bypass local prefix-cache reads because native unload does not invalidate
+KV cached under the adapter name. This prevents stale KV reuse after reloading different
+weights under that name, including after a sidecar restart. Base-model prefix caching and
+NIXL prefill/decode transfers remain available. Repeated LoRA prompts therefore recompute
+their prefill until the native gRPC API supports safe cache invalidation.
+
 LoRA lifecycle mutations are serialized per worker, including source resolution. Requests
 using other loaded adapters can continue during a load or unload. Multiple workers can
 publish the same adapter independently.

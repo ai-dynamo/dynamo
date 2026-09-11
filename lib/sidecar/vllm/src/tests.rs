@@ -137,8 +137,6 @@ impl pb::inference_server::Inference for FakeVllm {
         if self.reject.load(Ordering::SeqCst) {
             return Err(Status::invalid_argument("rejected by fake vLLM"));
         }
-        // Upstream resolves the adapter before generating; reproduce that second
-        // safety layer so the sidecar's own guard is not the only thing tested.
         if !request.lora_name.is_empty() {
             if self.lora_disabled.load(Ordering::SeqCst) {
                 return Err(Status::failed_precondition(
@@ -2122,17 +2120,12 @@ async fn lora_lifecycle_preserves_identity_and_routing_metadata() {
         collect(&engine, request_selecting("math-r8")).await.len(),
         1
     );
-    assert_eq!(
-        server
-            .service
-            .requests
-            .lock()
-            .await
-            .last()
-            .unwrap()
-            .lora_name,
-        "math-r8"
-    );
+    {
+        let requests = server.service.requests.lock().await;
+        let sent = requests.last().unwrap();
+        assert_eq!(sent.lora_name, "math-r8");
+        assert!(sent.kv.as_ref().unwrap().bypass_prefix_cache);
+    }
     let listed = engine
         .engine_update("list_loras".into(), json!({}))
         .await
@@ -2380,33 +2373,36 @@ async fn restart_republishes_resident_adapters_and_shutdown_unpublishes() {
 
 #[tokio::test]
 async fn invalid_restart_inventory_keeps_base_serving() {
-    let service = FakeVllm::default();
-    for (id, name) in [(1, "math-r8"), (2, "Math-R8")] {
-        service.loras.lock().await.push(pb::LoraAdapter {
-            lora_id: id,
-            lora_name: name.into(),
-            source_path: "/shared/loras/math-r8".into(),
-        });
+    for conflicting_name in ["Math-R8", "model-source"] {
+        let service = FakeVllm::default();
+        for (id, name) in [(1, "math-r8"), (2, conflicting_name)] {
+            service.loras.lock().await.push(pb::LoraAdapter {
+                lora_id: id,
+                lora_name: name.into(),
+                source_path: "/shared/loras/math-r8".into(),
+            });
+        }
+        let (server, engine, endpoint) =
+            started_lora_engine(service, "lora_restart_collision").await;
+        assert!(
+            engine
+                .supported_updates()
+                .await
+                .unwrap()
+                .contains(&"load_lora".to_string())
+        );
+        assert!(lora_siblings(&endpoint).await.is_empty());
+        assert_eq!(collect(&engine, request()).await.len(), 1);
+        server.service.loras.lock().await.pop();
+        assert_eq!(
+            engine
+                .engine_update("list_loras".into(), json!({}))
+                .await
+                .unwrap()["status"],
+            "success"
+        );
+        assert_eq!(lora_siblings(&endpoint).await.len(), 1);
     }
-    let (server, engine, endpoint) = started_lora_engine(service, "lora_restart_collision").await;
-    assert!(
-        engine
-            .supported_updates()
-            .await
-            .unwrap()
-            .contains(&"load_lora".to_string())
-    );
-    assert!(lora_siblings(&endpoint).await.is_empty());
-    assert_eq!(collect(&engine, request()).await.len(), 1);
-    server.service.loras.lock().await.pop();
-    assert_eq!(
-        engine
-            .engine_update("list_loras".into(), json!({}))
-            .await
-            .unwrap()["status"],
-        "success"
-    );
-    assert_eq!(lora_siblings(&endpoint).await.len(), 1);
 }
 
 #[tokio::test]
@@ -2415,17 +2411,10 @@ async fn base_aliases_and_unknown_adapters_do_not_select_lora() {
         started_lora_engine(FakeVllm::default(), "lora_admission_names").await;
     for name in ["model-source", "served-model", "model-alias"] {
         assert_eq!(collect(&engine, request_selecting(name)).await.len(), 1);
-        assert_eq!(
-            server
-                .service
-                .requests
-                .lock()
-                .await
-                .last()
-                .unwrap()
-                .lora_name,
-            ""
-        );
+        let requests = server.service.requests.lock().await;
+        let sent = requests.last().unwrap();
+        assert_eq!(sent.lora_name, "");
+        assert!(!sent.kv.as_ref().unwrap().bypass_prefix_cache);
     }
     let count = server.service.requests.lock().await.len();
     assert!(
@@ -2461,6 +2450,7 @@ async fn hot_swap_is_refused() {
 fn request_selecting(lora_name: &str) -> PreprocessedRequest {
     let mut value = serde_json::to_value(request()).unwrap();
     value["routing"]["lora_name"] = json!(lora_name);
+    value["extra_args"]["bypass_prefix_cache"] = json!(false);
     serde_json::from_value(value).unwrap()
 }
 
@@ -2494,6 +2484,26 @@ async fn request_admission_and_unload_cannot_race() {
     let mut generating =
         Box::pin(engine.generate(request_selecting("math-r8"), generate_context()));
     wait_pending(&server.service.headers_pending, &mut generating).await;
+    let context = dynamo_backend_common::testing::mock_context();
+    let mut waiting = Box::pin(engine.generate(
+        request_selecting("math-r8"),
+        GenerateContext::new(context.clone(), None),
+    ));
+    assert!(
+        futures::future::poll_immediate(&mut waiting)
+            .await
+            .is_none()
+    );
+    context.stop_generating();
+    let mut cancelled = tokio::time::timeout(std::time::Duration::from_secs(2), waiting)
+        .await
+        .expect("cancel admission wait")
+        .unwrap();
+    assert_eq!(
+        cancelled.next().await.unwrap().unwrap().finish_reason,
+        Some(FinishReason::Cancelled)
+    );
+    assert_eq!(server.service.requests.lock().await.len(), 1);
     let mut unloading = Box::pin(unload(&engine, "math-r8"));
     assert!(
         futures::future::poll_immediate(&mut unloading)
@@ -2893,8 +2903,6 @@ async fn unsupported_features_fail_before_rpc_submission() {
         vec![Some("audio-cache-id".to_string())],
     )]));
     requests.push(audio_uuid);
-
-    // covered by `selecting_an_adapter_without_engine_support_fails_clearly`.
 
     let mut mismatched_cache_salt = request();
     mismatched_cache_salt.extra_args.as_mut().unwrap()["nvext"]["cache_salt"] =
