@@ -20,7 +20,7 @@ covers Dynamo mode only.
 | Dynamo runtime | Required, with etcd and NATS | Not used |
 | Worker discovery | Dynamo runtime discovery | Kubernetes pod watch driven by `InferencePool.spec.selector` |
 | EPP ServiceAccount and RBAC | Created by the operator against the ClusterRole or Role from the `dynamo-platform` chart | Supplied with the deployment manifests |
-| EPP replication | Not available; exactly one replica | Available through `DYN_EPP_PEER_SERVICE` |
+| EPP replication | Available; active-sequence state shared over the Dynamo event plane | Available; active-sequence state shared over ZMQ, peers discovered through `DYN_EPP_PEER_SERVICE` |
 
 Standalone mode does not install or run the Dynamo operator, so no operator-generated resource
 described on this page applies to it, including the EPP ServiceAccount and the chart's EPP RBAC. A
@@ -51,9 +51,10 @@ and is configured through `DYN_*` environment variables. It implements the GAIE
 </ParamField>
 
 <ParamField path="spec.components[].replicas" type="integer" default="1">
-  Number of EPP pods. Must be exactly `1`. Admission rejects any other value with the message
-  `EPP component must have exactly 1 replica`. EPP replication is not available in Dynamo mode. To run
-  several EPP replicas that share active-load state, use standalone mode.
+  Number of EPP pods. Increase it for endpoint-picker throughput or to survive the loss of a single
+  EPP pod. Above `1`, the operator defaults `DYN_ROUTER_REPLICA_SYNC` to `true` so replicas share
+  active-load state, and the routing accuracy of the fleet becomes approximate. Read
+  [EPP Replication and Routing Accuracy](#epp-replication-and-routing-accuracy) before scaling it.
 </ParamField>
 
 <ParamField path="spec.components[].frontendSidecar" type="string" required={true}>
@@ -111,8 +112,9 @@ Gateway topology.
 
 <ParamField path="DYN_ROUTER_REPLICA_SYNC" type="boolean" default="false">
   Publishes and consumes best-effort active-sequence state across EPP replicas through the Dynamo event
-  plane. A DGD EPP component runs a single replica, so this setting has no peer to synchronize with
-  there.
+  plane. The operator defaults it to `true` when `replicas` is above `1`, and a value set in
+  `podTemplate` takes precedence. It has no peer to synchronize with at one replica. See
+  [EPP Replication and Routing Accuracy](#epp-replication-and-routing-accuracy).
 </ParamField>
 
 <ParamField path="DYN_ROUTER_TRACK_ACTIVE_BLOCKS" type="boolean" default="true">
@@ -129,6 +131,73 @@ Gateway topology.
 
 For the full shared configuration surface and tuning guidance, see
 [Configuration and Tuning](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md).
+
+## EPP Replication and Routing Accuracy
+
+Running more than one EPP replica trades exact load accounting for endpoint-picker throughput and
+fault tolerance. The trade is the same one the Frontend-hosted KV router already makes when it is
+replicated, described in
+[Router Operations](../../developer-guide/knowledge-base/modular-components/router/router-operations.md).
+This section states what a replicated EPP gets wrong, and by how much.
+
+The router keeps two kinds of state, and only one of them is affected.
+
+**Prefix-cache state converges on its own.** Workers publish KV `Stored` and `Removed` events to the
+Dynamo event plane, and every subscriber receives every event, so each replica builds an equivalent
+radix tree without any router-to-router traffic. Cache-overlap scoring, which dominates worker choice
+on prefix-heavy traffic, is therefore as accurate with ten replicas as with one. A replica that starts
+late rebuilds prefix state by querying each worker's local indexer.
+
+**Active-block state does not.** A booking is recorded by the replica that routed the request, so each
+replica sees only the load it placed itself. `DYN_ROUTER_REPLICA_SYNC` shares the request lifecycle —
+add, prefill-complete, and free — across replicas, which is why the operator defaults it on above one
+replica. That channel is fire-and-forget: its outbound queue drops the newest event when full, there is
+no acknowledgement, replay, or resynchronization, and replicas can disagree for a bounded period.
+Output-block growth is never shared, because it changes at a frequency that would consume
+disproportionate bandwidth, so decode-side load estimates drift between replicas whenever
+`DYN_ROUTER_TRACK_OUTPUT_BLOCKS` is on.
+
+### Booking Ownership on Disconnect and Retry
+
+This is the sharpest accuracy limit, and it is specific to the EPP rather than inherited from the
+router.
+
+The Frontend owns a request end to end: it selects a worker, dispatches, and observes completion, so it
+frees the booking exactly when the work ends. The EPP only selects. Envoy dispatches, and the EPP's
+booking lives for the life of the `ext_proc` stream. When that stream ends the EPP frees the booking,
+whether or not the backend request it accounted for has finished.
+
+At one replica the consequences are self-correcting. At several replicas they are not:
+
+- **A retry can land on a different EPP.** Envoy load-balances `ext_proc` streams across EPP pods with
+  no request affinity. If a stream fails and Envoy retries, the replica that made the original booking
+  frees it when its stream ends, while the backend may still be generating. That worker's load is then
+  understated on the replica that placed it and, once the retry is booked elsewhere, double-counted
+  across the fleet until one of the two bookings is freed.
+- **Backend work can outlive the stream.** An `ext_proc` disconnect does not cancel work already
+  dispatched to the worker. The EPP stops accounting for a request that is still consuming KV blocks.
+- **Expiry bounds the error but does not correct it.** A quiet booking is reclaimed by a router-owned
+  reaper at `DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS` (default `300` seconds). Lease expiry is local to
+  the replica that holds it and publishes no `free`, so peers reclaim their copies on their own timers.
+
+The practical effect is a transient over- or under-estimate of one worker's active load, on some
+replicas and not others, lasting until the affected requests complete or the reaper runs. It shifts
+load balancing, not correctness: a misrouted request is still served by a worker that holds the model.
+
+### Selection-to-Booking Race
+
+Replica synchronization is eventually consistent, so it cannot serialize selection. Two replicas can
+evaluate the same worker as least-loaded before either one's booking has propagated, and both send work
+to it. The size of the error grows with request arrival rate and with propagation delay, and no setting
+removes it. `DYN_ROUTER_TEMPERATURE` above `0` decorrelates replicas by sampling among near-equal
+workers, which reduces how often they converge on the same choice.
+
+### Choosing a Replica Count
+
+Use one replica when active-load precision matters more than endpoint-picker throughput, or when the
+workload is long-generation and sensitive to decode-side balance. Use several when the EPP itself is
+the bottleneck or its availability is, and the traffic is prefix-heavy enough that cache-overlap
+scoring — the part that stays accurate — drives most of the routing decision.
 
 ## Generated Resource Contract
 

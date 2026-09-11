@@ -180,6 +180,24 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 			Name:      "hf-cache",
 			MountPath: nativeRustEPPHome + "/.cache",
 		})
+
+		// A replicated EPP defaults to sharing active-sequence state. Each
+		// replica tracks only the requests it routed itself, so without this a
+		// scale-out silently degrades load balancing: every replica scores
+		// workers from a fraction of the in-flight load and they converge on
+		// the same "least loaded" worker. Prefix-cache state needs no such
+		// default -- workers broadcast KV events over the event plane, so every
+		// replica already builds an equivalent radix tree.
+		//
+		// Defaulted rather than required because MergeEnvs gives podTemplate env
+		// precedence, so a deployment that wants the isolated-view mode the
+		// Frontend router also offers can still set it to "false".
+		if context.Replicas != nil && *context.Replicas > 1 {
+			container.Env = append(container.Env, corev1.EnvVar{
+				Name:  "DYN_ROUTER_REPLICA_SYNC",
+				Value: "true",
+			})
+		}
 	}
 
 	return container, nil

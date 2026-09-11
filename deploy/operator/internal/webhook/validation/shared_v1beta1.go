@@ -125,13 +125,6 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 				allErrs = append(allErrs, field.Forbidden(fldPath.Child("type"), fmt.Sprintf("cannot deploy EPP component: %v", err)))
 			}
 		}
-		if spec.Replicas != nil && *spec.Replicas != 1 {
-			allErrs = append(allErrs, field.Invalid(
-				fldPath.Child("replicas"),
-				*spec.Replicas,
-				"EPP component must have exactly 1 replica",
-			))
-		}
 	}
 	// Validate the represented eppConfig once using the submitted API version's field path.
 	if spec.EPPConfig != nil && !v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {

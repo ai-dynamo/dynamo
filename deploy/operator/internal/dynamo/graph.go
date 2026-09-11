@@ -2064,6 +2064,7 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 		Discovery:                      discovery,
 		DynamoNamespace:                dynamoNamespace,
 		EPPConfig:                      component.EPPConfig,
+		Replicas:                       component.Replicas,
 		WorkerHashSuffix:               workerHashSuffix,
 		RuntimeVersion:                 resolvedRuntimeVersion,
 	}
