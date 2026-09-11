@@ -568,3 +568,44 @@ FROM pre_runtime AS runtime
 {% if target not in ("dev", "local-dev") and device != "cpu" %}
 COPY --from=licenses /legal /legal
 {% endif %}
+
+# Qualification-only codec overlay for DIS-2745. This commit is built on a
+# separate experiment branch; the product stack keeps the overlay opt-in.
+USER root
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        ffmpeg \
+    && ln -sf /usr/bin/ffmpeg /usr/local/bin/ffmpeg \
+    && ln -sf /usr/bin/ffprobe /usr/local/bin/ffprobe \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN uv pip install --system --no-deps av==18.0.0 \
+    && ffmpeg -hide_banner -encoders 2>/dev/null | grep -Eq '(^| )libx264( |$)' \
+    && python3 -c \
+        'import av; av.codec.Codec("h264", "w"); av.codec.Codec("aac", "w")'
+
+RUN python3 <<'PY'
+import io
+
+import av
+import numpy as np
+from vllm_omni.diffusion.utils.media_utils import mux_video_audio_bytes
+
+frames = np.zeros((4, 16, 16, 3), dtype=np.uint8)
+waveform = np.zeros((2, 8000), dtype=np.float32)
+payload = mux_video_audio_bytes(
+    frames,
+    waveform,
+    fps=24,
+    audio_sample_rate=32000,
+)
+with av.open(io.BytesIO(payload), mode="r") as container:
+    video = container.streams.video[0]
+    audio = container.streams.audio[0]
+    assert video.codec_context.name == "h264"
+    assert int(video.average_rate) == 24
+    assert audio.codec_context.name == "aac"
+    assert audio.codec_context.sample_rate == 32000
+PY
+
+USER dynamo
