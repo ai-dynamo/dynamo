@@ -46,7 +46,7 @@ use aisimulate_core::replay::{
     ProviderSpec, ReplayAdmissionMetadata, WorkerTopology,
 };
 
-mod composition;
+pub(crate) mod composition;
 pub(in crate::replay) use composition::{KvReplayComposition, RoundRobinReplayComposition};
 
 #[derive(Clone, Copy)]
@@ -112,7 +112,7 @@ impl fmt::Display for KvEventSummary {
 ///
 /// Keeping this value with the adapter prevents the neutral offline entrypoint
 /// from naming or depending on the concrete Router crate.
-pub(in crate::replay) fn provider_spec() -> ProviderSpec {
+pub fn provider_spec() -> ProviderSpec {
     ProviderSpec {
         provider: "dynamo_kv_router".to_string(),
         config: serde_json::Value::Null,
@@ -122,7 +122,7 @@ pub(in crate::replay) fn provider_spec() -> ProviderSpec {
 /// Dynamo-owned metadata used by KV-aware placement. AISimulate only defines
 /// the neutral admission-metadata contract and never imports Router types.
 #[derive(Debug, Default)]
-pub(in crate::replay) struct KvReplayMetadata {
+pub struct KvReplayMetadata {
     hashes: Option<ReplayRequestHashes>,
     max_output_tokens_override: Option<usize>,
 }
@@ -154,6 +154,7 @@ pub(crate) struct WorkerAdmission {
     uuid: Uuid,
     worker_idx: usize,
     overlap_blocks: u32,
+    best_available_overlap_blocks: u32,
     isl_blocks: u32,
 }
 
@@ -169,6 +170,10 @@ pub(crate) struct RouterEffects {
 struct AdmitOutcome {
     worker_idx: usize,
     overlap_blocks: u32,
+    /// Largest prefix overlap any eligible worker offered at selection time.
+    /// The report subtracts the selected worker's overlap from this to derive
+    /// routing regret, so the two must be measured independently.
+    best_available_overlap_blocks: u32,
     isl_blocks: u32,
 }
 
@@ -337,12 +342,12 @@ pub(crate) struct OfflineReplayRouter {
     tracking_hash: TrackingHashContext,
 }
 
-pub(in crate::replay) struct KvRouterPlacement {
+pub struct KvRouterPlacement {
     router: OfflineReplayRouter,
 }
 
 impl KvRouterPlacement {
-    pub(in crate::replay) fn new_with_selector_seed(
+    pub fn new_with_selector_seed(
         args: &MockEngineArgs,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
@@ -370,8 +375,10 @@ impl KvRouterPlacement {
             scheduler_id: admission.worker_idx,
             reported_overlap_tokens: admission.overlap_blocks as usize
                 * self.router.block_size as usize,
+            placement_replica_id: None,
             cache_sample: Some(PlacementCacheSample {
                 overlap_blocks: admission.overlap_blocks,
+                best_available_overlap_blocks: admission.best_available_overlap_blocks,
                 isl_blocks: admission.isl_blocks,
             }),
         }
@@ -477,7 +484,7 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
     }
 
     fn observe(&mut self, observation: RouterEventBatch, _now_ms: f64) -> Result<Vec<Placement>> {
-        let effects = self.router.on_kv_events(observation.0)?;
+        let effects = self.router.on_kv_events(observation.into_events())?;
         Ok(self.placements(effects.admissions))
     }
 
@@ -662,6 +669,7 @@ impl OfflineReplayRouter {
                 uuid,
                 worker_idx: outcome.worker_idx,
                 overlap_blocks: outcome.overlap_blocks,
+                best_available_overlap_blocks: outcome.best_available_overlap_blocks,
                 isl_blocks: outcome.isl_blocks,
             }],
         })
@@ -953,6 +961,39 @@ impl OfflineReplayRouter {
         let isl_blocks = u32::try_from(request.isl_tokens.div_ceil(self.block_size as usize))
             .unwrap_or(u32::MAX);
         let overlap_blocks = selection.effective_overlap_blocks.floor() as u32;
+        // `PlacementCacheSample::best_available_overlap_blocks` is documented
+        // as the largest prefix overlap available on any *eligible* worker at
+        // selection time; `overlap_regret_blocks` is derived from it upstream.
+        //
+        // Walking `eligibility` is currently equivalent to walking
+        // `self.workers_with_configs` directly: `scheduling_request` (above)
+        // hardcodes `allowed_worker_ids: None`, `pinned_worker: None`, and
+        // `routing_constraints: RoutingConstraints::default()`, and
+        // `SchedulingRequest::eligibility()` passes `overloaded_worker_ids:
+        // None`, so every predicate `RoutingEligibility::allows_worker`
+        // checks is vacuously true here. Written against `eligibility`
+        // rather than the raw map as future-proofing: if this offline router
+        // ever threads a real routing constraint or busy-worker exclusion
+        // through `scheduling_request`, this reduction picks it up for free
+        // instead of silently continuing to count overlap on a worker that
+        // constraint would have forbidden.
+        //
+        // That difference is forgone overlap, not a routing mistake: a
+        // load-aware selector declines a cache hit on a saturated worker on
+        // purpose, and that correct decision still reports nonzero regret.
+        //
+        // Comparable to `overlap_blocks` because `scheduling_request` builds
+        // `effective_overlap_blocks` one-to-one from this same `scores` map, so
+        // both are device-tier block counts in the same unit. The live path
+        // reaches them through `cache_hit_estimates_from_tiered_matches`, which
+        // adds weighted lower-tier hits on top; routing this router through
+        // that function is what would stop the two being the same quantity.
+        let mut best_available_overlap_blocks = 0;
+        eligibility.for_each_eligible_worker_rank(&self.workers_with_configs, |worker, _| {
+            if let Some(overlap) = request.overlaps.scores.get(&worker) {
+                best_available_overlap_blocks = best_available_overlap_blocks.max(*overlap);
+            }
+        });
 
         self.slots
             .add_request(
@@ -972,6 +1013,7 @@ impl OfflineReplayRouter {
         Ok(AdmitOutcome {
             worker_idx,
             overlap_blocks,
+            best_available_overlap_blocks,
             isl_blocks,
         })
     }
@@ -993,6 +1035,7 @@ impl OfflineReplayRouter {
                 uuid,
                 worker_idx: outcome.worker_idx,
                 overlap_blocks: outcome.overlap_blocks,
+                best_available_overlap_blocks: outcome.best_available_overlap_blocks,
                 isl_blocks: outcome.isl_blocks,
             });
         }
@@ -1171,6 +1214,7 @@ mod tests {
             uuid: Some(Uuid::from_u128(uuid)),
             dp_rank: 0,
             preferred_dp_rank: None,
+            preferred_prefill_dp_rank: None,
             arrival_timestamp_ms: Some(0.0),
             priority,
             strict_priority,
@@ -1419,8 +1463,120 @@ mod tests {
                 uuid: Uuid::from_u128(1),
                 worker_idx: 1,
                 overlap_blocks: 1,
+                best_available_overlap_blocks: 1,
                 isl_blocks: 1,
             }]
+        );
+    }
+
+    /// The case the field exists to report: the selector declines the worker
+    /// holding the cached prefix, so best-available exceeds what was taken.
+    /// Every other test asserts the two equal, which a hardcoded value or a
+    /// broken eligibility reduction would satisfy just as well.
+    #[test]
+    fn declined_cache_hit_reports_nonzero_routing_regret() {
+        // Overlap-blind scoring is not enough on its own: the prefill load
+        // model already credits cached tokens, so the cached worker still wins
+        // on load. Saturating it is what makes the router decline it.
+        let overlap_blind = KvRouterConfig {
+            overlap_score_credit: 0.0,
+            ..queueing_router_config()
+        };
+        let mut router =
+            OfflineReplayRouter::new(&queueing_args(), Some(overlap_blind), None, 2).unwrap();
+
+        // Fill one worker, then cache the target's prefix on that same worker.
+        let occupied = router
+            .on_request_arrival(&request(1, 3), None, 0.0)
+            .unwrap()
+            .admissions
+            .into_iter()
+            .next()
+            .expect("first request is admitted")
+            .worker_idx;
+        // `worker_idx` is `worker_id * dp_size + dp_rank` (see `admit_request`),
+        // so this identity holds only at dp_size 1, which `replay_args` fixes.
+        assert_eq!(router.dp_size, 1, "fixture assumes one dp rank per worker");
+        let occupied_worker_id = occupied as WorkerId;
+
+        let target = request(2, 7);
+        let hashes = ReplayRequestHashes::from_tokens(&target.tokens, router.block_size);
+        router
+            .on_kv_events(vec![store_event_for_rank(
+                occupied_worker_id,
+                0,
+                1,
+                hashes.local_block_hashes[0],
+                StorageTier::Device,
+            )])
+            .unwrap();
+
+        let admission = router
+            .on_request_arrival(&target, Some(hashes), 0.0)
+            .unwrap()
+            .admissions
+            .into_iter()
+            .next()
+            .expect("request is admitted");
+        assert_ne!(
+            admission.worker_idx, occupied,
+            "the saturated worker was selected anyway, so this is not the declined-hit case"
+        );
+
+        assert_eq!(
+            admission.best_available_overlap_blocks, 1,
+            "worker {occupied} holds the cached block, so one block was available"
+        );
+        assert!(
+            admission.best_available_overlap_blocks > admission.overlap_blocks,
+            "expected regret, got selected {} against best {}",
+            admission.overlap_blocks,
+            admission.best_available_overlap_blocks
+        );
+    }
+
+    /// Overlap on a removed worker is not "available".
+    ///
+    /// `remove_worker` drops a worker from the config map but deliberately
+    /// leaves its radix-tree blocks intact, so the cached prefix still scores
+    /// for it. Reducing over `overlaps.scores` directly would count that
+    /// unreachable overlap and report regret against a worker that no longer
+    /// exists. This test excludes the worker by removal, not by any real
+    /// `eligibility` predicate rejecting it (every predicate is currently
+    /// vacuous for this router -- see the comment above
+    /// `best_available_overlap_blocks`'s reduction); walking the eligible
+    /// set still catches it because a removed worker is absent from
+    /// `self.workers_with_configs`, which `for_each_eligible_worker_rank`
+    /// walks.
+    #[test]
+    fn overlap_on_a_removed_worker_is_not_available() {
+        let mut router =
+            OfflineReplayRouter::new(&replay_args(), Some(router_config()), None, 2).unwrap();
+        let target = request(1, 7);
+        let hashes = ReplayRequestHashes::from_tokens(&target.tokens, router.block_size);
+
+        router
+            .on_kv_events(vec![store_event_for_rank(
+                1,
+                0,
+                1,
+                hashes.local_block_hashes[0],
+                StorageTier::Device,
+            )])
+            .unwrap();
+        router.remove_worker(1).unwrap();
+
+        let admission = router
+            .on_request_arrival(&target, Some(hashes), 0.0)
+            .unwrap()
+            .admissions
+            .into_iter()
+            .next()
+            .expect("request is admitted to the remaining worker");
+
+        assert_eq!(
+            admission.best_available_overlap_blocks, 0,
+            "the only cached block sits on an ineligible worker, so no overlap was available"
         );
     }
 
@@ -1804,6 +1960,7 @@ policy_classes:
                 uuid: Uuid::from_u128(1),
                 worker_idx: 3,
                 overlap_blocks: 0,
+                best_available_overlap_blocks: 0,
                 isl_blocks: 1,
             }]
         );
@@ -1901,6 +2058,7 @@ policy_classes:
                 uuid: Uuid::from_u128(2),
                 worker_idx: 1,
                 overlap_blocks: 0,
+                best_available_overlap_blocks: 0,
                 isl_blocks: 1,
             }]
         );
