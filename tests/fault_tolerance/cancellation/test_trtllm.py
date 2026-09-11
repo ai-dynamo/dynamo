@@ -6,7 +6,7 @@ Test Execution Times (Last Run: 2025-12-13):
 - test_request_cancellation_trtllm_aggregated: ~45s (gpu_1)
 - test_request_cancellation_trtllm_decode_cancel: ~65s (gpu_1)
 - test_request_cancellation_trtllm_prefill_cancel: ~65s (gpu_1)
-- test_request_cancellation_trtllm_kv_transfer_cancel: ~65s (gpu_1)
+- test_request_cancellation_trtllm_decode_handoff_cancel: ~65s (gpu_1)
 - Total: ~240s x2 request planes = ~480s (0:08:00)
 """
 
@@ -447,19 +447,20 @@ def test_request_cancellation_trtllm_prefill_cancel(
                 )
 
 
-@pytest.mark.timeout(195)  # 3x average
-def test_request_cancellation_trtllm_kv_transfer_cancel(
+@pytest.mark.timeout(350)  # 3x average
+def test_request_cancellation_trtllm_decode_handoff_cancel(
     request, runtime_services_dynamic_ports, predownload_models
 ):
     """
-    End-to-end test for request cancellation during prefill to decode KV transfer phase.
+    End-to-end test for request cancellation after the decode worker accepts it.
 
-    This test verifies that when a request is cancelled by the client during the KV transfer phase,
-    the system properly handles the cancellation and cleans up resources on the workers.
+    The decode-entry log is emitted before KV transfer begins, so this test does not prove that
+    TRT-LLM supports an engine abort during transfer. It verifies Dynamo's deferred-abort behavior:
+    cancellation completes after the handoff, resources are cleaned up, and both workers remain usable.
 
     Timing (Last Run: 2025-12-09): ~115s total (2 workers at 45% GPU each)
     - Engine initialization: ~92s (frontend: 2s, prefill worker: 45s, decode worker: 45s sequential)
-    - Testing KV transfer cancellation: ~20s
+    - Testing decode handoff cancellation: ~20s
     - Teardown: ~3s
     """
 
@@ -482,9 +483,9 @@ def test_request_cancellation_trtllm_kv_transfer_cancel(
                 # TODO: Why wait after worker ready fixes frontend 404 / 500 flakiness?
                 time.sleep(2)
 
-                # Step 4: Test request cancellation during KV transfer phase
+                # Step 4: Test request cancellation after decode handoff
                 logger.info(
-                    "Testing completion request cancellation during KV transfer phase..."
+                    "Testing completion request cancellation after decode handoff..."
                 )
 
                 # Send request with long prompt
@@ -499,18 +500,19 @@ def test_request_cancellation_trtllm_kv_transfer_cancel(
                     match_type="contains",
                 )
 
-                # Poll for decode worker entry signaling start of KV transfer phase
+                # Wait for decode admission. This log precedes KV transfer, and normal
+                # handoff can take longer than poll_for_pattern's 500 ms default.
                 _, decode_log_offset = poll_for_pattern(
                     process=decode_worker,
                     pattern=f"Decode Request ID: {request_id}",
+                    max_wait_ms=30_000,
                     poll_interval_ms=2,
+                    cancellable_request=cancellable_req,
                 )
 
-                # Cancel during KV transfer phase in decode worker
+                # Dynamo defers the engine abort until the first result completes.
                 cancellable_req.cancel()
-                logger.info(
-                    f"Cancelled request ID: {request_id} at beginning of decode"
-                )
+                logger.info(f"Cancelled request ID: {request_id} after decode handoff")
 
                 # Poll for "Aborted Request ID" in decode worker
                 _, decode_log_offset = poll_for_pattern(
@@ -527,7 +529,7 @@ def test_request_cancellation_trtllm_kv_transfer_cancel(
                 )
 
                 logger.info(
-                    "Completion request cancellation at beginning of decode detected successfully"
+                    "Completion request cancellation after decode handoff detected successfully"
                 )
 
                 # Verify the workers are still functional
@@ -551,7 +553,7 @@ def test_request_cancellation_trtllm_kv_transfer_cancel(
                 )
 
                 logger.info(
-                    "Workers are functional after cancellation during KV transfer"
+                    "Workers are functional after cancellation following decode handoff"
                 )
 
                 # Verify cancellation metrics
