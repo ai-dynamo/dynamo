@@ -127,7 +127,7 @@ sglang:
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
     # DeepSeek V4.1 Flash has not shipped in a numbered SGLang release yet;
     # use the CUDA 13 multi-arch preview published for this model.
-    runtime_image_tag: dev-dsv41@sha256:cdea1bdb35fe69f98e6b4164cd330f6a5870aff08733c8ab68c846f3fbb4adf2
+    runtime_image_tag: dev-dsv41@sha256:e56358a68b06427362283c8c8a9d7d706448082ae53098ea1131b5d51aa1fd62
     # Baseline is the TRUE base of the third-party lmsysorg/sglang image,
     # nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04 (Docker Hub; CUDA_VERSION=13.0.3,
     # ubuntu24.04), NOT a self-baseline of lmsysorg/sglang.
