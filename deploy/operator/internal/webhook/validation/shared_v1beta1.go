@@ -413,21 +413,29 @@ type componentRoleSpecValidationOptions struct {
 	workloadProvider           string
 	scope                      provideroverride.Scope
 	component                  *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+	podTemplateAllowed         bool
 }
 
 // validateComponentRoleSpec validates role. role and fldPath must not be nil;
-// the optional provider override may be nil.
+// the optional provider override and PodTemplate may be nil.
 func (v *sharedValidation) validateComponentRoleSpec(
 	role *nvidiacomv1beta1.ComponentRoleSpec,
 	fldPath *field.Path,
 	options componentRoleSpecValidationOptions,
 ) field.ErrorList {
+	allErrs := field.ErrorList{}
+	if role.PodTemplate != nil && !options.podTemplateAllowed {
+		allErrs = append(allErrs, field.Forbidden(
+			fldPath.Child("podTemplate"),
+			"is not supported for this component role",
+		))
+	}
 	if role.ProviderOverride == nil {
-		return nil
+		return allErrs
 	}
 
 	// Validate the provider fragment against this exact multinode role.
-	return v.validateProviderOverride(
+	return append(allErrs, v.validateProviderOverride(
 		role.ProviderOverride,
 		fldPath.Child("providerOverride"),
 		providerOverrideValidationOptions{
@@ -436,7 +444,7 @@ func (v *sharedValidation) validateComponentRoleSpec(
 			scope:            options.scope,
 			component:        options.component,
 		},
-	)
+	)...)
 }
 
 // validateEPPConfig validates deprecated Go-EPP config. config and fldPath must not be nil.

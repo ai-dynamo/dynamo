@@ -334,6 +334,23 @@ func TestValidateComponentRolesRejectsDuplicateMultinodeRole(t *testing.T) {
 	})
 }
 
+func TestValidateComponentRoleSpecPodTemplateCapability(t *testing.T) {
+	validation := &sharedValidation{ctx: context.Background()}
+	rolePath := field.NewPath("spec", "components").Index(0).Child("roles").Index(0)
+	role := &nvidiacomv1beta1.ComponentRoleSpec{
+		Name:        nvidiacomv1beta1.ComponentRoleLeader,
+		PodTemplate: &corev1.PodTemplateSpec{},
+	}
+
+	t.Log("Reject role PodTemplates unless the enclosing role schema opts in")
+	errs := validation.validateComponentRoleSpec(role, rolePath, componentRoleSpecValidationOptions{})
+	assertFieldPaths(t, errs, []string{"spec.components[0].roles[0].podTemplate"})
+
+	t.Log("Allow a component-specific role schema to opt in without changing the shared validator")
+	errs = validation.validateComponentRoleSpec(role, rolePath, componentRoleSpecValidationOptions{podTemplateAllowed: true})
+	assertFieldPaths(t, errs, nil)
+}
+
 func TestValidateDynamoComponentDeploymentSharedSpecFrontendSidecar(t *testing.T) {
 	validation := &sharedValidation{ctx: context.Background(), mgr: newGroveTopologyTestManager(t)}
 	componentPath := field.NewPath("spec", "components").Index(0)
