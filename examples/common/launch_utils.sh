@@ -40,6 +40,41 @@ fi
 EXAMPLE_PROMPT="Who is the tennis GOAT: Federer, Djokovic, or Nadal?"
 EXAMPLE_PROMPT_VISUAL="A golden retriever riding a skateboard through a neon-lit city"
 
+# Resolve an indexed managed port, retaining a standalone fallback.
+# Usage: dyn_port DYN_SYSTEM_PORT 1 8081
+dyn_port() {
+    local prefix="$1"
+    local index="$2"
+    local fallback="$3"
+    local variable="${prefix}${index}"
+    local value="${!variable:-}"
+
+    local selected="${value:-${fallback}}"
+
+    if [[ -n "${DYN_MANAGED_PORTS:-}" ]]; then
+        if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
+            echo "Missing or invalid managed port ${variable}: ${value:-<unset>}" >&2
+            return 1
+        fi
+        if (( 10#${value} < 1 || 10#${value} > 32767 )); then
+            echo "Managed port ${variable} is out of range: ${value}" >&2
+            return 1
+        fi
+        printf '%s\n' "${value}"
+        return 0
+    fi
+
+    if [[ -n "${value}" && ! "${value}" =~ ^[0-9]+$ ]]; then
+        echo "Invalid port ${variable}: ${value}" >&2
+        return 1
+    fi
+    if [[ ! "${selected}" =~ ^[0-9]+$ ]] || (( 10#${selected} < 1 || 10#${selected} > 32767 )); then
+        echo "Port ${variable} is out of range: ${selected}" >&2
+        return 1
+    fi
+    printf '%s\n' "${selected}"
+}
+
 # wait_any_exit
 #
 # Waits for ANY backgrounded process to exit and propagates its exit code.
