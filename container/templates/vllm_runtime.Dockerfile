@@ -182,11 +182,6 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 {# Inline expression, not a block tag: render.py leaves trim_blocks off, so a tag
    on its own line inside the RUN breaks the backslash continuation. #}
 {% set vllm_rs_required = "1" if device == "cuda" else "0" %}
-{# EngineCore msgpack is positional: an auto-loaded plugin that extends
-   EngineCoreOutput breaks the `vllm-rs` decoder. See lib/sidecar/vllm/README.md.
-   Only the targets that install vLLM-Omni carry such a plugin; dev and local-dev
-   skip that install, so they keep vLLM's own plugin discovery instead of an
-   allowlist that would name an entry point they never install. #}
 {% set vllm_rs_allowlist = "1" if target not in ("dev", "local-dev") else "0" %}
 {% set vllm_rs_plugins = "modelexpress" if context.vllm.enable_modelexpress == "true" else "" %}
 
@@ -538,23 +533,14 @@ if actual != expected:
     raise RuntimeError(f"expected transformers {expected}, found {actual}")
 PY
 
-# `vllm-rs` ships inside the installed `vllm` package, not as a console script;
-# putting it on PATH keeps the binary at that package's vLLM revision. Fatal on
-# cuda only.
+# Use the packaged binary to match the installed vLLM version.
 RUN set -eu; \
     pkg="$({{ python_executable }} -c 'import os, vllm; print(os.path.dirname(vllm.__file__))')"; \
     if [ -f "${pkg}/vllm-rs" ] && [ -x "${pkg}/vllm-rs" ]; then \
         if [ "{{ vllm_rs_allowlist }}" = "1" ]; then \
             printf '%s\n' \
                 '#!/bin/sh' \
-                '# vLLM loads every vllm.general_plugins entry point unless VLLM_PLUGINS' \
-                '# names an allowlist. vLLM-Omni appends three fields to' \
-                '# vllm.v1.engine.EngineCoreOutput, and EngineCore msgpack is positional,' \
-                '# so the strict Rust decoder in this binary then rejects every engine' \
-                '# output as the wrong length. This allowlist is deliberately minimal:' \
-                '# it excludes every plugin this image does not install on purpose,' \
-                '# including the LoRA resolvers that vLLM itself ships. An exported' \
-                '# VLLM_PLUGINS, the empty allowlist included, still wins.' \
+                '# Keep Omni from changing the EngineCore output schema.' \
                 'VLLM_PLUGINS="${VLLM_PLUGINS-{{ vllm_rs_plugins }}}"' \
                 'export VLLM_PLUGINS' \
                 "exec \"${pkg}/vllm-rs\" \"\$@\"" \
