@@ -281,7 +281,10 @@ impl StageMaxima {
             // An uncapped stage is `Duration::MAX`, not zero: `duration_from_secs`
             // maps a non-finite value to `ZERO`, which would skip the barrier
             // outright rather than let the remaining total bound it.
-            inflight: match config.inflight_timeout_secs.unwrap_or_else(inflight_timeout_secs) {
+            inflight: match config
+                .inflight_timeout_secs
+                .unwrap_or_else(inflight_timeout_secs)
+            {
                 v if v.is_infinite() => Duration::MAX,
                 v => duration_from_secs(v),
             },
@@ -904,9 +907,9 @@ mod tests {
         let total = total_budget(&ShutdownConfig::default());
         let grace = duration_from_secs(grace_period_secs());
         let post_grace = total.saturating_sub(grace);
-        let floor = post_grace.mul_f64(0.9).min(
-            Duration::from_secs_f64(drain_timeout_secs()),
-        );
+        let floor = post_grace
+            .mul_f64(0.9)
+            .min(Duration::from_secs_f64(drain_timeout_secs()));
         assert!(
             kv >= floor,
             "the KV stage must keep the post-grace remainder on defaults; \
