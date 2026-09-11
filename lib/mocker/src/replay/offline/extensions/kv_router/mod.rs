@@ -260,11 +260,29 @@ impl SyncReplayIndexer {
     }
 }
 
+/// The raw input `overlaps` was matched from at arrival, kept so a request
+/// that sits in the queue can be re-matched against the indexer at admission
+/// time instead of routing on however cache state looked when it arrived.
+enum PendingMatchInput {
+    Hashes(Vec<LocalBlockHash>),
+    Tokens(Vec<u32>),
+}
+
+impl PendingMatchInput {
+    fn rematch(&self, indexer: &SyncReplayIndexer) -> OverlapScores {
+        match self {
+            PendingMatchInput::Hashes(hashes) => indexer.find_matches_for_hashes(hashes.clone()),
+            PendingMatchInput::Tokens(tokens) => indexer.find_matches_for_request(tokens, None),
+        }
+    }
+}
+
 struct PendingRequest {
     uuid: Uuid,
     token_seq: Option<Vec<SequenceHash>>,
     isl_tokens: usize,
     overlaps: OverlapScores,
+    match_input: PendingMatchInput,
     track_prefill_tokens: bool,
     expected_output_tokens: Option<u32>,
     priority_jump: f64,
@@ -860,13 +878,11 @@ impl OfflineReplayRouter {
             .uuid
             .ok_or_else(|| anyhow!("offline replay requires requests to have stable UUIDs"))?;
         let (priority_jump, strict_priority) = request.router_priorities();
-        let (overlaps, token_seq) = match replay_hashes {
+        let (overlaps, match_input, token_seq) = match replay_hashes {
             Some(replay_hashes) => {
-                let overlaps =
-                    self.indexer
-                        .find_matches_for_hashes(crate::loadgen::local_block_hashes(
-                            replay_hashes.local_block_hashes,
-                        ));
+                let local_hashes =
+                    crate::loadgen::local_block_hashes(replay_hashes.local_block_hashes);
+                let overlaps = self.indexer.find_matches_for_hashes(local_hashes.clone());
                 let token_seq = if !self.config.router_track_active_blocks {
                     None
                 } else if self.config.router_assume_kv_reuse
@@ -887,7 +903,7 @@ impl OfflineReplayRouter {
                         None,
                     )
                 };
-                (overlaps, token_seq)
+                (overlaps, PendingMatchInput::Hashes(local_hashes), token_seq)
             }
             None => {
                 let tokens = request_view.prompt_tokens_for_placement()?;
@@ -900,7 +916,11 @@ impl OfflineReplayRouter {
                     BlockHashOptions::default(),
                     None,
                 );
-                (overlaps, token_seq)
+                (
+                    overlaps,
+                    PendingMatchInput::Tokens(tokens.into_owned()),
+                    token_seq,
+                )
             }
         };
 
@@ -909,6 +929,7 @@ impl OfflineReplayRouter {
             token_seq,
             isl_tokens: input_length,
             overlaps,
+            match_input,
             track_prefill_tokens: self.config.router_track_prefill_tokens,
             expected_output_tokens: Some(
                 u32::try_from(max_output_tokens)
@@ -930,9 +951,16 @@ impl OfflineReplayRouter {
 
     fn admit_request(
         &mut self,
-        request: PendingRequest,
+        mut request: PendingRequest,
         decay_now: Instant,
     ) -> Result<AdmitOutcome> {
+        // `overlaps` was matched against the indexer at arrival. A request
+        // that queued (router_queue_threshold) can sit for an arbitrary
+        // amount of virtual time before this runs, during which cache state
+        // moves on -- KV events land, other requests evict blocks. Re-match
+        // now so routing (and the overlap stats reported below) reflect
+        // cache state at admission, not at arrival.
+        request.overlaps = request.match_input.rematch(&self.indexer);
         let worker_loads = self
             .slots
             .project_worker_loads(request.token_seq.as_deref(), decay_now);
@@ -1408,6 +1436,54 @@ mod tests {
                 .map(|request| request.uuid)
                 .collect::<Vec<_>>(),
             vec![Uuid::from_u128(2)]
+        );
+    }
+
+    /// A request queued at arrival must route on cache state as of
+    /// *admission*, not as of arrival: `overlaps` was matched against the
+    /// indexer once, at `on_request_arrival`, and stored on `PendingRequest`
+    /// -- if that stored value is what `admit_request` still routes on, a KV
+    /// event that lands while the request sits in the queue is invisible to
+    /// it, even though the same event would have been picked up by a request
+    /// arriving fresh at that same later instant.
+    #[test]
+    fn queued_request_routes_on_cache_state_at_admission_not_arrival() {
+        let mut router =
+            OfflineReplayRouter::new(&queueing_args(), Some(queueing_router_config()), None, 1)
+                .unwrap();
+
+        let second_request = request(2, 8);
+        router
+            .on_request_arrival(&request(1, 7), None, 0.0)
+            .unwrap();
+        let second = router
+            .on_request_arrival(&second_request, None, 0.0)
+            .unwrap();
+        assert!(second.admissions.is_empty(), "second request must queue");
+
+        // No cache overlap exists for request 2's tokens yet -- confirm the
+        // premise before making it stop being true.
+        let hashes = ReplayRequestHashes::from_tokens(&second_request.tokens, router.block_size);
+        router
+            .on_kv_events(vec![store_event(
+                0,
+                99,
+                hashes.local_block_hashes[0],
+                StorageTier::Device,
+            )])
+            .unwrap();
+
+        // Free the only worker's capacity, draining request 2 out of the
+        // queue and admitting it.
+        let drained = router
+            .on_request_completed(Uuid::from_u128(1), 0.0)
+            .unwrap();
+        assert_eq!(drained.admissions.len(), 1);
+        assert_eq!(drained.admissions[0].uuid, Uuid::from_u128(2));
+        assert_eq!(
+            drained.admissions[0].overlap_blocks, 1,
+            "admission must reflect the KV event that landed while the request was queued, \
+             not the empty cache state captured when it arrived"
         );
     }
 
