@@ -598,6 +598,7 @@ class VLLMProcess(ManagedEngineProcessMixin):
 @pytest.mark.h100
 @pytest.mark.nightly
 @pytest.mark.model("Qwen/Qwen2.5-3B-Instruct")
+@pytest.mark.profiled_vram_gib(6.9)
 @pytest.mark.requested_vllm_kv_cache_bytes(268_435_456)
 @pytest.mark.timeout(600)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
