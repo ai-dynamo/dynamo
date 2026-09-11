@@ -141,12 +141,14 @@ export DYN_H3_FASTH3_LORA_PATH="$(hf download \
 
 This path requires vLLM-Omni `v0.29.0rc1` or later. The video-audio overlay
 pins `fastvideo-kernel==0.3.5`. For a `vsa-*` adapter, the launcher selects
-`FASTVIDEO_VSA`, retains 64 key/value blocks per query block, and opts into the
-native Blackwell forward. Override the top-k value with
-`DYN_H3_FASTVIDEO_VSA_TOPK`. FastH3 VSA supports pure Ulysses sequence
-parallelism; ring and all-gather degrees must remain 1. Check the first-forward
-worker logs for `FASTVIDEO_VSA H3 routing` and verify that no VSA fallback
-warning appears.
+`FASTVIDEO_VSA` and retains 64 key/value blocks per query block. The published
+kernel wheel defaults to the portable Triton route used on B300/SM103. On a
+B200/SM100 system with a source-built wheel containing the native SM100a
+extension, set `DYN_H3_FASTVIDEO_VSA_SM100A=1` to opt into that forward.
+Override the top-k value with `DYN_H3_FASTVIDEO_VSA_TOPK`. FastH3 VSA supports
+pure Ulysses sequence parallelism; ring and all-gather degrees must remain 1.
+Check the first-forward worker logs for `FASTVIDEO_VSA H3 routing` and verify
+that it does not fall back to dense SDPA.
 
 Run the supplied end-to-end qualification against the same worker. It requests
 a 10-second clip, then verifies a non-empty H.264 stream at 24 FPS and a
