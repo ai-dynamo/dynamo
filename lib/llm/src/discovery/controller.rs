@@ -132,11 +132,13 @@ enum GroupStatus {
     Idle,
     Queued {
         mdc_checksum: String,
+        committed_members: Option<BTreeSet<String>>,
     },
     Building {
         mdc_checksum: String,
         generation: u64,
         cancellation: CancellationToken,
+        committed_members: Option<BTreeSet<String>>,
     },
     Ready {
         mdc_checksum: String,
@@ -145,10 +147,12 @@ enum GroupStatus {
     Retrying {
         mdc_checksum: String,
         deadline: Instant,
+        committed_members: Option<BTreeSet<String>>,
     },
     Blocked {
         mdc_checksum: String,
         deadline: Instant,
+        committed_members: Option<BTreeSet<String>>,
     },
     BlockedReady {
         mdc_checksum: String,
@@ -467,15 +471,32 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             &mdc_checksum,
             cohort_video_contract(&members).as_deref(),
         );
-        if status_checksum(&old_status).is_some_and(|previous| previous != fingerprint) {
-            group.admission_tx.send_replace(Vec::new());
+        let fingerprint_changed =
+            status_checksum(&old_status).is_some_and(|previous| previous != fingerprint);
+        let mut retained_commit = status_committed_members(&old_status).cloned();
+        if fingerprint_changed {
+            retained_commit = retained_commit.filter(|committed_members| {
+                committed_members != &member_keys
+                    && (status_checksum(&old_status) == Some(mdc_checksum.as_str())
+                        || status_checksum(&old_status).is_some_and(|previous| {
+                            previous
+                                .strip_prefix(mdc_checksum.as_str())
+                                .is_some_and(|suffix| suffix.starts_with("\0video_contract\0"))
+                        }))
+            });
             cancel_build(&old_status);
-            if status_has_commit(&old_status) {
-                self.host.remove_group(key);
+            if retained_commit.is_some() {
+                let (admission_tx, _) = watch::channel(Vec::new());
+                group.admission_tx = admission_tx;
+            } else {
+                group.admission_tx.send_replace(Vec::new());
+                if status_has_commit(&old_status) {
+                    self.host.remove_group(key);
+                }
+                // Retained pipeline clients must never observe the successor's IDs.
+                let (admission_tx, _) = watch::channel(Vec::new());
+                group.admission_tx = admission_tx;
             }
-            // Retained pipeline clients must never observe the successor's IDs.
-            let (admission_tx, _) = watch::channel(Vec::new());
-            group.admission_tx = admission_tx;
             group.reported_rejections.clear();
             group.retry_attempt = 0;
         }
@@ -484,7 +505,8 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         if !matches!(
             &old_status,
             GroupStatus::Ready { .. } | GroupStatus::BlockedReady { .. }
-        ) {
+        ) || (fingerprint_changed && retained_commit.is_some())
+        {
             group.admission_tx.send_replace(admitted);
         }
 
@@ -555,29 +577,37 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 mdc_checksum: building_checksum,
                 generation,
                 cancellation,
+                committed_members,
             } if building_checksum == fingerprint => GroupStatus::Building {
                 mdc_checksum: fingerprint,
                 generation,
                 cancellation,
+                committed_members,
             },
             GroupStatus::Queued {
                 mdc_checksum: queued_checksum,
+                committed_members,
             } if queued_checksum == fingerprint => GroupStatus::Queued {
                 mdc_checksum: fingerprint,
+                committed_members,
             },
             GroupStatus::Retrying {
                 mdc_checksum: retry_checksum,
                 deadline,
+                committed_members,
             } if retry_checksum == fingerprint && !desired_changed => GroupStatus::Retrying {
                 mdc_checksum: fingerprint,
                 deadline,
+                committed_members,
             },
             GroupStatus::Blocked {
                 mdc_checksum: blocked_checksum,
                 deadline,
+                committed_members,
             } if blocked_checksum == fingerprint && !desired_changed => GroupStatus::Blocked {
                 mdc_checksum: fingerprint,
                 deadline,
+                committed_members,
             },
             previous => {
                 cancel_build(&previous);
@@ -585,6 +615,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 group.retry_attempt = 0;
                 GroupStatus::Queued {
                     mdc_checksum: fingerprint,
+                    committed_members: retained_commit,
                 }
             }
         };
@@ -667,6 +698,13 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             let GroupStatus::Queued { .. } = &group.status else {
                 continue;
             };
+            let committed_members = match &group.status {
+                GroupStatus::Queued {
+                    committed_members,
+                    ..
+                } => committed_members.clone(),
+                _ => unreachable!("queued status was checked above"),
+            };
             let Some(mdc_checksum) = group.selected_checksum().map(str::to_string) else {
                 continue;
             };
@@ -698,6 +736,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 mdc_checksum: fingerprint,
                 generation,
                 cancellation: cancellation.clone(),
+                committed_members,
             };
 
             let host = self.host.clone();
@@ -756,6 +795,13 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                         cohort_video_contract(&self.members(member_keys)).as_deref(),
                     ) == result.spec.fingerprint
                 });
+        let committed_members = match &group.status {
+            GroupStatus::Building {
+                committed_members,
+                ..
+            } => committed_members.clone(),
+            _ => None,
+        };
         if !is_current {
             if let BuildOutcome::Prepared(prepared) = result.outcome {
                 self.host.discard_prepared(prepared);
@@ -796,6 +842,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                         group.status = GroupStatus::Blocked {
                             mdc_checksum: result.spec.fingerprint,
                             deadline: Instant::now() + retry_delay(group.retry_attempt),
+                            committed_members,
                         };
                     }
                 }
@@ -813,11 +860,13 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 group.status = GroupStatus::Retrying {
                     mdc_checksum: result.spec.fingerprint,
                     deadline: Instant::now() + delay,
+                    committed_members,
                 };
             }
             BuildOutcome::Cancelled => {
                 group.status = GroupStatus::Queued {
                     mdc_checksum: result.spec.fingerprint,
+                    committed_members,
                 };
             }
         }
@@ -840,15 +889,17 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         let now = Instant::now();
         let mut retained_retries = Vec::new();
         for (key, group) in &mut self.groups {
-            let (mdc_checksum, deadline) = match &group.status {
+            let (mdc_checksum, deadline, committed_members) = match &group.status {
                 GroupStatus::Retrying {
                     mdc_checksum,
                     deadline,
+                    committed_members,
                 }
                 | GroupStatus::Blocked {
                     mdc_checksum,
                     deadline,
-                } => (mdc_checksum, deadline),
+                    committed_members,
+                } => (mdc_checksum, deadline, committed_members.clone()),
                 GroupStatus::BlockedReady {
                     mdc_checksum,
                     committed_members,
@@ -866,6 +917,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             if *deadline <= now {
                 group.status = GroupStatus::Queued {
                     mdc_checksum: mdc_checksum.clone(),
+                    committed_members,
                 };
             }
         }
@@ -977,7 +1029,7 @@ fn cancel_build(status: &GroupStatus) {
 fn status_checksum(status: &GroupStatus) -> Option<&str> {
     match status {
         GroupStatus::Idle => None,
-        GroupStatus::Queued { mdc_checksum }
+        GroupStatus::Queued { mdc_checksum, .. }
         | GroupStatus::Building { mdc_checksum, .. }
         | GroupStatus::Ready { mdc_checksum, .. }
         | GroupStatus::Retrying { mdc_checksum, .. }
@@ -987,10 +1039,35 @@ fn status_checksum(status: &GroupStatus) -> Option<&str> {
 }
 
 fn status_has_commit(status: &GroupStatus) -> bool {
-    matches!(
-        status,
-        GroupStatus::Ready { .. } | GroupStatus::BlockedReady { .. }
-    )
+    status_committed_members(status).is_some()
+}
+
+fn status_committed_members(status: &GroupStatus) -> Option<&BTreeSet<String>> {
+    match status {
+        GroupStatus::Ready {
+            committed_members, ..
+        }
+        | GroupStatus::BlockedReady {
+            committed_members, ..
+        } => Some(committed_members),
+        GroupStatus::Queued {
+            committed_members,
+            ..
+        }
+        | GroupStatus::Building {
+            committed_members,
+            ..
+        }
+        | GroupStatus::Retrying {
+            committed_members,
+            ..
+        }
+        | GroupStatus::Blocked {
+            committed_members,
+            ..
+        } => committed_members.as_ref(),
+        GroupStatus::Idle => None,
+    }
 }
 
 async fn wait_for_deadline(deadline: Option<Instant>) {
