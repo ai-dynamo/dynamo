@@ -544,6 +544,15 @@ class VllmProcessor:
             v = getattr(request_for_sampling, k, None)
             if v is not None:
                 setattr(sampling_params, k, v)
+        # Reasoning parsers split model output on special control delimiters.
+        # Dynamo 1.4.1's public chat schema does not reliably forward the
+        # vLLM skip_special_tokens request extension, so leaving the default
+        # enabled removes the delimiter before StreamingPostProcessor can
+        # parse it. Keep special tokens only in the internal decoder output;
+        # the configured reasoning/tool parsers consume the delimiters and do
+        # not expose them in the OpenAI response.
+        if self.reasoning_parser_class is not None:
+            sampling_params.skip_special_tokens = False
         # nvext.max_thinking_tokens is enforced on the worker, not here. The
         # frontend's InputProcessor is built without reasoning_config (it only
         # tokenizes), so setting sampling_params.thinking_token_budget would
