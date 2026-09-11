@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Admission control and the shutdown stages built on it.
 //!
 //! [`RequestTracker`] is the admission gate and in-flight counter: one packed
@@ -194,25 +197,21 @@ pub async fn stage_unregister(
     budget: &ShutdownBudget,
 ) -> StageOutcome {
     let started = Instant::now();
-    let (reason, detail) = match maybe_timeout(
-        budget.allowance(Stage::Unregister),
-        discovery.unregister(),
-    )
-    .await
-    {
-        Ok(Ok(())) => (StageReason::Completed, None),
-        Ok(Err(error)) => {
-            tracing::warn!(%error, "discovery unregister failed");
-            (StageReason::Skipped, Some(error.to_string()))
-        }
-        Err(()) => {
-            tracing::warn!(
-                "discovery unregister exceeded the remaining shutdown budget; \
+    let (reason, detail) =
+        match maybe_timeout(budget.allowance(Stage::Unregister), discovery.unregister()).await {
+            Ok(Ok(())) => (StageReason::Completed, None),
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "discovery unregister failed");
+                (StageReason::Skipped, Some(error.to_string()))
+            }
+            Err(()) => {
+                tracing::warn!(
+                    "discovery unregister exceeded the remaining shutdown budget; \
                  continuing so engine cleanup still runs"
-            );
-            (StageReason::TimedOut, None)
-        }
-    };
+                );
+                (StageReason::TimedOut, None)
+            }
+        };
     let outcome =
         StageOutcome::new(Stage::Unregister, reason, started.elapsed(), budget).with_detail(detail);
     outcome.log();
