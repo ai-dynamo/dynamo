@@ -178,7 +178,6 @@ def test_trace_paths_only_workload_routes_to_trace_replay(monkeypatch) -> None:
             "trace_paths": ["first.jsonl", "second.jsonl"],
             "trace_format": "dynamo",
             "arrival_speedup_ratio": 2.0,
-            "agentic_lanes": 4,
         },
         goal={"target": "throughput"},
     )
@@ -187,8 +186,40 @@ def test_trace_paths_only_workload_routes_to_trace_replay(monkeypatch) -> None:
 
     assert seen["trace_files"] == ["first.jsonl", "second.jsonl"]
     assert seen["arrival_speedup_ratio"] == 2.0
-    assert seen["agentic_lanes"] == 4
+    assert seen["agentic_lanes"] is None
     assert report.metrics["completed_requests"] == 2.0
+
+
+def test_trace_adapter_forwards_agentic_lanes_without_qualifying_runner(monkeypatch):
+    seen = {}
+
+    def fake_run_trace_replay(**kwargs):
+        seen.update(kwargs)
+        return _report({"completed_requests": 2})
+
+    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
+    monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
+    spec = ReplaySpec(
+        backend_deployment=_agg_deployment(),
+        workload={
+            "trace_paths": ["first.jsonl", "second.jsonl"],
+            "trace_format": "dynamo",
+            "agentic_lanes": 4,
+        },
+        goal={"target": "throughput"},
+    )
+    runner = simulation.DynamoReplayRunnerFactory().create(0)
+
+    # Verify adapter plumbing separately from the public capability contract.
+    # Older optional AISimulate packages predate the explicit lane capability.
+    if hasattr(runner.capabilities, "supports_agentic_lanes"):
+        with pytest.raises(ValueError, match="runner does not support agentic_lanes"):
+            runner.run(spec)
+        assert not seen
+
+    runner._run_trace(spec, {})
+    assert seen["trace_files"] == ["first.jsonl", "second.jsonl"]
+    assert seen["agentic_lanes"] == 4
 
 
 def test_trace_replay_rejects_boolean_agentic_lanes() -> None:
