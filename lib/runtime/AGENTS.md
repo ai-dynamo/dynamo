@@ -61,9 +61,9 @@ not at a call site.
 Canonical prose for each plane, including deployment guidance and the interaction
 between them:
 
-- [Request plane](../../docs/fern/pages/developer-guide/knowledge-base/concepts/communication-planes/request-plane.md)
-- [Event plane](../../docs/fern/pages/developer-guide/knowledge-base/concepts/communication-planes/event-plane.md)
-- [Discovery plane](../../docs/fern/pages/developer-guide/knowledge-base/concepts/communication-planes/discovery-plane.md)
+- [Request plane](../../docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/architecture.md#request-plane)
+- [Event plane](../../docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/architecture.md#event-plane)
+- [Discovery plane](../../docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/architecture.md#discovery-plane)
 
 ## Source layout
 
