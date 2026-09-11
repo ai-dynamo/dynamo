@@ -79,7 +79,7 @@ vllm:
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
     # DeepSeek V4.1 Flash requires vLLM's model-preview runtime. Keep the
     # Dynamo wheel-builder on the standard CUDA 13.0 development image above.
-    runtime_image_tag: deepseekv41-flash-0909@sha256:4f3c8bcf6328305b8cb6f61146dbfa125b0b04ae98eef3d091019ec30f564a9b
+    runtime_image_tag: deepseekv41-flash-0909@sha256:00d577a6a63281e15336029d5bcee4e9a2cf182214a4f20ba6111b1c8e79893d
     # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
     # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
     # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM
