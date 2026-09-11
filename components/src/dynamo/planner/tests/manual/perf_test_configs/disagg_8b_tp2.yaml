@@ -44,7 +44,7 @@ spec:
             - -c
           args:
             - "python3 -m dynamo.frontend --http-port 8000 --kv-cache-block-size 128"
-    VllmDecodeWorker:
+    decode:
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
@@ -91,7 +91,7 @@ spec:
             - -c
           args:
             - "python3 -m dynamo.vllm --model nvidia/Llama-3.1-8B-Instruct-FP8 --no-enable-prefix-caching --block-size 128 --tensor-parallel-size 2 --disaggregation-mode decode 2>&1 | tee /tmp/vllm.log"
-    VllmPrefillWorker:
+    prefill:
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
