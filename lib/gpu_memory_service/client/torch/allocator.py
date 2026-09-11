@@ -277,6 +277,34 @@ def set_persistent_allocator_tag_plan(tag: str, planned_tags: list[str]) -> None
     state.persistent_alloc_seq = 0
 
 
+def validate_persistent_allocator_tag_plan_consumed(tag: str) -> None:
+    """Fail unless the active semantic plan covered every allocation.
+
+    Plan overflow is rejected directly by ``_gms_malloc``. Validate the
+    opposite direction at the allocation-scope boundary: consuming fewer tags
+    than planned means the semantic description no longer matches the native
+    allocator callback sequence. Treating that constructor as persistent would
+    make a later process reattach tensors to the wrong physical layout.
+    """
+    state = _tag_states.get(tag)
+    if state is None or not state.is_persistent:
+        raise RuntimeError(f"GMS persistent allocator tag={tag!r} is not registered")
+    plan = state.persistent_tag_plan
+    if plan is None:
+        raise RuntimeError(f"GMS persistent allocator tag={tag!r} has no active plan")
+    if not plan:
+        raise RuntimeError(
+            f"GMS persistent allocator tag={tag!r} has an empty semantic tag plan"
+        )
+    consumed = int(state.persistent_alloc_seq)
+    if consumed != len(plan):
+        raise RuntimeError(
+            f"GMS persistent tag plan under-consumed for tag {tag!r}: "
+            f"consumed {consumed}/{len(plan)} semantic tags. Native KV "
+            "allocation no longer matches the persistent layout."
+        )
+
+
 def clear_persistent_allocator_tag_plan(tag: str) -> None:
     state = _tag_states.get(tag)
     if state is None:
