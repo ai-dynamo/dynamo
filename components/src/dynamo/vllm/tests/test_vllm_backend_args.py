@@ -728,6 +728,28 @@ class TestEmbeddingWorkerProcesses:
         config.embedding_worker_processes = 3
         config._validate_embedding_worker_processes()
 
+    @pytest.mark.parametrize(
+        ("enabled_value", "exporter_value"),
+        [
+            (" y", "prometheus"),
+            ("y ", "prometheus"),
+            ("y", "PROMETHEUS"),
+            ("y", "prometheus "),
+        ],
+    )
+    def test_nixl_invalid_telemetry_tokens_reserve_nothing(
+        self, monkeypatch, enabled_value, exporter_value
+    ):
+        """NIXL does not trim boolean values or normalize exporter names."""
+        monkeypatch.setenv("DYN_SYSTEM_PORT", "19089")
+        monkeypatch.setenv("NIXL_TELEMETRY_ENABLE", enabled_value)
+        monkeypatch.setenv("NIXL_TELEMETRY_EXPORTER", exporter_value)
+        monkeypatch.setenv("NIXL_TELEMETRY_PROMETHEUS_PORT", "19090")
+        config = create_config()
+        config.embedding_worker = True
+        config.embedding_worker_processes = 3
+        config._validate_embedding_worker_processes()
+
     def test_nixl_without_prometheus_port_reserves_the_exporter_default(
         self, monkeypatch
     ):
@@ -751,7 +773,25 @@ class TestEmbeddingWorkerProcesses:
         ):
             config._validate_embedding_worker_processes()
 
-    @pytest.mark.parametrize("port_value", ["abc", "0", "99999"])
+    def test_nixl_hexadecimal_prometheus_port_is_reserved(self, monkeypatch):
+        """NIXL accepts unsigned hexadecimal integers for its listener port."""
+        monkeypatch.setenv("DYN_SYSTEM_PORT", "19089")
+        monkeypatch.setenv("NIXL_TELEMETRY_ENABLE", "y")
+        monkeypatch.setenv("NIXL_TELEMETRY_EXPORTER", "prometheus")
+        monkeypatch.setenv("NIXL_TELEMETRY_PROMETHEUS_PORT", "0x4A92")
+        config = create_config()
+        config.embedding_worker = True
+        config.embedding_worker_processes = 3
+
+        with pytest.raises(
+            ValueError,
+            match="NIXL_TELEMETRY_PROMETHEUS_PORT reserves 19090",
+        ):
+            config._validate_embedding_worker_processes()
+
+    @pytest.mark.parametrize(
+        "port_value", ["abc", "0", "99999", " 9090", "+9090", "9_090"]
+    )
     def test_nixl_with_unusable_prometheus_port_reserves_nothing(
         self, monkeypatch, port_value
     ):

@@ -6,6 +6,7 @@
 import pytest
 
 from dynamo.common.utils.nixl_telemetry import (
+    DEFAULT_NIXL_PROMETHEUS_PORT,
     MAX_COLOCATED_NIXL_EXPORTERS,
     MAX_PORT,
     derive_nixl_prometheus_port,
@@ -97,6 +98,53 @@ class TestDeriveNixlPrometheusPort:
 class TestNixlPrometheusBasePort:
     def test_operator_defaults_are_recognized(self):
         assert nixl_prometheus_base_port(OPERATOR_ENV) == 19090
+
+    @pytest.mark.parametrize(
+        "enabled_value", ["y", "1", "yes", "on", "true", "enable", "TRUE"]
+    )
+    def test_nixl_truthy_token_is_recognized(self, enabled_value):
+        env = {**OPERATOR_ENV, "NIXL_TELEMETRY_ENABLE": enabled_value}
+        assert nixl_prometheus_base_port(env) == 19090
+
+    def test_unset_exporter_is_not_prometheus(self):
+        env = dict(OPERATOR_ENV)
+        del env["NIXL_TELEMETRY_EXPORTER"]
+        assert nixl_prometheus_base_port(env) is None
+
+    def test_unset_port_uses_nixl_default(self):
+        env = dict(OPERATOR_ENV)
+        del env["NIXL_TELEMETRY_PROMETHEUS_PORT"]
+        assert nixl_prometheus_base_port(env) == DEFAULT_NIXL_PROMETHEUS_PORT
+
+    def test_hexadecimal_port_is_recognized(self):
+        env = {**OPERATOR_ENV, "NIXL_TELEMETRY_PROMETHEUS_PORT": "0x4A92"}
+        assert nixl_prometheus_base_port(env) == 19090
+
+    @pytest.mark.parametrize(
+        "port_value", ["abc", "0", "99999", " 9090", "+9090", "9_090"]
+    )
+    def test_unusable_port_is_not_recognized(self, port_value):
+        env = {**OPERATOR_ENV, "NIXL_TELEMETRY_PROMETHEUS_PORT": port_value}
+        assert nixl_prometheus_base_port(env) is None
+
+    @pytest.mark.parametrize(
+        ("enabled_value", "exporter_value"),
+        [
+            (" y", "prometheus"),
+            ("y ", "prometheus"),
+            ("y", "PROMETHEUS"),
+            ("y", "prometheus "),
+        ],
+    )
+    def test_invalid_telemetry_tokens_are_not_recognized(
+        self, enabled_value, exporter_value
+    ):
+        env = {
+            **OPERATOR_ENV,
+            "NIXL_TELEMETRY_ENABLE": enabled_value,
+            "NIXL_TELEMETRY_EXPORTER": exporter_value,
+        }
+        assert nixl_prometheus_base_port(env) is None
 
     @pytest.mark.parametrize(
         "override",

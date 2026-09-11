@@ -19,6 +19,11 @@ from dynamo.common.configuration.utils import (
     add_negatable_bool_argument,
     parse_bool,
 )
+from dynamo.common.utils.nixl_telemetry import (
+    DEFAULT_NIXL_PROMETHEUS_PORT,
+    NIXL_TELEMETRY_ENABLED_VALUES,
+    configured_nixl_uint16,
+)
 
 from . import __version__
 from .benchmark_points import (
@@ -32,15 +37,6 @@ from .constants import DisaggregationMode, EmbeddingTransferMode
 logger = logging.getLogger(__name__)
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
 MAX_PORT = 65535
-
-# NIXL's own truthy tokens for NIXL_TELEMETRY_ENABLE, compared case-insensitively.
-# Restated here because NIXL exposes no predicate Dynamo could ask instead.
-_NIXL_TELEMETRY_ENABLED_VALUES = frozenset({"y", "1", "yes", "on", "true", "enable"})
-
-# Port NIXL's Prometheus exporter binds when NIXL_TELEMETRY_PROMETHEUS_PORT is
-# unset. Distinct from Dynamo's 19090 convention, and equal to the operator's
-# DYN_SYSTEM_PORT preset, so leaving the variable unset is a real collision.
-_NIXL_DEFAULT_PROMETHEUS_PORT = 9090
 
 
 def _configured_fixed_port(env_name: str, *, default: int | None = None) -> int | None:
@@ -64,12 +60,12 @@ def _nixl_prometheus_port() -> int | None:
     back to the exporter's own default rather than Dynamo's 19090, while a value
     NIXL cannot parse as a port leaves it exporting nothing at all.
     """
-    enabled = os.environ.get("NIXL_TELEMETRY_ENABLE", "").strip().lower()
-    exporter = os.environ.get("NIXL_TELEMETRY_EXPORTER", "").strip().lower()
-    if enabled not in _NIXL_TELEMETRY_ENABLED_VALUES or exporter != "prometheus":
+    enabled = os.environ.get("NIXL_TELEMETRY_ENABLE", "").lower()
+    exporter = os.environ.get("NIXL_TELEMETRY_EXPORTER", "")
+    if enabled not in NIXL_TELEMETRY_ENABLED_VALUES or exporter != "prometheus":
         return None
-    port = _configured_fixed_port(
-        "NIXL_TELEMETRY_PROMETHEUS_PORT", default=_NIXL_DEFAULT_PROMETHEUS_PORT
+    port = configured_nixl_uint16(
+        "NIXL_TELEMETRY_PROMETHEUS_PORT", default=DEFAULT_NIXL_PROMETHEUS_PORT
     )
     if port is None:
         logger.warning(
