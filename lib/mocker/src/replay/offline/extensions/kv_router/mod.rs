@@ -1119,7 +1119,10 @@ mod tests {
     use tempfile::NamedTempFile;
     use uuid::Uuid;
 
-    use super::{OfflineReplayRouter, ReplayRequestHashes, SyncReplayIndexer, WorkerAdmission};
+    use super::{
+        KvRouterPlacement, OfflineReplayRouter, ReplayRequestHashes, SyncReplayIndexer,
+        WorkerAdmission,
+    };
     use crate::common::protocols::{DirectRequest, MockEngineArgs};
     use crate::replay::ReplayPrefillLoadEstimator;
     use aisimulate_core::replay::{ReplayPromptTokenSource, ReplayRequestContext};
@@ -1153,6 +1156,20 @@ mod tests {
             .max_num_batched_tokens(Some(64))
             .build()
             .unwrap()
+    }
+
+    /// `KvRouterPlacement::new` is reachable from outside the crate through
+    /// the `placement` facade, and its own doc advertises `Some(seed)` as
+    /// the reproducible mode -- it must refuse cleanly on a build without
+    /// `replay-bench`, not panic on a documented-valid argument.
+    #[cfg(not(feature = "replay-bench"))]
+    #[test]
+    fn seeded_placement_refuses_cleanly_without_the_replay_bench_feature() {
+        let error = match KvRouterPlacement::new(&replay_args(), None, None, 1, Some(7)) {
+            Ok(_) => panic!("a seeded selector requires replay-bench"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("replay-bench"), "{error}");
     }
 
     fn router_config() -> KvRouterConfig {

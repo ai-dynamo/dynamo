@@ -126,7 +126,10 @@ pub(super) fn replay_selector_with_seed(
         #[cfg(feature = "replay-bench")]
         Some(seed) => DefaultWorkerSelector::new_seeded(Some(config.clone()), "replay", seed),
         #[cfg(not(feature = "replay-bench"))]
-        Some(_) => unreachable!("canonical KV Router replay requires the replay-bench feature"),
+        Some(_) => anyhow::bail!(
+            "a seeded KV-router selector requires the replay-bench feature, which this \
+             binary was not built with"
+        ),
         None => DefaultWorkerSelector::new(Some(config.clone()), "replay"),
     })
 }
