@@ -269,10 +269,22 @@ pub struct ResponseStreamPrologue {
     /// convenience: worker and frontend are deployed independently, so during a
     /// rolling upgrade an old worker sends a prologue without this field and a
     /// new worker sends one an old frontend does not know. A required field
-    /// would break the handshake in both directions; an absent field decodes to
-    /// `None` and the frontend falls back to the untyped behavior.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// would break the handshake in both directions; an absent or unrecognized
+    /// field decodes to `None` and the frontend falls back to the untyped behavior.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_typed_error",
+        skip_serializing_if = "Option::is_none"
+    )]
     typed_error: Option<DynamoError>,
+}
+
+fn deserialize_typed_error<'de, D>(deserializer: D) -> Result<Option<DynamoError>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let typed_error = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(typed_error.and_then(|typed_error| serde_json::from_value(typed_error).ok()))
 }
 
 /// A pre-stream failure as it reaches the requesting side of the transport.

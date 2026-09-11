@@ -2399,12 +2399,10 @@ mod tests {
         }
     }
 
-    /// A prologue that arrives well-framed but undecodable -- the shape a worker
-    /// newer than this build produces when it types an error with an `ErrorType`
-    /// variant this build lacks -- must still reach the requester rather than
-    /// leaving it with a bare disconnect.
+    /// A prologue from a newer worker may carry an `ErrorType` this build does
+    /// not know; its legacy error must still reach the requester.
     #[tokio::test]
-    async fn test_undecodable_prologue_still_reaches_the_requester() {
+    async fn test_unknown_typed_error_preserves_the_legacy_prologue_error() {
         let options = ServerOptions::builder().port(0).build().unwrap();
         let server = TcpStreamServer::new_with_resolver(options, FailingIpResolver)
             .await
@@ -2437,7 +2435,7 @@ mod tests {
             .unwrap();
 
         // Correctly framed HeaderOnly, but the typed error names a variant this
-        // build does not know, so the whole prologue fails to deserialize.
+        // build does not know.
         framed_writer
             .send(TwoPartMessage::from_header(Bytes::from_static(
                 br#"{"error":"Generate Error: boom","typed_error":{"error_type":"VariantFromTheFuture","message":"boom"}}"#,
@@ -2452,11 +2450,11 @@ mod tests {
 
         // `StreamReceiver` is not `Debug`, so match instead of `expect_err`.
         match outcome {
-            Err(err) => assert!(
-                err.contains("malformed prologue"),
-                "expected malformed-prologue error, got: {err}"
-            ),
-            Ok(_) => panic!("an undecodable prologue must not yield a usable stream"),
+            Err(err) => {
+                assert_eq!(err.message, "Generate Error: boom");
+                assert!(err.typed_error.is_none());
+            }
+            Ok(_) => panic!("an error prologue must not yield a usable stream"),
         }
     }
 
