@@ -8,7 +8,12 @@ from dataclasses import dataclass, field
 
 import pytest
 
-torch = pytest.importorskip("torch")
+# dynamo.common.multimodal eagerly imports torch via its package __init__.
+# Skip the whole module in images that do not ship torch (e.g. Triton).
+try:
+    import torch  # noqa: F401
+except ModuleNotFoundError as e:
+    pytest.skip(f"torch not available in this image: {e}", allow_module_level=True)
 
 from dynamo.common.multimodal.nvdec_decoder import nvdec_available
 from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
