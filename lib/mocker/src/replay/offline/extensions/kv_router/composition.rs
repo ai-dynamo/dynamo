@@ -38,14 +38,7 @@ impl ReplayComposition for RoundRobinReplayComposition {
     type DisaggregatedPlacement = PoolRoundRobinPlacement<()>;
 
     fn validate_spec(&self, spec: &ReplaySpec) -> aisimulate_core::replay::ReplayResult<()> {
-        if spec.adapters.placement.provider != "round_robin" {
-            return Err(aisimulate_core::replay::ReplayError::InvalidSpec(format!(
-                "round-robin composition received placement provider {:?}",
-                spec.adapters.placement.provider
-            )));
-        }
-        validate_adapter_descriptors(spec, "round_robin", self.scaling_enabled)?;
-        Ok(())
+        validate_adapter_descriptors(spec, "round_robin", self.scaling_enabled)
     }
 
     fn create_aggregated_placement(
@@ -156,14 +149,7 @@ impl ReplayComposition for KvReplayComposition {
     type DisaggregatedPlacement = KvRouterPlacement;
 
     fn validate_spec(&self, spec: &ReplaySpec) -> aisimulate_core::replay::ReplayResult<()> {
-        if spec.adapters.placement.provider != "dynamo_kv_router" {
-            return Err(aisimulate_core::replay::ReplayError::InvalidSpec(format!(
-                "Dynamo KV composition received placement provider {:?}",
-                spec.adapters.placement.provider
-            )));
-        }
-        validate_adapter_descriptors(spec, "dynamo_kv_router", self.scaling_enabled)?;
-        Ok(())
+        validate_adapter_descriptors(spec, "dynamo_kv_router", self.scaling_enabled)
     }
 
     fn create_aggregated_placement(

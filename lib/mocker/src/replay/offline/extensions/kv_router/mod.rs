@@ -963,33 +963,12 @@ impl OfflineReplayRouter {
         let isl_blocks = u32::try_from(request.isl_tokens.div_ceil(self.block_size as usize))
             .unwrap_or(u32::MAX);
         let overlap_blocks = selection.effective_overlap_blocks.floor() as u32;
-        // `PlacementCacheSample::best_available_overlap_blocks` is documented
-        // as the largest prefix overlap available on any *eligible* worker at
-        // selection time; `overlap_regret_blocks` is derived from it upstream.
-        //
-        // Walking `eligibility` is currently equivalent to walking
-        // `self.workers_with_configs` directly: `scheduling_request` (above)
-        // hardcodes `allowed_worker_ids: None`, `pinned_worker: None`, and
-        // `routing_constraints: RoutingConstraints::default()`, and
-        // `SchedulingRequest::eligibility()` passes `overloaded_worker_ids:
-        // None`, so every predicate `RoutingEligibility::allows_worker`
-        // checks is vacuously true here. Written against `eligibility`
-        // rather than the raw map as future-proofing: if this offline router
-        // ever threads a real routing constraint or busy-worker exclusion
-        // through `scheduling_request`, this reduction picks it up for free
-        // instead of silently continuing to count overlap on a worker that
-        // constraint would have forbidden.
-        //
-        // That difference is forgone overlap, not a routing mistake: a
-        // load-aware selector declines a cache hit on a saturated worker on
-        // purpose, and that correct decision still reports nonzero regret.
-        //
-        // Comparable to `overlap_blocks` because `scheduling_request` builds
-        // `effective_overlap_blocks` one-to-one from this same `scores` map, so
-        // both are device-tier block counts in the same unit. The live path
-        // reaches them through `cache_hit_estimates_from_tiered_matches`, which
-        // adds weighted lower-tier hits on top; routing this router through
-        // that function is what would stop the two being the same quantity.
+        // The largest prefix overlap available on any *eligible* worker at
+        // selection time (used to derive overlap_regret_blocks upstream).
+        // Walked against `eligibility` rather than `workers_with_configs`
+        // directly so a future routing constraint on `scheduling_request`
+        // excludes the worker here too, instead of still counting its
+        // overlap as available.
         let mut best_available_overlap_blocks = 0;
         eligibility.for_each_eligible_worker_rank(&self.workers_with_configs, |worker, _| {
             if let Some(overlap) = request.overlaps.scores.get(&worker) {
@@ -1538,19 +1517,12 @@ mod tests {
         );
     }
 
-    /// Overlap on a removed worker is not "available".
-    ///
-    /// `remove_worker` drops a worker from the config map but deliberately
-    /// leaves its radix-tree blocks intact, so the cached prefix still scores
-    /// for it. Reducing over `overlaps.scores` directly would count that
-    /// unreachable overlap and report regret against a worker that no longer
-    /// exists. This test excludes the worker by removal, not by any real
-    /// `eligibility` predicate rejecting it (every predicate is currently
-    /// vacuous for this router -- see the comment above
-    /// `best_available_overlap_blocks`'s reduction); walking the eligible
-    /// set still catches it because a removed worker is absent from
-    /// `self.workers_with_configs`, which `for_each_eligible_worker_rank`
-    /// walks.
+    /// Overlap on a removed worker is not "available". `remove_worker` drops
+    /// a worker from the config map but leaves its radix-tree blocks intact,
+    /// so the cached prefix still scores for it; reducing over
+    /// `overlaps.scores` directly would count that unreachable overlap.
+    /// `for_each_eligible_worker_rank` walks `workers_with_configs`, which a
+    /// removed worker is absent from, so it's excluded regardless.
     #[test]
     fn overlap_on_a_removed_worker_is_not_available() {
         let mut router =

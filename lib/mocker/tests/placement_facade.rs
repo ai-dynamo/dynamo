@@ -2,11 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Exercises `dynamo_mocker::placement` from outside the crate, the way an
-//! external co-simulator (aiperf) actually reaches it. Every other test for
-//! this facade compiles in-crate against `pub(crate)` visibility, so none of
-//! them can catch a reachability regression: if `replay::mod` or
-//! `offline::mod` is tightened back to a bare `mod`, or `pub(crate)` is
-//! dropped from `extensions::mod`, this is the one test that fails.
+//! external co-simulator (aiperf) actually reaches it -- the one place that
+//! catches a reachability regression in the pub(crate) chain underneath.
 
 use dynamo_mocker::placement::{
     KvReplayComposition, KvReplayMetadata, KvRouterConfig, KvRouterPlacement, MockEngineArgs,
@@ -23,10 +20,8 @@ fn placement_facade_builds_a_composition_and_names_its_provider() {
     assert_eq!(spec.provider, "dynamo_kv_router");
 }
 
-/// `KvRouterPlacement` is the whole point of this facade: aiperf injects it
-/// as an `aisimulate_core::PlacementPolicy`. The composition test above
-/// never constructs one directly, so it alone wouldn't catch that
-/// re-export going missing or the constructor signature changing under it.
+/// `KvRouterPlacement` is the whole point of this facade -- aiperf injects
+/// it as an `aisimulate_core::PlacementPolicy`.
 #[test]
 fn placement_facade_constructs_a_kv_router_placement() {
     let args = MockEngineArgs::default();
@@ -35,11 +30,7 @@ fn placement_facade_constructs_a_kv_router_placement() {
 }
 
 /// Names every remaining facade re-export the tests above don't otherwise
-/// touch, so removing any one of them fails this file to compile. Some of
-/// these (event batches, metadata, the estimator alias) have no meaningful
-/// standalone construction from outside the crate; a compile error on a
-/// missing import still catches the same reachability regression full
-/// construction would.
+/// touch, so removing any one of them fails this file to compile.
 #[allow(dead_code)]
 fn _remaining_facade_items_stay_nameable(
     _config: KvRouterConfig,
