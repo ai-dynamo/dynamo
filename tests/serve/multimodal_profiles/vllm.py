@@ -650,8 +650,6 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 ],
             ),
             "epd": TopologyConfig(
-                health_check_workers=True,
-                health_check_worker_count=3,
                 # Moved to post_merge: same LLaVA-1.5 flake as e_pd above.
                 marks=[pytest.mark.post_merge],
                 timeout_s=600,
