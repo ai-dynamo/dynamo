@@ -4,5 +4,5 @@
 import sys
 from pathlib import Path
 
-_ROUTER_DIR = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(_ROUTER_DIR.parent), str(_ROUTER_DIR)]
+_BENCHMARKS_DIR = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_BENCHMARKS_DIR))
