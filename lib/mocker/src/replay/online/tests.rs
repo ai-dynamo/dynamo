@@ -843,6 +843,7 @@ async fn a_routing_decision_observes_kv_events_published_just_before_it() {
 
         router
             .sink(CACHED_WORKER)
+            .unwrap()
             .publish(
                 dynamo_kv_router::protocols::KvCacheEvent {
                     event_id: 1,
@@ -953,15 +954,26 @@ fn test_online_trace_replay_kv_router_marks_prefill_and_free_once() {
     assert_eq!(stats.freed_count, 1);
 }
 
-// Observed flaky in fresh-agent review (one failure in ~215 invocations
-// across several batches, on a tree with no changes to this test's code
-// path). Confirmed unrelated to the kv-router-placement injection work:
-// the failure predates that branch and this test's own logic is untouched
-// by it. Left as a normal test -- ignoring it would silently drop coverage
-// -- but a "213/215 passing" report should not be read as proof this test
-// is unconditionally deterministic.
-#[test]
-fn test_online_replay_crosses_a_bounded_preemption_edge_and_drains() {
+/// Preemption requires both requests to be *concurrently* resident: the pool is
+/// 6 blocks, each 8-token prompt is 2 blocks, and decode grows them past 6 only
+/// if neither has retired. Driving that through the plain concurrency entrypoint
+/// made the precondition a wall-clock race -- `speedup_ratio(1000.0)` lets
+/// request 1 run to completion before request 2's task is even spawned, and then
+/// nothing ever oversubscribes the pool.
+///
+/// That is what the flake earlier rounds observed actually was. Measured here
+/// over repeated full-suite runs, the failing value was always exactly
+/// `vllm_preemptions_total == 0` -- never 4-or-more -- i.e. the fixture failed to
+/// reach the capacity edge at all, rather than cycling past it. It was never a
+/// preemption bug; the test simply asserted an engine-capacity property through a
+/// nondeterministic path.
+///
+/// Gate output delivery until both requests are resident, the same barrier
+/// `test_online_concurrency_replay_reaches_but_does_not_exceed_cap` uses, so
+/// co-residency is established before either can drain. The assertion is
+/// unchanged and is now reached on every run.
+#[tokio::test]
+async fn test_online_replay_crosses_a_bounded_preemption_edge_and_drains() {
     let args = MockEngineArgs::builder()
         .block_size(4)
         .num_gpu_blocks(6)
@@ -980,16 +992,40 @@ fn test_online_replay_crosses_a_bounded_preemption_edge_and_drains() {
             uuid: Some(Uuid::from_u128(request_idx as u128 + 1)),
             ..Default::default()
         })
-        .collect();
+        .collect::<VecDeque<_>>();
 
-    let (report, stats) = simulate_concurrency_requests_with_stats(
-        args,
+    let (gate_tx, gate_rx) = watch::channel(false);
+    let runtime = LiveRuntime::new_with_output_gate(
+        replay_config(
+            args,
+            1,
+            ReplayRouterMode::RoundRobin,
+            OnlineReplayOptions::default(),
+        ),
         requests,
-        2,
-        1,
-        ReplayRouterMode::RoundRobin,
+        LiveReplayMode::Concurrency { max_in_flight: 2 },
+        gate_rx,
+        CancellationToken::new(),
     )
     .unwrap();
+    let engines = runtime.engines();
+    let run = tokio::spawn(runtime.run());
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while engines
+            .iter()
+            .map(|engine| engine.active_request_count())
+            .sum::<usize>()
+            != 2
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("both requests must be concurrently resident before either drains");
+    gate_tx.send(true).unwrap();
+
+    let (report, stats) = run.await.unwrap().unwrap();
 
     assert_eq!(report.request_counts.completed_requests, 2);
     assert!(

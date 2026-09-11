@@ -269,16 +269,18 @@ impl LiveRuntime {
         let mut engines = Vec::with_capacity(rank_handle_count);
         for worker_idx in 0..num_workers {
             let rank_options = (0..dp_size)
-                .map(|_| LiveEngineOptions {
-                    kv_event_publishers: router.sink(worker_idx as _),
-                    admission_tx: Some(admission_tx.clone()),
-                    fpm_publisher: FpmPublisher::default(),
-                    request_output_buffering: RequestOutputBuffering::FullResponse,
-                    allow_zero_output: true,
-                    #[cfg(test)]
-                    output_gate: output_gate.clone(),
+                .map(|_| {
+                    Ok(LiveEngineOptions {
+                        kv_event_publishers: router.sink(worker_idx as _)?,
+                        admission_tx: Some(admission_tx.clone()),
+                        fpm_publisher: FpmPublisher::default(),
+                        request_output_buffering: RequestOutputBuffering::FullResponse,
+                        allow_zero_output: true,
+                        #[cfg(test)]
+                        output_gate: output_gate.clone(),
+                    })
                 })
-                .collect();
+                .collect::<Result<Vec<_>>>()?;
             engines.extend(LiveEngine::start_grouped_with_options(
                 args.clone(),
                 rank_options,

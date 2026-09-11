@@ -274,18 +274,26 @@ impl KvReplayRouter {
         })
     }
 
-    fn sink(&self, worker_id: WorkerId) -> Arc<dyn KvCacheEventSink> {
+    /// Fallible, not `expect`-ing: the "runtime is active" invariant the old
+    /// message asserted is not enforced anywhere -- `shutdown` takes the sender,
+    /// and `await_indexed` already treats both the poisoned lock and the taken
+    /// sender as ordinary error/`None` cases. Panicking here for conditions its
+    /// sibling handles was the inconsistency, and a poisoned lock is reachable
+    /// from any panic in the event task regardless of the invariant.
+    fn sink(&self, worker_id: WorkerId) -> Result<Arc<dyn KvCacheEventSink>> {
         let event_tx = self
             .event_tx
             .lock()
-            .unwrap()
+            .map_err(|_| anyhow!("replay router event channel lock poisoned"))?
             .as_ref()
-            .expect("router event channel should exist while runtime is active")
+            .ok_or_else(|| {
+                anyhow!("replay router event channel is closed; the router was already shut down")
+            })?
             .clone();
-        Arc::new(ReplayKvEventSink {
+        Ok(Arc::new(ReplayKvEventSink {
             worker_id,
             event_tx,
-        })
+        }))
     }
 
     /// Wait until every KV event published before this call is visible to the indexer.
@@ -342,10 +350,13 @@ impl KvReplayRouter {
             .scores
             .iter()
             .map(|(worker, overlap)| {
-                (
-                    *worker,
-                    (*overlap as usize) * usize::try_from(self.block_size).unwrap_or(0),
-                )
+                // Plain widening cast, not `try_from(..).unwrap_or(0)`: the
+                // conversion is infallible for `u32` on every supported target,
+                // and a silent `0` would not degrade gracefully -- it would zero
+                // every worker's cached-token figure and make the scheduler route
+                // as if no prefix cache existed anywhere. The offline path already
+                // spells the same conversion `self.block_size as usize`.
+                (*worker, (*overlap as usize) * self.block_size as usize)
             })
             .collect();
         let token_seq = self.config.compute_seq_hashes_for_tracking_with_context(
@@ -418,8 +429,18 @@ impl KvReplayRouter {
 
     async fn shutdown(&self) -> Result<()> {
         self.scheduler_cancel.cancel();
-        self.event_tx.lock().unwrap().take();
-        let Some(event_task) = self.event_task.lock().unwrap().take() else {
+        self.event_tx
+            .lock()
+            .map_err(|_| anyhow!("replay router event channel lock poisoned"))?
+            .take();
+        // Scoped so the guard is dropped before the `await` below.
+        let event_task = {
+            self.event_task
+                .lock()
+                .map_err(|_| anyhow!("replay router event task lock poisoned"))?
+                .take()
+        };
+        let Some(event_task) = event_task else {
             return Ok(());
         };
         event_task
@@ -486,11 +507,11 @@ impl ReplayRouter {
         })
     }
 
-    pub(crate) fn sink(&self, worker_id: WorkerId) -> KvEventPublishers {
-        match self {
+    pub(crate) fn sink(&self, worker_id: WorkerId) -> Result<KvEventPublishers> {
+        Ok(match self {
             Self::RoundRobin(_) => KvEventPublishers::default(),
-            Self::Kv(router) => KvEventPublishers::new(Some(router.sink(worker_id)), None),
-        }
+            Self::Kv(router) => KvEventPublishers::new(Some(router.sink(worker_id)?), None),
+        })
     }
 
     pub(crate) async fn select_worker(
@@ -582,8 +603,11 @@ impl ReplayRouter {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
     use std::sync::Arc;
     use std::time::Duration;
+
+    use tempfile::NamedTempFile;
 
     use dynamo_kv_router::config::RouterQueuePolicy;
     use dynamo_kv_router::protocols::{
@@ -843,13 +867,14 @@ mod tests {
             ReplayRouter::new(ReplayRouterMode::KvRouter, &args, Some(missing), None, 1,).is_err()
         );
 
-        let path = std::env::temp_dir().join(format!(
-            "dynamo-online-replay-policy-{}.yaml",
-            Uuid::new_v4()
-        ));
-        std::fs::write(
-            &path,
-            r#"
+        // NamedTempFile, not a hand-rolled temp_dir path plus a `remove_file`
+        // call: every `unwrap` between the write and the removal is a panic
+        // that would leak the file. The guard is held to the end of the test
+        // so removal is tied to scope exit, not to reaching a statement.
+        let mut policy_file = NamedTempFile::new().unwrap();
+        policy_file
+            .write_all(
+                r#"
 default_policy_family: latency
 uncached_isl_buckets:
   - min_tokens: 0
@@ -865,15 +890,16 @@ policy_classes:
     cache_bucket: all
     quantum: 4
     prefill_busy_threshold: 1024
-"#,
-        )
-        .unwrap();
+"#
+                .as_bytes(),
+            )
+            .unwrap();
         let router = Arc::new(
             ReplayRouter::new(
                 ReplayRouterMode::KvRouter,
                 &args,
                 Some(KvRouterConfig {
-                    router_policy_config: Some(path.display().to_string()),
+                    router_policy_config: Some(policy_file.path().display().to_string()),
                     ..KvRouterConfig::default()
                 }),
                 None,
@@ -881,7 +907,6 @@ policy_classes:
             )
             .unwrap(),
         );
-        std::fs::remove_file(path).unwrap();
 
         let mut active = priority_request(10, 0, 0);
         active.policy_class = Some("latency".to_string());
@@ -895,7 +920,15 @@ policy_classes:
                 router.select_worker(&queued, 1, 1).await.unwrap()
             })
         };
-        tokio::task::yield_now().await;
+        // Poll the real observable rather than counting `yield_now()`s -- the
+        // same reason `wait_for_pending_count` exists and the same warning
+        // `debug_pending_count`'s doc carries: `select_worker` awaits an indexer
+        // barrier before it ever reaches the scheduler, so "one yield gets the
+        // spawned task queued" is not a property the runtime guarantees. A
+        // single `yield_now` that lost that race would make the assertion below
+        // pass for the wrong reason -- the task would be unfinished because it
+        // had not yet been queued, not because its class is busy.
+        wait_for_pending_count(&router, 1).await;
 
         let mut batch = priority_request(12, 0, 0);
         batch.policy_class = Some("batch".to_string());
@@ -922,6 +955,29 @@ policy_classes:
         );
         router.on_complete(Uuid::from_u128(11)).await.unwrap();
         router.shutdown().await.unwrap();
+    }
+
+    /// `sink` used to `expect` an invariant nothing enforces ("the channel
+    /// exists while the runtime is active"), so asking a shut-down router for a
+    /// publisher aborted the process. It is a `pub(crate)` accessor with no
+    /// state machine gating it -- it must report, not panic.
+    #[tokio::test]
+    async fn sink_after_shutdown_reports_an_error_instead_of_panicking() {
+        let args = MockEngineArgs::builder()
+            .block_size(64)
+            .max_num_batched_tokens(Some(64))
+            .build()
+            .unwrap();
+        let router = ReplayRouter::new(ReplayRouterMode::KvRouter, &args, None, None, 1).unwrap();
+        assert!(router.sink(0).is_ok(), "a live router hands out publishers");
+
+        router.shutdown().await.unwrap();
+
+        let error = match router.sink(0) {
+            Ok(_) => panic!("a shut-down router must not hand out a publisher"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("already shut down"), "{error}");
     }
 
     fn store_event(
