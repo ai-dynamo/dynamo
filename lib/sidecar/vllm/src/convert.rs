@@ -24,8 +24,13 @@ pub(crate) fn build_generate_request(
     request_id: String,
     mode: DisaggregationMode,
 ) -> Result<pb::GenerateRequest, DynamoError> {
+    let request = normalize_response_options(request)?;
     validate_request(&request, mode)?;
     validate_multimodal_cache_uuids(&request)?;
+    let mut native_sampling_params_json = native_sampling_params_json(&request)?;
+    if mode.is_prefill() || mode.is_encode() {
+        native_sampling_params_json.clear();
+    }
 
     let has_media = request
         .multi_modal_data
@@ -83,7 +88,7 @@ pub(crate) fn build_generate_request(
     let stop_conditions = request.stop_conditions;
     let encoder_result = request.encoder_result;
     let mut extra_args = request.extra_args;
-    let skip_special_tokens = consume_vllm_tito(&mut extra_args, skip_special_tokens)?;
+    consume_vllm_tito(&mut extra_args)?;
     consume_redundant_nvext(&mut extra_args, cache_salt.as_deref())?;
     if has_media && let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() {
         // These fields are already represented by token_ids and media.
@@ -141,6 +146,7 @@ pub(crate) fn build_generate_request(
         priority,
         session_id: None,
         media,
+        native_sampling_params_json,
     })
 }
 
@@ -155,22 +161,211 @@ pub(crate) fn data_parallel_rank(
     })
 }
 
-fn consume_vllm_tito(
-    extra_args: &mut Option<serde_json::Value>,
-    canonical_skip_special_tokens: Option<bool>,
-) -> Result<Option<bool>, DynamoError> {
-    let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() else {
-        return Ok(canonical_skip_special_tokens);
+/// Compatibility with v1.4 frontends during v1.5 and v1.6 rolling upgrades.
+/// TODO(v1.7): Remove after v1.4 falls outside the N-2 compatibility window.
+pub(crate) fn normalize_response_options(
+    mut request: PreprocessedRequest,
+) -> Result<PreprocessedRequest, DynamoError> {
+    let Some(sampling) = vllm_tito_sampling(&request.extra_args)?.cloned() else {
+        return Ok(request);
     };
-    let Some(envelope) = extra.remove("vllm_tito") else {
-        return Ok(canonical_skip_special_tokens);
+    let legacy_kv_transfer = request
+        .extra_args
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .and_then(|extra| extra.get("vllm_tito"))
+        .and_then(serde_json::Value::as_object)
+        .and_then(|envelope| envelope.get("kv_transfer_params"))
+        .cloned();
+    if request.output_options.logprobs.is_none() {
+        request.output_options.logprobs = legacy_logprob_count(&sampling, "logprobs")?;
+    }
+    if request.output_options.prompt_logprobs.is_none() {
+        request.output_options.prompt_logprobs =
+            legacy_logprob_count(&sampling, "prompt_logprobs")?;
+    }
+    if request.output_options.skip_special_tokens.is_none() {
+        request.output_options.skip_special_tokens = legacy_bool(&sampling, "skip_special_tokens")?;
+    }
+    if let Some(legacy_kv_transfer) = legacy_kv_transfer
+        && let Some(extra) = request
+            .extra_args
+            .as_mut()
+            .and_then(serde_json::Value::as_object_mut)
+        && !extra.contains_key("kv_transfer_params")
+    {
+        extra.insert("kv_transfer_params".to_string(), legacy_kv_transfer);
+    }
+    Ok(request)
+}
+
+fn native_sampling_params_json(request: &PreprocessedRequest) -> Result<Vec<u8>, DynamoError> {
+    let Some(mut native) = vllm_tito_sampling(&request.extra_args)?.cloned() else {
+        return Ok(Vec::new());
+    };
+    macro_rules! overlay {
+        ($name:literal, $value:expr) => {
+            if let Some(value) = $value {
+                native.insert(
+                    $name.to_string(),
+                    serde_json::to_value(value).map_err(|error| {
+                        client::invalid_argument(format!(
+                            "failed to serialize canonical sampling_params.{}: {error}",
+                            $name
+                        ))
+                    })?,
+                );
+            }
+        };
+    }
+
+    let sampling = &request.sampling_options;
+    overlay!("temperature", sampling.temperature);
+    overlay!("top_p", sampling.top_p);
+    overlay!("min_p", sampling.min_p);
+    overlay!("seed", sampling.seed);
+    overlay!("presence_penalty", sampling.presence_penalty);
+    overlay!("frequency_penalty", sampling.frequency_penalty);
+    overlay!("repetition_penalty", sampling.repetition_penalty);
+    overlay!(
+        "include_stop_str_in_output",
+        sampling.include_stop_str_in_output
+    );
+    if let Some(top_k) = sampling.top_k {
+        overlay!("top_k", Some(if top_k == -1 { 0 } else { top_k }));
+    }
+
+    let stopping = &request.stop_conditions;
+    overlay!("max_tokens", stopping.max_tokens);
+    overlay!("min_tokens", stopping.min_tokens);
+    overlay!("ignore_eos", stopping.ignore_eos);
+    if stopping.stop_token_ids.is_some() || stopping.stop_token_ids_hidden.is_some() {
+        overlay!(
+            "stop_token_ids",
+            Some(stop_token_ids(
+                stopping.stop_token_ids.clone(),
+                stopping.stop_token_ids_hidden.clone(),
+            ))
+        );
+    }
+
+    let output = &request.output_options;
+    if native
+        .get("logprob_token_ids")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|ids| !ids.is_empty())
+    {
+        native.remove("logprobs");
+    } else {
+        overlay!("logprobs", output.logprobs.map(native_logprob_count));
+    }
+    overlay!(
+        "prompt_logprobs",
+        output.prompt_logprobs.map(native_logprob_count)
+    );
+    overlay!("skip_special_tokens", output.skip_special_tokens);
+    let extra = request
+        .extra_args
+        .as_ref()
+        .and_then(serde_json::Value::as_object);
+    overlay!(
+        "skip_reading_prefix_cache",
+        bool_extra(extra, "skip_reading_prefix_cache")?
+    );
+
+    if native
+        .get("return_token_ids")
+        .is_some_and(|value| value != &serde_json::Value::Bool(true))
+    {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito.sampling_params.return_token_ids must be true",
+        ));
+    }
+    serde_json::to_vec(&native).map_err(|error| {
+        client::invalid_argument(format!(
+            "extra_args.vllm_tito.sampling_params is invalid: {error}"
+        ))
+    })
+}
+
+fn vllm_tito_sampling(
+    extra_args: &Option<serde_json::Value>,
+) -> Result<Option<&serde_json::Map<String, serde_json::Value>>, DynamoError> {
+    let Some(serde_json::Value::Object(extra)) = extra_args else {
+        return Ok(None);
+    };
+    let Some(envelope) = extra.get("vllm_tito") else {
+        return Ok(None);
     };
     let serde_json::Value::Object(envelope) = envelope else {
         return Err(client::invalid_argument(
             "extra_args.vllm_tito must be a JSON object",
         ));
     };
+    let sampling = envelope.get("sampling_params").ok_or_else(|| {
+        client::invalid_argument("extra_args.vllm_tito.sampling_params is required")
+    })?;
+    let serde_json::Value::Object(sampling) = sampling else {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito.sampling_params must be a JSON object",
+        ));
+    };
+    Ok(Some(sampling))
+}
 
+fn legacy_bool(
+    sampling: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<Option<bool>, DynamoError> {
+    match sampling.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Bool(value)) => Ok(Some(*value)),
+        Some(_) => Err(client::invalid_argument(format!(
+            "extra_args.vllm_tito.sampling_params.{field} must be a boolean"
+        ))),
+    }
+}
+
+fn legacy_logprob_count(
+    sampling: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<Option<u32>, DynamoError> {
+    match sampling.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => match value.as_i64() {
+            Some(-1) => Ok(Some(u32::MAX)),
+            Some(value) if value >= 0 => u32::try_from(value).map(Some).map_err(|_| {
+                client::invalid_argument(format!(
+                    "extra_args.vllm_tito.sampling_params.{field} exceeds u32"
+                ))
+            }),
+            _ => Err(client::invalid_argument(format!(
+                "extra_args.vllm_tito.sampling_params.{field} must be non-negative or -1"
+            ))),
+        },
+    }
+}
+
+fn native_logprob_count(value: u32) -> i64 {
+    if value == u32::MAX {
+        -1
+    } else {
+        i64::from(value)
+    }
+}
+
+fn consume_vllm_tito(extra_args: &mut Option<serde_json::Value>) -> Result<(), DynamoError> {
+    let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() else {
+        return Ok(());
+    };
+    let Some(envelope) = extra.remove("vllm_tito") else {
+        return Ok(());
+    };
+    let serde_json::Value::Object(envelope) = envelope else {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito must be a JSON object",
+        ));
+    };
     for key in envelope.keys() {
         if !matches!(
             key.as_str(),
@@ -188,68 +383,8 @@ fn consume_vllm_tito(
             )));
         }
     }
-
-    let sampling = envelope.get("sampling_params").ok_or_else(|| {
-        client::invalid_argument("extra_args.vllm_tito.sampling_params is required")
-    })?;
-    let serde_json::Value::Object(sampling) = sampling else {
-        return Err(client::invalid_argument(
-            "extra_args.vllm_tito.sampling_params must be a JSON object",
-        ));
-    };
-    for key in sampling.keys() {
-        if !matches!(
-            key.as_str(),
-            "temperature"
-                | "top_p"
-                | "top_k"
-                | "min_p"
-                | "seed"
-                | "max_tokens"
-                | "min_tokens"
-                | "presence_penalty"
-                | "frequency_penalty"
-                | "repetition_penalty"
-                | "stop_token_ids"
-                | "ignore_eos"
-                | "logprobs"
-                | "prompt_logprobs"
-                | "skip_reading_prefix_cache"
-                | "skip_special_tokens"
-                | "return_token_ids"
-        ) {
-            return Err(client::invalid_argument(format!(
-                "extra_args.vllm_tito.sampling_params.{key} is not supported by vLLM gRPC"
-            )));
-        }
-    }
-    let skip_special_tokens = match sampling.get("skip_special_tokens") {
-        None | Some(serde_json::Value::Null) => canonical_skip_special_tokens,
-        Some(serde_json::Value::Bool(value)) => {
-            if canonical_skip_special_tokens.is_some_and(|canonical| canonical != *value) {
-                return Err(client::invalid_argument(
-                    "extra_args.vllm_tito.sampling_params.skip_special_tokens does not match the canonical output option",
-                ));
-            }
-            Some(*value)
-        }
-        Some(_) => {
-            return Err(client::invalid_argument(
-                "extra_args.vllm_tito.sampling_params.skip_special_tokens must be a boolean",
-            ));
-        }
-    };
-    if sampling
-        .get("return_token_ids")
-        .is_some_and(|value| value != &serde_json::Value::Bool(true))
-    {
-        return Err(client::invalid_argument(
-            "extra_args.vllm_tito.sampling_params.return_token_ids must be true",
-        ));
-    }
-    Ok(skip_special_tokens)
+    Ok(())
 }
-
 fn consume_redundant_nvext(
     extra_args: &mut Option<serde_json::Value>,
     cache_namespace: Option<&str>,

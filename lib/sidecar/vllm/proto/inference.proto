@@ -50,6 +50,11 @@ message GenerateRequest {
 
   // Multimodal inputs aligned with placeholder markers in token_ids.
   repeated MediaItem media = 14;
+
+  // Exact JSON object from native /inference/v1/generate sampling_params.
+  // When non-empty, this is the sampling authority; structured fields remain
+  // the compatibility path for generic gRPC clients.
+  bytes native_sampling_params_json = 16;
 }
 
 message RandomSampling {

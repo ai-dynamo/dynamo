@@ -107,8 +107,13 @@ impl GenerateRequest {
             .map_err(|error| error.to_string())?;
         validate::validate_presence_penalty(self.sampling_params.presence_penalty)
             .map_err(|error| error.to_string())?;
-        validate::validate_repetition_penalty(self.sampling_params.repetition_penalty)
-            .map_err(|error| error.to_string())?;
+        if let Some(value) = self.sampling_params.repetition_penalty
+            && (!value.is_finite() || value <= 0.0)
+        {
+            return Err(format!(
+                "sampling_params.repetition_penalty must be a finite positive number, got {value}"
+            ));
+        }
         validate::validate_min_p(self.sampling_params.min_p).map_err(|error| error.to_string())?;
 
         if let Some(logprobs) = self.sampling_params.logprobs()
@@ -876,6 +881,19 @@ mod tests {
             let error = req.validate().expect_err("must reject");
             assert!(error.contains(expected), "unexpected error: {error}");
         }
+    }
+
+    #[test]
+    fn generate_request_accepts_vllm_repetition_penalty_above_two() {
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "token_ids": [1],
+            "sampling_params": {"repetition_penalty": 2.5}
+        }))
+        .expect("deserialize");
+
+        request
+            .validate()
+            .expect("vLLM accepts finite positive repetition penalties");
     }
 
     #[test]
