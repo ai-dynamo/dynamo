@@ -66,7 +66,7 @@ def validate_chat_response(
         expected_model: Expected model name in the response
         min_content_length: Minimum required length for response content
         max_tokens: Optional requested token cap for the completion contract
-        stop: Prefix stop sequence; permits fully suppressed response content
+        stop: Stop sequence; permits empty or shortened response content
 
     Returns:
         Parsed response JSON on success

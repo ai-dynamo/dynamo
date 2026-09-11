@@ -20,6 +20,8 @@ spec:
       spec:
         containers:
         - args:
+          - --embedding-worker
+          - --use-sglang-tokenizer
           - --model-path
           - Qwen/Qwen3-Embedding-0.6B
           - --served-model-name

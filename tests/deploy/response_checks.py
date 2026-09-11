@@ -41,10 +41,24 @@ def validate_chat(body, max_tokens, stop=None):
     tokens = body["usage"]["completion_tokens"]
     assert type(tokens) is int and 0 <= tokens <= max_tokens, body
     if stop is not None:
-        assert content is None or content == "", body
+        assert content is None or isinstance(content, str), body
+        assert stop not in (content or ""), body
         assert choice["finish_reason"] == "stop", body
         assert not message.get("refusal") and (not message.get("tool_calls")), body
         assert not message.get("function_call"), body
+
+
+def validate_stop_response(body, baseline, stop):
+    """Require a stopped response to end before the baseline's stop sequence."""
+    content = body["choices"][0]["message"]["content"] or ""
+    original = baseline["choices"][0]["message"]["content"]
+    stop_index = original.index(stop)
+    assert content.strip(), "Interior stop suppressed preceding text"
+    assert original.startswith(content), "Stopped output diverged from baseline"
+    assert len(content) <= stop_index, "Output continued past the stop position"
+    assert (
+        body["usage"]["completion_tokens"] < baseline["usage"]["completion_tokens"]
+    ), "Stop did not reduce generated tokens"
 
 
 def validate_stream(lines):

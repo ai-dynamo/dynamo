@@ -12,7 +12,11 @@ import requests
 from tests.deploy import api_checks
 from tests.deploy.conftest import deployment_spec
 from tests.deploy.dgd_utils import validate_chat_response
-from tests.deploy.response_checks import validate_embedding, validate_stream
+from tests.deploy.response_checks import (
+    validate_embedding,
+    validate_stop_response,
+    validate_stream,
+)
 from tests.utils import client
 
 pytestmark = [
@@ -44,11 +48,13 @@ def response(content="hello", finish="stop", tokens=1):
     return result
 
 
-@pytest.mark.parametrize("content", [None, ""])
-def test_stop_accepts_suppressed_content_and_rejects_visible_text(content):
-    validate_chat_response(response(content), "model", max_tokens=30, stop="hello")
+@pytest.mark.parametrize(
+    "content,stop", [(None, "hello"), ("", "hello"), ("The", "The ")]
+)
+def test_stop_accepts_shortened_content_and_rejects_stop_sequence(content, stop):
+    validate_chat_response(response(content), "model", max_tokens=30, stop=stop)
     with pytest.raises(AssertionError):
-        validate_chat_response(response("hello"), "model", max_tokens=30, stop="hello")
+        validate_chat_response(response(stop), "model", max_tokens=30, stop=stop)
 
 
 def test_chat_keeps_default_minimum_length_without_stop():
@@ -103,9 +109,14 @@ def test_api_cases_use_shared_client_and_preserve_invalid_response(
             result = response()
             result._content = b'data: {"choices":[{"index":0,"delta":{"content":"hello"}}]}\n\ndata: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n'
             return result
+        if payload.get("max_tokens") == 1:
+            return response("The", "length", tokens=1)
         if "stop" in payload:
-            return response(None)
-        return response("hello " * 20)
+            return response("The", tokens=2)
+        return response(
+            "The air in the ruins was thick with the scent of damp earth. " * 2,
+            tokens=30,
+        )
 
     monkeypatch.setattr(api_checks, "send_request", send)
     api_checks.check_deployment_api(
@@ -115,10 +126,10 @@ def test_api_cases_use_shared_client_and_preserve_invalid_response(
     assert all(
         url == "http://test" + (endpoint or "/v1/chat/completions") for url, _ in calls
     )
-    assert calls[-1][1]["stop"] == "hell"
+    assert calls[-1][1]["stop"] == "air"
     assert (
         json.loads((tmp_path / "stop.json").read_text())["response"]
-        == response(None).text
+        == response("The", tokens=2).text
     )
     monkeypatch.setattr(
         api_checks, "send_request", lambda *a, **k: response(tokens=100)
@@ -182,3 +193,36 @@ def test_deploy_fixture_overrides_frontend_separately():
     assert spec["Frontend"].image == "frontend:candidate"
     assert spec["decode"].image == "worker:candidate"
     assert spec["decode"].model == "Qwen/Qwen3-Embedding-0.6B"
+    assert "--embedding-worker" in spec["decode"]._get_args()
+    assert "--use-sglang-tokenizer" in spec["decode"]._get_args()
+
+
+@pytest.mark.parametrize("content", ["The", "The "])
+def test_stop_allows_text_before_stop(content):
+    baseline = response("The air in the ruins", tokens=30).json()
+    stopped = response(content, tokens=2)
+    body = validate_chat_response(stopped, "model", max_tokens=30, stop="air")
+    validate_stop_response(body, baseline, "air")
+
+
+@pytest.mark.parametrize(
+    "content,finish,tokens",
+    [
+        (None, "stop", 2),
+        ("", "stop", 2),
+        ("The air", "stop", 2),
+        ("Other", "stop", 2),
+        ("The ", "length", 2),
+        ("The ", "stop", 30),
+        (False, "stop", 2),
+    ],
+)
+def test_stop_rejects_leaked_stop_divergence_and_no_early_termination(
+    content, finish, tokens
+):
+    baseline = response("The air in the ruins", tokens=30).json()
+    with pytest.raises(AssertionError):
+        body = validate_chat_response(
+            response(content, finish, tokens), "model", max_tokens=30, stop="air"
+        )
+        validate_stop_response(body, baseline, "air")

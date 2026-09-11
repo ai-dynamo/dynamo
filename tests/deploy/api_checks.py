@@ -5,6 +5,7 @@
 
 import json
 import logging
+import re
 from pathlib import Path
 
 from tests.deploy.dgd_utils import (
@@ -14,7 +15,11 @@ from tests.deploy.dgd_utils import (
     TEST_PROMPT,
     validate_chat_response,
 )
-from tests.deploy.response_checks import validate_embedding, validate_stream
+from tests.deploy.response_checks import (
+    validate_embedding,
+    validate_stop_response,
+    validate_stream,
+)
 from tests.utils.client import send_request
 
 logger = logging.getLogger(__name__)
@@ -67,9 +72,21 @@ def check_deployment_api(
     )
     _request(url, {**payload, "stream": True}, output / "stream.json")
     _request(url, {**payload, "max_tokens": 1}, output / "limited.json")
-    prefix = unary["choices"][0]["message"]["content"][:4]
-    assert prefix, "Cannot derive a stop sequence from empty unary output"
-    _request(url, {**payload, "stop": prefix}, output / "stop.json")
+    content = unary["choices"][0]["message"]["content"]
+    # Use a later word, avoiding a whitespace boundary at the start of output.
+    match = next(
+        (
+            m
+            for m in re.finditer(r"\S+", content)
+            if 0 < m.start() < len(content) // 2
+            and content.find(m.group()) == m.start()
+        ),
+        None,
+    )
+    assert match is not None, "Cannot derive an interior stop sequence"
+    stop = match.group()
+    stopped = _request(url, {**payload, "stop": stop}, output / "stop.json")
+    validate_stop_response(stopped, unary, stop)
 
 
 def _request(url: str, payload: dict, artifact: Path, min_content_length: int = 0):
