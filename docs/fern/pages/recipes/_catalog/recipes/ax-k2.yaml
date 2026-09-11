@@ -38,10 +38,14 @@ targets:
   - eagle3
   workload:
     type: chat
+    traffic: 8K/1K Mooncake chat, 15% trace subset, 70% KV reuse, concurrency 16
   deploy:
     asset: recipes/ax-k2/vllm/agg-b200-chat/deploy.yaml
   expected_performance:
-    available: false
+    available: true
+    summary: 'C=16, chat 15%: 76.49 output toks/sec/GPU, 55.83 mean toks/sec/user, 0.525 s p50 TTFT. Historical
+      synthetic EAGLE3 AL=2.12 run; 1765/1765 successful requests, 0 failed, 20 warmup requests. Predates
+      the pinned CI runtime update.'
   benchmark:
     tool: aiperf
     asset: recipes/ax-k2/perf/perf.yaml
@@ -61,11 +65,16 @@ targets:
   - eagle3
   workload:
     type: chat
+    traffic: 8K/1K Mooncake chat, 15% trace subset, 70% KV reuse, concurrency 16
   deploy:
     asset: recipes/ax-k2/vllm/disagg-b200-chat/deploy-generic.yaml
   expected_performance:
-    available: false
+    available: true
+    summary: 'C=16, chat 15%: 61.97 output toks/sec/GPU, 83 mean toks/sec/user, 3.879 s p50 TTFT. Historical
+      synthetic EAGLE3 AL=2.12 run; 1755/1765 successful requests, 10 failed, 32 warmup requests. Predates
+      the pinned CI runtime update.'
 related_benchmarks: []
 maintainer: Vanshil Shah
 gaps:
-- No accuracy or throughput measurements published for the pinned CI runtime.
+- Published C16 short-trace results predate the pinned CI runtime; no measurements for this image.
+- Disaggregated C16 run had 10 failed requests out of 1765; warmup differed between topologies.
