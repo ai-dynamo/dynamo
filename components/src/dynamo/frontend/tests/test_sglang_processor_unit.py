@@ -245,6 +245,44 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
             "json": {"type": "object"}
         }
 
+    @pytest.mark.router
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "backend_instance_id",
+            "decode_worker_id",
+            "prefill_worker_id",
+            "dp_rank",
+            "prefill_dp_rank",
+        ],
+    )
+    @pytest.mark.parametrize("value", [0, 7, None])
+    def test_worker_routing_hints_are_projected(self, field, value):
+        result = _build_dynamo_preproc({"nvext": {field: value}}, [1], "test", None)
+        assert result["routing"] == ({field: value} if value is not None else None)
+
+    @pytest.mark.router
+    def test_worker_routing_preserves_priority_and_explicit_overrides(self):
+        request = {
+            "nvext": {
+                "backend_instance_id": 2**64 - 1,
+                "decode_worker_id": 7,
+                "dp_rank": 0,
+                "agent_hints": {"priority": 10},
+            },
+            "routing": {"decode_worker_id": 9, "priority": 3},
+        }
+        original = copy.deepcopy(request)
+        result = _build_dynamo_preproc(request, [1], "test", None)
+        assert result["routing"] == {
+            "backend_instance_id": 2**64 - 1,
+            "decode_worker_id": 9,
+            "dp_rank": 0,
+            "priority": 3,
+            "priority_jump": 10.0,
+        }
+        assert request == original
+
     def test_agent_hints_are_projected_to_routing(self):
         result = _build_dynamo_preproc(
             {
@@ -3250,10 +3288,11 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
     "requested", [None, True, False], ids=["omitted", "true", "false"]
 )
 @pytest.mark.parametrize("use_pool", [False, True], ids=["inline", "pool"])
-def test_generator_honors_explicit_skip_special_tokens(
-    requested, use_pool, monkeypatch
+@pytest.mark.parametrize("pin_workers", [False, True], ids=["unpinned", "pinned"])
+def test_generator_preserves_decode_and_routing_options(
+    requested, use_pool, pin_workers, monkeypatch
 ):
-    """Decode flags reach both the routed request and local detokenization."""
+    """Both preprocessing paths retain decode options and explicit worker targets."""
 
     class SpecialTokenTokenizer:
         chat_template = ""
@@ -3273,6 +3312,16 @@ def test_generator_honors_explicit_skip_special_tokens(
     request = {"model": "test", "messages": [{"role": "user", "content": "Hi"}]}
     if requested is not None:
         request["skip_special_tokens"] = requested
+
+    worker_routing = {
+        "backend_instance_id": 7,
+        "decode_worker_id": 8,
+        "prefill_worker_id": 9,
+        "dp_rank": 0,
+        "prefill_dp_rank": 1,
+    }
+    if pin_workers:
+        request["nvext"] = worker_routing.copy()
 
     if use_pool:
         # Run the real worker through the pool branch without loading a model
@@ -3313,6 +3362,7 @@ def test_generator_honors_explicit_skip_special_tokens(
     assert engine.requests[0]["output_options"]["skip_special_tokens"] is (
         requested is not False
     )
+    assert engine.requests[0]["routing"] == (worker_routing if pin_workers else None)
 
 
 class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
