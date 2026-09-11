@@ -2696,6 +2696,7 @@ dependencies = [
  "futures",
  "futures-util",
  "galil-seiferas",
+ "half",
  "hf-hub 0.4.3",
  "http-body-util",
  "image",
@@ -4222,6 +4223,7 @@ dependencies = [
  "num-traits",
  "rand 0.9.4",
  "rand_distr",
+ "serde",
  "zerocopy",
 ]
 
