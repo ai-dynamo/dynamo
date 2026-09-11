@@ -13,7 +13,9 @@ import sys
 _PR_SET_PDEATHSIG = 1
 
 
-def arm_parent_death_signal(signum: int = signal.SIGKILL) -> None:
+def arm_parent_death_signal(
+    signum: int = signal.SIGKILL, *, expected_parent_pid: int | None = None
+) -> None:
     """Terminate this process if the process that created it exits.
 
     A GMS failover flock lives in the Dynamo leader, while EngineCore and CUDA
@@ -23,7 +25,12 @@ def arm_parent_death_signal(signum: int = signal.SIGKILL) -> None:
     if sys.platform != "linux":
         raise RuntimeError("GMS shared-KV failover requires Linux PDEATHSIG support")
 
-    parent_pid = os.getppid()
+    # A spawned child can first execute after its parent has already died.
+    # getppid() alone would incorrectly arm against the reaper in that case.
+    parent_pid = os.getppid() if expected_parent_pid is None else expected_parent_pid
+    if os.getppid() != parent_pid:
+        os.kill(os.getpid(), signum)
+        raise RuntimeError("GMS writer's expected parent has already exited")
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.prctl(_PR_SET_PDEATHSIG, int(signum), 0, 0, 0) != 0:
         error = ctypes.get_errno()
@@ -32,3 +39,4 @@ def arm_parent_death_signal(signum: int = signal.SIGKILL) -> None:
     # Close the race where the parent dies between getppid() and prctl().
     if os.getppid() != parent_pid:
         os.kill(os.getpid(), signum)
+        raise RuntimeError("GMS writer's parent exited while arming PDEATHSIG")
