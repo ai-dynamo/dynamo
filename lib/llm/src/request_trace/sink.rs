@@ -973,6 +973,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn jsonl_sink_shutdown_drains_accepted_record() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("request_trace_shutdown.jsonl");
+        // Nothing but shutdown can flush this record: the buffer dwarfs one
+        // record and the flush tick is a minute away.
+        let sink = JsonlRequestTraceSink::new(
+            path.display().to_string(),
+            JsonlSinkOptions {
+                buffer_bytes: 1024 * 1024,
+                flush_interval: Duration::from_secs(60),
+            },
+        )
+        .await
+        .unwrap();
+
+        sink.emit(&sample_record()).await;
+
+        RequestTraceSink::shutdown(&sink).await;
+        // A second shutdown must return normally rather than panic.
+        RequestTraceSink::shutdown(&sink).await;
+
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(
+            content.contains("\"request_id\":\"req-123\""),
+            "shutdown returned without flushing the accepted record to {}",
+            path.display()
+        );
+    }
+
+    #[tokio::test]
     async fn jsonl_sink_shutdown_flushes_buffered_record() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("request_trace_jsonl_shutdown.jsonl");
