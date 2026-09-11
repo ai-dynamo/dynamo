@@ -56,10 +56,18 @@ pub struct SystemHealth {
     live_path: String,
     start_time: Instant,
     uptime_gauge: OnceLock<prometheus::Gauge>,
-    /// Deadline until which canary probes are suppressed. A deadline rather than
-    /// a flag: a window nobody closes expires instead of silencing canaries forever.
-    canary_suppressed_until: Option<Instant>,
+    /// Open canary maintenance windows, keyed by the lease that owns each one.
+    /// The value is a deadline rather than a flag: a window nobody closes expires
+    /// instead of silencing canaries forever.
+    canary_maintenance: HashMap<CanaryMaintenanceLease, Instant>,
+    /// Source of lease identifiers, monotonic so a released lease is never reused.
+    next_canary_lease: CanaryMaintenanceLease,
 }
+
+/// Identifies one open canary maintenance window. Returned by
+/// [`SystemHealth::begin_canary_maintenance`] and surrendered to
+/// [`SystemHealth::end_canary_maintenance`].
+pub type CanaryMaintenanceLease = u64;
 
 impl SystemHealth {
     pub fn new(
@@ -96,7 +104,8 @@ impl SystemHealth {
             live_path,
             start_time: Instant::now(),
             uptime_gauge: OnceLock::new(),
-            canary_suppressed_until: None,
+            canary_maintenance: HashMap::new(),
+            next_canary_lease: 0,
         }
     }
 
@@ -127,28 +136,35 @@ impl SystemHealth {
         endpoint_health.insert(endpoint.to_string(), status);
     }
 
-    /// Open a canary maintenance window lasting at most `max_duration`.
+    /// Open a canary maintenance window lasting at most `max_duration`, and return
+    /// the lease that owns it.
     ///
     /// Used around an operation that blocks the engine, such as an RL weight
-    /// transfer waiting on a peer to join a collective. A second call can only
-    /// extend the window, never shorten it.
-    pub fn begin_canary_maintenance(&mut self, max_duration: Duration) {
-        let deadline = Instant::now() + max_duration;
-        self.canary_suppressed_until = Some(match self.canary_suppressed_until {
-            Some(existing) if existing > deadline => existing,
-            _ => deadline,
-        });
+    /// transfer waiting on a peer to join a collective. Windows nest: probes stay
+    /// suppressed until every lease has been released or has expired, so one
+    /// operation finishing cannot uncover another that is still running.
+    pub fn begin_canary_maintenance(&mut self, max_duration: Duration) -> CanaryMaintenanceLease {
+        let now = Instant::now();
+        self.canary_maintenance
+            .retain(|_, deadline| now < *deadline);
+        let lease = self.next_canary_lease;
+        self.next_canary_lease += 1;
+        self.canary_maintenance.insert(lease, now + max_duration);
+        lease
     }
 
-    /// Close the canary maintenance window. Closing a closed window is a no-op.
-    pub fn end_canary_maintenance(&mut self) {
-        self.canary_suppressed_until = None;
+    /// Release `lease`, leaving every other lease's window open. Releasing a lease
+    /// twice, or one that has already expired, is a no-op.
+    pub fn end_canary_maintenance(&mut self, lease: CanaryMaintenanceLease) {
+        self.canary_maintenance.remove(&lease);
     }
 
     /// Whether canary probes are currently suppressed.
     pub fn canary_suppressed(&self) -> bool {
-        self.canary_suppressed_until
-            .is_some_and(|deadline| Instant::now() < deadline)
+        let now = Instant::now();
+        self.canary_maintenance
+            .values()
+            .any(|deadline| now < *deadline)
     }
 
     /// Apply a canary-derived health status, dropping a `NotReady` write while a
@@ -506,12 +522,11 @@ mod tests {
         assert_eq!(endpoints.get(ENDPOINT).map(String::as_str), Some("ready"));
     }
 
-    /// Closing the window restores canary authority; suppression is not permanent.
     #[test]
     fn ending_maintenance_restores_canary_authority() {
         let mut health = verified_health();
-        health.begin_canary_maintenance(Duration::from_secs(600));
-        health.end_canary_maintenance();
+        let lease = health.begin_canary_maintenance(Duration::from_secs(600));
+        health.end_canary_maintenance(lease);
 
         health.set_canary_health_status(ENDPOINT, HealthStatus::NotReady);
 
@@ -519,6 +534,54 @@ mod tests {
             !health.get_health_status().0,
             "once the transaction ends the canary decides again"
         );
+    }
+
+    /// Two weight-transfer lifecycles can overlap. Each spans several admin calls,
+    /// so a second one can start before the first one's terminator arrives, and
+    /// the terminators carry no identity beyond the lease their opener was given.
+    /// Releasing one lease must not uncover a transfer still holding another.
+    #[test]
+    fn ending_one_window_leaves_an_overlapping_window_open() {
+        let mut health = verified_health();
+        let first = health.begin_canary_maintenance(Duration::from_secs(600));
+        let second = health.begin_canary_maintenance(Duration::from_secs(600));
+
+        health.end_canary_maintenance(first);
+        health.set_canary_health_status(ENDPOINT, HealthStatus::NotReady);
+        assert!(
+            health.get_health_status().0,
+            "the second transfer still holds a window open"
+        );
+
+        health.end_canary_maintenance(second);
+        health.set_canary_health_status(ENDPOINT, HealthStatus::NotReady);
+        assert!(
+            !health.get_health_status().0,
+            "with every lease released the canary decides again"
+        );
+    }
+
+    /// Releasing the same lease twice must not cancel a window somebody else
+    /// opened. A lifecycle can reach both of its terminators — `finish_weight_update`
+    /// and then `destroy_weights_update_group` — and the second release arrives
+    /// with a lease that is already gone.
+    #[test]
+    fn releasing_a_lease_twice_leaves_other_windows_alone() {
+        let mut health = verified_health();
+        let first = health.begin_canary_maintenance(Duration::from_secs(600));
+        let second = health.begin_canary_maintenance(Duration::from_secs(600));
+
+        health.end_canary_maintenance(first);
+        health.end_canary_maintenance(first);
+
+        health.set_canary_health_status(ENDPOINT, HealthStatus::NotReady);
+        assert!(
+            health.get_health_status().0,
+            "the repeat release is a no-op, not a release of the other lease"
+        );
+        assert!(health.canary_suppressed());
+        health.end_canary_maintenance(second);
+        assert!(!health.canary_suppressed());
     }
 
     /// A transaction that is never closed cannot leave a worker unprobed: the

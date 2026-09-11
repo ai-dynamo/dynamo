@@ -1189,6 +1189,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self._lora_capacity_guard = asyncio.Lock()
         self._paused: bool = False
         self._weight_version: str = "initial"
+        # Canary maintenance leases this worker holds, oldest first. A weight
+        # transfer spans several admin calls, so its terminator arrives long after
+        # _pause_lock was released and a second transfer may already have started.
+        # Releasing the oldest lease pairs terminators with transfers in arrival
+        # order, which is as much identity as the admin protocol carries.
+        self._rl_maintenance_leases: deque[int] = deque()
 
         embedding_loader = self.init_embedding_loader(config, encode_worker_client)
 
@@ -2113,7 +2119,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 if rpc == "finish_weight_update":
                     # The other terminator of a weight-transfer transaction: a
                     # controller may end here and never call destroy.
-                    self.runtime.end_health_check_maintenance()
+                    self._end_rl_maintenance()
                 if reset_prefix_cache:
                     # Weights changed: stale prefix/KV cache must be invalidated
                     # before resume so it is not reused under the new weights.
@@ -2144,6 +2150,18 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             "message": "update_weights_from_tensor is not implemented",
         }
 
+    def _begin_rl_maintenance(self) -> None:
+        self._rl_maintenance_leases.append(
+            self.runtime.begin_health_check_maintenance(_RL_MAINTENANCE_WINDOW_S)
+        )
+
+    def _end_rl_maintenance(self) -> None:
+        """Release the oldest lease this worker holds, if it holds any."""
+        if self._rl_maintenance_leases:
+            self.runtime.end_health_check_maintenance(
+                self._rl_maintenance_leases.popleft()
+            )
+
     async def init_weights_update_group(self, body: dict) -> dict:
         """Initialize the distributed weight-update communication group."""
         if body is None:
@@ -2160,7 +2178,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 timeout_s = _rl_init_weights_timeout_s()
                 # The rendezvous blocks EngineCore well past the canary timeout, so
                 # without this window the liveness probe restarts the worker.
-                self.runtime.begin_health_check_maintenance(_RL_MAINTENANCE_WINDOW_S)
+                self._begin_rl_maintenance()
                 rpc_task = asyncio.create_task(
                     self.engine_client.collective_rpc(rpc, kwargs=kwargs)
                 )
@@ -2169,12 +2187,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 except asyncio.CancelledError:
                     rpc_task.cancel()
                     await asyncio.gather(rpc_task, return_exceptions=True)
-                    self.runtime.end_health_check_maintenance()
+                    self._end_rl_maintenance()
                     raise
                 if rpc_task not in done:
                     rpc_task.cancel()
                     await asyncio.gather(rpc_task, return_exceptions=True)
-                    self.runtime.end_health_check_maintenance()
+                    self._end_rl_maintenance()
                     logger.error(
                         f"[RL] init_weights_update_group timed out after "
                         f"{timeout_s:.1f} seconds (rpc={rpc}); terminating the "
@@ -2190,7 +2208,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             except EngineDeadError as e:
                 self._shutdown_on_engine_dead(e)
             except Exception as e:
-                self.runtime.end_health_check_maintenance()
+                self._end_rl_maintenance()
                 logger.error(f"[RL] init_weights_update_group failed: {e}")
                 return {"status": "error", "message": str(e)}
 
@@ -2217,7 +2235,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 return {"status": "error", "message": str(e)}
             finally:
                 # A worker whose teardown failed should be probed again, not hidden.
-                self.runtime.end_health_check_maintenance()
+                self._end_rl_maintenance()
 
     @abstractmethod
     def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:

@@ -1441,28 +1441,32 @@ impl DistributedRuntime {
         Ok(())
     }
 
-    /// Suppress health check canaries for at most `max_seconds`.
+    /// Suppress health check canaries for at most `max_seconds`, and return the
+    /// lease that owns the window.
     ///
     /// For an operation that deliberately blocks the engine, such as an RL
     /// weight transfer waiting on a peer. The window expires on its own, so a
     /// transaction that never ends cannot leave the worker unprobed.
-    fn begin_health_check_maintenance(&self, max_seconds: f64) -> PyResult<()> {
+    fn begin_health_check_maintenance(&self, max_seconds: f64) -> PyResult<u64> {
         if !max_seconds.is_finite() || max_seconds <= 0.0 {
             return Err(PyValueError::new_err(format!(
                 "max_seconds must be a finite positive number, got {max_seconds}"
             )));
         }
+        Ok(self
+            .inner
+            .system_health()
+            .lock()
+            .begin_canary_maintenance(std::time::Duration::from_secs_f64(max_seconds)))
+    }
+
+    /// Release a lease returned by `begin_health_check_maintenance`. Windows held
+    /// by other leases stay open. Releasing a released lease is a no-op.
+    fn end_health_check_maintenance(&self, lease: u64) -> PyResult<()> {
         self.inner
             .system_health()
             .lock()
-            .begin_canary_maintenance(std::time::Duration::from_secs_f64(max_seconds));
-        Ok(())
-    }
-
-    /// End the health check maintenance window opened by
-    /// `begin_health_check_maintenance`. Ending a closed window is a no-op.
-    fn end_health_check_maintenance(&self) -> PyResult<()> {
-        self.inner.system_health().lock().end_canary_maintenance();
+            .end_canary_maintenance(lease);
         Ok(())
     }
 

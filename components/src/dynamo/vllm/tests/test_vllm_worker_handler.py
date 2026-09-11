@@ -9,7 +9,9 @@
 
 import asyncio
 import base64
+import itertools
 import json
+from collections import deque
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -81,6 +83,9 @@ def _make_handler(
         config = _make_config()
     model_config = MagicMock(enable_prompt_embeds=True)
     runtime = MagicMock()
+    # The real binding hands back an integer lease per window; keep them distinct
+    # so a test can tell which window a release closed.
+    runtime.begin_health_check_maintenance.side_effect = itertools.count(1)
     with patch.object(mod.BaseWorkerHandler, "__init__", return_value=None):
         handler = mod.DecodeWorkerHandler(
             runtime=runtime,
@@ -91,6 +96,7 @@ def _make_handler(
             encode_worker_client=encode_worker_client,
         )
     handler.runtime = runtime
+    handler._rl_maintenance_leases = deque()
     handler.model_config = model_config
     handler._multimodal_request_processor = VllmMultimodalRequestProcessor(
         model=config.model,
@@ -2065,6 +2071,9 @@ class TestRLAdminRouteHardening:
         assert rpc_cancelled.is_set()
         handler.runtime.shutdown.assert_called_once_with()
         exit_mock.assert_called_once_with(1)
+        handler.runtime.end_health_check_maintenance.assert_called_once_with(
+            handler.runtime.begin_health_check_maintenance.return_value
+        )
 
     @pytest.mark.asyncio
     async def test_init_weights_update_group_returns_inner_timeout_error(
@@ -2149,9 +2158,10 @@ class TestRLAdminRouteHardening:
             mod._RL_MAINTENANCE_WINDOW_S
         )
         handler.runtime.end_health_check_maintenance.assert_not_called()
+        assert list(handler._rl_maintenance_leases) == [1]
 
     @pytest.mark.asyncio
-    async def test_failed_init_leaves_no_maintenance_window(self):
+    async def test_failed_init_releases_its_maintenance_lease(self):
         handler = _make_handler()
         handler._pause_lock = asyncio.Lock()
         handler.engine_client = MagicMock()
@@ -2164,7 +2174,57 @@ class TestRLAdminRouteHardening:
         )
 
         assert resp["status"] == "error"
-        handler.runtime.end_health_check_maintenance.assert_called_once_with()
+        handler.runtime.end_health_check_maintenance.assert_called_once_with(1)
+        assert not handler._rl_maintenance_leases
+
+    @pytest.mark.asyncio
+    async def test_cancelled_init_releases_its_maintenance_lease(self):
+        """Cancelling the admin call must not leave the canary suppressed."""
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.engine_client = MagicMock()
+        rpc_running = asyncio.Event()
+
+        async def blocked_rpc(*_args, **_kwargs):
+            rpc_running.set()
+            await asyncio.Event().wait()
+
+        handler.engine_client.collective_rpc = AsyncMock(side_effect=blocked_rpc)
+
+        task = asyncio.create_task(
+            handler.init_weights_update_group(
+                {"engine_rpc": "init_weight_transfer_engine"}
+            )
+        )
+        await rpc_running.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        handler.runtime.end_health_check_maintenance.assert_called_once_with(1)
+        assert not handler._rl_maintenance_leases
+
+    @pytest.mark.asyncio
+    async def test_finish_weight_update_closes_maintenance_window(self):
+        """finish_weight_update ends the transaction for controllers that never
+        call destroy, so it must release the lease init took."""
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._paused = True
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+        handler.engine_client.reset_prefix_cache = AsyncMock()
+
+        await handler.init_weights_update_group(
+            {"engine_rpc": "init_weight_transfer_engine"}
+        )
+        resp = await handler.update_weights_from_distributed(
+            {"engine_rpc": "finish_weight_update"}
+        )
+
+        assert resp["status"] == "ok"
+        handler.runtime.end_health_check_maintenance.assert_called_once_with(1)
+        assert not handler._rl_maintenance_leases
 
     @pytest.mark.asyncio
     async def test_destroy_closes_maintenance_window_even_on_failure(self):
@@ -2172,6 +2232,10 @@ class TestRLAdminRouteHardening:
         handler = _make_handler()
         handler._pause_lock = asyncio.Lock()
         handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+        await handler.init_weights_update_group(
+            {"engine_rpc": "init_weight_transfer_engine"}
+        )
         handler.engine_client.collective_rpc = AsyncMock(
             side_effect=RuntimeError("teardown failed")
         )
@@ -2181,7 +2245,47 @@ class TestRLAdminRouteHardening:
         )
 
         assert resp["status"] == "error"
-        handler.runtime.end_health_check_maintenance.assert_called_once_with()
+        handler.runtime.end_health_check_maintenance.assert_called_once_with(1)
+
+    @pytest.mark.asyncio
+    async def test_destroy_without_an_open_window_releases_nothing(self):
+        """A stray destroy carries no lease, so it must not close a window some
+        other transfer is holding."""
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+
+        resp = await handler.destroy_weights_update_group(
+            {"engine_rpc": "destroy_weight_transfer_engine"}
+        )
+
+        assert resp["status"] == "ok"
+        handler.runtime.end_health_check_maintenance.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_overlapping_transfers_release_their_own_leases(self):
+        """Two transfers can overlap. The first one ending must release the first
+        lease, leaving the second transfer's window open."""
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+
+        await handler.init_weights_update_group(
+            {"engine_rpc": "init_weight_transfer_engine"}
+        )
+        await handler.init_weights_update_group(
+            {"engine_rpc": "init_weight_transfer_engine"}
+        )
+        assert list(handler._rl_maintenance_leases) == [1, 2]
+
+        await handler.destroy_weights_update_group(
+            {"engine_rpc": "destroy_weight_transfer_engine"}
+        )
+
+        handler.runtime.end_health_check_maintenance.assert_called_once_with(1)
+        assert list(handler._rl_maintenance_leases) == [2]
 
     @pytest.mark.asyncio
     async def test_abort_request_surfaces_deferred_abort_failure(self):
