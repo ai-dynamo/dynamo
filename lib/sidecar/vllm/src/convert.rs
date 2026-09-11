@@ -145,6 +145,11 @@ pub(crate) fn build_generate_request(
     let encoder_result = request.encoder_result;
     let mut extra_args = request.extra_args;
     let features = consume_vllm_tito(&mut extra_args)?;
+    if features.is_some()
+        && let Some(serde_json::Value::Object(extra)) = extra_args.as_mut()
+    {
+        extra.remove("dynamo_mm_routing_hashes");
+    }
     let media = if let Some(features) = features {
         build_preprocessed_media(features, prompt_token_count)?
     } else {
