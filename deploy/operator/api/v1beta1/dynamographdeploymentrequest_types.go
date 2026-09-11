@@ -298,6 +298,14 @@ type ModelCacheSpec struct {
 type OverridesSpec struct {
 	// ProfilingJob allows overriding the profiling Job specification.
 	// Fields set here are merged into the controller-generated Job spec.
+	//
+	// Security: creating a DGDR is workload-creation authority in its namespace —
+	// these overrides carry the same blast radius as creating a Job or Pod directly
+	// there, by design. Pod-level security is enforced centrally by Kubernetes Pod
+	// Security Admission on the resulting Pods, not by this API; grant create/update
+	// on DGDRs only to principals trusted to create Pods in the namespace. The
+	// profiling Job always runs in the DGDR's own namespace and overrides cannot
+	// change that, so a DGDR cannot escape its namespace.
 	// +optional
 	ProfilingJob *batchv1.JobSpec `json:"profilingJob,omitempty"`
 
