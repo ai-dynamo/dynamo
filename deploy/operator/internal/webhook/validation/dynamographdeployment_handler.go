@@ -44,10 +44,12 @@ type DynamoGraphDeploymentHandler struct {
 }
 
 // NewDynamoGraphDeploymentHandler creates a new handler for DynamoGraphDeployment Webhook.
-// mgr must not be nil.
-// operatorPrincipal is the full Kubernetes SA username of the operator, used to authorize
-// legacy workload-provider materialization and replica changes on scaling-adapter-enabled components (#7656).
-func NewDynamoGraphDeploymentHandler(mgr manager.Manager, operatorPrincipal string) *DynamoGraphDeploymentHandler {
+// mgr must not be nil. operatorPrincipal is the full Kubernetes SA username
+// used to authorize operator-owned updates.
+func NewDynamoGraphDeploymentHandler(
+	mgr manager.Manager,
+	operatorPrincipal string,
+) *DynamoGraphDeploymentHandler {
 	return &DynamoGraphDeploymentHandler{
 		mgr:               mgr,
 		operatorPrincipal: operatorPrincipal,
@@ -66,11 +68,15 @@ func (h *DynamoGraphDeploymentHandler) ValidateCreate(ctx context.Context, obj *
 
 	// Create validator with manager for API group detection and perform validation
 	validator := NewDynamoGraphDeploymentValidator(h.mgr)
-	return validator.Validate(
+	warnings, err := validator.Validate(
 		ctx,
 		obj,
 		runtimeVersionValidationSourceForRequest(ctx, nvidiacomv1beta1.DynamoGraphDeploymentGVK),
 	)
+	if err != nil {
+		return warnings, err
+	}
+	return warnings, nil
 }
 
 // ValidateUpdate validates a DynamoGraphDeployment update request.
@@ -86,16 +92,27 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(
 
 	logger.Info("validate update", "name", newObj.Name, "namespace", newObj.Namespace)
 
-	// Skip validation if the resource is being deleted (to allow finalizer removal)
-	if !newObj.DeletionTimestamp.IsZero() {
-		logger.Info("skipping validation for resource being deleted", "name", newObj.Name)
-		return nil, nil
-	}
-
 	// Create validator with manager for API group detection and perform validation.
 	validator := NewDynamoGraphDeploymentValidator(h.mgr)
 	runtimeVersionSource := runtimeVersionValidationSourceForRequest(ctx, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
-	warnings, err := validator.Validate(ctx, newObj, runtimeVersionSourceDisabled)
+
+	// Get user info from admission request context for identity-based validation
+	var terminatingUserInfo *authenticationv1.UserInfo
+	if req, reqErr := admission.RequestFromContext(ctx); reqErr == nil {
+		terminatingUserInfo = &req.UserInfo
+	}
+
+	// A finalizer can hold an object terminating for an arbitrary period, so
+	// admission still has to protect durable controller-owned metadata during
+	// that window. Only the metadata rules run: anything that judges the new
+	// object on its own can refuse the cleanup update a legacy object needs and
+	// leave it impossible to finalize.
+	if !newObj.DeletionTimestamp.IsZero() {
+		logger.Info("validating metadata-only update on terminating resource", "name", newObj.Name)
+		return validator.ValidateTerminatingUpdate(ctx, oldObj, newObj, terminatingUserInfo, h.operatorPrincipal)
+	}
+
+	warnings, err := validator.validate(ctx, newObj, runtimeVersionSource, true)
 	if err != nil {
 		return warnings, err
 	}
@@ -127,7 +144,6 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(
 		logger.Info("validation failed", "error", err.Error(), "user", username)
 		return updateWarnings, err
 	}
-
 	// Combine warnings
 	warnings = append(warnings, updateWarnings...)
 	return warnings, nil

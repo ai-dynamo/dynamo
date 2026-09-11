@@ -16,7 +16,7 @@
 #   3. No stale reference/(support|feature)-matrix repo links outside the
 #      allowed remnants.
 #   4. Every absolute /dynamo/dev/reference/... href in components, the data
-#      module, generated assets, and reference pages resolves to a URL the
+#      module, and reference pages resolves to a URL the
 #      index.yml reference tab actually publishes. Catches nav
 #      restructures (e.g. pages moving under a new section slug) that
 #      fern broken-links cannot see because the hrefs live in TSX/JSON.
@@ -103,8 +103,6 @@ sources = [
     pathlib.Path("components/releases.data.ts"),
     pathlib.Path("scripts/gen_llms_tables.py"),
     *pathlib.Path("pages/reference").rglob("*.mdx"),
-    pathlib.Path("assets/releases.json"),
-    pathlib.Path("assets/releases-atom.xml"),
 ]
 bad = []
 for source in sources:

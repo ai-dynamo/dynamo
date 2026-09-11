@@ -50,7 +50,8 @@ docker build \
 ```
 
 > [!NOTE]
-> The default `TRITON_SERVER_IMAGE` is `nvcr.io/nvidia/tritonserver:25.10-py3`
+> The default `TRITON_SERVER_IMAGE` is `nvcr.io/nvidia/tritonserver:25.10-py3`.
+> Rebuild `DYNAMO_BASE_IMAGE` from the same Dynamo checkout before building the Triton worker image. An older local `dynamo-base:latest` can retain `grpcio-tools` that requires protobuf 5, while this example installs protobuf 6. The build's `uv pip check` rejects that incompatible environment. If it reports this conflict, run both image-build commands above again.
 
 #### Step 2: Run the Container
 

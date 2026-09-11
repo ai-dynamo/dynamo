@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Reusable example base for Qwen-family ``VisionEncoderBackend`` authors.
+"""Reusable example base for Qwen-family ``EmbedsPrompt`` encoder authors.
 
 Hardcodes the Qwen ``<|image_pad|>`` placeholder id and loads the model tokenizer
 (handy for subclasses that tokenize text). A concrete Qwen-family encoder
@@ -27,14 +27,13 @@ from dynamo.vllm.multimodal_utils.custom_encoder import VisionEncoderBackend
 
 
 class QwenVisionEncoderBackend(VisionEncoderBackend):
-    """``VisionEncoderBackend`` base for Qwen-family models (Qwen2-VL / Qwen3-VL /
-    Qwen3.5).
+    """``VisionEncoderBackend`` base for Qwen-family ``EmbedsPrompt`` examples.
 
     Hardcodes ``image_token_id`` to Qwen3-VL's ``<|image_pad|>`` (151655) — override
-    it for other versions (e.g. 248056 for Qwen3.5). ``build`` loads the model
-    tokenizer; ``forward_batch`` stays abstract, so this class cannot be
-    instantiated directly — subclass it and implement ``forward_batch`` (and
-    ``preprocess`` only if it needs off-loop prep).
+    it for other versions. The linear adapter uses this token to locate embedding
+    replacement spans; native ``TokensPrompt`` encoders, such as the Qwen3.5
+    example, do not need it. ``build`` loads the model tokenizer;
+    ``forward_batch`` stays abstract, so this class cannot be instantiated directly.
     """
 
     # Qwen3-VL <|image_pad|>; override for other Qwen versions.

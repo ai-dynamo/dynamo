@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Block lifecycle orchestration over the unified [`BlockStore`].
+//! Block lifecycle orchestration over the unified `BlockStore`.
 //!
-//! [`BlockManager`] owns a single [`BlockStore`] and the [`BlockRegistry`].
+//! [`BlockManager`] owns a single `BlockStore` and the [`BlockRegistry`].
 //! All pool transitions go through the store's single mutex; the manager
 //! adds the registry coordination, allocation eviction policy, and metrics.
 
@@ -25,7 +25,7 @@ use crate::metrics::BlockPoolMetrics;
 use crate::pools::{BlockDuplicationPolicy, BlockStore, SequenceHash};
 use crate::registry::BlockRegistry;
 
-/// Manages the full block lifecycle over the unified [`BlockStore`].
+/// Manages the full block lifecycle over the unified `BlockStore`.
 ///
 /// Construct via [`BlockManager::builder()`].
 pub struct BlockManager<T: BlockMetadata> {
@@ -44,7 +44,7 @@ impl<T: BlockMetadata + Sync> BlockManager<T> {
     }
 
     /// Stable, process-unique identifier for this manager's underlying
-    /// [`BlockStore`](crate::pools::BlockStore). See [`crate::ManagerId`].
+    /// `BlockStore`. See [`crate::ManagerId`].
     /// Cheap (one field load via the store).
     ///
     /// Together with a [`BlockId`](crate::BlockId) this names a specific
@@ -127,7 +127,7 @@ impl<T: BlockMetadata + Sync> BlockManager<T> {
     /// the first hash that hits neither the active nor the inactive pool.
     ///
     /// The whole active-or-inactive prefix is resolved under a **single**
-    /// store-mutex acquisition via [`BlockStore::match_prefix_locked_batch`]
+    /// store-mutex acquisition via `BlockStore::match_prefix_locked_batch`
     /// — no per-hash registry radix-tree lookup, no per-hash store lock.
     /// Frequency-tracker touches are batched and applied *after* the store
     /// lock is released: every returned block is touched exactly once

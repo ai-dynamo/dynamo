@@ -30,6 +30,8 @@
 #      because 2, 3 and 6 are vacuous without it — and because a selector that
 #      quietly stops matching is exactly how this broke: #12410 flattened the
 #      Reference tab and the old label-keyed selector no-opped for six days.
+#  10. The composed default version starts with the shared Home tab so the
+#      bare site URL renders Home instead of the release snapshot's first page.
 #
 # Usage: ./scripts/simulate_docs_website.sh [TAG]
 #   TAG defaults to v9.9.9 (must not exist on docs-website yet).
@@ -78,6 +80,15 @@ assert() { # assert <label> <ok|FAIL>
 GEN_SEL='.navigation[] | select(.tab == "reference") | .layout[] | select([.. | select(has("path")) | .path] | all_c(test("/reference/general/")))'
 
 echo "=== SYNC JOB (replayed) ==="
+# The Python/Rust API references are publish-time artifacts (gitignored in the
+# source tree); the real sync job generates them before the pages-dev rsync,
+# so the replay must too or the synced nav dangles. Requires griffe, like CI.
+if ! "$PY" -c 'import griffe' 2>/dev/null; then
+  echo "error: griffe is required to generate the API references (python3 -m pip install 'griffe==2.1.0')" >&2
+  exit 1
+fi
+"$PY" "$SRC/scripts/gen_python_api.py"
+"$PY" "$SRC/scripts/gen_rust_api.py"
 rm -rf "$WT/fern/pages-dev"; mkdir -p "$WT/fern/pages-dev"
 rsync -a --exclude='/home/index.mdx' "$SRC/pages/" "$WT/fern/pages-dev/"
 "$PY" "$SRC/scripts/rewrite_snapshot_paths.py" "$WT/fern/pages-dev"
@@ -94,6 +105,7 @@ rm -rf "$WT/fern/components"; cp -r "$SRC/components" "$WT/fern/components"
 rm -rf "$WT/fern/products"
 cp "$SRC/pages/home/index.mdx" "$WT/fern/index.mdx"
 perl -pi -e 's|\.\./\.\./assets/|./assets/|g' "$WT/fern/index.mdx"
+"$PY" "$SRC/scripts/gen_llms_tables.py" --assets-only
 [ -d "$SRC/assets" ] && cp -r "$SRC/assets/." "$WT/fern/assets/" || true
 if [ -d "$SRC/pages/blog/_assets" ]; then
   mkdir -p "$WT/fern/digest"; cp -r "$SRC/pages/blog/_assets/." "$WT/fern/digest/"
@@ -153,6 +165,13 @@ cp "$SRC/docs.yml" docs.yml
 yq -i '."landing-page".path = "./index.mdx"' docs.yml
 PRESERVED="$WT/.preserved_versions.yml" \
   yq -i '.versions = load(strenv(PRESERVED))' docs.yml
+"$SRC/scripts/ensure_default_version_home.sh" "$WT/fern"
+sync_default_nav=$(yq -r '.versions[0].path' docs.yml)
+sync_default_nav="${sync_default_nav#./}"
+sync_home_count=$(yq '[.navigation[] | select(.tab == "home")] | length' "$sync_default_nav")
+sync_first_tab=$(yq -r '.navigation[0].tab // ""' "$sync_default_nav")
+[ "$sync_home_count" = "1" ] && [ "$sync_first_tab" = "home" ] && s11=ok || s11=FAIL
+assert "10a. synced default version has one canonical Home tab first" "$s11"
 
 echo "=== RELEASE-VERSION JOB (replayed, tag $TAG) ==="
 cd "$WT"
@@ -211,6 +230,12 @@ yq -i ".versions[0].path = \"./versions/$TAG.yml\"" fern/docs.yml
 yq -i ".versions[0].display-name = \"Latest ($TAG)\"" fern/docs.yml
 
 echo "=== ASSERTIONS ==="
+default_nav=$(yq -r '.versions[0].path' fern/docs.yml)
+default_nav="fern/${default_nav#./}"
+default_first_tab=$(yq -r '.navigation[0].tab // ""' "$default_nav")
+[ "$default_first_tab" = "home" ] && s11=ok || s11=FAIL
+assert "10b. released default version starts with the shared Home tab" "$s11"
+
 # 9 first: everything below assumes the shared group is findable at all. This is
 # the tripwire the old label-keyed selector lacked — it no-opped silently for six
 # days after #12410 renamed the nav out from under it.

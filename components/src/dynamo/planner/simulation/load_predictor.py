@@ -5,17 +5,29 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 from statistics import mean
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from tqdm import tqdm  # type: ignore[import-untyped]
+
+from dynamo.planner.offline.trace_data import (
+    extract_metrics_from_mooncake,
+    extract_metrics_from_trace_paths,
+)
 
 from .presets import throughput_intervals
 
 if TYPE_CHECKING:
     from dynamo.planner.config.planner_config import PlannerConfig
+
+logger = logging.getLogger(__name__)
+
+# Exception classes a predictor is allowed to raise from predict_next(); mirrors
+# BuiltinLoadPredict._predict_load, which logs them and yields no forecast.
+_PREDICTOR_ERRORS = (ArithmeticError, IndexError, RuntimeError, TypeError, ValueError)
 
 LOAD_PREDICTOR_PRESETS: dict[str, dict[str, Any]] = {
     "constant_last": {"family": "constant", "log1p": False},
@@ -88,6 +100,46 @@ _VALID_FAMILIES = frozenset(
 )
 
 
+def complete_predictor_preset(entry: str | dict[str, Any]) -> dict[str, Any]:
+    """Expand one predictor preset into every public predictor knob."""
+
+    if isinstance(entry, str):
+        preset = LOAD_PREDICTOR_PRESETS[entry]
+        family = preset["family"]
+        log1p = preset["log1p"]
+        prophet_window_size = preset.get(
+            "prophet_window_size", _DEFAULTS["prophet_window_size"]
+        )
+        kalman_q_level = preset.get("q_level", _DEFAULTS["q_level"])
+        kalman_q_trend = preset.get("q_trend", _DEFAULTS["q_trend"])
+        kalman_r = preset.get("r", _DEFAULTS["r"])
+        kalman_min_points = preset.get("min_points", _DEFAULTS["min_points"])
+    else:
+        family = entry["load_predictor"]
+        if family not in _VALID_FAMILIES:
+            raise ValueError(
+                f"load_predictor must be one of {sorted(_VALID_FAMILIES)}, got {family!r}"
+            )
+        log1p = bool(entry.get("load_predictor_log1p", False))
+        prophet_window_size = entry.get(
+            "prophet_window_size", _DEFAULTS["prophet_window_size"]
+        )
+        kalman_q_level = entry.get("kalman_q_level", _DEFAULTS["q_level"])
+        kalman_q_trend = entry.get("kalman_q_trend", _DEFAULTS["q_trend"])
+        kalman_r = entry.get("kalman_r", _DEFAULTS["r"])
+        kalman_min_points = entry.get("kalman_min_points", _DEFAULTS["min_points"])
+
+    return {
+        "load_predictor": family,
+        "load_predictor_log1p": log1p,
+        "prophet_window_size": prophet_window_size,
+        "kalman_q_level": kalman_q_level,
+        "kalman_q_trend": kalman_q_trend,
+        "kalman_r": kalman_r,
+        "kalman_min_points": kalman_min_points,
+    }
+
+
 @dataclass(frozen=True)
 class Window:
     """One aggregated traffic window."""
@@ -136,23 +188,15 @@ class LoadPredictorResult:
 
 
 def _internal_preset(entry: str | dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(entry, dict):
-        return LOAD_PREDICTOR_PRESETS[entry]
-    family = entry["load_predictor"]
-    if family not in _VALID_FAMILIES:
-        raise ValueError(
-            f"load_predictor must be one of {sorted(_VALID_FAMILIES)}, got {family!r}"
-        )
+    complete = complete_predictor_preset(entry)
     return {
-        "family": family,
-        "log1p": bool(entry.get("load_predictor_log1p", False)),
-        "prophet_window_size": entry.get(
-            "prophet_window_size", _DEFAULTS["prophet_window_size"]
-        ),
-        "q_level": entry.get("kalman_q_level", _DEFAULTS["q_level"]),
-        "q_trend": entry.get("kalman_q_trend", _DEFAULTS["q_trend"]),
-        "r": entry.get("kalman_r", _DEFAULTS["r"]),
-        "min_points": entry.get("kalman_min_points", _DEFAULTS["min_points"]),
+        "family": complete["load_predictor"],
+        "log1p": complete["load_predictor_log1p"],
+        "prophet_window_size": complete["prophet_window_size"],
+        "q_level": complete["kalman_q_level"],
+        "q_trend": complete["kalman_q_trend"],
+        "r": complete["kalman_r"],
+        "min_points": complete["kalman_min_points"],
     }
 
 
@@ -180,8 +224,6 @@ def predictor_fields(entry: str | dict[str, Any]) -> dict[str, Any]:
 def build_windows(trace_path: str, interval_s: int) -> list[Window]:
     """Aggregate a Mooncake trace using the Planner's production trace utility."""
 
-    from dynamo.planner.offline.trace_data import extract_metrics_from_mooncake
-
     return [
         Window(
             float(metrics["request_count"]),
@@ -189,6 +231,27 @@ def build_windows(trace_path: str, interval_s: int) -> list[Window]:
             float(metrics["avg_osl"]),
         )
         for metrics in extract_metrics_from_mooncake(trace_path, interval_s)
+    ]
+
+
+def build_windows_from_trace_paths(
+    trace_paths: list[str],
+    trace_format: Literal["mooncake", "dynamo"],
+    interval_s: int,
+) -> list[Window]:
+    """Aggregate one resolved public traffic source into predictor windows."""
+
+    return [
+        Window(
+            float(metrics["request_count"]),
+            float(metrics["avg_isl"]),
+            float(metrics["avg_osl"]),
+        )
+        for metrics in extract_metrics_from_trace_paths(
+            trace_paths,
+            trace_format,
+            interval_s,
+        )
     ]
 
 
@@ -206,6 +269,11 @@ def window_loss(
 ) -> float:
     """Compute the existing weighted one-step-ahead forecast loss."""
 
+    # Clamp forecasts before forming the token products: two negative
+    # forecasts would otherwise multiply into a positive product that the
+    # clamp inside _error() never sees, scoring a doubly-wrong forecast
+    # better than a singly-wrong one.
+    n_hat, i_hat, o_hat = max(n_hat, 0.0), max(i_hat, 0.0), max(o_hat, 0.0)
     return (
         0.4 * _error(n_hat * i_hat, num_req * isl)
         + 0.4 * _error(n_hat * o_hat, num_req * osl)
@@ -257,12 +325,18 @@ def evaluate_preset(
                 isl_predictor.predict_next(),
                 osl_predictor.predict_next(),
             )
-        except Exception:
-            n_hat, i_hat, o_hat = (
-                request_predictor.get_last_value(),
-                isl_predictor.get_last_value(),
-                osl_predictor.get_last_value(),
+        except _PREDICTOR_ERRORS as exc:
+            # In production this predictor would yield no forecast for the
+            # interval, so it must not be scored as if it had forecast the
+            # last value (ConstantPredictor's behaviour). Disqualify it;
+            # to_state() renders the inf loss as null.
+            logger.warning(
+                "load-predictor preset %s failed at window %d: %r; scoring as inf",
+                preset,
+                index,
+                exc,
             )
+            return math.inf
         if index >= warmup:
             losses.append(
                 window_loss(
@@ -298,23 +372,40 @@ def sweep_load_predictor(
     candidates: list[str | dict[str, Any]],
     trace_path: str | None,
     show_progress: bool,
+    trace_paths: list[str] | None = None,
+    trace_format: str | None = None,
 ) -> LoadPredictorResult:
     """Choose the best candidate independently for each scaling interval."""
 
     intervals = throughput_intervals(policies)
     if not intervals:
         return LoadPredictorResult(reason="no_throughput_scaling_candidate")
-    if trace_path is None:
+    if not candidates:
+        raise ValueError("load-predictor candidates must be nonempty")
+    fallback = candidates[0]
+    resolved_paths = list(
+        trace_paths or ([trace_path] if trace_path is not None else [])
+    )
+    temporal_format = trace_format or "mooncake"
+    if not resolved_paths or temporal_format not in {"mooncake", "dynamo"}:
         return LoadPredictorResult(
-            best_by_interval=dict.fromkeys(intervals, _DEFAULT_PRESET),
-            reason="static_workload_constant",
+            best_by_interval=dict.fromkeys(intervals, fallback),
+            reason="static_workload_configured_fallback",
         )
 
     result = LoadPredictorResult(reason="swept")
     labels = [_entry_label(entry, index) for index, entry in enumerate(candidates)]
     fallback_intervals: list[int] = []
     for interval_s in intervals:
-        windows = build_windows(trace_path, interval_s)
+        windows = (
+            build_windows(resolved_paths[0], interval_s)
+            if temporal_format == "mooncake" and len(resolved_paths) == 1
+            else build_windows_from_trace_paths(
+                resolved_paths,
+                cast(Literal["mooncake", "dynamo"], temporal_format),
+                interval_s,
+            )
+        )
         warmup = _common_warmup(candidates, interval_s)
         losses: dict[str, float] = {}
         best_entry: str | dict[str, Any] | None = None
@@ -338,11 +429,9 @@ def sweep_load_predictor(
                 best_entry = entry
         result.losses[interval_s] = losses
         if best_entry is None:
-            best_entry = _DEFAULT_PRESET
+            best_entry = fallback
             fallback_intervals.append(interval_s)
         result.best_by_interval[interval_s] = best_entry
     if fallback_intervals:
-        result.reason = (
-            f"swept; no_winner_fallback_{_DEFAULT_PRESET}@{fallback_intervals}"
-        )
+        result.reason = f"swept; no_winner_configured_fallback@{fallback_intervals}"
     return result

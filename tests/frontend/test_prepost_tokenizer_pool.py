@@ -48,6 +48,14 @@ class _SlotsTokenizer:
         return SimpleNamespace(input_ids=[4, 5, 6])
 
 
+class _EqualTokenizer(_DummyTokenizer):
+    def __eq__(self, other):
+        return isinstance(other, _EqualTokenizer)
+
+    def __hash__(self):
+        return 1
+
+
 class _RecordingExecutor(ThreadPoolExecutor):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -64,7 +72,7 @@ def _clean_pools(monkeypatch):
     prepost._ASYNC_TOKENIZER_EXECUTORS.clear()
     prepost._STRONG_ASYNC_TOKENIZER_EXECUTORS.clear()
     yield
-    for executor in list(prepost._ASYNC_TOKENIZER_EXECUTORS.values()):
+    for _, executor in list(prepost._ASYNC_TOKENIZER_EXECUTORS.values()):
         executor.shutdown()
     for _, executor in list(prepost._STRONG_ASYNC_TOKENIZER_EXECUTORS.values()):
         executor.shutdown()
@@ -84,7 +92,8 @@ def test_same_tokenizer_reuses_one_executor():
     prepost._get_async_tokenizer(tokenizer)
 
     assert len(prepost._ASYNC_TOKENIZER_EXECUTORS) == 1
-    executor = prepost._ASYNC_TOKENIZER_EXECUTORS[tokenizer]
+    tokenizer_ref, executor = prepost._ASYNC_TOKENIZER_EXECUTORS[id(tokenizer)]
+    assert tokenizer_ref() is tokenizer
     assert isinstance(executor, _RecordingExecutor)
 
     result = asyncio.run(_call_tokenizer(tokenizer, "hello"))
@@ -95,7 +104,7 @@ def test_same_tokenizer_reuses_one_executor():
 def test_executor_evicted_and_shut_down_when_tokenizer_collected():
     tokenizer = _DummyTokenizer()
     prepost._get_async_tokenizer(tokenizer)
-    executor = prepost._ASYNC_TOKENIZER_EXECUTORS[tokenizer]
+    _, executor = prepost._ASYNC_TOKENIZER_EXECUTORS[id(tokenizer)]
     tokenizer_ref = weakref.ref(tokenizer)
 
     # No cached wrapper may survive this del: it would pin the tokenizer.
@@ -110,7 +119,7 @@ def test_executor_evicted_and_shut_down_when_tokenizer_collected():
 def test_new_tokenizer_after_eviction_gets_fresh_executor():
     first = _DummyTokenizer()
     prepost._get_async_tokenizer(first)
-    first_executor = prepost._ASYNC_TOKENIZER_EXECUTORS[first]
+    _, first_executor = prepost._ASYNC_TOKENIZER_EXECUTORS[id(first)]
     del first
     gc.collect()
     assert len(prepost._ASYNC_TOKENIZER_EXECUTORS) == 0
@@ -118,7 +127,36 @@ def test_new_tokenizer_after_eviction_gets_fresh_executor():
     second = _DummyTokenizer()
     prepost._get_async_tokenizer(second)
     assert len(prepost._ASYNC_TOKENIZER_EXECUTORS) == 1
-    assert prepost._ASYNC_TOKENIZER_EXECUTORS[second] is not first_executor
+    _, second_executor = prepost._ASYNC_TOKENIZER_EXECUTORS[id(second)]
+    assert second_executor is not first_executor
+
+
+def test_equal_tokenizers_have_independent_executor_lifetimes():
+    first = _EqualTokenizer()
+    second = _EqualTokenizer()
+    assert first == second
+    assert first is not second
+
+    prepost._get_async_tokenizer(first)
+    prepost._get_async_tokenizer(second)
+    _, first_executor = prepost._ASYNC_TOKENIZER_EXECUTORS[id(first)]
+    _, second_executor = prepost._ASYNC_TOKENIZER_EXECUTORS[id(second)]
+
+    assert len(prepost._ASYNC_TOKENIZER_EXECUTORS) == 2
+    assert first_executor is not second_executor
+
+    first_ref = weakref.ref(first)
+    del first
+    gc.collect()
+
+    assert first_ref() is None
+    assert len(prepost._ASYNC_TOKENIZER_EXECUTORS) == 1
+    assert first_executor.shutdown_calls == 1
+    assert second_executor.shutdown_calls == 0
+
+    result = asyncio.run(_call_tokenizer(second, "still live"))
+    assert result.input_ids == [1, 2, 3]
+    assert second.prompts == ["still live"]
 
 
 def test_non_weakrefable_tokenizer_falls_back_to_strong_pool():

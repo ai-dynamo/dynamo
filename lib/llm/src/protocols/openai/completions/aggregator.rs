@@ -15,7 +15,7 @@ use crate::protocols::{
     openai::ParsingOptions,
 };
 
-/// Aggregates a stream of [`CompletionResponse`]s into a single [`CompletionResponse`].
+/// Aggregates a stream of `CompletionResponse`s into a single `CompletionResponse`.
 pub struct DeltaAggregator {
     id: String,
     model: String,
@@ -52,7 +52,7 @@ impl DeltaAggregator {
         }
     }
 
-    /// Aggregates a stream of [`Annotated<CompletionResponse>`]s into a single [`CompletionResponse`].
+    /// Aggregates a stream of `Annotated<CompletionResponse>`s into a single `CompletionResponse`.
     pub async fn apply(
         stream: impl Stream<Item = Annotated<NvCreateCompletionResponse>>,
         parsing_options: ParsingOptions,
