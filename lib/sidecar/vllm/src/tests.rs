@@ -2505,6 +2505,53 @@ fn preprocessed_multimodal_features_are_forwarded_to_vllm_grpc() {
 }
 
 #[test]
+fn multimodal_routing_hashes_are_consumed_for_preprocessed_features() {
+    let marker = format!("{}{}", "0123456789abcdef", "0".repeat(48));
+    let mut request =
+        request_with_preprocessed_features(image_features(json!(VALID_MM_KWARGS_BASE64)));
+    request
+        .extra_args
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("object extra_args")
+        .insert("dynamo_mm_routing_hashes".to_string(), json!([marker]));
+
+    let wire = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("routing metadata should be consumed");
+
+    let feature = match wire.media[0].source.as_ref() {
+        Some(pb::media_item::Source::Features(feature)) => feature,
+        other => panic!("expected preprocessed features, got {other:?}"),
+    };
+    assert!(feature.identifier.starts_with("grpc-mm:"));
+    assert_eq!(feature.mm_hash.as_deref(), Some("image-hash-a"));
+}
+
+#[test]
+fn multimodal_routing_hashes_without_preprocessed_features_are_rejected() {
+    let marker = format!("{}{}", "0123456789abcdef", "0".repeat(48));
+    let mut request = request();
+    request
+        .extra_args
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("object extra_args")
+        .insert("dynamo_mm_routing_hashes".to_string(), json!([marker]));
+
+    let error = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("routing metadata without features must be rejected");
+    assert!(error.to_string().contains("dynamo_mm_routing_hashes"));
+}
+
+#[test]
 fn preprocessed_multimodal_features_support_disaggregated_modes() {
     for mode in [
         DisaggregationMode::Encode,
