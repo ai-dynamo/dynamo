@@ -20,6 +20,8 @@ import os
 from threading import Lock
 from typing import Optional
 
+from kubernetes.client import ApiException
+
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import PlannerConnector
 from dynamo.planner.connectors.clients.kubernetes_api import (
@@ -104,6 +106,7 @@ class KubernetesConnector(PlannerConnector):
         # the pre-write Ready condition is observed again.
         self._startup_scale_down_lock = Lock()
         self._startup_scale_down_targets: dict[str, int] = {}
+        self._startup_read_warnings: set[str] = set()
 
     async def async_init(self):
         """No-op asynchronous lifecycle hook."""
@@ -788,6 +791,27 @@ class KubernetesConnector(PlannerConnector):
         )
         return info
 
+    def _list_startup_pods(self) -> Optional[list]:
+        """Return lifecycle Pods, or None when legacy RBAC forbids listing them."""
+        try:
+            pods = self.kube_api.list_pods_for_graph(self.graph_deployment_name)
+        except ApiException as exc:
+            if exc.status != 403:
+                raise
+            with self._startup_scale_down_lock:
+                warn = "pods" not in self._startup_read_warnings
+                self._startup_read_warnings.add("pods")
+            if warn:
+                logger.warning(
+                    "Pod list forbidden for %s; startup cancellation is disabled "
+                    "until pods/list is granted",
+                    self.graph_deployment_name,
+                )
+            return None
+        with self._startup_scale_down_lock:
+            self._startup_read_warnings.discard("pods")
+        return KubernetesAPI.exclude_checkpoint_capture_pods(pods)
+
     def _startup_scale_down_in_progress(self, deployment: dict, pods: list) -> bool:
         # Snapshot under the lock, then do Kubernetes I/O without holding it.
         # Writers replace the dictionary so identity detects even a concurrent
@@ -812,9 +836,29 @@ class KubernetesConnector(PlannerConnector):
             ).number_replicas()
             _, stable = self.kube_api.get_service_replica_status(deployment, name)
             if desired != target:
-                authoritative_target = self.kube_api.get_service_replica_target(
-                    self.graph_deployment_name, name
-                )
+                try:
+                    authoritative_target = self.kube_api.get_service_replica_target(
+                        self.graph_deployment_name, name
+                    )
+                except ApiException as exc:
+                    if exc.status != 403:
+                        raise
+                    # Old roles allow Scale PATCH but not GET. Retain this
+                    # request until its DGD target arrives; do not guess that
+                    # an unobserved write was superseded or drop the latch.
+                    with self._startup_scale_down_lock:
+                        warn = "scale" not in self._startup_read_warnings
+                        self._startup_read_warnings.add("scale")
+                    if warn:
+                        logger.warning(
+                            "Scale get forbidden for %s; holding startup scale-down "
+                            "until its DGD target is observed",
+                            self.graph_deployment_name,
+                        )
+                    remaining[name] = target
+                    continue
+                with self._startup_scale_down_lock:
+                    self._startup_read_warnings.discard("scale")
                 if authoritative_target == target or desired != authoritative_target:
                     remaining[name] = target
                 # A superseding DGDSA target has reached the observed DGD spec.
@@ -832,12 +876,13 @@ class KubernetesConnector(PlannerConnector):
         self,
         prefill_component_name: Optional[str] = None,
         decode_component_name: Optional[str] = None,
-    ) -> WorkerCounts:
+    ) -> Optional[WorkerCounts]:
         """Read selected roles' serving/pending inventory off the event loop.
 
         DGD status and Pods supply startup, drain, and rollout checks, including
         the power-aware readiness guarantees. An omitted component name reports
         zero counts for that role; pending counts never include draining workers.
+        Return None on a Pod-list 403 so callers can retain legacy behavior.
         """
         return await asyncio.to_thread(
             self._get_worker_inventory_sync,
@@ -849,11 +894,11 @@ class KubernetesConnector(PlannerConnector):
         self,
         prefill_component_name: Optional[str],
         decode_component_name: Optional[str],
-    ) -> WorkerCounts:
+    ) -> Optional[WorkerCounts]:
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
-        pods = KubernetesAPI.exclude_checkpoint_capture_pods(
-            self.kube_api.list_pods_for_graph(self.graph_deployment_name)
-        )
+        pods = self._list_startup_pods()
+        if pods is None:
+            return None
         p, d, stable = self._worker_counts_from_snapshot(
             deployment,
             prefill_component_name=prefill_component_name,
@@ -1028,48 +1073,58 @@ class KubernetesConnector(PlannerConnector):
         with self._startup_scale_down_lock:
             scale_down_pending = bool(self._startup_scale_down_targets)
         if not ready or scale_down_pending or reducing:
-            pods = KubernetesAPI.exclude_checkpoint_capture_pods(
-                self.kube_api.list_pods_for_graph(self.graph_deployment_name)
-            )
-            if self._startup_scale_down_in_progress(deployment, pods):
-                logger.info("Startup scale-down still converging, ignoring scaling")
-                return
-            pending = self.kube_api.pending_startup_replicas(deployment, pods)
-            # Ready can still describe the state before a Pod deletion or the
-            # latest spec change. Recheck lifecycle before issuing a reduction.
-            phase = (deployment.get("status", {}).get("rollingUpdate") or {}).get(
-                "phase"
-            )
-            ready = (
-                ready
-                and self.kube_api.is_spec_generation_observed(deployment)
-                and not self.kube_api.has_terminating_pods(pods)
-                and self.kube_api.pcsg_pods_within_desired_replicas(deployment, pods)
-                and self.kube_api.non_planner_components_stable(deployment)[0]
-                and phase in (None, "", "Completed")
-                and not pending
-            )
-            startup_reduction = bool(pending)
-            any_reduction = False
-            for target in target_replicas:
-                if not startup_reduction:
-                    break
-                service = get_component_from_type_or_name(
-                    deployment,
-                    target.sub_component_type,
-                    component_name=target.component_name,
+            pods = self._list_startup_pods()
+            if pods is None:
+                # Keep ordinary Ready-deployment scaling working with old RBAC.
+                # Never release an accepted startup reversal without observing
+                # its drain, or use the startup exception to scale an unready DGD.
+                ready = (
+                    ready
+                    and not scale_down_pending
+                    and self.kube_api.non_planner_components_stable(deployment)[0]
                 )
-                serving, _ = self.kube_api.get_service_replica_status(
-                    deployment, service.name
+            else:
+                if self._startup_scale_down_in_progress(deployment, pods):
+                    logger.info("Startup scale-down still converging, ignoring scaling")
+                    return
+                pending = self.kube_api.pending_startup_replicas(deployment, pods)
+                # Ready can still describe the state before a Pod deletion or the
+                # latest spec change. Recheck lifecycle before issuing a reduction.
+                phase = (deployment.get("status", {}).get("rollingUpdate") or {}).get(
+                    "phase"
                 )
-                desired = service.number_replicas()
-                if target.desired_replicas != desired:
-                    startup_reduction &= (
-                        0 <= target.desired_replicas <= serving
-                        and target.desired_replicas < desired
+                ready = (
+                    ready
+                    and self.kube_api.is_spec_generation_observed(deployment)
+                    and not self.kube_api.has_terminating_pods(pods)
+                    and self.kube_api.pcsg_pods_within_desired_replicas(
+                        deployment, pods
                     )
-                    any_reduction = True
-            startup_reduction &= any_reduction
+                    and self.kube_api.non_planner_components_stable(deployment)[0]
+                    and phase in (None, "", "Completed")
+                    and not pending
+                )
+                startup_reduction = bool(pending)
+                any_reduction = False
+                for target in target_replicas:
+                    if not startup_reduction:
+                        break
+                    service = get_component_from_type_or_name(
+                        deployment,
+                        target.sub_component_type,
+                        component_name=target.component_name,
+                    )
+                    serving, _ = self.kube_api.get_service_replica_status(
+                        deployment, service.name
+                    )
+                    desired = service.number_replicas()
+                    if target.desired_replicas != desired:
+                        startup_reduction &= (
+                            0 <= target.desired_replicas <= serving
+                            and target.desired_replicas < desired
+                        )
+                        any_reduction = True
+                startup_reduction &= any_reduction
 
         if not ready and not startup_reduction:
             if self.raise_not_ready:

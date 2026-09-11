@@ -531,30 +531,34 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
                 prefill_component_name=prefill_name,
                 decode_component_name=decode_name,
             )
-            for required, replicas, active, expected, scaling, pending in (
-                (
-                    self.require_prefill,
-                    self._state.prefill.replicas,
-                    inventory.ready_num_prefill,
-                    inventory.expected_num_prefill,
-                    inventory.prefill_scaling_in_progress,
-                    inventory.pending_num_prefill,
-                ),
-                (
-                    self.require_decode,
-                    self._state.decode.replicas,
-                    inventory.ready_num_decode,
-                    inventory.expected_num_decode,
-                    inventory.decode_scaling_in_progress,
-                    inventory.pending_num_decode,
-                ),
-            ):
-                if required:
-                    replicas.active = active or 0
-                    replicas.expected = expected
-                    replicas.scaling = scaling
-                    replicas.pending_startup = pending
-            return
+            if inventory is not None:
+                for required, replicas, active, expected, scaling, pending in (
+                    (
+                        self.require_prefill,
+                        self._state.prefill.replicas,
+                        inventory.ready_num_prefill,
+                        inventory.expected_num_prefill,
+                        inventory.prefill_scaling_in_progress,
+                        inventory.pending_num_prefill,
+                    ),
+                    (
+                        self.require_decode,
+                        self._state.decode.replicas,
+                        inventory.ready_num_decode,
+                        inventory.expected_num_decode,
+                        inventory.decode_scaling_in_progress,
+                        inventory.pending_num_decode,
+                    ),
+                ):
+                    if required:
+                        replicas.active = active or 0
+                        replicas.expected = expected
+                        replicas.scaling = scaling
+                        replicas.pending_startup = pending
+                return
+        # Never retain previously verified pending counts after losing access.
+        self._state.prefill.replicas.pending_startup = 0
+        self._state.decode.replicas.pending_startup = 0
         if power_controller is not None:
             counts = await power_controller.get_power_aware_worker_counts(
                 prefill_component_name=prefill_name,

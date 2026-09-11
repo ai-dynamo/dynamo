@@ -231,6 +231,7 @@ def _connector(deployment, pods):
     connector.raise_not_ready = False
     connector._startup_scale_down_lock = Lock()
     connector._startup_scale_down_targets = {}
+    connector._startup_read_warnings = set()
     return connector
 
 

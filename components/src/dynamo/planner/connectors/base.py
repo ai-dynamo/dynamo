@@ -128,9 +128,11 @@ class StartupAwareConnector(Protocol):
         self,
         prefill_component_name: Optional[str] = None,
         decode_component_name: Optional[str] = None,
-    ) -> WorkerCounts:
+    ) -> Optional[WorkerCounts]:
         """Return serving counts and verified pending startup counts by role.
 
+        Return None when optional startup reads are forbidden. The caller may
+        use legacy inventory, or power-aware inventory when power checks apply.
         Names select the DGD components; an omitted name excludes that role.
         ``WorkerCounts.pending_num_*`` may be positive only after ruling out
         drain, rollout, and unobserved spec changes across the deployment.
