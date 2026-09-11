@@ -78,7 +78,7 @@ class ImageLoader:
 
         Args:
             cache_size: Maximum number of images to store in the in-memory LRU cache.
-                Defaults to CACHE_SIZE_MAXIMUM.
+                Zero or less disables caching. Defaults to CACHE_SIZE_MAXIMUM.
             http_timeout: Timeout in seconds for HTTP requests when fetching remote images.
                 Defaults to 30.0 seconds.
             enable_frontend_decoding: If True, enables NIXL RDMA for transferring
@@ -117,6 +117,10 @@ class ImageLoader:
 
     def _cache_put(self, key: str, image: Image.Image) -> None:
         """Insert into cache if not already present. Sync — no awaits."""
+        # A capacity of zero or less means caching is off. Falling through would
+        # try to evict from an empty OrderedDict and raise KeyError.
+        if self._cache_size <= 0:
+            return
         if key not in self._image_cache:
             if len(self._image_cache) >= self._cache_size:
                 self._image_cache.popitem(last=False)
