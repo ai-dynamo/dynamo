@@ -12,6 +12,7 @@ import (
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
 )
 
@@ -267,7 +268,7 @@ func configureNodeLocalAgentRuntime(
 			}},
 		})
 	} else {
-		addLP30InitContainer(agentPodSpec, agent)
+		return addLP30InitContainer(agentPodSpec, agent)
 	}
 
 	return nil
@@ -325,7 +326,12 @@ func configureNodeLocalAgentWorkerContainer(
 	}
 }
 
-func addLP30InitContainer(podSpec *corev1.PodSpec, agent *corev1.Container) {
+func addLP30InitContainer(podSpec *corev1.PodSpec, agent *corev1.Container) error {
+	// Reserve this name only when the selected runtime actually adds the init container.
+	if err := validateRolePodSpecContainerNames(podSpec, field.NewPath("spec"), lp30InitContainerName).ToAggregate(); err != nil {
+		return err
+	}
+
 	initContainer := corev1.Container{
 		Name:            lp30InitContainerName,
 		Image:           agent.Image,
@@ -345,7 +351,8 @@ func addLP30InitContainer(podSpec *corev1.PodSpec, agent *corev1.Container) {
 		},
 	}
 	addLPUHostDeviceVolumeMounts(&initContainer)
-	podSpec.InitContainers = setContainerByName(podSpec.InitContainers, initContainer)
+	podSpec.InitContainers = append(podSpec.InitContainers, initContainer)
+	return nil
 }
 
 func setNodeLocalPodIPEnv(container *corev1.Container, isXT bool) {

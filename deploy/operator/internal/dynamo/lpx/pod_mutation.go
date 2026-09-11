@@ -32,12 +32,6 @@ func setVolumeMount(volumeMounts []corev1.VolumeMount, volumeMount corev1.Volume
 	})
 }
 
-func setContainerByName(containers []corev1.Container, container corev1.Container) []corev1.Container {
-	return replaceConflicts(containers, container, func(existing corev1.Container) bool {
-		return existing.Name == container.Name
-	})
-}
-
 func replaceConflicts[T any](items []T, replacement T, conflicts func(T) bool) []T {
 	// Preserve the first conflict's position while removing later conflicts, or append when none exists.
 	first := slices.IndexFunc(items, conflicts)

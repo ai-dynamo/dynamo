@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
 )
 
@@ -56,6 +57,11 @@ func sshVolumeMount() corev1.VolumeMount {
 }
 
 func addConductorSSHKey(podSpec *corev1.PodSpec, conductor *corev1.Container, secretName string) error {
+	// Check both container lists before replacing any authored configuration.
+	if err := validateRolePodSpecContainerNames(podSpec, field.NewPath("spec"), conductorSSHKeyInitContainerName).ToAggregate(); err != nil {
+		return err
+	}
+
 	// Mount the source Secret and the writable destination used by OpenMPI.
 	if err := addSSHVolume(podSpec, secretName, 0600); err != nil {
 		return err
@@ -83,7 +89,7 @@ func addConductorSSHKey(podSpec *corev1.PodSpec, conductor *corev1.Container, se
 		},
 		VolumeMounts: []corev1.VolumeMount{conductorSSHKeyVolumeMount(), sshVolumeMount()},
 	}
-	podSpec.InitContainers = setContainerByName(podSpec.InitContainers, initContainer)
+	podSpec.InitContainers = append(podSpec.InitContainers, initContainer)
 	return nil
 }
 

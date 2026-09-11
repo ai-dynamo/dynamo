@@ -480,6 +480,53 @@ func TestConfigureDirectHybridAgentRuntimePreservesPodOverrides(t *testing.T) {
 	}
 }
 
+func TestLPXInitContainerNames(t *testing.T) {
+	t.Log("Reserve a generated name only in the Pod receiving that init container")
+	for _, test := range []struct {
+		name string
+		add  func(*corev1.PodSpec, *corev1.Container) error
+	}{
+		{name: "prepare-lp30", add: addLP30InitContainer},
+		{name: "prepare-ssh-key", add: func(spec *corev1.PodSpec, main *corev1.Container) error {
+			return addConductorSSHKey(spec, main, "ssh-secret")
+		}},
+	} {
+		for _, name := range []string{"prepare-lp30", "prepare-ssh-key"} {
+			for _, list := range []string{"containers", "initContainers"} {
+				t.Run(test.name+"/"+name+"/"+list, func(t *testing.T) {
+					t.Log("Author an independent container with an image and command to preserve")
+					spec := corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "runtime"}}}
+					authored := corev1.Container{Name: name, Image: "custom", Command: []string{"/custom-init"}}
+					if list == "containers" {
+						spec.Containers = append(spec.Containers, authored)
+					} else {
+						spec.InitContainers = []corev1.Container{authored}
+					}
+					before := spec.DeepCopy()
+
+					t.Log("Reject only the actual generated name, before any mutation")
+					err := test.add(&spec, &spec.Containers[0])
+					if name == test.name {
+						require.ErrorContains(t, err, list)
+						require.ErrorContains(t, err, name)
+						require.Equal(t, *before, spec)
+						return
+					}
+
+					t.Log("Preserve a name belonging to the other role and add the intended init")
+					require.NoError(t, err)
+					require.Equal(t, before.Containers, spec.Containers)
+					require.Len(t, spec.InitContainers, len(before.InitContainers)+1)
+					for i, container := range before.InitContainers {
+						require.Equal(t, container, spec.InitContainers[i])
+					}
+					require.Equal(t, test.name, spec.InitContainers[len(before.InitContainers)].Name)
+				})
+			}
+		}
+	}
+}
+
 func TestConfigureNodeLocalLPURuntimeRolesRejectsUnsupportedShape(t *testing.T) {
 	t.Log("Define unsupported node-local PodSpec shapes")
 	tests := []struct {

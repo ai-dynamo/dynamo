@@ -168,7 +168,7 @@ func ValidateAgentContainerNames(dgd *dynamov1beta1.DynamoGraphDeployment) field
 // validateRolePodSpecContainerNames checks both lists that share the Pod's name space.
 // spec and fldPath must be non-nil.
 func validateRolePodSpecContainerNames(spec *corev1.PodSpec, fldPath *field.Path, reservedName string) field.ErrorList {
-	// Regular and init containers must not collide with the renamed main container.
+	// Both lists must avoid renamed main and generated init-container names.
 	allErrs := field.ErrorList{}
 	for _, group := range []struct {
 		name       string
