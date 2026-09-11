@@ -131,11 +131,11 @@ func TestIsSinglePodElasticEPLeader(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Classify the component against the single-pod elastic-EP leader gate")
 			component := tt.component()
-			got := isSinglePodElasticEPLeader(&component)
+			got := dynamo.IsSinglePodElasticEPLeader(&component, true)
 
 			t.Log("Verify only a component that renders as exactly one Ray head qualifies")
 			if got != tt.want {
-				t.Errorf("isSinglePodElasticEPLeader = %v, want %v", got, tt.want)
+				t.Errorf("dynamo.IsSinglePodElasticEPLeader = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -317,7 +317,7 @@ func TestGroveStableResourcesReconcilerDeletesTheExactOwnershipCheckedService(t 
 	reconciler := newGroveStableResourcesReconciler(
 		kubeClient,
 		events.NewFakeRecorder(100),
-		&configv1alpha1.OperatorConfiguration{},
+		&configv1alpha1.OperatorConfiguration{ElasticEPRayPoC: configv1alpha1.ElasticEPRayPoCConfiguration{Enabled: true}},
 	)
 	if _, err := reconciler.Reconcile(ctx, dgd, dgd); err != nil {
 		t.Fatalf("Reconcile returned an error: %v", err)
@@ -395,7 +395,7 @@ func newElasticEPTestStableResourcesReconciler(
 	reconciler := newGroveStableResourcesReconciler(
 		kubeClient,
 		events.NewFakeRecorder(100),
-		&configv1alpha1.OperatorConfiguration{},
+		&configv1alpha1.OperatorConfiguration{ElasticEPRayPoC: configv1alpha1.ElasticEPRayPoCConfiguration{Enabled: true}},
 	)
 	return reconciler, kubeClient
 }

@@ -104,6 +104,10 @@ dynamo-operator:
   gpuDiscovery:
     # -- DEVELOPMENT AND TESTING ONLY: Enable GPU discovery in namespace-restricted mode.
     enabled: true
+  elasticEPRayPoC:
+    # -- Enable the operator-managed Ray elastic expert-parallelism path (proof of concept).
+    # Off by default; see the operator sub-chart values for what enabling it turns on.
+    enabled: false
 
   # -- The Dynamo discovery backend to use. Default is "kubernetes" for Kubernetes API service discovery. Set to "etcd" to use ETCD for discovery. --
   discoveryBackend: "kubernetes"
