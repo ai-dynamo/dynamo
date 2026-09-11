@@ -7,7 +7,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"strconv"
 	"unicode/utf8"
 )
 
@@ -26,14 +25,8 @@ const (
 	PodRoleAgent                 = "agent"
 	PodRoleConductor             = "conductor"
 	PodRoleCyborgWorker          = "cyborg-worker"
-	MaxModelAnnotationBytes      = 261982
+	MaxModelAnnotationBytes      = 261054
 )
-
-type PodLogicalRow struct {
-	Model            string
-	ModelPartitionID uint32
-	RankInPartition  uint16
-}
 
 func ParsePodRole(value string) (string, error) {
 	switch value {
@@ -60,80 +53,6 @@ func ValidateModelAnnotation(value string) error {
 		return fmt.Errorf("model annotation %q has noncanonical boundary whitespace", value)
 	}
 	return nil
-}
-
-func ParseModelPartitionID(value string) (uint32, error) {
-	parsed, err := parseCanonicalUnsigned(PodPartitionIDAnnotation, value, 32)
-	return uint32(parsed), err
-}
-
-func ParseRankInPartition(value string) (uint16, error) {
-	parsed, err := parseCanonicalUnsigned(PodRankInPartitionAnnotation, value, 16)
-	return uint16(parsed), err
-}
-
-func ParsePodLogicalRow(annotations map[string]string) (PodLogicalRow, error) {
-	role, err := requiredPodAnnotation(annotations, PodRoleAnnotation)
-	if err != nil {
-		return PodLogicalRow{}, err
-	}
-	if _, err := ParsePodRole(role); err != nil {
-		return PodLogicalRow{}, err
-	}
-	if role != PodRoleAgent {
-		return PodLogicalRow{}, fmt.Errorf("logical-row parsing requires role=agent, got %q", role)
-	}
-	model, err := requiredPodAnnotation(annotations, PodModelAnnotation)
-	if err != nil {
-		return PodLogicalRow{}, err
-	}
-	if err := ValidateModelAnnotation(model); err != nil {
-		return PodLogicalRow{}, err
-	}
-	partition, err := requiredPodAnnotation(annotations, PodPartitionIDAnnotation)
-	if err != nil {
-		return PodLogicalRow{}, err
-	}
-	modelPartitionID, err := ParseModelPartitionID(partition)
-	if err != nil {
-		return PodLogicalRow{}, err
-	}
-	rank, err := requiredPodAnnotation(annotations, PodRankInPartitionAnnotation)
-	if err != nil {
-		return PodLogicalRow{}, err
-	}
-	rankInPartition, err := ParseRankInPartition(rank)
-	if err != nil {
-		return PodLogicalRow{}, err
-	}
-	return PodLogicalRow{Model: model, ModelPartitionID: modelPartitionID, RankInPartition: rankInPartition}, nil
-}
-
-func requiredPodAnnotation(annotations map[string]string, key string) (string, error) {
-	value, ok := annotations[key]
-	if !ok {
-		return "", fmt.Errorf("required Pod annotation %q is missing", key)
-	}
-	return value, nil
-}
-
-func parseCanonicalUnsigned(key, value string, bitSize int) (uint64, error) {
-	if value == "" {
-		return 0, fmt.Errorf("Pod annotation %q value %q is not canonical unsigned decimal", key, value)
-	}
-	for index := 0; index < len(value); index++ {
-		if value[index] < '0' || value[index] > '9' {
-			return 0, fmt.Errorf("Pod annotation %q value %q is not canonical unsigned decimal", key, value)
-		}
-	}
-	parsed, err := strconv.ParseUint(value, 10, bitSize)
-	if err != nil {
-		return 0, fmt.Errorf("Pod annotation %q value %q exceeds its public integer range", key, value)
-	}
-	if strconv.FormatUint(parsed, 10) != value {
-		return 0, fmt.Errorf("Pod annotation %q value %q is not canonical unsigned decimal", key, value)
-	}
-	return parsed, nil
 }
 
 func isAnnotationBoundaryWhitespace(value rune) bool {
@@ -233,6 +152,7 @@ const (
 	BindingTargetPhaseRecorded         BindingTargetPhase = "recorded"
 	BindingTargetPhaseClaimsAuthorized BindingTargetPhase = "claimsAuthorized"
 	BindingTargetPhaseBindingAttempted BindingTargetPhase = "bindingAttempted"
+	BindingTargetPhaseRetiring         BindingTargetPhase = "retiring"
 )
 
 type ClaimLifecyclePhase string
@@ -641,6 +561,8 @@ func (in *GroveLineage) DeepCopy() *GroveLineage {
 	return out
 }
 
+type GroveSlotDigest string
+
 type HxLogicalConnection struct {
 	FromLogicalDevice int64 `json:"fromLogicalDevice"`
 	ToLogicalDevice   int64 `json:"toLogicalDevice"`
@@ -784,13 +706,14 @@ func (in *LPUPipelineRequestSpec) DeepCopy() *LPUPipelineRequestSpec {
 }
 
 type LPUPipelineRequestStatus struct {
-	CommitFence        *CommitFence       `json:"commitFence,omitempty"`
-	Committed          *Committed         `json:"committed,omitempty"`
-	Conditions         []metav1.Condition `json:"conditions,omitempty"`
-	Diagnostics        []StatusDiagnostic `json:"diagnostics,omitempty"`
-	LastPlanRevision   int64              `json:"lastPlanRevision"`
-	ObservedGeneration *int64             `json:"observedGeneration,omitempty"`
-	Phase              RequestPhase       `json:"phase"`
+	CommitFence                *CommitFence               `json:"commitFence,omitempty"`
+	Committed                  *Committed                 `json:"committed,omitempty"`
+	Conditions                 []metav1.Condition         `json:"conditions,omitempty"`
+	Diagnostics                []StatusDiagnostic         `json:"diagnostics,omitempty"`
+	LastAbortedPlanReplacement *PlanReplacementAbortFence `json:"lastAbortedPlanReplacement,omitempty"`
+	LastPlanRevision           int64                      `json:"lastPlanRevision"`
+	ObservedGeneration         *int64                     `json:"observedGeneration,omitempty"`
+	Phase                      RequestPhase               `json:"phase"`
 }
 
 func (in *LPUPipelineRequestStatus) DeepCopyInto(out *LPUPipelineRequestStatus) {
@@ -812,6 +735,10 @@ func (in *LPUPipelineRequestStatus) DeepCopyInto(out *LPUPipelineRequestStatus) 
 		for i := range in.Diagnostics {
 			in.Diagnostics[i].DeepCopyInto(&out.Diagnostics[i])
 		}
+	}
+	if in.LastAbortedPlanReplacement != nil {
+		value := *in.LastAbortedPlanReplacement
+		out.LastAbortedPlanReplacement = &value
 	}
 	if in.ObservedGeneration != nil {
 		value := *in.ObservedGeneration
@@ -902,6 +829,7 @@ func (in *NodeLocalEndpoint) DeepCopy() *NodeLocalEndpoint {
 
 type NodeLocalExecution struct {
 	PartitionSelections []NodeLocalPartitionExecution `json:"partitionSelections"`
+	PlanReplacement     *NodeLocalPlanReplacement     `json:"planReplacement,omitempty"`
 }
 
 func (in *NodeLocalExecution) DeepCopyInto(out *NodeLocalExecution) {
@@ -911,6 +839,9 @@ func (in *NodeLocalExecution) DeepCopyInto(out *NodeLocalExecution) {
 		for i := range in.PartitionSelections {
 			in.PartitionSelections[i].DeepCopyInto(&out.PartitionSelections[i])
 		}
+	}
+	if in.PlanReplacement != nil {
+		out.PlanReplacement = in.PlanReplacement.DeepCopy()
 	}
 }
 
@@ -996,6 +927,7 @@ type NodeLocalPlacement struct {
 	EffectiveNodeRequests       map[string]int64              `json:"effectiveNodeRequests"`
 	InventoryRevision           string                        `json:"inventoryRevision"`
 	Model                       string                        `json:"model"`
+	NativeRepairBase            *string                       `json:"nativeRepairBase,omitempty"`
 	Objective                   PlanObjective                 `json:"objective"`
 	PartitionSelections         []NodeLocalPartitionSelection `json:"partitionSelections"`
 	PodGangRef                  ObjectReference               `json:"podGangRef"`
@@ -1017,6 +949,10 @@ func (in *NodeLocalPlacement) DeepCopyInto(out *NodeLocalPlacement) {
 			out.EffectiveNodeRequests[key] = value
 		}
 	}
+	if in.NativeRepairBase != nil {
+		value := *in.NativeRepairBase
+		out.NativeRepairBase = &value
+	}
 	in.Objective.DeepCopyInto(&out.Objective)
 	if in.PartitionSelections != nil {
 		out.PartitionSelections = make([]NodeLocalPartitionSelection, len(in.PartitionSelections))
@@ -1032,6 +968,48 @@ func (in *NodeLocalPlacement) DeepCopy() *NodeLocalPlacement {
 		return nil
 	}
 	out := new(NodeLocalPlacement)
+	in.DeepCopyInto(out)
+	return out
+}
+
+type NodeLocalPlanReplacement struct {
+	BasePlanDigest   PlanDigest      `json:"basePlanDigest"`
+	BasePlanRevision int64           `json:"basePlanRevision"`
+	RealizeMembers   []RealizeMember `json:"realizeMembers"`
+}
+
+func (in *NodeLocalPlanReplacement) DeepCopyInto(out *NodeLocalPlanReplacement) {
+	*out = *in
+	if in.RealizeMembers != nil {
+		out.RealizeMembers = make([]RealizeMember, len(in.RealizeMembers))
+		for i := range in.RealizeMembers {
+			in.RealizeMembers[i].DeepCopyInto(&out.RealizeMembers[i])
+		}
+	}
+}
+
+func (in *NodeLocalPlanReplacement) DeepCopy() *NodeLocalPlanReplacement {
+	if in == nil {
+		return nil
+	}
+	out := new(NodeLocalPlanReplacement)
+	in.DeepCopyInto(out)
+	return out
+}
+
+type NodeLocalRepairAuthorization struct {
+	GroveSlotDigest GroveSlotDigest `json:"groveSlotDigest"`
+}
+
+func (in *NodeLocalRepairAuthorization) DeepCopyInto(out *NodeLocalRepairAuthorization) {
+	*out = *in
+}
+
+func (in *NodeLocalRepairAuthorization) DeepCopy() *NodeLocalRepairAuthorization {
+	if in == nil {
+		return nil
+	}
+	out := new(NodeLocalRepairAuthorization)
 	in.DeepCopyInto(out)
 	return out
 }
@@ -1061,15 +1039,19 @@ func (in *NodeLocalRequest) DeepCopy() *NodeLocalRequest {
 }
 
 type NodeLocalRowExecution struct {
-	Current         *CurrentBinding `json:"current,omitempty"`
-	RankInPartition int64           `json:"rankInPartition"`
-	Target          *BindingTarget  `json:"target,omitempty"`
+	Current         *CurrentBinding               `json:"current,omitempty"`
+	RankInPartition int64                         `json:"rankInPartition"`
+	Repair          *NodeLocalRepairAuthorization `json:"repair,omitempty"`
+	Target          *BindingTarget                `json:"target,omitempty"`
 }
 
 func (in *NodeLocalRowExecution) DeepCopyInto(out *NodeLocalRowExecution) {
 	*out = *in
 	if in.Current != nil {
 		out.Current = in.Current.DeepCopy()
+	}
+	if in.Repair != nil {
+		out.Repair = in.Repair.DeepCopy()
 	}
 	if in.Target != nil {
 		out.Target = in.Target.DeepCopy()
@@ -1143,6 +1125,28 @@ func (in *ObjectReference) DeepCopy() *ObjectReference {
 		return nil
 	}
 	out := new(ObjectReference)
+	in.DeepCopyInto(out)
+	return out
+}
+
+type OldOnlyMember struct {
+	Current     CurrentBinding    `json:"current"`
+	OldEndpoint NodeLocalEndpoint `json:"oldEndpoint"`
+	OldNodeRef  NodeReference     `json:"oldNodeRef"`
+}
+
+func (in *OldOnlyMember) DeepCopyInto(out *OldOnlyMember) {
+	*out = *in
+	in.Current.DeepCopyInto(&out.Current)
+	in.OldEndpoint.DeepCopyInto(&out.OldEndpoint)
+	in.OldNodeRef.DeepCopyInto(&out.OldNodeRef)
+}
+
+func (in *OldOnlyMember) DeepCopy() *OldOnlyMember {
+	if in == nil {
+		return nil
+	}
+	out := new(OldOnlyMember)
 	in.DeepCopyInto(out)
 	return out
 }
@@ -1263,6 +1267,8 @@ func (in *PlanPlacement) DeepCopy() *PlanPlacement {
 	return out
 }
 
+type PlanReplacementAbortFence string
+
 type PropSyncConnectorKind string
 
 const (
@@ -1323,6 +1329,57 @@ func (in *PropSyncConnectorRequirement) DeepCopy() *PropSyncConnectorRequirement
 	in.DeepCopyInto(out)
 	return out
 }
+
+type RealizeMember struct {
+	GroveSlotDigest     GroveSlotDigest          `json:"groveSlotDigest"`
+	NextBindingRevision int64                    `json:"nextBindingRevision"`
+	PartitionID         string                   `json:"partitionId"`
+	Predecessor         RealizeMemberPredecessor `json:"predecessor"`
+	RankInPartition     int64                    `json:"rankInPartition"`
+}
+
+func (in *RealizeMember) DeepCopyInto(out *RealizeMember) {
+	*out = *in
+	in.Predecessor.DeepCopyInto(&out.Predecessor)
+}
+
+func (in *RealizeMember) DeepCopy() *RealizeMember {
+	if in == nil {
+		return nil
+	}
+	out := new(RealizeMember)
+	in.DeepCopyInto(out)
+	return out
+}
+
+type RealizeMemberPredecessor struct {
+	OldOnly *OldOnlyMember                `json:"oldOnly,omitempty"`
+	Phase   RealizeMemberPredecessorPhase `json:"phase"`
+}
+
+func (in *RealizeMemberPredecessor) DeepCopyInto(out *RealizeMemberPredecessor) {
+	*out = *in
+	if in.OldOnly != nil {
+		out.OldOnly = in.OldOnly.DeepCopy()
+	}
+}
+
+func (in *RealizeMemberPredecessor) DeepCopy() *RealizeMemberPredecessor {
+	if in == nil {
+		return nil
+	}
+	out := new(RealizeMemberPredecessor)
+	in.DeepCopyInto(out)
+	return out
+}
+
+type RealizeMemberPredecessorPhase string
+
+const (
+	RealizeMemberPredecessorPhaseProtected  RealizeMemberPredecessorPhase = "protected"
+	RealizeMemberPredecessorPhaseAuthorized RealizeMemberPredecessorPhase = "authorized"
+	RealizeMemberPredecessorPhaseRetired    RealizeMemberPredecessorPhase = "retired"
+)
 
 type ReleaseJournal struct {
 	Reason                ReleaseReason `json:"reason"`
@@ -1496,6 +1553,8 @@ type RepairPolicyMode string
 
 const (
 	RepairPolicyModeColdReplacement RepairPolicyMode = "coldReplacement"
+	RepairPolicyModeSamePlacement   RepairPolicyMode = "samePlacement"
+	RepairPolicyModeRepair          RepairPolicyMode = "repair"
 )
 
 type RequestIntentDigest string

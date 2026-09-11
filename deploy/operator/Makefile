@@ -282,10 +282,8 @@ manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and C
 			$(YQ) eval '.metadata.annotations."helm.sh/resource-policy" = "keep"' -i "$$file"; \
 		fi; \
 	done
-	# Compact LPX schemas last: subsequent schema edits could change an aliased role.
-	for file in config/crd/bases/nvidia.com_dynamographdeployments.yaml config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml; do \
-		$(YQ) --from-file api/scripts/lpx-crd-schema.yq -i --indent 2 $$file || exit 1; \
-	done
+	# Remove DGD-only LPX fields and rules from the standalone DCD schema.
+	$(YQ) --from-file api/scripts/lpx-crd-schema.yq -i --indent 2 config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml
 
 .PHONY: generate
 generate: controller-gen generate-pydantic ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.

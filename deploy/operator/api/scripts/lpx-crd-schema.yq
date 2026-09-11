@@ -7,25 +7,6 @@ with(select(.metadata.name == "dynamocomponentdeployments.nvidia.com");
   (.spec.versions[].schema.openAPIV3Schema.properties.spec) |= (
     del(.properties.lpx) |
     (select(has("x-kubernetes-validations"))."x-kubernetes-validations") |=
-      map(select(.rule | test("\\b(self|oldSelf)\\.(lpx|roles)\\b") | not))
+      map(select(.rule | test("\\b(self|oldSelf)\\.lpx\\b") | not))
   )
-) |
-
-# Keep native validation and merge semantics; omit only LPX template descriptions.
-# Ordinary PodTemplate and alpha extraPodSpec documentation remains unchanged.
-del(.. | select(has("lpx") and has("roles")) | .roles.items.properties.podTemplate | .. | select(has("description")) | .description) |
-
-# Compact only LPX templates, after every other schema transformation has finished.
-# YAML requires the anchor before every alias: traversal order is not document order.
-with(select([.. | select(has("lpx") and has("roles"))] | length > 0);
-  ([.. | select(has("lpx") and has("roles")) | .roles.items.properties.podTemplate |
-    {"path": (path | to_json), "line": line, "column": column}] | sort_by(.line, .column))[0].path as $first |
-  [.. | select(has("lpx") and has("roles")) | .roles.items.properties.podTemplate |
-    select((path | to_json) == $first) | to_json][0] as $schema |
-  (.. | select(has("lpx") and has("roles")) | .roles.items.properties.podTemplate |
-    select((path | to_json) == $first)) anchor = "lpx-pod-template" |
-
-  # Different role-specific constraints must never be replaced by an alias.
-  (.. | select(has("lpx") and has("roles")) | .roles.items.properties.podTemplate |
-    select((path | to_json) != $first) | select((to_json) == $schema)) alias = "lpx-pod-template"
 )

@@ -814,7 +814,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 				"cannot change node topology between single-node and multi-node after creation",
 			))
 		}
-	} else if !newComponent.IsLPX() && !oldComponent.IsLPX() {
+	} else {
 		if !hasUnsupportedMultinode(newComponent) &&
 			newComponent.Multinode != nil && oldComponent.Multinode != nil &&
 			newComponent.Multinode.NodeCount != oldComponent.Multinode.NodeCount {
@@ -939,6 +939,9 @@ func validateComponentRolesUpdate(
 	oldComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
 ) field.ErrorList {
+	if newComponent.IsLPX() || oldComponent.IsLPX() {
+		return nil
+	}
 	// Permit representation-only implicit/explicit migrations, but require
 	// role-specific configuration changes to happen in a subsequent update.
 	if (newComponent.Roles == nil) != (oldComponent.Roles == nil) {
