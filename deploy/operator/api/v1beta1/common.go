@@ -546,10 +546,12 @@ type SpecTopologyConstraint struct {
 	// Optional; omit when only components carry constraints.
 	//
 	// The operator renders this as the Grove `topologyConstraint.pack.required`
-	// domain, which Grove documents as applying to each replica of the resource
-	// it is set on. Whether replicas added by a later replica-count change land
-	// in the domain the existing replicas already occupy is determined by Grove
-	// and the backend scheduler, not by this operator.
+	// domain and leaves that constraint in place when the replica count later
+	// changes: a scale only writes the new replica count to the `scale`
+	// subresource of the Grove child. Replicas added by a scale-up are therefore
+	// expected to be placed in the same domain instance that already holds the
+	// running replicas, and to stay Pending while that instance has no room for
+	// them, rather than being placed in a different instance.
 	// +optional
 	PackDomain TopologyDomain `json:"packDomain,omitempty"`
 }
@@ -562,10 +564,12 @@ type TopologyConstraint struct {
 	// domain defined in the referenced ClusterTopology CR.
 	//
 	// The operator renders this as the Grove `topologyConstraint.pack.required`
-	// domain, which Grove documents as applying to each replica of the resource
-	// it is set on. Whether replicas added by a later replica-count change land
-	// in the domain the existing replicas already occupy is determined by Grove
-	// and the backend scheduler, not by this operator.
+	// domain and leaves that constraint in place when the replica count later
+	// changes: a scale only writes the new replica count to the `scale`
+	// subresource of the Grove child. Replicas added by a scale-up are therefore
+	// expected to be placed in the same domain instance that already holds the
+	// running replicas, and to stay Pending while that instance has no room for
+	// them, rather than being placed in a different instance.
 	PackDomain TopologyDomain `json:"packDomain"`
 }
 
