@@ -264,6 +264,10 @@ spec:
               ${DYNAMO_RDMA_RESOURCE}: "1"
               cpu: "1"
               memory: 3Gi
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
           startupProbe:
             exec:
               command:
