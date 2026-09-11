@@ -195,8 +195,9 @@ async def test_owner_separate_instance(lock_path):
 # half of it, a 2x margin on an exact bound.
 HOLD_S = 0.2
 
-# Without this skew both children can acquire uncontended on a loaded runner,
-# leaving the readiness handshake below unexercised.
+# Delays p2 past the whole of p1's hold, so a test that has lost the parent's
+# gate below sees no contention at all and fails on its first run instead of on
+# roughly one run in fifty. Must stay greater than HOLD_S for that to hold.
 START_STAGGER_S = 0.3
 
 
@@ -241,6 +242,11 @@ def _racer(
 
 
 @pytest.mark.asyncio
+# Backstop, not the primary bound: every wait below carries its own 10 s
+# timeout, summing to 80 s, so those report a precise failure first. This
+# catches the one wait that has no timeout of its own, the parent's gate
+# acquire. Measured runtime is about 5 s.
+@pytest.mark.timeout(90)
 async def test_cross_process_race(lock_path):
     """Two processes contend for the lock; the kernel serializes their holds."""
     import fcntl
@@ -255,32 +261,46 @@ async def test_cross_process_race(lock_path):
         target=_racer, args=(lock_path, "p2", ready_queue, result_queue)
     )
 
-    # Hold the lock here until both children are parked in flock(), so the
-    # contention under test is structural rather than a start-order race.
-    gate_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
     try:
-        fcntl.flock(gate_fd, fcntl.LOCK_EX)
+        # Hold the lock here until both children are parked in flock(), so the
+        # contention under test is structural rather than a start-order race.
+        gate_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+        try:
+            fcntl.flock(gate_fd, fcntl.LOCK_EX)
 
-        p1.start()
-        time.sleep(START_STAGGER_S)
-        p2.start()
+            p1.start()
+            time.sleep(START_STAGGER_S)
+            p2.start()
 
-        ready_queue.get(timeout=10)
-        ready_queue.get(timeout=10)
+            ready_queue.get(timeout=10)
+            ready_queue.get(timeout=10)
+        finally:
+            # LOCK_UN, not os.close(): forked children inherit a duplicate of
+            # gate_fd on the same open file description, so a close leaves it
+            # held.
+            fcntl.flock(gate_fd, fcntl.LOCK_UN)
+            os.close(gate_fd)
+
+        # Blocking gets rather than Queue.empty(): empty() is not a
+        # synchronization primitive, and joining a child before draining its
+        # queue can deadlock.
+        results = [result_queue.get(timeout=10), result_queue.get(timeout=10)]
+
+        p1.join(timeout=10)
+        p2.join(timeout=10)
+        assert p1.exitcode == 0
+        assert p2.exitcode == 0
     finally:
-        # LOCK_UN, not os.close(): forked children inherit a duplicate of
-        # gate_fd on the same open file description, so a close leaves it held.
-        fcntl.flock(gate_fd, fcntl.LOCK_UN)
-        os.close(gate_fd)
-
-    # Blocking gets rather than Queue.empty(): empty() is not a synchronization
-    # primitive, and joining a child before draining its queue can deadlock.
-    results = [result_queue.get(timeout=10), result_queue.get(timeout=10)]
-
-    p1.join(timeout=10)
-    p2.join(timeout=10)
-    assert p1.exitcode == 0
-    assert p2.exitcode == 0
+        # Any get above can time out and skip the joins. A child left parked in
+        # flock() would hold the lock file past the end of the test, and an
+        # unclosed queue leaves its feeder thread running.
+        for p in (p1, p2):
+            if p.is_alive():
+                p.terminate()
+            if p.pid is not None:  # None when start() was never reached
+                p.join(timeout=10)
+        ready_queue.close()
+        result_queue.close()
 
     # CLOCK_MONOTONIC is system-wide on Linux, so the two children's stamps are
     # comparable; fcntl.flock already makes this module Linux-only.
