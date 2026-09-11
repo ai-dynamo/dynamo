@@ -78,6 +78,14 @@ def _detect_record_format(record: Dict[str, Any]) -> Optional[TraceFormat]:
     return None
 
 
+def _event_type(record: Dict[str, Any]) -> Optional[str]:
+    event = record.get("event", record)
+    if not isinstance(event, dict):
+        return None
+    value = event.get("event_type")
+    return value if isinstance(value, str) else None
+
+
 def detect_trace_format(dataset: str) -> Optional[TraceFormat]:
     """Detect a Mooncake or Dynamo request-trace-v1 warmup dataset.
 
@@ -92,6 +100,8 @@ def detect_trace_format(dataset: str) -> Optional[TraceFormat]:
                 record = _load_json_line(path, line_number, line)
                 trace_format = _detect_record_format(record)
                 if trace_format is None:
+                    if _event_type(record) not in (None, "request_end"):
+                        continue
                     raise ValueError(
                         f"Unsupported warmup trace format at {path}:{line_number}"
                     )
@@ -140,8 +150,13 @@ def _parse_dynamo_row(record: Dict[str, Any], location: str) -> Optional[TraceRo
     replay = request.get("replay")
     if not isinstance(replay, dict):
         raise ValueError(f"request payload is missing replay metrics at {location}")
+    timestamp_source, timestamp_field = (
+        (request, "request_received_ms")
+        if request.get("request_received_ms") is not None
+        else (event, "event_time_unix_ms")
+    )
     return (
-        _number(request, "request_received_ms", location),
+        _number(timestamp_source, timestamp_field, location),
         _length(replay, "input_length", location),
         _length(request, "output_tokens", location),
     )
@@ -157,6 +172,11 @@ def _iter_trace_rows(
                     continue
                 location = f"{path}:{line_number}"
                 record = _load_json_line(path, line_number, line)
+                if trace_format == "dynamo" and _event_type(record) not in (
+                    None,
+                    "request_end",
+                ):
+                    continue
                 actual_format = _detect_record_format(record)
                 if actual_format != trace_format:
                     raise ValueError(
@@ -243,6 +263,25 @@ def extract_metrics_from_trace(
     trace_format = detect_trace_format(dataset)
     if trace_format is None:
         return []
+    return _extract_metrics(paths, trace_format, throughput_adjustment_interval_seconds)
+
+
+def extract_metrics_from_trace_paths(
+    datasets: Sequence[str | Path],
+    trace_format: TraceFormat,
+    throughput_adjustment_interval_seconds: int,
+) -> List[Dict[str, Any]]:
+    """Extract warmup metrics from an explicit ordered set of trace files.
+
+    The public simulation traffic contract already resolves source globs and
+    directories into ``trace_paths``. Keeping that resolved list intact is
+    important for Dynamo request-trace shards: timestamps share one global
+    origin and must be bucketed together rather than per file.
+    """
+
+    paths = _reject_duplicate_copies([Path(dataset) for dataset in datasets])
+    if not paths:
+        raise ValueError("At least one warmup trace path is required")
     return _extract_metrics(paths, trace_format, throughput_adjustment_interval_seconds)
 
 

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::CancellationToken;
-use crate::discovery::{DiscoveryMetadata, MetadataSnapshot};
+use crate::discovery::{DiscoveryEvent, DiscoveryMetadata};
 use anyhow::Result;
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Pod;
@@ -13,58 +13,107 @@ use kube::{
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::Notify;
-use tokio::time::{Duration, timeout};
+use tokio::sync::{RwLock, broadcast, mpsc};
 
 use super::crd::DynamoWorkerMetadata;
 use super::utils::{KubeDiscoveryMode, PodInfo, extract_endpoint_info, extract_ready_containers};
 
-const DEBOUNCE_DURATION: Duration = Duration::from_millis(500);
+mod state;
 
-#[derive(Clone)]
-struct CachedCrMetadata {
-    metadata: Arc<DiscoveryMetadata>,
-    generation: i64,
-    uid: Option<String>,
+use state::{BatchChanges, CachedCrMetadata, JoinTable, ReadinessIndex, ReadyEntry, StateChange};
+
+const SOURCE_CHANNEL_CAPACITY: usize = 1024;
+
+#[derive(Debug, PartialEq, Eq)]
+enum ReadinessEvent {
+    Apply {
+        object_key: String,
+        entries: Vec<(String, ReadyEntry)>,
+    },
+    Delete {
+        object_key: String,
+    },
+    Rebuild,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct CrRevision {
-    generation: i64,
-    uid: Option<String>,
+enum CrEvent {
+    Apply(DynamoWorkerMetadata),
+    Delete(DynamoWorkerMetadata),
+    Rebuild,
 }
 
-struct AggregatedSnapshot {
-    snapshot: MetadataSnapshot,
-    revisions: HashMap<u64, CrRevision>,
-}
-
-fn snapshot_has_changes(
-    snapshot: &MetadataSnapshot,
-    previous_snapshot: &MetadataSnapshot,
-    revisions: &HashMap<u64, CrRevision>,
-    previous_revisions: &HashMap<u64, CrRevision>,
-) -> bool {
-    let metadata_changed = snapshot.has_changes_from(previous_snapshot);
-    let revisions_changed = revisions != previous_revisions;
-    if revisions_changed && !metadata_changed {
-        tracing::debug!("DynamoWorkerMetadata CR identity changed");
-    }
-    metadata_changed || revisions_changed
-}
-
-/// Readiness data source for the discovery daemon.
-///
-/// Pod mode watches EndpointSlices (one entry per ready pod).
-/// Container mode watches Pods directly (one entry per ready container).
-/// Both produce the same (instance_id, cr_key) tuples for snapshot correlation.
 enum DiscoverySource {
     EndpointSlice(reflector::Store<EndpointSlice>),
     Pod(reflector::Store<Pod>),
 }
 
+fn endpoint_slice_update(slice: &EndpointSlice) -> Option<(String, Vec<(String, ReadyEntry)>)> {
+    let object_key = slice.metadata.name.clone()?;
+    let entries = extract_endpoint_info(slice)
+        .into_iter()
+        .map(|(instance_id, cr_key, pod_uid)| (cr_key, ReadyEntry::new(instance_id, pod_uid)))
+        .collect();
+    Some((object_key, entries))
+}
+
+fn pod_update(pod: &Pod) -> Option<(String, Vec<(String, ReadyEntry)>)> {
+    let object_key = pod.metadata.name.clone()?;
+    let entries = extract_ready_containers(pod)
+        .into_iter()
+        .map(|(instance_id, cr_key, pod_uid)| (cr_key, ReadyEntry::new(instance_id, pod_uid)))
+        .collect();
+    Some((object_key, entries))
+}
+
+fn endpoint_slice_event(event: watcher::Event<EndpointSlice>) -> Option<ReadinessEvent> {
+    match event {
+        watcher::Event::Apply(slice) => {
+            endpoint_slice_update(&slice).map(|(object_key, entries)| ReadinessEvent::Apply {
+                object_key,
+                entries,
+            })
+        }
+        watcher::Event::Delete(slice) => slice
+            .metadata
+            .name
+            .map(|object_key| ReadinessEvent::Delete { object_key }),
+        watcher::Event::InitDone => Some(ReadinessEvent::Rebuild),
+        watcher::Event::Init | watcher::Event::InitApply(_) => None,
+    }
+}
+
+fn pod_event(event: watcher::Event<Pod>) -> Option<ReadinessEvent> {
+    match event {
+        watcher::Event::Apply(pod) => {
+            pod_update(&pod).map(|(object_key, entries)| ReadinessEvent::Apply {
+                object_key,
+                entries,
+            })
+        }
+        watcher::Event::Delete(pod) => pod
+            .metadata
+            .name
+            .map(|object_key| ReadinessEvent::Delete { object_key }),
+        watcher::Event::InitDone => Some(ReadinessEvent::Rebuild),
+        watcher::Event::Init | watcher::Event::InitApply(_) => None,
+    }
+}
+
+fn cr_event(event: watcher::Event<DynamoWorkerMetadata>) -> Option<CrEvent> {
+    match event {
+        watcher::Event::Apply(cr) => Some(CrEvent::Apply(cr)),
+        watcher::Event::Delete(cr) => Some(CrEvent::Delete(cr)),
+        watcher::Event::InitDone => Some(CrEvent::Rebuild),
+        watcher::Event::Init | watcher::Event::InitApply(_) => None,
+    }
+}
+
 impl DiscoverySource {
-    async fn new(pod_info: &PodInfo, kube_client: KubeClient, notify: Arc<Notify>) -> Self {
+    fn new(
+        pod_info: &PodInfo,
+        kube_client: KubeClient,
+        events: mpsc::Sender<ReadinessEvent>,
+    ) -> Self {
         let labels = Config::default()
             .labels("nvidia.com/dynamo-discovery-backend=kubernetes")
             .labels("nvidia.com/dynamo-discovery-enabled=true");
@@ -73,82 +122,81 @@ impl DiscoverySource {
             KubeDiscoveryMode::Pod => {
                 let api: Api<EndpointSlice> = Api::namespaced(kube_client, &pod_info.pod_namespace);
                 let (reader, writer) = reflector::store();
-
                 tracing::info!("Daemon watching EndpointSlices (pod mode)");
 
-                let stream = reflector(writer, watcher(api, labels))
-                    .default_backoff()
-                    .touched_objects()
-                    .for_each(move |res| {
+                let stream = reflector(writer, watcher(api, labels)).default_backoff();
+                tokio::spawn(async move {
+                    tokio::pin!(stream);
+                    while let Some(res) = stream.next().await {
                         match res {
-                            Ok(obj) => {
-                                tracing::debug!(
-                                    name = obj.metadata.name.as_deref().unwrap_or("?"),
-                                    "EndpointSlice reflector updated"
-                                );
-                                notify.notify_one();
+                            Ok(event) => {
+                                if let Some(event) = endpoint_slice_event(event)
+                                    && events.send(event).await.is_err()
+                                {
+                                    break;
+                                }
                             }
                             Err(e) => {
                                 tracing::warn!("EndpointSlice reflector error: {e}");
-                                notify.notify_one();
                             }
                         }
-                        futures::future::ready(())
-                    });
-                tokio::spawn(stream);
+                    }
+                });
 
                 Self::EndpointSlice(reader)
             }
-
             KubeDiscoveryMode::Container => {
                 let api: Api<Pod> = Api::namespaced(kube_client, &pod_info.pod_namespace);
                 let (reader, writer) = reflector::store();
-
                 tracing::info!("Daemon watching Pods (container mode)");
 
-                let stream = reflector(writer, watcher(api, labels))
-                    .default_backoff()
-                    .touched_objects()
-                    .for_each(move |res| {
+                let stream = reflector(writer, watcher(api, labels)).default_backoff();
+                tokio::spawn(async move {
+                    tokio::pin!(stream);
+                    while let Some(res) = stream.next().await {
                         match res {
-                            Ok(obj) => {
-                                tracing::debug!(
-                                    name = obj.metadata.name.as_deref().unwrap_or("?"),
-                                    "Pod reflector updated"
-                                );
-                                notify.notify_one();
+                            Ok(event) => {
+                                if let Some(event) = pod_event(event)
+                                    && events.send(event).await.is_err()
+                                {
+                                    break;
+                                }
                             }
                             Err(e) => {
                                 tracing::warn!("Pod reflector error: {e}");
-                                notify.notify_one();
                             }
                         }
-                        futures::future::ready(())
-                    });
-                tokio::spawn(stream);
+                    }
+                });
 
                 Self::Pod(reader)
             }
         }
     }
 
-    fn ready_entries(&self) -> Vec<(u64, String)> {
+    fn rebuild_index(&self) -> ReadinessIndex {
+        let mut index = ReadinessIndex::default();
         match self {
-            Self::EndpointSlice(reader) => reader
-                .state()
-                .iter()
-                .flat_map(|s| extract_endpoint_info(s.as_ref()))
-                .collect(),
-            Self::Pod(reader) => reader
-                .state()
-                .iter()
-                .flat_map(|p| extract_ready_containers(p.as_ref()))
-                .collect(),
+            Self::EndpointSlice(reader) => {
+                for slice in reader.state() {
+                    if let Some((object_key, entries)) = endpoint_slice_update(slice.as_ref()) {
+                        index.replace_object(object_key, entries);
+                    }
+                }
+            }
+            Self::Pod(reader) => {
+                for pod in reader.state() {
+                    if let Some((object_key, entries)) = pod_update(pod.as_ref()) {
+                        index.replace_object(object_key, entries);
+                    }
+                }
+            }
         }
+        index
     }
 }
 
-/// Discovers and aggregates metadata from DynamoWorkerMetadata CRs in the cluster
+/// Discovers and aggregates metadata from DynamoWorkerMetadata CRs in the cluster.
 #[derive(Clone)]
 pub(super) struct DiscoveryDaemon {
     kube_client: KubeClient,
@@ -169,104 +217,99 @@ impl DiscoveryDaemon {
         })
     }
 
-    /// Run the discovery daemon.
-    ///
-    /// Watches a readiness source and DynamoWorkerMetadata CRs. An entry is
-    /// included in the snapshot only if it appears ready AND has valid current
-    /// or cached metadata from a matching CR.
     pub async fn run(
         self,
-        watch_tx: tokio::sync::watch::Sender<Arc<MetadataSnapshot>>,
+        list_state: Arc<RwLock<HashMap<u64, Arc<DiscoveryMetadata>>>>,
+        event_tx: broadcast::Sender<DiscoveryEvent>,
     ) -> Result<()> {
         tracing::info!("Discovery daemon starting");
 
-        let notify = Arc::new(Notify::new());
+        let (readiness_tx, mut readiness_rx) = mpsc::channel(SOURCE_CHANNEL_CAPACITY);
+        let source = DiscoverySource::new(&self.pod_info, self.kube_client.clone(), readiness_tx);
 
-        // Readiness source — EndpointSlice or Pod depending on mode
-        let source =
-            DiscoverySource::new(&self.pod_info, self.kube_client.clone(), notify.clone()).await;
-
-        // DynamoWorkerMetadata CR reflector
         let metadata_crs: Api<DynamoWorkerMetadata> =
             Api::namespaced(self.kube_client.clone(), &self.pod_info.pod_namespace);
-
         let (cr_reader, cr_writer) = reflector::store();
-        let cr_watch_config = Config::default();
+        let (cr_tx, mut cr_rx) = mpsc::channel(SOURCE_CHANNEL_CAPACITY);
 
         tracing::info!(
             "Daemon watching DynamoWorkerMetadata CRs in namespace: {}",
             self.pod_info.pod_namespace
         );
 
-        let notify_cr = notify.clone();
-        let cr_reflector_stream = reflector(cr_writer, watcher(metadata_crs, cr_watch_config))
-            .default_backoff()
-            .touched_objects()
-            .for_each(move |res| {
+        let cr_reflector_stream =
+            reflector(cr_writer, watcher(metadata_crs, Config::default())).default_backoff();
+        tokio::spawn(async move {
+            tokio::pin!(cr_reflector_stream);
+            while let Some(res) = cr_reflector_stream.next().await {
                 match res {
-                    Ok(obj) => {
-                        tracing::debug!(
-                            cr_name = obj.metadata.name.as_deref().unwrap_or("unknown"),
-                            "DynamoWorkerMetadata CR reflector updated"
-                        );
-                        notify_cr.notify_one();
+                    Ok(event) => {
+                        if let Some(event) = cr_event(event)
+                            && cr_tx.send(event).await.is_err()
+                        {
+                            break;
+                        }
                     }
                     Err(e) => {
                         tracing::warn!("DynamoWorkerMetadata CR reflector error: {e}");
-                        notify_cr.notify_one();
                     }
                 }
-                futures::future::ready(())
-            });
+            }
+        });
 
-        tokio::spawn(cr_reflector_stream);
-
-        // Event-driven loop with debouncing
-        let mut sequence = 0u64;
-        let mut prev_snapshot = MetadataSnapshot::empty();
-        let mut prev_revisions = HashMap::new();
-        // Keeps transient invalid CR updates from looking like removals.
+        let mut join_table = JoinTable::new();
+        let mut readiness_index = ReadinessIndex::default();
         let mut valid_cr_cache: HashMap<String, CachedCrMetadata> = HashMap::new();
 
         loop {
+            let mut changes = BatchChanges::default();
+
             tokio::select! {
-                _ = notify.notified() => {
-                    tokio::time::sleep(DEBOUNCE_DURATION).await;
-                    let _ = timeout(Duration::ZERO, notify.notified()).await;
-
-                    tracing::trace!("Debounce window elapsed, processing snapshot");
-
-                    match self
-                        .aggregate_snapshot(&source, &cr_reader, &mut valid_cr_cache, sequence)
-                        .await
-                    {
-                        Ok(aggregated) => {
-                            let AggregatedSnapshot { snapshot, revisions } = aggregated;
-                            if snapshot_has_changes(
-                                &snapshot,
-                                &prev_snapshot,
-                                &revisions,
-                                &prev_revisions,
-                            ) {
-                                prev_snapshot = snapshot.clone();
-                                prev_revisions = revisions;
-
-                                if watch_tx.send(Arc::new(snapshot)).is_err() {
-                                    tracing::debug!("No watch subscribers, daemon stopping");
-                                    break;
-                                }
-                            }
-
-                            sequence += 1;
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to aggregate snapshot: {e}");
-                        }
-                    }
-                }
                 _ = self.cancel_token.cancelled() => {
                     tracing::info!("Discovery daemon received cancellation");
                     break;
+                }
+                event = readiness_rx.recv() => {
+                    let Some(event) = event else {
+                        anyhow::bail!("Readiness reflector stream stopped");
+                    };
+                    apply_readiness_event(
+                        event,
+                        &source,
+                        &mut readiness_index,
+                        &mut join_table,
+                        &mut changes,
+                    );
+                }
+                event = cr_rx.recv() => {
+                    let Some(event) = event else {
+                        anyhow::bail!("DynamoWorkerMetadata reflector stream stopped");
+                    };
+                    apply_cr_event(
+                        event,
+                        &cr_reader,
+                        &mut valid_cr_cache,
+                        &mut join_table,
+                        &mut changes,
+                    );
+                }
+            }
+
+            let publication = changes.finish(&join_table);
+            if !publication.state_changes.is_empty() || !publication.events.is_empty() {
+                let mut state = list_state.write().await;
+                for change in publication.state_changes {
+                    match change {
+                        StateChange::Upsert(instance_id, metadata) => {
+                            state.insert(instance_id, metadata);
+                        }
+                        StateChange::Remove(instance_id) => {
+                            state.remove(&instance_id);
+                        }
+                    }
+                }
+                for event in publication.events {
+                    event_tx.send(event).ok();
                 }
             }
         }
@@ -274,171 +317,172 @@ impl DiscoveryDaemon {
         tracing::info!("Discovery daemon stopped");
         Ok(())
     }
+}
 
-    async fn aggregate_snapshot(
-        &self,
-        source: &DiscoverySource,
-        cr_reader: &reflector::Store<DynamoWorkerMetadata>,
-        valid_cr_cache: &mut HashMap<String, CachedCrMetadata>,
-        sequence: u64,
-    ) -> Result<AggregatedSnapshot> {
-        let start = std::time::Instant::now();
+fn apply_readiness_event(
+    event: ReadinessEvent,
+    source: &DiscoverySource,
+    readiness_index: &mut ReadinessIndex,
+    join_table: &mut JoinTable,
+    changes: &mut BatchChanges,
+) {
+    let affected = match event {
+        ReadinessEvent::Apply {
+            object_key,
+            entries,
+        } => readiness_index.replace_object(object_key, entries),
+        ReadinessEvent::Delete { object_key } => readiness_index.remove_object(&object_key),
+        ReadinessEvent::Rebuild => {
+            let next = source.rebuild_index();
+            let resolved = next.resolved_entries();
+            join_table.replace_readiness(resolved, changes);
+            *readiness_index = next;
+            return;
+        }
+    };
 
-        let ready_entries = source.ready_entries();
+    for cr_key in affected {
+        let ready = readiness_index.resolved(&cr_key);
+        join_table.set_readiness(cr_key, ready, changes);
+    }
+}
 
-        tracing::trace!(
-            "Daemon found {} ready entries (mode={:?})",
-            ready_entries.len(),
-            self.pod_info.mode,
-        );
-
-        let cr_state = cr_reader.state();
-        let mut cr_map: HashMap<String, CachedCrMetadata> = HashMap::new();
-        let mut invalid_crs: HashMap<String, Option<String>> = HashMap::new();
-        let mut observed_crs: HashSet<String> = HashSet::new();
-
-        for arc_cr in cr_state.iter() {
-            let Some(cr_name) = arc_cr.metadata.name.as_ref() else {
-                continue;
+fn apply_cr_event(
+    event: CrEvent,
+    cr_reader: &reflector::Store<DynamoWorkerMetadata>,
+    valid_cr_cache: &mut HashMap<String, CachedCrMetadata>,
+    join_table: &mut JoinTable,
+    changes: &mut BatchChanges,
+) {
+    match event {
+        CrEvent::Apply(cr) => {
+            if let Some((cr_key, cached)) = read_cr_object(&cr, valid_cr_cache) {
+                join_table.set_cr(cr_key, cached, changes);
+            }
+        }
+        CrEvent::Delete(cr) => {
+            let Some(cr_key) = cr.metadata.name else {
+                return;
             };
+            valid_cr_cache.remove(&cr_key);
+            join_table.set_cr(cr_key, None, changes);
+        }
+        CrEvent::Rebuild => {
+            let next = scan_cr_store(cr_reader, valid_cr_cache);
+            join_table.replace_crs(next, changes);
+        }
+    }
+}
 
-            observed_crs.insert(cr_name.clone());
-            let generation = arc_cr.metadata.generation.unwrap_or(0);
-            let uid = arc_cr.metadata.uid.clone();
-            let resource_version = arc_cr
-                .metadata
-                .resource_version
-                .as_deref()
-                .unwrap_or("unknown");
+fn scan_cr_store(
+    cr_reader: &reflector::Store<DynamoWorkerMetadata>,
+    valid_cr_cache: &mut HashMap<String, CachedCrMetadata>,
+) -> HashMap<String, CachedCrMetadata> {
+    let cr_state = cr_reader.state();
+    let mut new_right: HashMap<String, CachedCrMetadata> = HashMap::new();
+    let mut observed: HashSet<String> = HashSet::new();
 
-            if arc_cr.spec.data.is_null() {
-                tracing::debug!(
-                    cr_name = %cr_name,
-                    uid = %uid.as_deref().unwrap_or("unknown"),
-                    resource_version = %resource_version,
-                    generation,
-                    managed_fields = ?managed_fields_summary(arc_cr.as_ref()),
-                    "DynamoWorkerMetadata CR has null spec.data; reusing last valid metadata if available"
-                );
-                invalid_crs.insert(cr_name.clone(), uid);
-                continue;
-            }
-
-            match super::crd::deserialize_metadata(arc_cr.spec.data.clone()) {
-                Ok(metadata) => {
-                    tracing::trace!("Loaded metadata from CR '{cr_name}'");
-                    let cached = CachedCrMetadata {
-                        metadata: Arc::new(metadata),
-                        generation,
-                        uid,
-                    };
-                    cr_map.insert(cr_name.clone(), cached.clone());
-                    valid_cr_cache.insert(cr_name.clone(), cached);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        cr_name = %cr_name,
-                        uid = %uid.as_deref().unwrap_or("unknown"),
-                        resource_version = %resource_version,
-                        generation,
-                        managed_fields = ?managed_fields_summary(arc_cr.as_ref()),
-                        error = %e,
-                        "Failed to deserialize metadata from DynamoWorkerMetadata CR"
-                    );
-                    invalid_crs.insert(cr_name.clone(), uid);
-                }
+    for cr in cr_state {
+        if let Some((cr_name, cached)) = read_cr_object(cr.as_ref(), valid_cr_cache) {
+            observed.insert(cr_name.clone());
+            if let Some(cached) = cached {
+                new_right.insert(cr_name, cached);
             }
         }
+    }
 
-        valid_cr_cache.retain(|cr_name, _| observed_crs.contains(cr_name));
+    valid_cr_cache.retain(|cr_name, _| observed.contains(cr_name));
 
-        tracing::trace!("Daemon loaded {} DynamoWorkerMetadata CRs", cr_map.len());
+    tracing::trace!(
+        "CR scan: {} valid entries from {} observed CRs",
+        new_right.len(),
+        observed.len()
+    );
 
-        let mut instances: HashMap<u64, Arc<DiscoveryMetadata>> = HashMap::new();
-        let mut generations: HashMap<u64, i64> = HashMap::new();
-        let mut revisions: HashMap<u64, CrRevision> = HashMap::new();
+    new_right
+}
 
-        for (instance_id, cr_key) in ready_entries {
-            if let Some(cached) = cr_map.get(&cr_key) {
-                instances.insert(instance_id, cached.metadata.clone());
-                generations.insert(instance_id, cached.generation);
-                revisions.insert(
-                    instance_id,
-                    CrRevision {
-                        generation: cached.generation,
-                        uid: cached.uid.clone(),
-                    },
-                );
-                tracing::trace!(
-                    "Included '{}' (instance_id={:x}, generation={}) in snapshot",
-                    cr_key,
-                    instance_id,
-                    cached.generation
-                );
-            } else if let Some(uid) = invalid_crs.get(&cr_key) {
-                if let Some(cached) =
-                    cached_metadata_for_invalid_cr(&cr_key, uid.as_deref(), valid_cr_cache)
-                {
-                    instances.insert(instance_id, cached.metadata.clone());
-                    generations.insert(instance_id, cached.generation);
-                    revisions.insert(
-                        instance_id,
-                        CrRevision {
-                            generation: cached.generation,
-                            uid: cached.uid.clone(),
-                        },
-                    );
-                    tracing::trace!(
-                        "Included cached metadata for '{}' (instance_id={:x}, generation={}) because current CR data is not valid",
-                        cr_key,
-                        instance_id,
-                        cached.generation
-                    );
-                } else {
-                    tracing::trace!(
-                        "Skipping '{}' (instance_id={:x}): DynamoWorkerMetadata CR data is not valid yet",
-                        cr_key,
-                        instance_id
-                    );
-                }
-            } else {
-                tracing::trace!(
-                    "Skipping '{}' (instance_id={:x}): no DynamoWorkerMetadata CR found",
-                    cr_key,
-                    instance_id
-                );
-            }
-        }
+fn read_cr_object(
+    cr: &DynamoWorkerMetadata,
+    valid_cr_cache: &mut HashMap<String, CachedCrMetadata>,
+) -> Option<(String, Option<CachedCrMetadata>)> {
+    let cr_name = cr.metadata.name.clone()?;
+    let generation = cr.metadata.generation.unwrap_or(0);
+    let uid = cr.metadata.uid.clone();
+    let resource_version = cr.metadata.resource_version.as_deref().unwrap_or("unknown");
+    let owner_pod_uid = cr
+        .metadata
+        .owner_references
+        .as_ref()
+        .and_then(|refs| refs.iter().find(|owner| owner.kind == "Pod"))
+        .map(|owner| owner.uid.clone());
 
-        let elapsed = start.elapsed();
-
-        tracing::trace!(
-            "Daemon snapshot complete (seq={}): {} instances in {:?}",
-            sequence,
-            instances.len(),
-            elapsed
+    if cr.spec.data.is_null() {
+        tracing::debug!(
+            cr_name,
+            uid = %uid.as_deref().unwrap_or("unknown"),
+            resource_version,
+            generation,
+            managed_fields = ?managed_fields_summary(cr),
+            "DynamoWorkerMetadata CR has null spec.data; reusing last valid metadata if available"
         );
+        let cached = cached_metadata_for_invalid_cr(
+            &cr_name,
+            uid.as_deref(),
+            owner_pod_uid.as_deref(),
+            valid_cr_cache,
+        )
+        .cloned();
+        if cached.is_none() {
+            valid_cr_cache.remove(&cr_name);
+        }
+        return Some((cr_name, cached));
+    }
 
-        Ok(AggregatedSnapshot {
-            snapshot: MetadataSnapshot {
-                instances,
-                generations,
-                sequence,
-                timestamp: std::time::Instant::now(),
-            },
-            revisions,
-        })
+    match super::crd::deserialize_metadata(cr.spec.data.clone()) {
+        Ok(metadata) => {
+            tracing::trace!("Loaded metadata from CR '{cr_name}'");
+            let cached = CachedCrMetadata {
+                metadata: Arc::new(metadata),
+                uid,
+                owner_pod_uid,
+            };
+            valid_cr_cache.insert(cr_name.clone(), cached.clone());
+            Some((cr_name, Some(cached)))
+        }
+        Err(error) => {
+            tracing::warn!(
+                cr_name,
+                uid = %uid.as_deref().unwrap_or("unknown"),
+                resource_version,
+                generation,
+                managed_fields = ?managed_fields_summary(cr),
+                %error,
+                "Failed to deserialize metadata from DynamoWorkerMetadata CR"
+            );
+            let cached = cached_metadata_for_invalid_cr(
+                &cr_name,
+                uid.as_deref(),
+                owner_pod_uid.as_deref(),
+                valid_cr_cache,
+            )
+            .cloned();
+            if cached.is_none() {
+                valid_cr_cache.remove(&cr_name);
+            }
+            Some((cr_name, cached))
+        }
     }
 }
 
 fn cached_metadata_for_invalid_cr<'a>(
     cr_key: &str,
     uid: Option<&str>,
+    owner_pod_uid: Option<&str>,
     valid_cr_cache: &'a HashMap<String, CachedCrMetadata>,
 ) -> Option<&'a CachedCrMetadata> {
     let cached = valid_cr_cache.get(cr_key)?;
-
-    if cached.uid.as_deref() == uid {
+    if cached.uid.as_deref() == uid && cached.owner_pod_uid.as_deref() == owner_pod_uid {
         Some(cached)
     } else {
         None
@@ -480,61 +524,331 @@ fn managed_fields_summary(cr: &DynamoWorkerMetadata) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ManagedFieldsEntry;
+    use crate::component::{Instance, TransportType};
+    use crate::discovery::{DiscoveryEvent, DiscoveryInstance};
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ManagedFieldsEntry, OwnerReference};
 
-    #[test]
-    fn snapshot_detects_recreated_cr_with_same_generation() {
-        let mut previous_snapshot = MetadataSnapshot::empty();
-        previous_snapshot.generations.insert(1, 1);
-        let current_snapshot = previous_snapshot.clone();
-        let previous_revisions = HashMap::from([(
-            1,
-            CrRevision {
-                generation: 1,
-                uid: Some("uid-1".to_string()),
-            },
-        )]);
-        let current_revisions = HashMap::from([(
-            1,
-            CrRevision {
-                generation: 1,
-                uid: Some("uid-2".to_string()),
-            },
-        )]);
+    const TEST_POD_UID: &str = "pod-uid-test";
 
-        assert!(snapshot_has_changes(
-            &current_snapshot,
-            &previous_snapshot,
-            &current_revisions,
-            &previous_revisions,
-        ));
-    }
-
-    fn cached_cr(uid: &str) -> CachedCrMetadata {
+    fn make_cached(uid: &str) -> CachedCrMetadata {
         CachedCrMetadata {
             metadata: Arc::new(DiscoveryMetadata::new()),
-            generation: 7,
             uid: Some(uid.to_string()),
+            owner_pod_uid: Some(TEST_POD_UID.to_string()),
         }
+    }
+
+    fn make_cached_with_endpoint(uid: &str) -> CachedCrMetadata {
+        let mut meta = DiscoveryMetadata::new();
+        meta.register_endpoint(DiscoveryInstance::Endpoint(Instance {
+            namespace: "ns".to_string(),
+            component: "comp".to_string(),
+            endpoint: "ep".to_string(),
+            instance_id: 99,
+            transport: TransportType::Tcp("127.0.0.1:1234".to_string()),
+            device_type: None,
+            request_plane_codec: None,
+        }))
+        .unwrap();
+        CachedCrMetadata {
+            metadata: Arc::new(meta),
+            uid: Some(uid.to_string()),
+            owner_pod_uid: Some(TEST_POD_UID.to_string()),
+        }
+    }
+
+    fn readiness(entries: &[(&str, u64)]) -> HashMap<String, (u64, String)> {
+        entries
+            .iter()
+            .map(|(k, id)| (k.to_string(), (*id, TEST_POD_UID.to_string())))
+            .collect()
+    }
+
+    #[test]
+    fn join_table_detects_cr_recreated_with_same_generation() {
+        let mut table = JoinTable::new();
+
+        table.apply_readiness_scan(readiness(&[("worker-a", 1u64)]));
+
+        table.apply_cr_scan(HashMap::from([(
+            "worker-a".to_string(),
+            make_cached_with_endpoint("uid-1"),
+        )]));
+        assert!(table.known.contains_key(&1u64));
+
+        table.apply_cr_scan(HashMap::from([(
+            "worker-a".to_string(),
+            make_cached_with_endpoint("uid-2"),
+        )]));
+        assert_eq!(table.cr_uid("worker-a"), Some("uid-2"));
+    }
+
+    #[test]
+    fn join_table_removes_immediately_when_pod_not_ready() {
+        let mut table = JoinTable::new();
+
+        table.apply_readiness_scan(readiness(&[("worker-a", 1u64)]));
+        table.apply_cr_scan(HashMap::from([(
+            "worker-a".to_string(),
+            make_cached_with_endpoint("uid-1"),
+        )]));
+        assert!(table.known.contains_key(&1u64));
+
+        let events = table.apply_readiness_scan(HashMap::new());
+        assert!(!table.known.contains_key(&1u64));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, DiscoveryEvent::Removed(_)))
+        );
+    }
+
+    #[test]
+    fn join_table_adds_when_cr_arrives_after_pod_ready() {
+        let mut table = JoinTable::new();
+
+        let events = table.apply_readiness_scan(readiness(&[("worker-a", 1u64)]));
+        assert!(events.is_empty(), "no CR yet, should have no events");
+        assert!(!table.known.contains_key(&1u64));
+
+        let events = table.apply_cr_scan(HashMap::from([(
+            "worker-a".to_string(),
+            make_cached_with_endpoint("uid-1"),
+        )]));
+        assert!(!events.is_empty());
+        assert!(table.known.contains_key(&1u64));
+    }
+
+    #[test]
+    fn join_table_evicts_when_cr_removed() {
+        let mut table = JoinTable::new();
+
+        table.apply_readiness_scan(readiness(&[("worker-a", 1u64)]));
+        table.apply_cr_scan(HashMap::from([(
+            "worker-a".to_string(),
+            make_cached_with_endpoint("uid-1"),
+        )]));
+        assert!(table.known.contains_key(&1u64));
+
+        let events = table.apply_cr_scan(HashMap::new());
+        assert!(!table.known.contains_key(&1u64));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, DiscoveryEvent::Removed(_)))
+        );
+    }
+
+    #[test]
+    fn join_table_no_change_on_same_revision() {
+        let mut table = JoinTable::new();
+
+        table.apply_readiness_scan(readiness(&[("worker-a", 1u64)]));
+        table.apply_cr_scan(HashMap::from([(
+            "worker-a".to_string(),
+            make_cached_with_endpoint("uid-1"),
+        )]));
+
+        let events = table.apply_cr_scan(HashMap::from([(
+            "worker-a".to_string(),
+            make_cached_with_endpoint("uid-1"),
+        )]));
+        assert!(events.is_empty());
     }
 
     #[test]
     fn cached_metadata_for_invalid_cr_reuses_same_kube_object() {
         let mut cache = HashMap::new();
-        cache.insert("worker-a".to_string(), cached_cr("uid-1"));
+        cache.insert("worker-a".to_string(), make_cached("uid-1"));
 
-        let cached = cached_metadata_for_invalid_cr("worker-a", Some("uid-1"), &cache)
-            .expect("cache should be reused for the same CR UID");
+        let cached =
+            cached_metadata_for_invalid_cr("worker-a", Some("uid-1"), Some(TEST_POD_UID), &cache)
+                .expect("cache should be reused for the same CR and owner UIDs");
 
-        assert_eq!(cached.generation, 7);
+        assert_eq!(cached.uid.as_deref(), Some("uid-1"));
     }
 
     #[test]
     fn cached_metadata_for_invalid_cr_rejects_recreated_kube_object() {
         let mut cache = HashMap::new();
-        cache.insert("worker-a".to_string(), cached_cr("uid-1"));
+        cache.insert("worker-a".to_string(), make_cached("uid-1"));
 
-        assert!(cached_metadata_for_invalid_cr("worker-a", Some("uid-2"), &cache).is_none());
+        assert!(
+            cached_metadata_for_invalid_cr("worker-a", Some("uid-2"), Some(TEST_POD_UID), &cache,)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn cached_metadata_for_invalid_cr_rejects_new_pod_owner() {
+        let mut cache = HashMap::new();
+        cache.insert("worker-a".to_string(), make_cached("uid-1"));
+
+        assert!(
+            cached_metadata_for_invalid_cr("worker-a", Some("uid-1"), Some("new-pod-uid"), &cache,)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn invalid_cr_owner_change_discards_cached_metadata() {
+        let mut cache = HashMap::new();
+        cache.insert("worker-a".to_string(), make_cached("uid-1"));
+
+        let mut cr = DynamoWorkerMetadata::new(
+            "worker-a",
+            super::super::crd::DynamoWorkerMetadataSpec::new(serde_json::Value::Null),
+        );
+        cr.metadata.uid = Some("uid-1".to_string());
+        cr.metadata.owner_references = Some(vec![OwnerReference {
+            api_version: "v1".to_string(),
+            kind: "Pod".to_string(),
+            name: "worker-a".to_string(),
+            uid: "new-pod-uid".to_string(),
+            block_owner_deletion: None,
+            controller: Some(true),
+        }]);
+
+        let (cr_key, cached) =
+            read_cr_object(&cr, &mut cache).expect("named CR should be processed");
+        assert_eq!(cr_key, "worker-a");
+        assert!(cached.is_none());
+        assert!(!cache.contains_key("worker-a"));
+    }
+
+    #[test]
+    fn relist_events_only_wake_on_init_done() {
+        assert!(endpoint_slice_event(watcher::Event::Init).is_none());
+        assert!(pod_event(watcher::Event::Init).is_none());
+
+        let slice = EndpointSlice {
+            metadata: Default::default(),
+            address_type: "IPv4".to_string(),
+            endpoints: Vec::new(),
+            ports: None,
+        };
+        assert!(endpoint_slice_event(watcher::Event::InitApply(slice)).is_none());
+        assert_eq!(
+            endpoint_slice_event(watcher::Event::InitDone),
+            Some(ReadinessEvent::Rebuild)
+        );
+        assert!(matches!(
+            cr_event(watcher::Event::InitDone),
+            Some(CrEvent::Rebuild)
+        ));
+    }
+
+    #[test]
+    fn join_requires_matching_pod_uid() {
+        // Pod U2 arrives while old CR still has owner=U1 — must not join.
+        let mut table = JoinTable::new();
+
+        let new_left: HashMap<String, (u64, String)> =
+            HashMap::from([("worker-0".to_string(), (1u64, "pod-uid-U2".to_string()))]);
+        table.apply_readiness_scan(new_left);
+
+        let mut cr = make_cached_with_endpoint("cr-uid-1");
+        cr.owner_pod_uid = Some("pod-uid-U1".to_string()); // old owner
+        let events = table.apply_cr_scan(HashMap::from([("worker-0".to_string(), cr)]));
+
+        assert!(
+            events.is_empty(),
+            "stale CR owner must not join new pod incarnation"
+        );
+        assert!(!table.known.contains_key(&1u64));
+    }
+
+    #[test]
+    fn join_succeeds_when_pod_uid_matches_cr_owner() {
+        let mut table = JoinTable::new();
+
+        let new_left: HashMap<String, (u64, String)> =
+            HashMap::from([("worker-0".to_string(), (1u64, "pod-uid-U1".to_string()))]);
+        table.apply_readiness_scan(new_left);
+
+        let mut cr = make_cached_with_endpoint("cr-uid-1");
+        cr.owner_pod_uid = Some("pod-uid-U1".to_string());
+        let events = table.apply_cr_scan(HashMap::from([("worker-0".to_string(), cr)]));
+
+        assert!(
+            !events.is_empty(),
+            "matching UIDs must produce Added events"
+        );
+        assert!(table.known.contains_key(&1u64));
+    }
+
+    #[test]
+    fn new_pod_replaces_old_pod_after_uid_change() {
+        // Full incarnation cycle: U1 joins, U2 replaces, then U2's CR arrives.
+        let mut table = JoinTable::new();
+
+        // U1 ready + CR owner U1 → joined
+        let mut cr_u1 = make_cached_with_endpoint("cr-uid-1");
+        cr_u1.owner_pod_uid = Some("pod-uid-U1".to_string());
+        table.apply_readiness_scan(HashMap::from([(
+            "worker-0".to_string(),
+            (1u64, "pod-uid-U1".to_string()),
+        )]));
+        table.apply_cr_scan(HashMap::from([("worker-0".to_string(), cr_u1.clone())]));
+        assert!(table.known.contains_key(&1u64), "U1 should be in known");
+
+        // U2 replaces U1 in readiness (EndpointSlice updated)
+        let events = table.apply_readiness_scan(HashMap::from([(
+            "worker-0".to_string(),
+            (1u64, "pod-uid-U2".to_string()),
+        )]));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, DiscoveryEvent::Removed(_))),
+            "U1 departure must emit Removed"
+        );
+        assert!(!table.known.contains_key(&1u64), "U1 should be evicted");
+
+        // Old CR still present (GC hasn't run) — must not rejoin U2
+        let events = table.apply_cr_scan(HashMap::from([("worker-0".to_string(), cr_u1.clone())]));
+        assert!(
+            events.is_empty(),
+            "old CR must not rejoin new pod incarnation"
+        );
+
+        // New CR with owner U2 arrives → U2 joins
+        let mut cr_u2 = make_cached_with_endpoint("cr-uid-2");
+        cr_u2.owner_pod_uid = Some("pod-uid-U2".to_string());
+        let events = table.apply_cr_scan(HashMap::from([("worker-0".to_string(), cr_u2)]));
+        assert!(
+            events.iter().any(|e| matches!(e, DiscoveryEvent::Added(_))),
+            "U2 + matching CR must produce Added"
+        );
+        assert!(table.known.contains_key(&1u64), "U2 should be in known");
+    }
+
+    #[test]
+    fn cr_owner_change_evicts_joined_pod() {
+        // CR owner changes in-place while pod U1 is still ready → evict U1.
+        let mut table = JoinTable::new();
+
+        let mut cr = make_cached_with_endpoint("cr-uid-1");
+        cr.owner_pod_uid = Some("pod-uid-U1".to_string());
+        table.apply_readiness_scan(HashMap::from([(
+            "worker-0".to_string(),
+            (1u64, "pod-uid-U1".to_string()),
+        )]));
+        table.apply_cr_scan(HashMap::from([("worker-0".to_string(), cr)]));
+        assert!(table.known.contains_key(&1u64));
+
+        // CR updated with new owner U2 (in-place, same CR object, different owner)
+        let mut cr_new_owner = make_cached_with_endpoint("cr-uid-1");
+        cr_new_owner.owner_pod_uid = Some("pod-uid-U2".to_string());
+        let events = table.apply_cr_scan(HashMap::from([("worker-0".to_string(), cr_new_owner)]));
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, DiscoveryEvent::Removed(_))),
+            "CR owner change must evict the joined pod"
+        );
+        assert!(!table.known.contains_key(&1u64));
     }
 
     #[test]

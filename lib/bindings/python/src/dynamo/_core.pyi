@@ -68,6 +68,7 @@ class DistributedRuntime:
         enable_nats: Optional[bool] = None,
         *,
         event_plane: Optional[str] = None,
+        response_plane: Optional[str] = None,
     ) -> "DistributedRuntime":
         """
         Create a new DistributedRuntime.
@@ -78,6 +79,7 @@ class DistributedRuntime:
             request_plane: Request plane transport ("tcp" or "nats")
             enable_nats: Deprecated; NATS enablement is inferred from runtime config
             event_plane: Event plane transport ("nats" or "zmq")
+            response_plane: Response plane transport ("tcp" or "quic")
         """
         ...
 
@@ -147,6 +149,8 @@ class Endpoint:
     """
 
     ...
+
+    async def first_token_source(self, worker_type: WorkerType) -> Optional[FirstTokenSource]: ...
 
     async def serve_endpoint(self, handler: RequestHandler, graceful_shutdown: bool = True, metrics_labels: Optional[List[Tuple[str, str]]] = None, health_check_payload: Optional[Dict[str, Any]] = None) -> None:
         """
@@ -456,6 +460,12 @@ class ContextMetadata:
     def items(self) -> List[Tuple[str, str]]: ...
     def clear(self) -> None: ...
     def copy(self) -> Dict[str, str]: ...
+
+class FirstTokenSource:
+    """Endpoint-scoped worker prefill-completion source."""
+
+    def bind(self, context: Context, dp_rank: Optional[int] = None) -> None: ...
+
 
 class Context:
     """
@@ -1173,6 +1183,7 @@ class KvEventPublisher:
         batching_timeout_ms: Optional[int] = None,
         image_token_id: Optional[int] = None,
         kv_state_endpoint: Optional[str] = None,
+        video_token_id: Optional[int] = None,
     ) -> None:
         """
         Create a `KvEventPublisher` object.
@@ -1193,7 +1204,9 @@ class KvEventPublisher:
             zmq_topic: ZMQ topic to subscribe to (defaults to "" when zmq_endpoint is set)
             batching_timeout_ms: Cross-list batching timeout in milliseconds. None/0
                 flushes at each submitted source-list boundary.
+            image_token_id: Optional model image-placeholder token for exact MM routing.
             kv_state_endpoint: KV event ownership endpoint; defaults to endpoint.
+            video_token_id: Optional model video-placeholder token for exact MM routing.
         """
 
     def publish_stored(
@@ -1705,6 +1718,7 @@ class RouterConfig:
         active_prefill_tokens_threshold_frac: Optional[float] = None,
         enforce_disagg: bool = False,
         session_affinity_ttl_secs: Optional[int] = None,
+        session_affinity_mode: str = "hard",
     ) -> None:
         """
         Create a RouterConfig.
@@ -1717,7 +1731,24 @@ class RouterConfig:
             active_prefill_tokens_threshold_frac: Fraction of max_num_batched_tokens for busy detection
             enforce_disagg: Deprecated and ignored. Routing topology and readiness come from registered worker types.
             session_affinity_ttl_secs: Router-local session-affinity idle TTL in seconds.
+            session_affinity_mode: Session binding behavior: ``hard`` or ``soft``.
         """
+        ...
+
+class LoadThresholdConfig:
+    """Overload-admission thresholds shared by all policies in one routing load context."""
+
+    active_decode_blocks_threshold: Optional[float]
+    active_prefill_tokens_threshold: Optional[int]
+    active_prefill_tokens_threshold_frac: Optional[float]
+
+    def __init__(
+        self,
+        *,
+        active_decode_blocks_threshold: Optional[float] = None,
+        active_prefill_tokens_threshold: Optional[int] = None,
+        active_prefill_tokens_threshold_frac: Optional[float] = None,
+    ) -> None:
         ...
 
 class AicPerfConfig:
@@ -1759,6 +1790,7 @@ class KvRouterConfig:
         router_track_prefill_tokens: bool = True,
         router_prefill_load_model: str = "none",
         router_ttl_secs: float = 120.0,
+        router_approximate_cache_policy: Literal["ttl", "lru"] = "ttl",
         router_queue_threshold: Optional[float] = None,
         router_event_threads: int = 4,
         router_queue_policy: str = "fcfs",
@@ -1816,6 +1848,8 @@ class KvRouterConfig:
                 "none" keeps static prompt load accounting.
                 "aic" decays the oldest active prefill request using AIC-predicted duration.
             router_ttl_secs: TTL for blocks in seconds when not using KV events (default: 120.0)
+            router_approximate_cache_policy: Process-local approximate-index retention policy,
+                "ttl" or "lru" (default: "ttl"). LRU requires use_kv_events=False.
             router_queue_threshold: Optional queue threshold fraction for prefill token capacity (default: None).
                 Requests are queued if all workers exceed this fraction of max_num_batched_tokens.
                 Enables priority scheduling via request priority hints.
@@ -1968,18 +2002,7 @@ class MockEngineArgs:
         router_queue_policy: Optional[str] = None,
         sglang: Optional[SglangArgs] = None,
         trtllm: Optional[TrtllmArgs] = None,
-        num_g2_blocks: Optional[int] = None,
-        num_g3_blocks: Optional[int] = None,
-        offload_batch_size: Optional[int] = None,
-        bandwidth_g1_to_g2_gbps: Optional[float] = None,
-        bandwidth_g2_to_g1_gbps: Optional[float] = None,
-        bandwidth_g2_to_g3_gbps: Optional[float] = None,
-        bandwidth_g3_to_g2_gbps: Optional[float] = None,
-        enable_g4_storage: bool = False,
-        bandwidth_g2_to_g4_gbps: Optional[float] = None,
-        bandwidth_g4_to_g2_gbps: Optional[float] = None,
         max_model_len: Optional[int] = None,
-        g1_backend: Optional[str] = None,
     ) -> None:
         ...
 
@@ -2014,9 +2037,6 @@ class MockEngineArgs:
     def enable_prefix_caching(self, value: bool) -> None: ...
 
     @property
-    def g1_backend(self) -> str: ...
-
-    @property
     def enable_local_indexer(self) -> bool: ...
 
     @property
@@ -2036,36 +2056,6 @@ class MockEngineArgs:
 
     @property
     def response_replay_trace_path(self) -> Optional[os.PathLike[str]]: ...
-
-    @property
-    def num_g2_blocks(self) -> Optional[int]: ...
-
-    @property
-    def num_g3_blocks(self) -> Optional[int]: ...
-
-    @property
-    def offload_batch_size(self) -> Optional[int]: ...
-
-    @property
-    def bandwidth_g1_to_g2_gbps(self) -> Optional[float]: ...
-
-    @property
-    def bandwidth_g2_to_g1_gbps(self) -> Optional[float]: ...
-
-    @property
-    def bandwidth_g2_to_g3_gbps(self) -> Optional[float]: ...
-
-    @property
-    def bandwidth_g3_to_g2_gbps(self) -> Optional[float]: ...
-
-    @property
-    def enable_g4_storage(self) -> bool: ...
-
-    @property
-    def bandwidth_g2_to_g4_gbps(self) -> Optional[float]: ...
-
-    @property
-    def bandwidth_g4_to_g2_gbps(self) -> Optional[float]: ...
 
     @property
     def aic_backend(self) -> Optional[str]: ...
@@ -2323,10 +2313,10 @@ def lora_name_to_id(lora_name: str) -> int:
     ...
 
 def resolve_routing_image_token_id(model_id: str, model_dir: str) -> Optional[int]:
-    """Routing-side image-placeholder token id for a model, resolved with the
-    same per-family logic the frontend's MM-aware KV routing uses. Returns None
-    when the model isn't in the MM-routing registry or its config can't be read.
-    Only present when the bindings are built with the ``mm-routing`` feature.
+    """Routing-side image-placeholder token id resolved with the frontend's static
+    checks. Returns None when its model prerequisites are unavailable. Request-time
+    gates require a frontend-issued canonical MM UUID in worker KV events. Only
+    present when the bindings are built with the ``mm-routing`` feature.
     """
     ...
 
@@ -2504,6 +2494,7 @@ def run_mocker_trace_replay(
         "mooncake_delta",
         "agentic_mooncake",
         "agentic-mooncake",
+        "weka",
         "applied_compute_agentic",
         "dynamo",
     ] = "mooncake",
@@ -2518,6 +2509,7 @@ def run_mocker_trace_replay(
     capture_per_request: bool = False,
     capture_planner_details: bool = True,
     scaling_policy: Optional[Any] = None,
+    agentic_lanes: Optional[int] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 
@@ -2836,6 +2828,13 @@ class KvDcRelay:
         publication_threshold: int = 16,
         publication_delay_ms: int = 1,
         recovery_attempt_timeout_ms: int = 30_000,
+        *,
+        namespaces: Optional[List[str]] = None,
+        endpoint_prefixes: Optional[List[str]] = None,
+        watch_all: Optional[bool] = None,
+        expected_unique_blocks: int = 1_048_576,
+        bind: Optional[str] = None,
+        tuning: Optional[Dict[str, int]] = None,
     ) -> None:
         ...
 
@@ -2845,10 +2844,22 @@ class KvDcRelay:
     async def health(self) -> Dict[str, Any]:
         ...
 
+    async def stats(self) -> Dict[str, Any]:
+        """Available only in builds with the ckf-diagnostics Cargo feature."""
+        ...
+
+    async def snapshot(self, serving_endpoint: str) -> Dict[str, Any]:
+        """Available only in builds with the ckf-diagnostics Cargo feature."""
+        ...
+
     async def flush(self) -> None:
         ...
 
     async def shutdown(self) -> None:
+        ...
+
+    async def wait_for_shutdown(self) -> None:
+        """Resolve once the relay has stopped, whether by shutdown() or a terminal host failure."""
         ...
 
 class KvStateAgentHost:
@@ -2876,11 +2887,6 @@ class KvStateAttachmentOwner:
     async def start(self) -> None:
         ...
 
-    async def set_cache_readable(
-        self, global_dp_rank: int, readable: bool
-    ) -> None:
-        ...
-
     async def close(self) -> None:
         ...
 
@@ -2895,6 +2901,10 @@ class KvRouter:
         block_size: int,
         kv_router_config: KvRouterConfig,
         aic_perf_config: Optional[AicPerfConfig] = None,
+        session_affinity_ttl_secs: Optional[int] = None,
+        *,
+        load_threshold_config: Optional[LoadThresholdConfig] = None,
+        session_affinity_mode: str = "hard",
     ) -> None:
         """
         Create a new KvRouter instance.
@@ -2904,6 +2914,9 @@ class KvRouter:
             block_size: The KV cache block size
             kv_router_config: Configuration for the KV router
             aic_perf_config: Optional AIC perf-model config for effective prefill load tracking
+            session_affinity_ttl_secs: Optional router-local session-affinity idle TTL in seconds
+            load_threshold_config: Optional overload-admission thresholds; all checks are disabled when omitted
+            session_affinity_mode: Session binding behavior: ``hard`` or ``soft``
         """
         ...
 
@@ -3349,6 +3362,16 @@ class backend:
         """Run the native SGLang sidecar with CLI-style arguments."""
         ...
 
+    @staticmethod
+    def _run_trtllm_sidecar(argv: Optional[List[str]] = None) -> None:
+        """Run the native TensorRT-LLM sidecar with CLI-style arguments."""
+        ...
+
+    @staticmethod
+    def _run_vllm_sidecar(argv: Optional[List[str]] = None) -> None:
+        """Run the native vLLM sidecar with CLI-style arguments."""
+        ...
+
     class DisaggregationMode:
         # Mirrors `dynamo_backend_common::DisaggregationMode`. Engines consult
         # this on the WorkerConfig to switch their per-mode protocol behavior;
@@ -3371,6 +3394,7 @@ class backend:
             data_parallel_start_rank: Optional[int] = None,
             bootstrap_host: Optional[str] = None,
             bootstrap_port: Optional[int] = None,
+            enable_eagle: bool = False,
         ) -> None: ...
         @property
         def context_length(self) -> Optional[int]: ...
@@ -3390,6 +3414,8 @@ class backend:
         def bootstrap_host(self) -> Optional[str]: ...
         @property
         def bootstrap_port(self) -> Optional[int]: ...
+        @property
+        def enable_eagle(self) -> bool: ...
 
     class EngineConfig:
         def __init__(

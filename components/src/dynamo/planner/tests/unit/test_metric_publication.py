@@ -148,6 +148,20 @@ class TestPublishInventoryAndGpuHours:
         assert planner._cumulative_gpu_hours == pytest.approx(0.8)
         pm.gpu_hours.set.assert_called_with(pytest.approx(0.8))
 
+    def test_cumulative_gpu_hours_charges_sidecar_gpu_cost(self):
+        planner = _make_planner()
+        state = planner.environment.deployment_state()
+        state.prefill.gpus_per_replica = 3
+        state.decode.gpus_per_replica = 5
+
+        planner._publish_inventory_and_gpu_hours(_tick_input(now_s=1000.0))
+        planner._publish_inventory_and_gpu_hours(
+            _tick_input(now_s=1180.0, num_p=2, num_d=3)
+        )
+
+        # (2 * 3 + 3 * 5) GPUs * 180 seconds / 3600 = 1.05 GPU-hours.
+        assert planner._cumulative_gpu_hours == pytest.approx(1.05)
+
     def test_accumulates_across_multiple_ticks(self):
         """gpu_hours increases monotonically across successive ticks."""
         planner = _make_planner()

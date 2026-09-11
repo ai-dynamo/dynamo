@@ -5,6 +5,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    ffi::OsString,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -15,15 +16,15 @@ use anyhow::{Context, Result};
 use dynamo_kv_router::{
     identity::{CacheOwnerId, IndexerDomainId},
     indexer::KvStateProtocolVersion,
-    protocols::{WorkerId, WorkerWithDpRank},
+    protocols::{RouterHintSourceMetadata, WorkerId, WorkerWithDpRank},
 };
 use dynamo_runtime::{
     component::{Endpoint, Instance, build_transport_type},
+    config::environment_names::llm::DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS as HOST_DISCOVERY_TIMEOUT_ENV,
     discovery::{
         Discovery, DiscoveryInstance, DiscoveryQuery, DiscoverySpec, EventScope, EventSourceQuery,
     },
-    pipeline::{AddressedPushRouter, AddressedRequest, AsyncEngine, ManyOut, SingleIn},
-    protocols::{EndpointId, maybe_error::MaybeError},
+    protocols::EndpointId,
     traits::DistributedRuntimeProvider,
 };
 use futures::StreamExt;
@@ -36,12 +37,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::discovery::kv_state_agent::{
     KV_STATE_ATTACHMENT_INTENT_TOPIC_V2, KV_STATE_HOST_TOPIC_V2, KvStateAttachmentIntent,
-    KvStateHostAdvertisement, KvStateHostControlRequest, KvStateHostStatus, KvStateIngressProtocol,
+    KvStateHostAdvertisement, KvStateIngressProtocol,
 };
 
 const HOST_COMPONENT: &str = "kv_state_agent";
+const DEFAULT_HOST_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const JSON_SAFE_MASK: u64 = (1u64 << 53) - 1;
-const HOST_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct KvStateAttachmentDescriptor {
@@ -54,16 +55,16 @@ pub struct KvStateAttachmentDescriptor {
     pub raw_zmq_endpoint: String,
     pub raw_topic: String,
     pub image_token_id: Option<u32>,
+    pub video_token_id: Option<u32>,
+    pub router_hint_source: Option<RouterHintSourceMetadata>,
 }
 
 /// Process-scoped owner of every state-agent intent emitted by one backend worker.
 pub struct KvStateAttachmentOwner {
     component: dynamo_runtime::component::Component,
-    producer_instance: Instance,
     host: KvStateHostAdvertisement,
     intents: HashMap<u32, KvStateAttachmentIntent>,
     registrations: Arc<Mutex<Vec<DiscoveryInstance>>>,
-    addressed: Arc<AddressedPushRouter>,
     closed: AtomicBool,
 }
 
@@ -77,17 +78,14 @@ impl KvStateAttachmentOwner {
         let component = endpoint.component().clone();
         let host = discover_single_host(&component).await?;
         let producer_instance = producer_instance(&endpoint).await?;
-        let addressed = AddressedPushRouter::from_runtime_provider(&component).await?;
 
         let intents = materialize_intents(&host, &producer_instance, worker_id, descriptors)?;
 
         let owner = Arc::new(Self {
             component,
-            producer_instance,
             host,
             intents,
             registrations: Arc::new(Mutex::new(Vec::new())),
-            addressed,
             closed: AtomicBool::new(false),
         });
         register_transaction(owner.clone()).await?;
@@ -96,24 +94,6 @@ impl KvStateAttachmentOwner {
 
     pub fn managed_ranks(&self) -> impl Iterator<Item = u32> + '_ {
         self.intents.keys().copied()
-    }
-
-    pub async fn set_cache_readable(&self, global_dp_rank: u32, readable: bool) -> Result<()> {
-        if self.closed.load(Ordering::Acquire) {
-            anyhow::bail!("KV state attachment owner is closed");
-        }
-        let intent = self
-            .intents
-            .get(&global_dp_rank)
-            .context("global DP rank is not managed by this attachment owner")?;
-        let request = KvStateHostControlRequest::SetCacheReadable {
-            cache_owner_id: intent.cache_owner_id,
-            producer_instance: Box::new(self.producer_instance.clone()),
-            intent_incarnation: intent.intent_incarnation,
-            readable,
-        };
-        self.query_host(request).await?;
-        Ok(())
     }
 
     pub async fn close(&self) -> Result<()> {
@@ -135,29 +115,6 @@ impl KvStateAttachmentOwner {
         result
             .await
             .context("state-agent intent cleanup task terminated")
-    }
-
-    async fn query_host(&self, request: KvStateHostControlRequest) -> Result<KvStateHostStatus> {
-        let status = tokio::time::timeout(HOST_CONTROL_TIMEOUT, async {
-            let addressed = SingleIn::new(request).map(|request| {
-                AddressedRequest::for_instance(request, self.host.control_target.clone())
-            });
-            let mut responses: ManyOut<KvStateHostStatus> = self
-                .addressed
-                .generate(addressed)
-                .await
-                .context("failed to call KV state-agent host control endpoint")?;
-            responses
-                .next()
-                .await
-                .context("KV state-agent host returned no control response")
-        })
-        .await
-        .context("KV state-agent host control request timed out")??;
-        if let Some(error) = status.err() {
-            return Err(error).context("KV state-agent host rejected control request");
-        }
-        Ok(status)
     }
 }
 
@@ -192,6 +149,8 @@ fn materialize_intents(
                 raw_zmq_endpoint: descriptor.raw_zmq_endpoint,
                 raw_topic: descriptor.raw_topic,
                 image_token_id: descriptor.image_token_id,
+                video_token_id: descriptor.video_token_id,
+                router_hint_source: descriptor.router_hint_source,
             },
         );
     }
@@ -227,20 +186,141 @@ fn validate_descriptors(descriptors: &[KvStateAttachmentDescriptor]) -> Result<(
     Ok(())
 }
 
+/// Resolve the single live V2 state-agent host for this component's namespace.
 async fn discover_single_host(
     component: &dynamo_runtime::component::Component,
 ) -> Result<KvStateHostAdvertisement> {
-    // NOTE: V2 assumes one host is already running and remains alive for this
-    // deployment run. TODO(#13044): watch and retry host selection when rolling
-    // host replacement and Kubernetes lifecycle are supported.
-    let instances = component
-        .drt()
-        .discovery()
-        .list(DiscoveryQuery::EventSources(EventSourceQuery::topic(
-            component.namespace().name(),
-            HOST_COMPONENT,
-            KV_STATE_HOST_TOPIC_V2,
-        )))
+    let namespace = component.namespace().name();
+    let discovery = component.drt().discovery();
+    let shutdown = component.drt().primary_token();
+    await_single_host(
+        discovery.as_ref(),
+        &namespace,
+        host_discovery_timeout(|key| std::env::var_os(key)),
+        &shutdown,
+    )
+    .await
+}
+
+/// Startup wait for host discovery from the env knob; invalid values warn and use the default.
+fn host_discovery_timeout(mut get_env: impl FnMut(&str) -> Option<OsString>) -> Duration {
+    match get_env(HOST_DISCOVERY_TIMEOUT_ENV) {
+        None => DEFAULT_HOST_DISCOVERY_TIMEOUT,
+        Some(raw) => match raw.to_string_lossy().trim().parse::<u64>() {
+            Ok(secs) => Duration::from_secs(secs),
+            Err(_) => {
+                tracing::warn!(
+                    env = HOST_DISCOVERY_TIMEOUT_ENV,
+                    value = %raw.to_string_lossy(),
+                    default_secs = DEFAULT_HOST_DISCOVERY_TIMEOUT.as_secs(),
+                    "invalid state-agent host discovery timeout; using default"
+                );
+                DEFAULT_HOST_DISCOVERY_TIMEOUT
+            }
+        },
+    }
+}
+
+/// Wait up to `timeout` for exactly one live V2 state-agent host.
+///
+/// The `list` snapshot stays authoritative: two or more hosts fail closed
+/// immediately (misconfiguration, not a race), and the watch stream is only a
+/// wake-up to re-list while no host is advertised yet — a watch event is
+/// never trusted directly because initial-snapshot events are
+/// indistinguishable from later additions. A zero timeout preserves the
+/// original single-snapshot behavior; cancelling `shutdown` aborts the wait.
+async fn await_single_host(
+    discovery: &dyn Discovery,
+    namespace: &str,
+    timeout: Duration,
+    shutdown: &CancellationToken,
+) -> Result<KvStateHostAdvertisement> {
+    // NOTE: V2 assumes one host per control scope that remains alive for the
+    // deployment run. This wait covers only start ordering: source mode is
+    // immutable for a worker lifecycle, so a worker that races the host's
+    // advertisement would otherwise serve without KV routing until it
+    // restarts. TODO(#13044): watch and reselect the host after startup when
+    // rolling host replacement and Kubernetes lifecycle are supported.
+    if timeout.is_zero() {
+        return match list_single_host(discovery, namespace).await? {
+            Some(host) => Ok(host),
+            None => Err(exactly_one_host_error(0)),
+        };
+    }
+    // The deadline is fixed before any backend I/O: the initial list, watch
+    // setup, and every re-list all run under it.
+    let expiry = host_discovery_expiry(timeout);
+    let watch_cancel = shutdown.child_token();
+    // Cancelled on every exit path; without this the discovery watch task
+    // outlives the wait for the rest of the process.
+    let _watch_guard = watch_cancel.clone().drop_guard();
+    let wait = async {
+        if let Some(host) = list_single_host(discovery, namespace).await? {
+            return Ok(host);
+        }
+        tracing::info!(
+            namespace,
+            timeout_secs = timeout.as_secs(),
+            "KV state-agent host is not advertised yet; waiting"
+        );
+        let mut events = discovery
+            .list_and_watch(host_query(namespace), Some(watch_cancel.clone()))
+            .await
+            .context("failed to watch for the KV state-agent host")?;
+        while let Some(event) = events.next().await {
+            event.context("KV state-agent host discovery watch failed")?;
+            if let Some(host) = list_single_host(discovery, namespace).await? {
+                return Ok(host);
+            }
+        }
+        anyhow::bail!("KV state-agent host discovery watch ended before a host appeared")
+    };
+    tokio::select! {
+        biased;
+        _ = watch_cancel.cancelled() => {
+            anyhow::bail!("runtime shutdown before the KV state-agent host appeared")
+        }
+        result = tokio::time::timeout_at(expiry, wait) => match result {
+            Ok(result) => result,
+            Err(_elapsed) => anyhow::bail!(
+                "no live V2 KV state-agent host appeared within {}s \
+                 (topic {KV_STATE_HOST_TOPIC_V2} on {namespace}/{HOST_COMPONENT}; \
+                 set {HOST_DISCOVERY_TIMEOUT_ENV} to adjust the startup wait)",
+                timeout.as_secs()
+            ),
+        },
+    }
+}
+
+/// Absolute deadline for the wait; a span too large for the clock is
+/// effectively unbounded, not a panic.
+fn host_discovery_expiry(timeout: Duration) -> tokio::time::Instant {
+    let now = tokio::time::Instant::now();
+    now.checked_add(timeout)
+        .unwrap_or_else(|| now + Duration::from_secs(u32::MAX.into()))
+}
+
+/// Shared so the zero-timeout path stays byte-identical to the legacy error message.
+fn exactly_one_host_error(found: usize) -> anyhow::Error {
+    anyhow::anyhow!("state-agent mode requires exactly one live V2 host, found {found}")
+}
+
+/// The one discovery query the snapshot and the watch must share.
+fn host_query(namespace: &str) -> DiscoveryQuery {
+    DiscoveryQuery::EventSources(EventSourceQuery::topic(
+        namespace,
+        HOST_COMPONENT,
+        KV_STATE_HOST_TOPIC_V2,
+    ))
+}
+
+/// One authoritative snapshot: `None` while no host is advertised, an error on more than one.
+async fn list_single_host(
+    discovery: &dyn Discovery,
+    namespace: &str,
+) -> Result<Option<KvStateHostAdvertisement>> {
+    let instances = discovery
+        .list(host_query(namespace))
         .await
         .context("failed to discover KV state-agent host")?;
     let mut hosts = Vec::new();
@@ -267,13 +347,10 @@ async fn discover_single_host(
             hosts.push(host);
         }
     }
-    let [host] = hosts.as_slice() else {
-        anyhow::bail!(
-            "state-agent mode requires exactly one live V2 host, found {}",
-            hosts.len()
-        );
-    };
-    Ok(host.clone())
+    if hosts.len() > 1 {
+        return Err(exactly_one_host_error(hosts.len()));
+    }
+    Ok(hosts.pop())
 }
 
 async fn producer_instance(endpoint: &Endpoint) -> Result<Instance> {
@@ -558,7 +635,9 @@ mod tests {
                     ingress_protocol: KvStateIngressProtocol::VllmResidencyV1,
                     raw_zmq_endpoint: format!("tcp://producer.example:{}", 20_000 + rank),
                     raw_topic: String::new(),
-                    image_token_id: None,
+                    image_token_id: Some(99),
+                    video_token_id: Some(100),
+                    router_hint_source: None,
                 }
             })
             .collect()
@@ -581,6 +660,8 @@ mod tests {
         assert_eq!(selected.worker, WorkerWithDpRank::new(17, 7));
         assert_eq!(selected.raw_zmq_endpoint, "tcp://producer.example:20007");
         assert_eq!(selected.raw_topic, "");
+        assert_eq!(selected.image_token_id, Some(99));
+        assert_eq!(selected.video_token_id, Some(100));
     }
 
     #[tokio::test]
@@ -631,5 +712,181 @@ mod tests {
 
         assert!(registrations.lock().await.is_empty());
         assert!(discovery.list(intent_query()).await.unwrap().is_empty());
+    }
+
+    /// A fresh in-memory discovery backend with nothing advertised.
+    fn mock_discovery() -> Arc<dyn Discovery> {
+        Arc::new(MockDiscovery::new(Some(1), SharedMockRegistry::new()))
+    }
+
+    /// Advertise a host on the V2 topic the way `state_agent_host` would.
+    async fn register_host(
+        discovery: &dyn Discovery,
+        publisher_id: u64,
+        advertisement: &KvStateHostAdvertisement,
+    ) {
+        discovery
+            .register(DiscoverySpec::EventSource {
+                scope: EventScope::Component {
+                    namespace: "ns".to_string(),
+                    component: HOST_COMPONENT.to_string(),
+                },
+                topic: KV_STATE_HOST_TOPIC_V2.to_string(),
+                publisher_id,
+                metadata: serde_json::to_value(advertisement).unwrap(),
+            })
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn host_discovery_timeout_parses_and_defaults() {
+        assert_eq!(
+            host_discovery_timeout(|_| None),
+            DEFAULT_HOST_DISCOVERY_TIMEOUT
+        );
+        assert_eq!(
+            host_discovery_timeout(|_| Some(OsString::from("5"))),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            host_discovery_timeout(|_| Some(OsString::from(" 0 "))),
+            Duration::ZERO
+        );
+        assert_eq!(
+            host_discovery_timeout(|_| Some(OsString::from("not-a-number"))),
+            DEFAULT_HOST_DISCOVERY_TIMEOUT
+        );
+    }
+
+    #[tokio::test]
+    async fn advertised_host_is_returned_without_waiting() {
+        let discovery = mock_discovery();
+        register_host(discovery.as_ref(), 41, &host()).await;
+        let found = await_single_host(
+            discovery.as_ref(),
+            "ns",
+            Duration::ZERO,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(found.host_instance, host().host_instance);
+    }
+
+    /// A late advertisement must wake the watch and be found by the re-list.
+    #[tokio::test]
+    async fn host_advertised_during_the_wait_is_discovered() {
+        let discovery = mock_discovery();
+        let register = discovery.clone();
+        let registration = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            register_host(register.as_ref(), 41, &host()).await;
+        });
+        // The outer timeout bounds the test if registration fails or the
+        // watch never wakes.
+        let found = tokio::time::timeout(
+            Duration::from_secs(10),
+            await_single_host(
+                discovery.as_ref(),
+                "ns",
+                Duration::from_secs(30),
+                &CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("discovery must resolve well before the outer deadline")
+        .unwrap();
+        registration.await.unwrap();
+        assert_eq!(found.host_instance, host().host_instance);
+    }
+
+    #[tokio::test]
+    async fn oversized_timeout_expiry_saturates_instead_of_panicking() {
+        let expiry = host_discovery_expiry(Duration::from_secs(u64::MAX));
+        assert!(expiry > tokio::time::Instant::now());
+    }
+
+    /// Runtime shutdown must unblock the wait instead of running out the timeout.
+    #[tokio::test]
+    async fn shutdown_cancels_the_wait_before_the_timeout() {
+        let discovery = mock_discovery();
+        let shutdown = CancellationToken::new();
+        let cancel = shutdown.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cancel.cancel();
+        });
+        let started = tokio::time::Instant::now();
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            await_single_host(discovery.as_ref(), "ns", Duration::from_secs(30), &shutdown),
+        )
+        .await
+        .expect("cancellation must resolve the wait")
+        .unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(format!("{error:#}").contains("shutdown"), "{error:#}");
+    }
+
+    #[tokio::test]
+    async fn missing_host_fails_with_a_diagnosable_error_after_the_deadline() {
+        let discovery = mock_discovery();
+        let error = await_single_host(
+            discovery.as_ref(),
+            "ns",
+            Duration::from_millis(200),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("no live V2 KV state-agent host appeared"),
+            "{message}"
+        );
+        assert!(message.contains(HOST_DISCOVERY_TIMEOUT_ENV), "{message}");
+    }
+
+    #[tokio::test]
+    async fn zero_timeout_preserves_the_single_snapshot_failure() {
+        let discovery = mock_discovery();
+        let error = await_single_host(
+            discovery.as_ref(),
+            "ns",
+            Duration::ZERO,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("exactly one live V2 host, found 0"));
+    }
+
+    /// Ambiguity is misconfiguration: two hosts must bail without waiting.
+    #[tokio::test]
+    async fn two_advertised_hosts_fail_closed_before_the_deadline() {
+        let discovery = mock_discovery();
+        register_host(discovery.as_ref(), 41, &host()).await;
+        let second_instance = instance("kv_state_agent", 2);
+        let second = KvStateHostAdvertisement {
+            protocol_version: KvStateProtocolVersion::V2,
+            host_instance: second_instance.clone(),
+            control_target: second_instance,
+            max_slots: 8,
+        };
+        // Distinct publisher ids: a same-id re-register resolves to the
+        // existing instance and would silently collapse this into one host.
+        register_host(discovery.as_ref(), 42, &second).await;
+        let started = tokio::time::Instant::now();
+        let error = await_single_host(
+            discovery.as_ref(),
+            "ns",
+            Duration::from_secs(30),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(format!("{error:#}").contains("exactly one live V2 host, found 2"));
     }
 }

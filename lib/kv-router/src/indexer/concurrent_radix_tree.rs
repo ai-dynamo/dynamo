@@ -30,8 +30,8 @@ use std::collections::VecDeque;
 #[cfg(feature = "bench")]
 use super::WorkerObservationState;
 use super::{
-    EventKind, EventWarningKind, KvIndexerMetrics, PreBoundEventCounters, SyncIndexer,
-    WorkerLookupStats, WorkerTask,
+    EventKind, EventWarningKind, KvIndexerMetrics, KvRouterError, PreBoundEventCounters,
+    SyncIndexer, WorkerLookupStats, WorkerTask,
 };
 use crate::active_set::reconcile_active_workers;
 use crate::cleanup::{self, CleanableNode, CleanupGuard, CleanupState};
@@ -354,20 +354,7 @@ impl ConcurrentRadixTree {
 
                 // parent_guard is dropped at the end of this block
                 match parent_guard.children.get(&block_data.tokens_hash) {
-                    Some(existing) => {
-                        {
-                            let existing_guard = existing.read();
-                            if existing_guard.block_hash != Some(block_data.block_hash) {
-                                duplicate_store = false;
-                                tracing::warn!(
-                                    expected = ?block_data.block_hash,
-                                    actual = ?existing_guard.block_hash,
-                                    "block_hash mismatch: sequence hashes should be uniform across workers"
-                                );
-                            }
-                        }
-                        existing.clone()
-                    }
+                    Some(existing) => existing.clone(),
                     None => {
                         duplicate_store = false;
                         // Reuse from lookup or create new
@@ -516,6 +503,7 @@ impl ConcurrentRadixTree {
                 let event = RouterEvent {
                     worker_id: worker.worker_id,
                     state_source: None,
+                    session_id: None,
                     storage_tier: crate::protocols::StorageTier::Device,
                     residency_domain: crate::protocols::WireResidencyDomain::explicit(
                         crate::protocols::ResidencyDomain::Worker,
@@ -587,6 +575,9 @@ impl SyncIndexer for ConcurrentRadixTree {
                     }
                     let _ = resp.send(applied);
                 }
+                WorkerTask::ApproximateLru(task) => task.complete(Err(KvRouterError::Unsupported(
+                    "approximate LRU requires ConcurrentRadixTreeCompressed".to_string(),
+                ))),
                 #[cfg(feature = "bench")]
                 WorkerTask::InstallObservation { writer, resp } => {
                     observation.install(writer, resp);

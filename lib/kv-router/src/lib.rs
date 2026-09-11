@@ -15,9 +15,9 @@ mod lookup_update;
 
 pub mod identity;
 pub mod indexer;
+pub mod kv_hints;
 pub mod protocols;
 pub mod recovery;
-pub mod router_hint;
 pub mod scheduling;
 pub mod sequences;
 pub mod services;
@@ -73,12 +73,12 @@ pub use scheduling::PrefillLoadEstimator;
 pub use scheduling::policy::{FcfsPolicy, RouterSchedulingPolicy, SchedulingPolicy, WsptPolicy};
 pub use scheduling::{
     KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse, SessionContext,
-    WorkerSelectionInputTrigger, WorkerSelectionKvHints, WorkerSelectionPolicyError,
+    WorkerSelectionInputTrigger, WorkerSelectionPolicyError,
 };
 pub use selector::{
     DefaultWorkerSelector, ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerFilter,
-    WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerRoutingInput, WorkerScorer,
-    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelector,
+    WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer,
+    WorkerSelectionContext, WorkerSelectionInput, WorkerSelectionPolicy, WorkerSelector,
 };
 pub use tracking_hash::{TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope};
 pub use worker_type::WorkerType;

@@ -4,10 +4,13 @@
 """Unit tests for dynamo.vllm.multimodal_utils.model."""
 
 import json
+from importlib import import_module
+from unittest.mock import MagicMock
 
 import pytest
 import torch
 
+from dynamo.vllm.multimodal_utils import model as model_module
 from dynamo.vllm.multimodal_utils.model import (
     ModelFamily,
     construct_qwen_decode_mm_data,
@@ -46,6 +49,45 @@ class TestMultiModalUtils:
             )
             # Embedding values are randomly genearted as placehodler, we only check the shape
             assert mm_data["image"]["image_embeds"].shape == (2, 1024)
+
+
+class TestLoadVisionModel:
+    def test_vllm_encoder_settings_from_environment(self, monkeypatch):
+        fake_visual = object()
+        fake_llm = MagicMock()
+        model_runner = (
+            fake_llm.return_value.llm_engine.engine_core.engine_core.model_executor.driver_worker.worker.model_runner
+        )
+        model_runner.model.visual = fake_visual
+
+        monkeypatch.setattr(model_module, "VLLM_ENCODER", 1)
+        monkeypatch.setattr(model_module, "LLM", fake_llm)
+        monkeypatch.setattr(model_module, "update_environment_variables", MagicMock())
+        monkeypatch.delenv("DYN_VLLM_SKIP_ENCODER_ONLY_KERNEL_WARMUP", raising=False)
+        monkeypatch.setenv("DYN_VLLM_ENCODER_GPU_MEMORY_UTILIZATION", "0.125")
+        monkeypatch.setenv("DYN_VLLM_ENCODER_KV_CACHE_MEMORY_BYTES", "4294967296")
+        monkeypatch.setenv("DYN_VLLM_ENCODER_MAX_NUM_SEQS", "64")
+
+        loaded = model_module.load_vision_model("Qwen/Qwen3.5-9B")
+
+        kwargs = fake_llm.call_args.kwargs
+        assert kwargs["gpu_memory_utilization"] == 0.125
+        assert kwargs["kv_cache_memory_bytes"] == 4294967296
+        assert kwargs["max_num_seqs"] == 64
+        assert loaded is fake_visual
+
+    def test_encoder_kernel_warmup_patch_is_scoped(self, monkeypatch):
+        worker_module = import_module("vllm.v1.worker.gpu_worker")
+        original_kernel_warmup = worker_module.kernel_warmup
+        monkeypatch.setenv("DYN_VLLM_SKIP_ENCODER_ONLY_KERNEL_WARMUP", "1")
+
+        with pytest.raises(RuntimeError, match="test cleanup"):
+            with model_module._maybe_skip_encoder_only_kernel_warmup():
+                assert worker_module.kernel_warmup is not original_kernel_warmup
+                assert worker_module.kernel_warmup() is None
+                raise RuntimeError("test cleanup")
+
+        assert worker_module.kernel_warmup is original_kernel_warmup
 
 
 class TestResolveModelFamily:
