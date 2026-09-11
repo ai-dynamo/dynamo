@@ -190,12 +190,12 @@ func TestDGDDefaulter_DefaultsNilReplicas(t *testing.T) {
 			op:   admissionv1.Create,
 			components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 				{ComponentName: "Frontend", Replicas: nil},
-				{ComponentName: "VllmWorker", Replicas: ptr.To(int32(3))},
+				{ComponentName: "worker", Replicas: ptr.To(int32(3))},
 				{ComponentName: "NewComponent", Replicas: nil},
 			},
 			wantReplicas: map[string]int32{
 				"Frontend":     1,
-				"VllmWorker":   3,
+				"worker":       3,
 				"NewComponent": 1,
 			},
 		},
@@ -276,12 +276,14 @@ func TestDGDDefaulter_DefaultsProviderOverrideTargets(t *testing.T) {
 				{
 					ComponentName:    "worker",
 					ProviderOverride: providerOverrideForDefaulting(`{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"rack"}}}`),
-					Multinode: &nvidiacomv1beta1.MultinodeSpec{
-						NodeCount: 2,
-						Leader: &nvidiacomv1beta1.MultinodeRoleSpec{
+					Multinode:        &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
+					Roles: []nvidiacomv1beta1.ComponentRoleSpec{
+						{
+							Name:             nvidiacomv1beta1.ComponentRoleLeader,
 							ProviderOverride: providerOverrideForDefaulting(`{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"host"}}}`),
 						},
-						Worker: &nvidiacomv1beta1.MultinodeRoleSpec{
+						{
+							Name:             nvidiacomv1beta1.ComponentRoleWorker,
 							ProviderOverride: providerOverrideForDefaulting(`{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"host"}}}`),
 						},
 					},
@@ -308,10 +310,10 @@ func TestDGDDefaulter_DefaultsProviderOverrideTargets(t *testing.T) {
 	if got := multinode.ProviderOverride.Target; got != provideroverride.TargetPodCliqueScalingGroupConfig {
 		t.Errorf("multinode component target = %q, want %q", got, provideroverride.TargetPodCliqueScalingGroupConfig)
 	}
-	if got := multinode.Multinode.Leader.ProviderOverride.Target; got != provideroverride.TargetPodCliqueTemplateSpec {
+	if got := multinode.Roles[0].ProviderOverride.Target; got != provideroverride.TargetPodCliqueTemplateSpec {
 		t.Errorf("leader target = %q, want %q", got, provideroverride.TargetPodCliqueTemplateSpec)
 	}
-	if got := multinode.Multinode.Worker.ProviderOverride.Target; got != provideroverride.TargetPodCliqueTemplateSpec {
+	if got := multinode.Roles[1].ProviderOverride.Target; got != provideroverride.TargetPodCliqueTemplateSpec {
 		t.Errorf("worker target = %q, want %q", got, provideroverride.TargetPodCliqueTemplateSpec)
 	}
 }
