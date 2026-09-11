@@ -243,7 +243,7 @@ struct ServedIndexerService {
     bindings: Arc<RwLock<HashMap<String, Indexer>>>,
     // Set under the bindings lock and never cleared.
     retired: AtomicBool,
-    endpoints: parking_lot::Mutex<Vec<StartedEndpoint>>,
+    endpoints: Arc<parking_lot::Mutex<Vec<StartedEndpoint>>>,
     endpoint_retirement: parking_lot::Mutex<Option<Shared<BoxFuture<'static, HashSet<u64>>>>>,
 }
 
@@ -298,7 +298,7 @@ impl ServedIndexerService {
             mode,
             bindings,
             retired: AtomicBool::new(false),
-            endpoints: parking_lot::Mutex::new(startup.into_endpoints()),
+            endpoints: Arc::new(parking_lot::Mutex::new(startup.into_endpoints())),
             endpoint_retirement: parking_lot::Mutex::new(None),
         }))
     }
@@ -328,10 +328,10 @@ impl ServedIndexerService {
             let mut retirement = self.endpoint_retirement.lock();
             retirement
                 .get_or_insert_with(|| {
-                    let endpoints = std::mem::take(&mut *self.endpoints.lock());
+                    let endpoints = Arc::clone(&self.endpoints);
                     async move {
                         let mut instance_ids = HashSet::new();
-                        for endpoint in endpoints {
+                        while let Some(endpoint) = endpoints.lock().pop() {
                             instance_ids.insert(endpoint.instance().instance_id);
                             shutdown_endpoint(endpoint).await;
                         }
