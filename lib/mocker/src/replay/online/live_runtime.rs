@@ -21,7 +21,7 @@ use super::entrypoints::OnlineReplayConfig;
 use super::recorder::{OnlineRecorderOptions, OnlineTraceRecorder, forward_admissions};
 use super::state::{
     LiveReplayMode, LiveRuntimeStats, SharedLiveRuntimeStats, WorkloadDispatchState, arrival_event,
-    now_ms,
+    deadline_from_ms, now_ms,
 };
 use super::task::{
     InFlightGuard, RequestTaskContext, route_request, run_request_task, wait_for_workload_progress,
@@ -339,8 +339,7 @@ impl LiveRuntime {
             LiveReplayMode::Trace => {
                 while let Some(request) = pending.pop_front() {
                     let arrival_ms = request.arrival_timestamp_ms.unwrap_or(0.0);
-                    let deadline =
-                        start + tokio::time::Duration::from_secs_f64(arrival_ms / 1000.0);
+                    let deadline = deadline_from_ms(start, arrival_ms)?;
                     loop {
                         tokio::select! {
                             biased;
@@ -517,7 +516,7 @@ impl LiveRuntime {
                         joined??;
                     }
                 }
-                _ = wait_for_workload_progress(next_ready_ms, start, wake.as_mut()) => {}
+                result = wait_for_workload_progress(next_ready_ms, start, wake.as_mut()) => result?,
             }
         }
 

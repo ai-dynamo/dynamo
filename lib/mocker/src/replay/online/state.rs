@@ -84,6 +84,32 @@ pub(super) fn now_ms(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1000.0
 }
 
+/// Turn a replay-relative millisecond offset into a deadline measured from `start`.
+///
+/// `Duration::from_secs_f64` panics on NaN, on infinity, and on negative input, and
+/// the offsets reaching the two deadline sites are caller-supplied trace timing that
+/// no single choke point validates. `normalize_trace_requests` covers the
+/// trace-arrival path, but (a) workload-driver ready times reach
+/// `wait_for_workload_progress` without passing through it at all, and (b) even a
+/// validated-finite arrival can overflow to infinity when it is rebased and divided
+/// by a tiny `arrival_speedup_ratio`, which is only checked for being finite and
+/// positive.
+///
+/// Non-finite is refused: it has no meaning as a deadline. Negative is clamped to
+/// `start`, because a deadline already in the past means dispatch now -- the same
+/// thing `sleep_until` does with any elapsed deadline.
+pub(super) fn deadline_from_ms(start: Instant, offset_ms: f64) -> Result<Instant> {
+    anyhow::ensure!(
+        offset_ms.is_finite(),
+        "online replay requires a finite millisecond offset, got {offset_ms}"
+    );
+    let offset = std::time::Duration::try_from_secs_f64((offset_ms / 1000.0).max(0.0))
+        .map_err(|error| anyhow!("online replay offset {offset_ms}ms is out of range: {error}"))?;
+    start
+        .checked_add(offset)
+        .ok_or_else(|| anyhow!("online replay offset {offset_ms}ms overflows the run clock"))
+}
+
 pub(super) fn request_uuid(request: &DirectRequest) -> Result<Uuid> {
     request
         .uuid

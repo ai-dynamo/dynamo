@@ -528,8 +528,41 @@ async fn test_concurrency_workload_waits_for_wakeup_when_next_turn_is_completion
 
     tokio::time::timeout(tokio::time::Duration::from_millis(50), wait)
         .await
+        .unwrap()
         .unwrap();
     notify_task.await.unwrap();
+}
+
+/// `Duration::from_secs_f64` panics on NaN, infinity, and negative input, and
+/// workload-driver ready times reach here without passing through
+/// `normalize_trace_requests`. A meaningless deadline must be reported, not panic;
+/// a deadline already in the past means "now".
+#[tokio::test]
+async fn a_workload_deadline_is_validated_before_becoming_a_duration() {
+    let notify = Arc::new(Notify::new());
+
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let wake = notify.notified();
+        tokio::pin!(wake);
+        let error = wait_for_workload_progress(Some(bad), Instant::now(), wake.as_mut())
+            .await
+            .expect_err("a non-finite workload deadline must be reported, not panic");
+        assert_eq!(
+            error.to_string(),
+            format!("online replay requires a finite millisecond offset, got {bad}")
+        );
+    }
+
+    // Already-elapsed deadline: clamps to `start` and returns immediately.
+    let wake = notify.notified();
+    tokio::pin!(wake);
+    tokio::time::timeout(
+        tokio::time::Duration::from_millis(50),
+        wait_for_workload_progress(Some(-1_000.0), Instant::now(), wake.as_mut()),
+    )
+    .await
+    .expect("a past deadline must fire immediately")
+    .expect("a past deadline is not an error");
 }
 
 #[test]

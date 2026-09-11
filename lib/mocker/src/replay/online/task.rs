@@ -15,7 +15,9 @@ use crate::live::LiveEngine;
 use crate::replay::ReplayTerminalStatus;
 
 use super::recorder::{RecorderSender, TerminalObservation};
-use super::state::{SharedLiveRuntimeStats, WorkloadDispatchState, now_ms, request_uuid};
+use super::state::{
+    SharedLiveRuntimeStats, WorkloadDispatchState, deadline_from_ms, now_ms, request_uuid,
+};
 use super::{ReplayPlacement, ReplayRouter};
 
 #[derive(Clone)]
@@ -68,12 +70,16 @@ pub(super) async fn wait_for_workload_progress<F>(
     next_ready_ms: Option<f64>,
     start: Instant,
     mut wake: Pin<&mut F>,
-) where
+) -> Result<()>
+where
     F: Future<Output = ()>,
 {
     match next_ready_ms {
         Some(next_ready_ms) => {
-            let deadline = start + tokio::time::Duration::from_secs_f64(next_ready_ms / 1000.0);
+            // `deadline_from_ms`, not `Duration::from_secs_f64`: driver ready times are
+            // derived from caller-supplied trace timing and never pass through
+            // `normalize_trace_requests`, and `from_secs_f64` panics on NaN/infinite/negative.
+            let deadline = deadline_from_ms(start, next_ready_ms)?;
             tokio::select! {
                 _ = tokio::time::sleep_until(deadline) => {}
                 _ = wake.as_mut() => {}
@@ -83,6 +89,7 @@ pub(super) async fn wait_for_workload_progress<F>(
             wake.as_mut().await;
         }
     }
+    Ok(())
 }
 
 /// One request with its routing decision already made.
