@@ -120,13 +120,23 @@ class DistributedRuntime:
         self,
         route_name: str,
         callback: Callable[[dict], Awaitable[dict]],
+        default_enabled: bool = True,
+        gated_by: Optional[bool] = None,
     ) -> None:
         """
         Register an async callback for /engine/{route_name} on the system status server.
 
+        The operator engine-route policy (env-driven) is applied at registration time:
+        a policy-denied route is never wired, so a request to it returns 404.
+
         Args:
             route_name: The route path (e.g., "control/start_profile" creates /engine/control/start_profile)
             callback: Async function with signature: async def(body: dict) -> dict
+            default_enabled: Whether the route is served by default. Set False to mark a
+                route off unless an operator explicitly allows it via policy.
+            gated_by: If set, marks the route as sensitive and served only when the gate is
+                True (e.g. enable_rl for the RCE-capable weight-update routes). An explicit
+                operator policy still overrides this.
 
         Example:
             async def start_profile(body: dict) -> dict:
