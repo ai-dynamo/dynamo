@@ -3207,11 +3207,7 @@ mod ownership_tests {
     fn qwen_video_processor_contract_stays_out_of_the_checksum() {
         use crate::local_model::runtime_config::VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY;
 
-        // A checksum split becomes a cohort conflict, which withdraws the whole
-        // group. Disagreement over the contract disables exact video routing
-        // instead; see `discovery::controller::cohort_video_contract`.
-        // `mdcsum()` caches on first call via `OnceLock`, so each case builds a
-        // fresh card rather than mutating one and re-hashing.
+        // `mdcsum()` caches via `OnceLock`, so each case uses a fresh card.
 
         fn card_with_contract(contract: serde_json::Value) -> ModelDeploymentCard {
             let mut card = ModelDeploymentCard::with_name_only("model");
