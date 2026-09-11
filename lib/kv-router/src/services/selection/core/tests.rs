@@ -816,8 +816,12 @@ async fn full_affinity_table_routes_without_pinning() {
     let entry = core
         .entry(&RoutingPartitionId::new("model", "default"))
         .expect("entry");
-    let table =
-        SessionAffinity::new_with_limits(Duration::from_secs(60), 1, 256).expect("affinity table");
+    let table = SessionAffinity::with_config(SessionAffinityConfig {
+        max_entries: 1,
+        max_session_id_bytes: 256,
+        ..SessionAffinityConfig::new(Duration::from_secs(60))
+    })
+    .expect("affinity table");
     assert!(entry.affinity.set(table).is_ok());
 
     for (selection_id, session_id) in [("first", "s1"), ("second", "s2")] {

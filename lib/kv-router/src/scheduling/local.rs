@@ -667,10 +667,6 @@ where
         self.queue.class_queue_stats(class_index)
     }
 
-    pub fn supports_overlap_refresh(&self) -> bool {
-        self.queue.supports_overlap_refresh()
-    }
-
     pub fn worker_type(&self) -> &'static str {
         self.worker_type
     }

@@ -16,7 +16,7 @@ use crate::services::common::replica_sync::{
 use crate::services::indexer::backend::IndexerPolicy;
 use crate::tracking_hash::TrackingHashContext;
 
-use super::affinity::{SessionAffinityConfig, SessionAffinityMode};
+use super::affinity::SessionAffinityConfig;
 use super::core::{
     KvIndexSource, SelectionCore, SelectionHost, SelectionPartition, SelectionServiceConfig,
 };
@@ -42,7 +42,6 @@ pub struct SelectionServiceBuilder {
     host: SelectionHost,
     worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
     session_affinity_ttl: Option<std::time::Duration>,
-    session_affinity_mode: SessionAffinityMode,
 }
 
 /// Warn when a host does not construct workers for explicitly configured policy roles.
@@ -83,7 +82,6 @@ impl SelectionServiceBuilder {
             host: SelectionHost::default(),
             worker_selection_policy_factory: None,
             session_affinity_ttl: None,
-            session_affinity_mode: SessionAffinityMode::default(),
         }
     }
 
@@ -124,13 +122,6 @@ impl SelectionServiceBuilder {
     /// last request. Bindings replicate over the replica mesh when enabled.
     pub fn session_affinity(mut self, ttl: std::time::Duration) -> Self {
         self.session_affinity_ttl = Some(ttl);
-        self
-    }
-
-    /// How a bound session treats a booking that lands on another worker:
-    /// `Hard` (default) rejects it with 400, `Soft` moves the session.
-    pub fn session_affinity_mode(mut self, mode: SessionAffinityMode) -> Self {
-        self.session_affinity_mode = mode;
         self
     }
 
@@ -198,8 +189,7 @@ impl SelectionServiceBuilder {
             self.selection_cache,
             tracking_hash,
             indexer_policy,
-            self.session_affinity_ttl
-                .map(|ttl| SessionAffinityConfig::new(ttl).with_mode(self.session_affinity_mode)),
+            self.session_affinity_ttl.map(SessionAffinityConfig::new),
         ));
 
         if recover_from_peers {

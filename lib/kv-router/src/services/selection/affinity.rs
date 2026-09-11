@@ -224,18 +224,6 @@ impl SessionAffinity {
         Ok(())
     }
 
-    pub fn new_with_limits(
-        ttl: Duration,
-        max_entries: usize,
-        max_session_id_bytes: usize,
-    ) -> Result<Self, AffinityError> {
-        Self::with_config(SessionAffinityConfig {
-            max_entries,
-            max_session_id_bytes,
-            ..SessionAffinityConfig::new(ttl)
-        })
-    }
-
     pub fn with_config(config: SessionAffinityConfig) -> Result<Self, AffinityError> {
         Self::validate_ttl(config.ttl)?;
         let inner = Arc::new(Inner {

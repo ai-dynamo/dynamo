@@ -873,10 +873,6 @@ impl<
         })
     }
 
-    pub fn supports_overlap_refresh(&self) -> bool {
-        self.supports_overlap_refresh
-    }
-
     fn prepare_block_hashes_for_refresh(
         &self,
         block_hashes: Option<Vec<LocalBlockHash>>,

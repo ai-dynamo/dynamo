@@ -227,11 +227,11 @@ impl AffinityCoordinator {
     #[cfg(test)]
     pub(super) fn with_test_limits(max_entries: usize, max_session_id_bytes: usize) -> Self {
         Self::wrap(
-            SessionAffinity::new_with_limits(
-                Duration::from_secs(10),
+            SessionAffinity::with_config(SessionAffinityConfig {
                 max_entries,
                 max_session_id_bytes,
-            )
+                ..SessionAffinityConfig::new(Duration::from_secs(10))
+            })
             .unwrap(),
         )
     }

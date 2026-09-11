@@ -422,17 +422,6 @@ impl EmbeddedSelection {
         self.partition.scheduler().free(request_id).await
     }
 
-    pub(crate) async fn free_if_worker(
-        &self,
-        request_id: &str,
-        worker: WorkerWithDpRank,
-    ) -> Result<(), SequenceError> {
-        self.partition
-            .scheduler()
-            .free_if_worker(request_id, worker)
-            .await
-    }
-
     pub(crate) fn booking_cleanup(&self) -> SchedulerBookingCleanup {
         self.partition.scheduler().booking_cleanup()
     }

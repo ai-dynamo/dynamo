@@ -1598,18 +1598,6 @@ impl KvRouter {
         self.scheduler.free(request_id).await
     }
 
-    /// Release a booking only if it still belongs to `worker`.
-    ///
-    /// An ownership mismatch is a harmless no-op, which makes this safe for
-    /// delayed cleanup that captured the worker when it acquired the booking.
-    pub async fn free_if_worker(
-        &self,
-        request_id: &str,
-        worker: WorkerWithDpRank,
-    ) -> Result<(), SequenceError> {
-        self.scheduler.free_if_worker(request_id, worker).await
-    }
-
     #[doc(hidden)]
     pub(crate) fn affinity_coordinator(
         &self,
