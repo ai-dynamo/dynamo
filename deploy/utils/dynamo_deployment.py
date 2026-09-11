@@ -141,6 +141,10 @@ class DynamoDeploymentClient:
         self.model_name = model_name
         self.service_name = service_name or f"{self.deployment_name}-frontend"
         self.components: List[str] = []  # Will store component names from CR
+        self._original_components: List[str] = []
+        # Version segment of the DynamoGraphDeployment apiVersion, reset from the
+        # manifest in create_deployment: the request path must match the body.
+        self.api_version: str = "v1beta1"
         self.deployment_spec: Optional[
             Dict[str, Any]
         ] = None  # Will store the full deployment spec
@@ -261,10 +265,19 @@ class DynamoDeploymentClient:
             self.deployment_spec is not None
         ), "Failed to load deployment specification"
 
+        self.api_version = (
+            self.deployment_spec.get("apiVersion") or "nvidia.com/v1beta1"
+        ).split("/")[-1]
+
         # Extract component names (original case for label queries, lowercase for directories)
-        self._original_components = list(
-            self.deployment_spec["spec"]["services"].keys()
-        )
+        # v1beta1 spells this `spec.components`, a list of objects each with a
+        # `name`; v1alpha1 spelled it `spec.services`, a mapping keyed by name.
+        spec = self.deployment_spec["spec"]
+        components = spec.get("components")
+        if isinstance(components, list):
+            self._original_components = [component["name"] for component in components]
+        else:
+            self._original_components = list(spec["services"].keys())
         self.components = [svc.lower() for svc in self._original_components]
 
         # Ensure name and namespace are set correctly
@@ -281,7 +294,7 @@ class DynamoDeploymentClient:
             if self.namespace == dgdr_namespace:
                 self.deployment_spec["metadata"]["ownerReferences"] = [
                     {
-                        "apiVersion": "nvidia.com/v1alpha1",
+                        "apiVersion": "nvidia.com/v1beta1",
                         "kind": "DynamoGraphDeploymentRequest",
                         "name": dgdr_name,
                         "uid": dgdr_uid,
@@ -294,7 +307,7 @@ class DynamoDeploymentClient:
         try:
             await self.custom_api.create_namespaced_custom_object(
                 group="nvidia.com",
-                version="v1alpha1",
+                version=self.api_version,
                 namespace=self.namespace,
                 plural="dynamographdeployments",
                 body=self.deployment_spec,
@@ -404,7 +417,7 @@ class DynamoDeploymentClient:
             try:
                 status = await self.custom_api.get_namespaced_custom_object(
                     group="nvidia.com",
-                    version="v1alpha1",
+                    version=self.api_version,
                     namespace=self.namespace,
                     plural="dynamographdeployments",
                     name=self.deployment_name,
@@ -622,7 +635,7 @@ class DynamoDeploymentClient:
         try:
             await self.custom_api.delete_namespaced_custom_object(
                 group="nvidia.com",
-                version="v1alpha1",
+                version=self.api_version,
                 namespace=self.namespace,
                 plural="dynamographdeployments",
                 name=self.deployment_name,

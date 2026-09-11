@@ -22,6 +22,8 @@ use serde_json::{Map, Value};
 use super::{convert_backend_top_logprobs, token_to_utf8_bytes};
 use crate::protocols::Annotated;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PromptLogprobs};
+use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+use crate::protocols::openai::validate;
 
 /// Token-in/token-out generation request.
 ///
@@ -92,6 +94,36 @@ impl GenerateRequest {
             return Err("sampling_params.max_tokens must be greater than 0.".to_string());
         }
 
+        if self.sampling_params.thinking_token_budget.is_some() {
+            return Err(
+                "sampling_params.thinking_token_budget is not supported by vLLM gRPC.".to_string(),
+            );
+        }
+
+        validate::validate_temperature(self.sampling_params.temperature)
+            .map_err(|error| error.to_string())?;
+        validate::validate_top_p(self.sampling_params.top_p).map_err(|error| error.to_string())?;
+        validate::validate_top_k(self.sampling_params.top_k).map_err(|error| error.to_string())?;
+        validate::validate_frequency_penalty(self.sampling_params.frequency_penalty)
+            .map_err(|error| error.to_string())?;
+        validate::validate_presence_penalty(self.sampling_params.presence_penalty)
+            .map_err(|error| error.to_string())?;
+        if let Some(value) = self.sampling_params.repetition_penalty
+            && (!value.is_finite() || value <= 0.0)
+        {
+            return Err(format!(
+                "sampling_params.repetition_penalty must be a finite positive number, got {value}"
+            ));
+        }
+        validate::validate_min_p(self.sampling_params.min_p).map_err(|error| error.to_string())?;
+
+        if let Some(logprobs) = self.sampling_params.logprobs()
+            && logprobs < 0
+            && logprobs != -1
+        {
+            return Err("sampling_params.logprobs must be non-negative or -1.".to_string());
+        }
+
         if let Some(prompt_logprobs) = self.sampling_params.prompt_logprobs() {
             if prompt_logprobs < 0 && prompt_logprobs != -1 {
                 return Err(
@@ -151,7 +183,7 @@ pub struct SamplingParams {
     // reads only the controls it needs; `raw` remains authoritative.
     temperature: Option<f32>,
     top_p: Option<f32>,
-    top_k: Option<u32>,
+    top_k: Option<i32>,
     seed: Option<i64>,
     max_tokens: Option<u32>,
     min_tokens: Option<u32>,
@@ -172,6 +204,7 @@ pub struct SamplingParams {
     /// typed view opaque avoids duplicating version-specific vLLM validation.
     structured_outputs: Option<Value>,
     skip_reading_prefix_cache: Option<bool>,
+    skip_special_tokens: Option<bool>,
     vllm_xargs: Option<HashMap<String, Value>>,
 }
 
@@ -196,8 +229,57 @@ impl SamplingParams {
         self.prompt_logprobs
     }
 
+    pub fn skip_reading_prefix_cache(&self) -> Option<bool> {
+        self.skip_reading_prefix_cache
+    }
+
     pub fn as_value(&self) -> &Value {
         &self.raw
+    }
+
+    pub(crate) fn project_sampling_options(&self) -> Result<SamplingOptions, String> {
+        Ok(SamplingOptions {
+            n: Some(1),
+            presence_penalty: self.presence_penalty,
+            frequency_penalty: self.frequency_penalty,
+            repetition_penalty: self.repetition_penalty,
+            temperature: self.temperature,
+            top_p: self.top_p,
+            top_k: self.top_k,
+            min_p: self.min_p,
+            seed: self.seed,
+            ..Default::default()
+        })
+    }
+
+    pub(crate) fn project_stop_conditions(&self) -> StopConditions {
+        StopConditions {
+            max_tokens: self.max_tokens,
+            min_tokens: self.min_tokens,
+            stop_token_ids_hidden: self.stop_token_ids.clone(),
+            ignore_eos: Some(self.ignore_eos),
+            ..Default::default()
+        }
+    }
+
+    pub(crate) fn project_output_options(&self) -> Result<OutputOptions, String> {
+        Ok(OutputOptions {
+            logprobs: project_logprob_count(self.logprobs, "logprobs")?,
+            prompt_logprobs: project_logprob_count(self.prompt_logprobs, "prompt_logprobs")?,
+            skip_special_tokens: self.skip_special_tokens,
+            ..Default::default()
+        })
+    }
+}
+
+fn project_logprob_count(value: Option<i32>, field: &str) -> Result<Option<u32>, String> {
+    match value {
+        None => Ok(None),
+        Some(-1) => Ok(Some(u32::MAX)),
+        Some(value) if value >= 0 => Ok(Some(value as u32)),
+        Some(value) => Err(format!(
+            "sampling_params.{field} must be non-negative or -1, got {value}"
+        )),
     }
 }
 
@@ -254,6 +336,7 @@ impl<'de> Deserialize<'de> for SamplingParams {
             logprob_token_ids: field!(logprob_token_ids),
             structured_outputs: field!(structured_outputs),
             skip_reading_prefix_cache: field!(skip_reading_prefix_cache),
+            skip_special_tokens: field!(skip_special_tokens),
             vllm_xargs: field!(vllm_xargs),
             raw,
         })
@@ -721,6 +804,25 @@ mod tests {
     }
 
     #[test]
+    fn generate_request_accepts_disabled_top_k_sentinel() {
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "token_ids": [1],
+            "sampling_params": {"top_k": -1}
+        }))
+        .expect("deserialize");
+
+        request.validate().expect("validate");
+        assert_eq!(
+            request
+                .sampling_params
+                .project_sampling_options()
+                .expect("project")
+                .top_k,
+            Some(-1)
+        );
+    }
+
+    #[test]
     fn generate_request_matches_rust_integer_types() {
         for raw in [
             json!({
@@ -734,7 +836,7 @@ mod tests {
             }),
             json!({
                 "token_ids": [1],
-                "sampling_params": {"top_k": -1}
+                "sampling_params": {"top_k": i64::from(i32::MAX) + 1}
             }),
             json!({
                 "token_ids": [1],
@@ -766,9 +868,23 @@ mod tests {
             (
                 json!({
                     "token_ids": [1],
+                    "sampling_params": {"thinking_token_budget": 32}
+                }),
+                "thinking_token_budget",
+            ),
+            (
+                json!({
+                    "token_ids": [1],
                     "sampling_params": {"prompt_logprobs": -2}
                 }),
                 "prompt_logprobs",
+            ),
+            (
+                json!({
+                    "token_ids": [1],
+                    "sampling_params": {"top_k": -2}
+                }),
+                "Top_k",
             ),
             (
                 json!({
@@ -784,6 +900,19 @@ mod tests {
             let error = req.validate().expect_err("must reject");
             assert!(error.contains(expected), "unexpected error: {error}");
         }
+    }
+
+    #[test]
+    fn generate_request_accepts_vllm_repetition_penalty_above_two() {
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "token_ids": [1],
+            "sampling_params": {"repetition_penalty": 2.5}
+        }))
+        .expect("deserialize");
+
+        request
+            .validate()
+            .expect("vLLM accepts finite positive repetition penalties");
     }
 
     #[test]
