@@ -1441,6 +1441,31 @@ impl DistributedRuntime {
         Ok(())
     }
 
+    /// Suppress health check canaries for at most `max_seconds`.
+    ///
+    /// For an operation that deliberately blocks the engine, such as an RL
+    /// weight transfer waiting on a peer. The window expires on its own, so a
+    /// transaction that never ends cannot leave the worker unprobed.
+    fn begin_health_check_maintenance(&self, max_seconds: f64) -> PyResult<()> {
+        if !max_seconds.is_finite() || max_seconds <= 0.0 {
+            return Err(PyValueError::new_err(format!(
+                "max_seconds must be a finite positive number, got {max_seconds}"
+            )));
+        }
+        self.inner
+            .system_health()
+            .lock()
+            .begin_canary_maintenance(std::time::Duration::from_secs_f64(max_seconds));
+        Ok(())
+    }
+
+    /// End the health check maintenance window opened by
+    /// `begin_health_check_maintenance`. Ending a closed window is a no-op.
+    fn end_health_check_maintenance(&self) -> PyResult<()> {
+        self.inner.system_health().lock().end_canary_maintenance();
+        Ok(())
+    }
+
     // This is used to pass the DistributedRuntime from the dynamo-runtime bindings
     // to the KVBM bindings, since KVBM cannot directly use the struct from this cdylib.
     // TODO: Create a separate crate "dynamo-python" so that all binding crates can import

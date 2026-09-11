@@ -143,6 +143,9 @@ def _discard_orphan_result(fut: "asyncio.Future[dict]") -> None:
 
 _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY: Final = "kv_transfer_params"
 _KV_HINT_EXTRA_ARGS_KEY: Final = "kv_hint"
+# Ceiling on the canary suppression an RL weight transfer may hold. It only has
+# to outlast a rendezvous; on expiry the worker returns to ordinary probing.
+_RL_MAINTENANCE_WINDOW_S: Final = 600.0
 _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
     {
         "allow_unpaused",
@@ -2107,6 +2110,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             }
             try:
                 await self.engine_client.collective_rpc(rpc, kwargs=rpc_kwargs)
+                if rpc == "finish_weight_update":
+                    # The other terminator of a weight-transfer transaction: a
+                    # controller may end here and never call destroy.
+                    self.runtime.end_health_check_maintenance()
                 if reset_prefix_cache:
                     # Weights changed: stale prefix/KV cache must be invalidated
                     # before resume so it is not reused under the new weights.
@@ -2151,6 +2158,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         async with self._pause_lock:
             try:
                 timeout_s = _rl_init_weights_timeout_s()
+                # The rendezvous blocks EngineCore well past the canary timeout, so
+                # without this window the liveness probe restarts the worker.
+                self.runtime.begin_health_check_maintenance(_RL_MAINTENANCE_WINDOW_S)
                 rpc_task = asyncio.create_task(
                     self.engine_client.collective_rpc(rpc, kwargs=kwargs)
                 )
@@ -2159,10 +2169,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 except asyncio.CancelledError:
                     rpc_task.cancel()
                     await asyncio.gather(rpc_task, return_exceptions=True)
+                    self.runtime.end_health_check_maintenance()
                     raise
                 if rpc_task not in done:
                     rpc_task.cancel()
                     await asyncio.gather(rpc_task, return_exceptions=True)
+                    self.runtime.end_health_check_maintenance()
                     logger.error(
                         f"[RL] init_weights_update_group timed out after "
                         f"{timeout_s:.1f} seconds (rpc={rpc}); terminating the "
@@ -2171,11 +2183,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     self._shutdown_worker()
 
                 await rpc_task
+                # The window deliberately stays open: the transaction continues
+                # until destroy_weights_update_group or finish_weight_update.
                 logger.info(f"[RL] Weight update group initialized (rpc={rpc})")
                 return {"status": "ok", "message": "Weight update group initialized"}
             except EngineDeadError as e:
                 self._shutdown_on_engine_dead(e)
             except Exception as e:
+                self.runtime.end_health_check_maintenance()
                 logger.error(f"[RL] init_weights_update_group failed: {e}")
                 return {"status": "error", "message": str(e)}
 
@@ -2200,6 +2215,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             except Exception as e:
                 logger.error(f"[RL] destroy_weights_update_group failed: {e}")
                 return {"status": "error", "message": str(e)}
+            finally:
+                # A worker whose teardown failed should be probed again, not hidden.
+                self.runtime.end_health_check_maintenance()
 
     @abstractmethod
     def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:

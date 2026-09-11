@@ -80,15 +80,17 @@ def _make_handler(
     if config is None:
         config = _make_config()
     model_config = MagicMock(enable_prompt_embeds=True)
+    runtime = MagicMock()
     with patch.object(mod.BaseWorkerHandler, "__init__", return_value=None):
         handler = mod.DecodeWorkerHandler(
-            runtime=MagicMock(),
+            runtime=runtime,
             config=config,
             engine=MagicMock(),
             default_sampling_params={},
             model_config=model_config,
             encode_worker_client=encode_worker_client,
         )
+    handler.runtime = runtime
     handler.model_config = model_config
     handler._multimodal_request_processor = VllmMultimodalRequestProcessor(
         model=config.model,
@@ -2129,6 +2131,57 @@ class TestRLAdminRouteHardening:
         assert resp == {"status": "error", "message": "init failed"}
         handler.runtime.shutdown.assert_not_called()
         assert not handler._pause_lock.locked()
+
+    @pytest.mark.asyncio
+    async def test_init_weights_update_group_opens_maintenance_window(self):
+        """The canary must stay suppressed for the rest of the transaction."""
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+
+        resp = await handler.init_weights_update_group(
+            {"engine_rpc": "init_weight_transfer_engine"}
+        )
+
+        assert resp["status"] == "ok"
+        handler.runtime.begin_health_check_maintenance.assert_called_once_with(
+            mod._RL_MAINTENANCE_WINDOW_S
+        )
+        handler.runtime.end_health_check_maintenance.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_failed_init_leaves_no_maintenance_window(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock(
+            side_effect=RuntimeError("rendezvous refused")
+        )
+
+        resp = await handler.init_weights_update_group(
+            {"engine_rpc": "init_weight_transfer_engine"}
+        )
+
+        assert resp["status"] == "error"
+        handler.runtime.end_health_check_maintenance.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_destroy_closes_maintenance_window_even_on_failure(self):
+        """A worker whose teardown failed should be probed again, not hidden."""
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock(
+            side_effect=RuntimeError("teardown failed")
+        )
+
+        resp = await handler.destroy_weights_update_group(
+            {"engine_rpc": "destroy_weight_transfer_engine"}
+        )
+
+        assert resp["status"] == "error"
+        handler.runtime.end_health_check_maintenance.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_abort_request_surfaces_deferred_abort_failure(self):

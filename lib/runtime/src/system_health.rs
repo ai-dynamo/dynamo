@@ -18,7 +18,7 @@
 use std::{
     collections::HashMap,
     sync::{Arc, OnceLock},
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tokio::sync::mpsc;
 
@@ -56,6 +56,9 @@ pub struct SystemHealth {
     live_path: String,
     start_time: Instant,
     uptime_gauge: OnceLock<prometheus::Gauge>,
+    /// Deadline until which canary probes are suppressed. A deadline rather than
+    /// a flag: a window nobody closes expires instead of silencing canaries forever.
+    canary_suppressed_until: Option<Instant>,
 }
 
 impl SystemHealth {
@@ -93,6 +96,7 @@ impl SystemHealth {
             live_path,
             start_time: Instant::now(),
             uptime_gauge: OnceLock::new(),
+            canary_suppressed_until: None,
         }
     }
 
@@ -121,6 +125,43 @@ impl SystemHealth {
     pub fn set_endpoint_health_status(&self, endpoint: &str, status: HealthStatus) {
         let mut endpoint_health = self.endpoint_health.write().unwrap();
         endpoint_health.insert(endpoint.to_string(), status);
+    }
+
+    /// Open a canary maintenance window lasting at most `max_duration`.
+    ///
+    /// Used around an operation that blocks the engine, such as an RL weight
+    /// transfer waiting on a peer to join a collective. A second call can only
+    /// extend the window, never shorten it.
+    pub fn begin_canary_maintenance(&mut self, max_duration: Duration) {
+        let deadline = Instant::now() + max_duration;
+        self.canary_suppressed_until = Some(match self.canary_suppressed_until {
+            Some(existing) if existing > deadline => existing,
+            _ => deadline,
+        });
+    }
+
+    /// Close the canary maintenance window. Closing a closed window is a no-op.
+    pub fn end_canary_maintenance(&mut self) {
+        self.canary_suppressed_until = None;
+    }
+
+    /// Whether canary probes are currently suppressed.
+    pub fn canary_suppressed(&self) -> bool {
+        self.canary_suppressed_until
+            .is_some_and(|deadline| Instant::now() < deadline)
+    }
+
+    /// Apply a canary-derived health status, dropping a `NotReady` write while a
+    /// maintenance window is open. `Ready` always applies.
+    pub fn set_canary_health_status(&self, endpoint: &str, status: HealthStatus) {
+        if status == HealthStatus::NotReady && self.canary_suppressed() {
+            tracing::debug!(
+                "Canary maintenance window open; ignoring NotReady for endpoint '{}'",
+                endpoint
+            );
+            return;
+        }
+        self.set_endpoint_health_status(endpoint, status);
     }
 
     /// Returns the overall health status and endpoint health statuses
@@ -436,6 +477,79 @@ mod tests {
         assert!(
             health.get_health_status().0,
             "after the canary marks it ready the worker is healthy"
+        );
+    }
+
+    /// A verified endpoint, ready and probed by the canary.
+    fn verified_health() -> SystemHealth {
+        let health = system_health(true);
+        health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        health.set_endpoint_registered(ENDPOINT);
+        health.set_endpoint_health_status(ENDPOINT, HealthStatus::Ready);
+        health
+    }
+
+    /// The reported failure: a canary timeout during a weight transfer marks the
+    /// endpoint NotReady, `/live` answers 503 and kubelet restarts the worker.
+    #[test]
+    fn maintenance_window_drops_a_canary_notready() {
+        let mut health = verified_health();
+        health.begin_canary_maintenance(Duration::from_secs(600));
+
+        health.set_canary_health_status(ENDPOINT, HealthStatus::NotReady);
+
+        let (healthy, endpoints) = health.get_health_status();
+        assert!(
+            healthy,
+            "a canary timeout must not unseat a worker under maintenance"
+        );
+        assert_eq!(endpoints.get(ENDPOINT).map(String::as_str), Some("ready"));
+    }
+
+    /// Closing the window restores canary authority; suppression is not permanent.
+    #[test]
+    fn ending_maintenance_restores_canary_authority() {
+        let mut health = verified_health();
+        health.begin_canary_maintenance(Duration::from_secs(600));
+        health.end_canary_maintenance();
+
+        health.set_canary_health_status(ENDPOINT, HealthStatus::NotReady);
+
+        assert!(
+            !health.get_health_status().0,
+            "once the transaction ends the canary decides again"
+        );
+    }
+
+    /// A transaction that is never closed cannot leave a worker unprobed: the
+    /// window is a deadline and expires on its own.
+    #[test]
+    fn maintenance_window_expires_on_its_own() {
+        let mut health = verified_health();
+        health.begin_canary_maintenance(Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(20));
+
+        health.set_canary_health_status(ENDPOINT, HealthStatus::NotReady);
+
+        assert!(
+            !health.get_health_status().0,
+            "an expired window must not keep suppressing the canary"
+        );
+    }
+
+    /// Suppression is one-directional: real traffic and successful probes still
+    /// mark the endpoint ready inside the window.
+    #[test]
+    fn maintenance_window_still_lets_ready_through() {
+        let mut health = verified_health();
+        health.set_endpoint_health_status(ENDPOINT, HealthStatus::NotReady);
+        health.begin_canary_maintenance(Duration::from_secs(600));
+
+        health.set_canary_health_status(ENDPOINT, HealthStatus::Ready);
+
+        assert!(
+            health.get_health_status().0,
+            "a Ready write must apply even under maintenance"
         );
     }
 }

@@ -116,6 +116,29 @@ class DistributedRuntime:
         """
         ...
 
+    def begin_health_check_maintenance(self, max_seconds: float) -> None:
+        """
+        Suppress health check canaries for at most max_seconds.
+
+        Use around an operation that deliberately blocks the engine, such as an
+        RL weight transfer waiting on a peer to join the rendezvous. While the
+        window is open the canary does not probe and cannot mark an endpoint
+        NotReady, so /live keeps reporting the last known state. The window
+        expires on its own, so a transaction that never ends cannot leave the
+        worker unprobed.
+
+        Raises:
+            ValueError: If max_seconds is not a finite positive number.
+        """
+        ...
+
+    def end_health_check_maintenance(self) -> None:
+        """
+        Close the window opened by begin_health_check_maintenance and let the
+        canary resume. Closing an already closed window is a no-op.
+        """
+        ...
+
     def register_engine_route(
         self,
         route_name: str,
