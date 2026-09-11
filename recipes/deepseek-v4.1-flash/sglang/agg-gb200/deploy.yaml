@@ -22,8 +22,6 @@ data:
     max-running-requests: 256
     speculative-algorithm: DSPARK
     speculative-dspark-block-size: 5
-    # DSpark verify graphs run out of memory at batch 256.
-    cuda-graph-max-bs-decode: 64
     # The native parser gates guided decoding. Dynamo builds the response from
     # --dyn-reasoning-parser. Both are needed.
     reasoning-parser: auto
@@ -90,6 +88,8 @@ spec:
                 - --dyn-tool-call-parser
                 - deepseek_v41
                 - --dyn-enable-structural-tag
+                - --cuda-graph-max-bs-decode
+                - "64"
               env:
                 - name: HF_HUB_OFFLINE
                   value: "1"

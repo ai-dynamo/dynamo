@@ -42,7 +42,6 @@ data:
     disaggregation-mode: decode
     disaggregation-transfer-backend: mooncake
     disaggregation-bootstrap-port: 30001
-    prefill-round-robin-balance: true
   prefill.yaml: |-
     model-path: deepseek-ai/DeepSeek-V4.1-Flash
     served-model-name: deepseek-ai/DeepSeek-V4.1-Flash
@@ -229,6 +228,7 @@ spec:
           - --dyn-tool-call-parser
           - deepseek_v41
           - --dyn-enable-structural-tag
+          - --prefill-round-robin-balance
           command:
           - python3
           - -m

@@ -55,7 +55,6 @@ data:
     disaggregation-mode: decode
     disaggregation-transfer-backend: mooncake
     disaggregation-bootstrap-port: 30001
-    prefill-round-robin-balance: true
 ---
 apiVersion: resource.nvidia.com/v1beta1
 kind: ComputeDomain
@@ -223,6 +222,7 @@ spec:
                 - --dyn-tool-call-parser
                 - deepseek_v41
                 - --dyn-enable-structural-tag
+                - --prefill-round-robin-balance
               env: *workerEnv
               ports: *workerPorts
               resources: *workerResources
