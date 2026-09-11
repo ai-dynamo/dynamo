@@ -126,14 +126,6 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
         if config.stage_configs_path:
             omni_kwargs["deploy_config"] = config.stage_configs_path
 
-        # vLLM-Omni treats diffusion checkpoint adapters such as FastH3 as
-        # startup-time inputs to AsyncOmni. OmniEngineArgs parses --lora-path,
-        # but it is not part of Dynamo's request-time LoRA lifecycle and must
-        # be forwarded when the orchestrator is constructed.
-        lora_path = getattr(config.engine_args, "lora_path", None)
-        if lora_path is not None:
-            omni_kwargs["lora_path"] = lora_path
-
         for field, value in dataclasses.asdict(config.diffusion).items():
             if value is not None:
                 omni_kwargs[field] = value
