@@ -1862,10 +1862,6 @@ const DELAYED_ERROR_MODEL: &str = "delayed-error-model";
 /// win a window that should already have elapsed.
 const BACKEND_ERROR_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// Start a service whose streaming handlers apply `check`, register an
-/// `InvalidArgumentEngine` that fails after `BACKEND_ERROR_DELAY` for both
-/// chat and completions, post `body` to `path`, and return the status and
-/// body text.
 async fn post_streaming_with_check(
     check: BackendErrorCheck,
     path: &str,
@@ -2042,9 +2038,10 @@ async fn test_streaming_responses_until_first_event_returns_4xx_on_delayed_backe
 }
 
 /// Streaming completions, single prompt and batch, run the same pre-commit
-/// check as chat: a backend error before the first item is a typed 4xx under
-/// both a bounded window that covers it and an unbounded wait, and stays an
-/// HTTP 200 when the check is skipped.
+/// check as chat: a backend error before the first item is a typed 4xx under a
+/// bounded window that covers it, and stays an HTTP 200 when the check is
+/// skipped. `UntilFirstEvent` reaches this same call site and is covered by the
+/// chat tests above.
 #[tokio::test]
 async fn test_streaming_completions_delayed_backend_error_status_follows_check() {
     for prompt in [
@@ -2056,22 +2053,21 @@ async fn test_streaming_completions_delayed_backend_error_status_follows_check()
             "stream": true,
             "prompt": prompt,
         });
-        for check in [
+        let (status, text) = post_streaming_with_check(
             BackendErrorCheck::Bounded(std::time::Duration::from_secs(5)),
-            BackendErrorCheck::UntilFirstEvent,
-        ] {
-            let (status, text) =
-                post_streaming_with_check(check, "/v1/completions", body.clone()).await;
-            assert_eq!(
-                status,
-                StatusCode::BAD_REQUEST,
-                "{check:?} prompt {prompt}: body: {text}"
-            );
-            assert!(
-                text.contains(INVALID_ARGUMENT_MESSAGE),
-                "{check:?} prompt {prompt}: expected typed backend error message; got: {text}"
-            );
-        }
+            "/v1/completions",
+            body.clone(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "Bounded prompt {prompt}: body: {text}"
+        );
+        assert!(
+            text.contains(INVALID_ARGUMENT_MESSAGE),
+            "Bounded prompt {prompt}: expected typed backend error message; got: {text}"
+        );
 
         let (status, text) =
             post_streaming_with_check(BackendErrorCheck::Skip, "/v1/completions", body).await;
