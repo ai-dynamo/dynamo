@@ -132,12 +132,16 @@ impl DiscoverySource {
                     loop {
                         tokio::select! {
                             _ = token.cancelled() => {
-                                tracing::debug!("EndpointSlice reflector stopping on daemon shutdown");
+                                tracing::debug!(
+                                    "EndpointSlice reflector stopping on daemon shutdown"
+                                );
                                 break;
                             }
                             res = stream.next() => {
                                 let Some(res) = res else {
-                                    tracing::warn!("EndpointSlice reflector stream ended before daemon shutdown; store is now stale");
+                                    tracing::warn!(
+                                        "EndpointSlice reflector stream ended before daemon shutdown; store is now stale"
+                                    );
                                     break;
                                 };
                                 match res {
@@ -175,7 +179,9 @@ impl DiscoverySource {
                             }
                             res = stream.next() => {
                                 let Some(res) = res else {
-                                    tracing::warn!("Pod reflector stream ended before daemon shutdown; store is now stale");
+                                    tracing::warn!(
+                                        "Pod reflector stream ended before daemon shutdown; store is now stale"
+                                    );
                                     break;
                                 };
                                 match res {
@@ -276,15 +282,19 @@ impl DiscoveryDaemon {
             tokio::pin!(cr_reflector_stream);
             loop {
                 tokio::select! {
-                    _ = cr_token.cancelled() => {
-                        tracing::debug!("DynamoWorkerMetadata reflector stopping on daemon shutdown");
+                _ = cr_token.cancelled() => {
+                    tracing::debug!(
+                        "DynamoWorkerMetadata reflector stopping on daemon shutdown"
+                    );
+                    break;
+                }
+                res = cr_reflector_stream.next() => {
+                    let Some(res) = res else {
+                        tracing::warn!(
+                            "DynamoWorkerMetadata reflector stream ended before daemon shutdown; store is now stale"
+                        );
                         break;
-                    }
-                    res = cr_reflector_stream.next() => {
-                        let Some(res) = res else {
-                            tracing::warn!("DynamoWorkerMetadata reflector stream ended before daemon shutdown; store is now stale");
-                            break;
-                        };
+                    };
                         match res {
                             Ok(event) => {
                                 if let Some(event) = cr_event(event)
@@ -357,7 +367,6 @@ impl DiscoveryDaemon {
                     event_tx.send(event).ok();
                 }
             }
-
         };
 
         reflector_token.cancel();
