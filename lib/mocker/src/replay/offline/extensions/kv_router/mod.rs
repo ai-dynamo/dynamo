@@ -1041,6 +1041,12 @@ impl OfflineReplayRouter {
 
     fn drain_pending(&mut self, decay_now: Instant) -> Result<Vec<WorkerAdmission>> {
         let mut admissions = Vec::new();
+        // Nothing pending is the overwhelming common case on every
+        // on_request_completed/on_prefill_completed call, so check it before
+        // paying for `active_tokens()`'s per-call `HashMap` allocation below.
+        if self.pending.pending_count() == 0 {
+            return Ok(admissions);
+        }
         loop {
             let active_tokens = self.slots.active_tokens(decay_now);
             let workers = &self.workers_with_configs;
