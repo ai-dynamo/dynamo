@@ -1799,3 +1799,61 @@ async def test_decode_call_site_stops_workers_when_benchmark_wait_raises(
     assert order == ["wait", "stop"]
     register.assert_not_awaited()
     engine_client.shutdown.assert_called_once_with(timeout=5.0)
+
+
+@pytest.mark.asyncio
+class TestEncodeWorkerEmbeddingCacheCapacity:
+    """The encode worker gets its cache capacity from the configured flag.
+
+    ``--multimodal-embedding-cache-capacity-gb`` defaults to 0, which disables
+    the cache, so the disabled case is the stock deployment rather than an edge
+    case. The handler decides whether to build a cache at all; the factory's
+    part is to hand it the configured value unchanged.
+    """
+
+    @staticmethod
+    async def _create_encode_worker(capacity_gb):
+        """Run ``_create_multimodal_encode_worker`` with everything external stubbed.
+
+        Returns the patched handler constructor.
+        """
+        endpoint = Mock()
+        endpoint.serve_endpoint = AsyncMock()
+        runtime = Mock()
+        runtime.endpoint = Mock(return_value=endpoint)
+
+        handler = Mock()
+        handler.async_init = AsyncMock()
+
+        config = _make_config(
+            namespace="dynamo",
+            component="encoder",
+            endpoint="generate",
+            model="/models/qwen-vl",
+            served_model_name="qwen-vl",
+            frontend_decoding=False,
+            multimodal_embedding_cache_capacity_gb=capacity_gb,
+        )
+
+        with patch(
+            "dynamo.vllm.worker_factory.EncodeWorkerHandler", return_value=handler
+        ) as handler_cls, patch(
+            "dynamo.vllm.worker_factory.register_model", AsyncMock()
+        ), patch(
+            "dynamo.vllm.worker_factory.register_model_taint_route"
+        ):
+            await _make_factory()._create_multimodal_encode_worker(
+                runtime, config, asyncio.Event(), []
+            )
+
+        return handler_cls
+
+    async def test_passes_the_configured_capacity_to_the_handler(self) -> None:
+        handler_cls = await self._create_encode_worker(4.0)
+
+        assert handler_cls.call_args.kwargs["embedding_cache_capacity_gb"] == 4.0
+
+    async def test_passes_the_disabling_default_through_unchanged(self) -> None:
+        handler_cls = await self._create_encode_worker(0.0)
+
+        assert handler_cls.call_args.kwargs["embedding_cache_capacity_gb"] == 0.0
