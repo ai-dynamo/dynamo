@@ -152,6 +152,12 @@ aggregated profile at concurrency 32. It preserves expanded configurations,
 raw reports, and frontend metrics. Keep the default real EAGLE3 acceptance
 configuration for accuracy evaluation.
 
+Before starting the benchmark, follow the workflow's
+[trace-staging instructions](https://github.com/ai-dynamo/dynamo/blob/main/recipes/ax-k2/perf/README.md#stage-the-trace)
+to copy the Git LFS chat trace from your checkout onto the model-cache PVC.
+The job reads it through `TRACE_FILE` and verifies its SHA-256 and request
+counts before sending traffic.
+
 <div data-variant="disagg">
 
 The checked-in benchmark job targets the aggregate frontend. To benchmark

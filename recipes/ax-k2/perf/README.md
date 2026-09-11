@@ -24,18 +24,49 @@ recipes/nemotron-3-ultra/perf/traces/
 
 Its SHA-256 is
 `5f369eb75ce639ad8b05cc209bb534bfedd627e9f7b923de32888155b4c9085a`.
-The runner downloads that exact Git-LFS asset and verifies its checksum, line
-count, eligible-request count, and absence of timestamps before sending any
-traffic.
+The runner reads the staged Git LFS asset from `TRACE_FILE` on the model-cache
+PVC. It verifies the checksum, line count, eligible-request count, and absence
+of timestamps before sending any traffic.
+
+## Stage the trace
+
+Run these commands from the repository root after creating the model-cache
+PVC. Set `CONTEXT` and `NAMESPACE` to your cluster context and namespace. If
+you use an existing PVC, replace `model-cache` in the helper's `claimName`
+and in `perf.yaml` with that PVC name.
+
+Materialize the trace from your checked-out Git revision, then copy it through
+a helper pod that mounts the PVC:
+
+```bash
+git lfs pull --include='recipes/nemotron-3-ultra/perf/traces/nim_turbo_8k_1k_70kv_chat_new_noschedule.jsonl'
+
+kubectl --context "${CONTEXT}" -n "${NAMESPACE}" run axk2-trace-helper \
+  --image=busybox:1.36 --restart=Never \
+  --overrides='{"spec":{"containers":[{"name":"helper","image":"busybox:1.36","command":["sleep","3600"],"volumeMounts":[{"name":"model-cache","mountPath":"/model-cache"}]}],"volumes":[{"name":"model-cache","persistentVolumeClaim":{"claimName":"model-cache"}}]}}' \
+  --command -- sleep 3600
+kubectl --context "${CONTEXT}" -n "${NAMESPACE}" wait --for=condition=Ready \
+  pod/axk2-trace-helper --timeout=300s
+
+TRACE_SOURCE="$(git rev-parse --show-toplevel)/recipes/nemotron-3-ultra/perf/traces/nim_turbo_8k_1k_70kv_chat_new_noschedule.jsonl"
+kubectl --context "${CONTEXT}" -n "${NAMESPACE}" exec axk2-trace-helper -- mkdir -p /model-cache/traces
+kubectl --context "${CONTEXT}" -n "${NAMESPACE}" cp "${TRACE_SOURCE}" \
+  axk2-trace-helper:/model-cache/traces/nim_turbo_8k_1k_70kv_chat_new_noschedule.jsonl
+kubectl --context "${CONTEXT}" -n "${NAMESPACE}" delete pod axk2-trace-helper
+```
+
+The benchmark job sets `TRACE_FILE` to this PVC path. It does not download the
+trace at runtime.
 
 ## Run KV-aware routing
 
-Deploy the DGD as described in the [model README](../README.md), then apply the
-runner and Job:
+Deploy the DGD as described in the
+[A.X-K2 recipe](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/recipes/model-recipes/ax-k2.mdx#deploy), then apply the
+runner and Job from the repository root:
 
 For throughput-only speculative-decoding measurements at the measured
 acceptance proxy, change the worker `SPECULATIVE_CONFIG` ConfigMap key in
-`../vllm/agg-b200-chat/deploy.yaml` from `speculative-config` to
+`recipes/ax-k2/vllm/agg-b200-chat/deploy.yaml` from `speculative-config` to
 `speculative-config-synthetic` before deploying. This enables vLLM's
 `rejection_sample_method: synthetic` with
 `synthetic_acceptance_length: 2.12`. Keep the production key for functional or
@@ -43,12 +74,11 @@ quality validation because synthetic rejection sampling intentionally forces
 acceptance behavior.
 
 ```bash
-export NAMESPACE=your-namespace
-kubectl apply -f runner.configmap.yaml -n "${NAMESPACE}"
-kubectl apply -f perf.yaml -n "${NAMESPACE}"
-kubectl logs -n "${NAMESPACE}" -l job-name=axk2-kv-bench -f
-kubectl wait --for=condition=Complete job/axk2-kv-bench \
-  -n "${NAMESPACE}" --timeout=21600s
+kubectl --context "${CONTEXT}" -n "${NAMESPACE}" apply -f recipes/ax-k2/perf/runner.configmap.yaml
+kubectl --context "${CONTEXT}" -n "${NAMESPACE}" apply -f recipes/ax-k2/perf/perf.yaml
+kubectl --context "${CONTEXT}" -n "${NAMESPACE}" logs -l job-name=axk2-kv-bench -f
+kubectl --context "${CONTEXT}" -n "${NAMESPACE}" wait --for=condition=Complete \
+  job/axk2-kv-bench --timeout=21600s
 ```
 
 The Job first replays the first 32 eligible trace records as a warm-cache
