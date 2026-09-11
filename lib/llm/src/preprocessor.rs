@@ -2959,11 +2959,7 @@ impl OpenAIPreprocessor {
         request: &R,
         hidden_stop_token_ids: &mut Vec<TokenIdType>,
     ) -> Result<Vec<TokenIdType>> {
-        let has_tools = request
-            .tools()
-            .as_ref()
-            .and_then(|tools| tools.len())
-            .is_some_and(|len| len > 0);
+        let has_tools = Self::request_has_effective_tools(request);
         let tool_choice_none = request
             .tool_choice()
             .as_ref()
@@ -3011,6 +3007,23 @@ impl OpenAIPreprocessor {
         }
 
         Ok(visible_stop_token_ids)
+    }
+
+    fn request_has_effective_tools<R: OAIChatLikeRequest>(request: &R) -> bool {
+        request
+            .tools()
+            .as_ref()
+            .and_then(|tools| tools.len())
+            .is_some_and(|len| len > 0)
+            || request.typed_messages().is_some_and(|messages| {
+                messages.iter().any(|message| {
+                    matches!(
+                        message,
+                        dynamo_protocols::types::ChatCompletionRequestMessage::System(system)
+                            if system.tools.as_ref().is_some_and(|tools| !tools.is_empty())
+                    )
+                })
+            })
     }
 
     fn should_keep_tool_parser_end_tokens_visible(has_tools: bool, tool_choice_none: bool) -> bool {
@@ -4569,11 +4582,7 @@ impl OpenAIPreprocessor {
             .as_deref()
             .is_some_and(|parser| matches!(parser, "kimi_k3" | "kimi-k3"));
         let tool_call_parsing_enabled = Self::tool_call_parsing_enabled(request);
-        let has_tools = request
-            .inner
-            .tools
-            .as_ref()
-            .is_some_and(|tools| !tools.is_empty());
+        let has_tools = request.inner.has_effective_tools();
         let should_jail = if tool_call_parsing_enabled || parser_unwraps_all_kimi_k3_responses {
             Self::should_apply_tool_jail(
                 effective_tool_call_parser.as_ref(),
@@ -4680,16 +4689,9 @@ impl OpenAIPreprocessor {
         // it does not need the same entry gate.
         //
         if let ToolProcessingRoute::MuseUnified(family) = &tool_processing_route {
-            let tool_definitions = request.inner.tools.as_ref().map(|tools| {
-                tools
-                    .iter()
-                    .map(|tool| dynamo_parsers::tool_calling::ToolDefinition {
-                        name: tool.function.name.clone(),
-                        parameters: tool.function.parameters.clone(),
-                        strict: tool.function.strict,
-                    })
-                    .collect()
-            });
+            let tool_definitions =
+                crate::preprocessor::tool_choice::effective_tool_definitions(&request.inner)?;
+            let tool_definitions = (!tool_definitions.is_empty()).then_some(tool_definitions);
             let unified: Pin<Box<dyn Stream<Item = _> + Send>> =
                 Box::pin(tool_parser_v2::apply_unified_stream(
                     stream,
@@ -4705,16 +4707,9 @@ impl OpenAIPreprocessor {
         }
 
         if let ToolProcessingRoute::QwenUnified(family) = &tool_processing_route {
-            let tool_definitions = request.inner.tools.as_ref().map(|tools| {
-                tools
-                    .iter()
-                    .map(|tool| dynamo_parsers::tool_calling::ToolDefinition {
-                        name: tool.function.name.clone(),
-                        parameters: tool.function.parameters.clone(),
-                        strict: tool.function.strict,
-                    })
-                    .collect()
-            });
+            let tool_definitions =
+                crate::preprocessor::tool_choice::effective_tool_definitions(&request.inner)?;
+            let tool_definitions = (!tool_definitions.is_empty()).then_some(tool_definitions);
             let unified: Pin<Box<dyn Stream<Item = _> + Send>> =
                 Box::pin(unified_parser::apply_stream_with_constraint(
                     stream,
@@ -4838,16 +4833,9 @@ impl OpenAIPreprocessor {
         let tool_call_parsing_enabled = Self::tool_call_parsing_enabled(request);
 
         // Convert OpenAI tools to parser ToolDefinition format before applying jail
-        let tool_definitions = request.inner.tools.as_ref().map(|tools| {
-            tools
-                .iter()
-                .map(|tool| dynamo_parsers::tool_calling::ToolDefinition {
-                    name: tool.function.name.clone(),
-                    parameters: tool.function.parameters.clone(),
-                    strict: tool.function.strict,
-                })
-                .collect()
-        });
+        let tool_definitions =
+            crate::preprocessor::tool_choice::effective_tool_definitions(&request.inner)?;
+        let tool_definitions = (!tool_definitions.is_empty()).then_some(tool_definitions);
 
         let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> =
             match tool_processing_route {
@@ -7755,6 +7743,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn hidden_stop_policy_recognizes_dynamic_system_tools() {
+        let dynamic: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "moonshotai/Kimi-K3",
+            "messages": [
+                {"role": "system", "content": "", "tools": [{"name": "lookup"}]},
+                {"role": "user", "content": "test"}
+            ]
+        }))
+        .unwrap();
+        let none: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "test"}]
+        }))
+        .unwrap();
+
+        assert!(OpenAIPreprocessor::request_has_effective_tools(&dynamic));
+        assert!(!OpenAIPreprocessor::request_has_effective_tools(&none));
+        assert!(
+            OpenAIPreprocessor::should_keep_tool_parser_end_tokens_visible(
+                OpenAIPreprocessor::request_has_effective_tools(&dynamic),
+                false,
+            )
+        );
+        assert!(
+            !OpenAIPreprocessor::should_keep_tool_parser_end_tokens_visible(
+                OpenAIPreprocessor::request_has_effective_tools(&dynamic),
+                true,
+            )
+        );
+    }
+
     async fn apply_kimi_k3_no_tools(
         leaked_reasoning: &str,
     ) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
@@ -7772,6 +7792,53 @@ mod tests {
             None,
             false,
             // No tools and no forced choice, so no JSON grammar was installed.
+            false,
+            stream::iter(vec![
+                kimi_k3_reasoning_chunk(leaked_reasoning),
+                terminal_chat_stream_chunk(),
+            ]),
+        );
+
+        OpenAIPreprocessor::apply_tool_call_response_policy(jailed, tool_call_parsing_enabled)
+            .collect()
+            .await
+    }
+
+    async fn apply_kimi_k3_dynamic_tools(
+        leaked_reasoning: &str,
+    ) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "moonshotai/Kimi-K3",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "",
+                    "tools": [{
+                        "name": "lookup",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"query": {"type": "string"}},
+                            "required": ["query"]
+                        }
+                    }]
+                },
+                {"role": "user", "content": "test"}
+            ]
+        }))
+        .unwrap();
+        let tool_call_parsing_enabled = OpenAIPreprocessor::tool_call_parsing_enabled(&request);
+        assert!(
+            tool_call_parsing_enabled,
+            "dynamic system tools grant tool-call response permission"
+        );
+        let tool_definitions =
+            crate::preprocessor::tool_choice::effective_tool_definitions(&request.inner).unwrap();
+
+        let jailed = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("kimi_k3".to_string()),
+            request.inner.tool_choice.clone(),
+            Some(tool_definitions),
+            false,
             false,
             stream::iter(vec![
                 kimi_k3_reasoning_chunk(leaked_reasoning),
@@ -7894,6 +7961,57 @@ mod tests {
             choice.message.reasoning_content.as_deref(),
             Some("Use the calculator.")
         );
+    }
+
+    #[tokio::test]
+    async fn test_kimi_k3_dynamic_only_tools_survive_stream_and_batch_response_policy() {
+        let responses = apply_kimi_k3_dynamic_tools(concat!(
+            "Use the dynamic lookup tool.",
+            "<|open|>tools<|sep|>",
+            "<|open|>call tool=\"lookup\" index=\"1\"<|sep|>",
+            "<|open|>argument key=\"query\" type=\"string\"<|sep|>weather",
+            "<|close|>argument<|sep|>",
+            "<|close|>call<|sep|>",
+            "<|close|>tools<|sep|>",
+            "<|close|>message<|sep|>",
+            "<|end_of_msg|>"
+        ))
+        .await;
+
+        let choices: Vec<_> = responses
+            .iter()
+            .flat_map(|response| response.data.iter())
+            .flat_map(|data| data.inner.choices.iter())
+            .collect();
+        assert!(
+            choices
+                .iter()
+                .any(|choice| choice.delta.tool_calls.is_some()),
+            "streaming output must retain a dynamically declared tool call"
+        );
+        assert!(
+            choices
+                .iter()
+                .any(|choice| choice.finish_reason == Some(FinishReason::ToolCalls)),
+            "streaming finish reason must remain tool_calls"
+        );
+
+        let response =
+            crate::protocols::openai::chat_completions::aggregator::DeltaAggregator::apply(
+                stream::iter(responses),
+                crate::protocols::openai::ParsingOptions::new(None, None),
+            )
+            .await
+            .unwrap();
+        let choice = &response.inner.choices[0];
+        let calls = choice
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("batch output must retain the dynamic call");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "lookup");
+        assert_eq!(choice.finish_reason, Some(FinishReason::ToolCalls));
     }
 
     #[test]

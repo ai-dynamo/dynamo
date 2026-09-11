@@ -615,6 +615,36 @@ pub fn validate_tool_choice(
     }
 }
 
+/// Validate a forced tool choice against every tool visible to the model.
+///
+/// Kimi-style dynamic tools remain inside system messages so prompt ordering
+/// and prefix-cache semantics are preserved. They still participate in the
+/// request's tool-choice contract, alongside the ordinary top-level list.
+pub fn validate_effective_tool_choice(
+    request: &dynamo_protocols::types::CreateChatCompletionRequest,
+) -> Result<(), anyhow::Error> {
+    use dynamo_protocols::types::ChatCompletionToolChoiceOption;
+
+    match request.tool_choice.as_ref() {
+        None
+        | Some(ChatCompletionToolChoiceOption::None)
+        | Some(ChatCompletionToolChoiceOption::Auto) => Ok(()),
+        Some(ChatCompletionToolChoiceOption::Required) if !request.has_effective_tools() => {
+            anyhow::bail!("tool_choice is \"required\" but tools is empty")
+        }
+        Some(ChatCompletionToolChoiceOption::Named(named))
+            if !request.effective_tool_contains(&named.function.name) =>
+        {
+            anyhow::bail!(
+                "tool named \"{}\" in tool_choice is not present in tools",
+                named.function.name
+            )
+        }
+        Some(ChatCompletionToolChoiceOption::Required)
+        | Some(ChatCompletionToolChoiceOption::Named(_)) => Ok(()),
+    }
+}
+
 /// Validates reasoning effort parameter
 pub fn validate_reasoning_effort(
     _reasoning_effort: &Option<dynamo_protocols::types::ReasoningEffort>,

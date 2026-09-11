@@ -2079,7 +2079,7 @@ dependencies = [
  "async-trait",
  "clap",
  "dynamo-llm",
- "dynamo-protocols",
+ "dynamo-protocols 6.0.0",
  "dynamo-rl",
  "dynamo-runtime",
  "futures",
@@ -2202,7 +2202,7 @@ dependencies = [
  "dynamo-mocker",
  "dynamo-parsers",
  "dynamo-parsers-v2",
- "dynamo-protocols",
+ "dynamo-protocols 6.0.0",
  "dynamo-renderer",
  "dynamo-rl",
  "dynamo-runtime",
@@ -2332,7 +2332,7 @@ dependencies = [
  "aho-corasick",
  "anyhow",
  "async-stream",
- "dynamo-protocols",
+ "dynamo-protocols 5.4.1",
  "futures",
  "num-traits",
  "openai-harmony",
@@ -2368,6 +2368,23 @@ name = "dynamo-protocols"
 version = "5.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dbaf3179de1accba21fcad16eb22b5e113722084265e0315e808e32150088ee7"
+dependencies = [
+ "async-openai",
+ "derive_builder",
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "dynamo-protocols"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78c0b1eda0a7bfc732f825f8e831edad058b917fd43b5ecf9a3eb674340e9cd5"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2428,13 +2445,13 @@ dependencies = [
 
 [[package]]
 name = "dynamo-renderer"
-version = "5.1.2"
+version = "5.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ae2eaa139651c535aeaad8856c5546709608931ccd4d24d3a529f6c5233c4b6"
+checksum = "9bc2e88ca65967e191f32002da61b0e079f97a0e3f4b992cbfd70182c4bd5975"
 dependencies = [
  "anyhow",
  "chrono",
- "dynamo-protocols",
+ "dynamo-protocols 6.0.0",
  "dynamo-tokenizers",
  "either",
  "minijinja",
@@ -2576,9 +2593,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokenizers"
-version = "1.8.1"
+version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed232a9d254149a4e2e14f0a7d77f59bd64161964c0ba55267beea3955650faa"
+checksum = "aa6031ec0ca72092e6469ff659ddf9dbf5034110aa9de387ffbfb17e24a4d5d7"
 dependencies = [
  "aho-corasick",
  "anyhow",
