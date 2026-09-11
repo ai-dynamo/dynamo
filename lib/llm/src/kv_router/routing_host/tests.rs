@@ -968,6 +968,27 @@ async fn always_ready_terminals_cannot_starve_the_drain_deadline() {
     runtime.shutdown();
 }
 
+/// The selection future is nested inside every request future (deeper still
+/// on the disaggregated path). A debug build once overflowed a worker stack
+/// when this grew and `await_with_cleanup_policy` held it by value; keep it
+/// small enough that nesting stays cheap.
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_selection_future_stays_small() {
+    let (router, _runtime) = embedded_router_with_workers(None, &[1]).await;
+    let request = Context::with_id_and_metadata(
+        request(),
+        "selection-future-size".to_string(),
+        Default::default(),
+    );
+    let budget = CleanupBudget::default();
+    let future = router.select_with_affinity(&request, RequestPhase::Aggregated, false, &budget);
+    let size = std::mem::size_of_val(&future);
+    drop(future);
+    eprintln!("kv selection future size: {size} bytes");
+    assert!(size < 16 * 1024, "kv selection future is {size} bytes");
+}
+
 /// Transport EOF ends the drain and releases the booking.
 #[tokio::test]
 #[serial_test::serial]
