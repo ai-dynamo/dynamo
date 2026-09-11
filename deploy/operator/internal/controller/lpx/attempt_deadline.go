@@ -412,6 +412,10 @@ func lpxRequestsByName(requests []lpxv1alpha1.LPUPipelineRequest) map[string]*lp
 }
 
 func (r *graphReconciler) releaseLPXAttemptRecordingFinalizer(ctx context.Context, request *lpxv1alpha1.LPUPipelineRequest) error {
+	// The scheduler finishes cleanup and removes scheduling.lpu.nvidia.com/plan-protection
+	// independently, never waiting for lpxAttemptRecordingFinalizer. Dynamo releases
+	// its finalizer last to retain the request identity and terminal status during cleanup.
+	// Unknown finalizers block release; their owners must resolve them, not Dynamo.
 	if request.DeletionTimestamp.IsZero() || len(request.Finalizers) != 1 || request.Finalizers[0] != lpxAttemptRecordingFinalizer {
 		return nil
 	}
