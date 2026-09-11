@@ -62,13 +62,13 @@ pub(crate) fn engine_components(
     let schedule_policy = match sglang_args.and_then(|sglang| sglang.schedule_policy.as_deref()) {
         Some("lpm") => SglangSchedulePolicy::Lpm,
         Some("fifo") | Some("fcfs") | None => SglangSchedulePolicy::Fifo,
-        Some(other) => {
-            tracing::warn!(
-                schedule_policy = other,
-                "unknown SGLang schedule policy; using FIFO"
-            );
-            SglangSchedulePolicy::Fifo
-        }
+        // Fail closed, like every other conversion in this function. Silently
+        // substituting FIFO meant a typo ("LPM", "longest_prefix") changed which
+        // scheduler was simulated while the run stayed labelled with the policy
+        // the caller asked for -- a wrong benchmark number reported as a warning.
+        Some(other) => anyhow::bail!(
+            "unknown SGLang schedule policy {other:?}; expected \"lpm\", \"fifo\", or \"fcfs\""
+        ),
     };
     let sglang = SglangConfig {
         schedule_policy,
@@ -300,6 +300,28 @@ mod tests {
         assert!(components.rank.emit_kv_token_ids);
         assert_eq!(components.rank.timing_model, TimingModelConfig::Polynomial);
         assert!(components.timing.is_none());
+    }
+
+    /// An unrecognized policy used to fall back to FIFO with a `warn!`, so a
+    /// typo silently changed which scheduler was simulated while the run stayed
+    /// labelled with the policy the caller asked for.
+    #[test]
+    fn unknown_sglang_schedule_policy_is_rejected_not_downgraded_to_fifo() {
+        let mut args = MockEngineArgs::builder().build().unwrap();
+        args.engine_type = EngineType::Sglang;
+        args.sglang = Some(SglangArgs {
+            schedule_policy: Some("LPM".to_string()),
+            ..SglangArgs::default()
+        });
+
+        let error = match engine_components(args, false, false) {
+            Ok(_) => panic!("an unknown schedule policy must be rejected"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("unknown SGLang schedule policy"),
+            "{error}"
+        );
     }
 
     #[test]
