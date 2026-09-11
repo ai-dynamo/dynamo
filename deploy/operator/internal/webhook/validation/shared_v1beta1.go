@@ -63,6 +63,7 @@ type dynamoComponentDeploymentSharedSpecValidationOptions struct {
 	validateInferencePoolAvailability bool
 	providerOverridesSupported        bool
 	workloadProvider                  string
+	oldComponent                      *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
 }
 
 // validateDynamoComponentDeploymentSharedSpec validates spec. spec and fldPath must not be nil.
@@ -115,14 +116,14 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		))
 	}
 
+	// Ratchet unsupported legacy multinode combinations on update.
+	allErrs = append(allErrs, validateMultinodeComponentType(spec, options.oldComponent, fldPath.Child("multinode"))...)
+
 	if spec.ComponentType == nvidiacomv1beta1.ComponentTypeEPP {
 		if options.validateInferencePoolAvailability {
 			if err := inferencePoolAvailabilityError(v.ctx, v.mgr); err != nil {
 				allErrs = append(allErrs, field.Forbidden(fldPath.Child("type"), fmt.Sprintf("cannot deploy EPP component: %v", err)))
 			}
-		}
-		if spec.IsMultinode() {
-			allErrs = append(allErrs, field.Forbidden(fldPath.Child("multinode"), "EPP component cannot be multinode"))
 		}
 		if spec.Replicas != nil && *spec.Replicas != 1 {
 			allErrs = append(allErrs, field.Invalid(
@@ -189,6 +190,51 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	}
 
 	return allErrs
+}
+
+func supportsMultinodeComponentType(componentType nvidiacomv1beta1.ComponentType) bool {
+	switch componentType {
+	case nvidiacomv1beta1.ComponentTypeWorker,
+		nvidiacomv1beta1.ComponentTypePrefill,
+		nvidiacomv1beta1.ComponentTypeDecode:
+		return true
+	default:
+		return false
+	}
+}
+
+func hasUnsupportedMultinode(spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) bool {
+	return spec != nil && spec.Multinode != nil && !supportsMultinodeComponentType(spec.ComponentType)
+}
+
+// validateMultinodeComponentType rejects unsupported new combinations and
+// ratchets identical legacy violations on update. fldPath points to multinode.
+func validateMultinodeComponentType(
+	newSpec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	oldSpec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	if !hasUnsupportedMultinode(newSpec) {
+		return nil
+	}
+	if oldSpec != nil && oldSpec.ComponentType == newSpec.ComponentType &&
+		hasUnsupportedMultinode(oldSpec) &&
+		apiequality.Semantic.DeepEqual(oldSpec.Multinode, newSpec.Multinode) {
+		return nil
+	}
+	return field.ErrorList{field.Forbidden(
+		fldPath,
+		"multinode is supported only for worker, prefill, or decode components",
+	)}
+}
+
+func removesUnsupportedMultinode(
+	newSpec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	oldSpec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+) bool {
+	return hasUnsupportedMultinode(oldSpec) &&
+		newSpec.Multinode == nil &&
+		newSpec.ComponentType == oldSpec.ComponentType
 }
 
 type providerOverrideValidationOptions struct {
@@ -683,15 +729,19 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 		)...)
 	}
 
-	// Keep the component's multinode shape stable across updates.
+	// Keep the component's multinode shape stable across updates. Permit
+	// removing a legacy multinode value from an unsupported component type.
 	if newComponent.IsMultinode() != oldComponent.IsMultinode() {
-		allErrs = append(allErrs, field.Invalid(
-			fldPath.Child("multinode"),
-			newComponent.Multinode,
-			"cannot change node topology between single-node and multi-node after creation",
-		))
+		if !removesUnsupportedMultinode(newComponent, oldComponent) {
+			allErrs = append(allErrs, field.Invalid(
+				fldPath.Child("multinode"),
+				newComponent.Multinode,
+				"cannot change node topology between single-node and multi-node after creation",
+			))
+		}
 	} else {
-		if newComponent.Multinode != nil && oldComponent.Multinode != nil &&
+		if !hasUnsupportedMultinode(newComponent) &&
+			newComponent.Multinode != nil && oldComponent.Multinode != nil &&
 			newComponent.Multinode.NodeCount != oldComponent.Multinode.NodeCount {
 			allErrs = append(allErrs, field.Invalid(
 				fldPath.Child("multinode", "nodeCount"),

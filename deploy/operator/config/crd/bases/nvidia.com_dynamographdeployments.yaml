@@ -11541,7 +11541,9 @@ spec:
                           - name
                         type: object
                       multinode:
-                        description: Multinode is the configuration for multinode components.
+                        description: |-
+                          Multinode configures worker, prefill, or decode components that span
+                          multiple Pods.
                         properties:
                           nodeCount:
                             default: 2
@@ -12891,7 +12893,9 @@ spec:
                           - name
                         type: object
                       multinode:
-                        description: multinode configures multinode components.
+                        description: |-
+                          multinode configures worker, prefill, or decode components that span
+                          multiple Pods.
                         properties:
                           nodeCount:
                             default: 2

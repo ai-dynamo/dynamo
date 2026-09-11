@@ -160,7 +160,8 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	MinAvailable *int32 `json:"minAvailable,omitempty"`
 
-	// Multinode is the configuration for multinode components.
+	// Multinode configures worker, prefill, or decode components that span
+	// multiple Pods.
 	Multinode *MultinodeSpec `json:"multinode,omitempty"`
 	// Roles expose the named Pod-producing parts inside a compound component.
 	// When set for a multinode component, this list must contain exactly one

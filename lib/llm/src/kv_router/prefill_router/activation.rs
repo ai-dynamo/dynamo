@@ -23,7 +23,7 @@ use dynamo_runtime::{
 
 use super::{PrefillBinding, PrefillBuildContext, PrefillLifecycleState, PrefillRouter};
 use crate::{
-    discovery::{LoadThresholdHandle, ModelManager},
+    discovery::{LoadThresholdHandle, ModelManager, WorkerSetTarget},
     kv_router::{RouterLoadSource, RoutingHost, RoutingLoadContext, WorkerSelectorFactory},
     local_model::runtime_config::ModelRuntimeConfig,
     model_card::ModelDeploymentCard,
@@ -83,8 +83,8 @@ fn resolve_advertisement_from_cards(
         kv_cache_block_size: first.kv_cache_block_size,
     };
 
-    // A fleet mid-rolling-update can disagree. First card wins, but a silent
-    // split means half the fleet is routed on the other half's terms.
+    // Only legacy explicit endpoints can supply multiple cards here; managed
+    // topology supplies the selected card and filters incompatible workers.
     let disagreeing = cards
         .iter()
         .skip(1)
@@ -279,7 +279,7 @@ where
                 tokio::select! {
                     result = activation_rx => {
                         if let (Ok(endpoint), Some(router)) = (result, router.upgrade()) {
-                            router.set_target(Some(endpoint));
+                            router.set_target(Some(WorkerSetTarget::Legacy(endpoint)));
                         }
                     }
                     _ = cancel_token.cancelled() => {}
@@ -292,21 +292,31 @@ where
 
     async fn build_binding(
         context: &PrefillBuildContext<Sel>,
-        endpoint: Endpoint,
+        target: WorkerSetTarget,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
     ) -> Result<PrefillBinding<Sel>> {
+        let target_id = target.id();
+        let endpoint = target.endpoint();
         let endpoint_id = endpoint.id();
-        let client = endpoint.client().await?;
+        let client = target.client(context.parent_token.clone()).await?;
 
         // Start runtime config watcher for this endpoint (needed for get_disaggregated_endpoint)
         // This must be done before creating the router so bootstrap info is available
         context
             .model_manager
-            .get_or_create_runtime_config_watcher(&endpoint)
+            .get_or_create_runtime_config_watcher(endpoint)
             .await?;
 
-        let advertisement = Self::resolve_prefill_advertisement(context, &endpoint).await?;
+        let advertisement = match &target {
+            WorkerSetTarget::Committed(target) => resolve_advertisement_from_cards(
+                std::slice::from_ref(target.card.as_ref()),
+                context.decode_router_mode,
+            )?,
+            WorkerSetTarget::Legacy(endpoint) => {
+                Self::resolve_prefill_advertisement(context, endpoint).await?
+            }
+        };
         let prefill_router_mode = advertisement.router_mode;
 
         // Everything the hop uses comes from the prefill card when it says so,
@@ -423,6 +433,7 @@ where
         };
 
         Ok(PrefillBinding {
+            target_id,
             endpoint_id,
             router,
             prefill_router_mode,
@@ -474,7 +485,7 @@ where
 
     async fn drive_target(
         router: std::sync::Weak<Self>,
-        mut target_rx: watch::Receiver<Option<Endpoint>>,
+        mut target_rx: watch::Receiver<Option<WorkerSetTarget>>,
         cancel_token: tokio_util::sync::CancellationToken,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
@@ -482,7 +493,7 @@ where
     ) {
         loop {
             let target = target_rx.borrow_and_update().clone();
-            let Some(endpoint) = target else {
+            let Some(target) = target else {
                 tokio::select! {
                     biased;
                     _ = cancel_token.cancelled() => return,
@@ -494,14 +505,15 @@ where
                 }
                 continue;
             };
-            let endpoint_id = endpoint.id();
+            let target_id = target.id();
+            let endpoint_id = target.endpoint().id();
             let Some(router_ref) = router.upgrade() else {
                 return;
             };
             let reuses_binding = router_ref
                 .binding
                 .load_full()
-                .is_some_and(|binding| binding.endpoint_id == endpoint_id)
+                .is_some_and(|binding| binding.target_id == target_id)
                 && router_ref.lifecycle_state() == PrefillLifecycleState::Active;
             if reuses_binding {
                 drop(router_ref);
@@ -534,7 +546,7 @@ where
             drop(router_ref);
             let build = Self::build_binding(
                 &build_context,
-                endpoint,
+                target,
                 kv_cache_block_size,
                 kv_router_config.clone(),
             );
@@ -556,7 +568,7 @@ where
             match result {
                 Ok(binding) => {
                     let current_target = router_ref.target.lock();
-                    if current_target.as_ref() != Some(&endpoint_id) {
+                    if current_target.as_ref() != Some(&target_id) {
                         continue;
                     }
                     router_ref.binding.store(Some(Arc::new(binding)));
@@ -572,7 +584,7 @@ where
                     );
                 }
                 Err(error) => {
-                    if router_ref.target.lock().as_ref() != Some(&endpoint_id) {
+                    if router_ref.target.lock().as_ref() != Some(&target_id) {
                         continue;
                     }
                     tracing::error!(
@@ -601,8 +613,8 @@ where
     /// Update the desired Prefill endpoint. Clearing is synchronous so requests
     /// holding an older catalog snapshot bypass a removed endpoint before the
     /// replacement catalog is published.
-    pub(crate) fn set_target(&self, target: Option<Endpoint>) {
-        let target_id = target.as_ref().map(Endpoint::id);
+    pub(crate) fn set_target(&self, target: Option<WorkerSetTarget>) {
+        let target_id = target.as_ref().map(WorkerSetTarget::id);
         let mut current = self.target.lock();
         if *current == target_id {
             return;
@@ -612,7 +624,7 @@ where
             && self
                 .binding
                 .load_full()
-                .is_some_and(|binding| Some(&binding.endpoint_id) == target_id.as_ref());
+                .is_some_and(|binding| Some(&binding.target_id) == target_id.as_ref());
         let lifecycle = if target.is_none() {
             PrefillLifecycleState::Unavailable
         } else if reuses_binding {
@@ -638,25 +650,36 @@ where
 
     #[cfg(test)]
     pub(crate) fn target_endpoint_id(&self) -> Option<dynamo_runtime::protocols::EndpointId> {
-        self.target.lock().clone()
+        self.target_tx
+            .as_ref()
+            .and_then(|tx| tx.borrow().as_ref().map(|target| target.endpoint().id()))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
+    use crate::discovery::CommittedWorkerSetTarget;
     use crate::entrypoint::RouterConfig;
     use dynamo_kv_router::config::KvRouterConfig;
+    use dynamo_kv_router::protocols::RoutingConstraints;
+    use dynamo_runtime::{
+        DistributedRuntime, Runtime,
+        discovery::{DiscoverySpec, EventTransportKind},
+        distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode},
+        pipeline::{
+            AsyncEngine, AsyncEngineContextProvider, ManyOut, Operator, ResponseStream, SingleIn,
+            network::Ingress,
+        },
+        storage::kv,
+    };
+    use futures::StreamExt;
 
     fn card(router_config: Option<RouterConfig>) -> ModelDeploymentCard {
         let mut card = ModelDeploymentCard::with_name_only("test-model");
         card.router_config = router_config;
-        card
-    }
-
-    fn card_with_block_size(block_size: u32) -> ModelDeploymentCard {
-        let mut card = card(None);
-        card.kv_cache_block_size = block_size;
         card
     }
 
@@ -670,45 +693,6 @@ mod tests {
             resolve_advertisement_from_cards(&cards, RouterMode::RoundRobin).expect("resolves");
         assert_eq!(resolved.router_mode, RouterMode::RoundRobin);
         assert!(resolved.kv_router_config.is_none());
-    }
-
-    #[test]
-    fn card_router_config_overrides_decode_mode() {
-        // The headline case: KV-routed prefill in front of round-robin decode.
-        let cards = vec![card(Some(RouterConfig::new(
-            RouterMode::KV,
-            KvRouterConfig::default(),
-        )))];
-        let resolved =
-            resolve_advertisement_from_cards(&cards, RouterMode::RoundRobin).expect("resolves");
-        assert_eq!(resolved.router_mode, RouterMode::KV);
-        assert!(resolved.kv_router_config.is_some());
-    }
-
-    #[test]
-    fn first_card_wins_when_the_fleet_disagrees() {
-        // A rolling update can leave old (inheriting) and new (advertising)
-        // prefill workers side by side. Resolution must stay deterministic
-        // rather than depending on which card happened to be read.
-        let cards = vec![
-            card(Some(RouterConfig::new(
-                RouterMode::KV,
-                KvRouterConfig::default(),
-            ))),
-            card(None),
-        ];
-        let resolved =
-            resolve_advertisement_from_cards(&cards, RouterMode::RoundRobin).expect("resolves");
-        assert_eq!(resolved.router_mode, RouterMode::KV);
-    }
-
-    #[test]
-    fn block_size_comes_from_the_prefill_card() {
-        // The prefill pool's KV events are keyed on its own block size. Taking
-        // the decode set's would index this pool at the wrong granularity.
-        let cards = vec![card_with_block_size(64)];
-        let resolved = resolve_advertisement_from_cards(&cards, RouterMode::KV).expect("resolves");
-        assert_eq!(resolved.kv_cache_block_size, 64);
     }
 
     #[test]
@@ -746,5 +730,327 @@ mod tests {
             error.to_string().contains("no readable prefill model card"),
             "unexpected error: {error}"
         );
+    }
+
+    struct PrefillWorker(u32);
+
+    #[async_trait::async_trait]
+    impl
+        AsyncEngine<
+            SingleIn<PreprocessedRequest>,
+            ManyOut<Annotated<LLMEngineOutput>>,
+            anyhow::Error,
+        > for PrefillWorker
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
+            let mut output = LLMEngineOutput::stop();
+            output.token_ids = vec![self.0];
+            Ok(ResponseStream::new(
+                Box::pin(futures::stream::iter([Annotated::from_data(output)])),
+                request.context(),
+            ))
+        }
+    }
+
+    fn request() -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("test-model".into())
+            .token_ids(vec![1; 128])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .build()
+            .unwrap()
+    }
+
+    async fn prefilled_worker(router: &PrefillRouter) -> u32 {
+        let mut response = router
+            .generate(SingleIn::new(request()), Arc::new(PrefillWorker(99)))
+            .await
+            .unwrap();
+        let worker = response.next().await.unwrap().data.unwrap().token_ids[0];
+        while response.next().await.is_some() {}
+        worker
+    }
+
+    #[tokio::test]
+    async fn committed_prefill_uses_selected_card_and_admission_across_endpoint_reuse() {
+        // The request-plane server is process-global, but other Tokio tests
+        // destroy the runtime that owns its accept loop.
+        const TEST: &str = concat!(
+            module_path!(),
+            "::committed_prefill_uses_selected_card_and_admission_across_endpoint_reuse"
+        );
+        let test_name = TEST.split_once("::").unwrap().1;
+        if std::env::var("DYNAMO_ROUTING_HOP_TEST").as_deref() != Ok(test_name) {
+            let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args(["--exact", test_name, "--nocapture"])
+                .env("DYNAMO_ROUTING_HOP_TEST", test_name)
+                .env("DYN_TCP_RPC_HOST", "127.0.0.1")
+                .env("DYN_TCP_RPC_PORT", "0")
+                .env("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")
+                .env("DYN_TCP_RESPONSE_STREAM_PORT", "0")
+                .kill_on_drop(true);
+            let output = tokio::time::timeout(Duration::from_secs(30), child.output())
+                .await
+                .expect("prefill subprocess must finish within its deadline")
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let runtime = Runtime::from_current().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let config = || DistributedConfig {
+            discovery_backend: DiscoveryBackend::KvStore(kv::Selector::File(store.path().into())),
+            nats_config: None,
+            request_plane: RequestPlaneMode::Tcp,
+            response_plane: None,
+            event_transport_kind: EventTransportKind::Zmq,
+        };
+        let namespace = format!("prefill-admission-{}", uuid::Uuid::new_v4());
+        let mut workers = Vec::new();
+        let mut runtimes = Vec::new();
+        for marker in 0..3 {
+            let drt = DistributedRuntime::new(runtime.clone(), config())
+                .await
+                .unwrap();
+            let endpoint = drt
+                .namespace(namespace.clone())
+                .unwrap()
+                .component("workers")
+                .unwrap()
+                .endpoint("prefill");
+            workers.push(
+                endpoint
+                    .endpoint_builder()
+                    .handler(Ingress::for_engine(Arc::new(PrefillWorker(marker))).unwrap())
+                    .start_with_registration()
+                    .await
+                    .unwrap(),
+            );
+            // Raw cards provide per-worker runtime data, but the hop's effective
+            // routing configuration must come from its committed target.
+            let mut advertised = card(Some(RouterConfig::new(
+                RouterMode::RoundRobin,
+                KvRouterConfig::default(),
+            )));
+            advertised.kv_cache_block_size = if marker == 2 { 32 } else { 64 };
+            drt.discovery()
+                .register(
+                    DiscoverySpec::from_model(
+                        namespace.clone(),
+                        "workers".into(),
+                        "prefill".into(),
+                        &advertised,
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            runtimes.push(drt);
+        }
+        let drt = DistributedRuntime::new(runtime.clone(), config())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace(namespace.clone())
+            .unwrap()
+            .component("workers")
+            .unwrap()
+            .endpoint("prefill");
+        let raw_client = endpoint.client().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut instances = raw_client.instance_source.as_ref().clone();
+            while instances.borrow_and_update().len() != 3 {
+                instances.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("raw endpoint discovery must contain every worker");
+        let ids: Vec<_> = workers
+            .iter()
+            .map(|worker| worker.instance().id())
+            .collect();
+        let kv_config = KvRouterConfig {
+            use_kv_events: false,
+            router_track_active_blocks: false,
+            ..Default::default()
+        };
+        let target = |generation, block_size, admitted_ids| {
+            let mut selected = card(Some(RouterConfig::new(RouterMode::KV, kv_config.clone())));
+            selected.kv_cache_block_size = block_size;
+            WorkerSetTarget::Committed(CommittedWorkerSetTarget {
+                endpoint: endpoint.clone(),
+                group: endpoint.id().to_string(),
+                generation,
+                card: Arc::new(selected),
+                admitted_ids,
+            })
+        };
+        let router = PrefillRouter::new_with_selector_factory(
+            None,
+            Arc::new(ModelManager::new()),
+            RouterMode::RoundRobin,
+            16,
+            None,
+            Arc::new(|config, _, _| DefaultWorkerSelector::new(Some(config.clone()), "prefill")),
+            None,
+            None,
+            SessionAffinityMode::Hard,
+            "test-model".into(),
+            namespace,
+            LoadThresholdHandle::new(Default::default()),
+            drt.child_token(),
+            None,
+        );
+        let (admissions, admitted_ids) = watch::channel(vec![ids[0]]);
+        router.set_target(Some(target(1, 64, admitted_ids)));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let worker = prefilled_worker(&router).await;
+                if worker != 99 {
+                    assert_eq!(worker, 0);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("committed prefill target must activate");
+        let retired = router.binding.load_full().unwrap();
+        let chooser = retired
+            .router
+            .kv_router_if_enabled()
+            .expect("selected KV mode must override raw RR cards");
+        assert_eq!(chooser.block_size(), 64);
+        for _ in 0..6 {
+            assert_eq!(prefilled_worker(&router).await, 0);
+        }
+        let reservation = router
+            .reserve_prefill_worker(
+                "committed-prefill",
+                &[1; 128],
+                None,
+                None,
+                None,
+                0.0,
+                0,
+                None,
+                None,
+                RoutingConstraints::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reservation.worker_id(), ids[0]);
+        assert_eq!(reservation.dp_rank(), Some(0));
+        reservation.release().await.unwrap();
+
+        admissions.send_replace(vec![ids[0], ids[1]]);
+        admissions.send_replace(vec![ids[1]]);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let outcome = router
+                    .query_prefill_worker(
+                        &[1; 128],
+                        None,
+                        None,
+                        None,
+                        0.0,
+                        0,
+                        None,
+                        RoutingConstraints::default(),
+                    )
+                    .await
+                    .unwrap();
+                let crate::kv_router::prefill_router::PrefillQueryOutcome::Routed {
+                    worker_id, ..
+                } = outcome
+                else {
+                    panic!("prefill query must remain routable");
+                };
+                assert!(
+                    ids[..2].contains(&worker_id),
+                    "rejected prefill worker became selectable"
+                );
+                if worker_id == ids[1] {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("compatible replacement must route through the existing channel");
+        assert_eq!(prefilled_worker(&router).await, 1);
+        let mut retained_response = retired
+            .router
+            .generate(SingleIn::new(request()))
+            .await
+            .unwrap();
+        assert_eq!(
+            retained_response
+                .next()
+                .await
+                .unwrap()
+                .data
+                .unwrap()
+                .token_ids,
+            vec![1]
+        );
+        while retained_response.next().await.is_some() {}
+
+        admissions.send_replace(Vec::new());
+        drop(admissions);
+        router.set_target(None);
+        let (_successor_admissions, successor_ids) = watch::channel(vec![ids[2]]);
+        router.set_target(Some(target(2, 32, successor_ids)));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let worker = prefilled_worker(&router).await;
+                if worker != 99 {
+                    assert_eq!(worker, 2);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("same-endpoint successor must activate");
+        assert_eq!(
+            router
+                .binding
+                .load_full()
+                .unwrap()
+                .router
+                .kv_router_if_enabled()
+                .unwrap()
+                .block_size(),
+            32
+        );
+        for _ in 0..6 {
+            assert_eq!(prefilled_worker(&router).await, 2);
+        }
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                retired.router.generate(SingleIn::new(request()),)
+            )
+            .await
+            .expect("retired prefill admission must fail promptly")
+            .is_err()
+        );
+
+        drop(router);
+        for worker in workers {
+            worker.shutdown().await.unwrap();
+        }
+        runtime.shutdown();
     }
 }
