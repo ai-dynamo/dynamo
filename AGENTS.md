@@ -193,11 +193,10 @@ The architecture is documented once, under
 [`docs/fern/pages/developer-guide/knowledge-base/`](docs/fern/pages/developer-guide/knowledge-base/).
 Read it there rather than reconstructing it from source:
 
-- [Architecture flow](docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/architecture-flow.md) — what happens to a request, end to end
-- [Distributed runtime](docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/distributed-runtime.md) — the runtime/namespace/component/endpoint model
+- [Architecture](docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/architecture.md) — request flow and the runtime/namespace/component/endpoint model
 - [Disaggregated serving](docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/disaggregated-serving.md) — splitting prefill from decode
 - [Routing concepts](docs/fern/pages/developer-guide/knowledge-base/modular-components/router/routing-concepts.md) — KV-aware routing
-- [KVBM overview](docs/fern/pages/developer-guide/knowledge-base/modular-components/kvbm/overview.md) — multi-tier KV cache management
+- [KVBM configuration reference](docs/fern/pages/reference/components/kvbm-configuration.mdx) — multi-tier KV cache management
 
 ## Build
 

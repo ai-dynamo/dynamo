@@ -39,8 +39,7 @@ entrypoint that constructs one. All three are re-exported from
 > `src/distributed.rs` is the authoritative statement of this.
 
 For the full picture — how the frontend, router, and workers compose over this model —
-read [distributed runtime](../../docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/distributed-runtime.md)
-and [architecture flow](../../docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/architecture-flow.md).
+read [Architecture](../../docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/architecture.md).
 
 ## The three planes
 

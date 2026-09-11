@@ -100,8 +100,7 @@ the `gpu_0` … `gpu_8` markers described in the root
 Architecture is documented once, under
 [`docs/fern/pages/developer-guide/knowledge-base/`](../../../docs/fern/pages/developer-guide/knowledge-base/):
 
-- [Architecture flow](../../../docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/architecture-flow.md)
-- [Distributed runtime](../../../docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/distributed-runtime.md)
+- [Architecture](../../../docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/architecture.md)
 - [Disaggregated serving](../../../docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/disaggregated-serving.md)
 - [Routing concepts](../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/router/routing-concepts.md)
 

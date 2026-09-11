@@ -107,11 +107,10 @@ The architecture is documented once, under
 [`docs/fern/pages/developer-guide/knowledge-base/`](../docs/fern/pages/developer-guide/knowledge-base/).
 Read it there rather than reconstructing it from source:
 
-- [Distributed runtime](../docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/distributed-runtime.md)
-- [Architecture flow](../docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/architecture-flow.md)
+- [Architecture](../docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/architecture.md)
 - [Disaggregated serving](../docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/disaggregated-serving.md)
 - [Routing concepts](../docs/fern/pages/developer-guide/knowledge-base/modular-components/router/routing-concepts.md)
-- [KVBM overview](../docs/fern/pages/developer-guide/knowledge-base/modular-components/kvbm/overview.md)
+- [KVBM configuration reference](../docs/fern/pages/reference/components/kvbm-configuration.mdx)
 
 ## Nested agent files
 
