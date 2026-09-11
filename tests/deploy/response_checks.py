@@ -8,7 +8,6 @@ import math
 
 
 def validate_embedding(body, count, dimensions):
-    """Require finite float vectors with the requested shape and indices."""
     assert body["object"] == "list", body
     assert len(body["data"]) == count, body
     for index, item in enumerate(body["data"]):
@@ -25,7 +24,6 @@ def validate_embedding(body, count, dimensions):
 
 
 def validate_chat(body, max_tokens, stop=None):
-    """Validate unary chat content, token limits, and derived stop semantics."""
     assert "error" not in body, body
     assert len(body["choices"]) == 1, body
     choice = body["choices"][0]
@@ -49,7 +47,6 @@ def validate_chat(body, max_tokens, stop=None):
 
 
 def validate_stop_response(body, baseline, stop):
-    """Require a stopped response to end before the baseline's stop sequence."""
     content = body["choices"][0]["message"]["content"] or ""
     original = baseline["choices"][0]["message"]["content"]
     stop_index = original.index(stop)
@@ -62,7 +59,6 @@ def validate_stop_response(body, baseline, stop):
 
 
 def validate_stream(lines):
-    """Reject stream errors, malformed ordering, and incomplete termination."""
     content, finished, done = ([], False, False)
     for line in lines:
         if not line or line.startswith(":"):
