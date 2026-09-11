@@ -189,7 +189,6 @@ def _prepare_deployment(
             logger.info("Staggering startup by %ds (xdist %s)", stagger_s, worker_id)
             time.sleep(stagger_s)
 
-    # Track additional ports allocated for multi-GPU tests (for cleanup in finally)
     extra_allocated_ports: list[int] = []
 
     if ports is not None:
@@ -223,17 +222,12 @@ def _prepare_deployment(
                 merged_env[f"DYN_SYSTEM_PORT{idx}"] = str(port)
                 merged_env[f"DYN_SYSTEM_PORT_WORKER{idx}"] = str(port)
 
-        # Unique ZMQ port for vLLM KV event publishing (avoids xdist collisions).
-        if ports.kv_event_port:
-            merged_env["DYN_VLLM_KV_EVENT_PORT"] = str(ports.kv_event_port)
-            # For multi-worker scripts (xpu_2 router tests), allocate separate
-            # KV event ports for each worker to avoid ZMQ bind collisions.
-            if len(dynamic_system_ports) >= 2:
-                kv_port1 = ports.kv_event_port
-                kv_port2 = allocate_port(ports.kv_event_port + 1)
-                extra_allocated_ports.append(kv_port2)
-                merged_env["DYN_VLLM_KV_EVENT_PORT1"] = str(kv_port1)
-                merged_env["DYN_VLLM_KV_EVENT_PORT2"] = str(kv_port2)
+        # KV-event ports are allocated with the rest of the deployment and have
+        # the same worker cardinality as system ports.
+        for idx, port in enumerate(ports.kv_event_ports, start=1):
+            merged_env[f"DYN_VLLM_KV_EVENT_PORT{idx}"] = str(port)
+        if ports.kv_event_ports:
+            merged_env["DYN_VLLM_KV_EVENT_PORT"] = str(ports.kv_event_ports[0])
 
         # Per-worker NIXL side-channel ports (avoids xdist collisions on 20097).
         for idx, port in enumerate(ports.nixl_side_channel_ports, start=1):
@@ -258,6 +252,9 @@ def _prepare_deployment(
         ]
 
     config = _with_endpoint_readiness_checks(config, dynamic_frontend_port)
+
+    if ports is not None:
+        merged_env["DYN_MANAGED_PORTS"] = "1"
 
     # Disagg scripts need a unique bootstrap port so parallel runs don't collide.
     disagg_bootstrap_port: int | None = None
