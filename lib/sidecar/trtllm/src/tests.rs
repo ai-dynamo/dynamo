@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use dynamo_backend_common::{
-    FinishReason, GenerateContext, LLMEngine, OutputOptions, PreprocessedRequest, SamplingOptions,
-    StopConditions, StopReason,
+    BackendError, ErrorType, FinishReason, GenerateContext, LLMEngine, OutputOptions,
+    PreprocessedRequest, SamplingOptions, StopConditions, StopReason,
 };
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use futures::{Stream, StreamExt};
@@ -785,7 +785,50 @@ async fn unsupported_features_fail_before_rpc_submission() {
             .await;
         assert!(result.is_err());
     }
+    // Internal callers can bypass frontend array validation. Reject every
+    // non-null allowlist rather than silently generating unconstrained tokens.
+    for ids in [json!([198]), json!([]), json!("198")] {
+        let mut unsupported = request();
+        unsupported.extra_args = Some(json!({"sampling_options": {"allowed_token_ids": ids}}));
+        let context = dynamo_backend_common::testing::mock_context();
+        let mut stream = engine
+            .generate(unsupported, GenerateContext::new(context, None))
+            .await
+            .expect("unsupported allowlist must produce an error stream");
+        let error = stream
+            .next()
+            .await
+            .expect("error stream must contain an error")
+            .err()
+            .expect("unsupported allowlist must fail");
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert!(error.to_string().contains("allowed_token_ids"));
+        assert!(stream.next().await.is_none());
+    }
     assert!(server.service.requests.lock().await.is_empty());
+
+    // Omitted/null allowlists are unrestricted; other extensions retain their
+    // existing behavior and must not be rejected by this capability check.
+    for extra_args in [
+        None,
+        Some(json!({"sampling_options": {"allowed_token_ids": null}})),
+        Some(json!({"sampling_options": {"other_extension": true}})),
+    ] {
+        let mut supported = request();
+        supported.extra_args = extra_args;
+        let context = dynamo_backend_common::testing::mock_context();
+        let mut stream = engine
+            .generate(supported, GenerateContext::new(context, None))
+            .await
+            .expect("unrestricted request must be submitted");
+        while let Some(output) = stream.next().await {
+            output.expect("unrestricted generation must succeed");
+        }
+    }
+    assert_eq!(server.service.requests.lock().await.len(), 3);
 }
 
 #[tokio::test]
