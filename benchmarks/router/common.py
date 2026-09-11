@@ -5,6 +5,7 @@
 
 """Common utilities shared across router benchmark scripts."""
 
+import copy
 import json
 import logging
 import os
@@ -234,6 +235,16 @@ def add_expected_osl(request):
     """Add the trace output length as the router's expected OSL hint."""
     osl = request.get("output_length", request.get("output_tokens", 0))
     set_trace_agent_hint(request, "osl", osl)
+
+
+def tag_requests_with_priority(requests, priority):
+    """Return request copies with extra.nvext.agent_hints.priority merged in."""
+    tagged_requests = []
+    for request in requests:
+        tagged_request = copy.deepcopy(request)
+        set_trace_agent_hint(tagged_request, "priority", priority)
+        tagged_requests.append(tagged_request)
+    return tagged_requests
 
 
 def prepare_trace_dataset(args, output_dir, logger):
