@@ -58,7 +58,6 @@ authority for anything under `operator/`:
   [`internal/controller/`](operator/internal/controller/AGENTS.md),
   [`internal/crdmigrator/`](operator/internal/crdmigrator/AGENTS.md),
   [`internal/webhook/validation/`](operator/internal/webhook/validation/AGENTS.md)
-- [`operator/test/e2e/AGENTS.md`](operator/test/e2e/AGENTS.md)
 
 Read the one closest to the file you are changing; when it and this file both
 apply, the nested one wins.
