@@ -48,7 +48,7 @@ done
 
 command -v ffmpeg >/dev/null
 command -v ffprobe >/dev/null
-ffmpeg -hide_banner -encoders 2>/dev/null | grep -Eq '(^| )libx264( |$)'
+ffmpeg -hide_banner -encoders 2>/dev/null | grep -E '(^| )libx264( |$)' >/dev/null
 python -c 'import av; av.codec.Codec("h264", "w"); av.codec.Codec("aac", "w")'
 
 export VLLM_WORKER_MULTIPROC_METHOD="${VLLM_WORKER_MULTIPROC_METHOD:-spawn}"
