@@ -244,17 +244,6 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
         if [ -n "$GMS_WHEEL" ]; then uv pip install {{ pip_target }} --no-deps "$GMS_WHEEL"; fi; \
     fi
 
-# The preview image is only useful for DeepSeek V4.1 Flash if the Dynamo wheel
-# contains the native unified tool and reasoning parser. Keep this close to the
-# wheel installation so a stale wheel or frontend-crates regression fails the
-# image build before it can be published.
-RUN {{ python_executable }} - <<'PY'
-from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
-
-assert "deepseek_v41" in get_tool_parser_names(), "DeepSeek V4.1 tool parser missing"
-assert "deepseek_v41" in get_reasoning_parser_names(), "DeepSeek V4.1 reasoning parser missing"
-PY
-
 # Launch-script examples use jq for readable curl output like the upstream omni
 # image. SoX is intentionally NOT installed: vLLM-Omni replaced its sox audio path
 # with a pure-numpy peak_normalize() (vllm_omni/utils/audio.py), pysox isn't
@@ -409,6 +398,19 @@ RUN set -eu; \
         echo "ERROR: shipped ffmpeg ($ff) exposes an H.264/H.265/AAC/NVENC encoder" >&2; \
         exit 1; \
     fi
+{% endif %}
+
+{% if target not in ("dev", "local-dev") %}
+# The preview image is only useful for DeepSeek V4.1 Flash if the Dynamo wheel
+# contains the native unified tool and reasoning parser. dynamo._core links the
+# media runtime, so run this after the in-tree libavutil shared libraries above
+# have been copied and registered with ldconfig.
+RUN {{ python_executable }} - <<'PY'
+from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
+
+assert "deepseek_v41" in get_tool_parser_names(), "DeepSeek V4.1 tool parser missing"
+assert "deepseek_v41" in get_reasoning_parser_names(), "DeepSeek V4.1 reasoning parser missing"
+PY
 {% endif %}
 
 # Replace the upstream vllm/vllm-openai image's imageio-ffmpeg (which ships a
