@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 import pytest
 import yaml
 
+torch = pytest.importorskip("torch")
+
 from dynamo.common.multimodal.nvdec_decoder import nvdec_available
 from tests.serve.common import (
     SERVE_TEST_DIR,

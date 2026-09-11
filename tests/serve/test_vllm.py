@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 
 import pytest
 
+torch = pytest.importorskip("torch")
+
 from tests.serve.common import (
     WORKSPACE_DIR,
     params_with_model_mark,

@@ -22,6 +22,8 @@ import psutil
 import pytest
 import requests
 
+torch = pytest.importorskip("torch")
+
 from tests.serve.test_sglang import sglang_configs
 from tests.serve.test_trtllm import trtllm_configs
 from tests.serve.test_vllm import vllm_configs
