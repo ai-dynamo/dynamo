@@ -32,6 +32,11 @@ pub use tokio_util::sync::CancellationToken;
 
 const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: u64 = 15 * 60;
 
+/// Bound on joining post-cancellation teardown tasks. A lease revoke is one
+/// round trip; anything longer means etcd is unreachable, in which case the
+/// lease expires on its own TTL and waiting further only delays the exit.
+const TEARDOWN_TASK_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub(crate) fn graceful_shutdown_timeout() -> Duration {
     let timeout_secs = std::env::var(
         config::environment_names::runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
@@ -65,6 +70,12 @@ pub struct Runtime {
     /// a drain on a different clock is still running. Per-runtime rather than
     /// process-global so tests (and embedded runtimes) cannot see each other's.
     active_drain_timeout: Arc<std::sync::OnceLock<Duration>>,
+    /// Background tasks that do their cleanup *after* the primary token is
+    /// cancelled — today the etcd lease keep-alive, whose `lease.revoke()` runs
+    /// on cancellation. Phase 3 only cancels; without joining these the process
+    /// could exit with the lease still held, which is the stale-registration
+    /// symptom this teardown exists to remove.
+    teardown_tasks: Arc<std::sync::Mutex<Vec<JoinHandle<()>>>>,
     compute_pool: Option<Arc<compute::ComputePool>>,
     block_in_place_permits: Option<Arc<tokio::sync::Semaphore>>,
 }
@@ -107,6 +118,7 @@ impl Runtime {
             endpoint_shutdown_token,
             graceful_shutdown_tracker: Arc::new(GracefulShutdownTracker::new()),
             active_drain_timeout: Arc::new(std::sync::OnceLock::new()),
+            teardown_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
             compute_pool,
             block_in_place_permits,
         })
@@ -337,6 +349,14 @@ impl Runtime {
     /// and the wait for it cannot disagree. Outside shutdown — an endpoint
     /// unregistered on its own, e.g. a sleeping worker — it is the runtime
     /// default, which is the behaviour that existed before.
+    /// Register a task whose cleanup runs on primary-token cancellation, so
+    /// [`shutdown_and_wait`](Self::shutdown_and_wait) joins it after Phase 3.
+    pub(crate) fn register_teardown_task(&self, handle: JoinHandle<()>) {
+        if let Ok(mut tasks) = self.teardown_tasks.lock() {
+            tasks.push(handle);
+        }
+    }
+
     pub(crate) fn endpoint_drain_timeout(&self) -> Duration {
         self.active_drain_timeout
             .get()
@@ -379,10 +399,11 @@ impl Runtime {
     /// future — which would skip Phase 3 and leave the transports connected,
     /// the exact failure this method exists to prevent. Phase 3 always runs.
     ///
-    /// Note: Phase 3 cancels the primary token, which *signals* transport
-    /// teardown. Background tasks that react to it — notably the etcd
-    /// keep-alive task that issues `lease.revoke()` — are not awaited here,
-    /// so a caller that exits immediately after can still race that RPC.
+    /// Phase 3 cancels the primary token, which *signals* transport teardown.
+    /// The tasks whose cleanup is that signal — notably the etcd keep-alive
+    /// task and its `lease.revoke()` — are joined afterwards, separately
+    /// bounded by [`TEARDOWN_TASK_JOIN_TIMEOUT`], so an unreachable etcd delays
+    /// the exit by seconds rather than indefinitely.
     pub async fn shutdown_and_wait(&self, drain_timeout: Option<Duration>) {
         self.shutdown_sequence(drain_timeout).await
     }
@@ -400,6 +421,7 @@ impl Runtime {
         let main_token = self.cancellation_token.clone();
         let endpoint_token = self.endpoint_shutdown_token.clone();
         let active_drain_timeout = self.active_drain_timeout.clone();
+        let teardown_tasks = self.teardown_tasks.clone();
 
         async move {
             // Resolve the one bound this shutdown will use, *before* Phase 1.
@@ -422,23 +444,50 @@ impl Runtime {
             let count = tracker.get_count();
             tracing::info!("Active graceful endpoints: {count}");
 
-            if count != 0 {
-                if tokio::time::timeout(timeout, tracker.wait_for_completion())
+            if count != 0
+                && tokio::time::timeout(timeout, tracker.wait_for_completion())
                     .await
                     .is_err()
-                {
-                    let remaining = tracker.get_count();
-                    tracing::error!(
-                        timeout_secs = timeout.as_secs(),
-                        remaining_endpoints = remaining,
-                        "Graceful endpoint shutdown timed out; proceeding with runtime teardown"
-                    );
-                }
+            {
+                let remaining = tracker.get_count();
+                tracing::error!(
+                    timeout_secs = timeout.as_secs(),
+                    remaining_endpoints = remaining,
+                    "Graceful endpoint shutdown timed out; proceeding with runtime teardown"
+                );
             }
 
             // Phase 3: Now connections will be disconnected to backend services (e.g. NATS/ETCD) by cancelling the main token
             tracing::info!("Phase 3: Connections to backend services will now be disconnected");
             main_token.cancel();
+
+            // Phase 3 only *signals* teardown. Join the tasks whose cleanup is
+            // that signal — the etcd lease keep-alive issues `lease.revoke()`
+            // here — or the process can exit with the lease still held and the
+            // instance advertised until the TTL expires.
+            //
+            // Bounded, and the bound is what makes a self-await safe: the
+            // lease-loss path calls `Runtime::shutdown` from inside the
+            // keep-alive task itself. That call only spawns this sequence, so
+            // the task does finish — but a future caller who awaited from such
+            // a task would otherwise hang here forever.
+            let pending: Vec<JoinHandle<()>> = teardown_tasks
+                .lock()
+                .map(|mut tasks| std::mem::take(&mut *tasks))
+                .unwrap_or_default();
+            if !pending.is_empty() {
+                tracing::debug!(count = pending.len(), "Joining teardown tasks");
+                let joined = futures::future::join_all(pending);
+                if tokio::time::timeout(TEARDOWN_TASK_JOIN_TIMEOUT, joined)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(
+                        timeout_secs = TEARDOWN_TASK_JOIN_TIMEOUT.as_secs(),
+                        "Timed out joining teardown tasks; a lease may not have been revoked"
+                    );
+                }
+            }
         }
     }
 }
@@ -561,6 +610,35 @@ mod tests {
             "sanity: with no graceful tasks the spawned sequence runs to \
              completion once scheduled — the hazard is that the caller may \
              exit before this point, which shutdown_and_wait fixes"
+        );
+    }
+
+    /// Phase 3 only *cancels* the primary token; the etcd keep-alive task does
+    /// its `lease.revoke()` in response. Returning without joining that task let
+    /// the process exit with the lease still held, leaving the instance
+    /// advertised until its TTL expired.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_and_wait_joins_post_cancellation_teardown_tasks() {
+        let runtime = Runtime::from_current().unwrap();
+        let revoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        // Stands in for the lease keep-alive: cleanup runs only once the
+        // primary token is cancelled, and takes a moment to finish.
+        let token = runtime.primary_token();
+        let flag = revoked.clone();
+        runtime.register_teardown_task(tokio::spawn(async move {
+            token.cancelled().await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            flag.store(true, Ordering::SeqCst);
+        }));
+
+        runtime
+            .shutdown_and_wait(Some(Duration::from_millis(50)))
+            .await;
+
+        assert!(
+            revoked.load(Ordering::SeqCst),
+            "shutdown_and_wait returned before the post-cancellation cleanup finished"
         );
     }
 

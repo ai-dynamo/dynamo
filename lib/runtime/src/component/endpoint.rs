@@ -254,11 +254,7 @@ impl EndpointConfigBuilder {
                 // runtime default.
                 let drain_timeout = endpoint.drt().endpoint_drain_timeout();
                 let _ = server
-                    .unregister_endpoint(
-                        &endpoint_name_for_task,
-                        connection_id,
-                        drain_timeout,
-                    )
+                    .unregister_endpoint(&endpoint_name_for_task, connection_id, drain_timeout)
                     .await;
                 if let Some(tracker) = tracker_clone {
                     tracker.unregister_endpoint();

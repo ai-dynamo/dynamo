@@ -89,9 +89,6 @@ pub fn graceful_shutdown_timeout_secs() -> u64 {
         Ok(raw) if raw.trim().is_empty() => default,
         Ok(raw) => match raw.trim().parse::<u64>() {
             Ok(secs) => secs,
-            // Warned, not silently dropped: this is the knob that decides how
-            // long a worker gets to shut down, and a typo used to fall back to
-            // the default with no trace of why.
             Err(_) => {
                 tracing::warn!(
                     env = env_worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT,
@@ -105,7 +102,6 @@ pub fn graceful_shutdown_timeout_secs() -> u64 {
     }
 }
 
-/// [`graceful_shutdown_timeout_secs`] as a [`Duration`].
 pub fn graceful_shutdown_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(graceful_shutdown_timeout_secs())
 }
@@ -256,7 +252,6 @@ impl Worker {
         let runtime = self.runtime.clone();
         let task = self.execute_internal(f);
         task.await??;
-        // See `execute`: the teardown must complete before the caller exits.
         runtime
             .shutdown_and_wait(Some(remaining_shutdown_budget()))
             .await;

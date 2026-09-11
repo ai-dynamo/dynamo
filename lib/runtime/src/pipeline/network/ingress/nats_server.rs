@@ -12,11 +12,11 @@ use crate::SystemHealth;
 use crate::config::HealthStatus;
 use crate::pipeline::network::ingress::push_endpoint::PushEndpoint;
 use anyhow::Result;
-use std::time::Duration;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 /// Multiplexed NATS server that handles multiple endpoints

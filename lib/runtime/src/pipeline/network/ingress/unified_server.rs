@@ -10,10 +10,10 @@
 use super::*;
 use crate::SystemHealth;
 use anyhow::Result;
-use std::time::Duration;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Unified interface for request plane servers
 ///
