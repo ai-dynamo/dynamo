@@ -16,7 +16,7 @@
 //! System health monitoring and health check management
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, OnceLock},
     time::Instant,
 };
@@ -25,6 +25,43 @@ use tokio::sync::mpsc;
 use crate::component;
 use crate::config::HealthStatus;
 use crate::metrics::{MetricsHierarchy, prometheus_names::distributed_runtime};
+
+/// Withholds readiness for one endpoint until dropped, so the endpoint's owner
+/// decides when it is serviceable rather than its transport registration.
+///
+/// Two effects, matching [`SystemHealth::hold_endpoint_readiness`]: transport
+/// registration no longer marks the named endpoint ready, and while any hold is
+/// outstanding [`SystemHealth::get_health_status`] reports not-ready for the
+/// whole process.
+///
+/// Take the hold *before* the endpoint registers with its transport — that is
+/// what makes it race-free on both request planes, since the NATS path publishes
+/// readiness from a spawned task.
+///
+/// Never let one drop while the `SystemHealth` mutex is held: `Drop` takes that
+/// lock and it is not reentrant.
+pub struct ReadinessHold {
+    system_health: Arc<parking_lot::Mutex<SystemHealth>>,
+    endpoint: String,
+}
+
+impl ReadinessHold {
+    pub fn take(system_health: Arc<parking_lot::Mutex<SystemHealth>>, endpoint: &str) -> Self {
+        system_health.lock().hold_endpoint_readiness(endpoint);
+        Self {
+            system_health,
+            endpoint: endpoint.to_string(),
+        }
+    }
+}
+
+impl Drop for ReadinessHold {
+    fn drop(&mut self) {
+        self.system_health
+            .lock()
+            .release_endpoint_readiness(&self.endpoint);
+    }
+}
 
 /// Health check target containing instance info and payload
 #[derive(Clone, Debug)]
@@ -45,6 +82,9 @@ pub struct SystemHealth {
     health_check_targets: Arc<std::sync::RwLock<HashMap<String, HealthCheckTarget>>>,
     /// Maps endpoint subject to its specific health check notifier
     health_check_notifiers: Arc<std::sync::RwLock<HashMap<String, Arc<tokio::sync::Notify>>>>,
+    /// Endpoints whose owner publishes readiness itself. Transport registration
+    /// does not mark these ready; see [`SystemHealth::hold_endpoint_readiness`].
+    readiness_holds: Arc<std::sync::RwLock<HashSet<String>>>,
     /// Channel for new endpoint registrations
     /// This solves the race condition where HealthCheckManager starts before endpoints are registered
     /// Using a channel ensures no registrations are lost.
@@ -85,6 +125,7 @@ impl SystemHealth {
             endpoint_health: Arc::new(std::sync::RwLock::new(endpoint_health)),
             health_check_targets: Arc::new(std::sync::RwLock::new(HashMap::new())),
             health_check_notifiers: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            readiness_holds: Arc::new(std::sync::RwLock::new(HashSet::new())),
             new_endpoint_tx: tx,
             new_endpoint_rx: Arc::new(parking_lot::Mutex::new(Some(rx))),
             use_endpoint_health_status,
@@ -104,6 +145,9 @@ impl SystemHealth {
     /// NotReady until verification succeeds. Payload-less endpoints cannot run a
     /// canary, so transport registration is their readiness signal.
     pub fn set_endpoint_registered(&self, endpoint: &str) {
+        if self.readiness_holds.read().unwrap().contains(endpoint) {
+            return;
+        }
         let has_health_check_target = self
             .health_check_targets
             .read()
@@ -112,6 +156,37 @@ impl SystemHealth {
         if !self.health_check_enabled || !has_health_check_target {
             self.set_endpoint_health_status(endpoint, HealthStatus::Ready);
         }
+    }
+
+    /// Withhold readiness for `endpoint` until [`release_endpoint_readiness`].
+    ///
+    /// Two effects, because one alone is not enough: transport registration no
+    /// longer marks this endpoint ready, and while any hold is outstanding
+    /// [`get_health_status`] reports not-ready for the whole process. Without the
+    /// second, a sibling endpoint registering unheld would answer the health route
+    /// on the held endpoint's behalf.
+    ///
+    /// Take the hold *before* the endpoint registers with its transport — that is
+    /// what makes this race-free on both request planes, since the NATS path
+    /// publishes readiness from a spawned task. Prefer [`ReadinessHold`], which
+    /// pairs this with its release.
+    ///
+    /// [`get_health_status`]: SystemHealth::get_health_status
+    ///
+    /// [`release_endpoint_readiness`]: SystemHealth::release_endpoint_readiness
+    pub fn hold_endpoint_readiness(&self, endpoint: &str) {
+        self.readiness_holds
+            .write()
+            .unwrap()
+            .insert(endpoint.to_string());
+    }
+
+    /// Drop a [`hold_endpoint_readiness`] hold. Readiness is not published here —
+    /// the owner writes it.
+    ///
+    /// [`hold_endpoint_readiness`]: SystemHealth::hold_endpoint_readiness
+    pub fn release_endpoint_readiness(&self, endpoint: &str) {
+        self.readiness_holds.write().unwrap().remove(endpoint);
     }
 
     pub fn set_health_status(&mut self, status: HealthStatus) {
@@ -139,6 +214,13 @@ impl SystemHealth {
                     "notready".to_string()
                 },
             );
+        }
+
+        // An owner that has withheld an endpoint's readiness has not yet declared
+        // itself serviceable. Report not-ready for the whole process rather than
+        // letting some other endpoint's registration answer for it.
+        if !self.readiness_holds.read().unwrap().is_empty() {
+            return (false, endpoints);
         }
 
         let healthy = if !self.use_endpoint_health_status.is_empty() {
@@ -383,6 +465,64 @@ mod tests {
             !healthy,
             "with no health-check target the endpoint's readiness is ignored and \
              the worker falls back to system_health (NotReady) — this is the 503"
+        );
+    }
+
+    /// A held endpoint does not become ready on transport registration, so its
+    /// owner can keep the route at 503 until every mandatory endpoint is up.
+    #[test]
+    fn held_endpoint_is_not_ready_on_transport_registration() {
+        let health = system_health(false);
+        health.hold_endpoint_readiness(ENDPOINT);
+        health.set_endpoint_registered(ENDPOINT);
+        assert_ne!(
+            health.get_endpoint_health_status(ENDPOINT),
+            Some(HealthStatus::Ready),
+            "a held endpoint must not be marked ready by transport registration"
+        );
+
+        health.release_endpoint_readiness(ENDPOINT);
+        health.set_endpoint_registered(ENDPOINT);
+        assert_eq!(
+            health.get_endpoint_health_status(ENDPOINT),
+            Some(HealthStatus::Ready),
+            "after release the owner's registration signal publishes readiness"
+        );
+    }
+
+    /// A sibling endpoint registering while another is held must not answer the
+    /// health route on the held endpoint's behalf. With the canary on and no
+    /// registered target, `get_health_status` otherwise reduces to "every
+    /// endpoint present in the map is ready", which a held endpoint is absent
+    /// from.
+    #[test]
+    fn an_unheld_sibling_endpoint_cannot_report_the_worker_ready() {
+        let health = system_health(true);
+        health.hold_endpoint_readiness(ENDPOINT);
+        health.set_endpoint_registered(ENDPOINT);
+        health.set_endpoint_registered("rl_system");
+
+        assert!(
+            !health.get_health_status().0,
+            "a held endpoint must keep the worker not-ready however many siblings register"
+        );
+
+        health.release_endpoint_readiness(ENDPOINT);
+        health.set_endpoint_registered(ENDPOINT);
+        assert!(health.get_health_status().0);
+    }
+
+    /// A hold suppresses the *whole process's* readiness, but the per-endpoint
+    /// suppression inside `set_endpoint_registered` stays scoped to the endpoint
+    /// it names — a sibling still records its own transport registration.
+    #[test]
+    fn a_hold_does_not_suppress_a_siblings_endpoint_flag() {
+        let health = system_health(false);
+        health.hold_endpoint_readiness(ENDPOINT);
+        health.set_endpoint_registered("other");
+        assert_eq!(
+            health.get_endpoint_health_status("other"),
+            Some(HealthStatus::Ready)
         );
     }
 

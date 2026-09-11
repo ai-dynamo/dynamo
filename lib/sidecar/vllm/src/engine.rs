@@ -220,7 +220,7 @@ impl LLMEngine for VllmSidecarEngine {
         proto_request.model.clone_from(&self.model.served_name);
         let defer_request_cancellation = self.mode.is_decode();
         let stopped_ctx = ctx.inner_arc();
-        let shutdown = self.cancel.clone();
+        let shutdown = self.cancel.child_token();
         let mut request_cancellation = Box::pin(async move { stopped_ctx.stopped().await });
         let mut shutdown_cancellation = Box::pin(async move { shutdown.cancelled().await });
         let stream = if defer_request_cancellation {

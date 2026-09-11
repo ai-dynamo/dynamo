@@ -10,6 +10,7 @@ skills:
   - synthesize-user-workload
   - author-baseline-dgd
   - find-serving-recipe
+  - report-skillpack-issue
 "Required Readings: Docs":
   - agent-docs/references/definitions.md
 "Required Reading: Rules":
