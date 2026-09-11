@@ -203,7 +203,7 @@ fn min_tokens_keeps_visible_stop_tokens_below_the_floor() {
         stop_token_ids_visible: Some(vec![STOP]),
         ..Default::default()
     };
-    let mut decoder = Decoder::new(decode_stream, stop_conditions, false, None);
+    let mut decoder = Decoder::new(decode_stream, stop_conditions, false, None, None);
 
     let result = decoder.process_token_ids(&[HI, STOP]).unwrap();
     assert_eq!(result.text.as_deref(), Some("hiSTOP"));
