@@ -1,0 +1,214 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  annotations:
+    nvidia.com/dynamo-discovery-backend: etcd
+  name: vllm-agg-kvcr
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - env:
+          - name: DYN_ROUTER_MODE
+            value: kv
+          image: ${DYNAMO_VLLM_IMAGE}
+          name: main
+    replicas: 1
+    type: frontend
+  - name: worker
+    podTemplate:
+      spec:
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-component
+                  operator: In
+                  values:
+                  - worker
+                - key: nvidia.com/dynamo-graph-deployment-name
+                  operator: In
+                  values:
+                  - vllm-agg-kvcr
+              topologyKey: kubernetes.io/hostname
+        containers:
+        - args:
+          - |
+            set -euo pipefail
+            if ! compgen -G '/dev/infiniband/uverbs*' >/dev/null; then
+              echo "No RDMA userspace device is mounted" >&2
+              exit 1
+            fi
+
+            case "$POD_INDEX" in
+              0) owner_slot=00000000000000000000000000000000 ;;
+              1) owner_slot=00000000000000000000000000000001 ;;
+              *) echo "Unsupported Grove Pod index: $POD_INDEX" >&2; exit 1 ;;
+            esac
+            export KVCR_CACHE_OWNER="01010101010101010101010101010101:02020202020202020202020202020202/0303030303030303/${owner_slot}"
+            state_namespace=$DYN_NAMESPACE
+            if [ -n "${DYN_NAMESPACE_WORKER_SUFFIX:-}" ]; then
+              state_namespace="${state_namespace}-${DYN_NAMESPACE_WORKER_SUFFIX}"
+            fi
+
+            state_agent_pid=
+            vllm_pid=
+            cleanup() {
+              [ -z "$state_agent_pid" ] || kill -TERM "$state_agent_pid" 2>/dev/null || true
+              [ -z "$vllm_pid" ] || kill -TERM "$vllm_pid" 2>/dev/null || true
+              [ -z "$state_agent_pid" ] || wait "$state_agent_pid" 2>/dev/null || true
+              [ -z "$vllm_pid" ] || wait "$vllm_pid" 2>/dev/null || true
+            }
+            trap cleanup EXIT INT TERM
+
+            if [ "$POD_INDEX" = "0" ]; then
+              env \
+                DYN_COMPONENT=kv_state_agent \
+                DYN_DISCOVERY_BACKEND=etcd \
+                DYN_NAMESPACE="$state_namespace" \
+                DYN_SYSTEM_PORT=9091 \
+                python3 -m dynamo.kv_state_agent --max-slots 2 &
+              state_agent_pid=$!
+
+              state_agent_ready=false
+              for _ in $(seq 1 60); do
+                if python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9091/live', timeout=1).read()" >/dev/null 2>&1; then
+                  state_agent_ready=true
+                  break
+                fi
+                sleep 1
+              done
+              if [ "$state_agent_ready" != true ]; then
+                echo "KV state agent did not become ready" >&2
+                exit 1
+              fi
+            fi
+
+            kv_transfer_config=$(
+              python3 - <<'PY'
+            import json
+            import os
+
+            print(json.dumps({
+                "kv_connector": "OffloadingConnector",
+                "kv_role": "kv_both",
+                "kv_connector_extra_config": {
+                    "cpu_bytes_to_use": 2147483648,
+                    "spec_name": "TieringOffloadingSpec",
+                    "self_describing_kv_events": True,
+                    "dynamo_state_agent": {
+                        "raw_advertise_host": os.environ["POD_IP"],
+                        "cache_owner_ids": {"0": os.environ["KVCR_CACHE_OWNER"]},
+                    },
+                    "secondary_tiers": [{
+                        "type": "kvcr",
+                        "secondary_g2_slots": 1024,
+                        "router_capabilities": ["router_hint"],
+                        "control_host": "0.0.0.0",
+                        "control_ports": [23280],
+                        "control_advertise_host": os.environ["POD_IP"],
+                        "enable_telemetry": True,
+                    }],
+                },
+            }))
+            PY
+            )
+            python3 -m dynamo.vllm \
+              --model Qwen/Qwen3-0.6B \
+              --kv-transfer-config "$kv_transfer_config" \
+              --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:23080","enable_kv_cache_events":true}' &
+            vllm_pid=$!
+            if [ -n "$state_agent_pid" ]; then
+              wait -n "$state_agent_pid" "$vllm_pid"
+            else
+              wait "$vllm_pid"
+            fi
+          command:
+          - /bin/bash
+          - -c
+          env:
+          - name: DYN_DISCOVERY_BACKEND
+            value: etcd
+          - name: DYN_SYSTEM_PORT
+            value: "9090"
+          - name: POD_IP
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          - name: POD_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          - name: POD_INDEX
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.labels['grove.io/podclique-pod-index']
+          - name: PYTHONHASHSEED
+            value: "0"
+          - name: UCX_TLS
+            value: rc_x,cuda
+          - name: UCX_NET_DEVICES
+            value: ${DYNAMO_UCX_NET_DEVICES}
+          - name: UCX_PROTO_INFO
+            value: "y"
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: ${DYNAMO_VLLM_IMAGE}
+          livenessProbe:
+            exec:
+              command:
+              - python3
+              - -c
+              - import os,urllib.request; urls=['http://127.0.0.1:9090/live']; urls += ['http://127.0.0.1:9091/live'] if os.environ['POD_INDEX'] == '0' else []; [urllib.request.urlopen(url, timeout=1).read() for url in urls]
+            failureThreshold: 3
+            periodSeconds: 5
+            timeoutSeconds: 4
+          name: main
+          readinessProbe:
+            exec:
+              command:
+              - python3
+              - -c
+              - import os,urllib.request; urls=['http://127.0.0.1:9090/health']; urls += ['http://127.0.0.1:9091/live'] if os.environ['POD_INDEX'] == '0' else []; [urllib.request.urlopen(url, timeout=1).read() for url in urls]
+            failureThreshold: 3
+            periodSeconds: 10
+            timeoutSeconds: 4
+          resources:
+            limits:
+              ${DYNAMO_RDMA_RESOURCE}: "1"
+              nvidia.com/gpu: "1"
+            requests:
+              ${DYNAMO_RDMA_RESOURCE}: "1"
+              ephemeral-storage: 2Gi
+              nvidia.com/gpu: "1"
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+          startupProbe:
+            exec:
+              command:
+              - python3
+              - -c
+              - import os,urllib.request; urls=['http://127.0.0.1:9090/live']; urls += ['http://127.0.0.1:9091/live'] if os.environ['POD_INDEX'] == '0' else []; [urllib.request.urlopen(url, timeout=1).read() for url in urls]
+            failureThreshold: 720
+            periodSeconds: 10
+            timeoutSeconds: 5
+          workingDir: /workspace/examples/backends/vllm
+        tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+    replicas: 2
+    type: worker
