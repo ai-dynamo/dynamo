@@ -43,24 +43,10 @@ spec:
     minAvailable: 1
     podTemplate:
       spec:
-        # TODO: remove before merge. While the runtime image is hosted privately,
-        # two things here are pre-release: the image reference above, and this
-        # imagePullSecrets block. Replace the image with the published public
-        # tag and delete this block once the container patches land upstream.
-        imagePullSecrets:
-        - name: nvcr-secret
-        tolerations:
-        - key: nvidia.com/gpu
-          operator: Equal
-          value: 'true'
-          effect: NoSchedule
         containers:
         - name: main
           image: nvcr.io/nvstaging/nim/snarravula:1.4.1-solar-open2-toolfix-preview1@sha256:deea685b67f14e7fb8be7a7c07d634337bf0dfa39adb0aca40731587a5c6bfff
           imagePullPolicy: IfNotPresent
-          securityContext:
-            runAsUser: 0
-            runAsGroup: 0
           command:
           - python3
           - -m
@@ -100,17 +86,6 @@ spec:
     sharedMemorySize: 64Gi
     podTemplate:
       spec:
-        # TODO: remove before merge. While the runtime image is hosted privately,
-        # two things here are pre-release: the image reference above, and this
-        # imagePullSecrets block. Replace the image with the published public
-        # tag and delete this block once the container patches land upstream.
-        imagePullSecrets:
-        - name: nvcr-secret
-        tolerations:
-        - key: nvidia.com/gpu
-          operator: Equal
-          value: 'true'
-          effect: NoSchedule
         containers:
         - name: main
           image: nvcr.io/nvstaging/nim/snarravula:1.4.1-solar-open2-toolfix-preview1@sha256:deea685b67f14e7fb8be7a7c07d634337bf0dfa39adb0aca40731587a5c6bfff

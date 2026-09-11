@@ -132,6 +132,11 @@ The stock Dynamo 1.4.1 vLLM runtime does not serve this model — it has no Sola
 Open2 model definition — so the pinned image is required rather than optional.
 Pin by digest, not by tag.
 
+Until the supporting container changes land upstream this image is served from a
+staging registry and needs registry credentials to pull. The recipe deliberately
+carries no pull secret or other cluster-specific settings, so supply an
+`imagePullSecrets` entry for your environment.
+
 ## Configuration notes
 
 ### Both profiles
