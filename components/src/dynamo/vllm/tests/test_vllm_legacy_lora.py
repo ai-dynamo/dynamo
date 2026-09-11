@@ -103,6 +103,7 @@ async def test_prefill_load_records_and_publishes_without_eager_engine_add(
     assert str(kwargs["model_type"]) == str(ModelType.Prefill)
     assert kwargs["worker_type"] == WorkerType.Prefill
     assert kwargs["needs"] == [[WorkerType.Decode]]
+    assert kwargs["ignore_weights"] is True
     runtime_config = kwargs["runtime_config"]
     assert runtime_config.context_length == 8192
     assert json.loads(runtime_config.runtime_data["token_budget"]) == {
