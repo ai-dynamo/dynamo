@@ -1471,10 +1471,12 @@ class HttpService:
                 first item before the HTTP status is committed, so an exception
                 raised by an engine generator before its first ``yield`` maps to
                 the same HTTP error response as it does for a non-streaming
-                request. When False (the default), streaming requests commit
-                HTTP 200 immediately and such an error arrives as an SSE error
-                frame. The default follows ``DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS``;
-                True overrides it.
+                request. When False (the default), the service inherits
+                ``DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS``: unset or ``0``, it commits
+                HTTP 200 without waiting and such an error arrives as an SSE
+                error frame; set to a positive number of milliseconds, it waits
+                that long and still maps an error that arrives inside the
+                window. True overrides the variable with an unbounded wait.
         """
         ...
 
