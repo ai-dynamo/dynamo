@@ -3468,10 +3468,6 @@ thinking
 
     #[test]
     fn test_reasoning_text_preserved_without_explicit_summary_request() {
-        // Regression test for #14069: reasoning.summary is not the only way to
-        // preserve reasoning_content. Whenever the backend returns non-empty
-        // reasoning_content, it should show up as a raw-reasoning output item,
-        // whether or not the request asked for reasoning.summary.
         let unrequested = chat_completion_to_response(
             make_chat_resp_with_reasoning("private reasoning"),
             &ResponseParams::default(),
