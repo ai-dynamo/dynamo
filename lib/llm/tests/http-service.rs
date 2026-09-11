@@ -2567,6 +2567,7 @@ mod zero_top_logprobs {
                         worker_trace_link: None,
                         engine_data: None,
                         routing_data: None,
+                        jailed_text: None,
                     })
                     .expect("backend output conversion failed")
             })

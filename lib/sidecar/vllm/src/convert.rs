@@ -795,9 +795,11 @@ impl ResponseState {
             } else {
                 token_ids
             },
-            text: if self.mode.is_prefill() || self.mode.is_encode() || text.is_empty() {
+            text: if self.mode.is_prefill() || self.mode.is_encode() {
                 None
             } else {
+                // vLLM may buffer text while matching stop strings. Preserve an
+                // empty delta so the frontend does not detokenize its IDs again.
                 Some(text)
             },
             index: Some(0),

@@ -11219,7 +11219,7 @@ spec:
                       description: |-
                         Indicates the number of nodes to deploy for multinode components.
                         Total number of GPUs is NumberOfNodes * GPU limit.
-                        Must be greater than 1.
+                        Must be greater than 1 and is immutable after creation.
                       format: int32
                       minimum: 2
                       type: integer
@@ -11462,8 +11462,9 @@ spec:
                   description: |-
                     Roles expose the named Pod-producing parts inside a compound component.
                     When set for a multinode component, this list must contain exactly one
-                    leader and one worker role. Their cardinality is derived from multinode.nodeCount.
-                    Omission preserves the implicit multinode role layout.
+                    leader and one worker role. Admission defaults omitted replicas to 1 for
+                    leader and multinode.nodeCount minus 1 for worker. Omitting the roles list
+                    preserves the implicit multinode role layout.
                   items:
                     description: |-
                       ComponentRoleSpec configures one named Pod-producing role inside a compound component.
@@ -11477,6 +11478,16 @@ spec:
                         minLength: 1
                         pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                         type: string
+                      replicas:
+                        description: |-
+                          Replicas is the logical cardinality of this role in one complete component
+                          instance. The enclosing component type defines the cardinality. For
+                          multinode components, admission defaults and persists omitted values from
+                          Multinode.NodeCount; leader must be 1 and worker must be
+                          Multinode.NodeCount minus 1.
+                        format: int32
+                        minimum: 1
+                        type: integer
                     required:
                       - name
                     type: object
@@ -12339,7 +12350,8 @@ spec:
                       default: 2
                       description: |-
                         nodeCount is the number of nodes to deploy for the multinode component.
-                        Total GPUs used is `nodeCount * container GPU request`.
+                        Total GPUs used is `nodeCount * container GPU request`. The value is
+                        immutable after creation.
                       format: int32
                       minimum: 2
                       type: integer
@@ -20509,8 +20521,9 @@ spec:
                   description: |-
                     roles expose the named Pod-producing parts inside a compound component.
                     When set for a multinode component, this list must contain exactly one
-                    leader and one worker role. Their cardinality is derived from multinode.nodeCount.
-                    Omission preserves the implicit multinode role layout.
+                    leader and one worker role. Admission defaults omitted replicas to 1 for
+                    leader and multinode.nodeCount minus 1 for worker. Omitting the roles list
+                    preserves the implicit multinode role layout.
                   items:
                     description: |-
                       ComponentRoleSpec configures one named Pod-producing role inside a compound component.
@@ -20524,6 +20537,16 @@ spec:
                         minLength: 1
                         pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                         type: string
+                      replicas:
+                        description: |-
+                          replicas is the logical cardinality of this role in one complete component
+                          instance. The enclosing component type defines the cardinality. For
+                          multinode components, admission defaults and persists omitted values from
+                          multinode.nodeCount; leader must be 1 and worker must be
+                          multinode.nodeCount minus 1.
+                        format: int32
+                        minimum: 1
+                        type: integer
                     required:
                       - name
                     type: object
