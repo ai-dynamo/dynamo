@@ -66,8 +66,11 @@ runner and Job from the repository root:
 
 For throughput-only speculative-decoding measurements at the measured
 acceptance proxy, change the worker `SPECULATIVE_CONFIG` ConfigMap key in
-`recipes/ax-k2/vllm/agg-b200-chat/deploy.yaml` from `speculative-config` to
-`speculative-config-synthetic` before deploying. This enables vLLM's
+`recipes/ax-k2/vllm/agg-b200-chat/kustomize/base/deploy.yaml` from
+`speculative-config` to `speculative-config-synthetic`, then regenerate the
+manifest before deploying as described in the
+[aggregate instructions](../vllm/agg-b200-chat/README.md#edit-and-render).
+This enables vLLM's
 `rejection_sample_method: synthetic` with
 `synthetic_acceptance_length: 2.12`. Keep the production key for functional or
 quality validation because synthetic rejection sampling intentionally forces
