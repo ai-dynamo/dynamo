@@ -12,6 +12,8 @@ from unittest import mock
 from unittest.mock import MagicMock
 
 import pytest
+
+from dynamo.llm.exceptions import InvalidArgument
 import torch
 
 if not torch.cuda.is_available():
@@ -572,7 +574,9 @@ class TestMultimodalGuard:
         handler = self._make_handler(multimodal_processor=None)
         request = request_factory(self.IMAGE_MESSAGE)
 
-        with pytest.raises(RuntimeError, match="--modality multimodal"):
+        # InvalidArgument, not RuntimeError: the type is what makes the
+        # frontend answer 4xx instead of 500.
+        with pytest.raises(InvalidArgument, match="--modality multimodal"):
             await self._prepare(handler, request)
 
     @pytest.mark.asyncio

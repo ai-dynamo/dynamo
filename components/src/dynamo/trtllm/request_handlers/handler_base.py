@@ -40,7 +40,7 @@ from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMo
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.health_check import HEALTH_CHECK_KEY
-from dynamo.llm.exceptions import EngineShutdown
+from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
 from dynamo.nixl_connect import Connector
 from dynamo.runtime import DistributedRuntime
@@ -867,7 +867,10 @@ class HandlerBase(BaseGenerativeHandler):
             return processed_input
 
         if self.multimodal_processor is None and self._request_has_multimodal(request):
-            raise RuntimeError(
+            # InvalidArgument, not RuntimeError: no worker in the pool can serve
+            # this request, so the client must see 4xx rather than a 500 that
+            # reads as a server fault and dents the availability SLO.
+            raise InvalidArgument(
                 "Multimodal input received but worker started without --modality multimodal. "
                 "Restart the worker with --modality multimodal or remove image_url content."
             )
