@@ -1,13 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Startup check for SGLang's ``--elastic-ep-backend mooncake``.
+"""Validate SGLang's mooncake elastic-EP backend before model loading.
 
-SGLang builds its elastic-EP process groups from the mooncake transfer
-engine's torch ``ProcessGroup`` extension, deep inside engine startup and
-after the model is loaded. The check has to run before model load to be worth
-anything, and it must not import ``sglang`` or eagerly import ``torch``, so it
-still answers in an image whose engine is the broken part.
+The check avoids importing ``sglang`` or eagerly importing ``torch`` so it can
+diagnose a broken engine image.
 """
 
 from __future__ import annotations
@@ -189,8 +186,10 @@ def _torch_version() -> str:
         import torch
 
         return str(torch.__version__)
-    except ModuleNotFoundError:
-        return "not installed"
+    except ModuleNotFoundError as exc:
+        if exc.name == "torch":
+            return "not installed"
+        return f"installed but not importable: {type(exc).__name__}: {exc}"
     # A torch that is installed but unusable raises from its own loader, most
     # often ImportError or OSError for a missing CUDA runtime library.
     except (ImportError, OSError) as exc:
