@@ -28,7 +28,7 @@ use dynamo_renderer::PromptFormatter;
 
 use crate::{
     backend::Backend,
-    discovery::{LoadThresholdHandle, WORKER_TYPE_DECODE, WorkerSet},
+    discovery::{LoadThresholdHandle, WORKER_TYPE_DECODE, WorkerSet, runtime_config_watch},
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
     kv_router::{
@@ -688,6 +688,28 @@ where
                 None
             };
 
+            // Capabilities that shape a request before it is routed cannot be
+            // read off the representative card: `runtime_config` is excluded
+            // from `mdcsum`, so workers advertising different `runtime_data`
+            // still share one cohort and one representative. Hand the
+            // preprocessor the live per-worker view instead, so those reads can
+            // require the whole fleet. Scoped to this WorkerSet's lifecycle;
+            // see `base_runtime_config_watch`'s note on quiescent endpoints.
+            let worker_runtime_configs = if needs_preprocessed_routing {
+                match runtime_config_watch(&endpoint, cancellation.child_token()).await {
+                    Ok(watch) => Some(watch),
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            "Falling back to the representative card for pre-routing capabilities"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
             // Add chat engine only if the model supports chat
             if card.model_type.supports_chat() {
                 let routing = preprocessed_routing.as_ref().ok_or_else(|| {
@@ -710,9 +732,13 @@ where
                 } else if let Some(tk) = tokenizer.clone() {
                     let PromptFormatter::OAI(formatter) =
                         prompt_formatter_from_mdc(card).context("prompt_formatter_from_mdc")?;
-                    let preprocessor =
-                        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tk.clone())
-                            .context("OpenAIPreprocessor.new_with_parts")?;
+                    let preprocessor = OpenAIPreprocessor::new_with_parts_and_worker_configs(
+                        card.clone(),
+                        formatter,
+                        tk.clone(),
+                        worker_runtime_configs.clone(),
+                    )
+                    .context("OpenAIPreprocessor.new_with_parts_and_worker_configs")?;
                     Some(
                         routing
                             .build_pipeline::<
@@ -752,9 +778,13 @@ where
                 if let Some(tk) = tokenizer {
                     let formatter = PromptFormatter::no_op();
                     let PromptFormatter::OAI(formatter) = formatter;
-                    let preprocessor =
-                        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tk.clone())
-                            .context("OpenAIPreprocessor::new_with_parts")?;
+                    let preprocessor = OpenAIPreprocessor::new_with_parts_and_worker_configs(
+                        card.clone(),
+                        formatter,
+                        tk.clone(),
+                        worker_runtime_configs.clone(),
+                    )
+                    .context("OpenAIPreprocessor::new_with_parts_and_worker_configs")?;
                     let routing = preprocessed_routing.as_ref().ok_or_else(|| {
                         anyhow::anyhow!("completions pipeline requires preprocessed routing")
                     })?;

@@ -5,6 +5,7 @@
 
 use crate::local_model::runtime_config::{
     StructuralTagMode, StructuralTagScope, TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+    TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_WHEN_REQUIRED_RUNTIME_KEY,
 };
 use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
 use crate::protocols::openai::tools::{ToolChoiceValidation, validate_tool_choice_against_names};
@@ -194,23 +195,50 @@ impl OpenAIPreprocessor {
             parallel_tool_calls,
             schema_mode: self.runtime_config.structural_tag_schema,
             starts_in_reasoning: prompt_injected_reasoning
-                && !self.tool_call_structural_tag_excludes_reasoning(),
+                && !self.tool_call_structural_tag_excludes_reasoning(
+                    preprocessed_request.require_reasoning,
+                ),
         };
 
         Self::apply_tool_call_format(parser_name, builder, &ctx, preprocessed_request)
     }
 
-    fn tool_call_structural_tag_excludes_reasoning(&self) -> bool {
-        match self
-            .runtime_config
-            .get_engine_specific::<bool>(TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY)
-        {
+    /// Whether the tool structural tag must leave the reasoning block to the
+    /// backend. A backend either defers grammar activation for every request,
+    /// or only for the requests the frontend gates with `require_reasoning`.
+    /// Sending both the gate and a tag that opens with a reasoning section makes
+    /// the model close reasoning twice before it can emit a call, which burns
+    /// the token budget instead of producing tool calls.
+    fn tool_call_structural_tag_excludes_reasoning(&self, require_reasoning: bool) -> bool {
+        self.structural_tag_reasoning_flag(TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY)
+            || (require_reasoning
+                && self.structural_tag_reasoning_flag(
+                    TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_WHEN_REQUIRED_RUNTIME_KEY,
+                ))
+    }
+
+    /// Read a structural-tag capability.
+    ///
+    /// The tag is chosen before the request is routed, so the answer has to
+    /// hold for whichever worker ends up serving it. When a live per-worker
+    /// view exists, the capability counts only if every worker advertises it:
+    /// an upgraded worker alone must not strip the reasoning section from a
+    /// request a not-yet-upgraded worker will serve, which is the mixed-version
+    /// direction, and a stale worker must not keep the old shape once the
+    /// rollout finishes, which is the other one. Absent that view (local and
+    /// static engines) the model has exactly one worker and its card is the
+    /// fleet.
+    fn structural_tag_reasoning_flag(&self, key: &str) -> bool {
+        if let Some(worker_configs) = self.worker_runtime_configs.as_ref() {
+            return crate::discovery::all_workers_advertise(&worker_configs.borrow(), key);
+        }
+        match self.runtime_config.get_engine_specific::<bool>(key) {
             Ok(Some(excludes_reasoning)) => excludes_reasoning,
             Ok(None) => false,
             Err(error) => {
                 tracing::warn!(
                     %error,
-                    key = TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+                    key,
                     "Ignoring invalid structural-tag reasoning metadata; using the compatibility behavior"
                 );
                 false
@@ -350,6 +378,16 @@ mod tests {
     }
 
     fn kimi_k2_preprocessor(excludes_reasoning: Option<bool>) -> Arc<OpenAIPreprocessor> {
+        kimi_k2_preprocessor_with(
+            TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+            excludes_reasoning,
+        )
+    }
+
+    fn kimi_k2_preprocessor_with(
+        key: &str,
+        excludes_reasoning: Option<bool>,
+    ) -> Arc<OpenAIPreprocessor> {
         let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
         let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
@@ -357,10 +395,7 @@ mod tests {
         mdc.runtime_config.tool_call_parser = Some("kimi_k2".to_string());
         if let Some(excludes_reasoning) = excludes_reasoning {
             mdc.runtime_config
-                .set_engine_specific(
-                    TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
-                    excludes_reasoning,
-                )
+                .set_engine_specific(key, excludes_reasoning)
                 .unwrap();
         }
 
@@ -377,13 +412,26 @@ mod tests {
     }
 
     fn kimi_k2_required_format(excludes_reasoning: Option<bool>) -> serde_json::Value {
-        let preprocessor = kimi_k2_preprocessor(excludes_reasoning);
+        kimi_k2_required_format_with(
+            TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+            excludes_reasoning,
+            false,
+        )
+    }
+
+    fn kimi_k2_required_format_with(
+        key: &str,
+        excludes_reasoning: Option<bool>,
+        require_reasoning: bool,
+    ) -> serde_json::Value {
+        let preprocessor = kimi_k2_preprocessor_with(key, excludes_reasoning);
         let tools = [ToolDefinition {
             name: "get_weather".to_string(),
             parameters: None,
             strict: None,
         }];
         let mut request = preprocessed_request();
+        request.require_reasoning = require_reasoning;
 
         assert!(
             preprocessor
@@ -422,6 +470,234 @@ mod tests {
             format["elements"][0]["value"],
             "<|tool_calls_section_begin|>"
         );
+    }
+
+    /// Build a kimi_k2 preprocessor whose capability answer comes from a live
+    /// per-worker view rather than from its own card.
+    ///
+    /// `card_says` is written onto the representative card so a test can prove
+    /// which of the two the request path actually reads.
+    fn kimi_k2_preprocessor_with_fleet(
+        key: &str,
+        card_says: Option<bool>,
+        fleet: &[Option<bool>],
+    ) -> (
+        Arc<OpenAIPreprocessor>,
+        tokio::sync::watch::Sender<
+            std::collections::HashMap<
+                dynamo_kv_router::protocols::WorkerId,
+                crate::local_model::runtime_config::ModelRuntimeConfig,
+            >,
+        >,
+    ) {
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        mdc.runtime_config.structural_tag_mode = StructuralTagMode::On;
+        mdc.runtime_config.tool_call_parser = Some("kimi_k2".to_string());
+        if let Some(card_says) = card_says {
+            mdc.runtime_config
+                .set_engine_specific(key, card_says)
+                .unwrap();
+        }
+
+        let (tx, rx) = tokio::sync::watch::channel(worker_configs(key, fleet));
+        let crate::preprocessor::PromptFormatter::OAI(formatter) =
+            crate::preprocessor::prompt::prompt_formatter_from_mdc(&mdc).unwrap();
+        let tokenizer = mdc.tokenizer().unwrap();
+        let preprocessor = OpenAIPreprocessor::new_with_parts_and_worker_configs(
+            mdc,
+            formatter,
+            tokenizer,
+            Some(rx),
+        )
+        .unwrap();
+        (preprocessor, tx)
+    }
+
+    /// One entry per worker: `Some(v)` publishes `key = v`, `None` is a worker
+    /// that predates the capability and publishes nothing.
+    fn worker_configs(
+        key: &str,
+        fleet: &[Option<bool>],
+    ) -> std::collections::HashMap<
+        dynamo_kv_router::protocols::WorkerId,
+        crate::local_model::runtime_config::ModelRuntimeConfig,
+    > {
+        fleet
+            .iter()
+            .enumerate()
+            .map(|(index, advertises)| {
+                let mut config = crate::local_model::runtime_config::ModelRuntimeConfig::default();
+                if let Some(advertises) = advertises {
+                    config.set_engine_specific(key, *advertises).unwrap();
+                }
+                (index as dynamo_kv_router::protocols::WorkerId, config)
+            })
+            .collect()
+    }
+
+    fn required_format(preprocessor: &Arc<OpenAIPreprocessor>) -> serde_json::Value {
+        let tools = [ToolDefinition {
+            name: "get_weather".to_string(),
+            parameters: None,
+            strict: None,
+        }];
+        let mut request = preprocessed_request();
+        request.require_reasoning = true;
+
+        assert!(
+            preprocessor
+                .apply_tool_choice_structural_tag(
+                    &ToolChoice::Required,
+                    &tools,
+                    None,
+                    true,
+                    &mut request,
+                )
+                .unwrap()
+        );
+
+        request
+            .sampling_options
+            .guided_decoding
+            .unwrap()
+            .structural_tag
+            .unwrap()["format"]
+            .clone()
+    }
+
+    fn assert_models_reasoning(format: &serde_json::Value, why: &str) {
+        assert_eq!(format["elements"][0]["type"], "tag", "{why}");
+        assert_eq!(format["elements"][0]["end"], "</think>", "{why}");
+    }
+
+    fn assert_omits_reasoning(format: &serde_json::Value, why: &str) {
+        assert_eq!(format["elements"][0]["type"], "const_string", "{why}");
+        assert_eq!(
+            format["elements"][0]["value"], "<|tool_calls_section_begin|>",
+            "{why}"
+        );
+    }
+
+    /// Regression for the N/N-1 rollout hazard: the structural tag is chosen
+    /// before the request is routed, and `runtime_config` is excluded from
+    /// `mdcsum`, so workers publishing different `runtime_data` still share one
+    /// WorkerSet and one representative card. Shaping requests off that card
+    /// sends a reasoning-stripped tag to a worker that never got the
+    /// `require_reasoning` gate, which is unfollowable for it.
+    #[test]
+    fn mixed_version_fleet_keeps_the_compatibility_tag() {
+        let key = TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_WHEN_REQUIRED_RUNTIME_KEY;
+
+        // One upgraded worker, one that predates the capability.
+        let (preprocessor, tx) = kimi_k2_preprocessor_with_fleet(key, None, &[Some(true), None]);
+        assert_models_reasoning(
+            &required_format(&preprocessor),
+            "a worker without the capability must still be able to follow the tag",
+        );
+
+        // Rollout finishes: the last old worker is replaced.
+        tx.send(worker_configs(key, &[Some(true), Some(true)]))
+            .unwrap();
+        assert_omits_reasoning(
+            &required_format(&preprocessor),
+            "a fully upgraded fleet should get the fix",
+        );
+
+        // An old worker rejoins (rollback, or a straggler restarting).
+        tx.send(worker_configs(key, &[Some(true), None])).unwrap();
+        assert_models_reasoning(
+            &required_format(&preprocessor),
+            "the capability must switch back off when a worker without it returns",
+        );
+
+        // A worker that publishes the key as false is not support either.
+        tx.send(worker_configs(key, &[Some(true), Some(false)]))
+            .unwrap();
+        assert_models_reasoning(
+            &required_format(&preprocessor),
+            "an explicit false must count against the fleet",
+        );
+    }
+
+    /// No workers means nothing is known, which is the compatibility answer,
+    /// not an all-of-empty-set `true`.
+    #[test]
+    fn empty_fleet_keeps_the_compatibility_tag() {
+        let key = TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_WHEN_REQUIRED_RUNTIME_KEY;
+        let (preprocessor, _tx) = kimi_k2_preprocessor_with_fleet(key, None, &[]);
+        assert_models_reasoning(
+            &required_format(&preprocessor),
+            "an empty fleet advertises nothing",
+        );
+    }
+
+    /// The representative card is one worker's view. When a fleet view exists
+    /// it is the authority, in both directions.
+    #[test]
+    fn fleet_view_overrides_the_representative_card() {
+        let key = TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_WHEN_REQUIRED_RUNTIME_KEY;
+
+        // Representative advertises, fleet does not agree.
+        let (preprocessor, _tx) =
+            kimi_k2_preprocessor_with_fleet(key, Some(true), &[Some(true), None]);
+        assert_models_reasoning(
+            &required_format(&preprocessor),
+            "the representative card must not speak for a worker that lacks the capability",
+        );
+
+        // Representative is the stale one; every live worker has the capability.
+        let (preprocessor, _tx) =
+            kimi_k2_preprocessor_with_fleet(key, None, &[Some(true), Some(true)]);
+        assert_omits_reasoning(
+            &required_format(&preprocessor),
+            "a fully upgraded fleet should get the fix even if the card is stale",
+        );
+    }
+
+    #[test]
+    fn request_gated_reasoning_metadata_follows_require_reasoning() {
+        // SGLang takes the reasoning gate per request, so the tag drops its
+        // reasoning section only on the requests that carry the gate.
+        let format = kimi_k2_required_format_with(
+            TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_WHEN_REQUIRED_RUNTIME_KEY,
+            Some(true),
+            true,
+        );
+        assert_eq!(format["elements"][0]["type"], "const_string");
+        assert_eq!(
+            format["elements"][0]["value"],
+            "<|tool_calls_section_begin|>"
+        );
+
+        // Without the gate the backend enforces the grammar from the first
+        // token, so the tag must still model the open reasoning block.
+        let format = kimi_k2_required_format_with(
+            TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_WHEN_REQUIRED_RUNTIME_KEY,
+            Some(true),
+            false,
+        );
+        assert_eq!(format["elements"][0]["type"], "tag");
+        assert_eq!(format["elements"][0]["end"], "</think>");
+
+        // A backend that never advertises the capability keeps the
+        // compatibility behavior even when the gate is requested.
+        let format = kimi_k2_required_format_with(
+            TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_WHEN_REQUIRED_RUNTIME_KEY,
+            None,
+            true,
+        );
+        assert_eq!(format["elements"][0]["type"], "tag");
+        assert_eq!(format["elements"][0]["end"], "</think>");
+
+        // The unconditional capability stays independent of the gate.
+        let format = kimi_k2_required_format_with(
+            TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+            Some(true),
+            false,
+        );
+        assert_eq!(format["elements"][0]["type"], "const_string");
     }
 
     #[test]

@@ -191,6 +191,37 @@ pub async fn runtime_config_watch(
     Ok(rx)
 }
 
+/// True when every worker currently serving the model advertises boolean
+/// capability `key` in its `runtime_data`.
+///
+/// Capabilities arrive per worker, but a decision that shapes a request before
+/// it is routed applies to whichever worker the router later picks. Such a
+/// capability is therefore only usable once the whole fleet reports it: during
+/// an N/N-1 rollout an upgraded worker's `true` must not shape a request that a
+/// not-yet-upgraded worker will serve, and a retired worker's absent key must
+/// not keep the capability off once every live worker has it.
+///
+/// An empty fleet answers `false`, which is the compatibility behavior for
+/// every caller: absent metadata means "assume the old shape".
+pub fn all_workers_advertise(configs: &HashMap<WorkerId, ModelRuntimeConfig>, key: &str) -> bool {
+    !configs.is_empty()
+        && configs.iter().all(
+            |(worker_id, config)| match config.get_engine_specific::<bool>(key) {
+                Ok(Some(advertised)) => advertised,
+                Ok(None) => false,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        key,
+                        worker_id,
+                        "Ignoring invalid worker capability metadata; treating it as unsupported"
+                    );
+                    false
+                }
+            },
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
