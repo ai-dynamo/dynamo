@@ -9,6 +9,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use dynamo_kv_router::LocalBlockHash;
+// Sanctioned crossing point: the rest of `replay` (entrypoints.rs) types its
+// public offline API on this alias rather than importing dynamo_kv_router
+// itself, so the crate-name firewall in firewall_tests.rs only has to scan
+// for the raw `dynamo_kv_router` token, not every re-export of its types.
 pub(in crate::replay) use dynamo_kv_router::config::KvRouterConfig as ReplayKvRouterConfig;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::protocols::{
@@ -358,18 +362,13 @@ impl KvRouterPlacement {
         num_workers: usize,
         selector_seed: Option<u64>,
     ) -> Result<Self> {
-        let router = match selector_seed {
-            Some(seed) => OfflineReplayRouter::new_with_selector_seed(
-                args,
-                router_config,
-                prefill_load_estimator,
-                num_workers,
-                Some(seed),
-            )?,
-            None => {
-                OfflineReplayRouter::new(args, router_config, prefill_load_estimator, num_workers)?
-            }
-        };
+        let router = OfflineReplayRouter::new_with_selector_seed(
+            args,
+            router_config,
+            prefill_load_estimator,
+            num_workers,
+            selector_seed,
+        )?;
         Ok(Self { router })
     }
 
@@ -424,11 +423,11 @@ impl PlacementRequestView for DirectRequest {
 
 impl PlacementRequestView for ReplayRequestPayload {
     fn metadata(&self) -> &DirectRequest {
-        self.metadata()
+        ReplayRequestPayload::metadata(self)
     }
 
     fn input_length(&self) -> usize {
-        self.input_length()
+        ReplayRequestPayload::input_length(self)
     }
 
     fn prompt_tokens_for_placement(&self) -> Result<Cow<'_, [u32]>> {
@@ -533,7 +532,8 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
 }
 
 impl OfflineReplayRouter {
-    pub(crate) fn new(
+    #[cfg(test)]
+    fn new(
         args: &MockEngineArgs,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
@@ -664,10 +664,7 @@ impl OfflineReplayRouter {
             return Ok(RouterEffects::default());
         }
 
-        let uuid = request
-            .metadata()
-            .uuid
-            .expect("offline replay requests must have UUIDs before router submission");
+        let uuid = pending.uuid;
         let outcome = self.admit_request(pending, decay_now)?;
         Ok(RouterEffects {
             admissions: vec![WorkerAdmission {
@@ -1105,10 +1102,11 @@ impl OfflineReplayRouter {
             Some(estimator) => match estimator.predict_prefill_duration(1, effective_isl, prefix) {
                 Ok(expected_prefill_duration) => Some(expected_prefill_duration),
                 Err(error) => {
-                    tracing::warn!(
+                    tracing::debug!(
+                        error = %error,
                         effective_isl,
                         prefix,
-                        "failed to predict replay prefill duration for active load tracking: {error}"
+                        "failed to predict replay prefill duration for active load tracking"
                     );
                     None
                 }

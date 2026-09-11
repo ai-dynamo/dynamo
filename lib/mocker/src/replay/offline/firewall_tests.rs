@@ -20,8 +20,13 @@ fn rust_sources(root: &Path, sources: &mut Vec<PathBuf>) {
     }
 }
 
+/// Scans for the literal router crate name only -- it does not (and cannot,
+/// by text scan) block coupling to router types re-exported under another
+/// name, such as `kv_router::ReplayKvRouterConfig`, which `entrypoints.rs`
+/// is intentionally typed on. This pins imports to naming the crate in one
+/// place, not the depth of type coupling elsewhere.
 #[test]
-fn offline_kv_router_crate_references_are_extension_owned() {
+fn offline_kv_router_crate_is_named_only_inside_the_extension() {
     let offline = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/replay/offline");
     let extensions = offline.join("extensions");
     let mut sources = Vec::new();
@@ -38,7 +43,7 @@ fn offline_kv_router_crate_references_are_extension_owned() {
         let source = fs::read_to_string(&path).unwrap();
         assert!(
             !source.contains(concat!("dynamo_", "kv_router")),
-            "{} directly depends on the KV-router crate outside the extension firewall",
+            "{} names the KV-router crate directly outside the extension firewall",
             path.display()
         );
     }
