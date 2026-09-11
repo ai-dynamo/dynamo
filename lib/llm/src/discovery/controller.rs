@@ -832,7 +832,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 // would unlist the model until the commit landed, and a request
                 // arriving in that window would get the `404` the retained entry
                 // exists to prevent.
-                let commit = if group.pending_removal.take().is_some() {
+                let commit = if group.pending_removal.is_some() {
                     self.host
                         .supersede_group(&result.spec, prepared, &members, &adapters)
                 } else {
@@ -841,6 +841,9 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 };
                 match commit {
                     Ok(()) => {
+                        // The retained entry is the successor's own now, so the
+                        // deferred withdrawal is discharged.
+                        group.pending_removal = None;
                         group.retry_attempt = 0;
                         group.status = GroupStatus::Ready {
                             mdc_checksum: result.spec.mdc_checksum,
@@ -848,6 +851,10 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                         };
                     }
                     Err(error) => {
+                        // A rejected successor leaves the retained entry exactly
+                        // as it was, so its deadline still stands: the model
+                        // keeps answering `503` for the rest of the window and
+                        // the retry supersedes again if it gets there in time.
                         group.admission_tx.send_replace(Vec::new());
                         tracing::warn!(
                             group = %result.spec.key.id(),
@@ -1308,7 +1315,9 @@ mod tests {
                 })
                 .is_ok()
             {
-                self.committed.lock().unwrap().remove(&spec.key.id());
+                // `ModelManager::supersede_discovery_group` validates the whole
+                // successor before it withdraws the predecessor, so a rejected
+                // successor leaves the retained entry in place.
                 anyhow::bail!("injected commit conflict");
             }
             let mut committed = self.committed.lock().unwrap();
@@ -1619,6 +1628,54 @@ mod tests {
             host.members(&group_key()),
             BTreeSet::from([replacement.key])
         );
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+    }
+
+    /// A successor the host rejects must not cost the model its retained entry:
+    /// the window is there so requests get a retryable `503`, and a failed
+    /// installation is exactly when that still has to hold.
+    #[tokio::test(start_paused = true)]
+    async fn a_rejected_successor_leaves_the_retained_entry_for_the_rest_of_the_window() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller =
+            ModelDiscoveryController::with_removal_grace(host.clone(), Duration::from_secs(30));
+        let departing = instance(1, "spec");
+        controller.apply_added(departing.clone());
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+
+        controller.apply_removed(&departing.key);
+        host.commit_failures.store(1, Ordering::SeqCst);
+        let replacement = instance(2, "spec");
+        controller.apply_added(replacement.clone());
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([departing.key.clone()]),
+            "the rejected successor leaves the model listed"
+        );
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+        assert_eq!(host.superseded_groups.load(Ordering::SeqCst), 0);
+
+        tokio::time::advance(Duration::from_secs(5)).await;
+        controller.release_due_retries();
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([replacement.key]),
+            "the retry inside the window still takes the entry over"
+        );
+        assert_eq!(host.superseded_groups.load(Ordering::SeqCst), 1);
         assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
     }
 

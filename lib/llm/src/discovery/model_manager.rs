@@ -145,6 +145,21 @@ struct PendingLoraProjection {
 
 type EndpointLoraProjection = HashMap<EndpointId, HashMap<WorkerWithDpRank, LoraWorkerProjection>>;
 
+/// A withdrawn group, with the model name and topology namespace its removal
+/// has to be reconciled against.
+struct WithdrawnGroup {
+    removed: RemovedDiscoveryGroup,
+    primary: String,
+    namespace: String,
+}
+
+/// An installed group, with the predecessor whose catalog entry it took over.
+struct InstalledGroup {
+    primary: String,
+    namespace: String,
+    withdrawn: Option<WithdrawnGroup>,
+}
+
 pub(crate) struct RemovedDiscoveryGroup {
     pub(crate) representative: ModelDeploymentCard,
     pub(crate) cards: Vec<ModelDeploymentCard>,
@@ -650,16 +665,17 @@ impl ModelManager {
     ) -> anyhow::Result<()> {
         let _reservation = self.reservation_lock.lock();
         let lora_before = self.lora_projection_locked();
-        let (primary, namespace) = self.commit_discovery_group_locked(
+        let installed = self.commit_discovery_group_locked(
             group_id,
             worker_set_key,
             worker_set,
             members,
             adapters,
+            None,
         )?;
         let lora_after = self.lora_projection_locked();
         self.publish_lora_projection_locked(Self::union_lora_projection(&lora_before, &lora_after));
-        self.reconcile_discovery_topology(&primary, &namespace);
+        self.reconcile_discovery_topology(&installed.primary, &installed.namespace);
         self.publish_catalog_locked();
         self.publish_lora_projection_locked(lora_after);
         Ok(())
@@ -675,9 +691,9 @@ impl ModelManager {
     /// retained entry exists to prevent. Both halves therefore run under one hold
     /// of `reservation_lock` and become visible together.
     ///
-    /// A successor that cannot be installed leaves the predecessor withdrawn: the
-    /// removal is published and the error returned, which is the state a failed
-    /// commit after a removal would also leave behind.
+    /// A successor that is rejected changes nothing: the whole successor is
+    /// validated before the predecessor is touched, so the retained entry stays
+    /// listed for the rest of its grace period and the caller can try again.
     pub(crate) fn supersede_discovery_group(
         &self,
         group_id: &str,
@@ -688,35 +704,36 @@ impl ModelManager {
     ) -> anyhow::Result<Option<RemovedDiscoveryGroup>> {
         let _reservation = self.reservation_lock.lock();
         let lora_before = self.lora_projection_locked();
-        let withdrawn = self.remove_discovery_group_locked(group_id);
-        let committed = self.commit_discovery_group_locked(
+        let installed = self.commit_discovery_group_locked(
             group_id,
             worker_set_key,
             worker_set,
             members,
             adapters,
-        );
+            Some(group_id),
+        )?;
         let lora_after = self.lora_projection_locked();
         self.publish_lora_projection_locked(Self::union_lora_projection(&lora_before, &lora_after));
-        if let Some((_, primary, namespace)) = &withdrawn
-            && committed
-                .as_ref()
-                .ok()
-                .is_none_or(|(successor, _)| successor != primary)
+        if let Some(withdrawn) = &installed.withdrawn
+            && withdrawn.primary != installed.primary
         {
-            self.reconcile_discovery_topology(primary, namespace);
+            self.reconcile_discovery_topology(&withdrawn.primary, &withdrawn.namespace);
         }
-        if let Ok((primary, namespace)) = &committed {
-            self.reconcile_discovery_topology(primary, namespace);
-        }
+        self.reconcile_discovery_topology(&installed.primary, &installed.namespace);
         self.publish_catalog_locked();
         self.publish_lora_projection_locked(lora_after);
-        committed?;
-        Ok(withdrawn.map(|(removed, _, _)| removed))
+        Ok(installed.withdrawn.map(|withdrawn| withdrawn.removed))
     }
 
     /// Install a group's state without publishing the result. The caller holds
-    /// `reservation_lock`. Returns the primary model name and topology namespace.
+    /// `reservation_lock`. Returns the primary model name, the topology
+    /// namespace, and the predecessor this build replaced.
+    ///
+    /// `supersedes` names a committed group whose entry this build takes over.
+    /// It is withdrawn only once the successor has passed every check, so a
+    /// rejected successor leaves the predecessor exactly as it was. Everything
+    /// after that point is insertion and cannot fail.
+    #[allow(clippy::too_many_arguments)]
     fn commit_discovery_group_locked(
         &self,
         group_id: &str,
@@ -724,7 +741,8 @@ impl ModelManager {
         worker_set: WorkerSet,
         members: Vec<(String, ModelDeploymentCard)>,
         adapters: Vec<(String, ModelDeploymentCard)>,
-    ) -> anyhow::Result<(String, String)> {
+        supersedes: Option<&str>,
+    ) -> anyhow::Result<InstalledGroup> {
         let representative = members
             .first()
             .map(|(_, card)| card)
@@ -740,7 +758,7 @@ impl ModelManager {
         let representative = representative.clone();
 
         anyhow::ensure!(
-            !self.discovery_groups.contains_key(group_id),
+            supersedes == Some(group_id) || !self.discovery_groups.contains_key(group_id),
             "discovery group {group_id:?} is already committed"
         );
         if let Some(owner) = self.alias_to_primary.get(&primary) {
@@ -750,10 +768,13 @@ impl ModelManager {
             );
         }
         anyhow::ensure!(
-            !self.discovery_groups.iter().any(|entry| entry
-                .adapters
-                .values()
-                .any(|adapter| adapter.name() == primary)),
+            !self.discovery_groups.iter().any(|entry| {
+                Some(entry.key().as_str()) != supersedes
+                    && entry
+                        .adapters
+                        .values()
+                        .any(|adapter| adapter.name() == primary)
+            }),
             "model name {primary:?} is reserved by a LoRA adapter"
         );
 
@@ -777,6 +798,12 @@ impl ModelManager {
             );
         }
         self.validate_adapter_claims(&primary, adapters.iter().map(|(_, card)| card))?;
+
+        // Every check has passed, so the predecessor can go: nothing below here
+        // can fail and leave the model unlisted. A caller that withdrew it first
+        // would lose the retained entry to a successor its own checks rejected.
+        let withdrawn =
+            supersedes.and_then(|predecessor| self.remove_discovery_group_locked(predecessor));
 
         let role = representative
             .worker_type
@@ -826,7 +853,11 @@ impl ModelManager {
                 worker_set,
             },
         );
-        Ok((primary, namespace))
+        Ok(InstalledGroup {
+            primary,
+            namespace,
+            withdrawn,
+        })
     }
 
     fn validate_adapter_claims<'a>(
@@ -965,24 +996,20 @@ impl ModelManager {
     pub(crate) fn remove_discovery_group(&self, group_id: &str) -> Option<RemovedDiscoveryGroup> {
         let _reservation = self.reservation_lock.lock();
         let lora_before = self.lora_projection_locked();
-        let (removed, primary, topology_namespace) =
-            self.remove_discovery_group_locked(group_id)?;
+        let withdrawn = self.remove_discovery_group_locked(group_id)?;
         let lora_after = self.lora_projection_locked();
         self.publish_lora_projection_locked(Self::union_lora_projection(&lora_before, &lora_after));
-        self.reconcile_discovery_topology(&primary, &topology_namespace);
+        self.reconcile_discovery_topology(&withdrawn.primary, &withdrawn.namespace);
         self.publish_catalog_locked();
         self.publish_lora_projection_locked(lora_after);
-        Some(removed)
+        Some(withdrawn.removed)
     }
 
     /// Withdraw a group's state without publishing the result. The caller holds
     /// `reservation_lock` and decides which catalog the removal becomes visible
     /// in, so a successor can be installed in the same one. Returns the removed
     /// group with its primary model name and topology namespace.
-    fn remove_discovery_group_locked(
-        &self,
-        group_id: &str,
-    ) -> Option<(RemovedDiscoveryGroup, String, String)> {
+    fn remove_discovery_group_locked(&self, group_id: &str) -> Option<WithdrawnGroup> {
         let (_, group) = self.discovery_groups.remove(group_id)?;
         let representative = group.representative.clone();
         let topology_namespace = group.namespace.clone();
@@ -1025,7 +1052,11 @@ impl ModelManager {
             representative,
             cards,
         };
-        Some((removed, primary, topology_namespace))
+        Some(WithdrawnGroup {
+            removed,
+            primary,
+            namespace: topology_namespace,
+        })
     }
 
     // -- Model cards --
@@ -3518,6 +3549,46 @@ mod tests {
             vec!["instance-2".to_string()],
             "only the successor's card is published"
         );
+    }
+
+    #[test]
+    fn a_rejected_successor_leaves_the_predecessor_committed() {
+        let manager = ModelManager::new();
+        commit_single_member(&manager, "group", "instance-1");
+        manager.add_worker_set("taken", "existing", make_worker_set("existing", "old"));
+
+        let mut successor = ModelDeploymentCard::with_name_only("model");
+        successor.aliases = vec!["taken".to_string()];
+        let worker_set = WorkerSet::new(
+            "deployment".to_string(),
+            successor.mdcsum().to_string(),
+            successor.clone(),
+        );
+        let outcome = manager.supersede_discovery_group(
+            "group",
+            "model-workers",
+            worker_set,
+            vec![("instance-2".to_string(), successor)],
+            Vec::new(),
+        );
+        let Err(error) = outcome else {
+            panic!("the alias collision must reject the successor");
+        };
+
+        assert!(error.to_string().contains("collides"));
+        assert!(
+            manager.get_committed_model("model").is_some(),
+            "a successor rejected at validation costs the model nothing"
+        );
+        assert!(
+            manager.get_model("model").is_some(),
+            "the predecessor's worker set is still registered, not just published"
+        );
+        assert_eq!(
+            manager.get_model_card_keys(),
+            vec!["instance-1".to_string()]
+        );
+        assert_eq!(manager.get_model_cards().len(), 1);
     }
 
     /// The retained entry exists so that a request arriving during a rolling
