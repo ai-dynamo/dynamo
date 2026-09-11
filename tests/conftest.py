@@ -248,46 +248,91 @@ def pytest_configure(config: pytest.Config) -> None:
             returncode=2,
         )
 
-    vram_limit = config.getoption("max_vram_gib", default=None)
-    if vram_limit is None:
+    if not _vram_scheduling_requested(config):
         return
-    if config.option.collectonly:
-        return
-    # Delayed: vram_utils requires pynvml, otherwise conftest fails to load
-    # on CPU-only CI runners (e.g. ARM deploy tests) that lack nvidia-ml-py.
-    from tests.utils.pytest_parallel_gpu import _parse_cuda_visible
-    from tests.utils.vram_utils import auto_worker_count, detect_gpus
-
-    gpus = detect_gpus()
-    if gpus:
-        config.stash[_gpu_parallel_gpus_key] = gpus
-
-    # Honour CUDA_VISIBLE_DEVICES to restrict which GPUs the scheduler uses.
-    # NVML always sees all physical GPUs, so we filter here.
-    cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
-    if cvd is not None:
-        config.stash[_gpu_indices_key] = _parse_cuda_visible(cvd, gpus)
-        selected_gpus = [
-            g for g in gpus if g["index"] in config.stash[_gpu_indices_key]
-        ]
-    else:
-        config.stash[_gpu_indices_key] = None  # all GPUs
-        selected_gpus = gpus
+    vram_limit = config.getoption("max_vram_gib")
+    selected_gpus = _detect_selected_gpus(config)
 
     # If -n is set with --max-vram-gib, save the slot count and disable xdist
     # so our subprocess orchestrator handles parallelism instead.
     # xdist's pytest_configure(trylast=True) checks _is_distribution_mode()
     # which reads dist/tx (not numprocesses), so we must also clear dist.
+    # "auto" is normally already resolved by pytest_cmdline_main below; the
+    # string branch here is a fallback for xdist versions that resolve it later.
     numproc = config.getoption("numprocesses", default=None)
     if numproc is not None and numproc != 0:
         if isinstance(numproc, str) or numproc == -1:
-            config.stash[_gpu_slots_key] = (
-                auto_worker_count(selected_gpus, vram_limit) if selected_gpus else 1
+            config.stash[_gpu_slots_key] = _vram_auto_worker_count(
+                selected_gpus, vram_limit
             )
         else:
             config.stash[_gpu_slots_key] = int(numproc)
         config.option.numprocesses = 0
         config.option.dist = "no"
+
+
+def _vram_scheduling_requested(config: pytest.Config) -> bool:
+    """True when --max-vram-gib is set for a real (non --collect-only) run."""
+    if config.getoption("max_vram_gib", default=None) is None:
+        return False
+    return not config.option.collectonly
+
+
+def _detect_selected_gpus(config: pytest.Config) -> list[dict]:
+    """Detect GPUs once per session and return those the scheduler may use.
+
+    Populates the GPU stash keys on first call so pytest_cmdline_main and
+    pytest_configure share one NVML probe.
+    """
+    # Delayed: vram_utils requires pynvml, otherwise conftest fails to load
+    # on CPU-only CI runners (e.g. ARM deploy tests) that lack nvidia-ml-py.
+    from tests.utils.pytest_parallel_gpu import _parse_cuda_visible
+    from tests.utils.vram_utils import detect_gpus
+
+    if _gpu_indices_key not in config.stash:
+        gpus = detect_gpus()
+        if gpus:
+            config.stash[_gpu_parallel_gpus_key] = gpus
+        # Honour CUDA_VISIBLE_DEVICES to restrict which GPUs the scheduler uses.
+        # NVML always sees all physical GPUs, so we filter here.
+        cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
+        config.stash[_gpu_indices_key] = (
+            _parse_cuda_visible(cvd, gpus) if cvd is not None else None  # None = all
+        )
+
+    gpus = config.stash.get(_gpu_parallel_gpus_key, [])
+    indices = config.stash[_gpu_indices_key]
+    if indices is None:
+        return gpus
+    return [g for g in gpus if g["index"] in indices]
+
+
+def _vram_auto_worker_count(selected_gpus: list[dict], vram_limit: float) -> int:
+    # Delayed: see the pynvml note in _detect_selected_gpus.
+    from tests.utils.vram_utils import auto_worker_count
+
+    return auto_worker_count(selected_gpus, vram_limit) if selected_gpus else 1
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_cmdline_main(config: pytest.Config):
+    """Resolve ``-n auto`` from GPU VRAM before pytest-xdist resolves it from CPUs.
+
+    xdist (>= 3.x) turns "auto"/"logical" into an integer CPU count in its own
+    tryfirst pytest_cmdline_main, which runs before pytest_configure; by then the
+    VRAM-aware branch in pytest_configure only ever sees the host CPU count. A
+    hook wrapper runs ahead of every plain hookimpl regardless of registration
+    order, so this is the one place the "auto" request is still observable.
+
+    Explicit numeric ``-n`` values are left untouched. The CPU/cgroup ceiling is
+    applied later by run_parallel (see effective_cpu_budget).
+    """
+    if _vram_scheduling_requested(config):
+        if config.getoption("numprocesses", default=None) in ("auto", "logical"):
+            config.option.numprocesses = _vram_auto_worker_count(
+                _detect_selected_gpus(config), config.getoption("max_vram_gib")
+            )
+    return (yield)
 
 
 @pytest.hookimpl(tryfirst=True)
