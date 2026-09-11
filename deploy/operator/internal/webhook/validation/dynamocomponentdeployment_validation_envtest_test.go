@@ -135,6 +135,38 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			},
 		},
 		{
+			name: "v1beta1 role PodTemplates require component-specific support",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+				dcd.Spec.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
+					{
+						Name: nvidiacomv1beta1.ComponentRoleLeader,
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+							Name: consts.MainContainerName, Image: "registry.example/leader:1.1.0",
+						}}}},
+					},
+					{Name: nvidiacomv1beta1.ComponentRoleWorker},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.roles[0].podTemplate: Forbidden: is not supported for this component role"},
+		},
+		{
+			name: "v1alpha1 role PodTemplates require component-specific support",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.Multinode = &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2}
+				dcd.Spec.Roles = []nvidiacomv1alpha1.ComponentRoleSpec{
+					{
+						Name: nvidiacomv1alpha1.ComponentRoleLeader,
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+							Name: consts.MainContainerName, Image: "registry.example/leader:1.1.0",
+						}}}},
+					},
+					{Name: nvidiacomv1alpha1.ComponentRoleWorker},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.roles[0].podTemplate: Forbidden: is not supported for this component role"},
+		},
+		{
 			name: "v1beta1 main image is required when pod template is absent on create",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.PodTemplate = nil
