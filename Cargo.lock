@@ -3166,7 +3166,6 @@ dependencies = [
  "async-trait",
  "clap",
  "dynamo-backend-common",
- "dynamo-kv-router",
  "dynamo-sidecar-common",
  "futures",
  "prost 0.13.5",

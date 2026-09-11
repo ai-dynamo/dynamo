@@ -4,7 +4,6 @@
 use dynamo_backend_common::{
     DynamoError, EngineConfig, LlmRegistration, RlAdminBaseUrl, RlWorkerMetadata,
 };
-use dynamo_kv_router::zmq_wire::KvCacheSpecKind;
 
 use crate::client;
 use crate::proto as pb;
@@ -164,46 +163,19 @@ impl DiscoveredModel {
     }
 
     fn kv_cache_block_size(&self) -> Result<u32, DynamoError> {
-        let metadata = self.server.kv_cache_metadata.as_ref().ok_or_else(|| {
+        let block_size = self.server.effective_attention_block_size.ok_or_else(|| {
             client::protocol_error(
-                "KV routing requires Control.ServerInfo.kv_cache_metadata; use compatible Python vLLM and vllm-rs builds that report effective KV cache group sizes",
+                "KV routing requires Control.ServerInfo.effective_attention_block_size; use compatible Python vLLM and vllm-rs builds that report the effective attention block size",
             )
         })?;
-        let mut main_group = None;
-        for (index, group) in metadata.groups.iter().enumerate() {
-            if metadata.groups[..index]
-                .iter()
-                .any(|previous| previous.group_id == group.group_id)
-            {
-                return Err(client::protocol_error(format!(
-                    "KV routing requires unique KV cache group IDs; duplicate group {}",
-                    group.group_id
-                )));
-            }
-            if KvCacheSpecKind::from_wire(&group.kind).is_main_attention()
-                && main_group.replace(group).is_some()
-            {
-                return Err(client::protocol_error(
-                    "KV routing requires exactly one main-attention KV cache group; multiple groups are unsupported",
-                ));
-            }
-        }
-        let group = main_group.ok_or_else(|| {
-            client::protocol_error(
-                "KV routing requires a main-attention KV cache group (full_attention, mla_attention, or sink_full_attention)",
-            )
-        })?;
-        let block_size = u32::try_from(group.logical_block_size)
+        u32::try_from(block_size)
             .ok()
             .and_then(nonzero)
-            .filter(|_| group.block_size > 0)
             .ok_or_else(|| {
                 client::protocol_error(format!(
-                    "KV cache group {} has invalid block sizes: physical={}, logical={}; KV routing requires nonzero sizes and a logical size that fits u32",
-                    group.group_id, group.block_size, group.logical_block_size
+                    "invalid effective_attention_block_size {block_size}; KV routing requires a nonzero size that fits u32"
                 ))
-            })?;
-        Ok(block_size)
+            })
     }
 
     pub(crate) fn data_parallel_size(&self) -> u32 {

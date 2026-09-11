@@ -482,14 +482,7 @@ fn server_info() -> pb::ServerInfo {
         max_model_len: 8192,
         kv_block_size: 16,
         max_loras: 0,
-        kv_cache_metadata: Some(pb::KvCacheMetadata {
-            groups: vec![pb::KvCacheGroupMetadata {
-                group_id: 0,
-                kind: "full_attention".to_string(),
-                block_size: 16,
-                logical_block_size: 16,
-            }],
-        }),
+        effective_attention_block_size: Some(16),
         total_kv_blocks: 4096,
         max_running_requests: 128,
         max_batched_tokens: 2048,
@@ -1012,89 +1005,14 @@ fn discovery_rejects_incompatible_model_metadata() {
 }
 
 #[test]
-fn engine_config_uses_effective_main_attention_block_size() {
-    let group = |group_id, kind: &str, block_size, logical_block_size| pb::KvCacheGroupMetadata {
-        group_id,
-        kind: kind.to_string(),
-        block_size,
-        logical_block_size,
-    };
-    let full = |logical| group(0, "full_attention", 16, logical);
-    for (case, dcp, groups, expected) in [
-        ("DCP=1", 1, Some(vec![full(16)]), Ok(16)),
-        ("DCP=2", 2, Some(vec![full(32)]), Ok(32)),
-        ("engine is authoritative", 1, Some(vec![full(64)]), Ok(64)),
-        (
-            "MLA",
-            2,
-            Some(vec![group(1, "mla_attention", 16, 32)]),
-            Ok(32),
-        ),
-        (
-            "sink",
-            1,
-            Some(vec![group(2, "sink_full_attention", 16, 16)]),
-            Ok(16),
-        ),
-        (
-            "mixed",
-            2,
-            Some(vec![
-                group(0, "sliding_window", 16, 16),
-                group(1, "full_attention", 16, 32),
-            ]),
-            Ok(32),
-        ),
-        ("missing", 1, None, Err("kv_cache_metadata")),
-        ("empty", 1, Some(vec![]), Err("main-attention")),
-        (
-            "non-main",
-            1,
-            Some(vec![group(0, "mamba", 16, 16)]),
-            Err("main-attention"),
-        ),
-        (
-            "unknown",
-            1,
-            Some(vec![group(0, "unknown", 16, 16)]),
-            Err("main-attention"),
-        ),
-        (
-            "zero physical",
-            1,
-            Some(vec![group(0, "full_attention", 0, 16)]),
-            Err("invalid block sizes"),
-        ),
-        (
-            "zero logical",
-            1,
-            Some(vec![full(0)]),
-            Err("invalid block sizes"),
-        ),
-        (
-            "overflow",
-            1,
-            Some(vec![full(u64::from(u32::MAX) + 1)]),
-            Err("invalid block sizes"),
-        ),
-        (
-            "conflicting sizes",
-            2,
-            Some(vec![full(32), group(1, "full_attention", 16, 16)]),
-            Err("multiple groups"),
-        ),
-        (
-            "multiple main groups",
-            2,
-            Some(vec![full(32), group(1, "mla_attention", 16, 32)]),
-            Err("multiple groups"),
-        ),
-        (
-            "duplicate ID",
-            1,
-            Some(vec![group(0, "sliding_window", 16, 16), full(16)]),
-            Err("duplicate group"),
-        ),
+fn engine_config_uses_effective_attention_block_size() {
+    for (case, dcp, reported, expected) in [
+        ("DCP=1", 1, Some(16), Ok(16)),
+        ("DCP=2", 2, Some(32), Ok(32)),
+        ("engine is authoritative", 2, Some(64), Ok(64)),
+        ("missing", 1, None, Err("effective_attention_block_size")),
+        ("zero", 1, Some(0), Err("nonzero size")),
+        ("overflow", 1, Some(u64::from(u32::MAX) + 1), Err("fits u32")),
     ] {
         let mut server = server_info();
         server
@@ -1102,7 +1020,7 @@ fn engine_config_uses_effective_main_attention_block_size() {
             .as_mut()
             .unwrap()
             .decode_context_parallel_size = dcp;
-        server.kv_cache_metadata = groups.map(|groups| pb::KvCacheMetadata { groups });
+        server.effective_attention_block_size = reported;
         let model = DiscoveredModel::from_proto(model_info(), server).unwrap();
         let result = model.engine_config(true);
         match expected {

@@ -21,7 +21,6 @@ path = "src/main.rs"
 
 [dependencies]
 dynamo-backend-common = { workspace = true }
-dynamo-kv-router = { workspace = true }
 dynamo-sidecar-common = { workspace = true }
 
 anyhow = { workspace = true }

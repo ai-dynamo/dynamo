@@ -134,14 +134,7 @@ impl VllmMockerService {
                 })?
                 .unwrap_or_default(),
             max_loras: 0,
-            kv_cache_metadata: Some(pb::KvCacheMetadata {
-                groups: vec![pb::KvCacheGroupMetadata {
-                    group_id: 0,
-                    kind: "full_attention".to_string(),
-                    block_size: engine_args.block_size as u64,
-                    logical_block_size: engine_args.block_size as u64,
-                }],
-            }),
+            effective_attention_block_size: Some(engine_args.block_size as u64),
             rl_capabilities: None,
         };
         Ok(Self {
