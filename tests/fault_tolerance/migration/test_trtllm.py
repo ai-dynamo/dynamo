@@ -19,7 +19,11 @@ from tests.utils.port_utils import allocate_port, deallocate_ports
 from tests.utils.prometheus import sum_metric_samples
 
 # Customized utils for migration tests
-from .request_utils import assert_output_prefix, request_to_completion
+from .request_utils import (
+    OutputContinuityError,
+    assert_output_prefix,
+    request_to_completion,
+)
 from .utils import (
     DynamoFrontendProcess,
     managed_processes_concurrently,
@@ -132,6 +136,14 @@ KV_TRANSFER_CASES = [
         "completion",
         True,
         "tcp",
+        marks=pytest.mark.xfail(
+            reason=(
+                "Known TensorRT-LLM 1.3.0rc25 KV-migration output-continuity "
+                "failure; tracked in https://github.com/ai-dynamo/dynamo/pull/14609"
+            ),
+            raises=OutputContinuityError,
+            strict=False,
+        ),
         id="worker-failure-completion-stream-tcp",
     ),
 ]

@@ -16,6 +16,10 @@ from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 logger = logging.getLogger(__name__)
 
 
+class OutputContinuityError(AssertionError):
+    """A migrated response diverged from its stable fault-free prefix."""
+
+
 @dataclass
 class MigrationResponse:
     """Client-visible response state collected by the request thread."""
@@ -233,7 +237,7 @@ def assert_output_prefix(output: str, expected_prefix: str) -> None:
     )
     context_start = max(0, mismatch_index - 40)
     context_end = mismatch_index + 80
-    pytest.fail(
+    raise OutputContinuityError(
         "Migrated output diverged from the stable fault-free prefix "
         f"at character {mismatch_index}: "
         f"expected={expected_prefix[context_start:context_end]!r}, "
