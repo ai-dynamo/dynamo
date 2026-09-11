@@ -38,7 +38,16 @@ pub fn validate_replay_args_mode(
         (None, Some(_), None) | (None, None, Some(_)) => {
             bail!("prefill_engine_args and decode_engine_args must be provided together")
         }
-        (Some(_), Some(_), _) | (Some(_), _, Some(_)) => unreachable!(),
+        // Already rejected by the guard at the top of this function, so this arm
+        // is dead today. It stays a `bail!` rather than `unreachable!` because
+        // the only thing making it unreachable is that guard, fifteen lines away
+        // -- relax or move it and this becomes a panic on caller-supplied config
+        // instead of the error the caller would get either way.
+        (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
+            bail!(
+                "extra_engine_args cannot be combined with prefill_engine_args/decode_engine_args"
+            )
+        }
     }
 }
 

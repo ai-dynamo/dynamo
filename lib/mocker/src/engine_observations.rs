@@ -21,10 +21,19 @@ pub(crate) fn dynamo_kv_event(event: KvEvent) -> (KvCacheEvent, Option<Vec<Vec<u
                 .collect::<Option<Vec<_>>>();
             let data = KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: stored.parent_hash.map(ExternalSequenceBlockHash),
-                start_position: stored.start_position.map(|position| {
-                    u32::try_from(position)
-                        .expect("native KV start position exceeds the Dynamo router protocol")
-                }),
+                // Saturating, not `expect`: this is a per-KV-event conversion on
+                // the publication path, and the crate's standard is no
+                // production panic without a proof it cannot fire. There is no
+                // such proof to write -- `KvEvent`'s `start_position` is an
+                // `Option<usize>` from another crate, and while no aisimulate
+                // backend constructs `Some` today (both the vLLM and SGLang KV
+                // managers hardcode `None`), that is a fact about the current
+                // producers, not a bound this boundary enforces. A token offset
+                // past `u32::MAX` cannot occur in a real sequence, so clamping
+                // is a no-op in practice; aborting the run over it would not be.
+                start_position: stored
+                    .start_position
+                    .map(|position| u32::try_from(position).unwrap_or(u32::MAX)),
                 blocks: stored
                     .blocks
                     .into_iter()
