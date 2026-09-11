@@ -5,7 +5,6 @@ import dataclasses
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Optional
 
 import pytest
 
@@ -44,6 +43,7 @@ from tests.utils.payload_builder import (
     guided_decoding_chat_payload_default,
     image_token_metrics_payload,
     kv_events_metrics_payload,
+    lora_chat_payload,
     metric_payload_default,
     responses_payload_default,
     responses_stream_payload_default,
@@ -51,8 +51,8 @@ from tests.utils.payload_builder import (
 )
 from tests.utils.payloads import (
     ChatPayload,
+    HttpErrorPayload,
     ImageGenerationPayload,
-    LoraTestChatPayload,
     ResponsesPayload,
     ResponsesStreamPayload,
     SGLangDisaggRouterMetricsPayload,
@@ -273,6 +273,17 @@ sglang_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
+            HttpErrorPayload(
+                body={
+                    "messages": [{"role": "user", "content": "Name one color."}],
+                    "n": 2,
+                    "max_tokens": 1,
+                },
+                expected_response=["supports only n=1"],
+                expected_log=[],
+                endpoint="/v1/chat/completions",
+                timeout=10,
+            ),
             # Disagg workers expose fewer sglang:* metrics (~14 vs ~25 for aggregated)
             # because each only runs half the scheduler pipeline.
             metric_payload_default(
@@ -1171,40 +1182,6 @@ def test_sglang_deployment(
 # ── LoRA Tests ──────────────────────────────────────────────────────────────
 
 lora_dir = os.path.join(sglang_dir, "launch/lora")
-
-
-def lora_chat_payload(
-    lora_name: str,
-    s3_uri: str,
-    system_port: int = DefaultPort.SYSTEM1.value,
-    repeat_count: int = 2,
-    expected_response: Optional[list] = None,
-    expected_log: Optional[list] = None,
-    max_tokens: int = 100,
-    temperature: float = 0.0,
-) -> LoraTestChatPayload:
-    """Create a LoRA-enabled chat payload for testing"""
-    return LoraTestChatPayload(
-        body={
-            "model": lora_name,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": "What is deep learning? Answer in one sentence.",
-                }
-            ],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "stream": False,
-        },
-        lora_name=lora_name,
-        s3_uri=s3_uri,
-        system_port=system_port,
-        repeat_count=repeat_count,
-        expected_response=expected_response
-        or ["learning", "neural", "network", "AI", "model"],
-        expected_log=expected_log or [],
-    )
 
 
 @pytest.mark.sglang

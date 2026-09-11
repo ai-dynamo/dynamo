@@ -58,7 +58,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 </ParamField>
 
 <ParamField path="replicas" type="integer">
-  Desired number of pods for this component. Minimum `0`. When `scalingAdapter` is set, this field is owned by the [DynamoGraphDeploymentScalingAdapter](full-api-reference.mdx#dynamographdeploymentscalingadapter) and should not be modified directly.
+  Desired number of complete component instances. For a single-node component, each instance is one pod. For a multinode component, each instance contains all of its roles. Minimum `0`. When `scalingAdapter` is set, this field is owned by the [DynamoGraphDeploymentScalingAdapter](full-api-reference.mdx#dynamographdeploymentscalingadapter) and should not be modified directly.
 </ParamField>
 
 <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
@@ -68,12 +68,25 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 </ParamField>
 
 <ParamField path="multinode" type="MultinodeSpec">
-  Configures a multinode component. See [Multinode Orchestration](../../kubernetes/installation/multinode-orchestration.md).
+  Configures a `worker`, `prefill`, or `decode` component that spans multiple pods. Other component types reject this field. A pre-existing unsupported combination can remain unchanged during unrelated updates or remove `multinode`, but cannot change or reintroduce it. See [Multinode Orchestration](../../kubernetes/installation/multinode-orchestration.md).
 </ParamField>
 
 <Indent>
   <ParamField path="nodeCount" type="integer" default="2">
     Number of nodes to deploy. Minimum `2`. Total GPUs used is `nodeCount × container GPU request`.
+  </ParamField>
+</Indent>
+
+<ParamField path="roles" type="[]ComponentRoleSpec">
+  Optional explicit structure of a compound component. In this release, roles are supported for multinode components and must contain exactly one `leader` and one `worker`. Their cardinality remains derived from `multinode.nodeCount`. Omit the field to retain the implicit leader/worker layout.
+</ParamField>
+
+<Indent>
+  <ParamField path="name" type="string" required={true}>
+    Semantic role name. Multinode components allow `leader` and `worker`.
+  </ParamField>
+  <ParamField path="providerOverride" type="ProviderOverride">
+    Provider configuration for the workload unit generated for this role. Available only on components embedded in a DGD; standalone DCD OpenAPI omits this field.
   </ParamField>
 </Indent>
 
@@ -181,7 +194,7 @@ Groups opt-in preview features for a component. Referenced by `experimental`. Ne
     The DRA `DeviceClass` to request GPUs from.
   </ParamField>
   <ParamField path="extraClientContainers" type="[]string">
-    Additional user-declared containers that should be wired as GMS clients in service pods. Checkpoint Job clients are declared under the checkpoint job's `gmsClientContainers` instead. In each rendered pod, only matching container names are wired; absent names are ignored. Each name must match `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, 1–63 characters.
+    Additional user-declared containers that should be wired as GMS clients in service pods. `SnapshotJob` capture Pod clients are declared under `checkpoint.job.gmsClientContainers` instead. In each rendered pod, only matching container names are wired; absent names are ignored. Each name must match `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, 1–63 characters.
   </ParamField>
   <ParamField path="extraClientPods" type="[]GMSClientPodSpec">
     Additional GMS client pods for inter-pod GMS. Reserved for future use and rejected until inter-pod client orchestration is wired.
@@ -214,12 +227,18 @@ Groups opt-in preview features for a component. Referenced by `experimental`. Ne
 </Indent>
 
 <ParamField path="checkpoint" type="ComponentCheckpointConfig">
-  Configures container-image snapshotting and restore for the component. Set `checkpoint.enabled: true` to opt in; omit `checkpointRef` for a DGD-managed automatic checkpoint, or set it to restore an existing [DynamoCheckpoint API resource](full-api-reference.mdx#dynamocheckpoint).
+  Configures container-image snapshotting and restore for the component. Set `checkpoint.enabled: true` to opt in; omit `checkpointRef` for a DGD-managed automatic checkpoint, or set it to restore a `PodSnapshot` in the same namespace.
 </ParamField>
+
+<Warning>
+This release is a hard compatibility boundary for checkpoint resources. Dynamo creates automatic captures through the standalone Snapshot operator's `SnapshotJob` API, and `checkpointRef` names a standalone `PodSnapshot`. Legacy `DynamoCheckpoint` objects and their artifacts cannot be restored.
+
+The upgrade does not delete the legacy `DynamoCheckpoint` CRD, instances, `PodSnapshot` objects, `PodSnapshotContent` objects, PVC data, or stored artifacts. Before upgrading, list retained `DynamoCheckpoint` objects and legacy `PodSnapshot` objects labeled `nvidia.com/snapshot-owner`, recreate any required snapshots through the standalone Snapshot APIs, and delete unneeded legacy checkpoints while the old controller can still run their finalizers. After upgrading, review and remove unsupported resources manually. Do not delete the shared `PodSnapshot` or `PodSnapshotContent` CRDs because the standalone Snapshot operator uses them.
+</Warning>
 
 <Indent>
   <ParamField path="enabled" type="boolean" required={true}>
-    Whether checkpointing is enabled for this component. When `true`, omit `checkpointRef` for a DGD-managed automatic checkpoint, or set `checkpointRef` to restore an existing checkpoint. Omit the `checkpoint` block, or set `enabled: false`, to disable checkpointing.
+    Whether checkpointing is enabled for this component. When `true`, omit `checkpointRef` for a DGD-managed automatic checkpoint, or set `checkpointRef` to restore a `PodSnapshot` in the same namespace. Omit the `checkpoint` block, or set `enabled: false`, to disable checkpointing.
   </ParamField>
   <ParamField path="startupPolicy" type="CheckpointStartupPolicy" default="Immediate">
     When normal worker replicas are started relative to automatic checkpoint readiness. `Immediate` starts workers cold immediately, and later pods restore from the checkpoint once it is Ready. `WaitForCheckpoint` keeps worker replicas at zero until the checkpoint is Ready, then starts them from it.
@@ -227,36 +246,36 @@ Groups opt-in preview features for a component. Referenced by `experimental`. Ne
     <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>Immediate</Badge> <Badge intent="note" minimal>WaitForCheckpoint</Badge></span>
   </ParamField>
   <ParamField path="deletionPolicy" type="CheckpointDeletionPolicy" default="Delete">
-    Whether a DGD-managed automatic checkpoint CR and artifact are deleted or retained when the owning DGD is deleted. Explicit `checkpointRef` checkpoints are never owned or deleted by the DGD.
+    Whether a DGD-managed automatic checkpoint CR and artifact are deleted or retained when the owning DGD is deleted. Explicit `checkpointRef` PodSnapshots are never owned or deleted by the DGD, and retained automatic checkpoints are not valid `checkpointRef` targets.
 
     <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>Delete</Badge> <Badge intent="note" minimal>Retain</Badge></span>
   </ParamField>
   <ParamField path="checkpointRef" type="string">
-    References an existing `DynamoCheckpoint` CR by `metadata.name`. When set, this component's `identity` is ignored and the referenced checkpoint is used directly.
+    References an existing `PodSnapshot` in the same namespace by `metadata.name`. When set, this component's `identity` is ignored and the referenced PodSnapshot is used directly. Standalone worker-class (`worker`, `prefill`, or `decode`) `DynamoComponentDeployment` resources cannot set this field; configure `checkpointRef` on the component in the owning `DynamoGraphDeployment`.
   </ParamField>
   <ParamField path="targetContainerName" type="string" default="main">
     The workload container to snapshot and restore. Must match `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, 1–63 characters.
   </ParamField>
   <ParamField path="job" type="ComponentCheckpointJobConfig">
-    Customizes the DGD-managed checkpoint Job.
+    Customizes the DGD-managed `SnapshotJob` capture Pod.
   </ParamField>
   <Indent>
     <ParamField path="gmsClientContainers" type="[]string">
-      Checkpoint Job containers that should receive GMS client wiring. Requires `gpuMemoryService` on the component. Each name must match `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, 1–63 characters.
+      `SnapshotJob` capture Pod containers that should receive GMS client wiring. Requires `gpuMemoryService` on the component. Each name must match `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, 1–63 characters.
     </ParamField>
     <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
-      Customizes the checkpoint Job pod. The operator starts from the selected workload container and merges this template, so you can add helper containers such as `gms-saver`.
+      Customizes the `SnapshotJob` capture Pod. The operator starts from the selected workload container and merges this template, so you can add helper containers such as `gms-saver`.
 
       <a href="https://pkg.go.dev/k8s.io/api/core/v1#PodTemplateSpec" target="_blank">core/v1.PodTemplateSpec</a>
     </ParamField>
   </Indent>
   <ParamField path="mode" type="CheckpointMode" deprecated={true}>
-    Deprecated: omit `mode`. Use `enabled: true` without `checkpointRef` for a DGD-managed automatic checkpoint, or use `checkpointRef` to restore a named checkpoint.
+    Deprecated: omit `mode`. Use `enabled: true` without `checkpointRef` for a DGD-managed automatic checkpoint, or use `checkpointRef` to restore a named PodSnapshot.
 
     <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>Auto</Badge> <Badge intent="note" minimal>Manual</Badge></span>
   </ParamField>
   <ParamField path="identity" type="DynamoCheckpointIdentity" deprecated={true}>
-    Deprecated: omit for DGD-managed checkpoints; no action is needed. Use `checkpointRef` to restore an existing checkpoint. Legacy checkpoint identity duplicated from `v1alpha1`; `DynamoCheckpoint` itself remains `v1alpha1`.
+    Deprecated: omit for DGD-managed checkpoints; the operator ignores this field. Use `checkpointRef` to restore an existing `PodSnapshot`.
   </ParamField>
   <Indent>
     <ParamField path="model" type="string" required={true} deprecated={true}>

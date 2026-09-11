@@ -38,6 +38,4 @@ and DGD pods. Teardown stops DGDR reconciliation first and then waits for child
 resources to disappear. CI also runs the suite in a per-run namespace and
 deletes that namespace unconditionally.
 
-The Go package at `deploy/operator/test/e2e` is a deprecated, manual Kind smoke
-test for the legacy Kustomize installation path. New operator deployment tests
-belong here.
+New operator deployment tests belong in this directory.
