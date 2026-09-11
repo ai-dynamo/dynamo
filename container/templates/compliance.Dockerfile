@@ -122,9 +122,16 @@ RUN {% if framework == "sglang" %}PKG_ARG="--site-packages $(python3 -c 'import 
     -v
 # Policy gate runs on the single unified CSV (its `ecosystem` column scopes each
 # row), replacing the per-ecosystem loop. Non-zero exit fails the build.
+{% if context.get(framework, {}).get(device_key, {}).get("temporary_skip_license_policy_validation", "false") != "true" %}
 RUN python3 -m compliance.policy.validate \
         --policy /opt/compliance/policy/licenses.toml \
         --input /legal/osrb-deps.csv
+{% else %}
+# Explicit, per-image day-0 exception. The generators still emit the complete
+# SBOM and NOTICES set for review, while codec enforcement below remains active.
+# Do not reuse this flag for a released runtime image.
+RUN echo "WARNING: temporary license-policy validation bypass is enabled for {{ framework }} {{ device_key }}" >&2
+{% endif %}
 
 # Media-codec allowlist gate: scans THIS stage's filesystem (==
 # the shipped image tree, since licenses is FROM pre_runtime) and fails the build
