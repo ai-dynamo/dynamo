@@ -578,12 +578,32 @@ impl ErrorMessage {
 
         // InvalidArgument (top-level OR Backend) → 400.
         if let Some(dynamo_err) = find_invalid_argument_in_chain(err.as_ref()) {
+            // The message may be an [`ErrorPayload`] envelope rather than prose,
+            // so unwrap it; otherwise the client is shown the raw JSON. An
+            // explicit client-error status inside the envelope (for example 415)
+            // is honoured, matching what the in-stream path already does. A 5xx
+            // is not, because reaching this arm means the worker classified the
+            // failure as a request problem, and a 5xx body here would bypass the
+            // sanitizing the other arms apply.
+            let (message, code) = match serde_json::from_str::<ErrorPayload>(dynamo_err.message()) {
+                Ok(envelope) => (
+                    envelope
+                        .message
+                        .unwrap_or_else(|| dynamo_err.message().to_string()),
+                    envelope
+                        .code
+                        .and_then(|code| StatusCode::from_u16(code).ok())
+                        .filter(StatusCode::is_client_error)
+                        .unwrap_or(StatusCode::BAD_REQUEST),
+                ),
+                Err(_) => (dynamo_err.message().to_string(), StatusCode::BAD_REQUEST),
+            };
             return (
-                StatusCode::BAD_REQUEST,
+                code,
                 Json(ErrorMessage {
-                    message: dynamo_err.message().to_string(),
-                    error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST),
-                    code: StatusCode::BAD_REQUEST.as_u16(),
+                    message,
+                    error_type: map_error_code_to_error_type(code),
+                    code: code.as_u16(),
                     details: None,
                     metric_error_type: Some(ErrorType::Validation),
                 }),
@@ -2282,15 +2302,23 @@ impl BackendErrorInfo {
 
 /// Checks if an Annotated event represents a backend error and extracts error information.
 /// Returns Some(info) if it's an error, None otherwise.
+/// The `{"message": ..., "code": ...}` envelope `py_err_to_dynamo` emits for an
+/// HTTP-like Python exception (see `lib/bindings/python/rust/backend.rs`).
+///
+/// A worker's error message is therefore not always prose, and the raw envelope
+/// must never reach a client. Both the in-stream path
+/// ([`extract_backend_error_if_present`]) and the pre-stream path
+/// ([`ErrorMessage::from_anyhow`]) unwrap it, so they agree on the body a client
+/// sees for the same backend error.
+#[derive(serde::Deserialize)]
+struct ErrorPayload {
+    message: Option<String>,
+    code: Option<u16>,
+}
+
 fn extract_backend_error_if_present<T: serde::Serialize>(
     event: &Annotated<T>,
 ) -> Option<BackendErrorInfo> {
-    #[derive(serde::Deserialize)]
-    struct ErrorPayload {
-        message: Option<String>,
-        code: Option<u16>,
-    }
-
     // Check if event type is "error" (from postprocessor when FinishReason::Error is encountered)
     if let Some(event_type) = &event.event
         && event_type == "error"
@@ -6216,6 +6244,57 @@ mod tests {
                 .contains("multimodal input is not supported"),
             "the client should see the worker's reason, got: {}",
             response.1.message
+        );
+    }
+
+    /// `py_err_to_dynamo` wraps an HTTP-like Python exception's text in a
+    /// `{"message":..,"code":..}` envelope, so a refusal from a Python worker
+    /// carries JSON, not prose. The client must be shown the reason, never the
+    /// envelope -- the in-stream path already unwraps it, and the two must agree.
+    #[test]
+    fn test_pre_stream_refusal_unwraps_the_python_error_envelope() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+        use dynamo_runtime::pipeline::network::StreamPrologueError;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+
+        let refuse = |message: &str| {
+            let prologue = StreamPrologueError::new(
+                format!("Generate Error: {message}"),
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                    .message(message)
+                    .build(),
+            );
+            ErrorMessage::from_anyhow(
+                pre_stream_failure_error(&prologue).into(),
+                BACKUP_ERROR_MESSAGE,
+            )
+        };
+
+        let response = refuse(
+            &serde_json::json!({"message": "multimodal input is not supported", "code": 400})
+                .to_string(),
+        );
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.message, "multimodal input is not supported");
+
+        // An explicit client-error status inside the envelope is honoured.
+        let response = refuse(
+            &serde_json::json!({"message": "unsupported media type", "code": 415}).to_string(),
+        );
+        assert_eq!(response.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(response.1.message, "unsupported media type");
+
+        // A 5xx inside the envelope does not escape through the 4xx arm.
+        let response = refuse(&serde_json::json!({"message": "boom", "code": 500}).to_string());
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+
+        // A plain-prose message is untouched.
+        let response = refuse("multimodal input is not supported by this backend");
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.1.message,
+            "multimodal input is not supported by this backend"
         );
     }
 
