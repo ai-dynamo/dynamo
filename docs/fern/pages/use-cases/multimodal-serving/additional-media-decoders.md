@@ -16,7 +16,6 @@ Installing an additional decoder package covers what remains:
 
 - **AAC and other compressed audio**, which NVDEC does not decode at all.
 - **H.264 and H.265 on hosts where NVDEC is unavailable** — no video decode engine on the GPU, or a container without the `video` capability.
-- **Still images on Mistral-tokenizer models**, described in [Still images on the Mistral tokenizer path](#still-images-on-the-mistral-tokenizer-path) below. This one is not about video at all.
 
 Each backend decodes such input through a specific Python package whose wheel bundles its own FFmpeg, so the support is added with a plain `pip install` — no image rebuild. **Nothing installs automatically.** There is no environment switch and no startup hook: an operator runs the install as a deliberate, visible step, so a deployment that broadens the image's codec surface says so in its Dockerfile, pod spec, or runbook.
 
@@ -27,49 +26,19 @@ Each backend decodes such input through a specific Python package whose wheel bu
 
 | Backend | Input | Package (validated version bounds) | Import |
 |---------|-------|------------------------------------|--------|
-| vLLM | video | `opencv-python-headless>=4.13.0.92,<5` | `cv2` |
-| vLLM | image, with `--tokenizer-mode mistral` | `opencv-python-headless>=4.13.0.92,<5` | `cv2` |
 | vLLM | audio | `av>=18.0.0,<19` | `av` |
 | SGLang | video | `decord2>=3.4.0,<4` | `decord` |
 | TensorRT-LLM | video | `opencv-python-headless>=4.13.0.92,<5` | `cv2` |
 
 The lower bound of each spec is the version validated against Dynamo's multimodal test suite; the upper bound excludes the next major release so an install cannot silently pick up an unvalidated version. PyNvVideoCodec is not in this list because the images already ship it — it is the NVDEC path, not a fallback, so there is nothing to install. torchcodec is left out because no Dynamo decode path imports it.
 
-## Still images on the Mistral tokenizer path
-
-Serving a multimodal Mistral-family model with `--tokenizer-mode mistral` tokenizes images through `mistral_common`, which resizes every image with OpenCV before normalizing it. That makes `opencv-python-headless` a requirement for plain JPEG and PNG input on this path — no video is involved, and NVDEC never decodes a still image, so there is no hardware alternative here.
-
-Without the install, the vLLM worker refuses to start and names the package:
-
-```text
-Cannot process image input: this model tokenizes images through mistral_common
-(--tokenizer-mode mistral), which resizes them with OpenCV ('cv2'). ...
-```
-
-Install the same validated spec as the vLLM rows above:
-
-```bash
-pip install --no-deps 'opencv-python-headless>=4.13.0.92,<5'
-```
-
-The installer covers this too, but it takes a backend rather than a modality, so it installs every decoder in the vLLM row set — `av` for audio input alongside OpenCV. Reach for it when the deployment wants that whole set anyway; use the direct command above to add image input and nothing else:
-
-```bash
-python -m dynamo.common.utils.install_media_decoders vllm
-```
-
-> [!NOTE]
-> Upstream `mistral_common` raises ``ImportError: `opencv` is not installed`` and suggests `pip install mistral-common[opencv]`. Do not use that command here: it resolves an unbounded OpenCV version and pulls transitive dependencies into the image's pinned stack. The bounded, `--no-deps` install above is the supported one.
-
-The requirement follows the tokenizer mode, not the model. A model that also ships a Hugging Face processor can be served with `--tokenizer-mode auto` instead, which imports no OpenCV.
-
 ## Install with pip
 
 The table above is the contract; these commands are its direct translation, and work with the installer of your choice (`pip`, `uv pip`, ...):
 
 ```bash
-# vLLM: video + audio input
-pip install --no-deps 'opencv-python-headless>=4.13.0.92,<5' 'av>=18.0.0,<19'
+# vLLM: audio input
+pip install --no-deps 'av>=18.0.0,<19'
 
 # SGLang: video input
 pip install --no-deps 'decord2>=3.4.0,<4'
@@ -128,4 +97,13 @@ The default pip timeout is 600 seconds (`--timeout-s` overrides it; `0` disables
 - For H.264 and H.265, prefer NVDEC. Granting the container the `video` driver capability decodes those formats on the GPU with no extra package. Install a software decoder when that is not an option, or when the input is audio.
 - Installing a decoder package brings in that wheel's bundled media libraries. The runtime images are scanned for media components at build time; a package installed afterwards is not covered by that scan. Review what your deployment ships — a baked image layer keeps the change visible and reviewable.
 - On TensorRT-LLM, the install puts back `opencv-python-headless`, which those images deliberately do not ship. H.264 and H.265 already decode there through NVDEC, so install it only for a host where NVDEC is unavailable.
+- The vLLM images ship OpenCV already, rebuilt from source with every video backend disabled. It covers still images — which multimodal Mistral models need, because `mistral_common` resizes every image through `cv2` — and decodes no video at all. Video input on vLLM goes through NVDEC. To decode video in software instead, swap that build for the PyPI wheel of the same version:
+
+```bash
+VERSION=$(pip show opencv-python-headless | awk '/^Version:/{print $2}')
+pip install --no-deps --force-reinstall --only-binary opencv-python-headless \
+  "opencv-python-headless==${VERSION}"
+```
+
+Every part of that command is load-bearing. `--force-reinstall` and `--only-binary` are both needed because the source build already registers as `opencv-python-headless`, so a plain install reports the requirement as satisfied and leaves it in place. Pinning the installed version keeps the swap to source-build-for-wheel — a version range would risk moving you off the release the backend resolved. The wheel restores the bundled FFmpeg and its codecs, which is exactly the codec surface the image is built to exclude, so review it against your distribution policy. The bundled installer does not do this: it installs only PyAV for vLLM.
 - The optional Rust frontend decoder (`--frontend-decoding`) links FFmpeg's compiled-in decoders and always decodes VP8/VP9 regardless of installed Python packages; backend decoding is what an install extends. Re-encoding an input to VP9 (`ffmpeg -i input.mp4 -c:v libvpx-vp9 -an output.webm`) is an alternative that needs no additional packages.

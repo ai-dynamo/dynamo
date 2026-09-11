@@ -20,8 +20,11 @@ module installs anything.
 
 from __future__ import annotations
 
+import importlib.metadata
+import importlib.util
+
 from dynamo.common.multimodal.nvdec_decoder import HW_ROUTED_CODECS, nvdec_available
-from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
+from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS, installer_covers
 
 INSTALLER_CMD = "python -m dynamo.common.utils.install_media_decoders"
 
@@ -35,12 +38,55 @@ class MissingMediaDecoderError(RuntimeError):
     """
 
 
-def _install_hint(backend: str, package: str) -> str:
-    spec = VALIDATED_SPECS[package]
-    return (
-        f"install the validated decoder with `pip install --no-deps '{spec}'` "
-        f"(or `{INSTALLER_CMD} {backend}`)"
-    )
+def _carrier_present(module: str) -> bool:
+    """Whether the decode carrier imports here, however it was built."""
+    return importlib.util.find_spec(module) is not None
+
+
+def _installed_version(package: str) -> str | None:
+    """The installed distribution version, or None when it has no metadata."""
+    try:
+        return importlib.metadata.version(package)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def _install_hint(backend: str, package: str, module: str) -> str:
+    """The remedy line: a pip command that works from where the caller is.
+
+    Where the carrier is absent, install the validated spec. Where it is
+    already importable but unusable for this input -- the vLLM images ship an
+    OpenCV built from source with no video backend -- the remedy is to swap
+    that build for the binary wheel, so it pins the version already installed.
+    Reusing the validated spec there would be wrong twice over: it can be
+    satisfied by what is present, so pip changes nothing, and its upper bound
+    can be below the version the image ships, so a caller who ran it anyway
+    would be downgraded off what the backend resolved.
+
+    The bundled installer is offered only where it installs this package for
+    this backend; elsewhere it exits 0 having fixed nothing.
+    """
+    if _carrier_present(module):
+        # Replacing a build that is already here, so pin what is installed. The
+        # validated range would be wrong twice: it can be satisfied by what is
+        # present, so pip changes nothing, and its upper bound can sit below
+        # the version the image ships. That version is whatever the backend
+        # resolved, so this is deliberately not called a validated install.
+        installed = _installed_version(package)
+        spec = f"{package}=={installed}" if installed else VALIDATED_SPECS[package]
+        hint = (
+            "replace the shipped build with the binary wheel of the same "
+            f"version: `pip install --no-deps --force-reinstall "
+            f"--only-binary {package} '{spec}'`"
+        )
+    else:
+        hint = (
+            "install the validated decoder with "
+            f"`pip install --no-deps '{VALIDATED_SPECS[package]}'`"
+        )
+    if installer_covers(backend, package):
+        hint += f" (or `{INSTALLER_CMD} {backend}`)"
+    return hint
 
 
 def _with_cause(message: str, cause: str | None) -> str:
@@ -79,6 +125,16 @@ def video_decoder_missing(
             "but NVDEC is unavailable in this container. Grant the 'video' "
             "driver capability (NVIDIA_DRIVER_CAPABILITIES) to enable it, or "
         )
+    elif _carrier_present(module):
+        # Present but useless for video: the vLLM images ship an OpenCV built
+        # from source with no video backend. Saying it is "not installed"
+        # would send the reader looking for a package that is already there.
+        lead = (
+            f"this video ({codec_desc}) has no decoder in this image: shipped "
+            "images decode only H.264/H.265 (in hardware, via NVDEC), and the "
+            f"'{module}' they ship is built without a video backend. "
+            "Re-encode the input to H.264/H.265, or "
+        )
     else:
         lead = (
             f"this video ({codec_desc}) has no decoder in this image: shipped "
@@ -88,39 +144,10 @@ def video_decoder_missing(
         )
     return MissingMediaDecoderError(
         _with_cause(
-            "Cannot decode video: " + lead + _install_hint(backend, package) + ".",
-            cause,
-        )
-    )
-
-
-def mistral_image_decoder_missing(
-    backend: str, cause: str | None = None
-) -> MissingMediaDecoderError:
-    """Build the error for still-image input on the Mistral tokenizer path.
-
-    Not a video case: ``mistral_common`` resizes every still image with
-    ``cv2.resize`` inside ``transform_image``
-    (``mistral_common.tokens.tokenizers.image``) before normalization, so a
-    model served with ``--tokenizer-mode mistral`` needs OpenCV for plain JPEG
-    and PNG input. NVDEC decodes video, never a still image, so unlike video
-    there is no hardware alternative here.
-
-    Upstream's own message recommends ``pip install mistral-common[opencv]``.
-    That is the wrong remedy for these images -- it resolves an unbounded
-    OpenCV version and pulls transitive dependencies into a pinned stack --
-    so this message names the validated, bounded spec instead.
-    """
-    return MissingMediaDecoderError(
-        _with_cause(
-            "Cannot process image input: this model tokenizes images through "
-            "mistral_common (--tokenizer-mode mistral), which resizes them with "
-            "OpenCV ('cv2'). This image deliberately does not ship OpenCV, and "
-            "NVDEC decodes video only, so there is no hardware alternative for "
-            "still images. To enable image input, "
-            + _install_hint(backend, "opencv-python-headless")
-            + ". A model that also ships a Hugging Face processor can instead "
-            "be served with --tokenizer-mode auto, which needs no OpenCV.",
+            "Cannot decode video: "
+            + lead
+            + _install_hint(backend, package, module)
+            + ".",
             cause,
         )
     )
@@ -138,7 +165,7 @@ def audio_decoder_missing(
         _with_cause(
             "Cannot decode audio: this input needs the PyAV decoder ('av'), which "
             "this image deliberately does not ship, and NVDEC does not decode "
-            "audio. To enable audio input, " + _install_hint(backend, "av") + ".",
+            "audio. To enable audio input, " + _install_hint(backend, "av", "av") + ".",
             cause,
         )
     )

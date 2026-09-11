@@ -57,7 +57,9 @@ pytestmark = [
 # H.264/H.265 via NVDEC; audio has no hardware path and is opt-in only.
 # Mirrors the build-time guard's pattern in wheel_builder.Dockerfile: `aac` is
 # anchored to a word start so it cannot match inside an unrelated identifier.
-_DISALLOWED_RE = re.compile(r"h\.?264|h\.?265|hevc|(?:^|\s)aac|nvenc|cuvid|nvdec", re.I)
+_DISALLOWED_RE = re.compile(
+    r"h\.?264|h\.?265|hevc|(?:^|\s)aac|nvenc|cuvid|nvdec", re.IGNORECASE
+)
 # Present by construction, so a broken FFmpeg cannot masquerade as a pass.
 _REQUIRED = ("vp9",)
 
@@ -125,19 +127,59 @@ def _assert_no_software_codecs(surfaces: dict[str, str]) -> None:
         )
 
 
-def _assert_python_carriers_absent() -> None:
+def _assert_python_carriers_absent(ships_cv2: bool) -> None:
     """The Python decode carriers are absent from an unmodified image.
 
     They are installable at runtime behind an opt-in switch, and tests that do so
     are marked ``installs_extra_dependencies``. An unmodified image must not have
     them, or a green multimodal run says nothing about what customers receive.
+
+    ``ships_cv2`` covers the one image that carries a decode carrier on purpose:
+    the vLLM runtime rebuilds OpenCV from source without any video backend,
+    because mistral_common cannot tokenize a still image without ``cv2.resize``.
+    Presence is not what this file polices -- codecs are -- so that build is
+    checked by :func:`_assert_cv2_carries_no_codec` instead of by absence.
     """
-    for module, package in (("cv2", "opencv-python"), ("av", "PyAV")):
+    carriers = [("av", "PyAV")]
+    if not ships_cv2:
+        carriers.append(("cv2", "opencv-python"))
+    for module, package in carriers:
         spec = importlib.util.find_spec(module)
         assert spec is None, (
             f"{package} is installed ({module} at {spec.origin}); an unmodified "
             "runtime image is expected to ship without it"
         )
+
+
+def _assert_cv2_carries_no_codec() -> None:
+    """A shipped OpenCV must be the in-tree build with every video backend off.
+
+    The PyPI wheel vendors a full ffmpeg under ``opencv_python_headless.libs/``
+    and names it in the extension's DT_NEEDED, so installing it would put a
+    software H.264/H.265/AAC decoder back on disk. Ask the library what it was
+    built with rather than trusting the version, and check the vendored payload
+    is absent -- a wheel swapped in later would satisfy neither.
+    """
+    import cv2
+
+    build_info = cv2.getBuildInformation()
+    for backend in ("FFMPEG", "GSTREAMER"):
+        match = re.search(rf"^\s*{backend}:\s*(\S+)", build_info, re.MULTILINE)
+        assert not (match and match.group(1).upper() == "YES"), (
+            f"the shipped cv2 was built with {backend}; it must be built with "
+            f"-DWITH_{backend}=OFF so the image carries no software video codec"
+        )
+
+    vendored = [
+        os.path.join(root, name)
+        for root in {p for p in sys.path if p and os.path.isdir(p)}
+        for name in os.listdir(root)
+        if name.startswith("opencv_python") and name.endswith(".libs")
+    ]
+    assert not vendored, (
+        f"cv2 ships vendored media libraries ({', '.join(vendored)}); the image "
+        "is expected to carry the source build, which vendors none"
+    )
 
 
 def _bundled_libavcodecs() -> list[str]:
@@ -228,11 +270,13 @@ def _assert_bundled_libavcodecs_carry_no_software_codecs() -> None:
         )
 
 
-def _check_image() -> None:
+def _check_image(ships_cv2: bool = False) -> None:
     surfaces = _surfaces()
     _assert_required_codecs_present(surfaces)
     _assert_no_software_codecs(surfaces)
-    _assert_python_carriers_absent()
+    _assert_python_carriers_absent(ships_cv2)
+    if ships_cv2:
+        _assert_cv2_carries_no_codec()
     _assert_bundled_libavcodecs_carry_no_software_codecs()
 
 
@@ -244,7 +288,7 @@ def _check_image() -> None:
 
 @pytest.mark.vllm
 def test_vllm_image_ships_no_software_video_codecs() -> None:
-    _check_image()
+    _check_image(ships_cv2=True)
 
 
 @pytest.mark.sglang
