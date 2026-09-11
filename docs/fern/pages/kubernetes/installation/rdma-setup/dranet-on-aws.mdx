@@ -65,6 +65,21 @@ the container — `/dev/infiniband/uverbs*` device files for exactly the 4 alloc
 libfabric sees only those 4 devices, even though all 32 node EFAs are visible in
 `/sys/class/infiniband/`.
 
+**Why co-location matters for KV cache transfer performance.** GPU Direct RDMA (GDR)
+lets an EFA NIC DMA directly into and out of GPU HBM without staging through CPU memory.
+When the NIC and GPU share a PCIe root complex, this path is direct. When they do not,
+the DMA must traverse the inter-root or inter-NUMA interconnect, adding latency and
+reducing effective bandwidth. On p5.48xlarge the penalty for a cross-NUMA GPU-to-NIC
+assignment is roughly 25–40% bandwidth reduction on that path. More importantly, when
+all eight GPU workers transfer KV cache simultaneously, co-location guarantees eight
+non-contending PCIe paths. Random assignment from the device plugin can serialize
+transfers that should be parallel, with the effect compounding at high request concurrency
+and showing up primarily in tail latency rather than mean throughput.
+
+To measure the actual benefit for your workload, enable NIXL telemetry (see
+[Verification](#verification)) and compare `nixl_bytes_transferred` rate with and
+without co-location at your target concurrency.
+
 ```
 PCIe Root pci0000:44            ← scheduler picks one root atomically
   GPU  gpu-0  0000:53:00.0  NVIDIA H100 80GB HBM3
