@@ -24,7 +24,7 @@ use tonic::{Request, Response, Status};
 use tonic_health::ServingStatus as HealthServingStatus;
 
 use crate::client::{CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
-use crate::convert::{ResponseState, build_generate_request};
+use crate::convert::{ResponseState, build_generate_request, normalize_response_options};
 use crate::engine::VllmSidecarEngine;
 use crate::json::{json_to_struct, struct_to_json};
 use crate::model::DiscoveredModel;
@@ -477,7 +477,31 @@ fn server_info() -> pb::ServerInfo {
             sleep_mode_enabled: true,
             draft_weight_updates_enabled: true,
         }),
+        supports_native_sampling_params_json: true,
     }
+}
+
+#[test]
+fn native_generate_capability_requires_worker_support() {
+    let model = DiscoveredModel::from_proto(model_info(), server_info()).expect("valid discovery");
+    assert_eq!(
+        model
+            .engine_config()
+            .runtime_data
+            .get("vllm_inference_v1_generate")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+
+    let mut legacy_server = server_info();
+    legacy_server.supports_native_sampling_params_json = false;
+    let legacy = DiscoveredModel::from_proto(model_info(), legacy_server).expect("valid discovery");
+    assert!(
+        !legacy
+            .engine_config()
+            .runtime_data
+            .contains_key("vllm_inference_v1_generate")
+    );
 }
 
 #[test]
@@ -856,6 +880,240 @@ fn request() -> PreprocessedRequest {
         .expect("request")
 }
 
+#[test]
+fn skip_special_tokens_is_forwarded_without_compatibility_envelope() {
+    let mut request = request();
+    request.output_options.skip_special_tokens = Some(false);
+    let wire = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("native controls should be forwarded");
+
+    assert_eq!(
+        wire.response
+            .and_then(|response| response.skip_special_tokens),
+        Some(false)
+    );
+}
+
+#[test]
+fn compatibility_envelope_projects_skip_special_tokens() {
+    let mut request = request();
+    request
+        .extra_args
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("object extra_args")
+        .insert(
+            "vllm_tito".to_string(),
+            json!({"sampling_params": {"skip_special_tokens": false}}),
+        );
+
+    let wire = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("compatibility option should be projected");
+
+    assert_eq!(
+        wire.response
+            .and_then(|response| response.skip_special_tokens),
+        Some(false)
+    );
+}
+
+#[test]
+fn canonical_controls_override_compatibility_envelope() {
+    let mut request = request();
+    request.output_options.skip_special_tokens = Some(false);
+    request
+        .extra_args
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("object extra_args")
+        .insert(
+            "vllm_tito".to_string(),
+            json!({"sampling_params": {
+                "temperature": 0.7,
+                "seed": 456,
+                "max_tokens": 8,
+                "logprobs": 2,
+                "skip_special_tokens": true,
+                "future_vllm_field": {"preserved": true}
+            }}),
+        );
+
+    let wire = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("canonical controls should override compatibility values");
+    let native: serde_json::Value =
+        serde_json::from_slice(&wire.native_sampling_params_json).expect("native sampling JSON");
+    assert!(
+        (native["temperature"].as_f64().expect("temperature") - f64::from(0.2_f32)).abs()
+            < f64::EPSILON
+    );
+    assert_eq!(native["seed"], json!(123));
+    assert_eq!(native["max_tokens"], json!(1));
+    assert_eq!(native["logprobs"], json!(1));
+    assert_eq!(native["skip_special_tokens"], json!(false));
+    assert_eq!(native["future_vllm_field"], json!({"preserved": true}));
+}
+
+#[test]
+fn released_envelope_preserves_native_sampling_semantics() {
+    let mut request = request();
+    request.sampling_options = SamplingOptions {
+        top_k: Some(-1),
+        ..Default::default()
+    };
+    request.stop_conditions = StopConditions::default();
+    request.output_options = OutputOptions::default();
+    request.extra_args = Some(json!({
+        "skip_reading_prefix_cache": false,
+        "vllm_tito": {"sampling_params": {
+            "top_k": -1,
+            "repetition_penalty": 2.5,
+            "logprobs": -1,
+            "prompt_logprobs": 0,
+            "skip_reading_prefix_cache": true,
+            "skip_special_tokens": false,
+            "return_token_ids": true
+        }}
+    }));
+
+    let request = normalize_response_options(request).expect("normalize response options");
+    assert_eq!(request.output_options.logprobs, Some(u32::MAX));
+    assert_eq!(request.output_options.prompt_logprobs, Some(0));
+    assert_eq!(request.output_options.skip_special_tokens, Some(false));
+    let wire = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("convert released envelope");
+    let native: serde_json::Value =
+        serde_json::from_slice(&wire.native_sampling_params_json).expect("native sampling JSON");
+    assert_eq!(wire.sampling.expect("sampling").top_k, 0);
+    assert!(native.get("temperature").is_none());
+    assert_eq!(native["top_k"], json!(0));
+    assert_eq!(native["repetition_penalty"], json!(2.5));
+    assert_eq!(native["logprobs"], json!(-1));
+    assert_eq!(native["skip_reading_prefix_cache"], json!(false));
+}
+
+#[test]
+fn prefill_does_not_forward_decode_sampling_json() {
+    let mut request = request();
+    request
+        .extra_args
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("object extra_args")
+        .insert(
+            "vllm_tito".to_string(),
+            json!({"sampling_params": {"top_k": 0, "return_token_ids": true}}),
+        );
+
+    let wire = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Prefill,
+    )
+    .expect("convert prefill request");
+    assert!(wire.native_sampling_params_json.is_empty());
+}
+#[test]
+fn explicit_zero_temperature_is_preserved() {
+    let mut request = request();
+    request.sampling_options = SamplingOptions::default();
+    request.extra_args = Some(json!({
+        "vllm_tito": {"sampling_params": {"temperature": 0.0}}
+    }));
+
+    let wire = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("convert explicit zero temperature");
+    let native: serde_json::Value =
+        serde_json::from_slice(&wire.native_sampling_params_json).expect("native sampling JSON");
+    assert_eq!(native["temperature"], json!(0.0));
+}
+
+#[test]
+fn explicit_logprob_token_ids_override_native_logprob_count() {
+    let mut request = request();
+    request.output_options.logprobs = Some(5);
+    request.extra_args = Some(json!({
+        "vllm_tito": {"sampling_params": {"logprob_token_ids": [5000]}}
+    }));
+
+    let wire = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("convert explicit logprob token IDs");
+    let native: serde_json::Value =
+        serde_json::from_slice(&wire.native_sampling_params_json).expect("native sampling JSON");
+    assert!(native.get("logprobs").is_none());
+    assert_eq!(native["logprob_token_ids"], json!([5000]));
+}
+
+#[test]
+fn released_envelope_hydrates_kv_transfer_with_canonical_precedence() {
+    let mut legacy = request();
+    legacy.extra_args = Some(json!({
+        "vllm_tito": {
+            "sampling_params": {},
+            "kv_transfer_params": {"source": "legacy"}
+        }
+    }));
+    let legacy = normalize_response_options(legacy).expect("normalize legacy KV transfer");
+    assert_eq!(
+        legacy.extra_args.as_ref().unwrap()["kv_transfer_params"],
+        json!({"source": "legacy"})
+    );
+
+    let mut canonical = request();
+    canonical.extra_args = Some(json!({
+        "kv_transfer_params": {"source": "canonical"},
+        "vllm_tito": {
+            "sampling_params": {},
+            "kv_transfer_params": {"source": "legacy"}
+        }
+    }));
+    let canonical = normalize_response_options(canonical).expect("normalize canonical KV transfer");
+    assert_eq!(
+        canonical.extra_args.as_ref().unwrap()["kv_transfer_params"],
+        json!({"source": "canonical"})
+    );
+}
+
+#[test]
+fn canonical_dynamo_priority_is_converted_for_vllm() {
+    for (dynamo_priority, vllm_priority) in [(-7, 7), (7, -7), (i32::MIN, i32::MAX)] {
+        let mut request = request();
+        request.routing.as_mut().expect("routing").priority = Some(dynamo_priority);
+
+        let wire = build_generate_request(
+            request,
+            "request-1".to_string(),
+            DisaggregationMode::Aggregated,
+        )
+        .expect("canonical priority should be converted");
+
+        assert_eq!(wire.priority, vllm_priority);
+    }
+}
+
 fn epd_image_request() -> PreprocessedRequest {
     let mut request = request();
     request.output_options.prompt_logprobs = None;
@@ -1004,6 +1262,20 @@ fn engine_config_normalizes_total_kv_blocks_per_dp_rank() {
     let registration = model.engine_config().llm.expect("LLM registration");
 
     assert_eq!(registration.total_kv_blocks, Some(2048));
+}
+
+#[test]
+fn engine_config_advertises_vllm_generate_capability() {
+    let model =
+        DiscoveredModel::from_proto(model_info(), server_info()).expect("valid discovery metadata");
+
+    assert_eq!(
+        model
+            .engine_config()
+            .runtime_data
+            .get("vllm_inference_v1_generate"),
+        Some(&json!(true))
+    );
 }
 
 #[test]
