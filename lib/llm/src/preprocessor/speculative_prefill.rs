@@ -167,6 +167,7 @@ pub(super) fn maybe_wrap_stream(
         };
 
         let context_slot = PrefillContextSlot::new(None);
+        let warmup_cancel = cancel.child_token();
         // Keep the warmup alive for bounded cleanup after cancellation or timeout.
         let mut warmup = std::pin::pin!(prefill_task(
             next,
@@ -175,6 +176,7 @@ pub(super) fn maybe_wrap_stream(
             messages,
             response_text,
             &context_slot,
+            &warmup_cancel,
         ));
 
         let wind_down = tokio::select! {
@@ -215,6 +217,7 @@ pub(super) fn maybe_wrap_stream(
         };
 
         if wind_down {
+            warmup_cancel.cancel();
             // Never poll an unstarted warmup during shutdown.
             let dispatched = context_slot.lock().is_some();
 
@@ -282,6 +285,7 @@ async fn prefill_task(
     original_messages: Vec<ChatCompletionRequestMessage>,
     response_text: String,
     context_slot: &PrefillContextSlot,
+    cancel: &CancellationToken,
 ) -> Result<()> {
     let assistant_msg =
         ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
@@ -295,15 +299,26 @@ async fn prefill_task(
     messages.push(assistant_msg);
 
     let prefill_request = SpeculativePrefillRequest::new(messages);
-    let formatted_prompt = formatter.render(&prefill_request)?;
-    let encoding = tokenizer.encode(&formatted_prompt)?;
-    let token_ids = encoding.token_ids().to_vec();
+    let preprocessing_cancel = cancel.clone();
+    // Rendering and tokenization are synchronous and may be expensive. A running
+    // blocking operation cannot be interrupted, but it must never dispatch work.
+    let token_ids = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u32>>> {
+        if preprocessing_cancel.is_cancelled() {
+            return Ok(None);
+        }
+        let formatted_prompt = formatter.render(&prefill_request)?;
+        if preprocessing_cancel.is_cancelled() {
+            return Ok(None);
+        }
+        let encoding = tokenizer.encode(&formatted_prompt)?;
+        Ok(Some(encoding.token_ids().to_vec()))
+    })
+    .await??;
+    let Some(token_ids) = token_ids else {
+        return Ok(());
+    };
 
-    tracing::info!(
-        num_tokens = token_ids.len(),
-        "Speculative prefill: sending next-turn prefix"
-    );
-
+    let num_tokens = token_ids.len();
     let preprocessed = PreprocessedRequest::builder()
         .model("speculative_prefill".to_string())
         .token_ids(token_ids)
@@ -322,6 +337,12 @@ async fn prefill_task(
         uuid::Uuid::new_v4().to_string(),
         Default::default(),
     );
+    // The outer select cannot preempt a poll already in progress. Recheck after
+    // preprocessing, immediately before publishing the context and dispatching.
+    if cancel.is_cancelled() {
+        return Ok(());
+    }
+    tracing::info!(num_tokens, "Speculative prefill: sending next-turn prefix");
     // Publish before generate, which can block while waiting for a worker.
     *context_slot.lock() = Some(context.context());
 
@@ -421,6 +442,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct WindDownBackend {
         generate_calls: AtomicUsize,
+        dispatched: tokio::sync::Notify,
         stream_dropped: Arc<AtomicBool>,
         cleanup_ran: Arc<AtomicBool>,
         context: Mutex<Option<Arc<dyn AsyncEngineContext>>>,
@@ -469,6 +491,7 @@ mod tests {
                     None::<(Annotated<BackendOutput>, _)>
                 });
 
+            self.dispatched.notify_one();
             Ok(ResponseStream::new(Box::pin(winding), ctx))
         }
     }
@@ -476,6 +499,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct StalledInGenerateBackend {
         generate_calls: AtomicUsize,
+        dispatched: tokio::sync::Notify,
         context: Mutex<Option<Arc<dyn AsyncEngineContext>>>,
     }
 
@@ -506,6 +530,7 @@ mod tests {
             let ctx = context.context();
             *self.context.lock() = Some(ctx.clone());
 
+            self.dispatched.notify_one();
             ctx.stopped().await;
             Err(Error::msg("cancelled while selecting a worker"))
         }
@@ -627,6 +652,170 @@ mod tests {
         }
     }
 
+    async fn wait_for_dispatch(dispatched: &tokio::sync::Notify) {
+        // Keep paused time from advancing while the blocking pool preprocesses.
+        // Wait for an actual dispatch rather than assuming a fixed yield count.
+        let started = std::time::Instant::now();
+        loop {
+            tokio::select! {
+                biased;
+                () = dispatched.notified() => return,
+                () = tokio::task::yield_now() => {}
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "preprocessing did not dispatch the warmup"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_blocked_preprocessing_prevents_dispatch() {
+        struct BlockingFormatter {
+            inner: Arc<dyn OAIPromptFormatter>,
+            entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+            release: Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+
+        impl OAIPromptFormatter for BlockingFormatter {
+            fn supports_add_generation_prompt(&self) -> bool {
+                self.inner.supports_add_generation_prompt()
+            }
+
+            fn render(&self, request: &dyn OAIChatLikeRequest) -> Result<String> {
+                self.entered.lock().take().unwrap().send(()).unwrap();
+                self.release.lock().recv_timeout(Duration::from_secs(10))?;
+                self.inner.render(request)
+            }
+        }
+
+        let (formatter, tokenizer) = sample_model_parts();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let formatter = Arc::new(BlockingFormatter {
+            inner: formatter,
+            entered: Mutex::new(Some(entered_tx)),
+            release: Mutex::new(release_rx),
+        });
+        let cancel = CancellationToken::new();
+        let cancelling_task = {
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                entered_rx.await.unwrap();
+                cancel.cancel();
+                release_tx.send(()).unwrap();
+            })
+        };
+        let backend = Arc::new(StallingBackend::default());
+        let context_slot = PrefillContextSlot::new(None);
+        // Call the warmup directly so the outer select cannot mask a missing
+        // post-preprocessing cancellation check. The current-thread runtime also
+        // requires rendering to yield the executor for the cancelling task.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            prefill_task(
+                backend.clone(),
+                formatter,
+                tokenizer,
+                chat_request(true).inner.messages,
+                "8849 m tall.".to_string(),
+                &context_slot,
+                &cancel,
+            ),
+        )
+        .await
+        .expect("cancelled rendering must not dispatch a stalled warmup")
+        .unwrap();
+        cancelling_task.await.unwrap();
+        assert!(cancel.is_cancelled());
+        assert!(context_slot.lock().is_none());
+        assert_eq!(backend.generate_calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_tokenization_prevents_dispatch() {
+        use crate::tokenizers::traits::{Decoder, Encoder};
+        use crate::tokenizers::{DecodeResult, EncodeSegment, Encoding};
+
+        struct BlockingTokenizer {
+            inner: Arc<dyn Tokenizer>,
+            entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+            release: Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+
+        impl Encoder for BlockingTokenizer {
+            fn encode(&self, input: &str) -> Result<Encoding> {
+                self.entered.lock().take().unwrap().send(()).unwrap();
+                self.release.lock().recv_timeout(Duration::from_secs(10))?;
+                self.inner.encode(input)
+            }
+
+            fn encode_batch(&self, inputs: &[&str]) -> Result<Vec<Encoding>> {
+                self.inner.encode_batch(inputs)
+            }
+
+            fn encode_segments(&self, segments: &[EncodeSegment<'_>]) -> Result<Encoding> {
+                self.inner.encode_segments(segments)
+            }
+        }
+
+        impl Decoder for BlockingTokenizer {
+            fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> Result<DecodeResult> {
+                self.inner.decode(token_ids, skip_special_tokens)
+            }
+        }
+
+        impl Tokenizer for BlockingTokenizer {
+            fn validate_prefix_cache(&self) -> Result<()> {
+                self.inner.validate_prefix_cache()
+            }
+        }
+
+        let (formatter, tokenizer) = sample_model_parts();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let tokenizer = Arc::new(BlockingTokenizer {
+            inner: tokenizer,
+            entered: Mutex::new(Some(entered_tx)),
+            release: Mutex::new(release_rx),
+        });
+        let cancel = CancellationToken::new();
+        let cancelling_task = {
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                entered_rx.await.unwrap();
+                cancel.cancel();
+                release_tx.send(()).unwrap();
+            })
+        };
+        let backend = Arc::new(StallingBackend::default());
+        let context_slot = PrefillContextSlot::new(None);
+        // Cancellation occurs after the formatter check. Call directly so only
+        // the final pre-dispatch check can prevent the downstream request.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            prefill_task(
+                backend.clone(),
+                formatter,
+                tokenizer,
+                chat_request(true).inner.messages,
+                "8849 m tall.".to_string(),
+                &context_slot,
+                &cancel,
+            ),
+        )
+        .await
+        .expect("cancelled tokenization must not dispatch a stalled warmup")
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), cancelling_task)
+            .await
+            .expect("the tokenizer must signal entry and receive cancellation")
+            .unwrap();
+        assert!(cancel.is_cancelled());
+        assert!(context_slot.lock().is_none());
+        assert_eq!(backend.generate_calls(), 0);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn dropping_owner_stops_and_drains_a_permanently_pending_warmup() {
         let (formatter, tokenizer) = sample_model_parts();
@@ -647,7 +836,7 @@ mod tests {
         drop(engine);
         let items: Vec<_> = wrapped.collect().await;
         assert_eq!(items.len(), 2);
-        backend.dispatched.notified().await;
+        wait_for_dispatch(&backend.dispatched).await;
         assert_eq!(tracker.len(), 1);
 
         let stopped = backend.context.lock().as_ref().unwrap().clone();
@@ -720,7 +909,7 @@ mod tests {
             "client stream must be passed through intact"
         );
 
-        settle().await;
+        wait_for_dispatch(&backend.dispatched).await;
         assert_eq!(backend.generate_calls(), 1, "warmup should have dispatched");
         tokio::time::sleep(PREFILL_TASK_TIMEOUT / 2).await;
         settle().await;
@@ -776,7 +965,7 @@ mod tests {
         );
 
         let dispatched = Instant::now();
-        settle().await;
+        wait_for_dispatch(&backend.dispatched).await;
         assert_eq!(
             backend.generate_calls(),
             1,
@@ -825,7 +1014,7 @@ mod tests {
         let items: Vec<_> = wrapped.collect().await;
         assert_eq!(items.len(), 2);
 
-        settle().await;
+        wait_for_dispatch(&backend.dispatched).await;
         assert_eq!(backend.generate_calls(), 1, "warmup should have dispatched");
         assert!(!backend.stream_dropped());
 
@@ -871,7 +1060,7 @@ mod tests {
         let items: Vec<_> = wrapped.collect().await;
         assert_eq!(items.len(), 2);
 
-        settle().await;
+        wait_for_dispatch(&backend.dispatched).await;
         assert!(!backend.cleanup_ran(), "nothing should wind down yet");
 
         let cancelled_at = Instant::now();
@@ -963,7 +1152,7 @@ mod tests {
         let items: Vec<_> = wrapped.collect().await;
         assert_eq!(items.len(), 2);
 
-        settle().await;
+        wait_for_dispatch(&backend.dispatched).await;
         assert_eq!(
             backend.generate_calls(),
             1,
