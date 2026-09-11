@@ -578,8 +578,12 @@ def _connector_key(from_stage: int | str, to_stage: int | str) -> tuple[str, str
     return (str(from_stage), str(to_stage))
 
 
-def _uses_nixl_connector(stage_configs_path: str, stage_configs: list[Any]) -> bool:
+def _uses_nixl_connector(
+    stage_configs_path: str | None, stage_configs: list[Any]
+) -> bool:
     """Check if any stage connector uses NixlConnector."""
+    if stage_configs_path is None:
+        return False
     try:
         with open(stage_configs_path) as f:
             raw = f.read()
@@ -631,8 +635,12 @@ def _load_processor(func_path: str | None) -> Any:
     return getattr(importlib.import_module(module_path), func_name)
 
 
-def _ensure_stage_connectors(stage_configs_path: str, stage_configs: list[Any]) -> str:
+def _ensure_stage_connectors(
+    stage_configs_path: str | None, stage_configs: list[Any]
+) -> str | None:
     """Add default SHM connector edges for stage configs that omit them."""
+    if stage_configs_path is None:
+        return None
     try:
         with open(stage_configs_path) as f:
             deploy_config = yaml.safe_load(f) or {}
