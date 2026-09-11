@@ -22,6 +22,7 @@ TEXT_ENCODER_TP_SIZE="${DYN_H3_TEXT_ENCODER_TP_SIZE:-4}"
 # into the full DiT group size explicitly.
 VAE_PATCH_PARALLEL_SIZE="${DYN_H3_VAE_PATCH_PARALLEL_SIZE:-1}"
 ATTENTION_BACKEND="${DYN_H3_ATTENTION_BACKEND:-TRTLLM_ATTN}"
+FASTH3_LORA_PATH="${DYN_H3_FASTH3_LORA_PATH:-}"
 EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -48,6 +49,15 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+FASTH3_ARGS=()
+if [[ -n "$FASTH3_LORA_PATH" ]]; then
+    if [[ ! -f "$FASTH3_LORA_PATH" ]]; then
+        echo "FastH3 adapter not found: $FASTH3_LORA_PATH" >&2
+        exit 1
+    fi
+    FASTH3_ARGS=(--lora-path "$FASTH3_LORA_PATH")
+fi
 
 command -v ffmpeg >/dev/null
 command -v ffprobe >/dev/null
@@ -102,6 +112,7 @@ DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}" \
     --vae-patch-parallel-size "$VAE_PATCH_PARALLEL_SIZE" \
     --vae-use-tiling \
     --diffusion-attention-backend "$ATTENTION_BACKEND" \
+    "${FASTH3_ARGS[@]}" \
     "${EXTRA_ARGS[@]}" &
 
 wait_any_exit

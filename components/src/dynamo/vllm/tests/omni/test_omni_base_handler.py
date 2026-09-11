@@ -56,6 +56,7 @@ def _make_config(**parallel_overrides):
     cfg.engine_args.tensor_parallel_size = 1
     cfg.engine_args.pipeline_parallel_size = 1
     cfg.engine_args.data_parallel_size = 1
+    cfg.engine_args.lora_path = None
     cfg.diffusion = OmniDiffusionKwargs()
     cfg.parallel = dataclasses.replace(OmniParallelKwargs(), **parallel_overrides)
     return cfg
@@ -120,6 +121,16 @@ class TestDiffusionParallelConfigCoverage:
 
         assert kwargs["task_type"] == "fl2va"
         assert kwargs["diffusion_attention_backend"] == "TRTLLM_ATTN"
+
+    def test_startup_lora_path_forwarded_to_async_omni(self):
+        config = _make_config()
+        config.engine_args.lora_path = ["/models/fasth3/adapter_model.safetensors"]
+
+        kwargs = _build_kwargs(config)
+
+        assert kwargs["lora_path"] == [
+            "/models/fasth3/adapter_model.safetensors"
+        ]
 
     def test_lora_disabled_resolves_no_capacity(self):
         config = _make_config()
