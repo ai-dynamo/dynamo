@@ -53,6 +53,7 @@ from dynamo.frontend.sglang_processor import (
     SglangPreprocessWorkerResult,
     SglangProcessor,
     _build_dynamo_preproc,
+    _classify_sglang_error,
     _init_worker,
     _load_chat_template,
     _map_finish_reason,
@@ -68,7 +69,7 @@ from dynamo.frontend.utils import (
     random_call_id,
     random_uuid,
 )
-from dynamo.llm.exceptions import InvalidArgument
+from dynamo.llm.exceptions import HttpError, InvalidArgument
 
 # Needs sglang packages (gpu_1 container), but does not allocate GPU VRAM.
 pytestmark = [
@@ -3315,6 +3316,42 @@ def test_generator_honors_explicit_skip_special_tokens(
     )
 
 
+class TestClassifySglangError:
+    """Classify backend/routed-engine error strings to client-facing HTTP statuses."""
+
+    def test_over_context_message_is_400(self):
+        err = _classify_sglang_error(
+            "The input (5105302 tokens) is longer than the model's "
+            "context length (1048576 tokens)."
+        )
+        assert isinstance(err, HttpError)
+        assert err.code == 400
+        assert "longer than the model's context length" in err.message
+
+    def test_queue_overflow_message_is_429(self):
+        err = _classify_sglang_error(
+            'router policy class "default" queue raw_isl_tokens limit reached'
+            " (have=5000, limit=5000)"
+        )
+        assert err is not None
+        assert err.code == 429
+        assert "queue" in err.message
+
+    def test_backend_invalid_argument_envelope_is_honoured(self):
+        err = _classify_sglang_error(
+            'BackendInvalidArgument: {"message":"min_p unsupported","code":400}'
+        )
+        assert err is not None
+        assert err.code == 400
+        assert "BackendInvalidArgument" not in err.message
+
+    @pytest.mark.parametrize(
+        "message", ["unknown routed_engine error", "CUDA out of memory", ""]
+    )
+    def test_unclassified_messages_return_none(self, message):
+        assert _classify_sglang_error(message) is None
+
+
 class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
     """Test safe-boundary incremental detokenization."""
 
@@ -3984,16 +4021,22 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
 
         return asyncio.run(collect())
 
-    def test_routed_engine_is_error_yields_internal_error(self, tokenizer):
-        """is_error() True yields a single internal_error chunk with the comment text."""
+    def test_routed_engine_is_error_yields_error_envelope(self, tokenizer):
+        """is_error() with an unclassified message yields a tagged error frame.
+
+        An unclassified routed-engine error is wrapped in ``as_error_envelope``
+        so the binding reads it as an SSE error event (not a completion chunk);
+        an opaque 500 would otherwise drop the reason.
+        """
         items = self._run_stream(
             tokenizer,
             [FakeRoutedItem(None, is_error=True, comments=["backend disconnected"])],
         )
         assert len(items) == 1
-        err = items[0]["error"]
-        assert err["type"] == "internal_error"
-        assert "backend disconnected" in err["message"]
+        frame = items[0]
+        assert frame["_dynamo_annotated"] is True
+        assert frame["event"] == "error"
+        assert "backend disconnected" in frame["comment"][0]
 
     def test_routed_engine_none_data_is_skipped(self, tokenizer):
         """data() is None (e.g. comment-only event) is skipped, not yielded as error."""
@@ -4008,14 +4051,17 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         assert len(items) == 1
         assert items[0]["choices"][0]["finish_reason"] == "stop"
 
-    def test_malformed_engine_response_yields_engine_error(self, tokenizer):
-        """A response dict missing token_ids goes through handle_engine_error."""
+    def test_malformed_engine_response_yields_error_envelope(self, tokenizer):
+        """A response dict missing token_ids is tagged as an error frame."""
         items = self._run_stream(
             tokenizer,
             [{"status": "error", "message": "kv cache exhausted"}],
         )
         assert len(items) == 1
-        assert "error" in items[0]
+        frame = items[0]
+        assert frame["_dynamo_annotated"] is True
+        assert frame["event"] == "error"
+        assert "kv cache exhausted" in frame["comment"][0]
 
     def test_completed_batches_replace_decode_context(self):
         """Completed batches replace context instead of accumulating history."""

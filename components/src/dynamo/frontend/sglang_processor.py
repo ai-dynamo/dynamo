@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import os
+import re
 import time
 from collections.abc import AsyncGenerator
 from concurrent.futures import ProcessPoolExecutor
@@ -24,7 +25,7 @@ from dynamo._internal import ModelDeploymentCard
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
-from dynamo.llm.exceptions import InvalidArgument, Unknown
+from dynamo.llm.exceptions import HttpError, InvalidArgument, Unknown
 
 from .sglang_prepost import (
     ReasoningParser,
@@ -42,6 +43,8 @@ from .sglang_prepost import (
 from .thinking import runtime_default_thinking_mode
 from .utils import (
     PreprocessError,
+    as_error_envelope,
+    backend_invalid_argument_to_http_error,
     extract_mm_urls,
     handle_engine_error,
     make_internal_error,
@@ -53,6 +56,42 @@ from .utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Map SGLang/backend error strings to client-facing HTTP errors so the reason
+# reaches the client instead of an opaque 500. The 400/429 status is honoured
+# only where the HTTP layer can still set it -- non-streaming requests, and
+# streaming with DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS (pre-commit error peek).
+# Default streaming commits 200 up front, so a classified backend error there
+# surfaces as 200 + SSE error event carrying the reason.
+# See GitHub issue #14354 (DEP: unified semantic error propagation).
+_SGL_OVERCONTEXT_RE = re.compile(
+    r"longer than the model's context length"
+    r"|exceeds\s+context"
+    r"|input is too long"
+    r"|context length",
+    re.IGNORECASE,
+)
+_SGL_QUEUE_OVERFLOW_RE = re.compile(
+    r"queue[^.\n]*limit reached|policy class.*queue",
+    re.IGNORECASE,
+)
+
+
+def _classify_sglang_error(message: str) -> HttpError | None:
+    """Map a backend or routed-engine error message to a client-facing HttpError.
+
+    Returns None when the message is none of the recognized shapes, so the
+    caller keeps its existing fallback (an SSE error envelope or Unknown).
+    """
+    err = backend_invalid_argument_to_http_error(RuntimeError(message))
+    if err is not None:
+        return err
+    if _SGL_OVERCONTEXT_RE.search(message):
+        return HttpError(400, message)
+    if _SGL_QUEUE_OVERFLOW_RE.search(message):
+        return HttpError(429, message)
+    return None
 
 
 def _cached_tokens_from_usage(usage: dict[str, Any] | None) -> int | None:
@@ -716,6 +755,13 @@ class SglangProcessor:
         post_proc_total_ms = 0.0
         created_ts = int(time.time())
         stream_interval = self.stream_interval
+        # True once any frame has been yielded to the client. A classified
+        # backend error arriving before the first byte `raise`s HttpError so the
+        # HTTP layer can set the status where it still can (non-streaming, or
+        # streaming with DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS); one arriving
+        # mid-stream, after the 200 is committed, is sent as an SSE error event
+        # so the client sees the reason.
+        yielded_any = False
 
         try:
             dynamo_stream = await self.routed_engine.generate(
@@ -851,7 +897,15 @@ class SglangProcessor:
                         request_id,
                         message,
                     )
-                    yield make_internal_error(request_id, message)
+                    err = _classify_sglang_error(message)
+                    if err is not None:
+                        if not yielded_any:
+                            raise err
+                        yield as_error_envelope(
+                            make_internal_error(request_id, err.message)
+                        )
+                        break
+                    yield as_error_envelope(make_internal_error(request_id, message))
                     break
                 engine_response = dynamo_response.data()
 
@@ -864,7 +918,9 @@ class SglangProcessor:
                     not isinstance(engine_response, dict)
                     or "token_ids" not in engine_response
                 ):
-                    yield handle_engine_error(engine_response, request_id, logger)
+                    yield as_error_envelope(
+                        handle_engine_error(engine_response, request_id, logger)
+                    )
                     break
 
                 new_ids = engine_response["token_ids"]
@@ -887,6 +943,7 @@ class SglangProcessor:
                             stop_terminated=False,
                             engine_data=None,
                         )
+                        yielded_any = True
                         yield envelope
                         if post.locally_finished:
                             break
@@ -924,16 +981,31 @@ class SglangProcessor:
                         stop_terminated=stop_terminated,
                         engine_data=engine_data,
                     )
+                    yielded_any = True
                     yield envelope
                     if post.locally_finished:
                         break
         except Unknown:
             raise
+        except HttpError:
+            raise
         except Exception as e:
-            logger.exception("Error generating response for request %s", request_id)
-            raise Unknown(
-                f"Error generating response for request {request_id}: {e}"
-            ) from e
+            err = _classify_sglang_error(str(e))
+            if err is not None:
+                logger.warning(
+                    "Backend rejected request %s with %d: %s",
+                    request_id,
+                    err.code,
+                    err.message,
+                )
+                if not yielded_any:
+                    raise err from e
+                yield as_error_envelope(make_internal_error(request_id, err.message))
+            else:
+                logger.exception("Error generating response for request %s", request_id)
+                raise Unknown(
+                    f"Error generating response for request {request_id}: {e}"
+                ) from e
         finally:
             if self.debug_perf and token_count > 0:
                 logger.info(
