@@ -251,9 +251,7 @@ pub(super) async fn run_request_task(
     if let Some(workload) = ctx.workload.as_ref() {
         let completion_ms = now_ms(workload.start);
         workload
-            .driver
-            .lock()
-            .unwrap()
+            .lock_driver()?
             .on_terminal(uuid, completion_ms, status)?;
         workload.wakeup.notify_waiters();
         if let Some(guard) = guard.as_mut() {

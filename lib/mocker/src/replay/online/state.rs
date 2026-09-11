@@ -80,6 +80,25 @@ pub(super) struct WorkloadDispatchState {
     pub(super) start: Instant,
 }
 
+impl WorkloadDispatchState {
+    /// Lock the workload driver, reporting a poisoned mutex instead of panicking.
+    ///
+    /// Every dispatch-path call site used to `lock().unwrap()`. A panic anywhere
+    /// under the driver poisons this mutex, and the first `unwrap` to observe it
+    /// ran inside a spawned request task -- surfacing as a bare `JoinError` with
+    /// no indication of what actually went wrong. Report it as an error so it
+    /// travels to the caller through the same `joined??` path as every other
+    /// request-task failure.
+    ///
+    /// `InFlightGuard::drop` deliberately does not use this: a `Drop` impl cannot
+    /// propagate, and panicking while unwinding would abort the process.
+    pub(super) fn lock_driver(&self) -> Result<std::sync::MutexGuard<'_, WorkloadDriver>> {
+        self.driver
+            .lock()
+            .map_err(|_| anyhow!("online replay workload driver lock poisoned"))
+    }
+}
+
 pub(super) fn now_ms(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1000.0
 }

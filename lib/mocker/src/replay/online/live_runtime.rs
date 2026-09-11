@@ -143,6 +143,11 @@ impl LiveRunSession {
             ..
         } = self;
         let wall_time_ms = now_ms(task_ctx.start);
+        // Deliberately best-effort, unlike the dispatch-path `lock_driver()` calls:
+        // these two are optional report metadata gathered after every request has
+        // already settled. A poisoned lock here would mean some earlier panic, and
+        // the control-flow sites that matter have already reported it -- dropping
+        // an agentic annotation is better than discarding a complete run's results.
         let agentic_trajectory = task_ctx.workload.as_ref().and_then(|workload| {
             workload
                 .driver
@@ -457,8 +462,13 @@ impl LiveRuntime {
             }
 
             let now = now_ms(start);
-            let ready_turns =
-                tokio::task::block_in_place(|| workload.driver.lock().unwrap().pop_ready(now, 1));
+            // `block_in_place` requires a multi-thread runtime; `run_workload` is
+            // only ever reached through `run_live_workload_runtime`, which builds
+            // one. That is also why this function has no direct `#[tokio::test]`
+            // coverage -- a current-thread test runtime would panic here.
+            let ready_turns = tokio::task::block_in_place(|| -> Result<_> {
+                Ok(workload.lock_driver()?.pop_ready(now, 1))
+            })?;
             if let Some(ready_turn) = ready_turns.into_iter().next() {
                 let guard = cap_enabled
                     .then(|| InFlightGuard::new(Arc::clone(&workload), ready_turn.request_uuid));
@@ -501,7 +511,7 @@ impl LiveRuntime {
             let wake = workload.wakeup.notified();
             tokio::pin!(wake);
             let (is_drained, next_ready_ms) = {
-                let mut driver = workload.driver.lock().unwrap();
+                let mut driver = workload.lock_driver()?;
                 (driver.is_drained(), driver.next_ready_time_ms())
             };
             if is_drained {
