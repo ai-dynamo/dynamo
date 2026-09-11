@@ -10,6 +10,7 @@ use crate::metrics::work_handler_perf::{
     WORK_HANDLER_NETWORK_TRANSIT_SECONDS, WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS,
 };
 use crate::pipeline::{ManyIn, RequestStream};
+use crate::telemetry::{LifecycleStage, LifecycleTrace};
 use futures::StreamExt;
 use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
 use serde::Deserialize;
@@ -432,6 +433,12 @@ struct ParsedRequest<Req> {
     payload_codec: RequestPlanePayloadCodec,
 }
 
+#[derive(Clone, Copy)]
+struct ResponsePlaneModes {
+    configured: ResponsePlaneMode,
+    advertised: ResponsePlaneMode,
+}
+
 /// Per-shape strategy for turning a raw payload into a typed engine
 /// request. Captures the wire-shape divergence between the unary
 /// (`HeaderAndData`) and bidirectional (`HeaderOnly` + dial-in for the
@@ -648,14 +655,19 @@ where
         request: Req,
         payload_codec: RequestPlanePayloadCodec,
         start_time: Instant,
-        configured_mode: ResponsePlaneMode,
-        advertised_mode: ResponsePlaneMode,
+        response_modes: ResponsePlaneModes,
+        lifecycle: &LifecycleTrace,
         mut publisher: P,
     ) -> Result<(), PipelineError>
     where
         Self: IngressDispatch<Request = Req>,
         P: ResponsePublisher,
     {
+        let ResponsePlaneModes {
+            configured: configured_mode,
+            advertised: advertised_mode,
+        } = response_modes;
+
         if configured_mode != advertised_mode {
             let message = format!(
                 "response plane mismatch: frontend requested {}, worker configured {}",
@@ -669,26 +681,32 @@ where
 
         let request_context = request.context();
         tracing::trace!("calling generate");
+        let worker_operation = lifecycle.start_worker_operation();
         // Route backend generation through the transport-independent admission
         // boundary. Admission errors follow the existing generate error path.
-        let stream = admission_gate::global()
-            .admit(
-                Some(request_context.as_ref()),
-                self.segment
-                    .get()
-                    .expect("segment not set")
-                    .generate(request),
-            )
-            .await
-            .map_err(|error| {
-                if let Some(metrics) = self.metrics() {
-                    metrics
-                        .error_counter
-                        .with_label_values(&[work_handler::error_types::GENERATE])
-                        .inc();
-                }
-                PipelineError::GenerateError(error)
-            });
+        let stream = async {
+            admission_gate::global()
+                .admit(
+                    Some(request_context.as_ref()),
+                    self.segment
+                        .get()
+                        .expect("segment not set")
+                        .generate(request)
+                        .instrument(lifecycle.start(LifecycleStage::RequestDispatch)),
+                )
+                .await
+        }
+        .instrument(worker_operation.clone())
+        .await
+        .map_err(|error| {
+            if let Some(metrics) = self.metrics() {
+                metrics
+                    .error_counter
+                    .with_label_values(&[work_handler::error_types::GENERATE])
+                    .inc();
+            }
+            PipelineError::GenerateError(error)
+        });
 
         let stream = match stream {
             Ok(stream) => {
@@ -735,8 +753,13 @@ where
             }
         };
 
-        self.pump_response_stream(stream, &publisher, payload_codec)
-            .await;
+        async {
+            self.pump_response_stream(stream, &publisher, payload_codec)
+                .instrument(lifecycle.start_worker_response_streaming())
+                .await
+        }
+        .instrument(worker_operation)
+        .await;
         let finish = if publisher.reset_on_stop()
             && request_context.is_stopped()
             && !request_context.is_killed()
@@ -773,6 +796,17 @@ where
             .unwrap_or_default()
             .as_nanos() as u64;
         let start_time = std::time::Instant::now();
+        let lifecycle = request_id
+            .as_ref()
+            .map(|id| {
+                LifecycleTrace::from_request_id_with_role(
+                    id.clone(),
+                    self.lifecycle_operation_role(),
+                )
+            })
+            .unwrap_or_else(|| {
+                LifecycleTrace::from_environment_with_role(self.lifecycle_operation_role())
+            });
 
         // Increment inflight and ensure it's decremented on all exits via RAII guard
         let _inflight_guard = self.metrics().map(|m| {
@@ -790,12 +824,16 @@ where
             }
         });
 
+        let worker_admission = lifecycle.start(LifecycleStage::WorkerAdmission);
         let ParsedRequest {
             request,
             response_connection_info,
             frontend_send_ts_ns,
             payload_codec,
-        } = self.parse_and_build_request(payload).await?;
+        } = self
+            .parse_and_build_request(payload)
+            .instrument(worker_admission.clone())
+            .await?;
 
         // Compute network transit time (T2 - T1) using cross-process wall-clock timestamps
         if let Some(t1_ns) = frontend_send_ts_ns {
@@ -808,6 +846,10 @@ where
                 .map_err(|error| PipelineError::Generic(error.to_string()))?;
         let configured_mode = ResponsePlaneMode::configured()
             .map_err(|error| PipelineError::Generic(error.to_string()))?;
+        let response_modes = ResponsePlaneModes {
+            configured: configured_mode,
+            advertised: advertised_mode,
+        };
         let cancellation_counter = self
             .metrics()
             .map(|metrics| metrics.cancellation_total.clone());
@@ -820,6 +862,7 @@ where
                     response_connection_info,
                     cancellation_counter,
                 )
+                .instrument(worker_admission.clone())
                 .await
                 .map_err(|error| {
                     if let Some(metrics) = self.metrics() {
@@ -830,12 +873,13 @@ where
                     }
                     PipelineError::Generic(format!("Failed to create response stream: {error}"))
                 })?;
+                drop(worker_admission);
                 self.generate_and_publish(
                     request,
                     payload_codec,
                     start_time,
-                    configured_mode,
-                    advertised_mode,
+                    response_modes,
+                    &lifecycle,
                     publisher,
                 )
                 .await?;
@@ -849,6 +893,7 @@ where
                         response_connection_info,
                         cancellation_counter,
                     )
+                    .instrument(worker_admission.clone())
                     .await
                     .map_err(|error| {
                         if let Some(metrics) = self.metrics() {
@@ -861,12 +906,13 @@ where
                             "Failed to create QUIC response stream: {error}"
                         ))
                     })?;
+                drop(worker_admission);
                 self.generate_and_publish(
                     request,
                     payload_codec,
                     start_time,
-                    configured_mode,
-                    advertised_mode,
+                    response_modes,
+                    &lifecycle,
                     publisher,
                 )
                 .await?;
@@ -995,14 +1041,18 @@ mod tests {
             let publisher = MismatchPublisher::default();
             let prologue = publisher.prologue.clone();
             let finished = publisher.finished.clone();
+            let lifecycle = LifecycleTrace::from_environment();
 
             let error = ingress
                 .generate_and_publish(
                     Context::new(serde_json::json!({})),
                     RequestPlanePayloadCodec::Json,
                     Instant::now(),
-                    configured,
-                    advertised,
+                    ResponsePlaneModes {
+                        configured,
+                        advertised,
+                    },
+                    &lifecycle,
                     publisher,
                 )
                 .await

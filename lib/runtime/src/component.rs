@@ -54,7 +54,11 @@ use derive_builder::Builder;
 use derive_getters::Getters;
 use educe::Educe;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, hash::Hash, sync::Arc};
+use std::{
+    collections::HashMap,
+    hash::Hash,
+    sync::{Arc, OnceLock},
+};
 use validator::{Validate, ValidationError};
 
 mod client;
@@ -280,6 +284,7 @@ impl Component {
             name: endpoint.into(),
             labels: Vec::new(),
             metrics_registry: crate::MetricsRegistry::new(),
+            lifecycle_operation_role: Arc::new(OnceLock::new()),
         };
         // Attach endpoint registry so scrapes traverse separate registries (avoids collisions).
         self.get_metrics_registry()
@@ -368,6 +373,9 @@ pub struct Endpoint {
 
     /// This hierarchy's own metrics registry
     metrics_registry: crate::MetricsRegistry,
+
+    /// Topology role shared by all clones of this endpoint.
+    lifecycle_operation_role: Arc<OnceLock<crate::telemetry::LifecycleOperationRole>>,
 }
 
 impl Hash for Endpoint {
@@ -438,6 +446,40 @@ impl Endpoint {
 
     pub fn component(&self) -> &Component {
         &self.component
+    }
+
+    /// Record the topology role already advertised for this serving endpoint.
+    pub fn set_lifecycle_operation_role(
+        &self,
+        role: crate::telemetry::LifecycleOperationRole,
+    ) -> anyhow::Result<()> {
+        if let Some(existing) = self.lifecycle_operation_role.get() {
+            anyhow::ensure!(
+                *existing == role,
+                "endpoint {} lifecycle role is already {existing:?}, cannot set it to {role:?}",
+                self.id()
+            );
+            return Ok(());
+        }
+
+        if self.lifecycle_operation_role.set(role).is_err() {
+            let existing = self
+                .lifecycle_operation_role
+                .get()
+                .expect("lifecycle role was concurrently initialized");
+            anyhow::ensure!(
+                *existing == role,
+                "endpoint {} lifecycle role is already {existing:?}, cannot set it to {role:?}",
+                self.id()
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn lifecycle_operation_role(
+        &self,
+    ) -> Arc<OnceLock<crate::telemetry::LifecycleOperationRole>> {
+        self.lifecycle_operation_role.clone()
     }
 
     pub async fn client(&self) -> anyhow::Result<client::Client> {

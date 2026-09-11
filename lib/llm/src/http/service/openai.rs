@@ -24,6 +24,9 @@ use axum::{
 use base64::Engine as _;
 use bytes::Bytes;
 use dynamo_runtime::config::{env_is_truthy, environment_names::llm as env_llm};
+use dynamo_runtime::telemetry::{
+    LIFECYCLE_TRACE_CONTEXT_KEY, LifecycleStage, LifecycleTerminal, LifecycleTrace, TerminalOutcome,
+};
 use dynamo_runtime::{
     pipeline::{AsyncEngineContextProvider, Context},
     protocols::annotated::AnnotationsProvider,
@@ -36,7 +39,8 @@ use super::{
     RouteDoc, apply_request_tool_call_parsing_options,
     disconnect::{
         ConnectionHandle, StreamErrorSignal, create_connection_monitor, monitor_for_disconnects,
-        monitor_for_disconnects_with_activity, monitor_for_disconnects_with_error_signal,
+        monitor_for_disconnects_with_activity_and_error_signal,
+        monitor_for_disconnects_with_error_signal,
     },
     error::{HttpError, invalid_argument},
     metadata::{attach_x_request_id, extract_metadata_from_http},
@@ -132,6 +136,29 @@ pub(super) fn get_body_limit() -> usize {
 }
 
 pub type ErrorResponse = (StatusCode, Json<ErrorMessage>);
+
+/// Records cancellation if an SSE response is dropped before its stream reaches
+/// an explicit terminal outcome.
+struct StreamingLifecycleTerminal(LifecycleTerminal);
+
+impl Drop for StreamingLifecycleTerminal {
+    fn drop(&mut self) {
+        self.0.finish(TerminalOutcome::Cancelled);
+    }
+}
+
+fn terminal_outcome_for_error_response(response: &ErrorResponse) -> TerminalOutcome {
+    match extract_error_type_from_response(response) {
+        ErrorType::Validation
+        | ErrorType::NotFound
+        | ErrorType::Overload
+        | ErrorType::Unavailable
+        | ErrorType::NotImplemented => TerminalOutcome::Rejected,
+        ErrorType::Cancelled => TerminalOutcome::Cancelled,
+        ErrorType::ResponseTimeout => TerminalOutcome::TimedOut,
+        ErrorType::Internal | ErrorType::None => TerminalOutcome::Failed,
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub(crate) struct ErrorMessage {
@@ -546,6 +573,13 @@ impl ErrorMessage {
     /// If successful, it will return the [`HttpError`] as an [`ErrorMessage::internal_server_error`]
     /// with the details of the error.
     pub fn from_anyhow(err: anyhow::Error, alt_msg: &str) -> ErrorResponse {
+        if super::metrics::request_was_timed_out(err.as_ref()) {
+            let mut response =
+                ErrorMessage::internal_server_error_with_details(alt_msg, format!("{err:#}"));
+            response.1.metric_error_type = Some(ErrorType::ResponseTimeout);
+            return response;
+        }
+
         if let Some(rejection) = find_queue_rejection_in_chain(err.as_ref()) {
             let code = overload_status_code();
             return (
@@ -1986,8 +2020,28 @@ async fn handler_chat_completions(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ErrorResponse> {
-    let body = read_json_request_body(&headers, body).await?;
-    let mut request: NvCreateChatCompletionRequest = parse_json_request("chat completions", &body)?;
+    let request_id = get_or_create_request_id(&headers);
+    let lifecycle = LifecycleTrace::frontend_request_without_session(request_id.clone());
+    let lifecycle_request = lifecycle.start_request();
+    let request_lifecycle = lifecycle_request.span();
+    let terminal = lifecycle_request.terminal();
+    let body = match read_json_request_body(&headers, body).await {
+        Ok(body) => body,
+        Err(error) => {
+            lifecycle_request.record_session(&request_id, None);
+            terminal.finish(terminal_outcome_for_error_response(&error));
+            return Err(error);
+        }
+    };
+    let mut request: NvCreateChatCompletionRequest =
+        match parse_json_request("chat completions", &body) {
+            Ok(request) => request,
+            Err(error) => {
+                lifecycle_request.record_session(&request_id, None);
+                terminal.finish(terminal_outcome_for_error_response(&error));
+                return Err(error);
+            }
+        };
     if *FORCE_INCLUDE_USAGE && request.inner.stream.unwrap_or(false) {
         delta_common::force_include_usage(&mut request.inner.stream_options);
     }
@@ -1996,10 +2050,18 @@ async fn handler_chat_completions(
     // serving readiness). An aggregated request to a decode-only namespace
     // would otherwise hang/crash on the decode worker. Resolve the templated
     // model first so empty/missing `model` fields don't bypass the gate.
-    check_ready(&state)?;
+    if let Err(error) = check_ready(&state) {
+        lifecycle_request.record_session(&request_id, None);
+        terminal.finish(terminal_outcome_for_error_response(&error));
+        return Err(error);
+    }
     let resolved_model = resolve_request_model(&request.inner.model, template.as_ref());
-    if !resolved_model.is_empty() {
-        check_model_serving_ready(&state, resolved_model)?;
+    if !resolved_model.is_empty()
+        && let Err(error) = check_model_serving_ready(&state, resolved_model)
+    {
+        lifecycle_request.record_session(&request_id, None);
+        terminal.finish(terminal_outcome_for_error_response(&error));
+        return Err(error);
     }
 
     if !state.nvext_enabled() {
@@ -2016,7 +2078,6 @@ async fn handler_chat_completions(
         apply_frontend_nvext_policy(request.nvext.take(), &headers, state.nvext_enabled());
 
     // create the context for the request
-    let request_id = get_or_create_request_id(&headers);
     let streaming = request.inner.stream.unwrap_or(false);
     let resolved_model = resolve_request_model(&request.inner.model, template.as_ref());
     // Canonicalize alias → primary for the metric label.
@@ -2029,10 +2090,19 @@ async fn handler_chat_completions(
         endpoint: Endpoint::ChatCompletions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let mut request =
-        context_from_headers_with_input_trigger(request, request_id, &headers, |request| {
-            Some(classify_chat_request(request))
-        })?;
+    let mut request = match context_from_headers_with_input_trigger(
+        request,
+        request_id.clone(),
+        &headers,
+        |request| Some(classify_chat_request(request)),
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            lifecycle_request.record_session(&request_id, None);
+            terminal.finish(terminal_outcome_for_error_response(&error));
+            return Err(error);
+        }
+    };
     if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
         request.insert(
             crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
@@ -2040,6 +2110,14 @@ async fn handler_chat_completions(
         );
     }
     let context = request.context();
+
+    let session_id = request
+        .get_optional::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)
+        .ok()
+        .flatten()
+        .map(|context| context.session_id.clone());
+    lifecycle_request.record_session(&request_id, session_id.as_deref());
+    request.insert(LIFECYCLE_TRACE_CONTEXT_KEY, lifecycle.clone());
 
     // create the connection handles
     let (mut connection_handle, stream_handle) = create_connection_monitor(
@@ -2049,15 +2127,34 @@ async fn handler_chat_completions(
     )
     .await;
 
-    let response =
-        tokio::spawn(chat_completions(state, template, request, stream_handle).in_current_span())
-            .await
-            .map_err(|e| {
-                ErrorMessage::internal_server_error_with_details(
-                    "Failed to await chat completions task",
-                    format!("{e:?}"),
-                )
-            })?;
+    let response = match tokio::spawn(
+        chat_completions(
+            state,
+            template,
+            request,
+            stream_handle,
+            lifecycle,
+            request_lifecycle.clone(),
+            terminal.clone(),
+        )
+        .instrument(request_lifecycle),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            terminal.finish(TerminalOutcome::Failed);
+            connection_handle.disarm();
+            return Err(ErrorMessage::internal_server_error_with_details(
+                "Failed to await chat completions task",
+                format!("{error:?}"),
+            ));
+        }
+    };
+
+    if let Err(error_response) = &response {
+        terminal.finish(terminal_outcome_for_error_response(error_response));
+    }
 
     // if we got here, then we will return a response and the potentially long running task has completed successfully
     // without need to be cancelled.
@@ -2267,6 +2364,9 @@ struct BackendErrorInfo {
     /// status alone is not enough to recover it. `None` means "derive it from
     /// `status`" — the ordinary case for a status the worker supplied.
     sanitized: Option<SanitizedError>,
+    /// Semantic classification preserved from the typed request-plane error.
+    /// This may intentionally differ from the HTTP status classification.
+    metric_error_type: Option<ErrorType>,
 }
 
 impl BackendErrorInfo {
@@ -2276,7 +2376,13 @@ impl BackendErrorInfo {
             message,
             status,
             sanitized: None,
+            metric_error_type: None,
         }
+    }
+
+    fn with_metric_error_type(mut self, error_type: Option<ErrorType>) -> Self {
+        self.metric_error_type = error_type;
+        self
     }
 }
 
@@ -2295,14 +2401,15 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
     if let Some(event_type) = &event.event
         && event_type == "error"
     {
-        use dynamo_runtime::error::{BackendError, ErrorType};
+        use dynamo_runtime::error::{BackendError, ErrorType as DynamoErrorType};
 
         // Classify only this event's error, not its causes. An inner invalid
         // argument must not override an outer unavailable or internal error.
         let invalid_argument = event.error.as_ref().filter(|error| {
             matches!(
                 error.error_type(),
-                ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument)
+                DynamoErrorType::InvalidArgument
+                    | DynamoErrorType::Backend(BackendError::InvalidArgument)
             )
         });
 
@@ -2337,6 +2444,11 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
             .error
             .as_ref()
             .is_some_and(|error| super::metrics::request_was_rejected(error));
+        let metric_error_type = event
+            .error
+            .as_ref()
+            .filter(|error| super::metrics::request_was_timed_out(*error))
+            .map(|_| ErrorType::ResponseTimeout);
 
         // Parse the status-bearing node's own message. The diagnostic string
         // above includes its causes and therefore is not necessarily JSON.
@@ -2366,14 +2478,18 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
                 message,
                 status: code,
                 sanitized: overloaded.then_some(SanitizedError::Overloaded),
+                metric_error_type,
             });
         }
 
         if let Some(invalid_argument) = invalid_argument {
-            return Some(BackendErrorInfo::from_status(
-                invalid_argument.message().to_string(),
-                StatusCode::BAD_REQUEST,
-            ));
+            return Some(
+                BackendErrorInfo::from_status(
+                    invalid_argument.message().to_string(),
+                    StatusCode::BAD_REQUEST,
+                )
+                .with_metric_error_type(metric_error_type),
+            );
         }
 
         if overloaded {
@@ -2381,13 +2497,14 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
                 message: error_str,
                 status: overload_status_code(),
                 sanitized: Some(SanitizedError::Overloaded),
+                metric_error_type,
             });
         }
 
-        return Some(BackendErrorInfo::from_status(
-            error_str,
-            StatusCode::INTERNAL_SERVER_ERROR,
-        ));
+        return Some(
+            BackendErrorInfo::from_status(error_str, StatusCode::INTERNAL_SERVER_ERROR)
+                .with_metric_error_type(metric_error_type),
+        );
     }
 
     // Check if the data payload itself contains an error structure with code >= 400
@@ -2536,12 +2653,13 @@ fn backend_error_response(backend_error: BackendErrorInfo) -> ErrorResponse {
         message,
         status,
         sanitized,
+        metric_error_type,
     } = backend_error;
     let action = match sanitized {
         Some(variant) => BackendStatusAction::Sanitize(variant),
         None => BackendStatusAction::triage(status),
     };
-    match action {
+    let mut response = match action {
         BackendStatusAction::Sanitize(variant) => {
             ErrorMessage::sanitized_with_details(variant, message)
         }
@@ -2559,7 +2677,11 @@ fn backend_error_response(backend_error: BackendErrorInfo) -> ErrorResponse {
                 metric_error_type: None,
             }),
         ),
+    };
+    if let Some(error_type) = metric_error_type {
+        response.1.metric_error_type = Some(error_type);
     }
+    response
 }
 
 /// Read the pre-commit peek window from the environment.
@@ -2789,6 +2911,9 @@ async fn chat_completions(
     template: Option<RequestTemplate>,
     mut request: Context<NvCreateChatCompletionRequest>,
     stream_handle: ConnectionHandle,
+    lifecycle: LifecycleTrace,
+    request_lifecycle: tracing::Span,
+    terminal: LifecycleTerminal,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
@@ -2979,17 +3104,22 @@ async fn chat_completions(
         let mut reasoning_buffer: HashMap<u32, String> = HashMap::new();
         let mut dispatched_tool_ids: HashSet<(u32, String)> = HashSet::new();
         let mut emitted_roles: HashSet<u32> = HashSet::new();
-
         // Optionally prepend extra SSE events before each regular chunk:
         //   - `event: tool_call_dispatch`  — complete tool call detected early (tool dispatch)
         //   - `event: reasoning_dispatch`  — complete reasoning block (emitted once)
         let (activity_tx, activity_rx) = tokio::sync::mpsc::unbounded_channel();
+        let monitor_error_signal = StreamErrorSignal::default();
+        let producer_error_signal = monitor_error_signal.clone();
         let stream = async_stream::stream! {
             let mut stream = Box::pin(stream);
             let mut events: Vec<Result<Event, axum::Error>> = Vec::with_capacity(4);
 
             while let Some(mut response) = stream.next().await {
                 events.clear();
+                let response_timed_out = response
+                    .error
+                    .as_ref()
+                    .is_some_and(|error| super::metrics::request_was_timed_out(error));
 
                 // When parallel_tool_calls is false, surface only the first tool call
                 // Keep index 0 and drop any higher indexes
@@ -3011,6 +3141,7 @@ async fn chat_completions(
                 }
 
                 // Drop empty chunks from multi-byte token assembly.
+                // Empty chunks are transport artifacts, not a streaming boundary.
                 if response.data.as_ref().is_some_and(is_empty_stream_response) {
                     let _ = activity_tx.send(());
                     // Not forwarded, but the engine still generated these tokens,
@@ -3027,6 +3158,7 @@ async fn chat_completions(
                     );
                     continue;
                 }
+
                 if tool_dispatch_enabled {
                     streaming_tool_dispatch_events(
                         &response,
@@ -3055,7 +3187,12 @@ async fn chat_completions(
                 match sse_result {
                     Ok(Some(ev)) => events.push(Ok(ev)),
                     Ok(None) => {}
-                    Err(e) => events.push(Err(e)),
+                    Err(e) => {
+                        if response_timed_out {
+                            producer_error_signal.set(ErrorType::ResponseTimeout);
+                        }
+                        events.push(Err(e));
+                    }
                 }
 
                 events.reverse();
@@ -3065,13 +3202,44 @@ async fn chat_completions(
             }
         };
         let keep_alive = state.sse_keep_alive_for_response(stream_can_defer_all_output);
-        let stream = monitor_for_disconnects_with_activity(
+        let stream = monitor_for_disconnects_with_activity_and_error_signal(
             stream,
-            ctx,
+            ctx.clone(),
             inflight_guard,
             stream_handle,
             activity_rx,
+            monitor_error_signal.clone(),
         );
+        let terminal = terminal.clone();
+        // Arm the cancellation fallback before Axum can take ownership of the
+        // lazy response body. If the body is dropped without being polled, the
+        // guard still records cancellation instead of an unknown outcome.
+        let stream_terminal = StreamingLifecycleTerminal(terminal.clone());
+        let stream = async_stream::stream! {
+            let _stream_terminal = stream_terminal;
+            let mut response_streaming = None;
+            let mut inner = Box::pin(stream);
+            while let Some(item) = inner.next().await {
+                // This monitored stream is the final source of client-visible
+                // SSE events. It includes regular and side-channel events as
+                // well as errors converted into structured SSE + [DONE].
+                if response_streaming.is_none() {
+                    let _entered_request_lifecycle = request_lifecycle.enter();
+                    response_streaming = Some(lifecycle.start(LifecycleStage::ResponseStreaming));
+                }
+                yield item;
+            }
+            if let Some(error_type) = monitor_error_signal.error_type() {
+                terminal.finish(match error_type {
+                    ErrorType::ResponseTimeout => TerminalOutcome::TimedOut,
+                    _ => TerminalOutcome::Failed,
+                });
+            } else if ctx.is_stopped() || ctx.is_killed() {
+                terminal.finish(TerminalOutcome::Cancelled);
+            } else {
+                terminal.finish(TerminalOutcome::Success);
+            }
+        };
 
         let mut sse_stream = Sse::new(stream);
         if let Some(keep_alive) = keep_alive {
@@ -3120,6 +3288,9 @@ async fn chat_completions(
         // assembled but never delivered. Override to cancelled.
         if ctx.is_killed() {
             inflight_guard.mark_error(ErrorType::Cancelled);
+            terminal.finish(TerminalOutcome::Cancelled);
+        } else {
+            terminal.finish(TerminalOutcome::Success);
         }
         Ok(Json(crate::reasoning_field::RoutedReasoning::new(
             response,
@@ -6032,6 +6203,7 @@ mod tests {
             message: "Worker local total request limit reached (32/32)".to_string(),
             status: StatusCode::TOO_MANY_REQUESTS,
             sanitized: Some(SanitizedError::Overloaded),
+            metric_error_type: Some(ErrorType::Overload),
         });
 
         assert_eq!(response.0, overload_status_code());
@@ -6101,6 +6273,46 @@ mod tests {
             assert_eq!(response.1.code, StatusCode::SERVICE_UNAVAILABLE.as_u16());
             assert_eq!(response.1.message, "Service temporarily unavailable");
         }
+    }
+
+    #[test]
+    fn response_timeout_from_anyhow_preserves_terminal_outcome() {
+        use dynamo_runtime::error::{DynamoError, ErrorType as DynamoErrorType};
+
+        let err: anyhow::Error = DynamoError::builder()
+            .error_type(DynamoErrorType::ResponseTimeout)
+            .message("request-plane response timeout")
+            .build()
+            .into();
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::ResponseTimeout
+        );
+        assert_eq!(
+            terminal_outcome_for_error_response(&response),
+            TerminalOutcome::TimedOut
+        );
+    }
+
+    #[test]
+    fn terminal_outcome_uses_semantic_error_type() {
+        let response = (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorMessage {
+                message: "request rejected because the service is overloaded".to_string(),
+                error_type: "service_unavailable".to_string(),
+                code: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+                details: None,
+                metric_error_type: Some(ErrorType::Overload),
+            }),
+        );
+
+        assert_eq!(
+            terminal_outcome_for_error_response(&response),
+            TerminalOutcome::Rejected
+        );
     }
 
     #[test]
@@ -7056,6 +7268,39 @@ mod tests {
             assert_eq!(error_response.1.error_type, "Bad Request");
             assert_eq!(error_response.1.message, "unsupported JSON schema keyword");
         }
+    }
+
+    #[tokio::test]
+    async fn test_check_for_backend_error_preserves_response_timeout() {
+        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use dynamo_runtime::error::{DynamoError, ErrorType as DynamoErrorType};
+        use futures::stream;
+
+        let error_event = Annotated::<NvCreateChatCompletionStreamResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(
+                DynamoError::builder()
+                    .error_type(DynamoErrorType::ResponseTimeout)
+                    .message("request-plane response timeout")
+                    .build(),
+            ),
+        };
+
+        let response = match check_for_backend_error(stream::iter(vec![error_event]), None).await {
+            Err(response) => response,
+            Ok(_) => panic!("typed response timeout must fail preflight"),
+        };
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::ResponseTimeout
+        );
+        assert_eq!(
+            terminal_outcome_for_error_response(&response),
+            TerminalOutcome::TimedOut
+        );
     }
 
     #[tokio::test]
