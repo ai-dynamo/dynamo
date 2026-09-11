@@ -621,6 +621,8 @@ def handle_directory_ensure_hbm_capacity(
     try:
         expected_epoch = int(msg["expected_epoch"])
         required = max(0, int(msg.get("required_blocks", 0)))
+        eligible = msg.get("eligible_slot_ids")
+        eligible = None if eligible is None else {int(value) for value in eligible}
     except (KeyError, TypeError, ValueError) as exc:
         return {"ok": False, "error": f"malformed capacity request: {exc}"}
     with daemon._content_hash_lock:
@@ -644,6 +646,9 @@ def handle_directory_ensure_hbm_capacity(
             and entry.get("tier") == "hbm"
             and entry.get("state") == "ready"
             and int(entry.get("_claim_count", 0)) == 0
+            and (
+                eligible is None or set(entry.get("slot_ids") or ()).issubset(eligible)
+            )
         ]
         candidates.sort(key=lambda pair: int(pair[1].get("_last_access_seq", 0)))
         victims = []

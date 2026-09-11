@@ -199,6 +199,37 @@ def _safe_free_count(client: KVLeaseClient) -> int:
         return -1
 
 
+def _restore_directory_victims(directory, victims: list[dict]) -> None:
+    """Compensate a known destructive selection before leases are touched."""
+    if not victims:
+        return
+    items = [
+        {
+            "content_hash": bytes(victim["content_hash"]),
+            "engine_id": str(victim["engine_id"]),
+            "slot_ids": [int(page) for page in victim["slot_ids"]],
+            "generations": [int(generation) for generation in victim["generations"]],
+            "tier": "hbm",
+            "active": False,
+        }
+        for victim in victims
+    ]
+    if directory.publish(items) != len(items):
+        raise RuntimeError("could not restore retired SGLang HBM directory entries")
+    entries = directory.lookup_authoritative([item["content_hash"] for item in items])
+    expected = [
+        (item["engine_id"], item["slot_ids"], item["generations"]) for item in items
+    ]
+    observed = [
+        None
+        if entry is None
+        else (entry.get("engine_id"), entry.get("slot_ids"), entry.get("generations"))
+        for entry in entries
+    ]
+    if observed != expected:
+        raise RuntimeError("restored SGLang HBM directory entries did not verify")
+
+
 def _ensure_directory_capacity(self, required_pages: int) -> int:
     st = _state(self)
     directory = getattr(self, "_gms_kv_directory", None)
@@ -212,36 +243,62 @@ def _ensure_directory_capacity(self, required_pages: int) -> int:
     if available < 0 or available >= int(required_pages):
         return 0
     shortage = int(required_pages) - available
-    if shortage == 0:
+    # Retained means sealed, not evicted from the engine's native prefix tree.
+    # Only native-free pages may be retired and handed to a future allocation.
+    eligible = _pages_to_list(self.free_pages)
+    if not eligible:
         return 0
-    victims = directory.ensure_hbm_capacity(shortage)
     lease_map = st["leases_by_page"]
     retained = st["retained_pages"]
     assert isinstance(lease_map, dict) and isinstance(retained, set)
-    releases = []
-    restore_active = []
-    for victim in victims:
-        for page, generation in zip(victim["slot_ids"], victim["generations"]):
-            page = int(page)
-            current = lease_map.get(page)
-            if current is not None and page not in retained:
-                restore_active.append(
-                    {
-                        "content_hash": victim["content_hash"],
-                        "engine_id": victim["engine_id"],
-                        "slot_id": page,
-                        "generation": int(current.generation),
-                        "tier": "hbm",
-                        "active": True,
-                    }
-                )
-                continue
-            lease_map.pop(page, None)
-            retained.discard(page)
-            releases.append(current or KVLease(page, int(generation)))
-    if restore_active:
-        directory.publish(restore_active)
+    victims = []
+    victims_leases = []
+    try:
+        victims = directory.ensure_hbm_capacity(shortage, eligible_slot_ids=eligible)
+        seen = set()
+        for victim in victims:
+            pages = victim["slot_ids"]
+            generations = victim["generations"]
+            if len(pages) != len(generations):
+                raise RuntimeError("malformed GMS pressure victim")
+            for page, generation in zip(pages, generations):
+                lease = KVLease(int(page), int(generation))
+                current = lease_map.get(lease.block_id)
+                if lease.block_id not in eligible or lease.block_id in seen:
+                    raise RuntimeError(
+                        "GMS pressure victim is not uniquely native-free"
+                    )
+                if current is not None and (
+                    current != lease or lease.block_id not in retained
+                ):
+                    raise RuntimeError(
+                        "GMS pressure victim has divergent retained generation"
+                    )
+                seen.add(lease.block_id)
+                victims_leases.append(lease)
+    except Exception:
+        # No lease moved yet. Republish every known removed directory record.
+        try:
+            _restore_directory_victims(directory, victims)
+        except Exception as restore_error:
+            raise RuntimeError(
+                "could not compensate SGLang HBM capacity selection; "
+                "retaining leases and failing closed"
+            ) from restore_error
+        raise
+    if not victims_leases:
+        return 0
+    # Exact-generation adoption validates foreign preserved pages too. It never
+    # makes bytes FREE; failure leaves undiscoverable leases for recovery fencing.
+    releases = client.adopt(victims_leases)
+    if [lease.block_id for lease in releases] != [
+        lease.block_id for lease in victims_leases
+    ]:
+        raise RuntimeError("GMS pressure victim generation validation failed")
     client.release(releases)
+    for lease in releases:
+        lease_map.pop(lease.block_id, None)
+        retained.discard(lease.block_id)
     return len(releases)
 
 
