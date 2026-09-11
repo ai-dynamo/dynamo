@@ -99,7 +99,7 @@ jobs:
           export KUBECONFIG="${RUNNER_TEMP}/n2-kubeconfig"
           printf '%s' "$KUBECONFIG_B64" | base64 --decode > "$KUBECONFIG"
           kubectl -n default get pvc model-cache
-          kubectl create -f tests/deploy/n2/model-download.yaml --dry-run=client -o json |
+          kubectl -n default create -f tests/deploy/n2/model-download.yaml --dry-run=client -o json |
             jq --arg image "$WORKER_IMAGE" '.spec.template.spec.containers[0].image = $image' |
             kubectl -n default apply -f -
           kubectl -n default wait --for=condition=complete job/n2-model-download --timeout=920s
