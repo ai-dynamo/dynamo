@@ -26,6 +26,7 @@ import time
 from pathlib import Path
 
 import pytest
+import yaml
 
 from tests.deploy.dgd_utils import (
     DeploymentSpec,
@@ -132,6 +133,23 @@ def _logs(namespace: str, pod_name: str, container: str) -> str:
     ).stdout
 
 
+def _rdma_counter(
+    namespace: str,
+    pod_name: str,
+    container: str,
+    counter: str,
+) -> int:
+    pattern = f"/host/sys/class/infiniband/*/ports/*/counters/{counter}"
+    snippet = (
+        "import glob;"
+        f"paths=glob.glob('{pattern}');"
+        "assert paths, 'No host HCA counters found';"
+        "print(sum(int(open(path).read()) for path in paths)*4)"
+    )
+    result = _exec(namespace, pod_name, container, "python3", "-c", snippet)
+    return int(result.stdout.strip())
+
+
 def _wait_until(predicate, description: str, timeout: int) -> None:
     deadline = time.monotonic() + timeout
     last_error: subprocess.CalledProcessError | None = None
@@ -168,8 +186,29 @@ def _render_manifest(tmp_path: Path, image: str) -> Path:
         env=env,
         text=True,
     )
+    manifest = yaml.safe_load(result.stdout)
+    worker = next(
+        component
+        for component in manifest["spec"]["components"]
+        if component["name"] == WORKER
+    )
+    pod_spec = worker["podTemplate"]["spec"]
+    pod_spec["volumes"].append(
+        {
+            "name": "rdma-counters",
+            "hostPath": {"path": "/sys", "type": "Directory"},
+        }
+    )
+    for container in pod_spec["containers"]:
+        container["volumeMounts"].append(
+            {
+                "name": "rdma-counters",
+                "mountPath": "/host/sys",
+                "readOnly": True,
+            }
+        )
     manifest_path = tmp_path / "kvcr-memory-service.yaml"
-    manifest_path.write_text(result.stdout)
+    manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
     return manifest_path
 
 
@@ -407,6 +446,18 @@ async def test_kvcr_memory_service_guard_serves_after_engine_restart(
         target_protocols_before = len(
             RDMA_PROTOCOL_RE.findall(_logs(namespace, target.name, MAIN))
         )
+        xmit_before = _rdma_counter(
+            namespace,
+            source.name,
+            KVCR_SERVICES,
+            "port_xmit_data",
+        )
+        recv_before = _rdma_counter(
+            namespace,
+            target.name,
+            MAIN,
+            "port_rcv_data",
+        )
         recovered_content = _request(request_url)
         assert recovered_content == baseline_content
         transfer_deltas: dict[str, float] = {}
@@ -448,14 +499,43 @@ async def test_kvcr_memory_service_guard_serves_after_engine_restart(
         assert (
             len(RDMA_PROTOCOL_RE.findall(target_logs)) > target_protocols_before
         ), "Target did not select UCX rc_mlx5 for the remote request"
+        xmit_bytes = (
+            _rdma_counter(
+                namespace,
+                source.name,
+                KVCR_SERVICES,
+                "port_xmit_data",
+            )
+            - xmit_before
+        )
+        recv_bytes = (
+            _rdma_counter(
+                namespace,
+                target.name,
+                MAIN,
+                "port_rcv_data",
+            )
+            - recv_before
+        )
+        assert xmit_bytes >= tier_bytes, (
+            "Source HCA transmit bytes did not cover the KVCR payload: "
+            f"hca={xmit_bytes}, kvcr={int(tier_bytes)}"
+        )
+        assert recv_bytes >= tier_bytes, (
+            "Target HCA receive bytes did not cover the KVCR payload: "
+            f"hca={recv_bytes}, kvcr={int(tier_bytes)}"
+        )
         logger.info(
             "KVCR_TEST transfer source=%s target=%s blocks=%d bytes=%d "
-            "external_tokens=%d protocol=rc_mlx5",
+            "external_tokens=%d hca_xmit_bytes=%d hca_recv_bytes=%d "
+            "protocol=rc_mlx5",
             source.name,
             target.name,
             int(blocks),
             int(tier_bytes),
             int(external_tokens),
+            xmit_bytes,
+            recv_bytes,
         )
         _capture_workers(deployment, pods, ".remote-delivery")
 
