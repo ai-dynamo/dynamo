@@ -172,6 +172,7 @@ func TestDynamoGraphDeploymentReconcileFinalizesDeletingStoredCheckpointIncompat
 		Build()
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client:        kubeClient,
+		APIReader:     kubeClient,
 		Recorder:      events.NewFakeRecorder(10),
 		Config:        &configv1alpha1.OperatorConfiguration{},
 		RuntimeConfig: &controller_common.RuntimeConfig{},
@@ -209,6 +210,7 @@ func TestDynamoGraphDeploymentReconcileFinalizesWithoutSnapshotTypes(t *testing.
 		Build()
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client:        kubeClient,
+		APIReader:     kubeClient,
 		Recorder:      events.NewFakeRecorder(10),
 		Config:        &configv1alpha1.OperatorConfiguration{},
 		RuntimeConfig: &controller_common.RuntimeConfig{},
@@ -228,6 +230,72 @@ func TestDynamoGraphDeploymentReconcileFinalizesWithoutSnapshotTypes(t *testing.
 		require.NoError(t, err)
 		require.False(t, controller_common.ContainsFinalizer(&stored))
 	}
+}
+
+func TestDynamoGraphDeploymentReconcileReturnsSnapshotRBACFailureFromAPIReader(t *testing.T) {
+	t.Log("Create a deleting DGD whose cache must not lazily start a Snapshot informer")
+	now := metav1.Now()
+	dgd := &v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{
+		Name:              "test-dgd",
+		Namespace:         "default",
+		DeletionTimestamp: &now,
+	}}
+	controller_common.AddFinalizer(dgd)
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	cacheReadErr := fmt.Errorf("cache-backed Snapshot list must not be used during finalization")
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(testScheme).
+		WithObjects(dgd).
+		WithStatusSubresource(&v1beta1.DynamoGraphDeployment{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if _, ok := list.(*snapshotv1alpha1.SnapshotJobList); ok {
+					return cacheReadErr
+				}
+				return c.List(ctx, list, opts...)
+			},
+		}).
+		Build()
+	snapshotRBACErr := apierrors.NewForbidden(
+		snapshotv1alpha1.GroupVersion.WithResource("snapshotjobs").GroupResource(),
+		"",
+		fmt.Errorf("service account cannot list SnapshotJobs"),
+	)
+	apiReaderUsed := false
+	apiReader := fake.NewClientBuilder().
+		WithScheme(testScheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if _, ok := list.(*snapshotv1alpha1.SnapshotJobList); ok {
+					apiReaderUsed = true
+					return snapshotRBACErr
+				}
+				return c.List(ctx, list, opts...)
+			},
+		}).
+		Build()
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:        kubeClient,
+		APIReader:     apiReader,
+		Recorder:      events.NewFakeRecorder(10),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
+	}
+
+	t.Log("Reconcile the deletion while the direct reader returns Forbidden")
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKeyFromObject(dgd),
+	})
+	require.Error(t, err)
+	assert.True(t, apierrors.IsForbidden(err))
+	assert.NotContains(t, err.Error(), cacheReadErr.Error())
+	assert.True(t, apiReaderUsed)
+	assert.Equal(t, ctrl.Result{}, result)
+
+	t.Log("Verify the failed cleanup keeps the finalizer for a retry")
+	var stored v1beta1.DynamoGraphDeployment
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), &stored))
+	assert.True(t, controller_common.ContainsFinalizer(&stored))
 }
 
 func TestDGDScalingAdaptersReconciler_Reconcile(t *testing.T) {

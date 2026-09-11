@@ -60,6 +60,7 @@ func newTestDGDCheckpointsReconciler(
 		reconciler.Config,
 		reconciler.RuntimeConfig,
 		reconciler.DockerSecretRetriever,
+		reconciler.Client,
 	)
 }
 

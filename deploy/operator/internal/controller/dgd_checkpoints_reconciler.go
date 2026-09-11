@@ -69,6 +69,7 @@ type dgdCheckpointsReconciler struct {
 	config                *configv1alpha1.OperatorConfiguration
 	runtimeConfig         *commoncontroller.RuntimeConfig
 	dockerSecretRetriever DockerSecretRetriever
+	snapshotReader        client.Reader
 }
 
 func newDGDCheckpointsReconciler(
@@ -76,12 +77,14 @@ func newDGDCheckpointsReconciler(
 	config *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *commoncontroller.RuntimeConfig,
 	dockerSecretRetriever DockerSecretRetriever,
+	snapshotReader client.Reader,
 ) *dgdCheckpointsReconciler {
 	return &dgdCheckpointsReconciler{
 		dgdResourceSyncer:     syncer,
 		config:                config,
 		runtimeConfig:         runtimeConfig,
 		dockerSecretRetriever: dockerSecretRetriever,
+		snapshotReader:        snapshotReader,
 	}
 }
 
@@ -507,7 +510,7 @@ func (r *dgdCheckpointsReconciler) syncAutomaticPodSnapshotLifecycle(
 	}
 	snapshot := &snapshotv1alpha1.PodSnapshot{}
 	key := client.ObjectKey{Namespace: job.Namespace, Name: job.Status.PodSnapshotName}
-	if err := r.Get(ctx, key, snapshot); err != nil {
+	if err := r.snapshotReader.Get(ctx, key, snapshot); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
@@ -782,7 +785,7 @@ func (r *dgdCheckpointsReconciler) deleteAutomaticSnapshotJobsForDGD(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) (map[types.UID]string, bool, error) {
 	jobs := &snapshotv1alpha1.SnapshotJobList{}
-	if err := r.List(
+	if err := r.snapshotReader.List(
 		ctx,
 		jobs,
 		client.InNamespace(dgd.Namespace),
@@ -840,7 +843,7 @@ func (r *dgdCheckpointsReconciler) deleteAutomaticPodSnapshotsForDGD(
 	retainedSnapshotJobs map[types.UID]string,
 ) error {
 	snapshots := &snapshotv1alpha1.PodSnapshotList{}
-	if err := r.List(
+	if err := r.snapshotReader.List(
 		ctx,
 		snapshots,
 		client.InNamespace(dgd.Namespace),

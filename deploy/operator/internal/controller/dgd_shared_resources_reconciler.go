@@ -61,7 +61,7 @@ func newDGDSharedResourcesReconciler(
 		pvcs:          newDGDPVCReconciler(syncer),
 		discovery:     newDGDDiscoveryReconciler(syncer, config),
 		gmsClaims:     newDGDGMSResourceClaimsReconciler(syncer, runtimeConfig.Gate),
-		checkpoints:   newDGDCheckpointsReconciler(syncer, config, runtimeConfig, dockerSecretRetriever),
+		checkpoints:   newDGDCheckpointsReconciler(syncer, config, runtimeConfig, dockerSecretRetriever, kubeClient),
 		epp:           newDGDEPPReconciler(syncer, config, runtimeConfig, restConfig),
 		waitForLeader: newDGDWaitForLeaderReconciler(syncer),
 		sshKeys:       newDGDSSHKeysReconciler(sshKeyManager),

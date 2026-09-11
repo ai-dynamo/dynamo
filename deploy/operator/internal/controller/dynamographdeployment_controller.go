@@ -72,6 +72,7 @@ type rbacManager interface {
 // DynamoGraphDeploymentReconciler reconciles a DynamoGraphDeployment object
 type DynamoGraphDeploymentReconciler struct {
 	client.Client
+	APIReader             client.Reader
 	Config                *configv1alpha1.OperatorConfiguration
 	RuntimeConfig         *commoncontroller.RuntimeConfig
 	RestConfig            *rest.Config
@@ -237,11 +238,15 @@ func (r *DynamoGraphDeploymentReconciler) persistWorkloadProgramResult(
 
 func (r *DynamoGraphDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment) error {
 	syncer := newDGDResourceSyncer(r.Client, r.Recorder)
+
+	// Finalization uses a direct reader because checkpoint-disabled controllers do not register
+	// Snapshot informers, and a lazy cache read can block forever when Snapshot RBAC is incomplete.
 	return newDGDCheckpointsReconciler(
 		syncer,
 		r.Config,
 		r.RuntimeConfig,
 		r.DockerSecretRetriever,
+		r.APIReader,
 	).deleteAutoCheckpointsForDGD(ctx, dynamoDeployment)
 }
 
