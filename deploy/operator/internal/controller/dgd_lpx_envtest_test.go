@@ -38,7 +38,7 @@ func TestLPXGraphDeploymentAPIHandoff(t *testing.T) {
 	require.False(t, source.Status.Components["lpx"].Ready)
 
 	t.Log("Hand off the beta source to one independently observed alpha child with its beta DGD owner")
-	handoff := &dgdLPXHandoff{Client: env.Client()}
+	handoff := &dgdLPXHandoff{client: env.Client()}
 	child, err := handoff.Reconcile(t.Context(), source)
 	require.NoError(t, err)
 	require.Equal(t, int64(1), child.Generation)

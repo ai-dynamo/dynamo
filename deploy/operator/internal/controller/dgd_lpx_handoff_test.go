@@ -57,7 +57,7 @@ func newLPXHandoffFixture(t *testing.T, fixture string) (*v1alpha1.LPXGraphDeplo
 		WithRESTMapper(groveScaleRESTMapper()).
 		WithStatusSubresource(&v1beta1.DynamoGraphDeployment{}, &v1alpha1.LPXGraphDeployment{}).
 		WithObjects(source).Build()
-	child, err := (&dgdLPXHandoff{Client: kube}).Reconcile(t.Context(), source)
+	child, err := (&dgdLPXHandoff{client: kube}).Reconcile(t.Context(), source)
 	require.NoError(t, err)
 	child.UID, child.Generation = "child-uid", 3
 	require.NoError(t, kube.Update(t.Context(), child))
@@ -99,7 +99,7 @@ func TestLPXHandoffCreatesOnlyAnOwnedReference(t *testing.T) {
 	t.Log("Create the generated handoff from a real source DGD")
 	source := newLPXHandoffSource(t, "node-local-v2-lpu-only")
 	kube := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithObjects(source).Build()
-	handoff := &dgdLPXHandoff{Client: kube}
+	handoff := &dgdLPXHandoff{client: kube}
 	child, err := handoff.Reconcile(t.Context(), source)
 	require.NoError(t, err)
 	require.True(t, exactLPXSourceOwner(child, source))
@@ -120,7 +120,7 @@ func TestLPXHandoffCreatesOnlyAnOwnedReference(t *testing.T) {
 			foreign.OwnerReferences = nil
 		}
 		foreignClient := fake.NewClientBuilder().WithScheme(kube.Scheme()).WithObjects(foreign).Build()
-		_, err := (&dgdLPXHandoff{Client: foreignClient}).Reconcile(t.Context(), source)
+		_, err := (&dgdLPXHandoff{client: foreignClient}).Reconcile(t.Context(), source)
 		require.ErrorContains(t, err, "adoption is not supported", invalidIdentity)
 	}
 
@@ -303,16 +303,18 @@ func TestLPXRestartUsesPersistedSelectionAndCurrentChildStatus(t *testing.T) {
 			t.Log("Request an LPX-only restart without requiring an ordinary PCS")
 			_, source, kube := newLPXHandoffFixture(t, "node-local-v2-lpu-only")
 			source.Spec.Restart = &v1beta1.Restart{ID: "restart-1", Strategy: &v1beta1.RestartStrategy{Type: strategy}}
-			handoff := &dgdLPXHandoff{Client: kube}
+			handoff := &dgdLPXHandoff{client: kube}
 			unchanged, err := handoff.Reconcile(t.Context(), source)
 			require.NoError(t, err)
 			require.Empty(t, unchanged.Annotations[dynamo.LPXRestartAnnotation])
-			resolveProgress := (&DynamoGraphDeploymentReconciler{
+			program := (&DynamoGraphDeploymentReconciler{
 				Client: kube, RuntimeConfig: &commoncontroller.RuntimeConfig{},
-			}).newGroveProgram().resolveRestartProgress
+			}).newGroveProgram()
 			ordinaryDGD := projectOrdinaryGroveDeployment(source)
 			progress := func(ctx context.Context, source *v1beta1.DynamoGraphDeployment, inProgress []string) []string {
-				return resolveProgress(ctx, source, ordinaryDGD, inProgress)
+				return resolveCompositeGroveRestartProgress(
+					ctx, source, ordinaryDGD, inProgress, program.restartProgress, program.lpxRestartProgress,
+				)
 			}
 			restart := newDGDRestartReconciler().Resolve(t.Context(), source, &source.Status, progress)
 			require.Equal(t, []string{"lpx"}, restart.Status.InProgress)
@@ -377,7 +379,7 @@ func TestLPXHandoffOrdinaryScalingPreservesTheEntireAttempt(t *testing.T) {
 	meta.SetStatusCondition(&child.Status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionTrue, ObservedGeneration: child.Generation, Reason: "Ready"})
 	require.NoError(t, kube.Status().Update(t.Context(), child))
 	beforeChild := child.DeepCopy()
-	handoff := &dgdLPXHandoff{Client: kube}
+	handoff := &dgdLPXHandoff{client: kube}
 
 	t.Log("Reorder the pair and make five frontend-only edits without changing the child")
 	source.Spec.Components[0], source.Spec.Components[1] = source.Spec.Components[1], source.Spec.Components[0]
@@ -458,19 +460,21 @@ func TestSpecDecodeRestartRollsTheSharedChildOnce(t *testing.T) {
 					return reader.Get(ctx, key, obj, opts...)
 				},
 			})
-			resolveProgress := (&DynamoGraphDeploymentReconciler{
+			program := (&DynamoGraphDeploymentReconciler{
 				Client: observed, RuntimeConfig: &commoncontroller.RuntimeConfig{},
-			}).newGroveProgram().resolveRestartProgress
+			}).newGroveProgram()
 			ordinaryDGD := projectOrdinaryGroveDeployment(source)
 			progress := func(ctx context.Context, source *v1beta1.DynamoGraphDeployment, inProgress []string) []string {
-				return resolveProgress(ctx, source, ordinaryDGD, inProgress)
+				return resolveCompositeGroveRestartProgress(
+					ctx, source, ordinaryDGD, inProgress, program.restartProgress, program.lpxRestartProgress,
+				)
 			}
 			restarter := newDGDRestartReconciler()
 			source.Status.Restart = restarter.Resolve(t.Context(), source, &source.Status, progress).Status
 			require.NotEmpty(t, source.Status.Restart.InProgress)
 
 			t.Log("Either selected member delivers one token to the same child")
-			handoff := &dgdLPXHandoff{Client: kube}
+			handoff := &dgdLPXHandoff{client: kube}
 			child, err := handoff.Reconcile(t.Context(), source)
 			require.NoError(t, err)
 			require.Equal(t, "pair-restart", child.Annotations[dynamo.LPXRestartAnnotation])
@@ -560,7 +564,7 @@ func TestLPXChildFinalizationAndDeselectionWaitForCleanup(t *testing.T) {
 	child, source, kube := newLPXHandoffFixture(t, "node-local-v2-lpu-only")
 	child.Finalizers = []string{"test.example/child-cleanup"}
 	require.NoError(t, kube.Update(t.Context(), child))
-	handoff := &dgdLPXHandoff{Client: kube}
+	handoff := &dgdLPXHandoff{client: kube}
 	source.Spec.Components = nil
 	deleting, err := handoff.Reconcile(t.Context(), source)
 	require.NoError(t, err)
@@ -609,7 +613,7 @@ func TestLPXPendingDownloadDoesNotBlockOrdinaryWorkloads(t *testing.T) {
 		},
 	})
 	require.NoError(t, kube.Update(t.Context(), source))
-	child, err := (&dgdLPXHandoff{Client: kube}).Reconcile(t.Context(), source)
+	child, err := (&dgdLPXHandoff{client: kube}).Reconcile(t.Context(), source)
 	require.NoError(t, err)
 	child.Status.ObservedGeneration = child.Generation
 	child.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionFalse, ObservedGeneration: child.Generation, Reason: "ModelDownloadPending"}}

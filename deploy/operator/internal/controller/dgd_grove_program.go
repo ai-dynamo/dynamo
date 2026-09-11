@@ -30,15 +30,16 @@ import (
 )
 
 type groveProgram struct {
-	sharedResources *dgdSharedResourcesReconciler
-	rollout         *dgdWorkerRolloutReconciler
-	restart         *dgdRestartReconciler
-	restartProgress *groveRestartProgressResolver
-	workloads       *groveWorkloadsReconciler
-	scalingAdapters *dgdScalingAdaptersReconciler
-	topology        *dgdGroveTopologyConditionReconciler
-	gate            features.Gate
-	lpx             *dgdLPXHandoff
+	sharedResources    *dgdSharedResourcesReconciler
+	rollout            *dgdWorkerRolloutReconciler
+	restart            *dgdRestartReconciler
+	restartProgress    *groveRestartProgressResolver
+	lpxRestartProgress *lpxRestartProgressResolver
+	workloads          *groveWorkloadsReconciler
+	scalingAdapters    *dgdScalingAdaptersReconciler
+	topology           *dgdGroveTopologyConditionReconciler
+	gate               features.Gate
+	lpx                *dgdLPXHandoff
 }
 
 // newGroveProgram wires the Grove pathway at the DGD composition root.
@@ -55,9 +56,10 @@ func (r *DynamoGraphDeploymentReconciler) newGroveProgram() *groveProgram {
 			r.SSHKeyManager,
 			r.RBACManager,
 		),
-		rollout:         rollout,
-		restart:         newDGDRestartReconciler(),
-		restartProgress: newGroveRestartProgressResolver(r.Client),
+		rollout:            rollout,
+		restart:            newDGDRestartReconciler(),
+		restartProgress:    newGroveRestartProgressResolver(r.Client),
+		lpxRestartProgress: newLPXRestartProgressResolver(r.Client),
 		workloads: newGroveWorkloadsReconciler(
 			r.Client,
 			r.Recorder,
@@ -69,7 +71,7 @@ func (r *DynamoGraphDeploymentReconciler) newGroveProgram() *groveProgram {
 		scalingAdapters: newDGDScalingAdaptersReconciler(r.Client, r.Recorder),
 		topology:        newDGDGroveTopologyConditionReconciler(r.Client),
 		gate:            r.RuntimeConfig.Gate,
-		lpx:             &dgdLPXHandoff{Client: r.Client},
+		lpx:             &dgdLPXHandoff{client: r.Client},
 	}
 }
 
@@ -131,7 +133,14 @@ func (p *groveProgram) Reconcile(
 		req.DGD,
 		&programResult.Status,
 		func(ctx context.Context, source *nvidiacomv1beta1.DynamoGraphDeployment, inProgress []string) []string {
-			return p.resolveRestartProgress(ctx, source, ordinaryDGD, inProgress)
+			return resolveCompositeGroveRestartProgress(
+				ctx,
+				source,
+				ordinaryDGD,
+				inProgress,
+				p.restartProgress,
+				p.lpxRestartProgress,
+			)
 		},
 	)
 	recordRestartTransition(previousRestart, restart.Status, &programResult)

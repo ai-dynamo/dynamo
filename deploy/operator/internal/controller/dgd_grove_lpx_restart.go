@@ -14,38 +14,63 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// resolveRestartProgress composes child-owned LPX and ordinary Grove observations.
-func (p *groveProgram) resolveRestartProgress(
+type lpxRestartProgressResolver struct {
+	reader client.Reader
+}
+
+func newLPXRestartProgressResolver(reader client.Reader) *lpxRestartProgressResolver {
+	return &lpxRestartProgressResolver{reader: reader}
+}
+
+// Resolve returns LPX components whose current child has not completed the selected restart.
+func (r *lpxRestartProgressResolver) Resolve(
+	ctx context.Context,
+	source *v1beta1.DynamoGraphDeployment,
+	inProgress []string,
+) []string {
+	childComponents := r.observeRestart(ctx, source)
+	remaining := make([]string, 0, len(inProgress))
+	for _, name := range inProgress {
+		if !childComponents[name].Ready {
+			remaining = append(remaining, name)
+		}
+	}
+	return remaining
+}
+
+// resolveCompositeGroveRestartProgress composes child-owned LPX and ordinary Grove observations.
+func resolveCompositeGroveRestartProgress(
 	ctx context.Context,
 	source *v1beta1.DynamoGraphDeployment,
 	ordinaryDGD *v1beta1.DynamoGraphDeployment,
 	inProgress []string,
+	ordinaryResolver *groveRestartProgressResolver,
+	lpxResolver *lpxRestartProgressResolver,
 ) []string {
 	ordinary := make([]string, 0, len(inProgress))
+	lpxComponents := make([]string, 0, len(inProgress))
 	pending := make(map[string]bool, len(inProgress))
-	var childComponents map[string]v1beta1.ComponentReplicaStatus
-	childObserved := false
 
 	for _, name := range inProgress {
 		component := source.GetComponentByName(name)
 		if component == nil {
 			continue
 		}
-		if !component.IsLPX() {
+		if component.IsLPX() {
+			lpxComponents = append(lpxComponents, name)
+		} else {
 			ordinary = append(ordinary, name)
-			continue
-		}
-		if !childObserved {
-			childComponents = observeLPXRestart(ctx, p.lpx.Client, source)
-			childObserved = true
-		}
-		if !childComponents[name].Ready {
-			pending[name] = true
 		}
 	}
 
+	// Observe the shared LPX child before ordinary Grove restart progress.
+	if len(lpxComponents) > 0 {
+		for _, name := range lpxResolver.Resolve(ctx, source, lpxComponents) {
+			pending[name] = true
+		}
+	}
 	if len(ordinary) > 0 {
-		for _, name := range p.restartProgress.Resolve(ctx, ordinaryDGD, ordinary) {
+		for _, name := range ordinaryResolver.Resolve(ctx, ordinaryDGD, ordinary) {
 			pending[name] = true
 		}
 	}
@@ -59,11 +84,14 @@ func (p *groveProgram) resolveRestartProgress(
 	return remaining
 }
 
-// observeLPXRestart returns component status from one current, ready restart observation.
+// observeRestart returns component status from one current, ready restart observation.
 // A failed read or incomplete child leaves every requested member pending.
-func observeLPXRestart(ctx context.Context, reader client.Reader, source *v1beta1.DynamoGraphDeployment) map[string]v1beta1.ComponentReplicaStatus {
+func (r *lpxRestartProgressResolver) observeRestart(
+	ctx context.Context,
+	source *v1beta1.DynamoGraphDeployment,
+) map[string]v1beta1.ComponentReplicaStatus {
 	child := &v1alpha1.LPXGraphDeployment{}
-	if err := reader.Get(ctx, client.ObjectKeyFromObject(source), child); err != nil ||
+	if err := r.reader.Get(ctx, client.ObjectKeyFromObject(source), child); err != nil ||
 		child.Status.ObservedGeneration != child.Generation || !child.DeletionTimestamp.IsZero() ||
 		dynamo.ValidateLPXSource(child, source) != nil || source.Spec.Restart == nil ||
 		child.Annotations[dynamo.LPXRestartAnnotation] != source.Spec.Restart.ID {

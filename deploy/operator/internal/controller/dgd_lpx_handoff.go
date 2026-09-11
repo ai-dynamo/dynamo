@@ -18,13 +18,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// dgdLPXHandoff owns only the generated child and its status projection. Build,
-// Grove and scheduler lifecycles are exclusively the LPX controller's concern.
-type dgdLPXHandoff struct{ client.Client }
+// dgdLPXHandoff owns only convergence of the generated child resource family.
+// Build, Grove and scheduler lifecycles are exclusively the LPX controller's concern.
+type dgdLPXHandoff struct {
+	client client.Client
+}
 
 func (r *dgdLPXHandoff) Reconcile(ctx context.Context, source *v1beta1.DynamoGraphDeployment) (*v1alpha1.LPXGraphDeployment, error) {
 	child := &v1alpha1.LPXGraphDeployment{}
-	err := r.Get(ctx, client.ObjectKeyFromObject(source), child)
+	err := r.client.Get(ctx, client.ObjectKeyFromObject(source), child)
 	if err != nil && !apierrors.IsNotFound(err) {
 		return nil, err
 	}
@@ -55,7 +57,7 @@ func (r *dgdLPXHandoff) Reconcile(ctx context.Context, source *v1beta1.DynamoGra
 		child = &v1alpha1.LPXGraphDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: source.Name, Namespace: source.Namespace},
 		}
-		if err := ctrl.SetControllerReference(source, child, r.Scheme()); err != nil {
+		if err := ctrl.SetControllerReference(source, child, r.client.Scheme()); err != nil {
 			return nil, err
 		}
 	}
@@ -63,9 +65,9 @@ func (r *dgdLPXHandoff) Reconcile(ctx context.Context, source *v1beta1.DynamoGra
 	metav1.SetMetaDataAnnotation(&child.ObjectMeta, dynamo.LPXRestartAnnotation, restart)
 	metav1.SetMetaDataAnnotation(&child.ObjectMeta, lpx.DGDGenerationAnnotation, strconv.FormatInt(source.Generation, 10))
 	if exists {
-		err = r.Update(ctx, child)
+		err = r.client.Update(ctx, child)
 	} else {
-		err = r.Create(ctx, child)
+		err = r.client.Create(ctx, child)
 	}
 	return child, err
 }
@@ -82,12 +84,12 @@ func (r *dgdLPXHandoff) deleteChild(ctx context.Context, child *v1alpha1.LPXGrap
 		return nil
 	}
 	uid, version := child.UID, child.ResourceVersion
-	return client.IgnoreNotFound(r.Delete(ctx, child, &client.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &version}}))
+	return client.IgnoreNotFound(r.client.Delete(ctx, child, &client.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &version}}))
 }
 
 func (r *dgdLPXHandoff) Finalize(ctx context.Context, source *v1beta1.DynamoGraphDeployment) error {
 	child := &v1alpha1.LPXGraphDeployment{}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(source), child); err != nil {
+	if err := r.client.Get(ctx, client.ObjectKeyFromObject(source), child); err != nil {
 		return client.IgnoreNotFound(err)
 	}
 	if !exactLPXSourceOwner(child, source) {
