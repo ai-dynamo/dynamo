@@ -43,6 +43,16 @@ def _carrier_present(module: str) -> bool:
     return importlib.util.find_spec(module) is not None
 
 
+def _is_vllm_source_built_cv2(backend: str, package: str, module: str) -> bool:
+    """Whether this is the codec-free OpenCV build shipped by vLLM."""
+    return (
+        backend == "vllm"
+        and package == "opencv-python-headless"
+        and module == "cv2"
+        and _carrier_present(module)
+    )
+
+
 def _installed_version(package: str) -> str | None:
     """The installed distribution version, or None when it has no metadata."""
     try:
@@ -66,7 +76,7 @@ def _install_hint(backend: str, package: str, module: str) -> str:
     The bundled installer is offered only where it installs this package for
     this backend; elsewhere it exits 0 having fixed nothing.
     """
-    if _carrier_present(module):
+    if _is_vllm_source_built_cv2(backend, package, module):
         # Replacing a build that is already here, so pin what is installed. The
         # validated range would be wrong twice: it can be satisfied by what is
         # present, so pip changes nothing, and its upper bound can sit below
@@ -125,7 +135,7 @@ def video_decoder_missing(
             "but NVDEC is unavailable in this container. Grant the 'video' "
             "driver capability (NVIDIA_DRIVER_CAPABILITIES) to enable it, or "
         )
-    elif _carrier_present(module):
+    elif _is_vllm_source_built_cv2(backend, package, module):
         # Present but useless for video: the vLLM images ship an OpenCV built
         # from source with no video backend. Saying it is "not installed"
         # would send the reader looking for a package that is already there.
