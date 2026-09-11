@@ -116,17 +116,15 @@ class DistributedRuntime:
 
     async def shutdown_and_wait(self) -> None:
         """
-        Await runtime teardown: resolves once the in-flight drain has finished
-        and transport teardown has been *signalled*.
+        Await runtime teardown: resolves once the in-flight drain has finished,
+        transport teardown has been signalled, and the tasks whose cleanup is
+        that signal have been joined — including the etcd keep-alive task that
+        issues `lease.revoke()`, so the instance is not left registered.
 
         Phase 2 (the wait for in-flight requests) is bounded by
-        `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT`; Phase 3 always runs.
-
-        Phase 3 cancels the primary token, which is the teardown signal.
-        Background tasks reacting to it — notably the etcd keep-alive task that
-        issues `lease.revoke()` — are not awaited, so a caller that exits
-        immediately after can still race that RPC and leave a registration
-        live until its TTL expires.
+        `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT`; Phase 3 always runs. The join
+        after Phase 3 is separately bounded: if etcd is unreachable the lease
+        expires on its own TTL rather than delaying the exit.
         """
         ...
 
