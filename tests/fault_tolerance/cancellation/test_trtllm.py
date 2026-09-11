@@ -483,7 +483,6 @@ def test_request_cancellation_trtllm_decode_handoff_cancel(
                 # TODO: Why wait after worker ready fixes frontend 404 / 500 flakiness?
                 time.sleep(2)
 
-                # Step 4: Test request cancellation after decode handoff
                 logger.info(
                     "Testing completion request cancellation after decode handoff..."
                 )
