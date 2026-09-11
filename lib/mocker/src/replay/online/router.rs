@@ -193,7 +193,16 @@ pub(crate) struct KvReplayRouter {
     scheduler: Arc<ReplayScheduler>,
     scheduler_cancel: CancellationToken,
     event_tx: Mutex<Option<mpsc::UnboundedSender<ReplayIndexerMessage>>>,
-    event_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    // Abort-on-drop, not a bare `JoinHandle`, for the same reason the admission
+    // forwarder is (round-13 H8): `LiveRunSession::finish` reaches
+    // `router.shutdown()` only on the happy path -- every `bail!` above it, and
+    // every cancellation, drops the router instead, and a dropped `JoinHandle`
+    // detaches its task rather than stopping it. This task owns the indexer and
+    // parks on `recv()`, so it stops on its own only once every engine has
+    // dropped its publisher; until then it outlives the run on a caller-owned
+    // runtime. The happy path is unchanged -- `AbortOnDropHandle` is a `Future`,
+    // so `shutdown` still awaits ordered settlement.
+    event_task: Mutex<Option<tokio_util::task::AbortOnDropHandle<()>>>,
     indexer: ReplayIndexer,
     tracking_hash: TrackingHashContext,
     #[cfg(test)]
@@ -264,7 +273,7 @@ impl KvReplayRouter {
             scheduler,
             scheduler_cancel,
             event_tx: Mutex::new(Some(event_tx)),
-            event_task: Mutex::new(Some(event_task)),
+            event_task: Mutex::new(Some(tokio_util::task::AbortOnDropHandle::new(event_task))),
             indexer,
             tracking_hash,
             #[cfg(test)]
@@ -955,6 +964,52 @@ policy_classes:
         );
         router.on_complete(Uuid::from_u128(11)).await.unwrap();
         router.shutdown().await.unwrap();
+    }
+
+    /// The mirror of `dropping_a_session_terminates_the_admission_forwarder`
+    /// (round-13 H8) for the router's own KV event task, which that fix did not
+    /// cover. `shutdown()` is only reached on `LiveRunSession::finish`'s happy
+    /// path; every `bail!` above it drops the router instead, and a bare
+    /// `JoinHandle` detaches rather than stops.
+    #[tokio::test]
+    async fn dropping_the_router_terminates_its_kv_event_task() {
+        let args = MockEngineArgs::builder()
+            .block_size(64)
+            .max_num_batched_tokens(Some(64))
+            .build()
+            .unwrap();
+        let router = ReplayRouter::new(ReplayRouterMode::KvRouter, &args, None, None, 1).unwrap();
+        // Held for the duration so the event task never observes a closed channel
+        // and can only stop by being aborted -- exactly the case where a detached
+        // task would outlive the run.
+        let _publisher = router.sink(0).unwrap();
+
+        let ReplayRouter::Kv(kv_router) = &router else {
+            unreachable!("test constructed a KV replay router")
+        };
+        let event_task = kv_router
+            .event_task
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("a fresh router owns its event task")
+            .abort_handle();
+
+        tokio::task::yield_now().await;
+        assert!(
+            !event_task.is_finished(),
+            "the event task must still be parked on recv() before the router drops"
+        );
+
+        drop(router);
+        // Abort is asynchronous: the runtime has to reach the task to cancel it.
+        for _ in 0..100 {
+            if event_task.is_finished() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("dropping the router left its KV event task running");
     }
 
     /// `sink` used to `expect` an invariant nothing enforces ("the channel
