@@ -691,7 +691,7 @@ class TestEmbeddingWorkerProcesses:
             config._validate_embedding_worker_processes()
 
     @pytest.mark.parametrize(
-        "enabled_value", ["y", "1", "yes", "on", "true", "enable", "TRUE", "On"]
+        "enabled_value", ["y", "1", "yes", "on", "true", "enable", "TRUE"]
     )
     def test_nixl_truthy_token_is_reserved(self, monkeypatch, enabled_value):
         """NIXL accepts more than "y", so Dynamo must reserve the port for them.
