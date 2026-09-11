@@ -520,9 +520,8 @@ stages:
     assert stage_1["input_connectors"]["from_stage_0"] == ("connector_of_shared_memory")
 
 
-def test_ensure_stage_connectors_requires_resolved_path():
-    with pytest.raises(ValueError, match="did not resolve a stage configuration path"):
-        _ensure_stage_connectors(None, [])
+def test_ensure_stage_connectors_preserves_missing_path():
+    assert _ensure_stage_connectors(None, []) is None
 
 
 def test_ensure_stage_connectors_rejects_non_mapping_connectors(tmp_path):
