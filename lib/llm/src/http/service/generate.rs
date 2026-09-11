@@ -38,7 +38,6 @@ use super::{RouteDoc, service_v2};
 use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
 use crate::protocols::common::preprocessor::{MmRoutingInfo, PreprocessedRequest};
 use crate::protocols::common::timing::RequestTracker;
-use crate::protocols::common::{SamplingOptions, StopConditions};
 use crate::protocols::openai::generate::{
     GenerateRequest, GenerateResponse, GenerateResponseOptions, SamplingParams, StreamOptions,
 };
@@ -576,8 +575,13 @@ fn preprocessed_from_generate_with_tracker(
     } = routing_metadata;
     let sampling = &request.sampling_params;
     let max_tokens = sampling.max_tokens();
-    let min_tokens = sampling.min_tokens();
-    let ignore_eos = sampling.ignore_eos();
+    let stop_conditions = sampling.project_stop_conditions();
+    let sampling_options = sampling
+        .project_sampling_options()
+        .map_err(anyhow::Error::msg)?;
+    let output_options = sampling
+        .project_output_options()
+        .map_err(anyhow::Error::msg)?;
     let routing_priority = dynamo_routing_priority(request.priority);
     // With vLLM's default `enable_tower_connector_lora=false`, MM identifiers
     // are adapter-invariant and `lora_name` separately salts LM KV hashes. When
@@ -605,6 +609,18 @@ fn preprocessed_from_generate_with_tracker(
     let vllm_tito = serde_json::to_value(VllmTitoEnvelope::new(&request, request_id))?;
     let mut extra_args = serde_json::Map::new();
     extra_args.insert("vllm_tito".to_string(), vllm_tito);
+    if let Some(kv_transfer_params) = request.kv_transfer_params.as_ref() {
+        extra_args.insert(
+            "kv_transfer_params".to_string(),
+            serde_json::Value::Object(kv_transfer_params.clone()),
+        );
+    }
+    if let Some(skip_reading_prefix_cache) = sampling.skip_reading_prefix_cache() {
+        extra_args.insert(
+            "skip_reading_prefix_cache".to_string(),
+            serde_json::Value::Bool(skip_reading_prefix_cache),
+        );
+    }
     if let Some(projection) = &mm_routing {
         extra_args.insert(
             "dynamo_mm_routing_hashes".to_string(),
@@ -621,17 +637,9 @@ fn preprocessed_from_generate_with_tracker(
     PreprocessedRequest::builder()
         .model(model.to_string())
         .token_ids(token_ids)
-        .stop_conditions(StopConditions {
-            max_tokens,
-            min_tokens,
-            ignore_eos: Some(ignore_eos),
-            ..Default::default()
-        })
-        .sampling_options(SamplingOptions {
-            n: Some(1),
-            ..Default::default()
-        })
-        .output_options(Default::default())
+        .stop_conditions(stop_conditions)
+        .sampling_options(sampling_options)
+        .output_options(output_options)
         .mm_routing_info(mm_routing_info)
         .routing(Some(crate::protocols::common::preprocessor::RoutingHints {
             dp_rank: data_parallel_rank,
@@ -2257,6 +2265,90 @@ pub(crate) mod tests {
         )
         .expect("build request");
         assert_eq!(preprocessed.stop_conditions.min_tokens, Some(0));
+    }
+
+    #[test]
+    fn generate_projects_training_text_controls() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2],
+            "sampling_params": {
+                "temperature": 0.25,
+                "top_p": 0.9,
+                "top_k": -1,
+                "min_p": 0.05,
+                "seed": 23,
+                "max_tokens": 8,
+                "min_tokens": 2,
+                "presence_penalty": 0.1,
+                "frequency_penalty": 0.2,
+                "repetition_penalty": 1.1,
+                "stop_token_ids": [7, 8],
+                "ignore_eos": true,
+                "logprobs": 1,
+                "prompt_logprobs": 1,
+                "skip_reading_prefix_cache": false,
+                "skip_special_tokens": false
+            },
+            "kv_transfer_params": {
+                "connector_data": {"block_ids": [1, 2]}
+            },
+            "model": "test-model"
+        }))
+        .expect("deserialize request");
+
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "test-model",
+            None,
+            "resolved-request",
+            routing_metadata(16, false, None),
+        )
+        .expect("build request");
+
+        assert_eq!(preprocessed.sampling_options.temperature, Some(0.25));
+        assert_eq!(preprocessed.sampling_options.top_p, Some(0.9));
+        assert_eq!(preprocessed.sampling_options.top_k, Some(-1));
+        assert_eq!(preprocessed.sampling_options.min_p, Some(0.05));
+        assert_eq!(preprocessed.sampling_options.seed, Some(23));
+        assert_eq!(preprocessed.sampling_options.presence_penalty, Some(0.1));
+        assert_eq!(preprocessed.sampling_options.frequency_penalty, Some(0.2));
+        assert_eq!(preprocessed.sampling_options.repetition_penalty, Some(1.1));
+        assert_eq!(preprocessed.stop_conditions.max_tokens, Some(8));
+        assert_eq!(preprocessed.stop_conditions.min_tokens, Some(2));
+        assert_eq!(
+            preprocessed.stop_conditions.stop_token_ids_hidden,
+            Some(vec![7, 8])
+        );
+        assert_eq!(preprocessed.stop_conditions.ignore_eos, Some(true));
+        assert_eq!(preprocessed.output_options.logprobs, Some(1));
+        assert_eq!(preprocessed.output_options.prompt_logprobs, Some(1));
+        assert_eq!(
+            preprocessed
+                .extra_args
+                .as_ref()
+                .and_then(serde_json::Value::as_object)
+                .and_then(|extra| extra.get("skip_reading_prefix_cache")),
+            Some(&serde_json::Value::Bool(false))
+        );
+        assert_eq!(
+            preprocessed
+                .extra_args
+                .as_ref()
+                .and_then(serde_json::Value::as_object)
+                .and_then(|extra| extra.get("kv_transfer_params")),
+            Some(&serde_json::json!({"connector_data": {"block_ids": [1, 2]}}))
+        );
+        assert_eq!(
+            preprocessed
+                .extra_args
+                .as_ref()
+                .and_then(serde_json::Value::as_object)
+                .and_then(|extra| extra.get("vllm_tito"))
+                .and_then(|tito| tito.get("sampling_params"))
+                .and_then(|sampling| sampling.get("top_k")),
+            Some(&serde_json::json!(-1))
+        );
+        assert_eq!(preprocessed.output_options.skip_special_tokens, Some(false));
     }
 
     #[test]

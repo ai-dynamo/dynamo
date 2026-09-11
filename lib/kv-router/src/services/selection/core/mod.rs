@@ -181,10 +181,10 @@ impl SelectionCore {
         tracking_hash: Arc<TrackingHashContext>,
     ) -> Self {
         let cancel_token = cancel_token.child_token();
-        let indexer_registry = Arc::new(WorkerRegistry::new_with_cancel_token(
-            indexer_threads,
-            cancel_token.clone(),
-        ));
+        let indexer_registry = Arc::new(
+            WorkerRegistry::new_with_cancel_token(indexer_threads, cancel_token.clone())
+                .with_retained_indexers(),
+        );
         if signal_indexer_ready {
             indexer_registry.signal_ready();
         }
@@ -1392,30 +1392,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn shutdown_keeps_parent_alive() {
-        let parent = CancellationToken::new();
-        let core = SelectionCore::try_new_local(
-            test_config(false),
-            1,
-            parent.clone(),
-            SelectionCacheConfig::default(),
-        )
-        .expect("valid test config");
-
-        core.shutdown();
-
-        assert!(core.cancel_token.is_cancelled());
-        assert!(!parent.is_cancelled());
-    }
-
     #[tokio::test]
-    async fn shutdown_cancels_listeners() {
+    async fn shutdown_cancels_listeners_but_keeps_parent_alive() {
         let parent = CancellationToken::new();
         let core = SelectionCore::try_new_local(
             test_config(true),
             1,
-            parent,
+            parent.clone(),
             SelectionCacheConfig::default(),
         )
         .expect("valid test config");
@@ -1428,7 +1411,67 @@ mod tests {
         assert_eq!(core.indexer_registry.listener_cancelled(1, 0), Some(false));
 
         core.shutdown();
+        assert!(core.cancel_token.is_cancelled());
+        assert!(!parent.is_cancelled());
         assert_eq!(core.indexer_registry.listener_cancelled(1, 0), Some(true));
+    }
+
+    #[rstest::rstest]
+    #[case(1)]
+    #[case(2)]
+    #[tokio::test]
+    async fn selection_sees_cache_after_last_worker_replacement(#[case] indexer_threads: usize) {
+        let core = SelectionCore::try_new_local(
+            test_config(true),
+            indexer_threads,
+            CancellationToken::new(),
+            SelectionCacheConfig::default(),
+        )
+        .expect("valid test config");
+        let key = RoutingPartitionId::new("model", "default");
+        let request = || {
+            let mut request = select_request();
+            request.prompt.token_ids = None;
+            request.prompt.block_hashes = Some(vec![11]);
+            request.prompt.sequence_hashes = Some(vec![101]);
+            request.prompt.isl_tokens = Some(4);
+            request
+        };
+
+        // Exercise an in-place update, then removing the last worker and adding a new one.
+        for worker_id in [1, 1, 2] {
+            if worker_id == 2 {
+                core.delete_worker(1).await.expect("delete last worker");
+            }
+            core.upsert_worker(worker_with_kv_events(worker_id))
+                .await
+                .expect("worker upsert");
+            assert_eq!(core.select(request()).await.unwrap().overlap.gpu, 0);
+
+            // Write through the registry used by listeners, not the selector's saved reference.
+            let indexer = core
+                .indexer_registry
+                .get_indexer(&key)
+                .unwrap()
+                .indexer
+                .clone();
+            indexer
+                .apply_event_routed(store_event(
+                    worker_id,
+                    0,
+                    1,
+                    &[],
+                    &[11],
+                    StorageTier::Device,
+                ))
+                .await
+                .unwrap();
+            indexer.dump_events().await.expect("flush indexer");
+            let selected = core.select(request()).await.expect("select cached worker");
+            assert_eq!(selected.worker_id, worker_id);
+            assert_eq!(selected.overlap.gpu, 4);
+        }
+        core.shutdown();
     }
 
     #[tokio::test]
