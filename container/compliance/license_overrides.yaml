@@ -359,6 +359,7 @@ overrides:
   - { ecosystem: python, name: helion,                    license: "BSD-3-Clause",  source: "PyTorch Helion — https://github.com/pytorch/helion/blob/main/LICENSE" }
   - { ecosystem: python, name: hpc-ops,                   license: "MIT AND BSD-3-Clause",  source: "Tencent HPC-Ops and bundled CUTLASS — https://github.com/Tencent/hpc-ops/blob/main/LICENSE.txt" }
   - { ecosystem: python, name: icdiff,                    license: "BSD-3-Clause",  source: "icdiff upstream — https://github.com/jeffkaufman/icdiff/blob/master/LICENSE" }
+  - { ecosystem: python, name: instanttensor,             license: "Apache-2.0",  source: "InstantTensor upstream — https://github.com/scitix/InstantTensor/blob/main/LICENSE" }
   - { ecosystem: python, name: jinja2,                    license: "BSD-3-Clause",  source: "Jinja upstream — https://github.com/pallets/jinja/blob/main/LICENSE.rst" }
   - { ecosystem: python, name: jiter,                     license: "MIT",       source: "jiter upstream — https://github.com/pydantic/jiter/blob/main/LICENSE" }
   - { ecosystem: python, name: kiwisolver,                license: "BSD-3-Clause",  source: "kiwisolver upstream — https://github.com/nucleic/kiwi/blob/main/LICENSE" }
