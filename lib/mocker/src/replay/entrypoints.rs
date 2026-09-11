@@ -2575,7 +2575,7 @@ mod tests {
 
         assert_eq!(
             err.to_string(),
-            "replay invariant violated: offline replay detected an effect-free zero-duration pass with 1 in-flight requests remaining"
+            "replay invariant violated: offline replay detected an effect-free zero-duration pass with 1 in-flight requests remaining on an aggregated worker with same-timestamp retries already exhausted"
         );
     }
 
