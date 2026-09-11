@@ -753,7 +753,11 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     tokio::select! {
                         biased;
                         _ = cancellation.cancelled() => BuildOutcome::Cancelled,
-                        result = host.prepare(task_spec.clone(), admitted_ids, cancellation.clone()) => {
+                        result = host.prepare(
+                            task_spec.clone(),
+                            admitted_ids,
+                            cancellation.clone(),
+                        ) => {
                             match result {
                                 Ok(prepared) => BuildOutcome::Prepared(prepared),
                                 Err(error) => BuildOutcome::Failed(error),
@@ -763,7 +767,9 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 });
                 let outcome = match future.catch_unwind().await {
                     Ok(outcome) => outcome,
-                    Err(_) => BuildOutcome::Failed(anyhow::anyhow!("model materialization panicked")),
+                    Err(_) => BuildOutcome::Failed(anyhow::anyhow!(
+                        "model materialization panicked"
+                    )),
                 };
                 BuildResult {
                     spec: task_spec,
