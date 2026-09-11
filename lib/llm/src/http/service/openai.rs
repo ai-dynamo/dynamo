@@ -2503,8 +2503,9 @@ const MAX_LEADING_ANNOTATIONS: usize = 16;
 
 /// Inspect the first non-annotation event in the stream for a backend error.
 ///
-/// `BackendErrorCheck::UntilFirstEvent` awaits stream events indefinitely
-/// (non-streaming preflight). `BackendErrorCheck::Bounded` races against a
+/// `BackendErrorCheck::UntilFirstEvent` awaits stream events indefinitely: the
+/// non-streaming preflight, and the streaming pre-commit when the service is
+/// configured to wait. `BackendErrorCheck::Bounded` races against a
 /// single deadline captured at function entry (streaming pre-commit peek); if
 /// the deadline elapses before a non-annotation event arrives, the buffered
 /// annotations are returned chained with the remaining stream so downstream
@@ -3020,7 +3021,10 @@ async fn chat_completions(
         // return the typed 4xx that the non-streaming path returns. How long
         // to wait is service configuration; with a bounded window and no
         // signal, fall through to SSE, and `monitor_for_disconnects` owns the
-        // long backend-inactivity timeout from there.
+        // long backend-inactivity timeout from there. That monitor arms only
+        // once the response is built, so it does not bound this wait:
+        // `UntilFirstEvent` ends on the first event or on the client
+        // disconnecting, and on nothing else.
         let stream = until_client_disconnects(
             check_for_backend_error(stream, state.streaming_backend_error_check()),
             &ctx,
