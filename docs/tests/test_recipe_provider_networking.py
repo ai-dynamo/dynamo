@@ -1569,3 +1569,113 @@ def test_validator_accepts_root_patch_replacing_component_added_resource(
     main = rendered["PrefillWorker"]["podTemplate"]["spec"]["containers"][0]
     assert main["resources"]["requests"][key] == "4"
     assert main["resources"]["limits"][key] == "4"
+
+
+def _agg_case_with_optional_component(tmp_path: Path) -> Path:
+    """Aggregate vLLM case (Frontend, Worker) plus an optional Planner at index 2."""
+
+    case = core._filled_case(tmp_path, with_case_override=False)
+    base_path = case / "base.yaml"
+    documents = core._documents(base_path)
+    dgd = next(
+        document
+        for document in documents
+        if document.get("kind") == "DynamoGraphDeployment"
+    )
+    dgd["spec"]["components"].append(
+        {
+            "name": "Planner",
+            "type": "planner",
+            "replicas": 1,
+            "podTemplate": {
+                "spec": {
+                    "containers": [
+                        {
+                            "name": "main",
+                            "image": "example.invalid/planner:latest",
+                            "env": [{"name": "PLANNER_MODE", "value": "auto"}],
+                        }
+                    ]
+                }
+            },
+        }
+    )
+    core._write_documents(base_path, documents)
+    return case
+
+
+def test_validator_rejects_agg_networking_component_touching_optional_component(
+    tmp_path: Path,
+) -> None:
+    case = _agg_case_with_optional_component(tmp_path)
+    patch_path = case / "components" / "network-interface" / "agg" / "patch-dgd.yaml"
+    document = yaml.safe_load(patch_path.read_text())
+    document["spec"]["components"].append(
+        _worker_env_patch("Planner", [{"name": "NCCL_SOCKET_IFNAME", "value": "eth0"}])
+    )
+    patch_path.write_text(yaml.safe_dump(document, sort_keys=False))
+
+    _assert_error(core._validate(case), "networking-delta")
+
+
+def test_validator_accepts_agg_root_patch_on_optional_component(
+    tmp_path: Path,
+) -> None:
+    case = _agg_case_with_optional_component(tmp_path)
+    added = [{"name": "LOG_LEVEL", "value": "debug"}]
+    _attach_root_merge_patch(
+        case,
+        _merge_patch(
+            [
+                {"name": "Frontend"},
+                {"name": "Worker"},
+                _worker_env_patch("Planner", added),
+            ]
+        ),
+    )
+
+    result = core._validate(case)
+    rendered = _components(_rendered_dgd(case))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    planner_env = rendered["Planner"]["podTemplate"]["spec"]["containers"][0]["env"]
+    assert planner_env[0] == added[0]
+    worker_env = rendered["Worker"]["podTemplate"]["spec"]["containers"][0]["env"]
+    assert all(entry["name"] != "LOG_LEVEL" for entry in worker_env)
+
+
+def test_validator_accepts_root_patch_replacing_core_resource(tmp_path: Path) -> None:
+    case = core._filled_case(tmp_path, with_case_override=False)
+    _attach_root_merge_patch(
+        case,
+        _merge_patch(
+            [
+                {"name": "Frontend"},
+                _worker_resource_patch("Worker", "memory", "123Gi"),
+            ]
+        ),
+    )
+
+    result = core._validate(case)
+    rendered = _components(_rendered_dgd(case))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    resources = rendered["Worker"]["podTemplate"]["spec"]["containers"][0]["resources"]
+    assert resources["requests"]["memory"] == "123Gi"
+    assert resources["limits"]["memory"] == "123Gi"
+
+
+def test_validator_rejects_networking_component_adding_core_resource(
+    tmp_path: Path,
+) -> None:
+    case, _ = _custom_merge_networking_case(
+        tmp_path,
+        _merge_patch(
+            [
+                {"name": "Frontend"},
+                _worker_resource_patch("PrefillWorker", "memory", "123Gi"),
+                {"name": "DecodeWorker"},
+            ]
+        ),
+    )
+    _assert_error(core._validate(case), "networking-delta")

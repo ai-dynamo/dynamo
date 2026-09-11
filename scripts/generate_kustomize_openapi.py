@@ -21,7 +21,6 @@ OUTPUT_PATHS = (
     REPO_ROOT
     / "recipes/templates/kustomize/components/dynamo-openapi/dynamo-openapi.json",
 )
-OUTPUT_PATH = OUTPUT_PATHS[0]
 GENERATED_WARNING = "Generated file. Do not edit this checked-in copy."
 REGENERATE_COMMAND = "python3 scripts/generate_kustomize_openapi.py"
 

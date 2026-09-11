@@ -1903,9 +1903,12 @@ def _network_operation_kind(
         and tokens[: len(resource_prefix)] == resource_prefix
         and tokens[len(resource_prefix)] in ("requests", "limits")
     ):
+        if len(tokens) == len(resource_prefix) + 2 and "/" not in tokens[-1]:
+            # cpu, memory, ephemeral-storage, hugepages-*: core resources are
+            # portable recipe fields, not networking.
+            return None
         if (
             len(tokens) != len(resource_prefix) + 2
-            or "/" not in tokens[-1]
             or tokens[-1].startswith("/")
             or tokens[-1].endswith("/")
         ):
@@ -1948,11 +1951,24 @@ _NETWORK_SHAPE_KINDS = frozenset(
 _KEYED_LIST_FIELDS = frozenset({"env", "volumeMounts", "volumes"})
 
 
-def _is_canonical_worker_path(tokens: Tuple[str, ...]) -> bool:
+def _canonical_worker_indices(topology: str) -> frozenset:
+    """Component positions that hold canonical workers for a topology.
+
+    Aggregate bases carry ``Frontend`` and ``Worker``; disaggregated bases carry
+    ``Frontend``, ``PrefillWorker``, and ``DecodeWorker``. Optional components
+    follow the canonical prefix and are never networking targets.
+    """
+
+    return frozenset({"1"}) if topology == "agg" else frozenset({"1", "2"})
+
+
+def _is_canonical_worker_path(
+    tokens: Tuple[str, ...], worker_indices: frozenset
+) -> bool:
     return (
         len(tokens) >= 3
         and tokens[:2] == ("spec", "components")
-        and tokens[2] in ("1", "2")
+        and tokens[2] in worker_indices
     )
 
 
@@ -1962,6 +1978,7 @@ def _root_adds_network_shape(
     tokens: Tuple[str, ...],
     kind: Optional[str],
     moved_entries: Set[Tuple[str, str]],
+    worker_indices: frozenset,
 ) -> bool:
     """Recognize a root patch that adds networking-shaped fields to a worker.
 
@@ -1976,7 +1993,7 @@ def _root_adds_network_shape(
         layer.root_component is not None
         or operation["op"] != "add"
         or kind not in _NETWORK_SHAPE_KINDS
-        or not _is_canonical_worker_path(tokens)
+        or not _is_canonical_worker_path(tokens, worker_indices)
     ):
         return False
     value = operation.get("value")
@@ -2035,8 +2052,11 @@ def _networking_error(
 
 
 def _validate_networking_contract(
-    layers: Sequence[_PatchLayer], root_components: Sequence[_RootComponent]
+    layers: Sequence[_PatchLayer],
+    root_components: Sequence[_RootComponent],
+    topology: str,
 ) -> None:
+    worker_indices = _canonical_worker_indices(topology)
     # _validate_root_contract owns the networking slot count and ordering rules.
     network_root = next(
         (root for root in root_components if root.concern in _NETWORK_ROOT_CONCERNS),
@@ -2125,7 +2145,8 @@ def _validate_networking_contract(
             # by a provider-specific allowlist. Optional components after the
             # canonical workers keep the documented case-local patch path.
             resource_signal = kind in {"resource", "resource-invalid"} and (
-                layer.root_component is not None or _is_canonical_worker_path(tokens)
+                layer.root_component is not None
+                or _is_canonical_worker_path(tokens, worker_indices)
             )
             is_network_delta = (
                 owner_is_network
@@ -2133,7 +2154,7 @@ def _validate_networking_contract(
                 or physical_name is not None
                 or resource_signal
                 or _root_adds_network_shape(
-                    layer, operation, tokens, kind, moved_entries
+                    layer, operation, tokens, kind, moved_entries, worker_indices
                 )
             )
             if not is_network_delta:
@@ -2142,7 +2163,7 @@ def _validate_networking_contract(
             if (
                 len(tokens) >= 3
                 and tokens[:2] == ("spec", "components")
-                and tokens[2] not in {"1", "2"}
+                and tokens[2] not in worker_indices
             ):
                 raise _networking_error(
                     layer,
@@ -2779,14 +2800,14 @@ def validate_case(
             "yaml-parse", "%s must contain Kubernetes mapping documents" % base
         )
     dgd_index = _require_one_beta_dgd(base_documents, "base")
-    _validate_canonical_components(base_documents[dgd_index])
+    topology = _validate_canonical_components(base_documents[dgd_index])
     layers, root_components = _collect_layers(base, kustomization)
     schema = _load_schema(root_components)
     layers = _lower_merge_layers(base_documents, layers, schema)
     for layer in layers:
         _validate_guards(layer)
     _validate_base_ownership(base_documents, dgd_index, layers)
-    _validate_networking_contract(layers, root_components)
+    _validate_networking_contract(layers, root_components, topology)
 
     _require_kustomize_version(executable)
     build = _run_kustomize(kustomization, executable)
