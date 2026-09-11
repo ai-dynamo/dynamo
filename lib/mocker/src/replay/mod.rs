@@ -129,7 +129,7 @@ pub use offline::run_offline_handoff_conformance;
 pub use validate::validate_replay_args_mode;
 
 pub(crate) fn normalize_trace_requests(
-    mut requests: Vec<DirectRequest>,
+    requests: Vec<DirectRequest>,
     arrival_speedup_ratio: f64,
 ) -> anyhow::Result<VecDeque<DirectRequest>> {
     if !arrival_speedup_ratio.is_finite() || arrival_speedup_ratio <= 0.0 {
@@ -138,35 +138,42 @@ pub(crate) fn normalize_trace_requests(
         );
     }
 
-    requests.sort_by(|left, right| {
-        let left_ts = left
-            .arrival_timestamp_ms
-            .expect("trace replay requests must have an arrival timestamp");
-        let right_ts = right
-            .arrival_timestamp_ms
-            .expect("trace replay requests must have an arrival timestamp");
-        left_ts.total_cmp(&right_ts)
-    });
+    // Lift every arrival timestamp out before sorting. `arrival_timestamp_ms` is an
+    // `Option<f64>` on a `Deserialize` DTO, so a caller-supplied trace can carry a missing or
+    // non-finite value; neither the comparator nor the rebasing pass below can report an error,
+    // and a NaN would additionally sort first under `total_cmp` and poison `first_arrival_ms`
+    // for every request.
+    let mut timestamped = requests
+        .into_iter()
+        .enumerate()
+        .map(|(index, request)| match request.arrival_timestamp_ms {
+            Some(arrival_timestamp_ms) if arrival_timestamp_ms.is_finite() => {
+                Ok((arrival_timestamp_ms, request))
+            }
+            Some(arrival_timestamp_ms) => anyhow::bail!(
+                "trace replay request {index} has a non-finite arrival timestamp, got \
+                 {arrival_timestamp_ms}"
+            ),
+            None => anyhow::bail!("trace replay request {index} is missing an arrival timestamp"),
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
 
-    let first_arrival_ms = requests
+    // Stable sort: coincident arrivals keep their authored order.
+    timestamped.sort_by(|(left_ts, _), (right_ts, _)| left_ts.total_cmp(right_ts));
+
+    let first_arrival_ms = timestamped
         .first()
-        .and_then(|request| request.arrival_timestamp_ms)
+        .map(|(arrival_timestamp_ms, _)| *arrival_timestamp_ms)
         .ok_or_else(|| anyhow::anyhow!("trace replay requires at least one timestamped request"))?;
 
-    Ok(VecDeque::from(
-        requests
-            .into_iter()
-            .map(|mut request| {
-                let arrival_timestamp_ms = request
-                    .arrival_timestamp_ms
-                    .expect("trace replay requests must have an arrival timestamp")
-                    - first_arrival_ms;
-                let arrival_timestamp_ms = arrival_timestamp_ms / arrival_speedup_ratio;
-                request.arrival_timestamp_ms = Some(arrival_timestamp_ms);
-                request
-            })
-            .collect::<Vec<_>>(),
-    ))
+    Ok(timestamped
+        .into_iter()
+        .map(|(arrival_timestamp_ms, mut request)| {
+            request.arrival_timestamp_ms =
+                Some((arrival_timestamp_ms - first_arrival_ms) / arrival_speedup_ratio);
+            request
+        })
+        .collect::<VecDeque<_>>())
 }
 
 pub(crate) fn effective_agentic_lanes(
@@ -211,6 +218,51 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(arrivals, vec![0.0, 10.0]);
+    }
+
+    fn request_at(arrival_timestamp_ms: Option<f64>, id: u128) -> DirectRequest {
+        DirectRequest {
+            tokens: vec![1; 4],
+            max_output_tokens: 1,
+            output_token_ids: None,
+            uuid: Some(Uuid::from_u128(id)),
+            dp_rank: 0,
+            arrival_timestamp_ms,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_normalize_trace_requests_rejects_missing_arrival_timestamp() {
+        let error =
+            normalize_trace_requests(vec![request_at(Some(0.0), 1), request_at(None, 2)], 1.0)
+                .expect_err("a request without an arrival timestamp must be rejected, not panic");
+        assert_eq!(
+            error.to_string(),
+            "trace replay request 1 is missing an arrival timestamp"
+        );
+    }
+
+    #[test]
+    fn test_normalize_trace_requests_rejects_non_finite_arrival_timestamp() {
+        // A NaN arrival sorts first under `total_cmp`, so without validation it would silently
+        // become `first_arrival_ms` and poison every rebased arrival in the trace.
+        let error = normalize_trace_requests(
+            vec![request_at(Some(10.0), 1), request_at(Some(f64::NAN), 2)],
+            1.0,
+        )
+        .expect_err("a non-finite arrival timestamp must be rejected");
+        assert_eq!(
+            error.to_string(),
+            "trace replay request 1 has a non-finite arrival timestamp, got NaN"
+        );
+
+        let error = normalize_trace_requests(vec![request_at(Some(f64::INFINITY), 1)], 1.0)
+            .expect_err("an infinite arrival timestamp must be rejected");
+        assert_eq!(
+            error.to_string(),
+            "trace replay request 0 has a non-finite arrival timestamp, got inf"
+        );
     }
 
     #[test]
