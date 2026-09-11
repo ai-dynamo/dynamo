@@ -799,18 +799,18 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 			expectedError:   "exceeds the maximum port",
 		},
 		{
-			name:              "another exporter binds no port per rank, however many ranks there are",
+			name:              "an uppercase exporter binds no port per rank, however many ranks there are",
 			ports:             workerPorts,
 			telemetryEnable:   "y",
-			telemetryExporter: "file",
+			telemetryExporter: "PROMETHEUS",
 			containerGPUs:     -1,
 			expectedPorts:     map[string]int32{"nixl": 19090},
 		},
 		{
-			name:              "another exporter reads no base, so a sourced one is no obstacle",
+			name:              "a whitespace-padded exporter reads no base, so a sourced one is no obstacle",
 			ports:             workerPorts,
 			telemetryEnable:   "y",
-			telemetryExporter: "file",
+			telemetryExporter: "prometheus ",
 			portValueFrom: &corev1.EnvVarSource{
 				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
 					LocalObjectReference: corev1.LocalObjectReference{Name: "telemetry"},
@@ -842,10 +842,18 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 			expectedPorts: allEightPorts,
 		},
 		{
-			name:            "a base padded with whitespace is still a port",
+			name:            "a base padded with whitespace is rejected",
 			ports:           workerPorts,
 			telemetryEnable: "y",
 			telemetryPort:   " 19090 ",
+			containerGPUs:   4,
+			expectedError:   `is set to " 19090 ", which is not a number`,
+		},
+		{
+			name:            "a hexadecimal base moves every declared port with it",
+			ports:           workerPorts,
+			telemetryEnable: "y",
+			telemetryPort:   "0x4A92",
 			containerGPUs:   4,
 			expectedPorts: map[string]int32{
 				"nixl": 19090, "nixl-1": 19091, "nixl-2": 19092, "nixl-3": 19093,

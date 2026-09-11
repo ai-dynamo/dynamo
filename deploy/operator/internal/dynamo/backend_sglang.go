@@ -113,7 +113,7 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 	if exporter.ValueFrom != nil {
 		prometheusOn = false
 		sourced = append(sourced, "NIXL_TELEMETRY_EXPORTER")
-	} else if !strings.EqualFold(strings.TrimSpace(exporter.Value), "prometheus") {
+	} else if exporter.Value != "prometheus" {
 		return nil
 	}
 
@@ -126,7 +126,7 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 	// the whole range: realign `nixl` with it or it advertises a port rank 0
 	// never binds.
 	override := findEnvVar(container.Env, "NIXL_TELEMETRY_PROMETHEUS_PORT")
-	overridden, literal, err := literalPort(override)
+	overridden, literal, err := nixlPrometheusPort(override)
 	switch {
 	case err != nil:
 		// A base that is present but unusable is the quietest way to lose the
@@ -212,19 +212,23 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 	return nil
 }
 
-// literalPort reads a TCP port written inline on an environment variable. An
-// unset variable and one taken from valueFrom are both reported as absent,
-// because a value resolved in the container at startup cannot be turned into a
-// container port declaration here. A variable that is set inline to something
-// that is not a usable port is neither absent nor usable, so it is returned as
-// an error rather than folded into either.
-func literalPort(env *corev1.EnvVar) (int32, bool, error) {
+// nixlPrometheusPort reads a literal NIXL Prometheus port with NIXL's unsigned
+// 16-bit syntax. An unset variable and one taken from valueFrom are both
+// reported as absent, because a value resolved in the container at startup
+// cannot be turned into a container port declaration here.
+func nixlPrometheusPort(env *corev1.EnvVar) (int32, bool, error) {
 	if env == nil || env.ValueFrom != nil {
 		return 0, false, nil
 	}
 
-	value := strings.TrimSpace(env.Value)
-	port, err := strconv.Atoi(value)
+	value := env.Value
+	base := 10
+	digits := value
+	if strings.HasPrefix(value, "0x") || strings.HasPrefix(value, "0X") {
+		base = 16
+		digits = value[2:]
+	}
+	port, err := strconv.ParseUint(digits, base, 64)
 	if err != nil {
 		return 0, false, fmt.Errorf("is set to %q, which is not a number", env.Value)
 	}
