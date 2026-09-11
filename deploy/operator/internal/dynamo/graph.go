@@ -1301,7 +1301,7 @@ func expandMultinodeRoles(componentName string, numberOfNodes int32) []ServiceRo
 }
 
 // ExplicitMultinodeRolesMatchImplicit reports whether the authored roles carry
-// exactly the established multinode structure without role-specific behavior.
+// exactly the established cardinality-only multinode structure.
 // component must not be nil.
 func ExplicitMultinodeRolesMatchImplicit(component *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
 	if component.Multinode == nil || len(component.Roles) != 2 {
@@ -1317,9 +1317,16 @@ func ExplicitMultinodeRolesMatchImplicit(component *v1beta1.DynamoComponentDeplo
 		}
 		seen[role.Name] = true
 
+		var expected int32
 		switch role.Name {
-		case v1beta1.ComponentRoleLeader, v1beta1.ComponentRoleWorker:
+		case v1beta1.ComponentRoleLeader:
+			expected = 1
+		case v1beta1.ComponentRoleWorker:
+			expected = component.Multinode.NodeCount - 1
 		default:
+			return false
+		}
+		if role.Replicas != nil && *role.Replicas != expected {
 			return false
 		}
 	}
