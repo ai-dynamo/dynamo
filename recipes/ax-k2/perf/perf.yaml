@@ -58,6 +58,8 @@ spec:
               value: kv
             - name: ROOT_ARTIFACT_DIR
               value: /model-cache/perf/ax-k2
+            - name: TRACE_FILE
+              value: /model-cache/traces/nim_turbo_8k_1k_70kv_chat_new_noschedule.jsonl
             - name: AIPERF_HTTP_CONNECTION_LIMIT
               value: "200"
             - name: AIPERF_HTTP_SO_RCVTIMEO

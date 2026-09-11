@@ -96,12 +96,11 @@ data:
     : "${ENDPOINT:?ENDPOINT is required}"
     : "${ROOT_ARTIFACT_DIR:?ROOT_ARTIFACT_DIR is required}"
     : "${ROUTING_MODE:?ROUTING_MODE is required}"
+    : "${TRACE_FILE:?TRACE_FILE must point to the trace staged on the model-cache PVC}"
 
     MODEL="skt/A.X-K2-NVFP4"
     MODEL_REVISION="9e2e804e80f8d1b3afba5d7938173cec1ed46b49"
-    TRACE_URL="https://media.githubusercontent.com/media/ai-dynamo/dynamo/main/recipes/nemotron-3-ultra/perf/traces/nim_turbo_8k_1k_70kv_chat_new_noschedule.jsonl"
     TRACE_SHA256="5f369eb75ce639ad8b05cc209bb534bfedd627e9f7b923de32888155b4c9085a"
-    TRACE_FILE="/tmp/axk2-8k-1k-70kv-noschedule.jsonl"
     RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
     RESULT_DIR="${ROOT_ARTIFACT_DIR}/${ROUTING_MODE}/${RUN_ID}"
     export ENDPOINT MODEL MODEL_REVISION TRACE_FILE TRACE_SHA256 RESULT_DIR RUN_ID
@@ -113,15 +112,16 @@ data:
     import hashlib
     import json
     import os
-    import urllib.request
     from pathlib import Path
 
     trace_path = Path(os.environ["TRACE_FILE"])
-    urllib.request.urlretrieve(
-        "https://media.githubusercontent.com/media/ai-dynamo/dynamo/main/recipes/nemotron-3-ultra/perf/traces/nim_turbo_8k_1k_70kv_chat_new_noschedule.jsonl",
-        trace_path,
-    )
-    actual = hashlib.file_digest(trace_path.open("rb"), "sha256").hexdigest()
+    if not trace_path.is_file():
+        raise SystemExit(
+            f"TRACE_MISSING path={trace_path}. Stage the Git LFS trace on the "
+            "model-cache PVC as described in recipes/ax-k2/perf/README.md."
+        )
+    with trace_path.open("rb") as handle:
+        actual = hashlib.file_digest(handle, "sha256").hexdigest()
     if actual != os.environ["TRACE_SHA256"]:
         raise SystemExit(
             f"TRACE_SHA_MISMATCH expected={os.environ['TRACE_SHA256']} actual={actual}"
@@ -271,6 +271,7 @@ data:
         "model_revision": os.environ["MODEL_REVISION"],
         "routing_mode": os.environ["ROUTING_MODE"],
         "timing_mode": "concurrency (trace has no timestamps)",
+        "trace_file": os.environ["TRACE_FILE"],
         "trace_sha256": os.environ["TRACE_SHA256"],
         "warmup_requests": 32,
     }
