@@ -467,6 +467,7 @@ class TestClassifyWorkerExclusivity:
         config._validate_classify_worker_exclusivity()
 
 
+@pytest.mark.usefixtures("vllm_cpu_platform_when_no_accelerator")
 class TestParseArgsLoraExclusivity:
     """The --enable-lora exclusivity rules must fire on the real CLI path.
 
