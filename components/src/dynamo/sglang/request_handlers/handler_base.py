@@ -991,6 +991,14 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             "control/stop_profile": self.stop_profile,
             "control/release_memory_occupation": self.release_memory_occupation,
             "control/resume_memory_occupation": self.resume_memory_occupation,
+        }
+        # Weight-update controls drive the tokenizer_manager weight-update APIs
+        # (RCE-capable) and exist only for RL training. Always *declare* them but
+        # gate them on enable_rl (--enable-rl / DYN_SGL_ENABLE_RL, default off):
+        # the runtime registers a gated route only when the gate is set, so a
+        # non-RL deployment never exposes the surface. Operators can further
+        # restrict the registered routes via the engine-route policy.
+        weight_update_routes = {
             "control/update_weights_from_disk": self.update_weights_from_disk,
             "control/update_weights_from_tensor": self.update_weights_from_tensor,
             "control/update_weights_from_distributed": (
@@ -999,6 +1007,7 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             "control/update_weights_from_ipc": self.update_weights_from_ipc,
             "control/update_weight_version": self.update_weight_version,
         }
+        enable_rl = bool(getattr(self.config.dynamo_args, "enable_rl", False))
         # Register elastic-EP scaling only on workers whose engine can serve it
         # (see _supports_elastic_ep); the rest simply don't expose the route.
         if self._supports_elastic_ep():
@@ -1006,7 +1015,7 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             built_in_routes[
                 "control/is_scaling_elastic_ep"
             ] = self.is_scaling_elastic_ep
-        reserved_routes = {*built_in_routes, MODEL_TAINT_ROUTE}
+        reserved_routes = {*built_in_routes, *weight_update_routes, MODEL_TAINT_ROUTE}
         for path, _ in configured_routes:
             if path in reserved_routes:
                 raise ValueError(
@@ -1017,6 +1026,8 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         register_model_taint_route(runtime, self.generate_endpoint)
         for path, handler in built_in_routes.items():
             runtime.register_engine_route(path, handler)
+        for path, handler in weight_update_routes.items():
+            runtime.register_engine_route(path, handler, gated_by=enable_rl)
         for path, configured_handler in configured_routes:
             runtime.register_engine_route(path, configured_handler)
 
