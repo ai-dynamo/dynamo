@@ -490,12 +490,14 @@ fn spawn_teardown_eviction(
         let Some(service) = service.upgrade() else {
             return;
         };
-        // Retire before removal so a cloned service cannot accept a new binding.
+        // Retire before removal so a cloned service cannot accept a new binding, then keep the
+        // retired entry visible until its endpoints have finished shutting down. This makes a
+        // replacement wait for the shared retirement barrier instead of racing old cleanup.
         service.mark_retired();
+        service.stop_endpoints().await;
         let removed =
             SERVED_INDEXER_SERVICES.remove_if(&key, |_, entry| Arc::ptr_eq(entry, &service));
         drop(removed);
-        service.stop_endpoints().await;
     });
 }
 
