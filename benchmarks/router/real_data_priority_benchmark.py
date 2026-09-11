@@ -15,15 +15,27 @@ import subprocess
 
 import matplotlib.pyplot as plt
 import numpy as np
-from common import (
-    add_common_args,
-    add_synthesis_args,
-    get_aiperf_cmd_for_trace,
-    prepare_trace_dataset,
-    resolve_tokenizer,
-    set_trace_agent_hint,
-    setup_logger,
-)
+
+if __package__:
+    from .common import (
+        add_common_args,
+        add_synthesis_args,
+        get_aiperf_cmd_for_trace,
+        prepare_trace_dataset,
+        resolve_tokenizer,
+        set_trace_agent_hint,
+        setup_logger,
+    )
+else:
+    from common import (
+        add_common_args,
+        add_synthesis_args,
+        get_aiperf_cmd_for_trace,
+        prepare_trace_dataset,
+        resolve_tokenizer,
+        set_trace_agent_hint,
+        setup_logger,
+    )
 
 logger = setup_logger(__name__)
 
