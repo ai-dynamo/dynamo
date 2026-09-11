@@ -46,23 +46,7 @@ Day-0 recipe. Both targets pass a functional probe. Neither is benchmarked, and 
 
 ## Overview
 
-DeepSeek-V4.1-Flash is a Mixture-of-Experts model. SGLang resolves its attention, MoE, and GEMM backends from the checkpoint. Do not set those backend flags. A hand-set backend flag selects a slower fallback.
-
-The recipe sets these values, and SGLang resolves the rest:
-
-| Setting | Aggregated | Disaggregated |
-|---|---|---|
-| **Workers** | 2 | 1 prefill + 1 decode |
-| **Parallelism** | TP4, EP4 | TP4, EP4 per role |
-| **Static memory fraction** | 0.8 | 0.8 |
-| **Maximum running requests** | 256 | 256 |
-| **Page size** | 256, set | 256, resolved |
-| **Speculation** | DSpark, block size 5 | None |
-| **Decode CUDA graph batch** | 64 | 512, resolved |
-| **KV transfer** | None | Mooncake over MNNVL |
-| **Routing** | KV-aware | KV-aware |
-
-SGLang resolves `attention_backend` to `dsv4`, `moe_runner_backend` to `flashinfer_mxfp4`, `kv_cache_dtype` to `fp8_e4m3`, and `grammar_backend` to `xgrammar`.
+DeepSeek-V4.1-Flash is a Mixture-of-Experts model. SGLang picks its attention, MoE, and GEMM backends from the checkpoint. Do not set those backend flags. A hand-set backend flag selects a slower fallback.
 
 The aggregated target caps the decode CUDA graph batch at 64. DSpark verify graphs run out of memory at batch 256.
 
@@ -167,6 +151,28 @@ curl http://localhost:8000/v1/chat/completions \
 
 The model reasons before it answers, and the reasoning text arrives in `reasoning_content`. Both targets support streaming chat, tool calls, and schema-constrained output. The `deepseek_v41` reasoning and tool-call parsers build the response.
 
+## Compare All Targets
+
+| | Aggregated | Disaggregated |
+|---|---|---|
+| **Checkpoint** | deepseek-ai/DeepSeek-V4.1-Flash | deepseek-ai/DeepSeek-V4.1-Flash |
+| **Precision** | FP8 dense, FP4 MoE experts | FP8 dense, FP4 MoE experts |
+| **GPUs** | 8x GB200, two workers | 4x GB200 prefill + 4x GB200 decode (1P1D) |
+| **Parallelism** | TP4, EP4 | TP4, EP4 per role |
+| **Attention backend** | dsv4 | dsv4 |
+| **MoE backend** | flashinfer_mxfp4 | flashinfer_mxfp4 |
+| **KV cache dtype** | fp8_e4m3 | fp8_e4m3 |
+| **Grammar backend** | xgrammar | xgrammar |
+| **Page size** | 256 | 256 |
+| **GPU memory utilization** | 0.80 | 0.80 |
+| **Maximum running requests** | 256 | 256 |
+| **Maximum prefill tokens** | 16,384 | 16,384 |
+| **Decode CUDA graph batch** | 64 | 512 |
+| **Speculative decoding** | DSpark, block size 5 | None |
+| **KV transfer** | — | Mooncake over MNNVL |
+| **Routing** | KV-aware | KV-aware |
+| **Context length** | 1,048,576 | 1,048,576 |
+
 ## Related Feature Benchmarks
 
 No feature benchmark is linked to this recipe. Browse the [Feature Benchmarks](../feature-benchmarks/browse-all-benchmarks.mdx) for comparable KV-routing and disaggregation studies.
@@ -175,6 +181,7 @@ No feature benchmark is linked to this recipe. Browse the [Feature Benchmarks](.
 
 - The disaggregated target has no speculative decoding. SGLang refuses DSpark under prefill and decode disaggregation for this model. Use the aggregated target for speculative decoding.
 - Each worker needs TP4 and a GB200 node holds 4 GPUs. So prefill and decode always sit on different nodes, and KV crosses nodes. Mooncake carries KV over the NVLink fabric with an NVLINK memory pool and an IMEX channel. Without the ComputeDomain, KV falls back to TCP and runs about 80 times slower.
+- Both targets set the router to KV-aware. On the disaggregated target this is a no-op today, because one decode worker gives the router nothing to choose between. To make it count, raise the decode replicas and add `--kv-events-config` to the decode worker.
 - Both targets set `SGLANG_DEFAULT_THINKING=true`. Thinking is off by default for this model, and then `reasoning_content` is empty.
 - Both targets keep `--enable-metrics` on and set `DYN_FORWARDPASS_METRIC_PORT` to an empty value. The forward-pass publisher crashes this model on a null `seq_lens_cpu`.
 - Both targets pair the native `reasoning-parser` with `--dyn-reasoning-parser`. The native parser gates guided decoding, and Dynamo builds the response. Do not pair the native and Dynamo tool-call parsers. Dynamo rejects that pair.

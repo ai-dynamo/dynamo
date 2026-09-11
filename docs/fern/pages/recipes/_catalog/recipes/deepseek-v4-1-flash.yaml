@@ -24,13 +24,14 @@ targets:
   techniques:
   - kv-aware-routing
   - dspark-speculative-decoding
+  - expert-parallel
+  - tp4
+  - prefix-caching
   - fp8-kv-cache
-  - tool-calling
-  - structured-output
   - 1m-context
   workload:
-    type: functional
-    traffic: Not benchmarked. Day-0 functional recipe.
+    type: agentic
+    traffic: Day-0 deployment; no published benchmark traffic yet
   deploy:
     asset: recipes/deepseek-v4.1-flash/sglang/agg-gb200/deploy.yaml
   expected_performance:
@@ -45,15 +46,17 @@ targets:
   topology: disaggregated
   techniques:
   - disaggregated-prefill-decode
+  - 1p1d
   - pd-kv-transfer
-  - mnnvl-kv-transfer
+  - kv-aware-routing
+  - expert-parallel
+  - tp4-per-role
+  - prefix-caching
   - fp8-kv-cache
-  - tool-calling
-  - structured-output
   - 1m-context
   workload:
-    type: functional
-    traffic: Not benchmarked. Day-0 functional recipe.
+    type: agentic
+    traffic: Day-0 deployment; no published benchmark traffic yet
   deploy:
     asset: recipes/deepseek-v4.1-flash/sglang/disagg-gb200/deploy-generic.yaml
   expected_performance:
