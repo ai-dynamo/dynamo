@@ -16,6 +16,7 @@ import psutil
 import requests
 
 from tests.utils.constants import DefaultPort, DynamoPortRange
+from tests.utils.http_checks import check_health_ready as check_health_ready
 from tests.utils.port_utils import allocate_port, deallocate_port
 from tests.utils.test_output import resolve_test_output_path
 
@@ -957,14 +958,6 @@ class DynamoFrontendProcess(ManagedProcess):
             env.update(extra_env)
 
         log_dir = f"{request.node.name}_frontend"
-
-        # Clean up any existing log directory from previous runs
-        try:
-            shutil.rmtree(log_dir)
-            self._logger.info(f"Cleaned up existing log directory: {log_dir}")
-        except FileNotFoundError:
-            # Directory doesn't exist, which is fine
-            pass
 
         super().__init__(
             command=command,

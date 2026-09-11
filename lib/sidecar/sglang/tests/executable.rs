@@ -17,8 +17,8 @@ fn executable_exposes_sglang_and_shared_sidecar_contracts() {
     );
     let stdout = String::from_utf8(output.stdout).expect("help output is UTF-8");
     for expected in [
-        "--sglang-endpoint",
-        "SGLANG_GRPC_ENDPOINT",
+        "--grpc-endpoint",
+        "DYN_SIDECAR_GRPC_ENDPOINT",
         "--grpc-connections",
         "DYN_SIDECAR_GRPC_CONNECTIONS",
         "--grpc-connect-attempt-timeout-secs",

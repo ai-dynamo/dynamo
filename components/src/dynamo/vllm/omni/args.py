@@ -7,6 +7,9 @@ import argparse
 import dataclasses
 import logging
 import os
+import re
+import sys
+from types import SimpleNamespace
 from typing import Optional
 
 import huggingface_hub
@@ -23,7 +26,11 @@ from dynamo.common.configuration.groups.runtime_args import (
     DynamoRuntimeArgGroup,
     DynamoRuntimeConfig,
 )
-from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
+from dynamo.common.configuration.utils import (
+    add_argument,
+    add_negatable_bool_argument,
+    env_or_default,
+)
 from dynamo.common.constants import DisaggregationMode
 
 logger = logging.getLogger(__name__)
@@ -66,6 +73,7 @@ class OmniParallelKwargs:
     allgather_degree: int = 1
     cfg_parallel_size: int = 1
     vae_patch_parallel_size: int = 1
+    text_encoder_tp_size: int = 1
     vae_parallel_mode: str = "tile"
     use_hsdp: bool = False
     hsdp_shard_size: int = -1
@@ -281,6 +289,17 @@ class OmniArgGroup(ArgGroup):
         )
         add_argument(
             g,
+            flag_name="--text-encoder-tp-size",
+            env_var="DYN_OMNI_TEXT_ENCODER_TP_SIZE",
+            default=1,
+            arg_type=int,
+            help=(
+                "Number of ranks used to tensor-parallel shard the diffusion "
+                "text encoder."
+            ),
+        )
+        add_argument(
+            g,
             flag_name="--vae-parallel-mode",
             env_var="DYN_OMNI_VAE_PARALLEL_MODE",
             default="tile",
@@ -420,6 +439,8 @@ class OmniConfig(DynamoRuntimeConfig):
             raise ValueError("--ring-degree must be > 0")
         if self.parallel.allgather_degree <= 0:
             raise ValueError("--allgather-degree must be > 0")
+        if self.parallel.text_encoder_tp_size <= 0:
+            raise ValueError("--text-encoder-tp-size must be > 0")
         if not (0 < self.diffusion.boundary_ratio <= 1):
             raise ValueError("--boundary-ratio must be in (0, 1]")
         if self.stage_configs_path is None:
@@ -435,6 +456,78 @@ class OmniConfig(DynamoRuntimeConfig):
             raise ValueError(
                 "--realtime cannot be combined with --stage-id or --omni-router"
             )
+
+
+def _wants_stage_router(argv: list[str]) -> bool:
+    """Detect router mode before vLLM parser construction infers a device.
+
+    Match argparse precedence through the first ``--``; an explicit stage ID
+    keeps the full engine path.
+    """
+    options = argv[: argv.index("--")] if "--" in argv else argv
+    if any(
+        token == "--stage-id" or token.startswith("--stage-id=") for token in options
+    ):
+        return False
+    for token in reversed(options):
+        if token == "--omni-router":
+            return True
+        if token == "--no-omni-router":
+            return False
+    return bool(env_or_default("DYN_OMNI_ROUTER", False))
+
+
+# Everything from the leading "--" up to the first "." -- the option name, but
+# not the key of a dotted value such as --json-arg.key_1.
+_OPTION_NAME = re.compile(r"(?<=^--)[^.]*")
+
+
+def _normalize_engine_option_names(argv: list[str]) -> list[str]:
+    """Rewrite ``--served_model_name`` to ``--served-model-name``, as vLLM does.
+
+    ``FlexibleArgumentParser`` accepts either spelling, but only through
+    ``parse_args``, which rewrites underscores to dashes in the option name
+    before parsing. ``parse_known_args`` -- which the stage router calls so that
+    a stage worker's engine flags stay non-fatal -- does not. Without this, the
+    underscore spelling would bind on the stage-worker path and be reported as
+    unrecognized on the router path, silently dropping the requested value.
+    """
+    normalized = []
+    for token in argv:
+        if not token.startswith("--"):
+            normalized.append(token)
+            continue
+        name, sep, value = token.partition("=")
+        name = _OPTION_NAME.sub(lambda match: match.group(0).replace("_", "-"), name)
+        normalized.append(f"{name}{sep}{value}" if sep else name)
+    return normalized
+
+
+def _add_stage_router_engine_args(parser: argparse.ArgumentParser) -> None:
+    """Register the only engine options the stage router itself reads.
+
+    Each one mirrors the corresponding action from
+    ``OmniEngineArgs.add_cli_args`` -- same flag, same ``nargs``, same default
+    -- so router argv that parsed before parses the same way now. Nothing here
+    instantiates a vLLM config dataclass, so device detection is never reached.
+    """
+    parser.add_argument("--model", type=str, default=OmniEngineArgs.model)
+    parser.add_argument(
+        "--served-model-name",
+        type=str,
+        nargs="+",
+        default=None,
+        dest="served_model_name",
+    )
+    parser.add_argument(
+        "--trust-remote-code", action=argparse.BooleanOptionalAction, default=False
+    )
+    parser.add_argument("--revision", type=str, default=None)
+    parser.add_argument(
+        "--disable-log-stats",
+        action="store_true",
+        default=OmniEngineArgs.disable_log_stats,
+    )
 
 
 def parse_omni_args() -> OmniConfig:
@@ -454,8 +547,12 @@ def parse_omni_args() -> OmniConfig:
     vg = parser.add_argument_group(
         "vLLM-Omni Engine Options. Please refer to vLLM-Omni documentation for more details."
     )
+    stage_router = _wants_stage_router(sys.argv[1:])
     vllm_parser = FlexibleArgumentParser(add_help=False)
-    OmniEngineArgs.add_cli_args(vllm_parser)
+    if stage_router:
+        _add_stage_router_engine_args(vllm_parser)
+    else:
+        OmniEngineArgs.add_cli_args(vllm_parser)
 
     for action in vllm_parser._actions:
         if not action.option_strings:
@@ -468,7 +565,20 @@ def parse_omni_args() -> OmniConfig:
     if config.endpoint is None:
         config.endpoint = "generate"
 
-    vllm_args = vllm_parser.parse_args(unknown)
+    if stage_router:
+        if "--config" in unknown:
+            unknown = vllm_parser._pull_args_from_config(unknown)
+        vllm_args, ignored = vllm_parser.parse_known_args(
+            _normalize_engine_option_names(unknown)
+        )
+        if ignored:
+            logger.warning(
+                "Stage router ignored %d unrecognized engine argument tokens; "
+                "the router does not build an engine.",
+                len(ignored),
+            )
+    else:
+        vllm_args = vllm_parser.parse_args(unknown)
     config.model = vllm_args.model
 
     # Resolve repo id to local snapshot path under HF_HUB_OFFLINE so
@@ -496,7 +606,20 @@ def parse_omni_args() -> OmniConfig:
                 config.model,
             )
 
-    engine_args = OmniEngineArgs.from_cli_args(vllm_args)
+    if stage_router:
+        # OmniConfig.engine_args has no class-level default, so leaving it unset
+        # makes main.worker() fail before it reaches the router dispatch.
+        engine_args = SimpleNamespace(
+            # The parsed repo id, not the snapshot path config.model may have
+            # been rewritten to above; the non-router path leaves this the same.
+            model=vllm_args.model,
+            served_model_name=vllm_args.served_model_name,
+            trust_remote_code=vllm_args.trust_remote_code,
+            revision=vllm_args.revision,
+            disable_log_stats=vllm_args.disable_log_stats,
+        )
+    else:
+        engine_args = OmniEngineArgs.from_cli_args(vllm_args)
 
     if getattr(engine_args, "served_model_name", None) is not None:
         served = engine_args.served_model_name

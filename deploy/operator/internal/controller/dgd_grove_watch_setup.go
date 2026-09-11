@@ -51,9 +51,7 @@ func newGroveWatchSetup(reader client.Reader) *groveWatchSetup {
 func (s *groveWatchSetup) addTo(ctrlBuilder *builder.Builder) *builder.Builder {
 	return ctrlBuilder.
 		Owns(&grovev1alpha1.PodCliqueSet{}, builder.WithPredicates(predicate.Funcs{
-			// Creation is caused by DGD reconciliation and does not need to
-			// enqueue the owner again.
-			CreateFunc:  func(event.CreateEvent) bool { return false },
+			CreateFunc:  func(event.CreateEvent) bool { return true },
 			DeleteFunc:  func(event.DeleteEvent) bool { return true },
 			UpdateFunc:  func(event.UpdateEvent) bool { return true },
 			GenericFunc: func(event.GenericEvent) bool { return true },
@@ -219,6 +217,9 @@ func podCliqueStatusChangeIsSignificant(
 		oldPodClique.Status.ScheduleGatedReplicas != newPodClique.Status.ScheduleGatedReplicas ||
 		oldPodClique.Spec.Replicas != newPodClique.Spec.Replicas ||
 		!ptr.Equal(oldPodClique.Status.ObservedGeneration, newPodClique.Status.ObservedGeneration) ||
+		!ptr.Equal(oldPodClique.Status.CurrentPodCliqueSetGenerationHash, newPodClique.Status.CurrentPodCliqueSetGenerationHash) ||
+		(oldPodClique.Status.UpdateProgress != nil && oldPodClique.Status.UpdateProgress.UpdateEndedAt != nil) !=
+			(newPodClique.Status.UpdateProgress != nil && newPodClique.Status.UpdateProgress.UpdateEndedAt != nil) ||
 		groveScheduledConditionChanged(oldPodClique.Status.Conditions, newPodClique.Status.Conditions)
 }
 
@@ -234,5 +235,8 @@ func pcsgStatusChangeIsSignificant(
 		oldScalingGroup.Status.ScheduledReplicas != newScalingGroup.Status.ScheduledReplicas ||
 		oldScalingGroup.Spec.Replicas != newScalingGroup.Spec.Replicas ||
 		!ptr.Equal(oldScalingGroup.Status.ObservedGeneration, newScalingGroup.Status.ObservedGeneration) ||
+		!ptr.Equal(oldScalingGroup.Status.CurrentPodCliqueSetGenerationHash, newScalingGroup.Status.CurrentPodCliqueSetGenerationHash) ||
+		(oldScalingGroup.Status.UpdateProgress != nil && oldScalingGroup.Status.UpdateProgress.UpdateEndedAt != nil) !=
+			(newScalingGroup.Status.UpdateProgress != nil && newScalingGroup.Status.UpdateProgress.UpdateEndedAt != nil) ||
 		groveScheduledConditionChanged(oldScalingGroup.Status.Conditions, newScalingGroup.Status.Conditions)
 }
