@@ -428,20 +428,43 @@ def test_sglang_failover_watchdog_routes_sigquit_to_controlled_handoff(monkeypat
             return True
 
     loop = FakeLoop()
+
+    class TokenizerManager:
+        event_loop = None
+
+        def running_phase_sigquit_handler(self):
+            raise AssertionError("native crash diagnostics must not run")
+
+        def auto_create_handle_loop(self):
+            # Current SGLang lazily installs this on its first request.
+            if self.event_loop is not None:
+                return
+            self.event_loop = loop
+            loop.add_signal_handler(
+                failover_watchdog.signal.SIGQUIT, self.running_phase_sigquit_handler
+            )
+
+    manager = TokenizerManager()
     watchdog = failover_watchdog.SGLangGmsFailoverChildWatchdog(
-        SimpleNamespace(), SimpleNamespace(), loop
+        SimpleNamespace(), SimpleNamespace(tokenizer_manager=manager), loop
     )
     reasons = []
     monkeypatch.setattr(watchdog, "_trigger_failure", reasons.append)
 
     watchdog._install_sigquit_hook()
     installed = loop._signal_handlers[failover_watchdog.signal.SIGQUIT]._callback
+    assert manager.event_loop is loop
+    # A first request must not replace the GMS callback after startup.
+    manager.auto_create_handle_loop()
+    assert (
+        loop._signal_handlers[failover_watchdog.signal.SIGQUIT]._callback is installed
+    )
     installed()
     assert reasons == ["SGLang SIGQUIT reported child failure"]
 
     watchdog._restore_sigquit_hook()
     restored = loop._signal_handlers[failover_watchdog.signal.SIGQUIT]._callback
-    assert restored is loop.previous
+    assert restored == manager.running_phase_sigquit_handler
 
 
 def test_gms_multinode_shadow_enables_nccl_prewarm(monkeypatch):
