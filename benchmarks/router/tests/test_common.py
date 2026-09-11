@@ -3,8 +3,7 @@
 
 import pytest
 
-from benchmarks.router.common import add_expected_osl
-from benchmarks.router.real_data_priority_benchmark import tag_requests_with_priority
+from benchmarks.router.common import add_expected_osl, tag_requests_with_priority
 
 pytestmark = [
     pytest.mark.pre_merge,
