@@ -45,21 +45,11 @@ The official `Qwen/Qwen3-ASR-1.7B` repository currently needs Rust-frontend-comp
 
 ### Runtime compatibility
 
-The Python `vllm` package and `vllm-rs` must expose compatible EngineCore and gRPC contracts. Prefer artifacts built from the same vLLM source revision; do not combine a Python wheel from one nightly with a `vllm-rs` binary from another. The sidecar's vendored gRPC source revisions are recorded in [`proto/README.md`](proto/README.md).
+The Python `vllm` package and `vllm-rs` must come from compatible vLLM revisions. Do not combine a wheel from one nightly with a binary from another. The sidecar's vendored gRPC source revisions are recorded in [`proto/README.md`](proto/README.md).
 
-A matched pair is not sufficient on its own. EngineCore encodes each message as a msgpack array ordered by field position, so a third package that appends fields to `vllm.v1.engine.EngineCoreOutput` makes every element longer than the strict Rust decoder in `vllm-rs` expects, and the engine output fails to decode even though both halves of `vllm` agree. vLLM loads every `vllm.general_plugins` entry point unless `VLLM_PLUGINS` names an allowlist, so such a package reaches the engine processes `vllm-rs` manages without being asked for. vLLM-Omni is one such package: it appends three fields. The Dynamo vLLM runtime image therefore ships `vllm-rs` on `PATH` as a wrapper that sets `VLLM_PLUGINS`.
+vLLM-Omni changes an internal vLLM message format that the Dynamo sidecar does not support. Dynamo runtime images install a `vllm-rs` wrapper on `PATH` that prevents vLLM-Omni from loading. Start the engine with `vllm-rs` from `PATH`, not the binary inside the Python package.
 
-That allowlist is deliberately minimal: it names only `modelexpress`, the one plugin the image installs on purpose, so it also excludes the two `vllm.general_plugins` entry points vLLM itself ships, `lora_filesystem_resolver` and `lora_hf_hub_resolver`. Those two do not break the decoder, but this protocol does not support LoRA, and `lora_hf_hub_resolver` already declines to register unless it is named in `VLLM_PLUGINS` explicitly. `VLLM_PLUGINS` is also the shared gate for the `vllm.platform_plugins`, `vllm.io_processor_plugins`, `vllm.stat_logger_plugins`, and `vllm.endpoint_plugins` groups, so a plugin you add in any of them needs naming too. In an image built without ModelExpress the wrapper sets `VLLM_PLUGINS` to the empty string, which vLLM reads as an allowlist matching no plugin rather than as unset, so nothing loads. Export `VLLM_PLUGINS` yourself to change any of this; the wrapper keeps whatever you set, including the empty value.
-
-The `dev` and `local-dev` images install neither vLLM-Omni nor ModelExpress, so they have no plugin to exclude and nothing to allow. They link `vllm-rs` onto `PATH` directly and leave `VLLM_PLUGINS` unset, which keeps vLLM's default discovery and lets a plugin you install into a dev image load without being named.
-
-Invoking the binary by its path inside the `vllm` package bypasses that wrapper, so set `VLLM_PLUGINS` yourself when you do:
-
-```bash
-VLLM_PLUGINS=modelexpress \
-  "$(python3 -c 'import os, vllm; print(os.path.dirname(vllm.__file__))')/vllm-rs" \
-  serve Qwen/Qwen3-0.6B --host 127.0.0.1 --grpc-port 50051
-```
+The wrapper enables ModelExpress when that plugin is installed. Set `VLLM_PLUGINS` yourself to use a different plugin set; an exported value takes precedence. The `dev` and `local-dev` images do not install vLLM-Omni, so they keep vLLM's normal plugin discovery.
 
 Start vLLM with its gRPC listener:
 
