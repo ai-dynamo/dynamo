@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 _patched = False
 _factory: Callable[[object, int], KVLeaseClient] | None = None
 _STATE: dict[int, dict[str, object]] = {}
+_TP_RESERVATION_ATTEMPTS = 4
 
 
 def retain_hbm_indices(allocator, indices) -> list[KVLease]:
@@ -138,20 +139,6 @@ def rollback_adopted_hbm_pages(allocator, leases: list[KVLease]) -> None:
         allocator.free_pages, _ = torch.sort(allocator.free_pages)
 
 
-def _append_free_pages(allocator, pages: list[int]) -> None:
-    """Return rejected local pages at lowest allocation priority."""
-    if not pages:
-        return
-    import torch
-
-    page_tensor = torch.tensor(
-        pages,
-        dtype=allocator.free_pages.dtype,
-        device=allocator.free_pages.device,
-    )
-    allocator.free_pages = torch.cat((allocator.free_pages, page_tensor))
-
-
 # Resolved by `install()` from the running SGLang build. Module globals rather
 # than closure cells so every patched allocator method below can live at module
 # scope, where it is importable, greppable and unit-testable.
@@ -194,12 +181,31 @@ def _state(self) -> dict[str, object] | None:
     return _STATE.get(id(self))
 
 
+def _agree_native_capacity(self, operation: str, required: int, available: int) -> None:
+    cohort = getattr(self, "_gms_tp_consistency", None)
+    if cohort is not None and cohort.enabled:
+        cohort.agree(f"{operation}:capacity", (int(required), int(available)))
+
+
 def _safe_free_count(client: KVLeaseClient) -> int:
     try:
         return int(client.free_count())
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.debug("[GMS-KVLease] SGLang free-count read failed", exc_info=True)
         return -1
+
+
+def _canonical_victims(victims: list[dict]) -> list[tuple]:
+    """Return an order-independent representation for TP agreement."""
+    return sorted(
+        (
+            bytes(victim["content_hash"]),
+            str(victim["engine_id"]),
+            tuple(int(page) for page in victim["slot_ids"]),
+            tuple(int(generation) for generation in victim["generations"]),
+        )
+        for victim in victims
+    )
 
 
 def _restore_directory_victims(directory, victims: list[dict]) -> None:
@@ -221,7 +227,12 @@ def _restore_directory_victims(directory, victims: list[dict]) -> None:
         raise RuntimeError("could not restore retired SGLang HBM directory entries")
     entries = directory.lookup_authoritative([item["content_hash"] for item in items])
     expected = [
-        (item["engine_id"], item["slot_ids"], item["generations"]) for item in items
+        (
+            item["engine_id"],
+            item["slot_ids"],
+            item["generations"],
+        )
+        for item in items
     ]
     observed = [
         None
@@ -234,71 +245,110 @@ def _restore_directory_victims(directory, victims: list[dict]) -> None:
 
 
 def _ensure_directory_capacity(self, required_pages: int) -> int:
+    from gpu_memory_service.integrations.sglang.tp_consistency import TPConsistency
+
+    cohort = getattr(self, "_gms_tp_consistency", None) or TPConsistency()
     st = _state(self)
     directory = getattr(self, "_gms_kv_directory", None)
     if st is None or directory is None or not directory.authoritative:
         return 0
     client = st["client"]
     available = _safe_free_count(client)
+    if not cohort.common_prefix(
+        "pressure:capacity", [(int(required_pages), available)]
+    ):
+        # A competing standby can temporarily skew rank-local free counts.
+        # Contention is not permission to retire persistent bytes.
+        return 0
     # The directory RPC is destructive: it retires otherwise reusable HBM
     # entries. If the ring cannot report its capacity, or reports enough free
     # leases, the acquire failure was not confirmed as capacity pressure.
     if available < 0 or available >= int(required_pages):
         return 0
     shortage = int(required_pages) - available
-    # Retained means sealed, not evicted from the engine's native prefix tree.
-    # Only native-free pages may be retired and handed to a future allocation.
-    eligible = _pages_to_list(self.free_pages)
+    # Retained means sealed, not necessarily evicted from SGLang's native tree.
+    # Only pages native-free on every rank may be retired. This also protects
+    # a live TP1 prefix against a lease-protected standby's warmup writes.
+    native_free = cohort.run(
+        "pressure:native-free", lambda: _pages_to_list(self.free_pages)
+    )
+    eligible = cohort.intersection("pressure:eligible", native_free)
     if not eligible:
         return 0
     lease_map = st["leases_by_page"]
     retained = st["retained_pages"]
     assert isinstance(lease_map, dict) and isinstance(retained, set)
-    victims = []
-    victims_leases = []
+    local_victims = []
+
     try:
-        victims = directory.ensure_hbm_capacity(shortage, eligible_slot_ids=eligible)
-        seen = set()
-        for victim in victims:
-            pages = victim["slot_ids"]
-            generations = victim["generations"]
-            if len(pages) != len(generations):
-                raise RuntimeError("malformed GMS pressure victim")
-            for page, generation in zip(pages, generations):
-                lease = KVLease(int(page), int(generation))
-                current = lease_map.get(lease.block_id)
-                if lease.block_id not in eligible or lease.block_id in seen:
-                    raise RuntimeError(
-                        "GMS pressure victim is not uniquely native-free"
-                    )
-                if current is not None and (
-                    current != lease or lease.block_id not in retained
-                ):
-                    raise RuntimeError(
-                        "GMS pressure victim has divergent retained generation"
-                    )
-                seen.add(lease.block_id)
-                victims_leases.append(lease)
+
+        def select_victims():
+            local_victims.extend(
+                directory.ensure_hbm_capacity(shortage, eligible_slot_ids=eligible)
+            )
+            return _canonical_victims(local_victims)
+
+        # Directories are node-local in multi-node TP. Every rank retires the
+        # same logical record from its own daemon, then proves the victim set is
+        # identical before any rank advances a lease generation.
+        victims = cohort.run("pressure:select", select_victims)
+        cohort.agree("pressure:victims", [victim[:3] for victim in victims])
+
+        def validate_victims():
+            leases = []
+            seen = set()
+            for _content_hash, _engine_id, pages, generations in victims:
+                if len(pages) != len(generations):
+                    raise RuntimeError("malformed GMS pressure victim")
+                for page, generation in zip(pages, generations):
+                    lease = KVLease(int(page), int(generation))
+                    current = lease_map.get(lease.block_id)
+                    if lease.block_id not in eligible or lease.block_id in seen:
+                        raise RuntimeError(
+                            "GMS pressure victim is not uniquely native-free"
+                        )
+                    if current is not None and (
+                        current != lease or lease.block_id not in retained
+                    ):
+                        raise RuntimeError(
+                            "GMS pressure victim has divergent retained generation"
+                        )
+                    seen.add(lease.block_id)
+                    leases.append(lease)
+            return leases
+
+        victims_leases = cohort.run("pressure:validate", validate_victims)
     except Exception:
-        # No lease moved yet. Republish every known removed directory record.
+        # Selection is destructive but no lease has moved yet. Republish every
+        # victim for which this rank received an unambiguous response.
         try:
-            _restore_directory_victims(directory, victims)
+            _restore_directory_victims(directory, local_victims)
         except Exception as restore_error:
             raise RuntimeError(
                 "could not compensate SGLang HBM capacity selection; "
                 "retaining leases and failing closed"
             ) from restore_error
         raise
+
     if not victims_leases:
         return 0
-    # Exact-generation adoption validates foreign preserved pages too. It never
-    # makes bytes FREE; failure leaves undiscoverable leases for recovery fencing.
-    releases = client.adopt(victims_leases)
-    if [lease.block_id for lease in releases] != [
-        lease.block_id for lease in victims_leases
-    ]:
-        raise RuntimeError("GMS pressure victim generation validation failed")
-    client.release(releases)
+
+    def pin_victims():
+        # Atomic exact-generation adoption verifies the rank-local ring too,
+        # including foreign preserved pages absent from this engine's map.
+        # It never makes bytes FREE. A peer failure therefore strands only
+        # retired, undiscoverable pages until the cohort is fenced.
+        leases = client.adopt(victims_leases)
+        if [lease.block_id for lease in leases] != [
+            lease.block_id for lease in victims_leases
+        ]:
+            raise RuntimeError("GMS pressure victim generation validation failed")
+        return leases
+
+    releases = cohort.run("pressure:pin", pin_victims)
+    # Every rank has validated and pinned the identical retired victim set.
+    # Never retry an ambiguous release or proceed to allocation before the vote.
+    cohort.run("pressure:release", lambda: client.release(releases))
     for lease in releases:
         lease_map.pop(lease.block_id, None)
         retained.discard(lease.block_id)
@@ -337,6 +387,106 @@ def _rollback_reserved_pages(st: dict[str, object], leases: list[KVLease]) -> No
     _release_tracked_leases(st, leases)
 
 
+def _reserve_tp_pages(self, pages: list[int], operation: str) -> list[KVLease] | None:
+    """Hold leader-selected pages until every rank reserves the same layout.
+
+    Contention with a standby produces a reversible NACK. All successful
+    reservations are released before a bounded retry; native state changes
+    only after unanimous acceptance. Generations fence each rank's own ring
+    and directory and deliberately need not match across ranks.
+    """
+    st = _state(self)
+    client = st["client"]
+    cohort = self._gms_tp_consistency
+    # Native allocator entries agreed on required capacity before arriving
+    # here, so every rank takes this zero-page fast path together.
+    if not pages:
+        return []
+    tried = set()
+    leases = []
+    reclaimed = False
+
+    def release_candidate():
+        nonlocal leases
+        # Forget the batch before its release CAS or peer vote can fail.
+        # An ambiguous release must never be retried: retain any stranded
+        # ownership until this failed cohort is fenced and reclaimed.
+        pending, leases = leases, []
+        if pending:
+            client.release(pending)
+
+    for attempt in range(_TP_RESERVATION_ATTEMPTS):
+        stage = f"{operation}:reserve:{attempt}"
+
+        def choose_pages():
+            nonlocal leases
+            candidates = (
+                pages
+                if not tried
+                else [
+                    page
+                    for page in _pages_to_list(self.free_pages)
+                    if page not in tried
+                ]
+            )
+            try:
+                leases = client.acquire(
+                    len(pages), preferred_blocks=candidates, strict_preferred=True
+                )
+            except RuntimeError:
+                return []
+            return [int(lease.block_id) for lease in leases]
+
+        try:
+            chosen = cohort.leader_call(f"{stage}:choose", choose_pages)
+
+            def reserve_peer(chosen=chosen):
+                nonlocal leases
+                if len(chosen) != len(pages) or len(set(chosen)) != len(chosen):
+                    raise RuntimeError("SGLang GMS TP candidate unavailable")
+                if chosen != pages:
+                    native_free = set(_pages_to_list(self.free_pages))
+                    if not set(chosen).issubset(native_free):
+                        raise RuntimeError("SGLang GMS TP candidate is not native-free")
+                if cohort._rank() != 0:
+                    leases = client.acquire(
+                        len(chosen), preferred_blocks=chosen, strict_preferred=True
+                    )
+                if [int(lease.block_id) for lease in leases] != chosen:
+                    raise RuntimeError("SGLang GMS TP exact-page reservation failed")
+
+            accepted, _ = cohort.attempt(f"{stage}:vote", reserve_peer)
+            if accepted:
+
+                def prepare_native_pages(chosen=chosen):
+                    if chosen != pages:
+                        page_tensor = torch.tensor(
+                            chosen,
+                            dtype=self.free_pages.dtype,
+                            device=self.free_pages.device,
+                        )
+                        selected = torch.isin(self.free_pages, page_tensor)
+                        self.free_pages = torch.cat(
+                            (page_tensor, self.free_pages[~selected])
+                        )
+
+                cohort.run(f"{stage}:native-free", prepare_native_pages)
+                _record_leases(st, leases)
+                return leases
+            cohort.run(f"{stage}:rollback", release_candidate)
+        except Exception:
+            # A failed collective or rollback is not ordinary contention.
+            # No native write began; release our reservation and fail closed.
+            release_candidate()
+            raise
+        tried.update(chosen or pages)
+        if not reclaimed:
+            reclaimed = True
+            if _ensure_directory_capacity(self, len(pages)):
+                tried.clear()
+    return None
+
+
 def _reserve_pages(
     self,
     pages: list[int],
@@ -356,6 +506,9 @@ def _reserve_pages(
         return None
     client = st["client"]
     assert isinstance(client, GMSKVLeaseClient) or hasattr(client, "acquire")
+    cohort = getattr(self, "_gms_tp_consistency", None)
+    if cohort is not None and cohort.enabled:
+        return _reserve_tp_pages(self, pages, operation)
     if not pages:
         return []
     try:
@@ -504,11 +657,12 @@ def _gms_paged_init(self, *args, **kwargs):
 
 def _gms_token_alloc(self, need_size: int):
     st = _state(self)
-    if st is None:
+    if st is None or int(need_size) == 0:
         return orig_token_alloc(self, need_size)
     if self.need_sort and int(need_size) > len(self.free_pages):
         self.merge_and_sort_free()
     local_free = len(self.free_pages)
+    _agree_native_capacity(self, "token_alloc", need_size, local_free)
     if int(need_size) > local_free:
         return None
     pages = _pages_to_list(self.free_pages[: int(need_size)])
@@ -569,9 +723,12 @@ def _gms_paged_alloc(self, need_size: int):
     if st is None:
         return orig_paged_alloc(self, need_size)
     num_pages = int(need_size) // int(self.page_size)
+    if num_pages == 0:
+        return orig_paged_alloc(self, need_size)
     if self.need_sort and num_pages > len(self.free_pages):
         self.merge_and_sort_free()
     local_free = len(self.free_pages)
+    _agree_native_capacity(self, "paged_alloc", num_pages, local_free)
     if num_pages > local_free:
         return None
     pages = _pages_to_list(self.free_pages[:num_pages])
@@ -620,7 +777,19 @@ def _gms_paged_alloc_extend(
             prefix_lens=prefix_lens_cpu,
         )
     num_new_pages = int(num_new_pages)
+    if num_new_pages == 0:
+        return orig_paged_alloc_extend(
+            self,
+            prefix_lens,
+            prefix_lens_cpu,
+            seq_lens,
+            seq_lens_cpu,
+            last_loc,
+            extend_num_tokens,
+            num_new_pages=0,
+        )
     local_free = len(self.free_pages)
+    _agree_native_capacity(self, "paged_alloc_extend", num_new_pages, local_free)
     if num_new_pages > local_free:
         return None
     pages = _pages_to_list(self.free_pages[:num_new_pages])
@@ -661,7 +830,10 @@ def _gms_paged_alloc_decode(self, seq_lens, seq_lens_cpu, last_loc):
             decode=True,
         )
     )
+    if num_new_pages == 0:
+        return orig_paged_alloc_decode(self, seq_lens, seq_lens_cpu, last_loc)
     local_free = len(self.free_pages)
+    _agree_native_capacity(self, "paged_alloc_decode", num_new_pages, local_free)
     if num_new_pages > local_free:
         return None
     pages = _pages_to_list(self.free_pages[:num_new_pages])
@@ -779,7 +951,7 @@ def install(factory: Callable[[object, int], KVLeaseClient] | None = None) -> bo
         from sglang.srt.mem_cache import allocator as alloc_mod
         from sglang.srt.mem_cache import kv_cache_configurator
         from sglang.srt.utils import get_num_new_pages
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.debug("[GMS-KVLease] SGLang allocator not importable", exc_info=True)
         return False
 
@@ -837,5 +1009,5 @@ def lease_hooks_installed() -> bool:
 if kv_leases_enabled("sglang"):
     try:
         install()
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.exception("[GMS-KVLease] SGLang auto-install failed")

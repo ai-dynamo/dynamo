@@ -197,6 +197,73 @@ def test_uses_native_unified_tree_and_hashes(monkeypatch):
     assert len(cache.tree_core.get_hash_values(inserted.last_device_node)) == 2
 
 
+@pytest.mark.parametrize("operation", ["publish", "adopt"])
+def test_tp_logical_layout_agrees_with_rank_local_generations(monkeypatch, operation):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    barrier = threading.Barrier(2, timeout=5)
+    votes = [None, None]
+    caches = []
+    key = _key(1, 2)
+
+    def gather(rank, value):
+        votes[rank] = value
+        barrier.wait()
+        result = list(votes)
+        barrier.wait()
+        return result
+
+    for rank, generation in enumerate([5, 19]):
+        cache, allocator = _cache(monkeypatch)
+        cohort = adapter.TPConsistency(world_size=2)
+        cohort._gather = lambda value, rank=rank: gather(rank, value)
+        cache._gms_tp = cohort
+        cache._gms_directory = _Directory(
+            [
+                {
+                    "state": "ready",
+                    "tier": "hbm",
+                    "slot_ids": [3],
+                    "generations": [generation],
+                }
+            ]
+        )
+        allocator._gms_kv_leases_by_page = {3: KVLease(3, generation)}
+        if operation == "publish":
+            cache.insert(InsertParams(key=key, value=torch.tensor([6, 7])))
+        caches.append(cache)
+
+    monkeypatch.setattr(
+        adapter,
+        "retain_hbm_indices",
+        lambda allocator, _: list(allocator._gms_kv_leases_by_page.values()),
+    )
+    monkeypatch.setattr(
+        adapter,
+        "adopt_hbm_pages",
+        lambda _allocator, pages, generations: (
+            torch.tensor([6, 7]),
+            [
+                KVLease(page, generation + 1)
+                for page, generation in zip(pages, generations)
+            ],
+        ),
+    )
+
+    def execute(cache):
+        if operation == "publish":
+            cache._publish_finished_prefix(key)
+            return cache._gms_directory.published[0]["generations"]
+        result = cache.match_prefix(MatchPrefixParams(key=key))
+        assert result.device_indices.tolist() == [6, 7]
+        return cache._gms_directory.adopted[0][1][0]["generations"]
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        generations = list(executor.map(execute, caches))
+    assert generations == ([[5], [19]] if operation == "publish" else [[6], [20]])
+
+
 def test_publication_preserves_native_physical_page_order(monkeypatch):
     cache, allocator = _cache(monkeypatch)
     key = _key(1, 2, 3, 4)
@@ -333,6 +400,79 @@ def test_native_miss_adopts_directory_pages_and_retries_match(monkeypatch):
     assert result.device_indices.tolist() == [8, 9, 4, 5]
     assert len(directory.adopted) == 1
     assert [item["generations"] for item in directory.adopted[0][1]] == [[9], [10]]
+    assert directory.released == []
+
+
+def test_tp_stale_empty_peer_turns_directory_hit_into_common_miss(monkeypatch):
+    cache, _allocator = _cache(monkeypatch)
+    key = _key(10, 11)
+    directory = _Directory(
+        [{"state": "ready", "tier": "hbm", "slot_ids": [4], "generations": [8]}]
+    )
+    cache._gms_directory = directory
+    cohort = adapter.TPConsistency(world_size=2)
+
+    def gather(value):
+        stage, _payload = value
+        if stage == "adopt:prefix":
+            return [value, (stage, [])]
+        return [value, value]
+
+    monkeypatch.setattr(cohort, "_gather", gather)
+    cache._gms_tp = cohort
+    monkeypatch.setattr(
+        adapter,
+        "adopt_hbm_pages",
+        lambda *_args: pytest.fail("a non-common TP hit must not be adopted"),
+    )
+
+    result = cache.match_prefix(MatchPrefixParams(key=key))
+
+    assert result.device_indices.numel() == 0
+    assert directory.released == ["claim"]
+    assert directory.adopted == []
+
+
+def test_tp_peer_adoption_failure_is_fatal_before_native_insert(monkeypatch):
+    cache, _allocator = _cache(monkeypatch)
+    key = _key(20, 21)
+    directory = _Directory(
+        [{"state": "ready", "tier": "hbm", "slot_ids": [3], "generations": [7]}]
+    )
+    cache._gms_directory = directory
+    leases = [KVLease(3, 8)]
+    monkeypatch.setattr(
+        adapter,
+        "adopt_hbm_pages",
+        lambda *_args: (torch.tensor([6, 7]), leases),
+    )
+    rolled_back = []
+    monkeypatch.setattr(
+        adapter,
+        "rollback_adopted_hbm_pages",
+        lambda _allocator, value: rolled_back.extend(value),
+    )
+    cohort = adapter.TPConsistency(world_size=2)
+
+    def gather(value):
+        stage, _payload = value
+        if stage == "adopt:leases":
+            return [value, (stage, False)]
+        return [value, value]
+
+    monkeypatch.setattr(cohort, "_gather", gather)
+    cache._gms_tp = cohort
+    monkeypatch.setattr(
+        cache,
+        "insert",
+        lambda *_args: pytest.fail("TP adoption failure must precede native insertion"),
+    )
+
+    with pytest.raises(adapter.GmsTPConsistencyError, match="adopt:leases"):
+        cache.match_prefix(MatchPrefixParams(key=key))
+
+    assert rolled_back == []
+    assert len(directory.adopted) == 1
     assert directory.released == []
 
 
@@ -738,7 +878,6 @@ def test_configure_supports_legacy_server_args_override(monkeypatch):
         ("enable_session_radix_cache", True, "session radix cache"),
         ("enable_streaming_session", True, "streaming sessions"),
         ("speculative_algorithm", "EAGLE", "speculative decoding"),
-        ("tp_size", 2, "tensor parallelism"),
         ("dp_size", 2, "data parallelism"),
         ("pp_size", 2, "pipeline parallelism"),
         ("dcp_size", 2, "decode context parallelism"),

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# ruff: noqa: E402
 
+# ruff: noqa: E402
 import asyncio
 import threading
 import time
@@ -42,6 +42,30 @@ def _load_sglang_failover_modules():
     init_llm = init_llm_module
     _scheduler_dead = scheduler_dead
     maybe_start_gms_failover_child_watchdog = start_child_watchdog
+
+
+@pytest.mark.parametrize(("tp_size", "nnodes"), [(2, 1), (4, 2)])
+def test_authoritative_tp_requires_rank_local_directory_topology(
+    monkeypatch, tp_size, nnodes
+):
+    monkeypatch.setenv("GMS_KV_DIRECTORY_MODE", "authoritative")
+    with pytest.raises(ValueError, match="one TP rank per node"):
+        init_llm._validate_gms_tp_topology(
+            SimpleNamespace(tp_size=tp_size, nnodes=nnodes)
+        )
+
+
+@pytest.mark.parametrize(("tp_size", "nnodes"), [(1, 1), (2, 2), (4, 4)])
+def test_authoritative_one_rank_per_node_topology_is_supported(
+    monkeypatch, tp_size, nnodes
+):
+    monkeypatch.setenv("GMS_KV_DIRECTORY_MODE", "authoritative")
+    init_llm._validate_gms_tp_topology(SimpleNamespace(tp_size=tp_size, nnodes=nnodes))
+
+
+def test_vanilla_tp_topology_is_unchanged(monkeypatch):
+    monkeypatch.delenv("GMS_KV_DIRECTORY_MODE", raising=False)
+    init_llm._validate_gms_tp_topology(SimpleNamespace(tp_size=2, nnodes=1))
 
 
 @pytest.mark.asyncio
@@ -218,7 +242,7 @@ async def test_sglang_failover_watchdog_releases_lock_after_fence(monkeypatch):
         shutdown_event=asyncio.Event(),
     )
     engine = SimpleNamespace(
-        get_all_child_pids=lambda: [],
+        get_all_child_pids=list,
         tokenizer_manager=SimpleNamespace(
             _subprocess_watchdog=SimpleNamespace(
                 _processes=[Proc()], _names=["scheduler_0"]
@@ -237,37 +261,6 @@ async def test_sglang_failover_watchdog_releases_lock_after_fence(monkeypatch):
     finally:
         assert watchdog is not None
         watchdog.stop()
-
-
-@pytest.mark.asyncio
-async def test_sglang_failover_watchdog_retains_lock_when_unregister_fails(
-    monkeypatch,
-):
-    shutdown_requested = asyncio.Event()
-    monkeypatch.setattr(
-        failover_watchdog, "_request_owner_shutdown", shutdown_requested.set
-    )
-    lock = SimpleNamespace(release=AsyncMock())
-
-    class Endpoint:
-        async def unregister_endpoint_instance(self):
-            raise RuntimeError("discovery unavailable")
-
-    target = SimpleNamespace(
-        _gms_failover_lock=lock,
-        generate_endpoint=Endpoint(),
-        shutdown_event=asyncio.Event(),
-    )
-    watchdog = failover_watchdog.SGLangGmsFailoverChildWatchdog(
-        target, SimpleNamespace(), asyncio.get_running_loop()
-    )
-
-    await watchdog._release_after_fence()
-
-    lock.release.assert_not_awaited()
-    assert target._gms_failover_lock is lock
-    assert target.shutdown_event.is_set()
-    assert shutdown_requested.is_set()
 
 
 @pytest.mark.asyncio
@@ -310,6 +303,37 @@ async def test_sglang_failover_watchdog_bounds_endpoint_unregister(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_sglang_failover_watchdog_retains_lock_when_unregister_fails(
+    monkeypatch,
+):
+    shutdown_requested = asyncio.Event()
+    monkeypatch.setattr(
+        failover_watchdog, "_request_owner_shutdown", shutdown_requested.set
+    )
+    lock = SimpleNamespace(release=AsyncMock())
+
+    class Endpoint:
+        async def unregister_endpoint_instance(self):
+            raise RuntimeError("discovery unavailable")
+
+    target = SimpleNamespace(
+        _gms_failover_lock=lock,
+        generate_endpoint=Endpoint(),
+        shutdown_event=asyncio.Event(),
+    )
+    watchdog = failover_watchdog.SGLangGmsFailoverChildWatchdog(
+        target, SimpleNamespace(), asyncio.get_running_loop()
+    )
+
+    await watchdog._release_after_fence()
+
+    lock.release.assert_not_awaited()
+    assert target._gms_failover_lock is lock
+    assert target.shutdown_event.is_set()
+    assert shutdown_requested.is_set()
+
+
+@pytest.mark.asyncio
 async def test_sglang_failover_watchdog_shutdown_survives_release_error(monkeypatch):
     shutdown_requested = asyncio.Event()
     monkeypatch.setattr(
@@ -322,23 +346,24 @@ async def test_sglang_failover_watchdog_shutdown_survives_release_error(monkeypa
     monkeypatch.setattr(
         failover_watchdog, "release_attached_gms_failover_lock", fail_release
     )
-    target = SimpleNamespace(
-        _gms_failover_lock=object(), shutdown_event=asyncio.Event()
-    )
+    target = SimpleNamespace(shutdown_event=asyncio.Event())
     watchdog = failover_watchdog.SGLangGmsFailoverChildWatchdog(
         target, SimpleNamespace(), asyncio.get_running_loop()
     )
 
     await watchdog._release_after_fence()
 
-    assert target._gms_failover_lock is not None
     assert target.shutdown_event.is_set()
     assert shutdown_requested.is_set()
 
 
 def test_sglang_failover_watchdog_shutdown_when_loop_is_closed(monkeypatch):
-    shutdown = threading.Event()
-    monkeypatch.setattr(failover_watchdog, "_request_owner_shutdown", shutdown.set)
+    shutdown_calls = []
+    monkeypatch.setattr(
+        failover_watchdog,
+        "_request_owner_shutdown",
+        lambda: shutdown_calls.append(1),
+    )
     monkeypatch.setattr(failover_watchdog, "_fence_children", lambda _engine: True)
 
     def fail_schedule(*_args, **_kwargs):
@@ -357,7 +382,7 @@ def test_sglang_failover_watchdog_shutdown_when_loop_is_closed(monkeypatch):
     watchdog._fence_thread.join(timeout=1.0)
     assert not watchdog._fence_thread.is_alive()
 
-    assert shutdown.is_set()
+    assert shutdown_calls == [1]
 
 
 @pytest.mark.asyncio
@@ -391,13 +416,13 @@ async def test_sglang_failover_watchdog_hooks_subprocess_watchdog(monkeypatch):
     sglang_watchdog = SGLangWatchdog()
     target = SimpleNamespace(_gms_failover_lock=Lock(), shutdown_event=asyncio.Event())
     engine = SimpleNamespace(
-        get_all_child_pids=lambda: [],
+        get_all_child_pids=list,
         tokenizer_manager=SimpleNamespace(_subprocess_watchdog=sglang_watchdog),
     )
 
     watchdog = maybe_start_gms_failover_child_watchdog(target, engine)
     try:
-        assert getattr(sglang_watchdog, "_dynamo_gms_failover_hooked") is True
+        assert sglang_watchdog._dynamo_gms_failover_hooked is True
         assert sglang_watchdog._check_processes() is True
         await asyncio.wait_for(released.wait(), timeout=1.0)
         assert sglang_watchdog.original_called is False
@@ -558,3 +583,178 @@ def test_lock_before_init_keeps_release_and_remap_path(monkeypatch):
 
     monkeypatch.setenv("GMS_KV_LEASES", "1")
     assert init_llm._can_prewarm_mapped_standby() is True
+
+
+@pytest.mark.asyncio
+async def test_sglang_worker_fences_when_leader_acknowledgements_stop(monkeypatch):
+    from dynamo.common import rank_liveness
+
+    captured = {}
+
+    class Client:
+        def __init__(self, leader_host, rank, **kwargs):
+            captured.update(leader_host=leader_host, rank=rank, **kwargs)
+
+        def start(self):
+            captured["started"] = True
+
+    monkeypatch.setenv("DYN_GMS_RANK_LIVENESS", "1")
+    monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "1")
+    monkeypatch.setattr(rank_liveness, "RankLivenessClient", Client)
+    reasons = []
+    target = SimpleNamespace(
+        _gms_failover_child_watchdog=SimpleNamespace(_trigger_failure=reasons.append)
+    )
+
+    client = failover_watchdog.maybe_start_rank_liveness(
+        target, object(), node_rank=1, leader_host="leader.example"
+    )
+
+    assert client is not None
+    assert captured["started"] is True
+    captured["on_leader_lost"](0, "liveness-timeout")
+    assert reasons == ["cross-node leader rank 0 liveness lost (liveness-timeout)"]
+
+
+@pytest.mark.asyncio
+async def test_rank_liveness_without_polling_watchdog_uses_controlled_handoff(
+    monkeypatch,
+):
+    from dynamo.common import rank_liveness
+
+    captured = {}
+
+    class Client:
+        def __init__(self, _leader_host, _rank, **kwargs):
+            captured.update(kwargs)
+
+        def start(self):
+            pass
+
+    class Handoff:
+        def __init__(self, target, engine, loop):
+            captured.update(target=target, engine=engine, loop=loop)
+
+        def _trigger_failure(self, reason):
+            captured["reason"] = reason
+
+    monkeypatch.setenv("DYN_GMS_RANK_LIVENESS", "1")
+    monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "1")
+    monkeypatch.setattr(rank_liveness, "RankLivenessClient", Client)
+    monkeypatch.setattr(failover_watchdog, "SGLangGmsFailoverChildWatchdog", Handoff)
+    target = SimpleNamespace()
+    engine = object()
+
+    failover_watchdog.maybe_start_rank_liveness(
+        target, engine, node_rank=1, leader_host="leader.example"
+    )
+    captured["on_leader_lost"](0, "liveness-timeout")
+
+    assert target._gms_failover_child_watchdog is not None
+    assert captured["target"] is target
+    assert captured["engine"] is engine
+    assert captured["loop"] is asyncio.get_running_loop()
+    assert captured["reason"] == (
+        "cross-node leader rank 0 liveness lost (liveness-timeout)"
+    )
+
+
+def test_sglang_failover_watchdog_retains_lock_while_child_alive(monkeypatch):
+    monkeypatch.setattr(failover_watchdog, "_FENCE_RETRY_INTERVAL_S", 0.01)
+    fence_attempted = threading.Event()
+    shutdowns = []
+
+    def fence(_engine):
+        fence_attempted.set()
+        return False
+
+    monkeypatch.setattr(failover_watchdog, "_fence_children", fence)
+    monkeypatch.setattr(
+        failover_watchdog, "_request_owner_shutdown", lambda: shutdowns.append(1)
+    )
+    target = SimpleNamespace(_gms_failover_lock=object())
+    watchdog = failover_watchdog.SGLangGmsFailoverChildWatchdog(
+        target, SimpleNamespace(), object()
+    )
+
+    watchdog._trigger_failure("test")
+    assert fence_attempted.wait(timeout=0.2)
+    time.sleep(0.03)
+    watchdog.stop()
+
+    assert shutdowns == []
+    assert target._gms_failover_lock is not None
+
+
+def test_sglang_failover_watchdog_retains_lock_when_fence_raises(monkeypatch):
+    monkeypatch.setattr(failover_watchdog, "_FENCE_RETRY_INTERVAL_S", 0.01)
+    fence_attempted = threading.Event()
+    shutdowns = []
+
+    def fence(_engine):
+        fence_attempted.set()
+        raise PermissionError("cannot signal child")
+
+    monkeypatch.setattr(failover_watchdog, "_fence_children", fence)
+    monkeypatch.setattr(
+        failover_watchdog, "_request_owner_shutdown", lambda: shutdowns.append(1)
+    )
+    target = SimpleNamespace(_gms_failover_lock=object())
+    watchdog = failover_watchdog.SGLangGmsFailoverChildWatchdog(
+        target, SimpleNamespace(), object()
+    )
+
+    watchdog._trigger_failure("test")
+    assert fence_attempted.wait(timeout=0.2)
+    time.sleep(0.03)
+    watchdog.stop()
+
+    assert shutdowns == []
+    assert target._gms_failover_lock is not None
+
+
+@pytest.mark.asyncio
+async def test_sglang_failover_watchdog_hands_off_after_delayed_fence(monkeypatch):
+    monkeypatch.setattr(failover_watchdog, "_FENCE_RETRY_INTERVAL_S", 0.01)
+    fence_attempts = []
+    releases = []
+    shutdowns = []
+    shutdown_requested = asyncio.Event()
+
+    def fence(_engine):
+        fence_attempts.append(1)
+        return len(fence_attempts) >= 2
+
+    async def release(target, **_kwargs):
+        releases.append(1)
+        target._gms_failover_lock = None
+
+    def request_shutdown():
+        shutdowns.append(1)
+        shutdown_requested.set()
+
+    monkeypatch.setattr(failover_watchdog, "_fence_children", fence)
+    monkeypatch.setattr(
+        failover_watchdog, "release_attached_gms_failover_lock", release
+    )
+    monkeypatch.setattr(failover_watchdog, "_request_owner_shutdown", request_shutdown)
+    target = SimpleNamespace(
+        _gms_failover_lock=object(), shutdown_event=asyncio.Event()
+    )
+    watchdog = failover_watchdog.SGLangGmsFailoverChildWatchdog(
+        target, SimpleNamespace(), asyncio.get_running_loop()
+    )
+
+    try:
+        watchdog._trigger_failure("test")
+        await asyncio.wait_for(shutdown_requested.wait(), timeout=1.0)
+        assert watchdog._fence_thread is not None
+        watchdog._fence_thread.join(timeout=1.0)
+
+        assert len(fence_attempts) == 2
+        assert releases == [1]
+        assert shutdowns == [1]
+        assert target._gms_failover_lock is None
+        assert target.shutdown_event.is_set()
+    finally:
+        watchdog.stop()

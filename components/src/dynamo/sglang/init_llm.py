@@ -173,6 +173,23 @@ async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
     await warmup_prefill_engine(engine, server_args.disaggregation_bootstrap_port)
 
 
+def _validate_gms_tp_topology(server_args) -> None:
+    """Persistent TP metadata currently requires a rank-local daemon per node."""
+    if (
+        os.environ.get("GMS_KV_DIRECTORY_MODE", "off").strip().lower()
+        != "authoritative"
+    ):
+        return
+    tp_size = int(getattr(server_args, "tp_size", 1) or 1)
+    nnodes = int(getattr(server_args, "nnodes", 1) or 1)
+    if tp_size > 1 and nnodes != tp_size:
+        raise ValueError(
+            "SGLang GMS persistent TP currently requires one TP rank per node "
+            "(nnodes == tp_size), with a separate directory daemon/socket per rank; "
+            "same-node multi-GPU TP is not supported"
+        )
+
+
 async def init_decode(
     runtime: DistributedRuntime,
     config: Config,
@@ -182,6 +199,7 @@ async def init_decode(
     snapshot_engine: Optional[sgl.Engine] = None,
 ) -> None:
     server_args, dynamo_args = config.server_args, config.dynamo_args
+    _validate_gms_tp_topology(server_args)
     _enable_gms_nccl_prewarm(server_args)
 
     if server_args.node_rank >= 1:

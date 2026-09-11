@@ -79,6 +79,7 @@ class GMSProcessManager:
         self._kv_directory = kv_directory
         self._migration_limit = max(0, int(migration_limit))
         self._directory_env: dict[str, str] = {}
+        self.kv_directory_sockets: list[str] = []
         self.kv_directory_socket: str | None = None
         self.kv_directory_manifest: str | None = None
         self._stack: ExitStack | None = None
@@ -95,7 +96,13 @@ class GMSProcessManager:
                 shared_dir = stack.enter_context(
                     tempfile.TemporaryDirectory(prefix="gms-local-failover-")
                 )
-                self.kv_directory_socket = os.path.join(shared_dir, "directory.sock")
+                self.kv_directory_sockets = [
+                    os.path.join(shared_dir, f"directory-rank-{rank}.sock")
+                    for rank in range(_tp_size())
+                ]
+                # Compatibility alias for TP=1 tests and callers that inspect
+                # only the rank-0 directory.
+                self.kv_directory_socket = self.kv_directory_sockets[0]
                 self.kv_directory_manifest = f"local-{self._request.node.name}-v1"
                 lease_dir = os.path.join(shared_dir, "leases")
                 os.makedirs(lease_dir)
@@ -124,7 +131,11 @@ class GMSProcessManager:
                     GMSServer(
                         device=0,
                         tag="kv_cache",
-                        directory_socket_path=self.kv_directory_socket,
+                        directory_socket_path=(
+                            self.kv_directory_sockets[0]
+                            if self.kv_directory_sockets
+                            else None
+                        ),
                     )
                 )
                 for device in range(1, _tp_size()):
@@ -132,6 +143,11 @@ class GMSProcessManager:
                         GMSServer(
                             device=device,
                             tag="kv_cache",
+                            directory_socket_path=(
+                                self.kv_directory_sockets[device]
+                                if self.kv_directory_sockets
+                                else None
+                            ),
                         )
                     )
             frontend = stack.enter_context(
@@ -157,6 +173,7 @@ class GMSProcessManager:
         self.weights_gms = None
         self.kv_cache_gms = None
         self._engine_ids.clear()
+        self.kv_directory_sockets = []
         self.kv_directory_socket = None
         self.kv_directory_manifest = None
         self._directory_env = {}

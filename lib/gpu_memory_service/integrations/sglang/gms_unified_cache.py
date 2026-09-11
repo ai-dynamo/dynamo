@@ -22,6 +22,10 @@ from gpu_memory_service.integrations.sglang.install_kv_leases import (
     retain_hbm_indices,
     rollback_adopted_hbm_pages,
 )
+from gpu_memory_service.integrations.sglang.tp_consistency import (
+    GmsTPConsistencyError,
+    TPConsistency,
+)
 
 if TYPE_CHECKING:
     from sglang.srt.mem_cache.base_prefix_cache import MatchPrefixParams, MatchResult
@@ -123,6 +127,8 @@ def make_gms_unified_cache_class():
             self._gms_directory = _make_directory(self.page_size)
             self._gms_engine_id = _engine_id()
             self.token_to_kv_pool_allocator._gms_kv_directory = self._gms_directory
+            self._gms_tp = TPConsistency(self.tp_group, self.tp_world_size)
+            self.token_to_kv_pool_allocator._gms_tp_consistency = self._gms_tp
 
             # TreeCore normally computes these hashes only for HiCache or an
             # external linker. GMS needs the same native hashes, but neither
@@ -182,11 +188,19 @@ def make_gms_unified_cache_class():
                 )
             if len(set(pages)) != len(pages):
                 raise RuntimeError("completed SGLang prefix reuses a physical KV page")
+            self._gms_tp.agree(
+                "publish:layout",
+                [
+                    {key: value for key, value in item.items() if key != "generations"}
+                    for item in items
+                ],
+            )
 
             retained = self.token_to_kv_pool_allocator._gms_retained_pages
             retained_before = set(retained)
             newly_retained = set(pages).difference(retained_before)
-            try:
+
+            def seal():
                 leases = retain_hbm_indices(self.token_to_kv_pool_allocator, indices)
                 retained_leases = {
                     int(lease.block_id): int(lease.generation) for lease in leases
@@ -196,20 +210,30 @@ def make_gms_unified_cache_class():
                 }
                 if len(leases) != expected or retained_leases != expected_leases:
                     raise RuntimeError("could not seal every completed SGLang HBM page")
+                return retained_leases
+
+            try:
+                self._gms_tp.run("publish:seal", seal)
             except Exception:
                 # No directory mutation was attempted. Removing only new flags
                 # lets a later native eviction release its still-live lease.
                 retained.difference_update(newly_retained)
                 raise
 
-            # Even an atomic directory batch can lose its response. Verify
-            # invalidation before making a potentially published lease reusable.
-            try:
+            # Directory batch publication is atomic per daemon. The TP vote can
+            # still expose a partial cross-daemon commit when one rank fails.
+            def publish():
                 if self._gms_directory.publish(items) != len(items):
                     raise RuntimeError("incomplete SGLang HBM directory publication")
+
+            try:
+                self._gms_tp.run("publish:commit", publish)
             except Exception:
                 try:
-                    _invalidate_and_verify(self._gms_directory, items)
+                    self._gms_tp.run(
+                        "publish:invalidate",
+                        lambda: _invalidate_and_verify(self._gms_directory, items),
+                    )
                 except Exception as cleanup_error:
                     # An ambiguous directory record is less dangerous while
                     # its exact-generation lease remains sealed. Keep the
@@ -293,8 +317,9 @@ def make_gms_unified_cache_class():
                 )
 
             try:
-                entries, claim_token = self._gms_directory.lookup_and_claim(
-                    suffix_hashes
+                entries, claim_token = self._gms_tp.run(
+                    "adopt:lookup",
+                    lambda: self._gms_directory.lookup_and_claim(suffix_hashes),
                 )
                 usable = []
                 for entry in entries:
@@ -309,6 +334,12 @@ def make_gms_unified_cache_class():
                     if len(slots) != 1 or len(generations) != 1:
                         break
                     usable.append((int(slots[0]), int(generations[0])))
+                # Page layout is collective; generations fence rank-local
+                # rings and directories and may differ after a rolled-back CAS.
+                common_pages = self._gms_tp.common_prefix(
+                    "adopt:prefix", [page for page, _generation in usable]
+                )
+                usable = usable[: len(common_pages)]
                 if not usable or self._gms_directory.mode == "shadow":
                     release_claim()
                     return False
@@ -325,6 +356,11 @@ def make_gms_unified_cache_class():
                         successor_generations,
                     )
                 )
+                self._gms_tp.agree(
+                    "adopt:plan", [record[:2] for record in staged_records]
+                )
+            except GmsTPConsistencyError:
+                raise
             except Exception:
                 logger.warning(
                     "SGLang GMS HBM lookup failed before directory staging",
@@ -333,26 +369,31 @@ def make_gms_unified_cache_class():
                 release_claim()
                 return False
 
+            stage_items = [
+                {
+                    "content_hash": content_hash,
+                    "generations": [successor_generation],
+                }
+                for (
+                    content_hash,
+                    _page,
+                    _source_generation,
+                    successor_generation,
+                ) in staged_records
+            ]
             try:
-                staged = self._gms_directory.adopt_claim(
-                    claim_token,
-                    [
-                        {
-                            "content_hash": content_hash,
-                            "generations": [successor_generation],
-                        }
-                        for (
-                            content_hash,
-                            _page,
-                            _source_generation,
-                            successor_generation,
-                        ) in staged_records
-                    ],
-                )
+
+                def stage_adoption():
+                    adopted = self._gms_directory.adopt_claim(claim_token, stage_items)
+                    if self._gms_tp.enabled and adopted != len(staged_records):
+                        raise RuntimeError("incomplete SGLang TP directory adoption")
+                    return adopted
+
+                staged = self._gms_tp.run("adopt:stage", stage_adoption)
             except Exception:
-                # No ring generation changed. Promotion can discard an ACTIVE
-                # stage, but this engine cannot safely continue after an
-                # ambiguous directory response.
+                # The RPC may have committed before its response was lost. No
+                # ring generation changed, and promotion will discard ACTIVE
+                # staging records; continuing this engine would be unsafe.
                 release_claim()
                 logger.exception(
                     "SGLang directory adoption outcome is unknown; failing closed"
@@ -369,19 +410,30 @@ def make_gms_unified_cache_class():
             claim_token = None
 
             try:
-                fresh, leases = adopt_hbm_pages(
-                    self.token_to_kv_pool_allocator, pages, source_generations
-                )
-                expected_leases = [
-                    KVLease(page, generation)
-                    for page, generation in zip(pages, successor_generations)
-                ]
-                if (
-                    fresh is None
-                    or len(fresh) != len(staged_records) * self.page_size
-                    or leases != expected_leases
-                ):
-                    raise RuntimeError("incomplete SGLang HBM page adoption")
+
+                def acquire_pages():
+                    fresh, leases = adopt_hbm_pages(
+                        self.token_to_kv_pool_allocator,
+                        pages,
+                        source_generations,
+                    )
+                    expected_leases = [
+                        KVLease(page, generation)
+                        for page, generation in zip(pages, successor_generations)
+                    ]
+                    if (
+                        fresh is None
+                        or len(fresh) != len(staged_records) * self.page_size
+                        or leases != expected_leases
+                    ):
+                        raise RuntimeError("incomplete SGLang HBM page adoption")
+                    return fresh, leases
+
+                fresh, leases = self._gms_tp.run("adopt:leases", acquire_pages)
+            except GmsTPConsistencyError:
+                # Some peers may already own successor leases. Keep them until
+                # the failed cohort is fenced; promotion discards ACTIVE state.
+                raise
             except Exception:
                 logger.warning(
                     "SGLang HBM lease adoption failed after directory staging",
@@ -400,13 +452,19 @@ def make_gms_unified_cache_class():
                 return False
 
             try:
-                value = torch.cat((result.device_indices, fresh))
-                prefix_len = matched_len + len(fresh)
-                insert_params = InsertParams(
-                    key=key[:prefix_len],
-                    value=value,
-                    prev_prefix_len=matched_len,
-                )
+
+                def prepare_insert():
+                    value = torch.cat((result.device_indices, fresh))
+                    prefix_len = matched_len + len(fresh)
+                    return InsertParams(
+                        key=key[:prefix_len],
+                        value=value,
+                        prev_prefix_len=matched_len,
+                    )
+
+                insert_params = self._gms_tp.run("adopt:prepare-insert", prepare_insert)
+            except GmsTPConsistencyError:
+                raise
             except Exception:
                 logger.warning(
                     "SGLang GMS HBM adoption failed before native insertion",
@@ -428,21 +486,35 @@ def make_gms_unified_cache_class():
             # failure. There is no native transaction/undo API. Never return the
             # pages to the allocator or lease ring after crossing this boundary.
             try:
-                inserted = self.insert(insert_params)
-                if inserted.last_device_node is None:
-                    raise RuntimeError(
-                        "SGLang rejected adopted HBM pages after native insertion began"
-                    )
+
+                def insert():
+                    inserted = self.insert(insert_params)
+                    if inserted.last_device_node is None:
+                        raise RuntimeError(
+                            "SGLang rejected adopted HBM pages after native insertion began"
+                        )
+                    return inserted
+
+                inserted = self._gms_tp.run("adopt:insert", insert)
             except Exception:
                 logger.exception(
                     "SGLang native insertion failed after mutation began; failing closed"
                 )
                 raise
+            if inserted.last_device_node is None:
+                raise RuntimeError(
+                    "SGLang rejected adopted HBM pages after native insertion began"
+                )
             logger.info("[GMS-KVDirectory] SGLang adopted_hbm_pages=%d", len(leases))
             return True
 
         def match_prefix(self, params):
             result = super().match_prefix(params)
+            if self._gms_directory.authoritative:
+                self._gms_tp.agree(
+                    "match:native",
+                    (len(params.key), len(result.device_indices)),
+                )
             if self._gms_directory.authoritative and self._adopt_directory_suffix(
                 params, result
             ):
