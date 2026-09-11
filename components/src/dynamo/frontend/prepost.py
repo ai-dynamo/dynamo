@@ -19,11 +19,25 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
 )
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaFunctionCall,
-    DeltaMessage,
-    DeltaToolCall,
-)
+
+try:
+    # vLLM moved these shared OpenAI response types out of the OpenAI-specific
+    # engine package. The DeepSeek V4.1 Flash preview image has the new path;
+    # released images predating that move retain the old one.
+    from vllm.entrypoints.generate.base.protocol import (
+        DeltaFunctionCall,
+        DeltaMessage,
+        DeltaToolCall,
+    )
+except ModuleNotFoundError as exc:
+    if not (exc.name or "").startswith("vllm.entrypoints.generate"):
+        raise
+    from vllm.entrypoints.openai.engine.protocol import (
+        DeltaFunctionCall,
+        DeltaMessage,
+        DeltaToolCall,
+    )
+
 from vllm.reasoning import ReasoningParser
 from vllm.renderers import ChatParams, merge_kwargs
 from vllm.sampling_params import SamplingParams

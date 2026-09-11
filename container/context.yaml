@@ -136,7 +136,7 @@ sglang:
     # use the CUDA 13 multi-arch preview published for this model.
     # Pin the OCI index, rather than one architecture's child manifest, so
     # Buildx selects the matching vendor image for each target platform.
-    runtime_image_tag: dev-dsv41@sha256:e56358a68b06427362283c8c8a9d7d706448082ae53098ea1131b5d51aa1fd62
+    runtime_image_tag: dev-dsv41@sha256:4a5d132a06a77c8331e15845f2e925adc788b00105097ad55409afa3f4fa4860
     # Baseline is the TRUE base of the third-party lmsysorg/sglang image,
     # nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04 (Docker Hub; CUDA_VERSION=13.0.3,
     # ubuntu24.04), NOT a self-baseline of lmsysorg/sglang.
