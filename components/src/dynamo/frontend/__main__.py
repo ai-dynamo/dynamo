@@ -1,6 +1,7 @@
 #  SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
+import ctypes.util
 import os
 import sys
 
@@ -22,8 +23,6 @@ def _maybe_preload_jemalloc() -> None:
         return
     if "jemalloc" in os.environ.get("LD_PRELOAD", ""):
         return  # already active (or we already re-exec'd)
-
-    import ctypes.util
 
     lib = ctypes.util.find_library("jemalloc")
     if not lib:
