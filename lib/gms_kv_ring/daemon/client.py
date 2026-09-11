@@ -365,6 +365,8 @@ class DaemonClient:
         writer_id: str,
         expected_epoch: int,
         required_blocks: int,
+        *,
+        eligible_slot_ids: list[int] | None = None,
     ) -> tuple[list[dict], bool]:
         resp = self._ok(
             {
@@ -373,6 +375,11 @@ class DaemonClient:
                 "writer_id": str(writer_id),
                 "expected_epoch": int(expected_epoch),
                 "required_blocks": int(required_blocks),
+                **(
+                    {"eligible_slot_ids": [int(value) for value in eligible_slot_ids]}
+                    if eligible_slot_ids is not None
+                    else {}
+                ),
             }
         )
         victims = []
