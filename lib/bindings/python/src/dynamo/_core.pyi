@@ -3395,6 +3395,7 @@ class backend:
             bootstrap_host: Optional[str] = None,
             bootstrap_port: Optional[int] = None,
             enable_eagle: bool = False,
+            max_gpu_lora_count: Optional[int] = None,
         ) -> None: ...
         @property
         def context_length(self) -> Optional[int]: ...
@@ -3416,6 +3417,8 @@ class backend:
         def bootstrap_port(self) -> Optional[int]: ...
         @property
         def enable_eagle(self) -> bool: ...
+        @property
+        def max_gpu_lora_count(self) -> Optional[int]: ...
 
     class EngineConfig:
         def __init__(

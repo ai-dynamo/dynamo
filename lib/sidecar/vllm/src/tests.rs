@@ -268,6 +268,27 @@ impl pb::control_server::Control for FakeVllm {
         Ok(Response::new(pb::AbortResponse {}))
     }
 
+    async fn load_lora(
+        &self,
+        _request: Request<pb::LoadLoraRequest>,
+    ) -> Result<Response<pb::LoadLoraResponse>, Status> {
+        Err(Status::unimplemented("LoRA lifecycle is not implemented"))
+    }
+
+    async fn unload_lora(
+        &self,
+        _request: Request<pb::UnloadLoraRequest>,
+    ) -> Result<Response<pb::UnloadLoraResponse>, Status> {
+        Err(Status::unimplemented("LoRA lifecycle is not implemented"))
+    }
+
+    async fn list_loras(
+        &self,
+        _request: Request<pb::ListLorasRequest>,
+    ) -> Result<Response<pb::ListLorasResponse>, Status> {
+        Err(Status::unimplemented("LoRA lifecycle is not implemented"))
+    }
+
     async fn get_kv_event_sources(
         &self,
         _request: Request<pb::GetKvEventSourcesRequest>,
@@ -447,6 +468,7 @@ fn model_info() -> pb::ModelInfo {
         served_model_aliases: vec!["model-alias".to_string()],
         supports_text_input: true,
         supports_token_ids_input: true,
+        supports_lora: true,
         supports_multimodal: false,
         reasoning_parser: "deepseek_r1".to_string(),
         tool_call_parser: "hermes".to_string(),
@@ -471,6 +493,7 @@ fn server_info() -> pb::ServerInfo {
         total_kv_blocks: 4096,
         max_running_requests: 128,
         max_batched_tokens: 2048,
+        max_loras: 4,
         rl_capabilities: Some(pb::RlCapabilities {
             weight_transfer_enabled: true,
             weight_transfer_backend: "nccl".to_string(),
@@ -1423,6 +1446,7 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     assert_eq!(registration.total_kv_blocks, Some(2048));
     assert_eq!(registration.max_num_seqs, Some(128));
     assert_eq!(registration.max_num_batched_tokens, Some(2048));
+    assert_eq!(registration.max_gpu_lora_count, Some(4));
     assert_eq!(registration.data_parallel_size, Some(2));
     assert_eq!(registration.data_parallel_start_rank, Some(0));
 
