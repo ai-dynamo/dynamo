@@ -120,7 +120,7 @@ to that port to trusted consumers because KV events contain request token IDs.
 
 ### Native Generate compatibility
 
-`vllm-proto 0.1.0` does not include the native sampling JSON extension proposed
+`vllm-proto 0.3.0` does not include the native sampling JSON extension proposed
 in [vLLM #56421](https://github.com/vllm-project/vllm/pull/56421). The sidecar
 therefore does not advertise `vllm_inference_v1_generate`. Aggregated and decode
 requests from v1.4 frontends can still use the legacy
@@ -209,7 +209,11 @@ The RL endpoint, engine routes, and raw HTTP compatibility surface are administr
 
 The sidecar discovers `model_id`, the served name, context length, KV capacity, scheduler limits, data-parallel topology, and KV-event sources through `vllm.Control`. `model_id` must be readable locally or fetchable by Dynamo for tokenization and chat templates. Parser defaults are not advertised because the current inference protocol cannot preserve all parser-related request semantics.
 
-The sidecar currently supports one vLLM frontend hosting the complete data-parallel group starting at rank 0. Control reports the global size; Dynamo forwards the selected rank as `x-data-parallel-rank` gRPC metadata on each generation request. Partial and hybrid rank ownership are unsupported because the protocol does not report the locally hosted rank count, and a nonzero starting rank is rejected. When KV routing is enabled, Control must return one unique ZMQ event source for every rank in the group.
+The sidecar supports a frontend hosting the complete data-parallel group and hybrid load balancing with one frontend and sidecar per node. Each frontend reports the global `data_parallel_size`, the first locally hosted `data_parallel_rank`, and `data_parallel_size_local` through Control. For example, global size 8, starting rank 4, and local size 4 register ranks 4–7 and normalize the frontend's aggregate KV capacity by four. The local range must be nonempty and contained in the global group; model world size remains global.
+
+Dynamo forwards the selected absolute rank unchanged as `x-data-parallel-rank` gRPC metadata. When KV routing is enabled, Control must return one unique ZMQ event source for every locally hosted rank, using those same absolute ranks. Older servers that omit the local-size field decode it as zero and retain complete-group behavior only at starting rank 0; a nonzero starting rank without a local count is rejected.
+
+The sidecar uses the published `vllm-proto 0.3.0` bindings. Hybrid deployments also need a vLLM server containing [vLLM #57116](https://github.com/vllm-project/vllm/pull/57116). Launch vLLM on each node with the global DP size, its local size and starting rank, and `--data-parallel-hybrid-lb`. Every node must expose its own native Rust gRPC frontend; do not use `--headless` for these endpoints. Point each colocated sidecar's `--grpc-endpoint` at that node's frontend.
 
 Aggregated serving is the default. The sidecar role is configured explicitly because the current Control API does not report it:
 
