@@ -867,9 +867,14 @@ class HandlerBase(BaseGenerativeHandler):
             return processed_input
 
         if self.multimodal_processor is None and self._request_has_multimodal(request):
-            # InvalidArgument, not RuntimeError: no worker in the pool can serve
-            # this request, so the client must see 4xx rather than a 500 that
-            # reads as a server fault and dents the availability SLO.
+            # InvalidArgument, not RuntimeError: no worker in the pool can
+            # serve this request. RuntimeError maps to Backend(Unknown) and so
+            # to a sanitized 500 that reads as a server fault; this maps to
+            # Backend(InvalidArgument), which the frontend answers 4xx.
+            #
+            # That 4xx reaches a non-streaming client. A streaming client still
+            # sees 200 then an SSE error frame unless the operator sets
+            # DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS, which is unset by default.
             raise InvalidArgument(
                 "Multimodal input received but worker started without --modality multimodal. "
                 "Restart the worker with --modality multimodal or remove image_url content."

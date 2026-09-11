@@ -2308,8 +2308,11 @@ impl BackendErrorInfo {
 /// A worker's error message is therefore not always prose, and the raw envelope
 /// must never reach a client. Both the in-stream path
 /// ([`extract_backend_error_if_present`]) and the pre-stream path
-/// ([`ErrorMessage::from_anyhow`]) unwrap it, so they agree on the body a client
-/// sees for the same backend error.
+/// ([`ErrorMessage::from_anyhow`]) unwrap it, so the *body* is the same either
+/// way. They deliberately differ on the *status*: the in-stream path honours
+/// any code in the envelope, while the pre-stream path honours only a client
+/// error, because it is reached solely through the `InvalidArgument` arm and a
+/// 5xx there would skip the sanitizing the other arms apply.
 #[derive(serde::Deserialize)]
 struct ErrorPayload {
     message: Option<String>,

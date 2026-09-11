@@ -77,8 +77,8 @@ def raise_if_unextracted_multimodal(request: Dict[str, Any]) -> None:
         "remove the corresponding multimodal content."
     )
     logger.error(message)
-    # See the note in trtllm handler_base: a request no worker can
-    # serve is the client's problem, so it must classify as 4xx.
+    # See the note in trtllm handler_base on why this is InvalidArgument
+    # rather than RuntimeError, and on what a streaming client still sees.
     raise InvalidArgument(message)
 
 
