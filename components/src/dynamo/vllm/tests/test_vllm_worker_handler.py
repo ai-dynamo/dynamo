@@ -2044,7 +2044,6 @@ class TestRLAdminRouteHardening:
     async def test_init_weights_update_group_timeout_exits_worker(self, monkeypatch):
         handler = _make_handler()
         handler._pause_lock = asyncio.Lock()
-        handler.runtime = MagicMock()
         handler.engine_client = MagicMock()
 
         rpc_cancelled = asyncio.Event()
