@@ -3,10 +3,28 @@
 
 suite: LPX operator configuration and RBAC
 templates:
+  - templates/validate-values.yaml
   - charts/dynamo-operator/templates/operator-config.yaml
   - charts/dynamo-operator/templates/manager-rbac.yaml
   - charts/dynamo-operator/templates/validate-values.yaml
 tests:
+  - it: preserves the bundled Grove compatibility error
+    template: templates/validate-values.yaml
+    set:
+      global.grove.install: true
+      dynamo-operator.lpx.enabled: true
+    asserts:
+      - failedTemplate:
+          errorPattern: "bundled Grove v0.1.0-alpha.13 does not support"
+
+  - it: rejects LPX without Grove integration
+    template: charts/dynamo-operator/templates/validate-values.yaml
+    set:
+      dynamo-operator.lpx.enabled: true
+    asserts:
+      - failedTemplate:
+          errorPattern: "LPX requires Grove integration to be enabled"
+
   - it: keeps LPX disabled by default
     template: charts/dynamo-operator/templates/operator-config.yaml
     asserts:
@@ -14,18 +32,23 @@ tests:
           path: data["config.yaml"]
           pattern: '(?m)^lpx:\n  enabled: false$'
 
-  - it: renders only Dynamo operator LPX configuration when enabled
+  - it: enables LPX and externally installed Grove together
     template: charts/dynamo-operator/templates/operator-config.yaml
     set:
+      global.grove.enabled: true
       dynamo-operator.lpx.enabled: true
     asserts:
       - matchRegex:
           path: data["config.yaml"]
           pattern: '(?m)^lpx:\n  enabled: true$'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '(?m)^  grove:\n    enabled: true$'
 
   - it: renders canonical LPX model registry configuration
     template: charts/dynamo-operator/templates/operator-config.yaml
     set:
+      global.grove.enabled: true
       dynamo-operator.lpx.enabled: true
       dynamo-operator.lpx.modelRegistryURL: gs://models/canonical
     asserts:

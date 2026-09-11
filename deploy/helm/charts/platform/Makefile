@@ -84,7 +84,7 @@ verify-operator-chart-crds: ## Verify operator CRDs are managed from the image, 
 
 .PHONY: test
 test: helm-unittest-install charts-prep verify-operator-chart-crds ## Run helm-unittest chart tests
-	@helm unittest .
+	@helm unittest . components/operator
 
 .PHONY: lint
 lint: charts-prep verify-operator-chart-crds ## Run helm lint
