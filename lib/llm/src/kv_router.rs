@@ -793,6 +793,10 @@ impl KvRouter {
         let available_worker_provider: WorkerAvailabilityProvider =
             Arc::new(move || client_for_availability.available_instance_ids());
 
+        // The manager is the partition's lease observer, so it exists before
+        // the scheduler; its scheduler cleanup is set once the scheduler does.
+        let request_leases =
+            request_lease::RequestLeaseManager::new(cancellation_token.child_token());
         let (scheduler, replica_ingress) = embedded::EmbeddedSelection::start(
             embedded::EmbeddedSelectionArgs {
                 kv_router_config: kv_router_config.clone(),
@@ -816,17 +820,14 @@ impl KvRouter {
                 policy_factory,
             },
             workers_with_configs.clone(),
+            Some(Arc::new(request_leases.clone())),
             cancellation_token.child_token(),
         )
         .await?;
-        let request_leases = request_lease::RequestLeaseManager::new(
-            scheduler.booking_cleanup(),
-            cancellation_token.child_token(),
-        );
-        // Inbound lifecycle events start only now that their consumer exists.
-        replica_ingress
-            .start(Arc::new(request_leases.clone()))
-            .await;
+        request_leases.set_scheduler(scheduler.booking_cleanup());
+        // Inbound lifecycle events start only now that their consumer can
+        // release bookings.
+        replica_ingress.start().await;
         tracing::info!("KV Routing initialized");
         let cancellation_token = cancellation_guard.disarm();
         Ok(Self {
@@ -2681,6 +2682,53 @@ mod tests {
         .await
         .expect("dropped selection released its booking");
         assert!(router.scheduler.has_request("kept"));
+    }
+
+    /// A lease released before `set_scheduler` is a wiring bug: it logs and
+    /// leaves the booking alone. After `set_scheduler`, the release reaches
+    /// the scheduler's booking cleanup.
+    #[tokio::test]
+    async fn request_lease_manager_releases_bookings_only_once_scheduler_is_set() {
+        use dynamo_kv_router::scheduling::queue::SchedulerBookingDescriptor;
+
+        let router = differential_router("lease-manager").await;
+        let worker = WorkerWithDpRank::from_worker_id(1);
+        let scheduler = &router.scheduler;
+        let book = |request_id: &'static str| async move {
+            let attempt_id = scheduler
+                .add_request_admitted(SequenceRequest {
+                    request_id: request_id.to_string(),
+                    token_sequence: None,
+                    track_prefill_tokens: false,
+                    expected_output_tokens: None,
+                    prefill_load_hint: None,
+                    worker,
+                    lora_name: None,
+                })
+                .await
+                .expect("booking");
+            SchedulerBookingDescriptor {
+                request_id: request_id.to_string(),
+                worker,
+                attempt_id,
+            }
+        };
+        let cancel = CancellationToken::new();
+        let manager = request_lease::RequestLeaseManager::new(cancel.child_token());
+
+        let before = manager.register_local(book("before").await, None);
+        drop(before);
+        assert!(
+            router.scheduler.has_request("before"),
+            "no scheduler to release through yet"
+        );
+
+        manager.set_scheduler(router.scheduler.booking_cleanup());
+        let after = manager.register_local(book("after").await, None);
+        after.finish().await;
+        assert!(!router.scheduler.has_request("after"));
+        assert!(router.scheduler.has_request("before"));
+        cancel.cancel();
     }
 
     /// A public enrollment cancelled while its routing update is in flight

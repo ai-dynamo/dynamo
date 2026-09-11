@@ -175,20 +175,16 @@ pub(crate) struct EmbeddedSelection {
     queue_metric_indices: HashMap<String, usize>,
 }
 
-/// The partition's inbound replica ingress, not yet running. Starting it
-/// installs the router's lease manager first, so no lifecycle event reaches
-/// the partition before its consumer exists.
+/// The partition's inbound replica ingress, not yet running. The caller starts
+/// it only after the lease manager it passed as `request_leases` has its
+/// scheduler set, so no lifecycle event reaches the manager before it can
+/// release the booking.
 pub(crate) struct PendingReplicaIngress {
     ingress: crate::kv_router::sequence::ReplicaIngress,
-    leases: Arc<crate::kv_router::sequence::LateBoundLeaseObserver>,
 }
 
 impl PendingReplicaIngress {
-    pub(crate) async fn start(
-        self,
-        leases: Arc<dyn dynamo_kv_router::sequences::ReplicaRequestLeaseObserver>,
-    ) {
-        self.leases.install(leases);
+    pub(crate) async fn start(self) {
         self.ingress.start().await;
     }
 }
@@ -239,6 +235,7 @@ impl EmbeddedSelection {
     pub(crate) async fn start(
         args: EmbeddedSelectionArgs,
         workers_with_configs: RuntimeConfigWatch,
+        request_leases: Option<Arc<dyn dynamo_kv_router::sequences::ReplicaRequestLeaseObserver>>,
         cancellation_token: CancellationToken,
     ) -> Result<(Self, PendingReplicaIngress)> {
         let worker_type = args.worker_role.unwrap_or(WorkerType::Aggregated);
@@ -260,7 +257,6 @@ impl EmbeddedSelection {
         )
         .await
         .context("start replica sync for the embedded selection partition")?;
-        let leases = Arc::new(crate::kv_router::sequence::LateBoundLeaseObserver::default());
         let slot = std::sync::Mutex::new(Some(channels));
         let replica_sync: Option<dynamo_kv_router::services::selection::HostReplicaSyncFactory> =
             Some(Arc::new(move |_partition| {
@@ -297,7 +293,7 @@ impl EmbeddedSelection {
             },
             replication: HostReplication {
                 channels: replica_sync,
-                request_leases: Some(leases.clone()),
+                request_leases,
             },
         })
         .build()
@@ -379,7 +375,6 @@ impl EmbeddedSelection {
             },
             PendingReplicaIngress {
                 ingress: replica_ingress,
-                leases,
             },
         ))
     }

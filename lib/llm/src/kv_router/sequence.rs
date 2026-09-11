@@ -18,7 +18,6 @@ use dynamo_kv_router::protocols::{
 pub use dynamo_kv_router::sequence::{ActiveSequences, RequestId};
 
 use anyhow::Result;
-use dynamo_kv_router::scheduling::queue::SchedulerBookingDescriptor;
 use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::{
@@ -26,7 +25,6 @@ use dynamo_runtime::transports::event_plane::{
 };
 use std::collections::VecDeque;
 use std::future::Future;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -41,56 +39,6 @@ use dynamo_runtime::transports::event_plane::MsgpackCodec;
 // Match the existing standalone replica-sync queue. Lifecycle callers enqueue without awaiting;
 // if the queue is full, the newest event is dropped without blocking the local mutation.
 const REPLICA_EVENT_CHANNEL_CAPACITY: usize = 100_000;
-
-/// The partition's lease observer until the router's `RequestLeaseManager`
-/// exists; an event before `install` is a wiring bug and is dropped loudly.
-#[derive(Default)]
-pub(crate) struct LateBoundLeaseObserver {
-    target: std::sync::OnceLock<Arc<dyn ReplicaRequestLeaseObserver>>,
-}
-
-impl LateBoundLeaseObserver {
-    pub(crate) fn install(&self, target: Arc<dyn ReplicaRequestLeaseObserver>) {
-        let installed = self.target.set(target).is_ok();
-        debug_assert!(installed, "request lease manager installed twice");
-    }
-
-    fn target(
-        &self,
-        event: &str,
-        booking: &SchedulerBookingDescriptor,
-    ) -> Option<&Arc<dyn ReplicaRequestLeaseObserver>> {
-        let target = self.target.get();
-        if target.is_none() {
-            tracing::error!(
-                request_id = %booking.request_id,
-                event,
-                "request lifecycle event before the lease manager was installed; the manager will not track this mirrored booking"
-            );
-        }
-        target
-    }
-}
-
-impl ReplicaRequestLeaseObserver for LateBoundLeaseObserver {
-    fn admitted(&self, booking: SchedulerBookingDescriptor) {
-        if let Some(target) = self.target("admitted", &booking) {
-            target.admitted(booking);
-        }
-    }
-
-    fn progressed(&self, booking: &SchedulerBookingDescriptor) {
-        if let Some(target) = self.target("progressed", booking) {
-            target.progressed(booking);
-        }
-    }
-
-    fn completed(&self, booking: &SchedulerBookingDescriptor) {
-        if let Some(target) = self.target("completed", booking) {
-            target.completed(booking);
-        }
-    }
-}
 
 /// How active-sequence events are framed on the wire for a transport.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -531,7 +479,6 @@ async fn forward_replica_events(
 mod tests {
     use super::*;
     use dynamo_kv_router::protocols::ActiveSequenceEventData;
-    use parking_lot::Mutex;
     use std::sync::Arc;
     use tokio::time::Instant;
 
@@ -816,52 +763,6 @@ mod tests {
             MsgpackCodec
                 .decode_payload::<ActiveSequenceEvent>(&batch_payload)
                 .is_err()
-        );
-    }
-    #[test]
-    fn late_bound_observer_drops_before_install_and_forwards_after() {
-        use dynamo_kv_router::sequences::NoopSequencePublisher;
-        use std::collections::HashMap;
-        #[derive(Default)]
-        struct Observer(Mutex<Vec<(&'static str, String)>>);
-        impl ReplicaRequestLeaseObserver for Observer {
-            fn admitted(&self, booking: SchedulerBookingDescriptor) {
-                self.0.lock().push(("add", booking.request_id));
-            }
-            fn progressed(&self, booking: &SchedulerBookingDescriptor) {
-                self.0.lock().push(("progress", booking.request_id.clone()));
-            }
-            fn completed(&self, booking: &SchedulerBookingDescriptor) {
-                self.0.lock().push(("free", booking.request_id.clone()));
-            }
-        }
-        let slots = ActiveSequencesMultiWorker::new_without_expiry(
-            NoopSequencePublisher,
-            4,
-            HashMap::from([(1, (0, 1))]),
-            true,
-            0,
-            "test",
-        );
-        let late = Arc::new(LateBoundLeaseObserver::default());
-        assert!(slots.set_replica_request_lease_observer(late.clone()));
-        // Dropped: no target installed.
-        slots.apply_replica_batch(vec![
-            add_event("before-install"),
-            free_event("before-install"),
-        ]);
-        let observer = Arc::new(Observer::default());
-        late.install(observer.clone());
-        slots.apply_replica_batch(vec![
-            add_event("after-install"),
-            free_event("after-install"),
-        ]);
-        assert_eq!(
-            *observer.0.lock(),
-            vec![
-                ("add", "after-install".to_string()),
-                ("free", "after-install".to_string())
-            ]
         );
     }
 
