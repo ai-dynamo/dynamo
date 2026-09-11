@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use async_trait::async_trait;
 use dynamo_backend_common::{
     DisaggregationMode, DynamoError, GenerateContext, KvEventSource, LLMEngine, LLMEngineOutput,
-    LLMEngineOutputExt, RlAdminBaseUrl, WorkerConfig, usage,
+    LLMEngineOutputExt, RlAdminBaseUrl, WorkerConfig, shutdown::KvTransferFallback, usage,
 };
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig, SidecarStartupError};
 use futures::stream::BoxStream;
@@ -533,6 +533,16 @@ impl LLMEngine for VllmSidecarEngine {
             }
             _ => Ok(unsupported("update", &update)),
         }
+    }
+
+    /// This adapter cannot observe the engine's KV-transfer state, so a
+    /// prefill worker waits the full stage budget before releasing GPU memory
+    /// rather than risk freeing blocks a decode peer is still pulling.
+    /// Declared explicitly so the wait is a recorded decision, not an
+    /// inherited default. Replace with a real `is_quiescent` when the engine
+    /// exposes transfer status.
+    fn kv_transfer_fallback(&self) -> KvTransferFallback {
+        KvTransferFallback::WaitFullBudget
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {

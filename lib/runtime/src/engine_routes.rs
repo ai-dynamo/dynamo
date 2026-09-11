@@ -1,10 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use parking_lot::RwLock;
+use thiserror::Error;
 
 /// Callback type for engine routes (async)
 /// Takes JSON body, returns JSON response (or error) wrapped in a Future
@@ -16,13 +20,43 @@ pub type EngineRouteCallback = Arc<
         + Sync,
 >;
 
+/// HTTP method accepted by an engine route.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EngineRouteMethod {
+    Get,
+    Post,
+}
+
+/// Registered engine route, including an optional method restriction.
+#[derive(Clone)]
+pub struct EngineRoute {
+    callback: EngineRouteCallback,
+    method: Option<EngineRouteMethod>,
+}
+
+impl EngineRoute {
+    pub fn callback(&self) -> EngineRouteCallback {
+        Arc::clone(&self.callback)
+    }
+
+    pub fn method(&self) -> Option<EngineRouteMethod> {
+        self.method
+    }
+}
+
 /// Registry for engine route callbacks
 ///
 /// This registry stores callbacks that handle requests to `/engine/*` routes.
 /// Routes are registered from Python via `runtime.register_engine_route()`.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct EngineRouteRegistry {
-    routes: Arc<RwLock<HashMap<String, EngineRouteCallback>>>,
+    routes: Arc<RwLock<HashMap<String, EngineRoute>>>,
+}
+
+impl Default for EngineRouteRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl EngineRouteRegistry {
@@ -40,8 +74,28 @@ impl EngineRouteRegistry {
     /// it usually signals two registration mechanisms colliding rather than an
     /// intentional replacement.
     pub fn register(&self, route: &str, callback: EngineRouteCallback) {
-        let mut routes = self.routes.write().unwrap();
-        if routes.insert(route.to_string(), callback).is_some() {
+        self.register_inner(route, None, callback);
+    }
+
+    /// Register a callback that accepts only `method`.
+    pub fn register_method(
+        &self,
+        route: &str,
+        method: EngineRouteMethod,
+        callback: EngineRouteCallback,
+    ) {
+        self.register_inner(route, Some(method), callback);
+    }
+
+    fn register_inner(
+        &self,
+        route: &str,
+        method: Option<EngineRouteMethod>,
+        callback: EngineRouteCallback,
+    ) {
+        let mut routes = self.routes.write();
+        let entry = EngineRoute { callback, method };
+        if routes.insert(route.to_string(), entry).is_some() {
             tracing::warn!("Overwriting already-registered engine route: /engine/{route}");
         } else {
             tracing::debug!("Registered engine route: /engine/{route}");
@@ -50,13 +104,19 @@ impl EngineRouteRegistry {
 
     /// Get callback for a route
     pub fn get(&self, route: &str) -> Option<EngineRouteCallback> {
-        let routes = self.routes.read().unwrap();
+        let routes = self.routes.read();
+        routes.get(route).map(EngineRoute::callback)
+    }
+
+    /// Get a route together with its method restriction.
+    pub fn get_route(&self, route: &str) -> Option<EngineRoute> {
+        let routes = self.routes.read();
         routes.get(route).cloned()
     }
 
     /// List all registered routes
     pub fn routes(&self) -> Vec<String> {
-        let routes = self.routes.read().unwrap();
+        let routes = self.routes.read();
         routes.keys().cloned().collect()
     }
 }
@@ -129,5 +189,18 @@ mod tests {
 
         // Original should also see it (they share the Arc)
         assert!(registry.get("test2").is_some());
+    }
+
+    #[test]
+    fn method_registration_preserves_method_metadata() {
+        let registry = EngineRouteRegistry::new();
+        let callback: EngineRouteCallback =
+            Arc::new(|_| Box::pin(async { Ok(serde_json::json!({})) }));
+
+        registry.register_method("drain", EngineRouteMethod::Post, callback);
+
+        let route = registry.get_route("drain").unwrap();
+        assert_eq!(route.method(), Some(EngineRouteMethod::Post));
+        assert!(registry.get("drain").is_some());
     }
 }

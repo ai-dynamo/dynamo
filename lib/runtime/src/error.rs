@@ -62,6 +62,21 @@ pub enum ErrorType {
     /// Distinct from [`Self::ResourceExhausted`] so a request whose routing
     /// constraints permit reassignment can migrate; both surface as HTTP 529.
     WorkerOverloaded,
+    /// The selected worker is intentionally draining and cannot admit this
+    /// request. Frontends may reselect another worker.
+    ///
+    /// **Does not currently survive the request plane.** It is raised inside
+    /// `generate()`, and the wire prologue carries only an opaque string, so
+    /// the egress router relabels it `CannotConnect` before any frontend
+    /// classifier sees it (see `addressed_router.rs`). The classifications
+    /// keyed on this variant are therefore correct but inert until the
+    /// prologue carries a structured error; `CannotConnect` already yields
+    /// migrate-and-inhibit, so behaviour is right today by accident rather
+    /// than by design.
+    ///
+    /// Note migration is not free here: `is_migratable` retries do consume the
+    /// per-request migration budget.
+    WorkerDraining,
     /// No backend worker is currently available to handle the request.
     Unavailable,
     /// One addressed worker answered that it does not serve this request's
@@ -85,6 +100,7 @@ impl fmt::Display for ErrorType {
             ErrorType::Cancelled => write!(f, "Cancelled"),
             ErrorType::ResourceExhausted => write!(f, "ResourceExhausted"),
             ErrorType::WorkerOverloaded => write!(f, "WorkerOverloaded"),
+            ErrorType::WorkerDraining => write!(f, "WorkerDraining"),
             ErrorType::Unavailable => write!(f, "Unavailable"),
             ErrorType::WorkerUnavailable => write!(f, "WorkerUnavailable"),
             ErrorType::Backend(sub) => write!(f, "Backend{sub}"),
@@ -489,6 +505,7 @@ mod tests {
             "ResourceExhausted"
         );
         assert_eq!(ErrorType::WorkerOverloaded.to_string(), "WorkerOverloaded");
+        assert_eq!(ErrorType::WorkerDraining.to_string(), "WorkerDraining");
         assert_eq!(ErrorType::Unavailable.to_string(), "Unavailable");
         assert_eq!(
             ErrorType::WorkerUnavailable.to_string(),

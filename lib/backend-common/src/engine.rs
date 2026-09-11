@@ -20,6 +20,7 @@ use futures::stream::BoxStream;
 use tokio::sync::watch;
 
 use crate::error::DynamoError;
+use crate::shutdown::KvTransferFallback;
 
 pub use dynamo_llm::first_token::FirstTokenNotifier;
 pub use dynamo_llm::kv_router::publisher::KvEventPublisher;
@@ -278,7 +279,28 @@ pub trait LLMEngine: Send + Sync + 'static {
         Ok(None)
     }
 
+    /// What the `Worker` should do on a prefill worker when
+    /// [`is_quiescent`](LLMEngine::is_quiescent) never reports a value.
+    ///
+    /// Declaring this is how an engine that cannot introspect transfers says
+    /// so deliberately, instead of inheriting a fixed delay that looks like a
+    /// real drain. The default is
+    /// [`Undeclared`](crate::shutdown::KvTransferFallback::Undeclared), which
+    /// still waits — the safe choice — but logs a warning naming the stage.
+    /// Overridden by `DYN_WORKER_SHUTDOWN_KV_TRANSFER_FALLBACK`.
+    fn kv_transfer_fallback(&self) -> KvTransferFallback {
+        KvTransferFallback::Undeclared
+    }
+
     /// Release all engine resources. Called exactly once.
+    ///
+    /// **Must not block the executor.** The `Worker` bounds this call with
+    /// `tokio::time::timeout`, which can only cancel at an await point — a
+    /// synchronous `sleep`, `join()`, or blocking FFI teardown holds the
+    /// thread and defeats both the cleanup bound and the process-wide
+    /// shutdown deadline, so the worker outlives the budget its operator
+    /// configured. Wrap blocking teardown in
+    /// `tokio::task::spawn_blocking(..).await` so the bound can take effect.
     ///
     /// `Worker` guarantees:
     ///

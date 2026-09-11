@@ -174,6 +174,21 @@ pub mod runtime {
 pub mod worker {
     /// Graceful shutdown timeout in seconds
     pub const DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT: &str = "DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT";
+
+    /// Upper bound on `engine.cleanup()` during shutdown, in seconds.
+    /// Defaults to `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT`.
+    pub const DYN_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECS: &str =
+        "DYN_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECS";
+
+    /// Upper bound on waiting for request-plane in-flight requests during
+    /// shutdown, in seconds.
+    pub const DYN_WORKER_SHUTDOWN_INFLIGHT_TIMEOUT_SECS: &str =
+        "DYN_WORKER_SHUTDOWN_INFLIGHT_TIMEOUT_SECS";
+
+    /// Policy for prefill engines that cannot report KV-transfer state:
+    /// `wait` (the default) or `skip`.
+    pub const DYN_WORKER_SHUTDOWN_KV_TRANSFER_FALLBACK: &str =
+        "DYN_WORKER_SHUTDOWN_KV_TRANSFER_FALLBACK";
 }
 
 /// NATS transport environment variables
@@ -987,6 +1002,9 @@ mod tests {
             runtime::canary::DYN_CANARY_WAIT_TIME,
             // Worker
             worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT,
+            worker::DYN_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECS,
+            worker::DYN_WORKER_SHUTDOWN_INFLIGHT_TIMEOUT_SECS,
+            worker::DYN_WORKER_SHUTDOWN_KV_TRANSFER_FALLBACK,
             // NATS
             nats::NATS_SERVER,
             nats::DYN_NATS_REQUEST_TIMEOUT_SECS,

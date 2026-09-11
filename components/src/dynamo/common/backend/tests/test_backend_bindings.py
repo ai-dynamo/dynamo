@@ -486,3 +486,123 @@ def test_worker_config_accepts_default_model_input():
     """ModelInput.Tokens is the default — engines that don't pass it must
     still construct cleanly so the Python shim's defaults are usable."""
     backend.WorkerConfig(namespace="dynamo")
+
+
+# ---------------------------------------------------------------------------
+# ShutdownConfig
+# ---------------------------------------------------------------------------
+
+
+def test_shutdown_config_accepts_partial_overrides():
+    """Every field is optional: a caller states only what it changes, and the
+    rest falls back to the environment."""
+    cfg = backend.ShutdownConfig(total_secs=45.0, cleanup_timeout_secs=10.0)
+    assert cfg is not None
+
+
+def test_worker_config_accepts_a_nested_shutdown_config():
+    """The nested field is what keeps a new knob from needing an edit in the
+    Rust struct, the PyO3 signature and the dataclass."""
+    cfg = backend.WorkerConfig(
+        namespace="ns",
+        shutdown=backend.ShutdownConfig(router_grace_secs=1.0),
+    )
+    assert cfg is not None
+
+
+def test_worker_config_shutdown_defaults_to_none():
+    """Omitting it must not be an error — every existing caller does."""
+    assert backend.WorkerConfig(namespace="ns") is not None
+
+
+@pytest.mark.parametrize("value", ["wait", "skip", "WAIT", " Skip "])
+def test_shutdown_config_accepts_both_fallback_policies(value):
+    assert backend.ShutdownConfig(kv_transfer_fallback=value) is not None
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("nan"), 1e30, -1.0])
+def test_shutdown_config_rejects_unrepresentable_durations(bad):
+    """Rejected at construction because Duration::from_secs_f64 panics on a
+    value it cannot represent — and a panic during shutdown aborts the drain.
+    is_finite() alone is not enough: 1e30 is finite and still panics."""
+    with pytest.raises(ValueError, match="finite"):
+        backend.ShutdownConfig(total_secs=bad)
+
+
+def test_shutdown_config_rejects_an_unknown_fallback_policy():
+    """Parsed at construction, so a typo fails here rather than silently
+    falling back to waiting at shutdown time, when nobody is watching."""
+    with pytest.raises(ValueError, match="wait.*skip"):
+        backend.ShutdownConfig(kv_transfer_fallback="nonsense")
+
+
+def test_python_worker_config_forwards_shutdown_to_the_rust_config(monkeypatch):
+    """The shim must pass the nested config through to `_backend.WorkerConfig`.
+
+    Asserted by intercepting that call, not by reading the dataclass back:
+    deleting the whole ``shutdown=`` block in ``worker.py`` left the previous
+    version of this test green, so it protected nothing.
+    """
+    import asyncio
+
+    from dynamo.common.backend import worker as worker_mod
+
+    captured = {}
+
+    def fake_worker_config(**kwargs):
+        captured.update(kwargs)
+        raise _StopBeforeRuntime
+
+    monkeypatch.setattr(worker_mod._backend, "WorkerConfig", fake_worker_config)
+    monkeypatch.setattr(worker_mod._backend, "RuntimeConfig", lambda **kwargs: object())
+
+    cfg = worker_mod.WorkerConfig(
+        namespace="ns",
+        shutdown=worker_mod.ShutdownConfig(
+            total_secs=30.0, kv_transfer_fallback="skip"
+        ),
+    )
+    shim = worker_mod.Worker(MagicMock(), cfg)
+
+    with pytest.raises(_StopBeforeRuntime):
+        asyncio.run(shim.run())
+
+    forwarded = captured["shutdown"]
+    assert forwarded is not None, "the nested shutdown config was dropped"
+    assert isinstance(forwarded, core.backend.ShutdownConfig)
+    # Assert the values, not just the type. Asserting `isinstance` alone passed
+    # identically when the forwarding kwargs were replaced by a bare
+    # `ShutdownConfig()` — so the test could not catch a dropped setting, which
+    # is the only thing it exists to catch.
+    assert (
+        forwarded.total_secs == 30.0
+    ), f"total_secs was not forwarded; got {forwarded.total_secs!r}"
+    assert forwarded.kv_transfer_fallback == "skip", (
+        f"kv_transfer_fallback was not forwarded; got "
+        f"{forwarded.kv_transfer_fallback!r}"
+    )
+    # Unset fields must stay unset rather than being filled with defaults on
+    # the way across — an unset field means "use the environment".
+    assert forwarded.router_grace_secs is None
+    assert forwarded.cleanup_timeout_secs is None
+
+
+class _StopBeforeRuntime(Exception):
+    """Aborts `Worker.run` once the config has been built, so the test never
+    needs a live runtime."""
+
+
+def test_python_worker_config_shutdown_defaults_are_all_unset():
+    """Default construction must not pin any value, or it would override the
+    environment for callers that never asked."""
+    from dynamo.common.backend.worker import WorkerConfig as PyWorkerConfig
+
+    shutdown = PyWorkerConfig(namespace="ns").shutdown
+    assert asdict(shutdown) == {
+        "total_secs": None,
+        "router_grace_secs": None,
+        "inflight_timeout_secs": None,
+        "kv_transfer_timeout_secs": None,
+        "cleanup_timeout_secs": None,
+        "kv_transfer_fallback": None,
+    }

@@ -56,6 +56,9 @@ pub fn request_was_unavailable(err: &(dyn std::error::Error + 'static)) -> bool 
     const UNAVAILABLE: &[DynamoErrorType] = &[
         DynamoErrorType::Unavailable,
         DynamoErrorType::WorkerUnavailable,
+        // A draining worker refused admission. If migration exhausted its
+        // options this is still "no worker took it", not a server fault.
+        DynamoErrorType::WorkerDraining,
     ];
     const AVAILABLE: &[DynamoErrorType] = &[];
     dynamo_runtime::error::match_error_chain(err, UNAVAILABLE, AVAILABLE)

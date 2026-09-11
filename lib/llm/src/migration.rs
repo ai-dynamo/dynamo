@@ -82,6 +82,11 @@ fn is_migratable(err: &(dyn StdError + 'static)) -> bool {
         // One worker answered that it no longer serves this instance: another
         // may. Pool-wide absence is Unavailable and is not a worker fault.
         ErrorType::WorkerUnavailable,
+        // The worker closed admission because it is shutting down. It refused
+        // before doing any work, so retrying elsewhere is always safe — and
+        // not migrating would turn every request caught in the stop-admission
+        // window into a user-visible 500.
+        ErrorType::WorkerDraining,
     ];
     const NON_MIGRATABLE: &[ErrorType] = &[ErrorType::Cancelled, ErrorType::ResourceExhausted];
     error::match_error_chain(err, MIGRATABLE, NON_MIGRATABLE)
@@ -739,6 +744,15 @@ mod tests {
             ErrorType::WorkerUnavailable
         )));
         assert!(!is_migratable(&migratable_error(ErrorType::Unavailable)));
+    }
+
+    /// Regression: a worker that closed admission for shutdown rejects before
+    /// doing any work, so the request must be retried elsewhere. Leaving it
+    /// non-migratable turned every request caught in the stop-admission window
+    /// into a user-visible 500.
+    #[test]
+    fn worker_draining_is_migratable() {
+        assert!(is_migratable(&migratable_error(ErrorType::WorkerDraining)));
     }
 
     // Guard: genuinely non-migratable errors stay non-migratable.
