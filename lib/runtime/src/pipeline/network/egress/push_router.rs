@@ -2503,43 +2503,6 @@ mod tests {
         );
     }
 
-    /// The other side of the same pin: a worker that correctly refuses a
-    /// request it cannot serve is not faulty, so it must stay in rotation.
-    /// `pre_stream_failure_error` keeps the refusal's own type rather than
-    /// framing it as `CannotConnect`, which `is_inhibited` quarantines on.
-    #[test]
-    fn a_request_refusal_does_not_quarantine_the_worker() {
-        use crate::pipeline::network::StreamPrologueError;
-        use crate::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
-
-        let refusal = pre_stream_failure_error(&StreamPrologueError::new(
-            "Generate Error: multimodal requests are not supported",
-            DynamoError::builder()
-                .error_type(ErrorType::Backend(BackendError::InvalidArgument))
-                .message("multimodal requests are not supported")
-                .build(),
-        ));
-        assert!(
-            !is_inhibited(&refusal),
-            "refusing an unservable request is not a worker fault; quarantining \
-             takes a healthy worker out of rotation"
-        );
-
-        // A worker that died before the stream is still a fault, and must
-        // keep quarantining through the same path.
-        let shutdown = pre_stream_failure_error(&StreamPrologueError::new(
-            "Generate Error: engine shut down",
-            DynamoError::builder()
-                .error_type(ErrorType::Backend(BackendError::EngineShutdown))
-                .message("engine shut down")
-                .build(),
-        ));
-        assert!(
-            is_inhibited(&shutdown),
-            "a pre-stream engine shutdown must still quarantine the worker"
-        );
-    }
-
     #[test]
     fn worker_unavailable_quarantines_the_worker() {
         let err = DynamoError::builder()

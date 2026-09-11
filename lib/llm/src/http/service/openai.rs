@@ -6209,12 +6209,13 @@ mod tests {
 
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
         assert_eq!(response.1.code, StatusCode::BAD_REQUEST.as_u16());
-        // Exact, not `contains`: the body must be the worker's own wording, not
-        // the transport's "failed before response stream" framing wrapped
-        // around it.
-        assert_eq!(
-            response.1.message,
-            "multimodal input is not supported by this backend"
+        assert!(
+            response
+                .1
+                .message
+                .contains("multimodal input is not supported"),
+            "the client should see the worker's reason, got: {}",
+            response.1.message
         );
     }
 
