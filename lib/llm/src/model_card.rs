@@ -1003,10 +1003,25 @@ impl ModelDeploymentCard {
         if parsers == [None; 2]
             && (self.model_type.supports_chat() || self.model_type.supports_completions())
             && let Some(info) = &self.model_info
-            && info.get_model_info()?.model_type() == "deepseek_v41"
         {
-            config.tool_call_parser = Some("deepseek_v41".into());
-            config.reasoning_parser = Some("deepseek_v41".into());
+            match info.model_type_hint() {
+                Ok(Some(model_type)) if model_type == "deepseek_v41" => {
+                    config.tool_call_parser = Some("deepseek_v41".into());
+                    config.reasoning_parser = Some("deepseek_v41".into());
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    // Parser selection is an optional discovery enhancement. In
+                    // particular, text-input workers may use model configs that
+                    // their backend accepts but the full Rust HFConfig projection
+                    // does not. Keep those workers discoverable and let explicit
+                    // runtime configuration remain the fallback.
+                    tracing::warn!(
+                        %error,
+                        "could not inspect model_type for automatic frontend parser selection"
+                    );
+                }
+            }
         }
         Ok(config)
     }
@@ -1940,6 +1955,19 @@ pub trait ModelInfo: Send + Sync {
 }
 
 impl ModelInfoType {
+    fn model_type_hint(&self) -> Result<Option<String>> {
+        match self {
+            Self::HfConfigJson(checked_file) => {
+                let Some(path) = checked_file.path() else {
+                    anyhow::bail!("model info is not a local path: {checked_file:?}");
+                };
+                let contents = std::fs::read_to_string(path)?;
+                let config: HFModelTypeProjection = json_five::from_str(&contents)?;
+                Ok(config.model_type)
+            }
+        }
+    }
+
     pub fn get_model_info(&self) -> Result<Arc<dyn ModelInfo>> {
         match self {
             Self::HfConfigJson(checked_file) => {
@@ -1950,6 +1978,11 @@ impl ModelInfoType {
             }
         }
     }
+}
+
+#[derive(Deserialize)]
+struct HFModelTypeProjection {
+    model_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2408,6 +2441,7 @@ fn check_valid_local_repo_path(path: impl AsRef<Path>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{HFConfig, ModelDeploymentCard};
+    use crate::model_type::{ModelInput, ModelType};
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
 
@@ -2464,6 +2498,31 @@ mod tests {
         let options = set.parsing_options();
         assert_eq!(options.tool_call_parser.as_deref(), Some("deepseek_v41"));
         assert_eq!(options.reasoning_parser.as_deref(), Some("deepseek_v41"));
+    }
+
+    #[test]
+    fn frontend_runtime_config_only_requires_model_type_for_text_workers() {
+        for (model_type, expected_parser) in [
+            ("deepseek_v41", Some("deepseek_v41")),
+            ("custom_text_model", None),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                dir.path().join("config.json"),
+                format!(r#"{{"model_type":"{model_type}"}}"#),
+            )
+            .unwrap();
+            let mut card = ModelDeploymentCard::with_name_only(model_type);
+            card.model_type = ModelType::Chat;
+            card.model_input = ModelInput::Text;
+            card.model_info = Some(super::ModelInfoType::from_disk(dir.path()).unwrap());
+
+            let config = card
+                .frontend_runtime_config()
+                .expect("text-worker parser detection should not require full HFConfig fields");
+            assert_eq!(config.tool_call_parser.as_deref(), expected_parser);
+            assert_eq!(config.reasoning_parser.as_deref(), expected_parser);
+        }
     }
 
     #[test]

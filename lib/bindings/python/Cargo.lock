@@ -2348,7 +2348,7 @@ dependencies = [
 [[package]]
 name = "dynamo-parsers-v2"
 version = "0.5.3"
-source = "git+https://github.com/abatilo/frontend-crates.git?rev=7b440444c9a296032386642bf6109bb700128632#7b440444c9a296032386642bf6109bb700128632"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=bdb4d2f6a44e522a964be8b3a5fec34297d31afb#bdb4d2f6a44e522a964be8b3a5fec34297d31afb"
 dependencies = [
  "anyhow",
  "num-traits",
@@ -2364,7 +2364,7 @@ dependencies = [
 [[package]]
 name = "dynamo-protocols"
 version = "5.4.3"
-source = "git+https://github.com/abatilo/frontend-crates.git?rev=7b440444c9a296032386642bf6109bb700128632#7b440444c9a296032386642bf6109bb700128632"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=bdb4d2f6a44e522a964be8b3a5fec34297d31afb#bdb4d2f6a44e522a964be8b3a5fec34297d31afb"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2426,7 +2426,7 @@ dependencies = [
 [[package]]
 name = "dynamo-renderer"
 version = "5.1.2"
-source = "git+https://github.com/abatilo/frontend-crates.git?rev=7b440444c9a296032386642bf6109bb700128632#7b440444c9a296032386642bf6109bb700128632"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=bdb4d2f6a44e522a964be8b3a5fec34297d31afb#bdb4d2f6a44e522a964be8b3a5fec34297d31afb"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2573,7 +2573,7 @@ dependencies = [
 [[package]]
 name = "dynamo-tokenizers"
 version = "1.8.1"
-source = "git+https://github.com/abatilo/frontend-crates.git?rev=7b440444c9a296032386642bf6109bb700128632#7b440444c9a296032386642bf6109bb700128632"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=bdb4d2f6a44e522a964be8b3a5fec34297d31afb#bdb4d2f6a44e522a964be8b3a5fec34297d31afb"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3862,7 +3862,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -6628,7 +6628,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.2",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -6666,7 +6666,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "tracing",
  "windows-sys 0.60.2",
 ]

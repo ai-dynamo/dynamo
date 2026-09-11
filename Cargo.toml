@@ -62,8 +62,8 @@ aisimulate-core = { version = "=0.1.0-dev.2" }
 dynamo-runtime = { path = "lib/runtime", version = "1.5.0" }
 dynamo-llm = { path = "lib/llm", version = "1.5.0" }
 dynamo-rl = { path = "lib/rl", version = "1.5.0" }
-dynamo-tokenizers = { git = "https://github.com/abatilo/frontend-crates.git", rev = "7b440444c9a296032386642bf6109bb700128632" }
-dynamo-renderer = { git = "https://github.com/abatilo/frontend-crates.git", rev = "7b440444c9a296032386642bf6109bb700128632" }
+dynamo-tokenizers = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "bdb4d2f6a44e522a964be8b3a5fec34297d31afb" }
+dynamo-renderer = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "bdb4d2f6a44e522a964be8b3a5fec34297d31afb" }
 dynamo-tokens = { path = "lib/tokens", version = "1.5.0" }
 dynamo-truthy = { path = "lib/truthy", version = "1.5.0" }
 dynamo-data-gen = { path = "lib/data-gen", version = "1.5.0" }
@@ -71,10 +71,10 @@ dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.5.0" }
 dynamo-memory = { path = "lib/memory", version = "1.5.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.5.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.5.0" }
-dynamo-protocols = { git = "https://github.com/abatilo/frontend-crates.git", rev = "7b440444c9a296032386642bf6109bb700128632" }
+dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "bdb4d2f6a44e522a964be8b3a5fec34297d31afb" }
 dynamo-parsers = { version = "8.1.0" }
 
-dynamo-parsers-v2 = { git = "https://github.com/abatilo/frontend-crates.git", rev = "7b440444c9a296032386642bf6109bb700128632" }
+dynamo-parsers-v2 = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "bdb4d2f6a44e522a964be8b3a5fec34297d31afb" }
 dynamo-backend-common = { path = "lib/backend-common", version = "1.5.0" }
 dynamo-sidecar-common = { path = "lib/sidecar/common", version = "1.5.0" }
 fastokens = { version = "0.2.0" }
@@ -221,4 +221,4 @@ debug = true
 strip = false
 
 [patch.crates-io]
-dynamo-protocols = { git = "https://github.com/abatilo/frontend-crates.git", rev = "7b440444c9a296032386642bf6109bb700128632" }
+dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "bdb4d2f6a44e522a964be8b3a5fec34297d31afb" }
