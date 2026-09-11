@@ -157,9 +157,13 @@ pub(crate) fn aggregated_replay_setup(
 ) -> Result<(ReplayEngineConfig, ReplayEngineFactory)> {
     let components = engine_components(args.clone(), false, false)?;
     let config = ReplayEngineConfig {
-        // `None` everywhere in this file: the mocker never overrides the
-        // upstream capacity estimator's block count, so it has no explicit
-        // value to author here.
+        // `None` everywhere in this file. `MockEngineArgs.num_gpu_blocks` can
+        // come from the caller (`common/protocols.rs`'s `num_gpu_blocks`
+        // builder field) or an estimator, but that provenance collapses into
+        // a plain `usize` by the time it reaches `args.num_gpu_blocks` here --
+        // nothing downstream of this constructor currently reads
+        // `num_gpu_blocks_is_explicit`, so there is no consumer yet to wire
+        // the real value for. Revisit if one starts branching on it.
         num_gpu_blocks_is_explicit: None,
         dp_size: components.args.dp_size,
         tensor_parallel_size: replay_tensor_parallel_size(&components.args)?,
