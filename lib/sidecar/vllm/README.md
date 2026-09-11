@@ -51,6 +51,8 @@ A matched pair is not sufficient on its own. EngineCore encodes each message as 
 
 That allowlist is deliberately minimal: it names only `modelexpress`, the one plugin the image installs on purpose, so it also excludes the two `vllm.general_plugins` entry points vLLM itself ships, `lora_filesystem_resolver` and `lora_hf_hub_resolver`. Those two do not break the decoder, but this protocol does not support LoRA, and `lora_hf_hub_resolver` already declines to register unless it is named in `VLLM_PLUGINS` explicitly. `VLLM_PLUGINS` is also the shared gate for the `vllm.platform_plugins`, `vllm.io_processor_plugins`, `vllm.stat_logger_plugins`, and `vllm.endpoint_plugins` groups, so a plugin you add in any of them needs naming too. In an image built without ModelExpress the wrapper sets `VLLM_PLUGINS` to the empty string, which vLLM reads as an allowlist matching no plugin rather than as unset, so nothing loads. Export `VLLM_PLUGINS` yourself to change any of this; the wrapper keeps whatever you set, including the empty value.
 
+The `dev` and `local-dev` images install neither vLLM-Omni nor ModelExpress, so they have no plugin to exclude and nothing to allow. They link `vllm-rs` onto `PATH` directly and leave `VLLM_PLUGINS` unset, which keeps vLLM's default discovery and lets a plugin you install into a dev image load without being named.
+
 Invoking the binary by its path inside the `vllm` package bypasses that wrapper, so set `VLLM_PLUGINS` yourself when you do:
 
 ```bash
