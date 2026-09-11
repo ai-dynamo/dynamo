@@ -132,7 +132,10 @@ class DistributedRuntime:
         expired, so one operation finishing cannot uncover another still running.
 
         Raises:
-            ValueError: If max_seconds is not a finite positive number.
+            ValueError: If max_seconds is not a finite positive number, or is
+                greater than 86400 (one day). A window is a backstop rather than
+                a schedule, so longer ones are rejected instead of suppressing
+                probes for an unbounded stretch.
         """
         ...
 

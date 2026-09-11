@@ -1189,12 +1189,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self._lora_capacity_guard = asyncio.Lock()
         self._paused: bool = False
         self._weight_version: str = "initial"
-        # Canary maintenance leases this worker holds, oldest first. A weight
-        # transfer spans several admin calls, so its terminator arrives long after
-        # _pause_lock was released and a second transfer may already have started.
-        # Releasing the oldest lease pairs terminators with transfers in arrival
-        # order, which is as much identity as the admin protocol carries.
-        self._rl_maintenance_leases: deque[int] = deque()
+        # Canary maintenance lease for the transfer this worker is running, if
+        # any. A worker has one weight-update group, so one lease is enough and
+        # holding it in a single slot is what makes the terminators idempotent —
+        # see _begin_rl_maintenance and _end_rl_maintenance.
+        self._rl_maintenance_lease: int | None = None
 
         embedding_loader = self.init_embedding_loader(config, encode_worker_client)
 
@@ -2151,16 +2150,29 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         }
 
     def _begin_rl_maintenance(self) -> None:
-        self._rl_maintenance_leases.append(
-            self.runtime.begin_health_check_maintenance(_RL_MAINTENANCE_WINDOW_S)
+        """Take the lease for a new transfer, superseding any lease still held.
+
+        A worker has one weight-update group, so an init means the previous
+        transfer is over however it ended. Releasing its lease here keeps a
+        transfer that never reached a terminator from holding a window until
+        its deadline.
+        """
+        self._end_rl_maintenance()
+        self._rl_maintenance_lease = self.runtime.begin_health_check_maintenance(
+            _RL_MAINTENANCE_WINDOW_S
         )
 
     def _end_rl_maintenance(self) -> None:
-        """Release the oldest lease this worker holds, if it holds any."""
-        if self._rl_maintenance_leases:
-            self.runtime.end_health_check_maintenance(
-                self._rl_maintenance_leases.popleft()
-            )
+        """Release this worker's lease, once.
+
+        Clearing the slot before releasing makes the terminators idempotent: a
+        transfer that reaches both `finish_weight_update` and
+        `destroy_weights_update_group` releases its lease on the first and does
+        nothing on the second, rather than releasing a lease it does not own.
+        """
+        lease, self._rl_maintenance_lease = self._rl_maintenance_lease, None
+        if lease is not None:
+            self.runtime.end_health_check_maintenance(lease)
 
     async def init_weights_update_group(self, body: dict) -> dict:
         """Initialize the distributed weight-update communication group."""
