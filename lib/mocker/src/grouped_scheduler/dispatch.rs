@@ -100,10 +100,22 @@ pub(super) async fn run_effect_dispatcher(
                     &completion_tracker,
                 )
                 .await?;
+                // Exempt a cancelled run. `dispatch_pass_completion` returns
+                // `Ok(())` for `CompletionDispatch::Cancelled`, and it reaches
+                // that from inside its per-rank loop -- so the ranks it had not
+                // visited yet still hold the deferred effects a mid-pass command
+                // left them. Those are abandoned deliberately during shutdown,
+                // but this invariant could not tell that apart from a genuine
+                // omission and turned an orderly cancellation into
+                // "grouped pass completion omitted deferred command effects for
+                // a rank", reported to the supervisor as a run failure. The
+                // dispatcher's own biased `cancel.cancelled()` arm returns on the
+                // next iteration, so no later pass observes the leftovers.
                 ensure!(
-                    deferred_commands
-                        .iter()
-                        .all(|deferred| deferred.kv.is_empty() && deferred.metrics.is_none()),
+                    cancel.is_cancelled()
+                        || deferred_commands
+                            .iter()
+                            .all(|deferred| deferred.kv.is_empty() && deferred.metrics.is_none()),
                     "grouped pass completion omitted deferred command effects for a rank"
                 );
             }
