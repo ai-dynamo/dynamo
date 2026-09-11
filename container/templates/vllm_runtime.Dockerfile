@@ -182,6 +182,7 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 {# Inline expression, not a block tag: render.py leaves trim_blocks off, so a tag
    on its own line inside the RUN breaks the backslash continuation. #}
 {% set vllm_rs_required = "1" if device == "cuda" else "0" %}
+{# TODO: Remove this workaround once bundled vllm-rs accepts extra output fields. #}
 {% set vllm_rs_allowlist = "1" if target not in ("dev", "local-dev") else "0" %}
 {% set vllm_rs_plugins = "modelexpress" if context.vllm.enable_modelexpress == "true" else "" %}
 
