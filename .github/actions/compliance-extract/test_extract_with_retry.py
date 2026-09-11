@@ -15,6 +15,7 @@ TRANSIENT = "ERROR: failed to build: failed to solve: Unavailable: error reading
 
 class ExtractRetryTest(unittest.TestCase):
     def run_extract(self, errors):
+        """Run the wrapper with scripted failures and inspect retries and output."""
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             for index, error in enumerate(errors, 1):
