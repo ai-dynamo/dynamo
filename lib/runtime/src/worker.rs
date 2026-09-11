@@ -110,6 +110,37 @@ pub fn graceful_shutdown_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(graceful_shutdown_timeout_secs())
 }
 
+/// Instant the post-signal shutdown must be finished by, armed once.
+///
+/// The application wait and the transport teardown that follows it are two
+/// sequential steps, and each used to take a full `graceful_shutdown_timeout()`
+/// of its own — so worst-case shutdown was twice the configured deadline, with
+/// the second half past the watchdog and therefore unbounded. Operators size
+/// `terminationGracePeriodSeconds` against the configured value, so the excess
+/// was paid as a SIGKILL mid-teardown.
+static SHUTDOWN_DEADLINE: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// Arm the shared deadline, or return the one already armed.
+fn arm_shutdown_deadline() -> std::time::Instant {
+    *SHUTDOWN_DEADLINE.get_or_init(|| {
+        std::time::Instant::now()
+            .checked_add(graceful_shutdown_timeout())
+            // A configured value large enough to overflow `Instant` is a
+            // configuration error, not a reason to panic while shutting down.
+            .unwrap_or_else(std::time::Instant::now)
+    })
+}
+
+/// What is left of the shutdown deadline. The full timeout when shutdown never
+/// started — the application returned on its own, so there is nothing to spend
+/// down.
+fn remaining_shutdown_budget() -> std::time::Duration {
+    match SHUTDOWN_DEADLINE.get() {
+        Some(deadline) => deadline.saturating_duration_since(std::time::Instant::now()),
+        None => graceful_shutdown_timeout(),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Worker {
     runtime: Runtime,
@@ -213,7 +244,7 @@ impl Worker {
         // endpoint inflight drain and leaving transports connected.
         runtime
             .secondary()
-            .block_on(runtime.shutdown_and_wait(Some(graceful_shutdown_timeout())));
+            .block_on(runtime.shutdown_and_wait(Some(remaining_shutdown_budget())));
         Ok(())
     }
 
@@ -227,7 +258,7 @@ impl Worker {
         task.await??;
         // See `execute`: the teardown must complete before the caller exits.
         runtime
-            .shutdown_and_wait(Some(graceful_shutdown_timeout()))
+            .shutdown_and_wait(Some(remaining_shutdown_budget()))
             .await;
         Ok(())
     }
@@ -268,12 +299,17 @@ impl Worker {
                 }
             };
 
+            // One deadline for the application wait *and* the transport
+            // teardown that follows it in `execute`/`execute_async`. Armed here
+            // so both spend down the same window.
+            arm_shutdown_deadline();
+
             let result = tokio::select! {
                 result = task => {
                     result
                 }
 
-                _ = tokio::time::sleep(tokio::time::Duration::from_secs(timeout)) => {
+                _ = tokio::time::sleep(remaining_shutdown_budget()) => {
                     tracing::debug!("Application did not shutdown in time; terminating");
                     std::process::exit(EXIT_CODE_SHUTDOWN_TIMEOUT);
                 }

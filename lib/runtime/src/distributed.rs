@@ -623,6 +623,11 @@ impl DistributedRuntime {
         self.runtime.child_token()
     }
 
+    /// See [`crate::Runtime::endpoint_drain_timeout`].
+    pub(crate) fn endpoint_drain_timeout(&self) -> std::time::Duration {
+        self.runtime.endpoint_drain_timeout()
+    }
+
     pub(crate) fn graceful_shutdown_tracker(&self) -> Arc<GracefulShutdownTracker> {
         self.runtime.graceful_shutdown_tracker()
     }

@@ -59,6 +59,12 @@ pub struct Runtime {
     cancellation_token: CancellationToken,
     endpoint_shutdown_token: CancellationToken,
     graceful_shutdown_tracker: Arc<GracefulShutdownTracker>,
+    /// Bound the in-progress shutdown is draining endpoints with. Set once,
+    /// before Phase 1, so the endpoint drain and the Phase 2 wait for it use
+    /// the same number — otherwise Phase 3 can tear down the transports while
+    /// a drain on a different clock is still running. Per-runtime rather than
+    /// process-global so tests (and embedded runtimes) cannot see each other's.
+    active_drain_timeout: Arc<std::sync::OnceLock<Duration>>,
     compute_pool: Option<Arc<compute::ComputePool>>,
     block_in_place_permits: Option<Arc<tokio::sync::Semaphore>>,
 }
@@ -100,6 +106,7 @@ impl Runtime {
             cancellation_token,
             endpoint_shutdown_token,
             graceful_shutdown_tracker: Arc::new(GracefulShutdownTracker::new()),
+            active_drain_timeout: Arc::new(std::sync::OnceLock::new()),
             compute_pool,
             block_in_place_permits,
         })
@@ -324,6 +331,19 @@ impl Runtime {
     }
 
     /// Get access to the graceful shutdown tracker
+    /// Bound for an endpoint's in-flight drain.
+    ///
+    /// During shutdown this is the value Phase 2 is waiting with, so the drain
+    /// and the wait for it cannot disagree. Outside shutdown — an endpoint
+    /// unregistered on its own, e.g. a sleeping worker — it is the runtime
+    /// default, which is the behaviour that existed before.
+    pub(crate) fn endpoint_drain_timeout(&self) -> Duration {
+        self.active_drain_timeout
+            .get()
+            .copied()
+            .unwrap_or_else(graceful_shutdown_timeout)
+    }
+
     pub(crate) fn graceful_shutdown_tracker(&self) -> Arc<GracefulShutdownTracker> {
         self.graceful_shutdown_tracker.clone()
     }
@@ -379,8 +399,19 @@ impl Runtime {
         let tracker = self.graceful_shutdown_tracker.clone();
         let main_token = self.cancellation_token.clone();
         let endpoint_token = self.endpoint_shutdown_token.clone();
+        let active_drain_timeout = self.active_drain_timeout.clone();
 
         async move {
+            // Resolve the one bound this shutdown will use, *before* Phase 1.
+            // The endpoint drain that Phase 2 waits on runs inside the endpoint
+            // cleanup task, which reads this — without it the drain used
+            // `DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` (900s) while Phase 2
+            // waited with the caller's bound (30s for a worker), so Phase 3
+            // cancelled the primary token and tore down NATS/etcd with the
+            // drain still running. Two clocks that could never agree.
+            let timeout = drain_timeout.unwrap_or_else(graceful_shutdown_timeout);
+            let _ = active_drain_timeout.set(timeout);
+
             // Phase 1: Cancel endpoint shutdown token to stop accepting new requests
             tracing::info!("Phase 1: Cancelling endpoint shutdown token");
             endpoint_token.cancel();
@@ -392,7 +423,6 @@ impl Runtime {
             tracing::info!("Active graceful endpoints: {count}");
 
             if count != 0 {
-                let timeout = drain_timeout.unwrap_or_else(graceful_shutdown_timeout);
                 if tokio::time::timeout(timeout, tracker.wait_for_completion())
                     .await
                     .is_err()
