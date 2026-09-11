@@ -6,6 +6,7 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import aiohttp
 import pytest
 from kubernetes_asyncio import config
 
@@ -116,19 +117,8 @@ def test_parse_served_model_ids_matches_exact_ids() -> None:
     assert parse_served_model_ids(content) == {"Qwen/Qwen3-0.6B", "Qwen3"}
 
 
-@pytest.mark.parametrize(
-    ("backend", "worker_names"),
-    [
-        ("vllm", {"VllmDecodeWorker", "VllmPrefillWorker"}),
-        (
-            "sglang",
-            {"decode", "prefill", "SglangDecodeWorker", "SglangPrefillWorker"},
-        ),
-    ],
-)
-def test_manifest_explicitly_trusts_known_remote_model(
-    backend: str, worker_names: set[str]
-) -> None:
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+def test_manifest_explicitly_trusts_known_remote_model(backend: str) -> None:
     manager = SimpleNamespace(
         config=DGDRTestConfig(
             namespace="test-namespace",
@@ -140,13 +130,9 @@ def test_manifest_explicitly_trusts_known_remote_model(
 
     dgdr = dgdr_tests.manifest(manager, "remote-code")
 
-    override = dgdr["spec"]["overrides"]["dgd"]
-    assert override["apiVersion"] == "nvidia.com/v1alpha1"
-    assert set(override["spec"]["services"]) == worker_names
-    for worker in override["spec"]["services"].values():
-        assert worker["extraPodSpec"]["mainContainer"]["args"] == [
-            "--trust-remote-code"
-        ]
+    overrides = dgdr["spec"]["overrides"]
+    assert overrides["trustRemoteCode"] is True
+    assert "dgd" not in overrides
 
 
 @pytest.mark.parametrize("backend", ["vllm", "sglang"])
@@ -194,6 +180,53 @@ async def test_lifecycle_uses_deployment_timeout_after_profiling() -> None:
     )
 
     manager.wait_for_phase.assert_awaited_once_with("request", "Deployed", 11)
+
+
+@pytest.mark.timeout(30)
+async def test_wait_for_phase_retries_vcluster_connection_refusals(
+    monkeypatch,
+) -> None:
+    manager = initialized_manager()
+    connection_key = MagicMock(host="127.0.0.1", port=1234, ssl=False)
+    manager.get = AsyncMock(
+        side_effect=[
+            aiohttp.ClientConnectorError(
+                connection_key,
+                ConnectionRefusedError(111, "vCluster tunnel unavailable"),
+            ),
+            {"status": {"phase": "Ready"}},
+        ]
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr("tests.deploy.dgdr_utils.asyncio.sleep", sleep)
+
+    result = await manager.wait_for_phase("request", "Ready", timeout=30)
+
+    assert result == {"status": {"phase": "Ready"}}
+    assert manager.get.await_count == 2
+    sleep.assert_awaited_once_with(5)
+
+
+@pytest.mark.timeout(30)
+async def test_wait_for_phase_limits_vcluster_connection_retries(
+    monkeypatch,
+) -> None:
+    manager = initialized_manager()
+    connection_key = MagicMock(host="127.0.0.1", port=1234, ssl=False)
+    manager.get = AsyncMock(
+        side_effect=aiohttp.ClientConnectorError(
+            connection_key,
+            ConnectionRefusedError(111, "vCluster tunnel unavailable"),
+        )
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr("tests.deploy.dgdr_utils.asyncio.sleep", sleep)
+
+    with pytest.raises(aiohttp.ClientConnectorError, match="tunnel unavailable"):
+        await manager.wait_for_phase("request", "Ready", timeout=30)
+
+    assert manager.get.await_count == 4
+    assert sleep.await_count == 3
 
 
 async def test_cleanup_reports_all_failures_and_retains_failed_names() -> None:

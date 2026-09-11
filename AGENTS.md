@@ -53,6 +53,7 @@ to it — edit only the canonical copy. Reach for the right group first:
 - `dynamo-agent-harness` — drive persistent Claude Code, Codex, or OpenCode sessions through Dynamo over ACP
 - `graham-code-review` — strict Rust/systems review in Graham King's style
 - `pr-monitor` — CI health check, failure root-cause, and skip analysis
+- `repo-codeowners` — who reviews a change, fixing a failing `codeowners` check, changing review routing
 - `visual-review` — interactive HTML code-review dashboards with diagrams and annotated diffs
 
 **For deploying and operating Dynamo:**
@@ -66,6 +67,8 @@ to it — edit only the canonical copy. Reach for the right group first:
 - `configure-aiperf-benchmark` — freeze and render a comparable AIPerf workload for a deployed candidate
 - `run-aiperf-benchmark` — execute and collect one run-scoped AIPerf Kubernetes benchmark
 - `analyze-aiperf-results` — validate AIPerf evidence, evaluate SLOs, and compare valid same-series runs
+- `find-serving-recipe` — walk the ordered recipe catalogs with provenance gates and write a recipe dossier
+- `report-skillpack-issue` — file a sanitized, operator-approved GitHub issue for a defect in the pack itself
 - `dynamo-router-starter` — start/patch router modes with smoke checks
 - `dynamo-interconnect-check` — validate NIXL/UCX/NCCL readiness for disaggregation
 - `troubleshoot-dynamo` — diagnose failed or unhealthy deployments
@@ -80,15 +83,17 @@ a maintainer comments `/nvskills-ci` on the PR.
 
 ## Improving These Instructions
 
-If these skills or instructions misled you, blocked you, or contradicted what you verified live, prepare an issue for
-this repository with the `agent-reported` label and ask your operator to approve filing it — filing is an external
-write and requires operator consent. Rules:
-
-1. Search existing `agent-reported` issues first; propose commenting on a duplicate instead of filing a new one.
-2. Prepare at most one issue per optimization session; batch findings into it.
-3. Identify yourself as an AI agent, including your driver model and the skills commit you were running.
-4. Sanitize completely: no user workload details, traffic numbers, cluster or namespace names, company names, or
-   credentials. Describe the instruction gap, not the engagement. Show the operator the full draft before filing.
+If these skills, instructions, role contracts, or this file misled you, blocked you, contradicted what you verified
+live, or left a component or situation uncovered, do not route around it silently: invoke the
+`report-skillpack-issue` skill (`.agents/skills/report-skillpack-issue/`), which every role contract declares and
+which owns the full procedure. Dispatched roles record drafts in `<EXP_ROOT>/analysis/skillpack-defects.md` and return
+them; only the top-level agent, with operator approval, files, at most one new issue per session with findings
+batched, plus comments on duplicates. If your harness cannot surface the skill, follow this minimum, which the skill
+also enforces: search existing reports by title, body, and comments first; identify yourself as an AI agent with
+your driver model and the skills commit; sanitize every emitted string (title, body, comment, search term: no
+workload details, traffic numbers, cluster or namespace names, company names, or credentials); keep drafts as
+run-scoped files, never in a shared temp path; and show the operator the exact draft and file only on their
+approval, using the `[AGENT]: ` title prefix and verifying the label landed.
 
 ## Optimization Role Dispatch
 
@@ -150,7 +155,7 @@ Sibling repositories this repo integrates with:
 |------|------|
 | [NIXL](https://github.com/ai-dynamo/nixl) | High-throughput inference data-transfer library (KV-cache transfer over RDMA/NVLink) that underpins disaggregated serving |
 | [AIPerf](https://github.com/ai-dynamo/aiperf) | Benchmarking and load-generation tool used by the benchmarking guides |
-| [AIConfigurator](https://github.com/ai-dynamo/aiconfigurator) | Simulates thousands of deployment configs to find an optimal serving config before spending GPU-hours |
+| [AISimulate](https://pypi.org/project/aisimulate/) | Predicts serving behavior and searches deployment configurations offline without requiring a GPU cluster |
 | [ModelExpress](https://github.com/ai-dynamo/modelexpress) | Streams model weights GPU-to-GPU via NIXL for fast replica cold-start |
 | [Grove](https://github.com/ai-dynamo/grove) | Kubernetes operator for topology-aware gang scheduling |
 
@@ -162,8 +167,8 @@ Sibling repositories this repo integrates with:
 | `components/src/dynamo/` | Python packages: `frontend`, `planner`, `router`, `vllm`/`sglang`/`trtllm` backends, `mocker`, `profiler`, and more |
 | `deploy/` | Kubernetes `operator`, Helm charts, `inference-gateway` ext-proc, `observability` |
 | `container/` | Dockerfiles and build scripts for runtime and dev images |
-| `docs/`, `fern/` | Documentation sources and the Fern docs-site config — read [`docs/AGENTS.md`](docs/fern/AGENTS.md) before editing |
-| `examples/`, `recipes/` | Runnable examples and deployment recipes — also covered by [`docs/AGENTS.md`](docs/fern/AGENTS.md) |
+| `docs/fern/` | Fern docs site: `pages/` holds every page, the rest is site config (`index.yml`, `docs.yml`, `main.css`, `components/`, `scripts/`, `translations/`). Read [`docs/fern/AGENTS.md`](docs/fern/AGENTS.md) before editing, and [`docs/fern/pages/AGENTS.md`](docs/fern/pages/AGENTS.md) before adding a page |
+| `examples/`, `recipes/` | Runnable examples and deployment recipes — also covered by [`docs/fern/AGENTS.md`](docs/fern/AGENTS.md) |
 | `benchmarks/`, `tests/` | Benchmark harnesses and the top-level pytest suite |
 | `.ai/` | Agent topic guidelines: `bash-launch-guidelines.md`, `ci-guidelines.md`, `linear-ticket-refs.md`, `pytest-guidelines.md`, `python-guidelines.md`, `test-model-size-guardrails.md` |
 | `.agents/skills/` | Agent skills (see [Skills](#skills)) |
@@ -171,7 +176,7 @@ Sibling repositories this repo integrates with:
 ## Build
 
 System prerequisites (Rust toolchain, `uv`, system libraries) and the VS Code / Cursor
-devcontainer are covered in [`docs/contribution-guide.md`](docs/fern/pages/community/contributing/overview.md).
+devcontainer are covered in [the contribution guide](docs/fern/pages/community/contributing/overview.md).
 
 Python dev build (bindings + wheel, editable):
 
@@ -223,23 +228,47 @@ cargo fmt --all && cargo clippy --workspace
   `style`, and `build`.
 - PR descriptions must include `Summary` and `Validation`.
 - Sign every commit with DCO: `git commit -s`.
+- For fork PRs that qualify for automatic trusted-CI approval, every commit must have a
+  cryptographic signature that GitHub reports as `Verified`; a DCO sign-off alone does not
+  satisfy this requirement. Signing commits does not itself qualify a PR for automatic approval;
+  a maintainer can manually approve the current head with `/ok to test <sha>`.
+- Do not hand-edit a generated artifact — change its source and regenerate. A
+  generated file says so in a `do not edit` marker, and its generator has a
+  `--check` mode that fails when the committed output is stale. Resolve a
+  conflict in a generated file by regenerating rather than editing the
+  conflict — a hand-resolved artifact passes review and then fails the next
+  `--check` — and resolve one in an aggregate list, such as a coverage set or
+  a filter list, as the union of both sides.
 - Do not hand-edit the root `CODEOWNERS` — it is generated. To change review
   routing, edit `.github/codeowners/areas.yaml` and regenerate; CI gates 100%
   coverage and `CODEOWNERS`↔`areas.yaml` drift. See
-  `.github/codeowners/README.md` (use `who_owns.py` to check who reviews a path).
+  `.github/codeowners/README.md`. To check who reviews your PR:
+  `python .github/codeowners/who_owns.py --codeowners CODEOWNERS --changed`
+  (`--people` expands teams to members for org members).
+  If the `codeowners` check fails after adding a new directory, claim it with
+  one line under the owning area in `areas.yaml`, regenerate, and commit both
+  files together. External contributors earn area-scoped co-ownership via
+  `.github/codeowners/external_contributors.yaml`. The `repo-codeowners`
+  skill automates all of this.
 - Full CI on a PR runs only after a maintainer comments `/ok to test <sha>` with the short
   SHA of the latest commit; copy-pr-bot then creates the `pull-request/N` branch that
-  triggers it. Fix failures before requesting human review.
+  triggers it. For an eligible fork PR, the automatic approval flow posts that command only
+  after every PR commit is GitHub-verified. Fix failures before requesting human review.
 - Architecture changes require a Dynamo Enhancement Proposal (DEP), filed as a GitHub
   issue on `ai-dynamo/dynamo` with `dep:*` labels (the `dep-create` skill automates this).
 
-See [`docs/contribution-guide.md`](docs/fern/pages/community/contributing/overview.md) for the full workflow
+See [the contribution guide](docs/fern/pages/community/contributing/overview.md) for the full workflow
 (issue sizing, CODEOWNERS, review process).
 
 ## Docs, Examples, Recipes
 
 Any change under `docs/`, `examples/`, or `recipes/` must follow
-[`docs/AGENTS.md`](docs/fern/AGENTS.md) and the
+[`docs/fern/AGENTS.md`](docs/fern/AGENTS.md) and the
 [documentation style guide](docs/fern/pages/community/contributing/documentation/documentation-style-guide.md): SPDX headers, Fern
 frontmatter (no body `# H1`), GitHub-style admonitions, and backend casing
 (vLLM / SGLang / TensorRT-LLM). The deterministic subset is enforced pre-merge.
+
+The docs site is tab-based: `docs/fern/pages/` splits into `kubernetes/` and `cli/` (parallel
+guides for two readers), plus `use-cases/`, `recipes/`, `developer-guide/`, `reference/`, `blog/`,
+and `community/`. Read [`docs/fern/pages/AGENTS.md`](docs/fern/pages/AGENTS.md) to pick the right
+tab before adding a page — a misplaced page costs a move plus a redirect.

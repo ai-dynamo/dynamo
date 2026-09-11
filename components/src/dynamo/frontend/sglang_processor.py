@@ -37,6 +37,7 @@ from .sglang_prepost import (
     create_parsers,
     detect_force_reasoning_from_template,
     preprocess_chat_request,
+    resolve_skip_special_tokens,
 )
 from .thinking import runtime_default_thinking_mode
 from .utils import (
@@ -135,6 +136,26 @@ def _routing_from_agent_hints(nvext: dict[str, Any]) -> dict[str, Any] | None:
         routing["expected_output_tokens"] = expected_output_tokens
 
     return routing or None
+
+
+def _request_stop_strings(request: dict[str, Any]) -> set[str]:
+    stop = request.get("stop")
+    if isinstance(stop, str):
+        return {stop}
+    if isinstance(stop, list):
+        return {item for item in stop if isinstance(item, str)}
+    return set()
+
+
+def _request_stop_token_ids(request: dict[str, Any]) -> list[int]:
+    """Merge ``stop_token_ids`` with the legacy integer-valued ``stop`` form."""
+    values: list[Any] = list(request.get("stop_token_ids") or [])
+    stop = request.get("stop")
+    if isinstance(stop, list) and all(
+        isinstance(item, int) and not isinstance(item, bool) for item in stop
+    ):
+        values.extend(stop)
+    return _normalize_eos_token_ids(values)
 
 
 def _tokenizer_eos_token_ids(tokenizer: Any) -> list[int]:
@@ -276,6 +297,7 @@ class SglangPreprocessWorkerResult:
     dynamo_preproc: dict[str, Any]
     request: dict[str, Any]
     force_reasoning: bool = False
+    named_zero_arg_tool: str | None = None
     # ``effective_reasoning_parser_name`` is None when the request opted out
     # via ``separate_reasoning=False``; the main process must skip creating
     # a reasoning parser in that case so the pool path matches the inline
@@ -350,6 +372,7 @@ def _preprocess_worker(
         request=request,
         force_reasoning=pre.force_reasoning,
         effective_reasoning_parser_name=effective_reasoning_parser_name,
+        named_zero_arg_tool=pre.named_zero_arg_tool,
     )
 
 
@@ -367,13 +390,12 @@ def _build_dynamo_preproc(
     max_tokens = request.get("max_completion_tokens") or request.get("max_tokens")
 
     stop = request.get("stop")
-    stop_token_ids = request.get("stop_token_ids", [])
+    stop_token_ids = _request_stop_token_ids(request)
     if isinstance(stop, str):
         stop = [stop]
     elif isinstance(stop, list) and all(
         isinstance(item, int) and not isinstance(item, bool) for item in stop
     ):
-        stop_token_ids = [*stop_token_ids, *stop]
         stop = []
     elif stop is None:
         stop = []
@@ -429,8 +451,9 @@ def _build_dynamo_preproc(
             "prompt_logprobs": None,
             # Preserve special tokens when a parser is active so delimiters
             # remain visible. Mirrors the post-processor's decode behavior.
-            "skip_special_tokens": (
-                tool_call_parser is None and reasoning_parser is None
+            "skip_special_tokens": resolve_skip_special_tokens(
+                request.get("skip_special_tokens"),
+                has_parser=tool_call_parser is not None or reasoning_parser is not None,
             ),
             "return_tokens_as_token_ids": request.get("return_tokens_as_token_ids"),
         },
@@ -597,8 +620,12 @@ class SglangProcessor:
             ),
             sglang_tools=convert_tools(request.get("tools")),
             tool_call_parser_name=self.tool_call_parser_name,
+            named_zero_arg_tool=pre.named_zero_arg_tool,
             eos_token_ids=self.eos_token_ids,
             prompt_token_ids=pre.prompt_token_ids,
+            stop_strings=_request_stop_strings(request),
+            skip_special_tokens=request.get("skip_special_tokens"),
+            stop_token_ids=set(_request_stop_token_ids(request)),
         )
 
         async for item in self._generate_and_stream(
@@ -626,6 +653,8 @@ class SglangProcessor:
                 preproc_result: SglangPreprocessWorkerResult = (
                     await asyncio.wrap_future(future)
                 )
+        except InvalidArgument:
+            raise
         except PreprocessError as exc:
             raise InvalidArgument(str(exc)) from exc
         except Exception as exc:
@@ -655,8 +684,12 @@ class SglangProcessor:
             ),
             sglang_tools=convert_tools(request.get("tools")),
             tool_call_parser_name=self.tool_call_parser_name,
+            named_zero_arg_tool=preproc_result.named_zero_arg_tool,
             eos_token_ids=self.eos_token_ids,
             prompt_token_ids=preproc_result.prompt_token_ids,
+            stop_strings=_request_stop_strings(request),
+            skip_special_tokens=request.get("skip_special_tokens"),
+            stop_token_ids=set(_request_stop_token_ids(request)),
         )
 
         async for item in self._generate_and_stream(
@@ -712,6 +745,7 @@ class SglangProcessor:
                 *,
                 finish_reason: str | None,
                 stop_reason: Any | None,
+                stop_terminated: bool,
                 engine_data: Any | None,
             ) -> dict[str, Any]:
                 nonlocal pending_token_ids
@@ -723,10 +757,11 @@ class SglangProcessor:
                 nonlocal token_count
 
                 chunk_token_count = len(pending_token_ids)
-                usage_for_metrics = pending_usage
                 mapped_response: dict[str, Any] = {
                     "token_ids": pending_token_ids,
                     "finish_reason": finish_reason,
+                    "stop_reason": stop_reason,
+                    "stop_terminated": stop_terminated,
                 }
                 if pending_log_probs is not None:
                     mapped_response["log_probs"] = pending_log_probs
@@ -737,6 +772,14 @@ class SglangProcessor:
                     t_pp0 = time.monotonic()
 
                 choice = post.process_output(mapped_response)
+
+                if post.locally_finished and pending_usage is None:
+                    pending_usage = {
+                        "prompt_tokens": input_tokens,
+                        "completion_tokens": cumulative_output_tokens,
+                        "total_tokens": input_tokens + cumulative_output_tokens,
+                    }
+                usage_for_metrics = pending_usage
 
                 if self.debug_perf:
                     t_pp1 = time.monotonic()
@@ -755,10 +798,16 @@ class SglangProcessor:
                     if pending_usage:
                         dynamo_out["usage"] = pending_usage
                     response_nvext: dict[str, Any] = {}
-                    if stop_reason is not None and nvext_extra_field_requested(
-                        request, "stop_reason"
+                    effective_stop_reason = (
+                        stop_reason
+                        if stop_reason is not None
+                        else post.local_stop_reason
+                    )
+                    if (
+                        effective_stop_reason is not None
+                        and nvext_extra_field_requested(request, "stop_reason")
                     ):
-                        response_nvext["stop_reason"] = stop_reason
+                        response_nvext["stop_reason"] = effective_stop_reason
                     if engine_data is not None and nvext_extra_field_requested(
                         request, "engine_data"
                     ):
@@ -832,17 +881,22 @@ class SglangProcessor:
                         top_logprobs is not None,
                     )
                     if pending_logprob_shape != chunk_logprob_shape:
-                        yield flush_pending(
+                        envelope = flush_pending(
                             finish_reason=None,
                             stop_reason=None,
+                            stop_terminated=False,
                             engine_data=None,
                         )
+                        yield envelope
+                        if post.locally_finished:
+                            break
 
                 chunk_tokens = len(new_ids)
                 cumulative_output_tokens += chunk_tokens
-                raw_finish = engine_response.get("finish_reason")
-                finish_reason = _map_finish_reason(raw_finish)
+                raw_finish_reason = engine_response.get("finish_reason")
+                finish_reason = _map_finish_reason(raw_finish_reason)
                 stop_reason = engine_response.get("stop_reason")
+                stop_terminated = raw_finish_reason in {"eos", "stop"}
 
                 if usage := engine_response.get("completion_usage"):
                     pending_usage = usage
@@ -860,13 +914,19 @@ class SglangProcessor:
 
                 # Flush on finish or when we've accumulated enough tokens.
                 # First chunk flushes immediately (si=1) to minimize TTFT.
-                flush_threshold = 1 if first_chunk else stream_interval
+                flush_threshold = (
+                    1 if first_chunk or post.has_pending_stop_text else stream_interval
+                )
                 if finish_reason or len(pending_token_ids) >= flush_threshold:
-                    yield flush_pending(
+                    envelope = flush_pending(
                         finish_reason=finish_reason,
                         stop_reason=stop_reason,
+                        stop_terminated=stop_terminated,
                         engine_data=engine_data,
                     )
+                    yield envelope
+                    if post.locally_finished:
+                        break
         except Unknown:
             raise
         except Exception as e:

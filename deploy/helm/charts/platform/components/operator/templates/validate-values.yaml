@@ -38,6 +38,50 @@ After:
 ` }}
 {{- end }}
 
+{{/* ---- NATS TLS requires a tls:// server address ---- */}}
+
+{{- $natsTLS := or .Values.natsTLSCAPath .Values.natsTLSClientCertPath .Values.natsTLSClientKeyPath }}
+{{- if and $natsTLS (hasKey .Values "natsAddr") (not (hasPrefix "tls://" .Values.natsAddr)) }}
+  {{- fail `
+CONFIGURATION ERROR: NATS TLS is configured (natsTLS*) but natsAddr is not a tls:// URL.
+The runtime fails closed at startup when NATS TLS env vars are set without a tls:// server.
+Set natsAddr to a tls:// URL, e.g.:
+  dynamo-operator:
+    natsAddr: "tls://dynamo-platform-nats.dynamo-system.svc.cluster.local:4222"
+    natsTLSCAPath: /etc/certs/ca/ca.pem
+` }}
+{{- end }}
+
+{{/* ---- TCP TLS cert/key must be set together ---- */}}
+
+{{- if and .Values.tcpTLSCertPath (not .Values.tcpTLSKeyPath) }}
+  {{- fail `
+CONFIGURATION ERROR: tcpTLSCertPath is set but tcpTLSKeyPath is not.
+Both must be set together to enable TCP server TLS.
+` }}
+{{- end }}
+{{- if and .Values.tcpTLSKeyPath (not .Values.tcpTLSCertPath) }}
+  {{- fail `
+CONFIGURATION ERROR: tcpTLSKeyPath is set but tcpTLSCertPath is not.
+Both must be set together to enable TCP server TLS.
+` }}
+{{- end }}
+
+{{/* ---- TCP TLS client cert/key must be set together ---- */}}
+
+{{- if and .Values.tcpTLSClientCertPath (not .Values.tcpTLSClientKeyPath) }}
+  {{- fail `
+CONFIGURATION ERROR: tcpTLSClientCertPath is set but tcpTLSClientKeyPath is not.
+Both must be set together to present a TCP client identity.
+` }}
+{{- end }}
+{{- if and .Values.tcpTLSClientKeyPath (not .Values.tcpTLSClientCertPath) }}
+  {{- fail `
+CONFIGURATION ERROR: tcpTLSClientKeyPath is set but tcpTLSClientCertPath is not.
+Both must be set together to present a TCP client identity.
+` }}
+{{- end }}
+
 {{/* ---- Webhook enabled toggle (removed, webhooks are always enabled) ---- */}}
 
 {{- if and (hasKey .Values "webhook") (hasKey .Values.webhook "enabled") }}
@@ -89,6 +133,25 @@ The 'dynamo-operator.dynamo.mpiRun.secretName' field is still supported.
 BREAKING CHANGE: 'dynamo-operator.checkpoint.readyForCheckpointFilePath' has been removed.
 Checkpoint lifecycle is now managed via file-based sentinels in DYN_SNAPSHOT_CONTROL_DIR.
 Remove 'dynamo-operator.checkpoint.readyForCheckpointFilePath' from your values.yaml.
+` }}
+{{- end }}
+
+{{/* ---- Legacy DynamoCheckpoint implementation settings ---- */}}
+
+{{- if and (hasKey .Values "checkpoint") (hasKey .Values.checkpoint "cleanupImage") }}
+  {{- fail `
+BREAKING CHANGE: 'dynamo-operator.checkpoint.cleanupImage' has been removed.
+The standalone Snapshot operator owns snapshot artifact lifecycle.
+Remove 'dynamo-operator.checkpoint.cleanupImage' from your values.yaml.
+` }}
+{{- end }}
+
+{{- if and (hasKey .Values "checkpoint") (hasKey .Values.checkpoint "storage") }}
+  {{- fail `
+BREAKING CHANGE: 'dynamo-operator.checkpoint.storage' has been removed.
+Configure storage on the standalone Snapshot release instead (or under
+'snapshot.storage' when Snapshot is bundled with the Dynamo platform chart).
+Remove 'dynamo-operator.checkpoint.storage' from your values.yaml.
 ` }}
 {{- end }}
 

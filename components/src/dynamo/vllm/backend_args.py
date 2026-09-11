@@ -14,7 +14,11 @@ from dynamo.common.configuration.config_base import ConfigBase
 from dynamo.common.configuration.groups.frontend_decoding_args import (
     add_frontend_decoding_arg,
 )
-from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
+from dynamo.common.configuration.utils import (
+    add_argument,
+    add_negatable_bool_argument,
+    parse_bool,
+)
 
 from . import __version__
 from .benchmark_points import (
@@ -27,6 +31,40 @@ from .constants import DisaggregationMode, EmbeddingTransferMode
 
 logger = logging.getLogger(__name__)
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
+MAX_PORT = 65535
+DEFAULT_NIXL_PROMETHEUS_PORT = 19090
+
+
+def _configured_fixed_port(env_name: str, *, default: int | None = None) -> int | None:
+    """Return a configured fixed TCP port, ignoring disabled/invalid values."""
+    raw = os.environ.get(env_name)
+    if raw is None:
+        return default
+    try:
+        port = int(raw)
+    except ValueError:
+        return None
+    return port if 0 < port <= MAX_PORT else None
+
+
+def _nixl_prometheus_port() -> int | None:
+    """Return the NIXL Prometheus listener port when it is enabled."""
+    enabled = os.environ.get("NIXL_TELEMETRY_ENABLE", "").strip().lower()
+    exporter = os.environ.get("NIXL_TELEMETRY_EXPORTER", "prometheus")
+    if enabled != "y" or exporter.strip().lower() != "prometheus":
+        return None
+    return _configured_fixed_port(
+        "NIXL_TELEMETRY_PROMETHEUS_PORT",
+        default=DEFAULT_NIXL_PROMETHEUS_PORT,
+    )
+
+
+def _is_intra_pod_failover_engine() -> bool:
+    """Recognize the operator's cloned intra-pod engine containers."""
+    engine_id = os.environ.get("ENGINE_ID")
+    if engine_id is None or "FAILOVER_LOCK_PATH" not in os.environ:
+        return False
+    return os.environ.get("CONTAINER_NAME") == f"engine-{engine_id}"
 
 
 def _warn_deprecated(message: str) -> None:
@@ -95,7 +133,14 @@ class DynamoVllmArgGroup(ArgGroup):
             flag_name="--use-vllm-tokenizer",
             env_var="DYN_VLLM_USE_TOKENIZER",
             default=False,
-            help="Use vLLM's tokenizer for pre and post processing. This bypasses Dynamo's preprocessor and only v1/chat/completions will be available through the Dynamo frontend.",
+            help=(
+                "Use vLLM's tokenizer for pre- and post-processing. This "
+                "bypasses Dynamo's preprocessor and only /v1/chat/completions "
+                "will be available through the Dynamo frontend. Dedicated embedding "
+                "workers currently ignore this option and use vLLM tokenization "
+                "by default; set --embedding-frontend-tokenization to enable "
+                "Dynamo frontend tokenization for text embeddings."
+            ),
         )
 
         # Multimodal
@@ -175,6 +220,44 @@ class DynamoVllmArgGroup(ArgGroup):
             help="Run as a text-embedding worker. Engine must be started with "
             "vLLM's --runner pooling. Skips KV-events, KV router registration, "
             "and InstrumentedScheduler injection (none apply to pooling models).",
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--embedding-frontend-tokenization",
+            env_var="DYN_VLLM_EMBEDDING_FRONTEND_TOKENIZATION",
+            default=False,
+            env_value_type=parse_bool,
+            help=(
+                "Use Dynamo frontend tokenization for raw-text inputs to a "
+                "dedicated embedding worker. The default preserves existing "
+                "behavior: vLLM tokenizes embedding text. Requires "
+                "--embedding-worker and cannot be combined with "
+                "--use-vllm-tokenizer. This temporary compatibility gate is "
+                "planned for removal in the next release, when pooling workers "
+                "use --use-vllm-tokenizer consistently."
+            ),
+        )
+
+        add_argument(
+            g,
+            flag_name="--embedding-worker-processes",
+            env_var="DYN_VLLM_EMBEDDING_WORKER_PROCESSES",
+            default=1,
+            arg_type=int,
+            help="Number of Dynamo embedding endpoint processes sharing one "
+            "vLLM EngineCore. Only valid with --embedding-worker. The parent "
+            "process counts as one worker (default: 1). Choose roughly the "
+            "minimum of CPU cores available to the worker and expected peak "
+            "request concurrency; values above the CPU count are unlikely to "
+            "help. More than one process is useful only when requests overlap, "
+            "because a single in-flight request occupies one process. The "
+            "processes share a single EngineCore, so adding processes adds "
+            "request-handling and tokenization capacity, not GPU throughput. "
+            "Each process binds DYN_SYSTEM_PORT + its index, so a pool of N "
+            "reserves DYN_SYSTEM_PORT through DYN_SYSTEM_PORT + N - 1. "
+            "A fixed DYN_TCP_RPC_PORT and intra-pod failover are not currently "
+            "supported with more than one process.",
         )
 
         add_negatable_bool_argument(
@@ -464,6 +547,8 @@ class DynamoVllmConfig(ConfigBase):
         str, EmbeddingTransferMode
     ]  # resolved to enum in validate()
     embedding_worker: bool = False
+    embedding_frontend_tokenization: bool = False
+    embedding_worker_processes: int = 1
     realtime: bool = False
     classify_worker: bool = False
 
@@ -520,7 +605,9 @@ class DynamoVllmConfig(ConfigBase):
         _reject_removed_multimodal_env_vars()
         self._resolve_disaggregation_mode()
         self._resolve_embedding_transfer_mode()
+        self._validate_embedding_frontend_tokenization()
         self._validate_embedding_worker_exclusivity()
+        self._validate_embedding_worker_processes()
         self._validate_realtime_worker_exclusivity()
         self._validate_classify_worker_exclusivity()
         self._validate_custom_encoder()
@@ -711,6 +798,126 @@ class DynamoVllmConfig(ConfigBase):
                 "Embedding workers do not run generation, so prefill/decode "
                 "benchmark sweeps are not meaningful."
             )
+
+    def _validate_embedding_frontend_tokenization(self) -> None:
+        """Validate the temporary embedding tokenization compatibility gate."""
+        if not self.embedding_frontend_tokenization:
+            return
+        if not self.embedding_worker:
+            raise ValueError(
+                "--embedding-frontend-tokenization requires --embedding-worker."
+            )
+        if self.use_vllm_tokenizer:
+            raise ValueError(
+                "--embedding-frontend-tokenization cannot be combined with "
+                "--use-vllm-tokenizer."
+            )
+
+    def _validate_embedding_worker_processes(self) -> None:
+        """Validate the embedding-only shared-EngineCore process count."""
+        if self.embedding_worker_processes < 1:
+            raise ValueError("--embedding-worker-processes must be at least 1.")
+        if self.embedding_worker_processes == 1:
+            return
+        if not self.embedding_worker:
+            raise ValueError(
+                "--embedding-worker-processes greater than 1 requires "
+                "--embedding-worker."
+            )
+        if self.headless:
+            raise ValueError(
+                "--embedding-worker-processes greater than 1 cannot be combined "
+                "with --headless. Shared-EngineCore processes serve Dynamo "
+                "embedding endpoints and therefore require the runtime."
+            )
+        if _is_intra_pod_failover_engine():
+            raise ValueError(
+                "--embedding-worker-processes greater than 1 cannot currently be "
+                "combined with intra-pod failover. The operator assigns adjacent "
+                "DYN_SYSTEM_PORT values to engine containers, so their embedding "
+                "process port ranges would overlap."
+            )
+
+        request_plane = getattr(self, "request_plane", "tcp")
+        tcp_rpc_port = _configured_fixed_port("DYN_TCP_RPC_PORT")
+        if request_plane == "tcp" and tcp_rpc_port is not None:
+            raise ValueError(
+                "DYN_TCP_RPC_PORT cannot be fixed when "
+                "--embedding-worker-processes is greater than 1 because every "
+                "endpoint process needs a unique TCP RPC listener. Unset "
+                "DYN_TCP_RPC_PORT to use OS-assigned ports."
+            )
+
+        # Children inherit the parent's argv, but their DYN_SYSTEM_PORT is
+        # already shifted to base+index. The parent alone owns the full range.
+        from .embedding_worker_processes import is_embedding_process_child
+
+        if is_embedding_process_child():
+            return
+
+        system_range = self._validate_system_port_range()
+        self._validate_port_reservation_collisions(system_range)
+
+    def _validate_system_port_range(self) -> tuple[int, int] | None:
+        """Reject a system-port range that would not fit."""
+        raw = os.environ.get("DYN_SYSTEM_PORT")
+        if raw is None or not raw.strip():
+            return None
+        try:
+            base = int(raw)
+        except ValueError:
+            return None
+        if base <= 0:
+            return None
+
+        highest = base + self.embedding_worker_processes - 1
+        if highest > MAX_PORT:
+            raise ValueError(
+                f"DYN_SYSTEM_PORT={base} with --embedding-worker-processes "
+                f"{self.embedding_worker_processes} needs ports {base}-{highest}, "
+                f"which exceeds the maximum port {MAX_PORT}. Lower DYN_SYSTEM_PORT or "
+                "reduce the process count."
+            )
+        return base, highest
+
+    def _validate_port_reservation_collisions(
+        self, system_range: tuple[int, int] | None
+    ) -> None:
+        """Reject overlaps between listeners active in this worker container."""
+        reservations: list[tuple[str, int, int]] = []
+        if system_range is not None:
+            reservations.append(("DYN_SYSTEM_PORT", *system_range))
+
+        if "DYN_FORWARDPASS_METRIC_PORT" in os.environ:
+            fpm_port = _configured_fixed_port("DYN_FORWARDPASS_METRIC_PORT")
+            if fpm_port is not None:
+                reservations.append(("DYN_FORWARDPASS_METRIC_PORT", fpm_port, fpm_port))
+
+        nixl_port = _nixl_prometheus_port()
+        if nixl_port is not None:
+            reservations.append(
+                ("NIXL_TELEMETRY_PROMETHEUS_PORT", nixl_port, nixl_port)
+            )
+
+        for index, (left_name, left_start, left_end) in enumerate(reservations):
+            for right_name, right_start, right_end in reservations[index + 1 :]:
+                if max(left_start, right_start) > min(left_end, right_end):
+                    continue
+                left_ports = (
+                    str(left_start)
+                    if left_start == left_end
+                    else f"{left_start}-{left_end}"
+                )
+                right_ports = (
+                    str(right_start)
+                    if right_start == right_end
+                    else f"{right_start}-{right_end}"
+                )
+                raise ValueError(
+                    "embedding worker port reservations overlap: "
+                    f"{left_name} reserves {left_ports}, while {right_name} "
+                    f"reserves {right_ports}. Configure non-overlapping ports."
+                )
 
     def _validate_realtime_worker_exclusivity(self) -> None:
         """Realtime serving uses a dedicated aggregated bidirectional worker."""

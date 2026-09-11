@@ -132,10 +132,10 @@ vllm-rs serve "$MODEL" \
 
 DYN_SYSTEM_PORT="$SYSTEM_PORT1" \
     dynamo-vllm-sidecar \
-    --vllm-endpoint "${VLLM_HOST}:${VLLM_WORKER1_GRPC_PORT}" &
+    --grpc-endpoint "${VLLM_HOST}:${VLLM_WORKER1_GRPC_PORT}" &
 
 DYN_SYSTEM_PORT="$SYSTEM_PORT2" \
     dynamo-vllm-sidecar \
-    --vllm-endpoint "${VLLM_HOST}:${VLLM_WORKER2_GRPC_PORT}" &
+    --grpc-endpoint "${VLLM_HOST}:${VLLM_WORKER2_GRPC_PORT}" &
 
 wait_any_exit

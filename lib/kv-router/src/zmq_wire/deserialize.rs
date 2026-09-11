@@ -56,6 +56,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
         let mut block_mm_infos: Option<Option<Vec<Option<BlockExtraInfo>>>> = None;
         let mut locality: Option<Option<Locality>> = None;
         let mut ownership: Option<Option<String>> = None;
+        let mut session_id: Option<Option<String>> = None;
         let mut metadata = KvCacheEventMetadata::default();
 
         while let Some(key) = map.next_key::<String>()? {
@@ -105,6 +106,9 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 "ownership" => {
                     ownership = Some(map.next_value()?);
                 }
+                "session_id" => {
+                    session_id = Some(map.next_value()?);
+                }
                 _ => {
                     map.next_value::<IgnoredAny>()?;
                 }
@@ -143,6 +147,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     kv_cache_spec_sliding_window: metadata.kv_cache_spec_sliding_window,
                     locality: locality.unwrap_or(None),
                     ownership: ownership.unwrap_or(None),
+                    session_id: session_id.unwrap_or(None),
                 })
             }
             Some("BlockRemoved") => {
@@ -237,6 +242,9 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     kv_cache_spec_sliding_window: parsed.metadata.kv_cache_spec_sliding_window,
                     locality: parsed.locality,
                     ownership: parsed.ownership,
+                    // vLLM emits session_id in its named-map format. Legacy
+                    // positional layouts have no unambiguous session slot.
+                    session_id: None,
                 })
             }
             "BlockRemoved" => {

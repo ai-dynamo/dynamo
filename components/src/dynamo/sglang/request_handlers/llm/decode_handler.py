@@ -20,10 +20,12 @@ from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.llm import HttpError
+from dynamo.llm.exceptions import EngineShutdown
 from dynamo.sglang._compat import (
     filter_supported_async_generate_kwargs,
     require_reasoning_kwargs,
 )
+from dynamo.sglang._disagg import validate_disagg_parallel_sampling
 from dynamo.sglang.args import Config
 from dynamo.sglang.engine_generate import (
     build_native_generate_request,
@@ -363,6 +365,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             param_mapping = {
                 "n": sampling_opts.get("n"),
                 "max_new_tokens": stop_conditions.get("max_tokens"),
+                "min_new_tokens": stop_conditions.get("min_tokens"),
                 "ignore_eos": stop_conditions.get("ignore_eos"),
                 "stop_token_ids": stop_token_ids,
                 **_sampling_option_params(sampling_opts),
@@ -375,6 +378,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             param_mapping = {
                 "n": request.get("n"),
                 "max_new_tokens": request.get("max_tokens"),
+                "min_new_tokens": request.get("min_tokens"),
                 **_sampling_option_params(request),
                 **_openai_stop_sampling_params(request),
                 **self._get_guided_decoding_params(request.get("guided_decoding")),
@@ -397,12 +401,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     @staticmethod
     def _extract_logprobs(
         meta_info: Dict[str, Any],
-        num_output_tokens_in_chunk: Optional[int] = None,
+        *,
         return_tokens_as_token_ids: bool = False,
     ) -> tuple:
         return _shared_logprobs.extract_from_sglang_meta(
             meta_info,
-            num_output_tokens_in_chunk=num_output_tokens_in_chunk,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
         )
 
@@ -460,6 +463,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         Raises:
             RuntimeError: If no bootstrap info received from prefill worker.
         """
+        if self.serving_mode == DisaggregationMode.DECODE:
+            validate_disagg_parallel_sampling(request)
         logging.debug(f"New Request ID: {context.id()}")
         routing = request.get("routing") or {}
         if self._first_token_source is not None:
@@ -711,6 +716,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 out: dict[str, Any] = {"index": output_idx}
                 finish_reason = meta_info["finish_reason"]
                 if finish_reason:
+                    shutdown_abort = finish_reason.get("type") == "abort"
+                    if (
+                        shutdown_abort
+                        and self.shutdown_event
+                        and self.shutdown_event.is_set()
+                    ):
+                        raise EngineShutdown(
+                            "Engine was shut down during token generation"
+                        )
                     out["finish_reason"] = normalize_finish_reason(
                         finish_reason["type"]
                     )
@@ -736,10 +750,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # Pass through disjoint token segments directly
                 out["token_ids"] = output_ids
                 if metadata_uploader is None:
-                    # Extract logprobs for new tokens if available
                     log_probs, top_logprobs = self._extract_logprobs(
                         meta_info,
-                        num_output_tokens_in_chunk=len(output_ids),
                         return_tokens_as_token_ids=return_tokens_as_token_ids,
                     )
                     if log_probs is not None:
@@ -784,6 +796,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             await metadata_uploader.upload_choice(output_idx, meta_info)
                         finally:
                             meta_info.clear()
+                        if (
+                            shutdown_abort
+                            and self.shutdown_event
+                            and self.shutdown_event.is_set()
+                        ):
+                            raise EngineShutdown(
+                                "Engine was shut down during token generation"
+                            )
                 elif metadata_uploader is not None:
                     meta_info.clear()
                 if engine_data:
@@ -809,10 +829,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             OpenAI-formatted chat completion chunk dicts.
         """
         request = request or {}
-        # SGLang text chunks are cumulative per choice. Keep independent text
-        # offsets so interleaved n>1 choices do not compute deltas from each
-        # other's previous text.
-        text_counts_per_choice: dict[int, int] = {}
 
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future: asyncio.Future[str] = asyncio.Future()
@@ -835,17 +851,26 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # Same defaulting as token mode: non-n chunks are choice 0.
                 index = res.get("index") or 0
 
-                text = res.get("text", "")
+                # Dynamo forces incremental_streaming_output=True, so SGLang
+                # has already produced the client-facing disjoint text delta.
+                # Its default detokenizer also buffers and trims stop markers.
+                delta = res.get("text", "")
 
                 finish_reason = meta_info["finish_reason"]
-                finish_reason_type = (
-                    normalize_finish_reason(finish_reason["type"])
-                    if finish_reason
-                    else None
-                )
-                next_count = len(text)
-                count = text_counts_per_choice.get(index, 0)
-                delta = text[count:]
+                if finish_reason:
+                    # Keep shutdown aborts retryable by the frontend.
+                    shutdown_abort = finish_reason.get("type") == "abort"
+                    if (
+                        shutdown_abort
+                        and self.shutdown_event
+                        and self.shutdown_event.is_set()
+                    ):
+                        raise EngineShutdown(
+                            "Engine was shut down during token generation"
+                        )
+                    finish_reason_type = normalize_finish_reason(finish_reason["type"])
+                else:
+                    finish_reason_type = None
                 if res.get("output_ids") and not first_output_seen:
                     first_output_seen = True
                     context.notify_first_token()
@@ -880,10 +905,17 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         await metadata_uploader.upload_choice(index, meta_info)
                     finally:
                         meta_info.clear()
+                    if (
+                        shutdown_abort
+                        and self.shutdown_event
+                        and self.shutdown_event.is_set()
+                    ):
+                        raise EngineShutdown(
+                            "Engine was shut down during token generation"
+                        )
                 elif metadata_uploader is not None:
                     meta_info.clear()
                 if response_nvext:
                     response["nvext"] = response_nvext
                 if not context.is_stopped():
                     yield response
-                text_counts_per_choice[index] = next_count
