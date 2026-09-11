@@ -953,14 +953,17 @@ def _stage_pair(timeout=1):
     return rank0, rank1
 
 
-def _stage_verdict(synchronizer, budget=2.0):
+def _stage_verdict(synchronizer, budget=2.0, first_step=1):
     """Drive ``stage_poll`` the way the scheduler does: one non-blocking poll
-    per idle step until the verdict arrives."""
+    per idle step, carrying this rank's stage-relative step count, until the
+    verdict arrives."""
     end = time.monotonic() + budget
+    step = first_step
     while time.monotonic() < end:
-        verdict = synchronizer.stage_poll()
+        verdict = synchronizer.stage_poll(step)
         if verdict is not None:
             return verdict
+        step += 1
         time.sleep(0.005)
     raise AssertionError("no stage verdict within budget")
 
@@ -978,14 +981,14 @@ def test_benchmark_synchronizer_stage_exchange_agrees_when_every_rank_is_ok():
     try:
         rank0.stage_report(8, True)
         # Non-blocking: rank 0 keeps polling between idle steps.
-        assert _stage_verdict(rank0) is True
+        assert _stage_verdict(rank0).ok is True
         follower.join(timeout=2)
         assert not follower.is_alive()
-        assert follower_result["verdict"] is True
+        assert follower_result["verdict"].ok is True
         # The exchange is closed on both sides once the verdict is out.
         for synchronizer in (rank0, rank1):
             with pytest.raises(RuntimeError, match="without a report"):
-                synchronizer.stage_poll()
+                synchronizer.stage_poll(1)
     finally:
         rank1.close()
         rank0.close()
@@ -1006,10 +1009,10 @@ def test_benchmark_synchronizer_stage_exchange_fails_the_group_with_one_rank(
     follower.start()
     try:
         rank0.stage_report(16, failing_rank != 0)
-        assert _stage_verdict(rank0) is False
+        assert _stage_verdict(rank0).ok is False
         follower.join(timeout=2)
         assert not follower.is_alive()
-        assert follower_result["verdict"] is False
+        assert follower_result["verdict"].ok is False
     finally:
         rank1.close()
         rank0.close()
@@ -1043,6 +1046,37 @@ def test_benchmark_synchronizer_stage_exchange_rejects_a_rung_mismatch():
             _stage_verdict(rank0)
         with pytest.raises(RuntimeError, match="synchronization failed"):
             _stage_verdict(rank1)
+    finally:
+        rank1.close()
+        rank0.close()
+
+
+def test_benchmark_synchronizer_stage_decision_carries_rank0_next_step():
+    """Every rank starts the rung's first point two steps after the one in
+    which rank 0 sent the decision, whatever step the follower's own poll is
+    at. Followers see the decision in rank 0's lockstep iteration or up to
+    two iterations later; a rank that entered the point's READY barrier one
+    iteration before its peers left them waiting in that iteration's
+    dummy-forward collective, and rank 0's READY tolerance aborted the
+    sweep."""
+    rank0, rank1 = _stage_pair()
+    try:
+        rank1.stage_report(8, True)
+        rank0.stage_report(8, True)
+        end = time.monotonic() + 2.0
+        verdict = None
+        while verdict is None and time.monotonic() < end:
+            verdict = rank0.stage_poll(41)
+            time.sleep(0.005)
+        assert verdict == instrumented_scheduler_module._BenchmarkStageVerdict(
+            ok=True, start_step=43
+        )
+        # The follower's own step count does not enter the agreed value.
+        assert _stage_verdict(
+            rank1, first_step=7
+        ) == instrumented_scheduler_module._BenchmarkStageVerdict(
+            ok=True, start_step=43
+        )
     finally:
         rank1.close()
         rank0.close()
@@ -5525,9 +5559,11 @@ def _kvwarm_group_stage_stub(*, chains=("chain-a", "chain-b"), synchronizer=None
 def test_kvwarm_stage_verdict_is_taken_from_the_group():
     stub, meta = _kvwarm_group_stage_stub()
     sync = stub._bench_synchronizer
-    sync.stage_poll.side_effect = [None, None, True]
+    verdict_cls = instrumented_scheduler_module._BenchmarkStageVerdict
+    # Rank 0 decides in its step 4 and names step 6 as the group's start.
+    sync.stage_poll.side_effect = [None, None, verdict_cls(ok=True, start_step=6)]
 
-    # Build complete: the local outcome is reported, not applied.
+    # Step 1, build complete: the local outcome is reported, not applied.
     assert InstrumentedScheduler._kvwarm_step_busy(stub) is True
     sync.stage_report.assert_called_once()
     (batch, ok), kwargs = sync.stage_report.call_args
@@ -5536,39 +5572,117 @@ def test_kvwarm_stage_verdict_is_taken_from_the_group():
     assert stub._kvwarm_building is False
     assert stub._kvwarm_stage_reported[:2] == (4, True)
     assert meta["stages"] == []
-    # Pending verdict: every step is an idle step for the real scheduler.
+    # Steps 2-3, pending verdict: every step is an idle step for the real
+    # scheduler, and every poll carries this rank's stage-relative step.
     assert InstrumentedScheduler._kvwarm_step_busy(stub) is True
     assert InstrumentedScheduler._kvwarm_step_busy(stub) is True
     assert meta["stages"] == []
-    # Verdict in: the stage is ready and the point flow resumes.
+    # Step 4, verdict in: the stage is ready, but the point waits for the
+    # agreed step so peers that see the decision up to two steps later catch
+    # up.
     assert InstrumentedScheduler._kvwarm_step_busy(stub) is True
     assert stub._kvwarm_stage_reported is None
+    assert (stub._kvwarm_stage_steps, stub._kvwarm_stage_start_step) == (4, 6)
     assert [entry["batch"] for entry in meta["stages"]] == [4]
     assert meta["stages"][0]["depth"] == 8 and "failed" not in meta["stages"][0]
+    assert sync.stage_poll.call_args_list == [call(2), call(3), call(4)]
+    # Step 5: still idle, no poll.
+    assert InstrumentedScheduler._kvwarm_step_busy(stub) is True
+    # Step 6: the point flow resumes.
     assert InstrumentedScheduler._kvwarm_step_busy(stub) is False
     assert stub._kvwarm_plan[4] == 128
     stub._kvwarm_shed_chains.assert_not_called()
     assert sync.stage_poll.call_count == 3
 
 
+def test_kvwarm_late_stage_verdict_starts_the_point_in_the_same_step():
+    """A follower whose poll sees the decision two lockstep iterations after
+    rank 0 sent it is already at the agreed start step: it must not idle
+    again, or rank 0 (blocked in the point's READY barrier) and this rank
+    (in the iteration's dummy-forward collective) wait for each other."""
+    stub, meta = _kvwarm_group_stage_stub()
+    sync = stub._bench_synchronizer
+    verdict_cls = instrumented_scheduler_module._BenchmarkStageVerdict
+    # Rank 0 sent the decision in step 2 (start step 4); it lands in this
+    # rank's step-4 poll.
+    sync.stage_poll.side_effect = [None, None, verdict_cls(ok=True, start_step=4)]
+
+    assert InstrumentedScheduler._kvwarm_step_busy(stub) is True  # 1: reported
+    assert InstrumentedScheduler._kvwarm_step_busy(stub) is True  # 2: pending
+    assert InstrumentedScheduler._kvwarm_step_busy(stub) is True  # 3: pending
+    assert InstrumentedScheduler._kvwarm_step_busy(stub) is False  # 4: start
+    assert stub._kvwarm_stage_reported is None
+    assert [entry["batch"] for entry in meta["stages"]] == [4]
+    assert sync.stage_poll.call_args_list == [call(2), call(3), call(4)]
+    stub._kvwarm_shed_chains.assert_not_called()
+
+
+def test_kvwarm_stage_verdict_far_from_the_agreed_step_idles_until_it():
+    """Outside lockstep (engines paused, no dummy forwards) a rank may be
+    well behind rank 0's count; it idles up to the agreed step and blocking
+    there is harmless. The skew is logged, not fatal."""
+    stub, meta = _kvwarm_group_stage_stub()
+    sync = stub._bench_synchronizer
+    verdict_cls = instrumented_scheduler_module._BenchmarkStageVerdict
+    sync.stage_poll.side_effect = [verdict_cls(ok=True, start_step=6)]
+
+    assert InstrumentedScheduler._kvwarm_step_busy(stub) is True  # 1: reported
+    assert InstrumentedScheduler._kvwarm_step_busy(stub) is True  # 2: verdict
+    assert stub._kvwarm_stage_reported is None
+    assert [entry["batch"] for entry in meta["stages"]] == [4]
+    for _ in range(3):  # steps 3-5: idle until the agreed step
+        assert InstrumentedScheduler._kvwarm_step_busy(stub) is True
+    assert InstrumentedScheduler._kvwarm_step_busy(stub) is False  # 6: start
+    assert sync.stage_poll.call_count == 1
+
+
 def test_kvwarm_group_fallback_zeroes_the_plan_and_sheds_a_healthy_fleet():
     stub, meta = _kvwarm_group_stage_stub()
     sync = stub._bench_synchronizer
-    sync.stage_poll.side_effect = [None, False]
+    verdict_cls = instrumented_scheduler_module._BenchmarkStageVerdict
+    sync.stage_poll.side_effect = [None, verdict_cls(ok=False, start_step=4)]
 
-    assert InstrumentedScheduler._kvwarm_step_busy(stub) is True  # reported ok
-    assert InstrumentedScheduler._kvwarm_step_busy(stub) is True  # pending
-    assert InstrumentedScheduler._kvwarm_step_busy(stub) is True  # verdict: no
+    assert InstrumentedScheduler._kvwarm_step_busy(stub) is True  # 1: reported ok
+    assert InstrumentedScheduler._kvwarm_step_busy(stub) is True  # 2: pending
+    # Step 3, verdict no: applied at once, but the group leaves the exchange
+    # together at step 4.
+    assert InstrumentedScheduler._kvwarm_step_busy(stub) is True
     assert stub._kvwarm_plan[4] == 0
     stub._kvwarm_shed_chains.assert_called_once_with()
     (entry,) = meta["stages"]
     assert entry["batch"] == 4 and entry["failed"] is True
     assert entry["group_fallback"] is True
+    assert (stub._kvwarm_stage_steps, stub._kvwarm_stage_start_step) == (3, 4)
     # The rung's points now take fake injection: the shed blocks drain behind
     # the fence first, then the fake path proceeds.
-    assert InstrumentedScheduler._kvwarm_step_busy(stub) is True
+    assert InstrumentedScheduler._kvwarm_step_busy(stub) is True  # 4: fence
     stub.deferred_frees.clear()
-    assert InstrumentedScheduler._kvwarm_step_busy(stub) is False
+    assert InstrumentedScheduler._kvwarm_step_busy(stub) is False  # 5
+    stub._kvwarm_start_stage.assert_not_called()
+
+
+def test_kvwarm_late_group_fallback_takes_the_fake_path_in_the_same_step():
+    """The fallback path ends in the same READY barrier as the real-KV path,
+    so a rank that sees the "no" verdict at the agreed step sheds and moves
+    on to fake injection in that very step."""
+    stub, meta = _kvwarm_group_stage_stub()
+    sync = stub._bench_synchronizer
+    verdict_cls = instrumented_scheduler_module._BenchmarkStageVerdict
+
+    def shed_parked():  # parked chains: their blocks return at once
+        stub._kvwarm_chain_ids = []
+        stub._kvwarm_stage_batch = None
+
+    stub._kvwarm_shed_chains = MagicMock(side_effect=shed_parked)
+    sync.stage_poll.side_effect = [None, verdict_cls(ok=False, start_step=3)]
+
+    assert InstrumentedScheduler._kvwarm_step_busy(stub) is True  # 1: reported ok
+    assert InstrumentedScheduler._kvwarm_step_busy(stub) is True  # 2: pending
+    assert InstrumentedScheduler._kvwarm_step_busy(stub) is False  # 3: fake path
+    assert stub._kvwarm_plan[4] == 0
+    stub._kvwarm_shed_chains.assert_called_once_with()
+    (entry,) = meta["stages"]
+    assert entry["failed"] is True and entry["group_fallback"] is True
     stub._kvwarm_start_stage.assert_not_called()
 
 
@@ -5576,7 +5690,10 @@ def test_kvwarm_local_stage_failure_is_reported_before_it_is_applied():
     stub, meta = _kvwarm_group_stage_stub()
     del stub.requests["chain-a"]  # vanished during the build
     sync = stub._bench_synchronizer
-    sync.stage_poll.side_effect = [None, False]
+    sync.stage_poll.side_effect = [
+        None,
+        instrumented_scheduler_module._BenchmarkStageVerdict(ok=False, start_step=4),
+    ]
 
     assert InstrumentedScheduler._kvwarm_step_busy(stub) is True
     # Survivors are released at once, but the plan waits for the group.
@@ -5600,7 +5717,9 @@ def test_kvwarm_stage_pool_shortfall_fails_the_rung_for_the_group():
     stub, meta = _kvwarm_group_stage_stub()
     stub._kvwarm_stage_shadow_shortfall = lambda batch: 3
     sync = stub._bench_synchronizer
-    sync.stage_poll.side_effect = [False]
+    sync.stage_poll.side_effect = [
+        instrumented_scheduler_module._BenchmarkStageVerdict(ok=False, start_step=3)
+    ]
 
     assert InstrumentedScheduler._kvwarm_step_busy(stub) is True
     (batch, ok), _ = sync.stage_report.call_args
@@ -5620,7 +5739,9 @@ def test_kvwarm_soft_timeout_mid_build_abandons_the_stage_through_the_group():
     stub.requests["chain-a"].num_computed_tokens = 2  # still building
     stub._bench_deadline_monotonic = 0.0  # soft timeout elapsed
     sync = stub._bench_synchronizer
-    sync.stage_poll.side_effect = [False]
+    sync.stage_poll.side_effect = [
+        instrumented_scheduler_module._BenchmarkStageVerdict(ok=False, start_step=3)
+    ]
 
     assert InstrumentedScheduler._kvwarm_step_busy(stub) is True
     (batch, ok), _ = sync.stage_report.call_args
@@ -5643,6 +5764,27 @@ def test_kvwarm_stage_settles_locally_without_a_synchronizer():
     assert [entry["batch"] for entry in meta["stages"]] == [4]
     stub._kvwarm_stage_shadow_shortfall.assert_not_called()
     assert InstrumentedScheduler._kvwarm_step_busy(stub) is False
+
+
+def test_kvwarm_start_stage_resets_the_stage_step_frame():
+    """The agreed start step is expressed in steps since the stage build
+    began, so each build restarts the count on every rank."""
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub.add_request = MagicMock()
+    stub._kvwarm_chain_token_ids = lambda index, depth: [index + 1] * depth
+    stub._bench_block_hasher = None
+    stub._fpm_dp_rank = 0
+    stub._kvwarm_seq = 0
+    stub._kvwarm_chain_ids = []
+    stub._kvwarm_chain_prompts = {}
+    stub._kvwarm_stage_steps = 17
+    stub._kvwarm_stage_start_step = 9
+
+    InstrumentedScheduler._kvwarm_start_stage(stub, 2, 8)
+
+    assert stub.add_request.call_count == 2
+    assert (stub._kvwarm_stage_batch, stub._kvwarm_building) == (2, True)
+    assert (stub._kvwarm_stage_steps, stub._kvwarm_stage_start_step) == (0, 0)
 
 
 def test_kvwarm_stage_shadow_shortfall_takes_the_rung_worst_case(monkeypatch):
