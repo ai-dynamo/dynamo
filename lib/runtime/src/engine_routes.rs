@@ -493,7 +493,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_registry_basic() {
-        let registry = EngineRouteRegistry::new();
+        let registry = EngineRouteRegistry::with_policy(EngineRoutePolicy::AllowAll);
 
         // Register a simple callback
         let callback: EngineRouteCallback =
@@ -513,7 +513,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_callback_execution() {
-        let registry = EngineRouteRegistry::new();
+        let registry = EngineRouteRegistry::with_policy(EngineRoutePolicy::AllowAll);
 
         let callback: EngineRouteCallback = Arc::new(|body| {
             Box::pin(async move {
@@ -535,7 +535,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_clone_shares_routes() {
-        let registry = EngineRouteRegistry::new();
+        let registry = EngineRouteRegistry::with_policy(EngineRoutePolicy::AllowAll);
 
         let callback: EngineRouteCallback =
             Arc::new(|_| Box::pin(async { Ok(serde_json::json!({"ok": true})) }));
