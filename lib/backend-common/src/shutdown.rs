@@ -20,9 +20,11 @@
 //! # One budget, not a sum
 //!
 //! Every stage draws from the same deadline, measured once from SIGTERM. A
-//! stage receives `min(its cap, remaining - cleanup reserve)`, so an early
-//! stage cannot spend the budget a later one needs, and `cleanup` is exempt
-//! from that reserve so it is not deducted twice.
+//! stage receives `min(its cap, remaining)`. No reserve is withheld from
+//! earlier stages — withholding one zeroed the in-flight barrier under the
+//! debug defaults, where grace and reserve together consumed the whole total.
+//! Cleanup is funded by its own floor in `cleanup_once`, and the force-exit
+//! watchdog is extended by that floor so the two cannot race.
 //!
 //! This is deliberately not a set of independent timers: the earlier design
 //! summed to roughly 95s worst case from a knob documented as 30, which could
@@ -52,10 +54,17 @@ pub(crate) const DRAIN_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 /// abandoning it leaks GPU memory; the hard-exit deadline bounds the overrun.
 pub(crate) const CLEANUP_RESERVE_S: f64 = 5.0;
 
-/// Default bound on waiting for request-plane in-flight requests to finish.
-/// Matches `DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` so the stage cap and the
-/// runtime's own inner bound start from the same number.
-pub(crate) const DEFAULT_INFLIGHT_TIMEOUT_S: f64 = 15.0 * 60.0;
+/// Default cap on waiting for request-plane in-flight requests to finish.
+///
+/// `f64::INFINITY` means "no cap of its own" — the stage is bounded by the
+/// remaining total, like [`Stage::Unregister`]. It used to default to 900s to
+/// match `DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS`, which was a knob that
+/// could never bind: `total_budget` is composed from the *worker* timeout plus
+/// the grace period (35s on release defaults), and `allowance` is
+/// `min(cap, remaining)`, so the documented 900s was 25x unreachable and
+/// raising it changed nothing. The total is the authority; this caps the stage
+/// *within* it.
+pub(crate) const DEFAULT_INFLIGHT_TIMEOUT_S: f64 = f64::INFINITY;
 pub(crate) const INFLIGHT_TIMEOUT_ENV: &str =
     dynamo_runtime::config::environment_names::worker::DYN_WORKER_SHUTDOWN_INFLIGHT_TIMEOUT_SECS;
 
@@ -97,7 +106,12 @@ fn env_secs(env: &str) -> Option<f64> {
     if raw.trim().is_empty() {
         return None;
     }
-    match raw.parse::<f64>() {
+    // Trimmed: the empty check above already trims, and Rust's `f64` grammar
+    // admits no surrounding whitespace, so a trailing newline from a ConfigMap
+    // or a Helm block scalar silently fell through to the default. Python's
+    // `float()` strips, so the same variable resolved differently in the Rust
+    // and Python workers of one deployment.
+    match raw.trim().parse::<f64>() {
         // Negatives are in range here on purpose: each knob applies its own
         // floor, and "negative means skip this stage" is meaningful for some.
         Ok(v) if v.is_finite() && v <= MAX_CONFIGURED_SECS => Some(v),
@@ -264,7 +278,13 @@ impl StageMaxima {
         };
         Self {
             router_grace: secs(config.router_grace_secs, grace_period_secs),
-            inflight: secs(config.inflight_timeout_secs, inflight_timeout_secs),
+            // An uncapped stage is `Duration::MAX`, not zero: `duration_from_secs`
+            // maps a non-finite value to `ZERO`, which would skip the barrier
+            // outright rather than let the remaining total bound it.
+            inflight: match config.inflight_timeout_secs.unwrap_or_else(inflight_timeout_secs) {
+                v if v.is_infinite() => Duration::MAX,
+                v => duration_from_secs(v),
+            },
             kv_transfer: secs(config.kv_transfer_timeout_secs, drain_timeout_secs),
             cleanup: config
                 .cleanup_timeout_secs
@@ -276,8 +296,11 @@ impl StageMaxima {
 
     fn get(&self, stage: Stage) -> Duration {
         match stage {
-            // Unbudgeted: one discovery RPC and one atomic flip. They still
-            // draw on the remaining total if a caller asks for an allowance.
+            // No cap of their own — one discovery RPC and one atomic flip — so
+            // `allowance` reduces to the remaining total. That is deliberately
+            // not "unbounded": the discovery RPC can block on an unreachable
+            // API server, and the remaining total is what stops it wedging
+            // shutdown before cleanup.
             Stage::Unregister | Stage::StopAdmission => Duration::MAX,
             Stage::RouterGrace => self.router_grace,
             Stage::Inflight => self.inflight,
@@ -412,10 +435,11 @@ impl StageOutcome {
 /// The single SIGTERM-to-exit budget every stage draws from.
 ///
 /// Stage maxima are caps, not additive deadlines: a stage gets
-/// `min(stage_max, remaining_total - cleanup_reserve)`, so an early stage can
-/// never consume the budget cleanup needs. `Cleanup` itself is exempt from
-/// that reserve, otherwise it would be subtracted twice and cleanup would get
-/// nothing precisely when the earlier stages overran.
+/// `min(stage_max, remaining_total)`. No reserve is withheld here — see
+/// [`ShutdownBudget::allowance`] for why withholding one zeroed the in-flight
+/// barrier under the debug defaults. Cleanup is funded instead by
+/// `cleanup_once`'s own floor, with [`force_exit_deadline`] extending the
+/// watchdog to cover it.
 #[derive(Clone, Copy, Debug)]
 pub struct ShutdownBudget {
     /// `None` for the reversible Admin drain, which has no deadline.
@@ -452,13 +476,29 @@ impl ShutdownBudget {
     /// Arm the total budget from an explicit config, falling back to the
     /// environment for anything the caller left unset.
     pub fn from_config(config: &ShutdownConfig) -> Self {
+        Self::from_config_starting_at(config, Instant::now())
+    }
+
+    /// Arm the total budget from an explicit config, measured from `origin`
+    /// rather than from now.
+    ///
+    /// The force-exit watchdog starts its clock the instant the shutdown token
+    /// is cancelled, but the stages are armed later — `begin_engine_route_shutdown`
+    /// and the RL endpoint teardown both run first, and both are unbounded. When
+    /// the budget measured from *its* start instead, that skew came straight out
+    /// of the cleanup floor `force_exit_deadline` adds, so the watchdog fired
+    /// during `engine.cleanup()` — the exact failure the floor exists to prevent.
+    /// Sharing one origin is what makes the floor real.
+    pub fn from_config_starting_at(config: &ShutdownConfig, origin: Instant) -> Self {
         let maxima = StageMaxima::resolve(config);
         // Via `total_budget` so this and the hard-exit timer cannot diverge —
         // and so an unrepresentable `total_secs` is clamped rather than
         // panicking here, which a raw `from_secs_f64` did.
         let total = total_budget(config);
         Self {
-            deadline: Instant::now().checked_add(total),
+            // A pathological env value could overflow the deadline; saturate
+            // rather than panic inside `Instant`'s addition.
+            deadline: origin.checked_add(total),
             maxima,
             kv_fallback: config.kv_transfer_fallback,
         }
@@ -605,6 +645,24 @@ mod tests {
         for bad in ["", "   ", "abc", "NaN", "inf", "-inf"] {
             let _g = EnvGuard::set(GRACE_PERIOD_ENV, bad);
             assert_eq!(env_secs(GRACE_PERIOD_ENV), None, "{bad:?} must be rejected");
+        }
+    }
+
+    /// Regression: the empty check trimmed but the parse did not, so a value
+    /// carrying a trailing newline — what a Helm block scalar or a ConfigMap
+    /// key routinely produces — was rejected and silently replaced by the
+    /// default. Python's `float()` strips, so the same variable resolved to two
+    /// different numbers in one deployment.
+    #[test]
+    fn env_secs_accepts_values_with_surrounding_whitespace() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for padded in [" 30", "30 ", "30\n", "  30.5  "] {
+            let _g = EnvGuard::set(GRACE_PERIOD_ENV, padded);
+            let parsed = env_secs(GRACE_PERIOD_ENV);
+            assert!(
+                parsed.is_some_and(|v| v == 30.0 || v == 30.5),
+                "{padded:?} must parse, got {parsed:?}"
+            );
         }
     }
 
@@ -802,13 +860,25 @@ mod tests {
     }
 
     /// A pathological env value must not panic in `Instant`'s addition.
+    /// An absurd total must not panic — but "does not panic" was the whole
+    /// assertion here, and `remaining`/`allowance` contain no panicking
+    /// operations, so the test could only have failed if `checked_add` itself
+    /// did. Pin the semantics that actually matter: the deadline saturates to
+    /// unbounded rather than wrapping into an already-expired budget, which
+    /// would skip every stage.
     #[test]
-    fn absurd_total_does_not_overflow_the_deadline() {
+    fn absurd_total_saturates_to_unbounded_rather_than_expiring() {
         let budget = ShutdownBudget::starting_now(Duration::MAX);
-        // Either the deadline saturated to `None` (unbounded) or it is simply
-        // enormous; both are acceptable, panicking is not.
-        let _ = budget.remaining();
-        let _ = budget.allowance(Stage::Cleanup);
+        match budget.remaining() {
+            // Saturated: `is_exhausted` must stay false, or every stage is
+            // skipped at the instant shutdown begins.
+            None => assert!(!budget.is_exhausted()),
+            Some(remaining) => assert!(
+                !remaining.is_zero(),
+                "a saturating deadline must not present as already spent"
+            ),
+        }
+        assert!(!budget.is_exhausted());
     }
 
     /// Regression: reserving `cleanup_timeout()` (which defaults to the whole
@@ -825,9 +895,22 @@ mod tests {
         let kv = budget
             .allowance(Stage::KvTransfer)
             .expect("bounded budget yields an allowance");
+
+        // Not merely non-zero. Reserving `cleanup_timeout()` instead of
+        // `CLEANUP_RESERVE_S` still leaves a non-zero remainder under both
+        // build profiles, so `!kv.is_zero()` passed under the very mutation
+        // this test names. Assert the stage keeps essentially the whole
+        // post-grace remainder, which the mutation does not.
+        let total = total_budget(&ShutdownConfig::default());
+        let grace = duration_from_secs(grace_period_secs());
+        let post_grace = total.saturating_sub(grace);
+        let floor = post_grace.mul_f64(0.9).min(
+            Duration::from_secs_f64(drain_timeout_secs()),
+        );
         assert!(
-            !kv.is_zero(),
-            "the KV stage must get a non-zero budget on defaults; got {kv:?}"
+            kv >= floor,
+            "the KV stage must keep the post-grace remainder on defaults; \
+             got {kv:?}, expected at least {floor:?} of {post_grace:?}"
         );
     }
 
@@ -964,6 +1047,34 @@ mod tests {
         assert!(
             Duration::from_secs_f64(drain_timeout_secs()) >= graceful_shutdown_timeout(),
             "the KV cap is expected to allow the stage to consume the entire remainder"
+        );
+    }
+
+    /// Regression: the watchdog and the stage budget used to read the clock at
+    /// two different moments — the watchdog when the shutdown token was
+    /// cancelled, the budget when the orchestrator was finally reached, with
+    /// the unbounded engine-route and RL-endpoint teardown in between. The
+    /// identity asserted above still held, but the cleanup floor it buys was
+    /// consumed by that skew, so the watchdog fired during `engine.cleanup()`.
+    ///
+    /// Asserting the identity is not enough; this pins the origin itself.
+    #[test]
+    fn a_budget_armed_from_an_earlier_origin_spends_the_skew() {
+        let config = ShutdownConfig {
+            total_secs: Some(30.0),
+            ..Default::default()
+        };
+        let skew = Duration::from_secs(10);
+        let origin = Instant::now() - skew;
+
+        let budget = ShutdownBudget::from_config_starting_at(&config, origin);
+        let remaining = budget.remaining().expect("a bounded budget");
+
+        // ~20s, not 30s. Armed from `now` instead, the stages would outlive the
+        // watchdog — which counts from `origin` — by exactly `skew`.
+        assert!(
+            remaining <= Duration::from_secs(21) && remaining >= Duration::from_secs(19),
+            "expected the 10s skew to come out of the 30s total; got {remaining:?}"
         );
     }
 

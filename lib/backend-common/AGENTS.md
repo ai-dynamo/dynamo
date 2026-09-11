@@ -80,8 +80,10 @@ opt-out and lets `run.rs` stay non-generic.
   keep polling until the budget expires. The stage runs **after** the
   request-plane in-flight barrier, so by the time it is polled no request is
   executing — it waits only on transfers that outlive the request stream.
-  Budget = `min(DYN_PREFILL_DRAIN_TIMEOUT_S, remaining total - cleanup reserve)`;
-  see `shutdown.rs`.
+  Budget = `min(DYN_PREFILL_DRAIN_TIMEOUT_S, remaining total)`; see
+  `shutdown.rs`. No cleanup reserve is subtracted here — withholding one zeroed
+  the in-flight barrier under the debug defaults. Cleanup is funded by its own
+  floor in `cleanup_once`, with the force-exit watchdog extended to match.
   The default `Ok(None)` never frees KV early. No Rust engine currently
   overrides it — the vLLM, SGLang, and TRT-LLM sidecar adapters all inherit
   the default, so their prefill drain waits the full budget rather than
