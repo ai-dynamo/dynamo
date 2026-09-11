@@ -56,6 +56,9 @@ message ParallelismInfo {
   uint32 decode_context_parallel_size = 5;
   // Process world size for one data-parallel engine (TP * PP * PCP).
   uint64 world_size = 6;
+  // Number of contiguous DP engines hosted by this frontend, starting at
+  // data_parallel_rank. Absent in older servers hosting the complete DP group.
+  optional uint32 data_parallel_size_local = 7;
 }
 
 message GetModelInfoRequest {}
