@@ -862,7 +862,18 @@ impl OfflineReplayRouter {
     }
 
     fn decay_now(&self, now_ms: f64) -> Instant {
-        self.decay_time_epoch + Duration::from_secs_f64(now_ms.max(0.0) / 1000.0)
+        // `now_ms` arrives as a bare `f64` through the public `PlacementPolicy`
+        // trait, so it must be treated as unvalidated input: `Duration::from_secs_f64`
+        // panics on a non-finite argument, and `self.decay_time_epoch + duration`
+        // separately panics if the resulting `Instant` overflows. `.max(0.0)`
+        // already neutralizes NaN (`f64::max` returns the non-NaN operand), but
+        // +infinity survives it unchanged. Clamp to a cap far beyond any replay
+        // this crate runs (100 years) rather than `Duration::MAX`, which would
+        // still overflow the `Instant` addition below.
+        const MAX_DECAY_SECS: f64 = 100.0 * 365.25 * 24.0 * 3600.0;
+        let secs = (now_ms.max(0.0) / 1000.0).min(MAX_DECAY_SECS);
+        self.decay_time_epoch
+            + Duration::try_from_secs_f64(secs).unwrap_or(Duration::from_secs_f64(MAX_DECAY_SECS))
     }
 
     fn build_pending_request<Request: PlacementRequestView>(
@@ -1248,6 +1259,20 @@ mod tests {
             strict_priority,
             policy_class: None,
             replay_context: None,
+        }
+    }
+
+    /// `now_ms` arrives as a bare `f64` through the public `PlacementPolicy`
+    /// trait; `decay_now` must never panic on it, however malformed.
+    #[test]
+    fn decay_now_never_panics_on_non_finite_input() {
+        let router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
+        for now_ms in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, 0.0] {
+            let decayed = router.decay_now(now_ms);
+            assert!(
+                decayed >= router.decay_time_epoch,
+                "{now_ms} must not decay before epoch"
+            );
         }
     }
 
