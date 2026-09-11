@@ -88,7 +88,14 @@ def setup_gms(server_args) -> Type["GMSModelLoader"]:
     _gms_ro_connect_timeout_ms = get_gms_ro_connect_timeout_ms(extra)
 
     # Import triggers patches at module level
+    from gpu_memory_service.integrations.sglang.install_gms_unified_cache import (
+        configure,
+    )
+    from gpu_memory_service.integrations.sglang.install_kv_leases import install
     from gpu_memory_service.integrations.sglang.model_loader import GMSModelLoader
+
+    install()
+    configure(server_args)
 
     global _gms_initialized
     _gms_initialized = True
