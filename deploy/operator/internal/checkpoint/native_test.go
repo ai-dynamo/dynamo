@@ -48,7 +48,7 @@ func TestResolvePodSnapshotForService(t *testing.T) {
 		assert.Equal(t, snapshot.UID, info.NativeSnapshot.UID)
 		assert.Equal(t, "content-a", info.NativeSnapshot.BoundContentName)
 		assert.Equal(t, "main", info.NativeSnapshot.SourceContainer)
-		assert.Equal(t, "compatibility-v1", info.NativeSnapshot.CompatibilityHash)
+		assert.Equal(t, "compatibility-v1", info.SnapshotCompatibilityHash)
 		assert.Nil(t, info.GPUMemoryService)
 		assert.Equal(t, []string{"engine-0"}, info.RestoreTargetContainers)
 		assert.Equal(t, nvidiacomv1alpha1.CheckpointStartupPolicyImmediate, info.StartupPolicy)
@@ -165,9 +165,9 @@ func TestResolvePodSnapshotForServiceRejectsIncompatibleReferences(t *testing.T)
 			wantErr: "exactly one source container",
 		},
 		{
-			name: "unsupported compatibility version",
+			name: "legacy compatibility version",
 			mutate: func(snapshot *snapshotv1alpha1.PodSnapshot) {
-				snapshot.Annotations[consts.SnapshotCompatibilityVersionAnnotation] = "v2"
+				snapshot.Annotations[consts.SnapshotCompatibilityVersionAnnotation] = "v1"
 			},
 			wantErr: "unsupported Dynamo compatibility version",
 		},

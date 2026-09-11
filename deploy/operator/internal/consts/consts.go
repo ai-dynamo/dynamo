@@ -123,7 +123,7 @@ const (
 	SnapshotCompatibilityVersionAnnotation = "nvidia.com/dynamo-snapshot-compatibility-version"
 	SnapshotCompatibilityHashAnnotation    = "nvidia.com/dynamo-snapshot-compatibility-hash"
 	SnapshotGMSModeAnnotation              = "nvidia.com/dynamo-snapshot-gms-mode"
-	SnapshotCompatibilityVersion           = "v1"
+	SnapshotCompatibilityVersion           = "v2"
 	SnapshotGMSModeDisabled                = "disabled"
 
 	// Native restore candidate metadata pins the PodSnapshot observation used

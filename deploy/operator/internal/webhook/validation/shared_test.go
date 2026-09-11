@@ -426,7 +426,7 @@ func TestValidateComponentCheckpointJobConfigFieldPaths(t *testing.T) {
 	assertFieldPaths(t, errs, nil)
 }
 
-func TestValidateComponentCheckpointConfigRejectsNonWorkers(t *testing.T) {
+func TestValidateComponentCheckpointConfigRequiresWorkerType(t *testing.T) {
 	validation := &sharedValidation{
 		ctx: features.WithGate(context.Background(), features.Gates{Checkpoint: true}),
 	}
@@ -439,6 +439,20 @@ func TestValidateComponentCheckpointConfigRejectsNonWorkers(t *testing.T) {
 		nvidiacomv1beta1.ComponentTypeFrontend,
 	)
 	assertFieldPaths(t, errList, []string{"spec.components[0].experimental.checkpoint"})
+	if len(errList) != 1 || !strings.Contains(errList[0].Detail, "supported only for worker, prefill, and decode") {
+		t.Fatalf("expected one unsupported component type error, got %v", errList)
+	}
+
+	errList = validation.validateComponentCheckpointConfig(
+		&nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
+		checkpointPath,
+		nil,
+		"",
+	)
+	assertFieldPaths(t, errList, []string{"spec.components[0].experimental.checkpoint"})
+	if len(errList) != 1 || !strings.Contains(errList[0].Detail, "requires component type to be explicitly set") {
+		t.Fatalf("expected one missing component type error, got %v", errList)
+	}
 
 	errList = validation.validateComponentCheckpointConfig(
 		&nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},

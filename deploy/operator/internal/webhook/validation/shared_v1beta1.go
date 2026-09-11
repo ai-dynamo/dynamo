@@ -665,7 +665,12 @@ func (v *sharedValidation) validateComponentCheckpointConfig(
 	if checkpointConfig.Enabled && !features.MustGateFrom(v.ctx).Enabled(features.Checkpoint) {
 		allErrs = append(allErrs, field.Forbidden(fldPath, "checkpoint functionality is disabled in the operator configuration"))
 	}
-	if checkpointConfig.Enabled && !dynamo.IsWorkerComponent(string(componentType)) {
+	if checkpointConfig.Enabled && componentType == "" {
+		allErrs = append(allErrs, field.Forbidden(
+			fldPath,
+			"checkpoint functionality requires component type to be explicitly set to worker, prefill, or decode",
+		))
+	} else if checkpointConfig.Enabled && !dynamo.IsWorkerComponent(string(componentType)) {
 		allErrs = append(allErrs, field.Forbidden(
 			fldPath,
 			"checkpoint functionality is supported only for worker, prefill, and decode components",

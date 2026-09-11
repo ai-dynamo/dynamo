@@ -79,6 +79,14 @@ func TestComputeSnapshotCompatibilityHashIsPortableAcrossGraphIdentity(t *testin
 	second := snapshotCompatibilityTestPodTemplate("restore-dgd", "restore-ns", "worker-b")
 	first.Spec.ResourceClaims = []corev1.PodResourceClaim{{Name: "network"}, {Name: "accelerator"}}
 	second.Spec.ResourceClaims = []corev1.PodResourceClaim{{Name: "accelerator"}, {Name: "network"}}
+	first.Spec.Containers[0].Resources.Claims = []corev1.ResourceClaim{
+		{Name: "network", Request: "interface"},
+		{Name: "accelerator", Request: "gpu"},
+	}
+	second.Spec.Containers[0].Resources.Claims = []corev1.ResourceClaim{
+		{Name: "accelerator", Request: "gpu"},
+		{Name: "network", Request: "interface"},
+	}
 	first.Spec.Volumes = append(first.Spec.Volumes, corev1.Volume{Name: "helper-only"})
 	first.Spec.Containers = append(first.Spec.Containers, corev1.Container{
 		Name:         "checkpoint-helper",

@@ -24,7 +24,6 @@ type ResolvedPodSnapshot struct {
 	BoundContentName     string
 	SourceContainer      string
 	CompatibilityVersion string
-	CompatibilityHash    string
 	GMSMode              string
 }
 
@@ -198,7 +197,6 @@ func ResolvePodSnapshotForService(
 			BoundContentName:     contentName,
 			SourceContainer:      containers[0],
 			CompatibilityVersion: version,
-			CompatibilityHash:    compatibilityHash,
 			GMSMode:              gmsMode,
 		},
 	}

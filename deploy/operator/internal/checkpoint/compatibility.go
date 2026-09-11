@@ -98,14 +98,16 @@ type snapshotCompatibilityContract struct {
 	ShareProcessNamespace *bool                      `json:"shareProcessNamespace,omitempty"`
 	SecurityContext       *corev1.PodSecurityContext `json:"securityContext,omitempty"`
 	RuntimeClassName      *string                    `json:"runtimeClassName,omitempty"`
-	NodeName              string                     `json:"nodeName,omitempty"`
-	NodeSelector          map[string]string          `json:"nodeSelector,omitempty"`
-	NodeAffinity          *corev1.NodeAffinity       `json:"nodeAffinity,omitempty"`
-	SchedulerName         string                     `json:"schedulerName,omitempty"`
-	ResourceClaims        []corev1.PodResourceClaim  `json:"resourceClaims,omitempty"`
+	// NodeName records only an explicit pod-template pin. The scheduler-assigned
+	// node is not present in a PodTemplateSpec and therefore is never hashed.
+	NodeName       string                    `json:"nodeName,omitempty"`
+	NodeSelector   map[string]string         `json:"nodeSelector,omitempty"`
+	NodeAffinity   *corev1.NodeAffinity      `json:"nodeAffinity,omitempty"`
+	SchedulerName  string                    `json:"schedulerName,omitempty"`
+	ResourceClaims []corev1.PodResourceClaim `json:"resourceClaims,omitempty"`
 }
 
-// ComputeSnapshotCompatibilityHash returns the portable v1 compatibility
+// ComputeSnapshotCompatibilityHash returns the portable v2 compatibility
 // identity for one captured process. It deliberately excludes rollout and
 // graph-incarnation identity, along with restore-time environment that Dynamo
 // refreshes in the destination Pod.
@@ -220,6 +222,12 @@ func canonicalSnapshotContainer(container corev1.Container, keepName bool) corev
 			return container.VolumeDevices[i].DevicePath < container.VolumeDevices[j].DevicePath
 		}
 		return container.VolumeDevices[i].Name < container.VolumeDevices[j].Name
+	})
+	sort.SliceStable(container.Resources.Claims, func(i, j int) bool {
+		if container.Resources.Claims[i].Name != container.Resources.Claims[j].Name {
+			return container.Resources.Claims[i].Name < container.Resources.Claims[j].Name
+		}
+		return container.Resources.Claims[i].Request < container.Resources.Claims[j].Request
 	})
 
 	// Health and termination policy affect Kubernetes lifecycle, not whether a
