@@ -88,11 +88,23 @@ pub struct KvReplayComposition {
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
     scaling_enabled: bool,
     determinism: ReplayDeterminism,
+    // `router_config`/`prefill_load_estimator` are consumed via `.take()`
+    // the first time a placement is created, so `None` is ambiguous between
+    // "the caller never provided one" and "already taken by a prior
+    // placement call". A `ReplayComposition` is a call-once builder, but
+    // nothing in the trait enforces that; without this flag a second call
+    // (a caller bug) would silently fall back to default config instead of
+    // being told the composition was already consumed.
+    placement_created: bool,
 }
 
 impl KvReplayComposition {
     /// `router_config`/`prefill_load_estimator`/`scaling_policy` are all
     /// optional: `None` takes the router/estimator/Planner defaults.
+    ///
+    /// Determinism defaults to [`ReplayDeterminism::Random`] (an unseeded
+    /// worker selector) unless [`Self::set_determinism`] is called
+    /// afterward; a reproducible replay must opt in explicitly.
     pub fn aggregated(
         args: MockEngineArgs,
         num_workers: usize,
@@ -111,11 +123,16 @@ impl KvReplayComposition {
             scaling_policy,
             scaling_enabled,
             determinism: ReplayDeterminism::Random,
+            placement_created: false,
         }
     }
 
     /// `router_config`/`prefill_load_estimator`/`scaling_policy` are all
     /// optional: `None` takes the router/estimator/Planner defaults.
+    ///
+    /// Determinism defaults to [`ReplayDeterminism::Random`] (an unseeded
+    /// worker selector) unless [`Self::set_determinism`] is called
+    /// afterward; a reproducible replay must opt in explicitly.
     pub fn disaggregated(
         prefill_args: MockEngineArgs,
         decode_args: MockEngineArgs,
@@ -138,6 +155,7 @@ impl KvReplayComposition {
             scaling_policy,
             scaling_enabled,
             determinism: ReplayDeterminism::Random,
+            placement_created: false,
         }
     }
 }
@@ -157,17 +175,26 @@ impl ReplayComposition for KvReplayComposition {
         dp_size: u32,
         topology: Vec<WorkerTopology>,
     ) -> Result<Self::AggregatedPlacement> {
+        if self.placement_created {
+            bail!(
+                "KvReplayComposition::create_aggregated_placement called more than once; \
+                 a composition is a call-once builder and its router config/load estimator \
+                 are consumed by the first call"
+            );
+        }
         let KvTopologyConfig::Aggregated { args, num_workers } = &self.topology else {
             bail!("disaggregated Router composition used for aggregated replay");
         };
         validate_runtime_topology("aggregated", args, *num_workers, dp_size, &topology)?;
-        KvRouterPlacement::new(
+        let placement = KvRouterPlacement::new(
             args,
             self.router_config.take(),
             self.prefill_load_estimator.take(),
             topology.len(),
             self.determinism.selector_seed(),
-        )
+        );
+        self.placement_created = true;
+        placement
     }
 
     fn create_disaggregated_placements(
@@ -177,6 +204,13 @@ impl ReplayComposition for KvReplayComposition {
         decode_dp_size: u32,
         decode_topology: Vec<WorkerTopology>,
     ) -> Result<(Self::DisaggregatedPlacement, Self::DisaggregatedPlacement)> {
+        if self.placement_created {
+            bail!(
+                "KvReplayComposition::create_disaggregated_placements called more than once; \
+                 a composition is a call-once builder and its router config/load estimator \
+                 are consumed by the first call"
+            );
+        }
         let KvTopologyConfig::Disaggregated {
             prefill_args,
             decode_args,
@@ -217,6 +251,7 @@ impl ReplayComposition for KvReplayComposition {
             self.determinism.selector_seed(),
         )
         .context("constructing decode KV Router placement")?;
+        self.placement_created = true;
         Ok((prefill, decode))
     }
 
@@ -483,6 +518,69 @@ mod tests {
         assert_eq!(
             composition.determinism.selector_seed(),
             Some(aisimulate_core::replay::CANONICAL_SELECTOR_SEED)
+        );
+    }
+
+    /// `router_config`/`prefill_load_estimator` are consumed by `.take()` on
+    /// the first placement call; a second call must fail loudly instead of
+    /// silently falling back to default config.
+    fn single_worker_topology() -> Vec<WorkerTopology> {
+        vec![WorkerTopology {
+            worker_id: 0,
+            scheduler_ids: vec![0],
+        }]
+    }
+
+    #[test]
+    fn create_aggregated_placement_refuses_a_second_call() {
+        let mut composition =
+            KvReplayComposition::aggregated(MockEngineArgs::default(), 1, None, None, None);
+        composition
+            .create_aggregated_placement(1, single_worker_topology())
+            .unwrap();
+
+        let error = match composition.create_aggregated_placement(1, single_worker_topology()) {
+            Ok(_) => panic!("a second call must be refused"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("called more than once"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn create_disaggregated_placements_refuses_a_second_call() {
+        let mut composition = KvReplayComposition::disaggregated(
+            MockEngineArgs::default(),
+            MockEngineArgs::default(),
+            1,
+            1,
+            None,
+            None,
+            None,
+        );
+        composition
+            .create_disaggregated_placements(
+                1,
+                single_worker_topology(),
+                1,
+                single_worker_topology(),
+            )
+            .unwrap();
+
+        let error = match composition.create_disaggregated_placements(
+            1,
+            single_worker_topology(),
+            1,
+            single_worker_topology(),
+        ) {
+            Ok(_) => panic!("a second call must be refused"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("called more than once"),
+            "{error}"
         );
     }
 }
