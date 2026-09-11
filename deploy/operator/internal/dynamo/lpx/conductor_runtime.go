@@ -85,7 +85,7 @@ func updateLPUConductorContainer(
 		"60",
 		"--agent-server-retry-sleep-dur",
 		"2s",
-		"--start-port",
+		"--controlplane-start-port",
 		"12345",
 		"--graceful-shutdown-timeout",
 		"0s",
