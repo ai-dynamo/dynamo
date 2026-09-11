@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/stretchr/testify/require"
@@ -77,22 +79,97 @@ func projectLPXChildStatus(
 }
 
 func TestOrdinaryGroveProjectionExcludesLPXWithoutMutatingSource(t *testing.T) {
-	t.Log("Project the exact DGD-owned component subset from a hybrid graph")
-	source := newLPXHandoffSource(t, "node-local-v2-hybrid")
-	source.Spec.Components = append(source.Spec.Components, v1beta1.DynamoComponentDeploymentSharedSpec{
-		ComponentName: "prefill",
-		ComponentType: v1beta1.ComponentTypePrefill,
-	})
-	before := source.DeepCopy()
-	ordinary := projectOrdinaryGroveDeployment(source)
+	for _, test := range []struct {
+		name      string
+		longNames bool
+		lpxOnly   bool
+	}{
+		{name: "mixed"},
+		{name: "mixed long names", longNames: true},
+		{name: "LPX only", lpxOnly: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Project the exact DGD-owned subset without changing the source")
+			source := newLPXHandoffSource(t, "node-local-v2-hybrid")
+			lpxComponent := &source.Spec.Components[0]
+			if test.longNames {
+				source.Name = strings.Repeat("graph-", 10) + "a"
+				lpxComponent.ComponentName = strings.Repeat("l", 30)
+			}
+			lpxName := lpxComponent.ComponentName
+			if !test.lpxOnly {
+				source.Spec.TopologyConstraint = &v1beta1.SpecTopologyConstraint{ClusterTopologyName: "test-topology", PackDomain: "rack"}
+				source.Spec.Components = append(source.Spec.Components, v1beta1.DynamoComponentDeploymentSharedSpec{
+					ComponentName: "ordinary-frontend", ComponentType: v1beta1.ComponentTypeFrontend,
+					Replicas: ptr.To(int32(1)),
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "main", Image: "frontend"}},
+					}},
+				})
+			}
+			before := source.DeepCopy()
+			ordinary := projectOrdinaryGroveDeployment(source)
+			require.Nil(t, ordinary.GetComponentByName(lpxName))
+			require.Len(t, ordinary.Spec.Components, len(source.Spec.Components)-1)
 
-	require.Equal(t, before, source)
-	require.Nil(t, ordinary.GetComponentByName("lpx"))
-	require.Len(t, ordinary.Spec.Components, len(source.Spec.Components)-1)
+			t.Log("Seed only the projected PCS identity, including the truncated-name case")
+			pcsName := dynamo.PCSNameForDGD(ordinary.Name, ordinary.Spec.Components)
+			if test.longNames {
+				require.NotEqual(t, source.Name, pcsName)
+				require.NotEqual(t, dynamo.PCSNameForDGD(source.Name, source.Spec.Components), pcsName)
+			}
+			pcs := &grovev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{Name: pcsName, Namespace: source.Namespace, Generation: 1},
+				Status: grovev1alpha1.PodCliqueSetStatus{ObservedGeneration: ptr.To(int64(1)), Conditions: []metav1.Condition{{
+					Type: groveconstants.ConditionTopologyLevelsUnavailable, Status: metav1.ConditionTrue,
+					Reason: groveconstants.ConditionReasonClusterTopologyNotFound, Message: "missing ordinary topology",
+				}}},
+			}
+			clique := &grovev1alpha1.PodClique{
+				ObjectMeta: metav1.ObjectMeta{Name: dynamo.GroveComponentResourceName(ordinary, "ordinary-frontend"), Namespace: source.Namespace, Generation: 1},
+				Spec:       grovev1alpha1.PodCliqueSpec{Replicas: 1},
+				Status:     grovev1alpha1.PodCliqueStatus{ObservedGeneration: ptr.To(int64(1)), Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1},
+			}
+			kube := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithObjects(pcs, clique).Build()
 
-	t.Log("Keep the projected value independently mutable by later Grove preparation")
-	ordinary.Spec.Components[0].ComponentName = "ordinary-copy"
-	require.Equal(t, before, source)
+			t.Log("Render and observe restarts against that same ordinary PCS")
+			renderer := newGroveWorkloadRenderer(kube, &configv1alpha1.OperatorConfiguration{}, &commoncontroller.RuntimeConfig{}, nil)
+			rendered, err := renderer.Render(t.Context(), source, ordinary, nil, nil, false)
+			require.NoError(t, err)
+			require.NotNil(t, rendered.existing)
+			require.Equal(t, pcsName, rendered.existing.Name)
+			if test.lpxOnly {
+				require.Nil(t, rendered.desired)
+			} else {
+				require.Equal(t, pcsName, rendered.desired.Name)
+			}
+			remaining := resolveCompositeGroveRestartProgress(t.Context(), source, ordinary,
+				[]string{lpxName, "ordinary-frontend"}, newGroveRestartProgressResolver(kube), newLPXRestartProgressResolver(kube))
+			require.Equal(t, []string{lpxName}, remaining)
+
+			t.Log("Observe the graph-level topology through the same ordinary PCS")
+			result := newWorkloadProgramResult(source)
+			newDGDGroveTopologyConditionReconciler(kube).Reconcile(t.Context(), ordinary, &result)
+			condition := meta.FindStatusCondition(result.Status.Conditions, v1beta1.ConditionTypeTopologyLevelsAvailable)
+			if test.lpxOnly {
+				require.Nil(t, condition)
+				require.Empty(t, result.Events)
+			} else {
+				require.NotNil(t, condition)
+				require.Equal(t, metav1.ConditionFalse, condition.Status)
+				require.Equal(t, v1beta1.ConditionReasonTopologyDefinitionNotFound, condition.Reason)
+				require.Equal(t, "missing ordinary topology", condition.Message)
+			}
+
+			t.Log("Keep the projected copy independently mutable after all observations")
+			require.Equal(t, before, source)
+			ordinary.Annotations["projection-only"] = "independent-copy"
+			if len(ordinary.Spec.Components) > 0 {
+				ordinary.Spec.Components[0].ComponentName = "ordinary-copy"
+			}
+			require.Equal(t, before, source)
+		})
+	}
 }
 
 func TestLPXHandoffCreatesOnlyAnOwnedReference(t *testing.T) {
