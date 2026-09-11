@@ -60,6 +60,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		groveDisabled      bool                             // disables the configured Grove pathway
 		checkpointOff      bool                             // disables checkpoint creation and restore
 		seedWithoutWebhook bool                             // seeds oldDeployment without validating it
+		terminating        bool                             // deletes the seeded object so the update runs while it terminates
 		username           string                           // supplies the admission request identity
 
 		wantSchemaErr      string
@@ -1006,6 +1007,36 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4}
 			}),
+		},
+		{
+			name: "frontend component cannot be multinode",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			wantWebhookErrs: []string{
+				"spec.components[0].multinode: Forbidden: multinode is supported only for worker, prefill, or decode components",
+			},
+		},
+		{
+			name: "planner component cannot be multinode",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].ComponentType = nvidiacomv1beta1.ComponentTypePlanner
+				dgd.Spec.Components[0].Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			wantWebhookErrs: []string{
+				"spec.components[0].multinode: Forbidden: multinode is supported only for worker, prefill, or decode components",
+			},
+		},
+		{
+			name: "v1alpha1 frontend component cannot be multinode after conversion",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				worker.ComponentType = consts.ComponentTypeFrontend
+				worker.Multinode = &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2}
+			}),
+			wantWebhookErrs: []string{
+				"spec.components[0].multinode: Forbidden: multinode is supported only for worker, prefill, or decode components",
+			},
 		},
 		{
 			name: "complete explicit multinode roles are admitted",
@@ -2307,6 +2338,67 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 
 		// Multinode updates.
 		{
+			name:               "unchanged legacy frontend multinode survives an unrelated update",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+				dgd.Labels = map[string]string{"updated": "true"}
+			}),
+		},
+		{
+			name:               "v1alpha1 unchanged legacy frontend multinode survives conversion and update",
+			seedWithoutWebhook: true,
+			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				worker.ComponentType = consts.ComponentTypeFrontend
+				worker.Multinode = &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2}
+			}),
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				worker.ComponentType = consts.ComponentTypeFrontend
+				worker.Multinode = &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2}
+				dgd.Labels = map[string]string{"updated": "true"}
+			}),
+		},
+		{
+			name:               "legacy multinode cannot set an unsupported component type",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].ComponentType = ""
+				dgd.Spec.Components[0].Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			wantWebhookErrs: []string{
+				"spec.components[0].multinode: Forbidden: multinode is supported only for worker, prefill, or decode components",
+			},
+		},
+		{
+			name:               "legacy frontend multinode can be removed",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			deployment: betaDGDForAdmission(nil),
+		},
+		{
+			name:               "legacy frontend multinode cannot change node count",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 3}
+			}),
+			wantWebhookErrs: []string{
+				"spec.components[0].multinode: Forbidden: multinode is supported only for worker, prefill, or decode components",
+			},
+		},
+		{
 			name:          "single-node to multinode transition is immutable",
 			oldDeployment: newBetaDGDForValidation(),
 			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
@@ -2778,6 +2870,90 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{"spec.backendFramework: Invalid value: \"sglang\": is immutable and cannot be changed after creation"},
 			wantWarnings:    []string{"Changing spec.backendFramework may cause unexpected behavior"},
 		},
+		// Terminating updates. A finalizer can hold a DGD terminating for an
+		// arbitrary period, so durable controller-owned metadata still has to be
+		// protected during that window while anything cleanup needs stays allowed.
+		// Each row deletes a finalizer-held object first, so the deletionTimestamp
+		// is the API server's and is present on both the old and the new object.
+		{
+			name:               "terminating rejects replacing the workload provider",
+			terminating:        true,
+			seedWithoutWebhook: true,
+			oldDeployment:      betaTerminatingDGDForAdmission(nil),
+			deployment: betaTerminatingDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations[consts.KubeAnnotationWorkloadProvider] = consts.WorkloadProviderComponent
+			}),
+			wantWebhookErrs: []string{
+				`metadata.annotations[nvidia.com/workload-provider]: Invalid value: "component": field is immutable`,
+			},
+		},
+		{
+			name:               "terminating rejects removing the workload provider",
+			terminating:        true,
+			seedWithoutWebhook: true,
+			oldDeployment:      betaTerminatingDGDForAdmission(nil),
+			deployment: betaTerminatingDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				delete(dgd.Annotations, consts.KubeAnnotationWorkloadProvider)
+			}),
+			// Removal reports a null bad value, since there is no new value to name.
+			wantWebhookErrs: []string{
+				"metadata.annotations[nvidia.com/workload-provider]: Invalid value: null: field is immutable",
+			},
+		},
+		{
+			// Reachable without broadening the seeder bypass: the seed creates a
+			// provider-bearing object, then the bypassed seeder UPDATE removes it,
+			// which the mutating webhook does not undo on UPDATE. That leaves the
+			// stored no-provider state a legacy object reaches the update path in.
+			name:               "terminating rejects an unsupported workload provider",
+			terminating:        true,
+			seedWithoutWebhook: true,
+			username:           admissionOperatorPrincipal,
+			oldBeforeUpdate:    betaTerminatingDGDForAdmission(nil),
+			oldDeployment: betaTerminatingDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				delete(dgd.Annotations, consts.KubeAnnotationWorkloadProvider)
+			}),
+			deployment: betaTerminatingDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations[consts.KubeAnnotationWorkloadProvider] = "bogus"
+			}),
+			wantWebhookErrs: []string{
+				`metadata.annotations[nvidia.com/workload-provider]: Unsupported value: "bogus": supported values: "component", "grove"`,
+			},
+		},
+		{
+			name:               "terminating accepts a finalizer-only update",
+			terminating:        true,
+			seedWithoutWebhook: true,
+			oldDeployment:      betaTerminatingDGDForAdmission(nil),
+			deployment: betaTerminatingDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Finalizers = nil
+			}),
+		},
+		{
+			// A legacy object whose existing settings no longer satisfy today's
+			// rules has to stay deletable, so no new-state rule may run here.
+			name:               "terminating accepts finalizer removal despite an invalid gpu memory service",
+			terminating:        true,
+			seedWithoutWebhook: true,
+			oldDeployment:      betaTerminatingDGDForAdmission(withInvalidGPUMemoryService),
+			deployment: betaTerminatingDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				withInvalidGPUMemoryService(dgd)
+				dgd.Finalizers = nil
+			}),
+		},
+		{
+			// Pins the boundary this draws: only the metadata update rules run
+			// while terminating, so a spec change the create-side rules would
+			// reject is accepted. Same edit on a live object is rejected by the
+			// "beta component main image is required" row above.
+			name:               "terminating accepts a spec update the create-side rules would reject",
+			terminating:        true,
+			seedWithoutWebhook: true,
+			oldDeployment:      betaTerminatingDGDForAdmission(nil),
+			deployment: betaTerminatingDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).PodTemplate = nil
+			}),
+		},
 	}
 
 	for _, tt := range tests {
@@ -2792,6 +2968,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				gates:              gates,
 				withoutTopology:    tt.withoutTopology,
 				seedWithoutWebhook: tt.seedWithoutWebhook,
+				terminating:        tt.terminating,
 				username:           tt.username,
 				wantSchemaError:    tt.wantSchemaErr,
 				wantCELError:       tt.wantCELErr,
@@ -2883,6 +3060,38 @@ func betaDGDForAdmission(
 		mutate(dgd)
 	}
 	return dgd
+}
+
+// dgdTerminatingFinalizer holds a DGD in the terminating state so an update can
+// be submitted while deletion is pending.
+const dgdTerminatingFinalizer = "nvidia.com/dynamo-graph-deployment-finalizer"
+
+// betaTerminatingDGDForAdmission builds a DGD that is seeded with a finalizer and
+// an already-materialized workload provider, which is the state a terminating
+// update starts from. Callers drop either one to express the case under test.
+func betaTerminatingDGDForAdmission(
+	mutate func(*nvidiacomv1beta1.DynamoGraphDeployment),
+) *nvidiacomv1beta1.DynamoGraphDeployment {
+	return betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+		dgd.Finalizers = []string{dgdTerminatingFinalizer}
+		dgd.Annotations = map[string]string{
+			consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove,
+		}
+		if mutate != nil {
+			mutate(dgd)
+		}
+	})
+}
+
+// withInvalidGPUMemoryService gives the worker a GPU memory service block that
+// today's create-side rules reject, standing in for a legacy object that has to
+// stay deletable.
+func withInvalidGPUMemoryService(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+	betaWorkerComponent(dgd).Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+		GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{
+			ExtraClientContainers: []string{"no-such-container"},
+		},
+	}
 }
 
 func betaComponentDGDForAdmission(
