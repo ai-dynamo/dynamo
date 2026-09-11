@@ -41,6 +41,24 @@ def _replace_cli_option(args: list[str], option: str, value: str) -> list[str]:
     return out
 
 
+def _tp_size() -> int:
+    """Return the local tensor-parallel size requested by an E2E scenario."""
+    return max(1, int(os.environ.get("GMS_TEST_TP_SIZE", "1")))
+
+
+def _tp_visible_devices() -> str:
+    size = _tp_size()
+    inherited = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if inherited:
+        devices = [item.strip() for item in inherited.split(",") if item.strip()]
+        if len(devices) < size:
+            raise ValueError(
+                f"GMS_TEST_TP_SIZE={size} exceeds CUDA_VISIBLE_DEVICES={inherited!r}"
+            )
+        return ",".join(devices[:size])
+    return ",".join(map(str, range(size)))
+
+
 class GMSProcessManager:
     """Start the shared GMS daemons and frontend for one test scenario."""
 
@@ -52,12 +70,14 @@ class GMSProcessManager:
         read_only_weights: bool = False,
         tags: tuple[str, ...] = ("weights", "kv_cache"),
         kv_directory: bool = False,
+        migration_limit: int = 0,
     ):
         self._request = request
         self._engine_cls = engine_cls
         self._read_only_weights = read_only_weights
         self._tags = tags
         self._kv_directory = kv_directory
+        self._migration_limit = max(0, int(migration_limit))
         self._directory_env: dict[str, str] = {}
         self.kv_directory_socket: str | None = None
         self.kv_directory_manifest: str | None = None
@@ -88,13 +108,17 @@ class GMSProcessManager:
                     "GMS_KV_DIRECTORY_ASYNC_READ": "1",
                     "GMS_KV_DIRECTORY_ASYNC_PUBLISH": "1",
                     "GMS_KV_LEASES": "1",
+                    "GMS_SGLANG_KV_LEASES": "1",
                     "GMS_KV_LEASE_SHM_DIR": lease_dir,
+                    "GMS_SGLANG_SHARED_KV": "1",
                     "GMS_VLLM_SHARED_KV": "1",
                 }
             if "weights" in self._tags:
                 self.weights_gms = stack.enter_context(
                     GMSServer(device=0, tag="weights")
                 )
+                for device in range(1, _tp_size()):
+                    stack.enter_context(GMSServer(device=device, tag="weights"))
             if "kv_cache" in self._tags:
                 self.kv_cache_gms = stack.enter_context(
                     GMSServer(
@@ -103,10 +127,18 @@ class GMSProcessManager:
                         directory_socket_path=self.kv_directory_socket,
                     )
                 )
+                for device in range(1, _tp_size()):
+                    stack.enter_context(
+                        GMSServer(
+                            device=device,
+                            tag="kv_cache",
+                        )
+                    )
             frontend = stack.enter_context(
                 DynamoFrontendProcess(
                     self._request,
                     frontend_port=0,
+                    migration_limit=self._migration_limit,
                     display_name="frontend",
                 )
             )
@@ -166,14 +198,20 @@ class GMSProcessManager:
         engine_id: str,
         *,
         read_only_weights: bool | None = None,
+        wait_until_ready: bool = True,
     ):
         if self._stack is None:
             raise RuntimeError(
                 "GMSProcessManager must be entered before starting engines"
             )
-        engine = self._stack.enter_context(
-            self.create_engine(engine_id, read_only_weights=read_only_weights)
-        )
+        engine = self.create_engine(engine_id, read_only_weights=read_only_weights)
+        health_checks = engine.health_check_urls
+        if not wait_until_ready:
+            engine.health_check_urls = []
+        try:
+            engine = self._stack.enter_context(engine)
+        finally:
+            engine.health_check_urls = health_checks
         self.engines[engine_id] = engine
         return engine
 
@@ -231,6 +269,10 @@ class GMSEngineProcess(EngineProcess, ABC):
         if not self.read_only_weights:
             return None
         return json.dumps({"gms_read_only": True})
+
+    def wait_until_ready(self, timeout: float | None = None) -> None:
+        """Wait for a previously started standby to become serving-ready."""
+        self._check_urls(self.timeout if timeout is None else timeout)
 
     @abstractmethod
     def pause_payload(self) -> dict:
@@ -488,7 +530,9 @@ class SGLangWithGMSProcess(GMSEngineProcess):
             "--disable-cuda-graph",
             "--disable-piecewise-cuda-graph",
             "--mem-fraction-static",
-            "0.8",
+            os.environ.get("SGLANG_GMS_MEM_FRACTION_STATIC", "0.8"),
+            "--tp-size",
+            str(_tp_size()),
             "--port",
             str(self.serve_port),
         ]
@@ -503,7 +547,10 @@ class SGLangWithGMSProcess(GMSEngineProcess):
         return command
 
     def env_updates(self) -> dict[str, str]:
-        return {"NVCC_PREPEND_FLAGS": "-ccbin /usr/bin/g++"}
+        return {
+            "CUDA_VISIBLE_DEVICES": _tp_visible_devices(),
+            "NVCC_PREPEND_FLAGS": "-ccbin /usr/bin/g++",
+        }
 
     def pause_payload(self) -> dict:
         return {}
