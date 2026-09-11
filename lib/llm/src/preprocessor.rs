@@ -1398,6 +1398,10 @@ struct NormalizedArgsRequest<'a, R> {
     inner: &'a R,
     normalize_tool_call_args: bool,
     continue_final_message: bool,
+    /// Forces `should_add_generation_prompt`. The renderer reads the flag from the
+    /// request, and MiniJinja's `context!{ ..a, ..b }` resolves `a` first, so
+    /// `chat_template_args` cannot override it.
+    add_generation_prompt: Option<bool>,
 }
 
 impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> {
@@ -1446,7 +1450,8 @@ impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> 
     }
 
     fn should_add_generation_prompt(&self) -> bool {
-        self.inner.should_add_generation_prompt()
+        self.add_generation_prompt
+            .unwrap_or_else(|| self.inner.should_add_generation_prompt())
     }
 
     fn extract_text(&self) -> Option<TextInput> {
@@ -2598,6 +2603,72 @@ impl OpenAIPreprocessor {
         }
     }
 
+    /// Every normalization [`Self::generate`] applies to a chat request before templating.
+    ///
+    /// These mutate `chat_template_args` and `tool_choice`, so templating without them
+    /// renders a different prompt. A step added here reaches every caller.
+    pub(crate) fn normalize_chat_request(&self, request: &mut NvCreateChatCompletionRequest) {
+        let thinking_control_from_client = Self::request_has_client_thinking_control(request);
+        self.apply_default_thinking_mode(request);
+        Self::normalize_thinking_arg_with_source(
+            request,
+            self.runtime_config.reasoning_parser.as_deref(),
+            self.tool_call_parser.as_deref(),
+            thinking_control_from_client,
+        );
+        Self::normalize_kimi_k3_named_tool_choice(request, self.tool_call_parser.as_deref());
+    }
+
+    /// Normalize, template and encode a chat request as [`Self::generate`] does, stopping
+    /// before the worker hop.
+    pub async fn tokenize_chat(
+        &self,
+        request: &mut NvCreateChatCompletionRequest,
+        add_generation_prompt: bool,
+    ) -> anyhow::Result<Encoding> {
+        self.normalize_chat_request(request);
+        let rendered = self
+            .apply_template_with(&*request, Some(add_generation_prompt))?
+            .ok_or_else(|| anyhow::anyhow!("chat template produced no prompt"))?;
+        self.encode_prompt_with_timing(Some(&rendered), rendered.as_str(), None)
+            .await
+    }
+
+    /// Encode a bare prompt as `/v1/completions` does: no template, no special tokens.
+    pub async fn tokenize_completion(&self, prompt: &str) -> anyhow::Result<Encoding> {
+        Self::encode_text(self.tokenizer.clone(), prompt).await
+    }
+
+    /// Decode token ids through this model's tokenizer, on the blocking pool.
+    pub async fn detokenize(
+        &self,
+        token_ids: &[TokenIdType],
+        skip_special_tokens: bool,
+    ) -> anyhow::Result<String> {
+        let tokenizer = self.tokenizer.clone();
+        let ids = token_ids.to_vec();
+        tokio::task::spawn_blocking(move || Ok(tokenizer.decode(&ids, skip_special_tokens)?.into()))
+            .await?
+    }
+
+    /// The text each token contributes, decoded per id.
+    ///
+    /// Not the vocabulary spelling: that is only reachable from an `Encoding::Hf`, and the
+    /// prefix cache normalizes every encode to `Encoding::Sp`, so it would vary with
+    /// `DYN_TOKENIZER_CACHE`. A partial multi-byte token decodes to U+FFFD.
+    /// One decode per token, so a long sequence is hundreds of milliseconds of CPU; it runs
+    /// on the blocking pool for the same reason [`Self::encode_text`] does.
+    pub async fn token_strings(&self, token_ids: &[TokenIdType]) -> anyhow::Result<Vec<String>> {
+        let tokenizer = self.tokenizer.clone();
+        let ids = token_ids.to_vec();
+        tokio::task::spawn_blocking(move || {
+            ids.iter()
+                .map(|id| Ok(tokenizer.decode(&[*id], false)?.into()))
+                .collect::<anyhow::Result<Vec<String>>>()
+        })
+        .await?
+    }
+
     /// Translate a [`NvCreateChatCompletionRequest`] request to a common completion request.
     /// Returns the common completion request, a hashmap of annotations, and a boolean
     /// indicating whether the rendered prompt ends with a reasoning start token (e.g.,
@@ -3037,16 +3108,36 @@ impl OpenAIPreprocessor {
         &self,
         request: &R,
     ) -> Result<Option<RenderedPrompt>> {
+        self.apply_template_with(request, None)
+    }
+
+    /// As [`Self::apply_template`], with `should_add_generation_prompt` forced to
+    /// `add_generation_prompt` when it is `Some`.
+    pub(crate) fn apply_template_with<
+        R: OAIChatLikeRequest
+            + AnnotationsProvider
+            + SamplingOptionsProvider
+            + StopConditionsProvider
+            + OutputOptionsProvider
+            + NvExtProvider
+            + CommonExtProvider,
+    >(
+        &self,
+        request: &R,
+        add_generation_prompt: Option<bool>,
+    ) -> Result<Option<RenderedPrompt>> {
         let continue_final = request.get_continue_final_message() == Some(true);
-        let formatted_prompt = if self.normalize_tool_call_args || continue_final {
-            self.apply_template_inner(&NormalizedArgsRequest {
-                inner: request,
-                normalize_tool_call_args: self.normalize_tool_call_args,
-                continue_final_message: continue_final,
-            })?
-        } else {
-            self.apply_template_inner(request)?
-        };
+        let formatted_prompt =
+            if self.normalize_tool_call_args || continue_final || add_generation_prompt.is_some() {
+                self.apply_template_inner(&NormalizedArgsRequest {
+                    inner: request,
+                    normalize_tool_call_args: self.normalize_tool_call_args,
+                    continue_final_message: continue_final,
+                    add_generation_prompt,
+                })?
+            } else {
+                self.apply_template_inner(request)?
+            };
         let Some(prompt) = formatted_prompt else {
             return Ok(None);
         };
@@ -4288,12 +4379,11 @@ impl OpenAIPreprocessor {
             .build()
     }
 
-    async fn encode_with_timing(
-        &self,
+    /// Encode `prompt`, stripping NUL bytes and offloading to the blocking pool.
+    pub async fn encode_text(
+        tokenizer: Arc<dyn Tokenizer>,
         prompt: &str,
-        tracker: Option<&RequestTracker>,
     ) -> anyhow::Result<Encoding> {
-        let encode_start = Instant::now();
         // Offload the CPU-heavy BPE encode to the bounded blocking pool instead of running it on
         // the async event loop. For long prompts at high concurrency, a synchronous encode here
         // stalls the frontend tokio runtime for seconds, starving the I/O tasks that share the
@@ -4305,8 +4395,16 @@ impl OpenAIPreprocessor {
         } else {
             prompt.to_string()
         };
-        let tokenizer = self.tokenizer.clone();
-        let encoding = tokio::task::spawn_blocking(move || tokenizer.encode(&owned)).await??;
+        tokio::task::spawn_blocking(move || tokenizer.encode(&owned)).await?
+    }
+
+    async fn encode_with_timing(
+        &self,
+        prompt: &str,
+        tracker: Option<&RequestTracker>,
+    ) -> anyhow::Result<Encoding> {
+        let encode_start = Instant::now();
+        let encoding = Self::encode_text(self.tokenizer.clone(), prompt).await?;
         if let Some(t) = tracker {
             t.record_tokenize_latency(encode_start.elapsed());
         }
@@ -6871,15 +6969,7 @@ impl
         // Apply the deployment default before parser-specific normalization so
         // it can override an implicit model default (for example Kimi K2.5),
         // while explicit request controls still take precedence.
-        let thinking_control_from_client = Self::request_has_client_thinking_control(&request);
-        self.apply_default_thinking_mode(&mut request);
-        Self::normalize_thinking_arg_with_source(
-            &mut request,
-            self.runtime_config.reasoning_parser.as_deref(),
-            self.tool_call_parser.as_deref(),
-            thinking_control_from_client,
-        );
-        Self::normalize_kimi_k3_named_tool_choice(&mut request, self.tool_call_parser.as_deref());
+        self.normalize_chat_request(&mut request);
 
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
@@ -10128,6 +10218,7 @@ mod tests {
                     inner: request,
                     normalize_tool_call_args: false,
                     continue_final_message: true,
+                    add_generation_prompt: None,
                 })
                 .unwrap()
         } else {
@@ -11738,5 +11829,162 @@ mod tests {
             image,
             video(2)
         ]));
+    }
+
+    /// `tokenize_chat` and the generate path must produce the same token ids.
+    ///
+    /// The request sends only `thinking`, so the `enable_thinking` the template branches on
+    /// exists only if normalization derived it; the second assertion checks it did, which
+    /// keeps this from passing when neither path normalized.
+    #[tokio::test]
+    async fn tokenize_chat_matches_the_generate_path_token_ids() {
+        use crate::model_card::ModelDeploymentCard;
+        use crate::preprocessor::prompt::prompt_formatter_from_mdc;
+        use dynamo_renderer::PromptFormatter;
+        use std::io::Write;
+
+        let mut template = tempfile::Builder::new()
+            .suffix(".jinja")
+            .tempfile()
+            .expect("tempfile");
+        template
+            .write_all(
+                b"{% for m in messages %}{{ m['content'] }}{% endfor %}\
+                  {% if enable_thinking %} thinking thinking thinking{% endif %}",
+            )
+            .expect("write template");
+        let template = template.into_temp_path();
+
+        let card = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/TinyLlama_v1.1",
+            Some(template.as_ref()),
+        )
+        .expect("load card");
+        let PromptFormatter::OAI(formatter) = prompt_formatter_from_mdc(&card).expect("formatter");
+        let preprocessor = OpenAIPreprocessor::new_with_parts(
+            card.clone(),
+            formatter,
+            card.tokenizer().expect("tokenizer"),
+        )
+        .expect("preprocessor");
+
+        let body = serde_json::json!({
+            "model": card.display_name,
+            "messages": [{"role": "user", "content": "What is 2+2?"}],
+            "chat_template_kwargs": {"thinking": true},
+        });
+
+        let mut via_generate: NvCreateChatCompletionRequest =
+            serde_json::from_value(body.clone()).expect("request");
+        preprocessor.normalize_chat_request(&mut via_generate);
+        let (preprocessed, _, _) = preprocessor
+            .preprocess_request(&via_generate, None)
+            .await
+            .expect("preprocess");
+
+        let mut via_tokenize: NvCreateChatCompletionRequest =
+            serde_json::from_value(body).expect("request");
+        let encoding = preprocessor
+            .tokenize_chat(&mut via_tokenize, true)
+            .await
+            .expect("tokenize_chat");
+
+        assert_eq!(
+            encoding.token_ids(),
+            preprocessed.token_ids.as_slice(),
+            "/tokenize and the generate path must agree on the token ids"
+        );
+
+        let mut without: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": card.display_name,
+                "messages": [{"role": "user", "content": "What is 2+2?"}],
+            }))
+            .expect("request");
+        let baseline = preprocessor
+            .tokenize_chat(&mut without, true)
+            .await
+            .expect("tokenize_chat");
+        assert!(
+            encoding.token_ids().len() > baseline.token_ids().len(),
+            "the thinking alias must reach the template via normalization, else this guard is vacuous"
+        );
+    }
+
+    /// Null bytes are stripped before encoding, so a prompt containing one tokenizes the
+    /// same as a prompt without.
+    #[tokio::test]
+    async fn tokenize_completion_strips_null_bytes_like_the_generate_path() {
+        use crate::model_card::ModelDeploymentCard;
+        use crate::preprocessor::prompt::prompt_formatter_from_mdc;
+        use dynamo_renderer::PromptFormatter;
+
+        let card =
+            ModelDeploymentCard::load_from_disk("tests/data/sample-models/TinyLlama_v1.1", None)
+                .expect("load card");
+        let PromptFormatter::OAI(formatter) = PromptFormatter::no_op();
+        let _ = prompt_formatter_from_mdc(&card);
+        let preprocessor = OpenAIPreprocessor::new_with_parts(
+            card.clone(),
+            formatter,
+            card.tokenizer().expect("tokenizer"),
+        )
+        .expect("preprocessor");
+
+        let with_null = preprocessor
+            .tokenize_completion("Hello\0, world!")
+            .await
+            .expect("encode");
+        let without_null = preprocessor
+            .tokenize_completion("Hello, world!")
+            .await
+            .expect("encode");
+        assert_eq!(
+            with_null.token_ids(),
+            without_null.token_ids(),
+            "null bytes must be stripped before encoding, as the generate path does"
+        );
+    }
+
+    /// `tokenize_completion` must equal what the `/v1/completions` pipeline sends the
+    /// worker. Pinned because it is short enough to look replaceable by any encode call.
+    #[tokio::test]
+    async fn tokenize_completion_matches_the_completions_pipeline() {
+        use crate::model_card::ModelDeploymentCard;
+        use crate::protocols::openai::completions::NvCreateCompletionRequest;
+        use dynamo_renderer::PromptFormatter;
+
+        let card =
+            ModelDeploymentCard::load_from_disk("tests/data/sample-models/TinyLlama_v1.1", None)
+                .expect("load card");
+        // Exactly how the watcher builds the completions pipeline: a no-op formatter.
+        let PromptFormatter::OAI(no_op) = PromptFormatter::no_op();
+        let preprocessor = OpenAIPreprocessor::new_with_parts(
+            card.clone(),
+            no_op,
+            card.tokenizer().expect("tokenizer"),
+        )
+        .expect("preprocessor");
+
+        let request: NvCreateCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": card.display_name,
+            "prompt": "Hello, world!",
+        }))
+        .expect("request");
+
+        let (preprocessed, _, _) = preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .expect("preprocess");
+        let via_tokenize = preprocessor
+            .tokenize_completion("Hello, world!")
+            .await
+            .expect("tokenize_completion");
+
+        assert_eq!(
+            via_tokenize.token_ids(),
+            preprocessed.token_ids.as_slice(),
+            "/tokenize must reproduce the /v1/completions token ids exactly"
+        );
     }
 }

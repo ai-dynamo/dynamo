@@ -1055,6 +1055,10 @@ static HTTP_SVC_FILES_PATH_ENV: &str = "DYN_HTTP_SVC_FILES_PATH";
 static HTTP_SVC_BATCHES_PATH_ENV: &str = "DYN_HTTP_SVC_BATCHES_PATH";
 /// Environment variable to set the anthropic messages endpoint path (default: `/v1/messages`)
 static HTTP_SVC_ANTHROPIC_PATH_ENV: &str = "DYN_HTTP_SVC_ANTHROPIC_PATH";
+/// Environment variable to set the tokenize endpoint path (default: `/tokenize`)
+static HTTP_SVC_TOKENIZE_PATH_ENV: &str = "DYN_HTTP_SVC_TOKENIZE_PATH";
+/// Environment variable to set the detokenize endpoint path (default: `/detokenize`)
+static HTTP_SVC_DETOKENIZE_PATH_ENV: &str = "DYN_HTTP_SVC_DETOKENIZE_PATH";
 /// Environment variable to enable the experimental vLLM-compatible
 /// `/inference/v1/generate` endpoint. Truthy value opts in; disabled by default.
 pub(super) static VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV: &str =
@@ -1264,6 +1268,11 @@ impl HttpServiceConfigBuilder {
             },
             super::health::health_check_router(state.clone(), var(HTTP_SVC_HEALTH_PATH_ENV).ok()),
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
+            super::tokenize::tokenize_router(state.clone(), var(HTTP_SVC_TOKENIZE_PATH_ENV).ok()),
+            super::tokenize::detokenize_router(
+                state.clone(),
+                var(HTTP_SVC_DETOKENIZE_PATH_ENV).ok(),
+            ),
         ];
         if admin_api_enabled {
             system_routes.push(super::busy_threshold::busy_threshold_router(

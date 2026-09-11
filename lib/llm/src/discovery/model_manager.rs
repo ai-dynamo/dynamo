@@ -24,6 +24,7 @@ use super::{
     GenerateEngineSelection, KvSourceMembershipWatch, Model, RuntimeConfigWatch, WorkerSet,
     kv_source_watch::KvSourceMembershipCoordinator, runtime_config_watch,
 };
+use crate::preprocessor::OpenAIPreprocessor;
 
 use dynamo_runtime::{
     component::{Client, Endpoint, build_transport_type},
@@ -946,6 +947,13 @@ impl ModelManager {
 
     // -- Model cards --
 
+    /// Published cards as shared handles. Prefer this over [`Self::get_model_cards`]
+    /// for readers that only inspect a card: that one deep-clones every card in the
+    /// catalog, which is a lot of copying for a per-request lookup.
+    pub fn model_cards(&self) -> Vec<Arc<ModelDeploymentCard>> {
+        self.catalog.load().cards.values().cloned().collect()
+    }
+
     pub fn get_model_cards(&self) -> Vec<ModelDeploymentCard> {
         self.catalog
             .load()
@@ -1288,6 +1296,19 @@ impl ModelManager {
             .get_pooling_engine()
     }
 
+    pub fn get_chat_preprocessor(&self, model: &str) -> Option<Arc<OpenAIPreprocessor>> {
+        self.catalog
+            .load()
+            .models
+            .get(model)?
+            .get_chat_preprocessor()
+    }
+
+    /// Whichever pipeline exists; both share the model's tokenizer.
+    pub fn get_preprocessor(&self, model: &str) -> Option<Arc<OpenAIPreprocessor>> {
+        self.catalog.load().models.get(model)?.get_preprocessor()
+    }
+
     pub fn get_completions_engine(
         &self,
         model: &str,
@@ -1484,6 +1505,30 @@ impl ModelManager {
         card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
         card.needs = Vec::new();
         card
+    }
+
+    /// Attach preprocessors for an in-process model. Discovery-backed models get theirs
+    /// from the watcher as it builds their pipelines.
+    pub fn add_model_preprocessors(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        chat: Option<Arc<OpenAIPreprocessor>>,
+        completions: Option<Arc<OpenAIPreprocessor>>,
+    ) -> Result<(), ModelManagerError> {
+        let _reservation = self.reservation_lock.lock();
+        let model_entry = self.get_or_create_model(model);
+        let namespace = format!("__local_preprocessors_{}", model);
+        let mut ws = WorkerSet::new(
+            namespace.clone(),
+            card_checksum.to_string(),
+            Self::aggregated_local_card(),
+        );
+        ws.chat_preprocessor = chat;
+        ws.completions_preprocessor = completions;
+        model_entry.add_worker_set(namespace, Arc::new(ws));
+        self.publish_catalog_locked();
+        Ok(())
     }
 
     pub fn add_chat_completions_model(
