@@ -29,9 +29,9 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 
-prost-types = "0.14.3"
-tonic = "0.14.6"
-tonic-health = "0.14.6"
+prost-types-v14 = { workspace = true }
+tonic-v14 = { workspace = true }
+tonic-health-v14 = { workspace = true }
 vllm-proto = { workspace = true }
 
 [dev-dependencies]
