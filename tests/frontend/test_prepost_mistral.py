@@ -9,13 +9,19 @@
 import json
 
 import pytest
+from packaging.version import Version
 
 from .common import check_module_available
 
 HAS_VLLM = check_module_available("vllm.entrypoints.openai.chat_completion.protocol")
 if HAS_VLLM:
     from mistral_common.tokens.tokenizers.base import SpecialTokens
-    from vllm.entrypoints.generate.base.protocol import FunctionDefinition
+    from vllm import __version__ as vllm_version
+
+    if Version(vllm_version).release >= (0, 29):
+        from vllm.entrypoints.generate.base.protocol import FunctionDefinition
+    else:
+        from vllm.entrypoints.openai.engine.protocol import FunctionDefinition
     from vllm.entrypoints.openai.chat_completion.protocol import (
         ChatCompletionRequest,
         ChatCompletionToolsParam,

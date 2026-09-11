@@ -28,6 +28,7 @@ to preserve and republish a new upstream field.
 import importlib
 
 import pytest
+from packaging.version import Version
 
 # Import vllm first to ensure it's properly loaded before accessing submodules.
 # This works around potential issues with pytest's import machinery.
@@ -105,7 +106,8 @@ class TestVllmKvEventsApi:
             expected_fields.append("kv_cache_spec_sliding_window")
         if _has_locality(BlockStored):
             expected_fields.append("locality")
-        expected_fields.append("ownership")
+        if Version(_vllm.__version__).release >= (0, 29):
+            expected_fields.append("ownership")
         expected_fields = tuple(expected_fields)
 
         actual_fields = BlockStored.__struct_fields__
@@ -133,7 +135,8 @@ class TestVllmKvEventsApi:
             expected_fields.append("kv_cache_spec_sliding_window")
         if _has_locality(BlockRemoved):
             expected_fields.append("locality")
-        expected_fields.append("ownership")
+        if Version(_vllm.__version__).release >= (0, 29):
+            expected_fields.append("ownership")
         expected_fields = tuple(expected_fields)
 
         actual_fields = BlockRemoved.__struct_fields__

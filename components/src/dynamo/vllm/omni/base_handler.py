@@ -10,7 +10,6 @@ import time
 from typing import Any, AsyncGenerator, Dict
 
 from vllm import SamplingParams
-from vllm_omni.config import resolve_omni_config
 from vllm_omni.entrypoints import AsyncOmni
 
 try:
@@ -23,6 +22,7 @@ from dynamo.common.protocols.audio_protocol import NvAudioSpeechResponse
 from dynamo.common.utils.output_modalities import RequestType
 from dynamo.vllm.handlers import BaseWorkerHandler, build_sampling_params
 from dynamo.vllm.lora_state import LoRAState
+from dynamo.vllm.omni.utils import resolve_stage_configs
 
 logger = logging.getLogger(__name__)
 
@@ -127,16 +127,13 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
         if config.stage_configs_path:
             omni_kwargs["deploy_config"] = config.stage_configs_path
 
-        resolved_config = resolve_omni_config(
+        _, stage_configs = resolve_stage_configs(
             config.model,
             trust_remote_code=config.engine_args.trust_remote_code,
             deploy_config_path=config.stage_configs_path,
-            cli_overrides={},
-            stage_overrides=None,
-            strategy_config_path=None,
         )
         has_diffusion_stage = any(
-            stage.stage_type == "diffusion" for stage in resolved_config.stage_configs
+            stage.stage_type == "diffusion" for stage in stage_configs
         )
         for field, value in dataclasses.asdict(config.diffusion).items():
             if value is not None and (has_diffusion_stage or field == "enforce_eager"):

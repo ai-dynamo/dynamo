@@ -16,13 +16,18 @@ import importlib
 import inspect
 
 import pytest
+from packaging.version import Version
 
 # Import vllm first to ensure it's properly loaded before accessing submodules.
 _vllm = importlib.import_module("vllm")
 _chat_protocol = importlib.import_module(
     "vllm.entrypoints.openai.chat_completion.protocol"
 )
-_engine_protocol = importlib.import_module("vllm.entrypoints.generate.base.protocol")
+_engine_protocol = importlib.import_module(
+    "vllm.entrypoints.generate.base.protocol"
+    if Version(_vllm.__version__).release >= (0, 29)
+    else "vllm.entrypoints.openai.engine.protocol"
+)
 _inputs_data = importlib.import_module("vllm.inputs")
 _reasoning = importlib.import_module("vllm.reasoning")
 _sampling_params = importlib.import_module("vllm.sampling_params")

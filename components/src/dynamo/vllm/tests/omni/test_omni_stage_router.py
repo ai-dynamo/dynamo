@@ -12,8 +12,6 @@ import pytest
 from dynamo.common.utils.output_modalities import RequestType
 
 try:
-    from vllm_omni.config import OmniConfigResolution
-
     from dynamo.vllm.omni import stage_router
 except ImportError:
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
@@ -90,23 +88,17 @@ def test_router_loads_stage_configs_from_model_deploy_config():
 
     with (
         patch(
-            "dynamo.vllm.omni.stage_router.resolve_omni_config",
-            return_value=OmniConfigResolution(
-                config_path="/deploy/glm_image.yaml",
-                stage_configs=tuple(stage_configs),
-            ),
-        ) as resolve_omni_config,
+            "dynamo.vllm.omni.stage_router.resolve_stage_configs",
+            return_value=("/deploy/glm_image.yaml", stage_configs),
+        ) as resolve_stage_configs,
         patch("dynamo.vllm.omni.stage_router.OutputFormatter") as output_formatter,
     ):
         router = stage_router.OmniStageRouter(config, "/deploy/glm_image.yaml")
 
-    resolve_omni_config.assert_called_once_with(
+    resolve_stage_configs.assert_called_once_with(
         config.model,
-        cli_overrides={},
         trust_remote_code=False,
         deploy_config_path="/deploy/glm_image.yaml",
-        stage_overrides=None,
-        strategy_config_path=None,
     )
     output_formatter.assert_called_once()
     assert router.stage_configs == stage_configs

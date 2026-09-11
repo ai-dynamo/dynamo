@@ -68,10 +68,8 @@ def _make_config(**parallel_overrides):
 def _build_kwargs(config, stage_type="diffusion"):
     handler = BaseOmniHandler.__new__(BaseOmniHandler)
     with patch(
-        "dynamo.vllm.omni.base_handler.resolve_omni_config",
-        return_value=SimpleNamespace(
-            stage_configs=(SimpleNamespace(stage_type=stage_type),)
-        ),
+        "dynamo.vllm.omni.base_handler.resolve_stage_configs",
+        return_value=(None, [SimpleNamespace(stage_type=stage_type)]),
     ):
         return handler._build_omni_kwargs(config)
 

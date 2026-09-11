@@ -201,6 +201,8 @@ STUB_MODULES = [
     "vllm.entrypoints.openai",
     "vllm.entrypoints.openai.chat_completion",
     "vllm.entrypoints.openai.chat_completion.protocol",
+    "vllm.entrypoints.openai.engine",
+    "vllm.entrypoints.openai.engine.protocol",
     "vllm.entrypoints.generate",
     "vllm.entrypoints.generate.base",
     "vllm.entrypoints.generate.base.protocol",
