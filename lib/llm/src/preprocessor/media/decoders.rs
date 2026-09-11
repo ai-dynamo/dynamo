@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use super::common::EncodedMediaData;
-use super::rdma::DecodedMediaData;
+use super::decoded::DecodedMediaData;
 pub mod image;
 #[cfg(feature = "media-ffmpeg")]
 pub mod video;
@@ -59,6 +59,7 @@ pub struct MediaDecoder {
 }
 
 impl MediaDecoder {
+    #[cfg(feature = "media-nixl")]
     pub(crate) fn warn_if_unavailable_backends(&self) {
         if let Some(image) = &self.image {
             image.warn_if_libjpeg_unavailable();
