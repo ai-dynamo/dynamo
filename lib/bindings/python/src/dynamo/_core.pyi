@@ -68,6 +68,7 @@ class DistributedRuntime:
         enable_nats: Optional[bool] = None,
         *,
         event_plane: Optional[str] = None,
+        response_plane: Optional[str] = None,
     ) -> "DistributedRuntime":
         """
         Create a new DistributedRuntime.
@@ -78,6 +79,7 @@ class DistributedRuntime:
             request_plane: Request plane transport ("tcp" or "nats")
             enable_nats: Deprecated; NATS enablement is inferred from runtime config
             event_plane: Event plane transport ("nats" or "zmq")
+            response_plane: Response plane transport ("tcp" or "quic")
         """
         ...
 
@@ -2826,6 +2828,13 @@ class KvDcRelay:
         publication_threshold: int = 16,
         publication_delay_ms: int = 1,
         recovery_attempt_timeout_ms: int = 30_000,
+        *,
+        namespaces: Optional[List[str]] = None,
+        endpoint_prefixes: Optional[List[str]] = None,
+        watch_all: Optional[bool] = None,
+        expected_unique_blocks: int = 1_048_576,
+        bind: Optional[str] = None,
+        tuning: Optional[Dict[str, int]] = None,
     ) -> None:
         ...
 
@@ -2833,6 +2842,14 @@ class KvDcRelay:
         ...
 
     async def health(self) -> Dict[str, Any]:
+        ...
+
+    async def stats(self) -> Dict[str, Any]:
+        """Available only in builds with the ckf-diagnostics Cargo feature."""
+        ...
+
+    async def snapshot(self, serving_endpoint: str) -> Dict[str, Any]:
+        """Available only in builds with the ckf-diagnostics Cargo feature."""
         ...
 
     async def flush(self) -> None:
@@ -3377,6 +3394,7 @@ class backend:
             data_parallel_start_rank: Optional[int] = None,
             bootstrap_host: Optional[str] = None,
             bootstrap_port: Optional[int] = None,
+            enable_eagle: bool = False,
         ) -> None: ...
         @property
         def context_length(self) -> Optional[int]: ...
@@ -3396,6 +3414,8 @@ class backend:
         def bootstrap_host(self) -> Optional[str]: ...
         @property
         def bootstrap_port(self) -> Optional[int]: ...
+        @property
+        def enable_eagle(self) -> bool: ...
 
     class EngineConfig:
         def __init__(
