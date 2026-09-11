@@ -1094,6 +1094,16 @@ impl Worker {
                 )
             })?;
         }
+        // Readiness is this worker's to publish: it is not serviceable until every
+        // mandatory endpoint is registered and the engine routes are open. Take the
+        // hold before registration, so the runtime's own transport-registration
+        // signal cannot report ready ahead of the gate below.
+        endpoint
+            .drt()
+            .system_health()
+            .lock()
+            .hold_endpoint_readiness(endpoint.name());
+
         let start_fut = builder.start_with_registration();
         tokio::pin!(start_fut);
         let primary_endpoint = tokio::select! {
@@ -1121,6 +1131,7 @@ impl Worker {
         // accepting administrative calls during shutdown.
         if shutdown.is_cancelled() {
             self.begin_engine_route_shutdown().await;
+            set_worker_health(&endpoint, HealthStatus::NotReady);
             if let Err(error) = primary_endpoint.shutdown().await {
                 tracing::warn!(%error, "primary endpoint shutdown failed");
             }
@@ -1174,8 +1185,9 @@ impl Worker {
         }
 
         // First instant the worker is serviceable: every mandatory endpoint is
-        // registered, the token is uncancelled, and engine routes are open.
-        // Nothing earlier may report ready.
+        // registered, the token is uncancelled, and engine routes are open. The
+        // readiness hold taken before registration is what keeps the runtime's
+        // transport-registration signal from reporting ready before this point.
         set_worker_health(&endpoint, HealthStatus::Ready);
 
         let serve_fut = primary_endpoint.wait();
@@ -1336,6 +1348,10 @@ impl Worker {
 fn set_worker_health(endpoint: &dynamo_runtime::component::Endpoint, status: HealthStatus) {
     let system_health = endpoint.drt().system_health();
     let mut system_health = system_health.lock();
+    // This call *is* the worker's readiness decision, so the startup hold has
+    // served its purpose; drop it before writing so later transport signals
+    // behave normally.
+    system_health.release_endpoint_readiness(endpoint.name());
     match status {
         HealthStatus::Ready => system_health.set_endpoint_registered(endpoint.name()),
         HealthStatus::NotReady => {
@@ -4043,6 +4059,7 @@ mod handoff_and_lifecycle_tests {
     /// be withdrawn with it and restored only once a resume control has
     /// re-registered.
     #[tokio::test]
+    #[serial_test::serial]
     async fn engine_controls_track_readiness_with_discovery() {
         with_each_health_route_shape(engine_controls_track_readiness_case).await;
     }
@@ -4083,9 +4100,97 @@ mod handoff_and_lifecycle_tests {
         worker.begin_engine_route_shutdown().await;
     }
 
+    /// The canary-backed row: with verification enabled and a target registered,
+    /// a resume must not publish endpoint readiness on the worker's say-so. This
+    /// is the one configuration where writing `Ready` straight to the endpoint
+    /// layer would differ from deferring to `set_endpoint_registered`.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn resume_defers_to_the_canary_when_a_target_is_registered() {
+        temp_env::async_with_vars(
+            [("DYN_HEALTH_CHECK_ENABLED", Some("true"))],
+            resume_defers_to_the_canary_case(),
+        )
+        .await;
+    }
+
+    async fn resume_defers_to_the_canary_case() {
+        let endpoint = test_local_endpoint().await;
+        let system_health = endpoint.drt().system_health();
+        assert!(
+            system_health.lock().health_check_enabled(),
+            "this case is only meaningful with canary verification enabled"
+        );
+        let instance = dynamo_runtime::component::Instance {
+            component: endpoint.component().name().to_string(),
+            endpoint: endpoint.name().to_string(),
+            namespace: "lifecycle_ns".to_string(),
+            instance_id: 1,
+            transport: dynamo_runtime::component::TransportType::Tcp("127.0.0.1:0".to_string()),
+            device_type: None,
+            request_plane_codec: None,
+        };
+        system_health.lock().register_health_check_target(
+            endpoint.name(),
+            instance,
+            serde_json::json!({}),
+        );
+
+        let (engine, _) = HandoffMockEngine::new(
+            false,
+            vec!["sleep".to_string(), "wake_up".to_string()],
+            Vec::new(),
+        );
+        let worker = Worker::new(engine, WorkerConfig::default());
+        worker.register_engine_controls(&endpoint).await.unwrap();
+        worker.activate_engine_routes().await;
+        endpoint.register_endpoint_instance().await.unwrap();
+
+        // The worker asserting readiness must not override an unverified canary.
+        set_worker_health(&endpoint, HealthStatus::Ready);
+        assert!(
+            !system_health.lock().get_health_status().0,
+            "a canary-backed endpoint must wait for verification, not the worker"
+        );
+
+        // Stand in for a successful canary probe.
+        system_health
+            .lock()
+            .set_endpoint_health_status(endpoint.name(), HealthStatus::Ready);
+        assert!(system_health.lock().get_health_status().0);
+
+        let routes = endpoint.drt().engine_routes();
+        routes.get("control/sleep").unwrap()(serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(
+            !system_health.lock().get_health_status().0,
+            "a paused worker must not keep reporting ready"
+        );
+
+        routes.get("control/wake_up").unwrap()(serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(
+            !system_health.lock().get_health_status().0,
+            "resume must leave readiness to the canary while a target is registered"
+        );
+
+        system_health
+            .lock()
+            .set_endpoint_health_status(endpoint.name(), HealthStatus::Ready);
+        assert!(
+            system_health.lock().get_health_status().0,
+            "the canary's verification is what restores readiness"
+        );
+
+        worker.begin_engine_route_shutdown().await;
+    }
+
     /// Ensures a payload-free Rust backend publishes readiness while it is
     /// serviceable and withdraws it again on shutdown.
     #[tokio::test]
+    #[serial_test::serial]
     async fn shutdown_returns_the_serving_worker_to_not_ready() {
         with_each_health_route_shape(shutdown_returns_the_serving_worker_to_not_ready_case).await;
     }
@@ -4125,6 +4230,7 @@ mod handoff_and_lifecycle_tests {
     /// `503 notready` to `200 ready` and back, so the wiring between this
     /// crate's readiness writes and the route a probe reads is covered too.
     #[tokio::test]
+    #[serial_test::serial]
     async fn the_health_route_follows_the_serving_worker() {
         use dynamo_runtime::config::environment_names::runtime::system::{
             DYN_SYSTEM_HOST, DYN_SYSTEM_PORT,

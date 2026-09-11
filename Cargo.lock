@@ -2402,6 +2402,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "serial_test",
  "temp-env",
  "tokio",
  "tokio-util",
