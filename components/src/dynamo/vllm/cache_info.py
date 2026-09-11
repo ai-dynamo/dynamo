@@ -21,7 +21,7 @@ async def configure_kv_event_block_size(
     vllm_config: VllmConfig,
 ) -> int:
     """Cache the engine's effective attention block size on vLLM config."""
-    kv_event_block_size = await engine.get_effective_attention_block_size()
+    kv_event_block_size = engine.vllm_config.cache_config.effective_attention_block_size
     if kv_event_block_size is None:
         kv_event_block_size = vllm_config.cache_config.block_size
 

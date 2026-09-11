@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -24,12 +23,13 @@ pytestmark = [
     "effective_size,expected", [(16, 16), (32, 32), (1056, 1056), (None, 16)]
 )
 async def test_configure_uses_effective_attention_block_size(effective_size, expected):
-    engine = SimpleNamespace(
-        get_effective_attention_block_size=AsyncMock(return_value=effective_size)
-    )
     config = SimpleNamespace(
-        cache_config=SimpleNamespace(block_size=16), additional_config=None
+        cache_config=SimpleNamespace(
+            block_size=16, effective_attention_block_size=effective_size
+        ),
+        additional_config=None,
     )
+    engine = SimpleNamespace(vllm_config=config)
 
     assert await configure_kv_event_block_size(engine, config) == expected
     assert config.additional_config[DYNAMO_KV_EVENT_BLOCK_SIZE_KEY] == expected
