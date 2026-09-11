@@ -5,7 +5,7 @@
 
 SGLang with GMS owns exactly two memory classes:
 1. "weights" via the shared RO/RW publish flow
-2. "kv_cache" via the RW failover flow
+2. "kv_cache" via the GMS-owned persistent KV pool
 
 Unsupported release/resume tags stay no-ops with a warning so the generic
 SGLang memory-control API can still pass broader tag sets without reintroducing
@@ -20,57 +20,124 @@ import gc
 import logging
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Optional
 
 import torch
 from gpu_memory_service.client.torch.allocator import (
     get_or_create_gms_client_memory_manager,
+    get_or_create_persistent_allocator,
     gms_use_mem_pool,
     gms_use_persistent_pool,
 )
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
-from gpu_memory_service.common.utils import GMS_TAGS, get_socket_path
-from gpu_memory_service.integrations.common.utils import finalize_gms_write
+from gpu_memory_service.common.utils import get_socket_path
+from gpu_memory_service.integrations.common.utils import (
+    finalize_gms_write,
+    get_gms_persistent_kv_socket,
+)
+from gpu_memory_service.integrations.sglang.kv_identity import (
+    allocation_engine_id,
+    allocation_shared,
+    allocator_tag,
+)
 
 logger = logging.getLogger(__name__)
 
-# Published weights must come back RO, while KV cache always resumes in a fresh
-# RW epoch so the restored engine can rebuild mutable cache state.
-_TAG_LOCK_TYPES = {"weights": RequestedLockType.RO, "kv_cache": RequestedLockType.RW}
-_PERSISTENT_KV_TAG: ContextVar[str | None] = ContextVar(
-    "gms_sglang_persistent_kv_tag", default=None
+_PERSISTENT_KV_SCOPE: ContextVar[bool | None] = ContextVar(
+    "gms_sglang_persistent_kv_scope", default=None
 )
+_PRESERVE_KV_ZERO_FILL: ContextVar[list[int] | None] = ContextVar(
+    "gms_sglang_preserve_kv_zero_fill", default=None
+)
+
+# Published weights come back RO. KV cache remaps the same persistent
+# (engine_id, allocator-tag) allocation; page leases arbitrate writes.
+_MEMORY_SAVER_TAGS = ("weights", "kv_cache")
+_TAG_LOCK_TYPES = {
+    "weights": RequestedLockType.RO,
+    "kv_pool": RequestedLockType.RW_PERSISTENT,
+}
+
+
+def _install_contextual_zeros_hook() -> None:
+    current_zeros = torch.zeros
+    if getattr(current_zeros, "_gms_sglang_contextual_zeros", False) is True:
+        return
+
+    def contextual_zeros(*args, **kwargs):
+        replacements = _PRESERVE_KV_ZERO_FILL.get()
+        if replacements is not None:
+            replacements[0] += 1
+            return torch.empty(*args, **kwargs)
+        return current_zeros(*args, **kwargs)
+
+    contextual_zeros._gms_sglang_contextual_zeros = True
+    contextual_zeros._gms_original = current_zeros
+    torch.zeros = contextual_zeros
 
 
 @contextmanager
-def persistent_kv_pool_scope(tag: str):
-    """Route only a native physical KV-pool constructor to ``tag``."""
-    token = _PERSISTENT_KV_TAG.set(tag)
+def persistent_kv_pool_scope(*, reattaching: bool):
+    """Select GMS only for SGLang's physical KV-pool constructors.
+
+    SGLang also labels request-to-token metadata as ``kv_cache``. That table is
+    process-local scheduler state and must neither survive nor be shared with a
+    standby. The pool-constructor hook establishes this narrow scope around the
+    native MHA/MLA constructor; unscoped ``kv_cache`` regions use normal CUDA.
+    """
+    token = _PERSISTENT_KV_SCOPE.set(bool(reattaching))
     try:
         yield
     finally:
-        _PERSISTENT_KV_TAG.reset(token)
+        _PERSISTENT_KV_SCOPE.reset(token)
 
 
-def _pause_resume_tags(tag: Optional[str]) -> tuple[str, ...]:
+@contextmanager
+def _preserve_persistent_kv_zeros(enabled: bool):
+    if not enabled:
+        yield
+        return
+
+    _install_contextual_zeros_hook()
+    replacements = [0]
+    token = _PRESERVE_KV_ZERO_FILL.set(replacements)
+    try:
+        yield
+    finally:
+        _PRESERVE_KV_ZERO_FILL.reset(token)
+        if replacements[0]:
+            logger.info(
+                "[GMS-VMM-IPC] allocated %d persistent SGLang KV tensors with "
+                "torch.empty to preserve existing pages",
+                replacements[0],
+            )
+
+
+def _pause_resume_tags(tag: str | None) -> tuple[str, ...]:
     if tag is None:
-        return GMS_TAGS
+        return ("weights", "kv_pool")
+    if tag == "kv_cache":
+        return ("kv_pool",)
     if tag in _TAG_LOCK_TYPES:
         return (tag,)
     logger.warning(
         "[GMS] Ignoring unsupported torch_memory_saver tag %r; supported tags are %s",
         tag,
-        list(GMS_TAGS),
+        list(_MEMORY_SAVER_TAGS),
     )
     return ()
 
 
-def get_gms_memory_saver_impl() -> Optional["GMSMemorySaverImpl"]:
-    """Get the GMS memory saver impl from the torch_memory_saver singleton."""
+def get_gms_memory_saver_impl() -> GMSMemorySaverImpl | None:
+    """Get or lazily initialize the GMS impl from torch_memory_saver."""
     try:
         import torch_memory_saver
 
-        return torch_memory_saver.torch_memory_saver.gms_impl
+        singleton = torch_memory_saver.torch_memory_saver
+        impl = getattr(singleton, "gms_impl", None)
+        if impl is None and hasattr(singleton, "_ensure_initialized"):
+            singleton._ensure_initialized()
+            impl = getattr(singleton, "gms_impl", None)
+        return impl
     except (ImportError, AttributeError):
         return None
 
@@ -85,22 +152,29 @@ class GMSMemorySaverImpl:
         ro_connect_timeout_ms=None,
     ):
         self._device = torch.device("cuda", device_index)
+        self._kv_engine_id = allocation_engine_id(device_index)
+        self._kv_tag = allocator_tag(device_index)
+        self._kv_shared = allocation_shared()
         self.imported_weights_bytes = 0
         self.preloaded_weights_bytes = 0
         self.ro_connect_timeout_ms = ro_connect_timeout_ms
         self._active_region_depth = 0
-        self._pending_write_model: Optional[torch.nn.Module] = None
+        self._pending_write_model: torch.nn.Module | None = None
         requested_mode = mode or RequestedLockType.RW_OR_RO
         self.allocators = {
-            tag: get_or_create_gms_client_memory_manager(
-                get_socket_path(device_index, tag),
+            "weights": get_or_create_gms_client_memory_manager(
+                get_socket_path(device_index, "weights"),
                 device_index,
-                # weights follow the configured publish/import mode; kv_cache is
-                # always mutable and therefore always needs an RW session.
-                mode=requested_mode if tag == "weights" else RequestedLockType.RW,
-                tag=tag,
-            )
-            for tag in GMS_TAGS
+                mode=requested_mode,
+                tag="weights",
+            ),
+            "kv_pool": get_or_create_persistent_allocator(
+                get_gms_persistent_kv_socket(device_index, "GMS_SGLANG_VMM_IPC_SOCKET"),
+                device_index,
+                self._kv_engine_id,
+                tag=self._kv_tag,
+                shared=self._kv_shared,
+            ),
         }
 
         logger.info(
@@ -111,20 +185,41 @@ class GMSMemorySaverImpl:
         )
 
     @contextmanager
-    def region(self, tag: str, enable_cpu_backup: bool):
+    def region(
+        self,
+        tag: str,
+        enable_cpu_backup: bool,
+        enable_disk_backup: bool = False,
+        cpu_backup_backend: str | None = None,
+    ):
         """Use the tag's RW pool and publish pending weights after clean exit."""
         if enable_cpu_backup:
             raise ValueError(
                 "SGLang with GMS does not support CPU backup for allocations."
             )
+        if enable_disk_backup:
+            raise ValueError(
+                "SGLang with GMS does not support disk backup for allocations."
+            )
+        if cpu_backup_backend is not None:
+            raise ValueError(
+                "SGLang with GMS does not support CPU backup backends for allocations."
+            )
 
-        if tag not in _TAG_LOCK_TYPES:
+        if tag not in _MEMORY_SAVER_TAGS:
             logger.warning(
                 "[GMS] Ignoring unsupported torch_memory_saver region tag %r; "
                 "supported tags are %s",
                 tag,
-                list(GMS_TAGS),
+                list(_MEMORY_SAVER_TAGS),
             )
+            yield
+            return
+
+        persistent_kv_reattach = (
+            _PERSISTENT_KV_SCOPE.get() if tag == "kv_cache" else None
+        )
+        if tag == "kv_cache" and persistent_kv_reattach is None:
             yield
             return
 
@@ -137,8 +232,14 @@ class GMSMemorySaverImpl:
             yield
             return
 
-        allocator = self.allocators[tag]
-        if allocator.granted_lock_type != GrantedLockType.RW:
+        target_tag = "kv_pool" if tag == "kv_cache" else tag
+        allocator = self.allocators[target_tag]
+        required_lock = (
+            GrantedLockType.RW_PERSISTENT
+            if target_tag == "kv_pool"
+            else GrantedLockType.RW
+        )
+        if allocator.granted_lock_type != required_lock:
             mode = (
                 allocator.granted_lock_type.name
                 if allocator.granted_lock_type is not None
@@ -148,19 +249,19 @@ class GMSMemorySaverImpl:
             # fail before entering the allocation path so SGLang never starts a
             # partial region with the wrong lock state.
             raise RuntimeError(
-                f"SGLang with GMS requires {tag!r} to be RW for allocations; got {mode}"
+                f"SGLang with GMS requires {tag!r} to be {required_lock.name} "
+                f"for allocations; got {mode}"
             )
 
         self._active_region_depth += 1
         clean_exit = False
         try:
-            persistent_tag = _PERSISTENT_KV_TAG.get() if tag == "kv_cache" else None
             pool = (
-                gms_use_persistent_pool(persistent_tag, self._device)
-                if persistent_tag is not None
+                gms_use_persistent_pool(self._kv_tag, self._device)
+                if tag == "kv_cache"
                 else gms_use_mem_pool(tag, self._device)
             )
-            with pool:
+            with pool, _preserve_persistent_kv_zeros(bool(persistent_kv_reattach)):
                 yield
             clean_exit = True
         finally:
@@ -180,6 +281,7 @@ class GMSMemorySaverImpl:
         capture_error_mode,
         tag: str,
         enable_cpu_backup: bool,
+        cpu_backup_backend: str | None = None,
     ):
         # The old hybrid path could delegate this to torch_memory_saver, but
         # strict GMS mode has no compatible pauseable CUDA-graph allocator hook.
@@ -189,7 +291,7 @@ class GMSMemorySaverImpl:
             "and GMS does not use the LD_PRELOAD path."
         )
 
-    def pause(self, tag: Optional[str] = None) -> None:
+    def pause(self, tag: str | None = None) -> None:
         for target_tag in _pause_resume_tags(tag):
             if self.allocators[target_tag].is_unmapped:
                 continue
@@ -201,7 +303,7 @@ class GMSMemorySaverImpl:
         gc.collect()
         torch.cuda.empty_cache()
 
-    def resume(self, tag: Optional[str] = None) -> None:
+    def resume(self, tag: str | None = None) -> None:
         for target_tag in _pause_resume_tags(tag):
             if not self.allocators[target_tag].is_unmapped:
                 continue
@@ -211,11 +313,14 @@ class GMSMemorySaverImpl:
             self.allocators[target_tag].connect(
                 _TAG_LOCK_TYPES[target_tag], timeout_ms=timeout_ms
             )
-            if target_tag == "kv_cache":
-                # KV cache resumes into a new RW layout epoch, so the handles
-                # must be re-created before the VA range is mapped again.
-                self.allocators[target_tag].reallocate_all_handles(tag=target_tag)
-            self.allocators[target_tag].remap_all_vas()
+            if target_tag == "kv_pool":
+                self.allocators[target_tag].remap_persistent_vas(
+                    self._kv_engine_id,
+                    shared=self._kv_shared,
+                    synchronize_per_mapping=False,
+                )
+            else:
+                self.allocators[target_tag].remap_all_vas()
 
     def finalize_write_mode(self, model: torch.nn.Module) -> None:
         """Publish write-mode weights after all managed GMS regions exit."""
