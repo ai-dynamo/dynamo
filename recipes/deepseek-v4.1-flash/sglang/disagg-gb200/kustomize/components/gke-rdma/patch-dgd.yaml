@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: deepseek-v41-flash-sglang-gb200-disagg
+spec:
+  components:
+    # A strategic merge puts patched components first. Name the Frontend so the
+    # rendered manifest keeps the canonical beta order.
+    - name: Frontend
+    - name: PrefillWorker
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              env: &gkeEnv
+                # eth0 is the GKE default pod interface. NCCL and Gloo must not
+                # pick an RDMA interface for their control plane.
+                - name: NCCL_SOCKET_IFNAME
+                  value: eth0
+                - name: GLOO_SOCKET_IFNAME
+                  value: eth0
+              resources: &gkeResources
+                limits:
+                  networking.gke.io.networks/rdma-0: "1"
+                  networking.gke.io.networks/rdma-1: "1"
+                  networking.gke.io.networks/rdma-2: "1"
+                  networking.gke.io.networks/rdma-3: "1"
+    - name: DecodeWorker
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              env: *gkeEnv
+              resources: *gkeResources
