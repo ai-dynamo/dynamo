@@ -364,17 +364,13 @@ fn validate_runtime_topology(
 /// application of the same base config -- harmless today only because that
 /// rule happens to be an idempotent overwrite; duplicating the call site
 /// would silently diverge the moment a non-idempotent rule is added there.
-pub(in crate::replay) fn derive_prefill_router_config(
-    router_config: Option<KvRouterConfig>,
-) -> KvRouterConfig {
+fn derive_prefill_router_config(router_config: Option<KvRouterConfig>) -> KvRouterConfig {
     let mut config = router_config.unwrap_or_default();
     config.router_track_active_blocks = false;
     config
 }
 
-pub(in crate::replay) fn derive_decode_router_config(
-    router_config: Option<KvRouterConfig>,
-) -> KvRouterConfig {
+fn derive_decode_router_config(router_config: Option<KvRouterConfig>) -> KvRouterConfig {
     let mut config = router_config.unwrap_or_default();
     config.overlap_score_credit = 0.0;
     config.router_assume_kv_reuse = false;
@@ -521,9 +517,6 @@ mod tests {
         );
     }
 
-    /// `router_config`/`prefill_load_estimator` are consumed by `.take()` on
-    /// the first placement call; a second call must fail loudly instead of
-    /// silently falling back to default config.
     fn single_worker_topology() -> Vec<WorkerTopology> {
         vec![WorkerTopology {
             worker_id: 0,
@@ -531,6 +524,9 @@ mod tests {
         }]
     }
 
+    /// `router_config`/`prefill_load_estimator` are consumed by `.take()` on
+    /// the first placement call; a second call must fail loudly instead of
+    /// silently falling back to default config.
     #[test]
     fn create_aggregated_placement_refuses_a_second_call() {
         let mut composition =
