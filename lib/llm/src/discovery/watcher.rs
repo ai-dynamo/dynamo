@@ -1215,13 +1215,26 @@ where
         members: &[DesiredInstance],
         adapters: &[DesiredInstance],
     ) -> anyhow::Result<()> {
-        let adapter_was_available = adapters
-            .iter()
-            .map(|adapter| {
+        let group_id = spec.key.id();
+        let previous = self
+            .manager
+            .discovery_group_adapter_cards(&group_id)
+            .into_iter()
+            .map(|card| (card.name().to_string(), card))
+            .collect::<HashMap<_, _>>();
+        let adapter_was_available = previous
+            .keys()
+            .cloned()
+            .chain(
+                adapters
+                    .iter()
+                    .map(|adapter| adapter.card.name().to_string()),
+            )
+            .map(|name| {
                 (
-                    adapter.card.name().to_string(),
+                    name.clone(),
                     self.manager
-                        .get_committed_model(adapter.card.name())
+                        .get_committed_model(&name)
                         .is_some(),
                 )
             })
@@ -1240,13 +1253,6 @@ where
         {
             *card = prepared.card.clone();
         }
-        let group_id = spec.key.id();
-        let previous = self
-            .manager
-            .discovery_group_adapter_cards(&group_id)
-            .into_iter()
-            .map(|card| (card.name().to_string(), card))
-            .collect::<HashMap<_, _>>();
         let desired = adapters
             .iter()
             .map(|adapter| (adapter.card.name().to_string(), adapter.card.clone()))

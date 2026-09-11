@@ -854,11 +854,18 @@ impl ModelManager {
         let lora_before = self.lora_projection_locked();
 
         if replacing_worker_set {
-            self.get_or_create_model(&primary)
-                .add_worker_set(worker_set_key.clone(), worker_set.clone());
+            let primary_model = self.get_or_create_model(&primary);
+            if let Some(displaced_worker_set) = primary_model.get_worker_set(&worker_set_key)
+            {
+                Self::clear_worker_set_targets(&displaced_worker_set);
+            }
+            primary_model.add_worker_set(worker_set_key.clone(), worker_set.clone());
             for alias in &aliases {
-                self.get_or_create_model(alias)
-                    .add_worker_set(worker_set_key.clone(), worker_set.clone());
+                let alias_model = self.get_or_create_model(alias);
+                if let Some(displaced_worker_set) = alias_model.get_worker_set(&worker_set_key) {
+                    Self::clear_worker_set_targets(&displaced_worker_set);
+                }
+                alias_model.add_worker_set(worker_set_key.clone(), worker_set.clone());
             }
         }
 
