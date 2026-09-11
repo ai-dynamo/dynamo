@@ -55,7 +55,7 @@ use crate::{
             classify::OpenAIClassifyStreamingEngine, completions::OpenAICompletionsStreamingEngine,
             embeddings::OpenAIEmbeddingsStreamingEngine, generate::GenerateStreamingEngine,
             images::OpenAIImagesStreamingEngine, pooling::OpenAIPoolingStreamingEngine,
-            videos::OpenAIVideosStreamingEngine,
+            rerank::OpenAIRerankStreamingEngine, videos::OpenAIVideosStreamingEngine,
         },
     },
     worker_type::WorkerType,
@@ -1147,6 +1147,16 @@ impl ModelManager {
             .collect()
     }
 
+    pub fn list_rerank_models(&self) -> Vec<String> {
+        self.catalog
+            .load()
+            .models
+            .iter()
+            .filter(|(_, model)| model.has_rerank_engine())
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
     pub fn list_tensor_models(&self) -> Vec<String> {
         self.catalog
             .load()
@@ -1249,6 +1259,7 @@ impl ModelManager {
                 || (model_type.contains(ModelType::Realtime) && model.has_realtime_engine())
                 || (model_type.contains(ModelType::Classify) && model.has_classify_engine())
                 || (model_type.contains(ModelType::Pooling) && model.has_pooling_engine())
+                || (model_type.contains(ModelType::Rerank) && model.has_rerank_engine())
         })
     }
 
@@ -1286,6 +1297,18 @@ impl ModelManager {
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_pooling_engine()
+    }
+
+    pub fn get_rerank_engine(
+        &self,
+        model: &str,
+    ) -> Result<OpenAIRerankStreamingEngine, ModelManagerError> {
+        self.catalog
+            .load()
+            .models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_rerank_engine()
     }
 
     pub fn get_completions_engine(
@@ -1601,6 +1624,29 @@ impl ModelManager {
         Ok(())
     }
 
+    pub fn add_rerank_model(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        engine: OpenAIRerankStreamingEngine,
+    ) -> Result<(), ModelManagerError> {
+        let _reservation = self.reservation_lock.lock();
+        let model_entry = self.get_or_create_model(model);
+        if model_entry.has_rerank_engine() {
+            return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
+        }
+        let namespace = format!("__local_rerank_{}", model);
+        let mut ws = WorkerSet::new(
+            namespace.clone(),
+            card_checksum.to_string(),
+            Self::aggregated_local_card(),
+        );
+        ws.rerank_engine = Some(engine);
+        model_entry.add_worker_set(namespace, Arc::new(ws));
+        self.publish_catalog_locked();
+        Ok(())
+    }
+
     pub fn add_tensor_model(
         &self,
         model: &str,
@@ -1813,6 +1859,13 @@ impl ModelManager {
 
     pub fn remove_pooling_model(&self, model: &str) -> Result<(), ModelManagerError> {
         let namespace = format!("__local_pooling_{}", model);
+        self.remove_worker_set(model, &namespace)
+            .map(|_| ())
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))
+    }
+
+    pub fn remove_rerank_model(&self, model: &str) -> Result<(), ModelManagerError> {
+        let namespace = format!("__local_rerank_{}", model);
         self.remove_worker_set(model, &namespace)
             .map(|_| ())
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))
@@ -4009,6 +4062,8 @@ mod tests {
             manager.add_classify_model(name, "ck", Arc::new(UncalledEngine))
         } else if model_type == ModelType::Pooling {
             manager.add_pooling_model(name, "ck", Arc::new(UncalledEngine))
+        } else if model_type == ModelType::Rerank {
+            manager.add_rerank_model(name, "ck", Arc::new(UncalledEngine))
         } else {
             return false;
         };

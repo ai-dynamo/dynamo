@@ -106,6 +106,18 @@ pub mod openai {
             ServerStreamingEngine<NvCreatePoolingRequest, Annotated<NvCreatePoolingResponse>>;
     }
 
+    pub mod rerank {
+        use super::*;
+
+        pub use protocols::openai::rerank::{NvCreateRerankRequest, NvCreateRerankResponse};
+
+        pub type OpenAIRerankUnaryEngine =
+            UnaryEngine<NvCreateRerankRequest, NvCreateRerankResponse>;
+
+        pub type OpenAIRerankStreamingEngine =
+            ServerStreamingEngine<NvCreateRerankRequest, Annotated<NvCreateRerankResponse>>;
+    }
+
     pub mod images {
         use super::*;
 

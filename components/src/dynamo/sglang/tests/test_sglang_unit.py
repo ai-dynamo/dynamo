@@ -1174,6 +1174,7 @@ async def test_invalid_fpm_trace_is_disabled_by_arg_parser(
     ("overrides", "role"),
     [
         ({"embedding_worker": True}, "embedding"),
+        ({"rerank_worker": True}, "rerank"),
         ({"multimodal_encode_worker": True}, "dedicated multimodal"),
         ({"multimodal_worker": True}, "dedicated multimodal"),
         ({"image_diffusion_worker": True}, "image diffusion"),

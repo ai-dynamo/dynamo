@@ -649,7 +649,10 @@ def test_init_kv_event_publish_allows_zero_worker_id_override(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_setup_sgl_metrics_skips_chat_pipeline_for_embedding_worker(monkeypatch):
+@pytest.mark.parametrize("role", ["embedding_worker", "rerank_worker"])
+async def test_setup_sgl_metrics_skips_chat_pipeline_for_pooling_worker(
+    monkeypatch, role
+):
     """``setup_sgl_metrics`` short-circuits for embedding workers.
 
     Chat-shaped collectors (``sglang:*`` multiproc metrics, the Dynamo
@@ -692,7 +695,7 @@ async def test_setup_sgl_metrics_skips_chat_pipeline_for_embedding_worker(monkey
         )
     )
     config = SimpleNamespace(
-        dynamo_args=SimpleNamespace(embedding_worker=True),
+        dynamo_args=SimpleNamespace(**{role: True}),
         server_args=engine.server_args,
     )
     generate_endpoint = SimpleNamespace()

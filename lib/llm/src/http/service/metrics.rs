@@ -558,6 +558,9 @@ pub enum Endpoint {
     /// Classification (sequence classification / cross-encoder pooling)
     Classify,
 
+    /// Cross-encoder reranking
+    Rerank,
+
     /// Pooling (raw pooler output)
     Pooling,
 
@@ -1689,6 +1692,7 @@ impl std::fmt::Display for Endpoint {
             Endpoint::ChatCompletions => write!(f, "chat_completions"),
             Endpoint::Embeddings => write!(f, "embeddings"),
             Endpoint::Classify => write!(f, "classify"),
+            Endpoint::Rerank => write!(f, "rerank"),
             Endpoint::Pooling => write!(f, "pooling"),
             Endpoint::Images => write!(f, "images"),
             Endpoint::Videos => write!(f, "videos"),
@@ -1708,6 +1712,7 @@ impl Endpoint {
             Endpoint::ChatCompletions => "chat_completions",
             Endpoint::Embeddings => "embeddings",
             Endpoint::Classify => "classify",
+            Endpoint::Rerank => "rerank",
             Endpoint::Pooling => "pooling",
             Endpoint::Images => "images",
             Endpoint::Videos => "videos",
