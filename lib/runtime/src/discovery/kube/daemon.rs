@@ -370,6 +370,8 @@ impl DiscoveryDaemon {
         };
 
         reflector_token.cancel();
+        drop(readiness_rx);
+        drop(cr_rx);
         for (kind, task) in [
             ("readiness", readiness_task),
             ("DynamoWorkerMetadata", cr_task),
