@@ -359,43 +359,72 @@ workflows. Authors never need to run it manually.
 
 ## Running Locally
 
-You can preview the documentation site on your machine using the
-[Fern CLI](https://buildwithfern.com/learn/cli-api-reference/cli-reference/overview). This is useful
-for verifying layout, navigation, and content before opening a PR.
-
 ### Prerequisites
 
-Install the Fern CLI globally via npm:
+Install Node.js 22 or newer and Python 3.11 or newer, including Python's
+`venv` module. Set `PYTHON=python3.12` if `python3` points to an older version.
+The first preview downloads the pinned Fern CLI, its preview
+bundle, and the Python documentation generator dependency.
+
+### Start a local preview server
+
+From the repository root:
 
 ```bash
-npm install -g fern-api
+bash docs/fern/scripts/preview.sh
 ```
 
-### Validate configuration
+The [preview helper](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/scripts/preview.sh)
+uses the CLI version in `fern.config.json`, creates an isolated Python
+environment under the gitignored `docs/fern/.preview/` directory, and generates
+the API references and release assets required by the site. It then starts
+Fern with hot reload. No Fern account or token is required.
 
-Run `fern check` from `docs/fern/` to validate that `docs/fern/docs.yml`,
-`docs/fern/fern.config.json`, and the navigation files are syntactically correct:
+Open `http://localhost:3000/dynamo/dev/recipes/ax-k2` to preview A.X-K2, or
+`http://localhost:3000/dynamo/dev/recipes/browse` for the recipe catalog.
+Press Ctrl+C in the server terminal to stop the preview.
+
+To choose another port, pass it as the first argument:
 
 ```bash
-cd docs/fern
-fern check
+bash docs/fern/scripts/preview.sh 3100
 ```
 
-### Check for broken links
+The frontend uses the selected port and the preview backend uses the next port.
+Both ports must be free.
 
-Use `fern docs broken-links` to scan all pages for internal links that don't
-resolve:
+### Open a remote preview from a Mac
+
+Run the preview helper on the remote machine. In a terminal on your Mac,
+replace `your-user@your-host` with the SSH destination for that machine:
 
 ```bash
-cd docs/fern
-fern docs broken-links
+ssh -N -o ExitOnForwardFailure=yes \
+  -L 3000:127.0.0.1:3000 \
+  -L 3001:127.0.0.1:3001 \
+  your-user@your-host
 ```
 
-This is the same check that runs in CI on every pull request.
+Keep the tunnel open and visit `http://localhost:3000/dynamo/dev/recipes/ax-k2`
+on your Mac. Forward both ports when using a different preview port.
+
+### Validate configuration and links
+
+After the helper has generated the reference pages, run the pinned CLI from
+`docs/`:
+
+```bash
+cd docs
+FERN_VERSION=$(node -p 'require("./fern/fern.config.json").version')
+npm exec --yes --package="fern-api@${FERN_VERSION}" -- fern check
+npm exec --yes --package="fern-api@${FERN_VERSION}" -- fern docs broken-links
+```
+
+These checks also run in CI on documentation pull requests.
 
 ### Dry-run a version release
 
-Build a tagged snapshot in temporary worktrees and run the release validation
+Build a tagged snapshot in temporary worktrees and run release validation
 without committing, pushing, or publishing:
 
 ```bash
@@ -405,18 +434,6 @@ docs/fern/scripts/simulate_docs_website.sh v1.2.1
 The script requires `git`, `fern`, `yq`, `jq`, `rsync`, and Python 3.10 or
 newer. Set `PYTHON=.venv/bin/python` to select a non-default interpreter, and
 set `KEEP=1` to retain the temporary worktrees for inspection.
-
-### Start a local preview server
-
-Run `fern docs dev` to build the site and serve it locally with hot-reload:
-
-```bash
-cd docs/fern
-fern docs dev
-```
-
-The local server lets you see exactly how pages will look on the live site,
-including navigation, version dropdowns, and custom styling.
 
 ---
 
