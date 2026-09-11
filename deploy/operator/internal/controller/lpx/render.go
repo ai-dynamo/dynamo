@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
-	"strconv"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -48,7 +47,7 @@ func renderPodCliqueSet(
 		return nil, nil, err
 	}
 
-	// Stamp the selected child revision and identify the engine's serving endpoint.
+	// Stamp stable ownership and identify the engine's serving endpoint.
 	stampLPXIdentity(deployment, pcs, resources)
 	serving := plan.ConductorTemplate
 	if serving == "" {
@@ -84,23 +83,20 @@ func renderPodCliqueSet(
 	return pcs, resources, nil
 }
 
-// stampLPXIdentity separates attempt ownership from the scheduler's source-DGD
-// identity. The source generation is frozen when effective LPX input changes.
+// stampLPXIdentity propagates stable ownership, never source revision, into Pod templates.
 func stampLPXIdentity(deployment *v1alpha1.LPXGraphDeployment, pcs *grovev1alpha1.PodCliqueSet, resources []client.Object) {
 	// Preflight validates the exact source controller owner before rendering resources.
 	sourceOwner := metav1.GetControllerOf(deployment)
 	identity := map[string]string{
 		dynamolpx.DeploymentNameAnnotation: deployment.Name,
 		lpxDeploymentUIDAnnotation:         string(deployment.UID),
-		lpxDeploymentGenerationAnnotation:  strconv.FormatInt(deployment.Generation, 10),
-		dynamo.LPXInputRevisionAnnotation:  deployment.Spec.InputRevision,
 		dynamolpx.DGDUIDAnnotation:         string(sourceOwner.UID),
-		dynamolpx.DGDGenerationAnnotation:  deployment.Annotations[dynamolpx.DGDGenerationAnnotation],
 	}
 	stamp := func(annotations *map[string]string) {
 		if *annotations == nil {
 			*annotations = make(map[string]string)
 		}
+		delete(*annotations, dynamolpx.DGDGenerationAnnotation)
 		maps.Copy(*annotations, identity)
 	}
 	stamp(&pcs.Annotations)

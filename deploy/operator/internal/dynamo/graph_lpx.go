@@ -6,6 +6,7 @@ package dynamo
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base32"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -86,12 +87,10 @@ func RenderLPXBasePodCliqueSet(
 }
 
 const (
-	LPXDeploymentUIDAnnotation        = dynamolpx.DeploymentUIDAnnotation
-	LPXDeploymentGenerationAnnotation = "lpx.nvidia.com/deployment-generation"
-	LPXInputRevisionAnnotation        = "lpx.nvidia.com/input-revision"
-	LPXRestartAnnotation              = "lpx.nvidia.com/restart-id"
-	LPXServingLabel                   = "lpx.nvidia.com/serving"
-	lpxGPUExecutionRole               = "gpu"
+	LPXDeploymentUIDAnnotation = dynamolpx.DeploymentUIDAnnotation
+	LPXRestartAnnotation       = "lpx.nvidia.com/restart-id"
+	LPXServingLabel            = "lpx.nvidia.com/serving"
+	lpxGPUExecutionRole        = "gpu"
 )
 
 // LPXRestartToken advances only from the DGD's persisted restart selection.
@@ -246,30 +245,18 @@ func LPXInputRevision(dgd *v1beta1.DynamoGraphDeployment, restart string) (strin
 func lpxSchedulingMetadata(metadata map[string]string) map[string]string {
 	selected := make(map[string]string)
 	for key, value := range metadata {
-		if strings.HasPrefix(key, "kai.scheduler/") || key == "priorityClassName" || key == "project" || key == "user" {
+		if strings.HasPrefix(key, "kai.scheduler/") || key == "priorityClassName" || key == "project" || key == "user" || key == commonconsts.GroveAnnotationVolcanoQueue {
 			selected[key] = value
 		}
 	}
 	return selected
 }
 
-// PCSNameForLPX hashes the materialization identity within the Grove name budget,
-// independently of ordinary components. The LPX planner checks materialized names.
-func PCSNameForLPX(deployment *v1alpha1.LPXGraphDeployment, dgd *v1beta1.DynamoGraphDeployment) string {
-	// The serving component owns all generated LPX names, including draft cliques.
-	groupBudget, cliqueBudget := 8, 0
-	if component := dynamolpx.ServingComponent(dgd); component != nil {
-		groupBudget = max(groupBudget, len(component.ComponentName))
-		cliqueBudget = max(cliqueBudget, longestLPXCliqueNameLength(component.ComponentName), len(component.ComponentName)+len("-engine-gpu"))
-	}
-	budget := commonconsts.MaxCombinedGroveResourceNameLength - groupBudget - cliqueBudget
-	budget = max(budget, 8)
-	name := strings.ReplaceAll(deployment.Name, ".", "-")
+// PCSNameForLPX derives a stable identity from the owning LGD, not its mutable source.
+func PCSNameForLPX(deployment *v1alpha1.LPXGraphDeployment) string {
+	// Eight characters fit Grove's name budget; a leading letter also permits Services.
 	digest := sha256.Sum256([]byte(deployment.Namespace + "/" + deployment.Name + "/" + string(deployment.UID)))
-	if budget <= 13 {
-		return fmt.Sprintf("%x", digest[:4])
-	}
-	return strings.TrimRight(name[:min(len(name), budget-13)], "-") + fmt.Sprintf("-%x-lpx", digest[:4])
+	return "l" + strings.ToLower(base32.StdEncoding.EncodeToString(digest[:5])[:7])
 }
 
 func longestLPXCliqueNameLength(componentName string) int {
@@ -350,8 +337,12 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.SelectedWorkload, m
 		role.MinAvailable = nil
 		defaults := ComponentDefaultsFactory(string(v1beta1.ComponentTypeDecode))
 		if workload.BuildFamily() == dynamolpx.BuildFamilyXT {
+			input.CyborgConfigMap, err = workload.RenderCyborgConfigMap(p.dynamoDeployment.Namespace, materializationName, lpuTemplate.Spec)
+			if err != nil {
+				return nil, nil, err
+			}
 			defaults = &selectedCyborgComponentDefaults{
-				ComponentDefaults: defaults, workload: workload, dgdName: materializationName,
+				ComponentDefaults: defaults, workload: workload, configMapName: input.CyborgConfigMap.Name,
 				replicas: *role.Replicas, lpxPodSpec: lpuTemplate.Spec,
 			}
 		} else {
@@ -416,10 +407,10 @@ func (d *imageEntrypointComponentDefaults) GetBaseContainer(context ComponentCon
 // the user's PodTemplate is merged, preserving the normal merge strategy.
 type selectedCyborgComponentDefaults struct {
 	ComponentDefaults
-	workload   *dynamolpx.SelectedWorkload
-	dgdName    string
-	replicas   int32
-	lpxPodSpec corev1.PodSpec
+	workload      *dynamolpx.SelectedWorkload
+	configMapName string
+	replicas      int32
+	lpxPodSpec    corev1.PodSpec
 }
 
 func (d *selectedCyborgComponentDefaults) GetBaseContainer(context ComponentContext) (corev1.Container, error) {
@@ -431,7 +422,7 @@ func (d *selectedCyborgComponentDefaults) GetBaseContainer(context ComponentCont
 	if err := dynamolpx.ApplySelectedCyborgContainerDefaults(
 		&container,
 		d.workload,
-		d.dgdName,
+		d.configMapName,
 		d.replicas,
 		d.lpxPodSpec,
 	); err != nil {
@@ -445,7 +436,7 @@ func (d *selectedCyborgComponentDefaults) GetBasePodSpec(context ComponentContex
 	if err != nil {
 		return corev1.PodSpec{}, err
 	}
-	dynamolpx.ApplySelectedCyborgPodDefaults(&podSpec, d.dgdName)
+	dynamolpx.ApplySelectedCyborgPodDefaults(&podSpec, d.configMapName)
 	return podSpec, nil
 }
 

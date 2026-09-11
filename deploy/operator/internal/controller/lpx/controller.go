@@ -55,7 +55,7 @@ func (r *graphReconciler) resolveLPXSource(ctx context.Context, deployment *v1al
 		return nil, nil, err
 	}
 	if err := dynamo.ValidateLPXSource(deployment, source); err != nil {
-		return nil, &lpxRejected{reason: err.Error()}, nil
+		return source, nil, err
 	}
 	return source, nil, nil
 }
@@ -144,7 +144,16 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	}
 	state := reconcileOutcome{State: v1beta1.DGDStatePending, Reason: "LPXPending", Message: "Waiting for the current LPX engine"}
 	var deadlineAt time.Time
+	var source *v1beta1.DynamoGraphDeployment
 	defer func() {
+		// Reconcile intended removals before deadline cleanup, including on failed renders.
+		if unavailableReason == "" {
+			classification, wake, _, deadlineErr := r.reconcileLPXAttemptDeadline(ctx, deployment, source)
+			deadlineAt, err = wake, errors.Join(err, deadlineErr)
+			if classification != nil {
+				state, result = lpxResult(classification), projectLPXLifecycleStatus(deployment, classification)
+			}
+		}
 		if err != nil {
 			state.State, state.Reason, state.Message = v1beta1.DGDStateFailed, "LPXReconciliationFailed", truncateLPXMessage(err.Error())
 		} else if unavailableReason == "" {
@@ -182,7 +191,9 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		return ctrl.Result{}, nil
 	}
 
-	source, rejected, sourceErr := r.resolveLPXSource(ctx, deployment)
+	var rejected *lpxRejected
+	var sourceErr error
+	source, rejected, sourceErr = r.resolveLPXSource(ctx, deployment)
 	if sourceErr != nil {
 		return ctrl.Result{}, sourceErr
 	}
@@ -195,18 +206,13 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		return ctrl.Result{RequeueAfter: time.Nanosecond}, r.Update(ctx, deployment)
 	}
 
-	classification, wake, requests, err := r.reconcileLPXAttemptDeadline(ctx, deployment, source)
-	deadlineAt = wake
-	var selected *lpxMaterializing
-	if classification == nil && err == nil {
-		selected, classification, err = r.reconcileLPXSafetyPreflight(ctx, deployment, source, requests)
-	}
+	selected, classification, err := r.reconcileLPXSafetyPreflight(ctx, deployment, source, nil)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if classification != nil {
-		state, result, err = r.finishLPXPreflight(ctx, deployment, classification)
-		return result, err
+		state = lpxResult(classification)
+		return projectLPXLifecycleStatus(deployment, classification), nil
 	}
 	ready, err := r.reconcileModelDownloads(ctx, deployment, source, selected == nil)
 	if err != nil {
@@ -222,22 +228,12 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 			return ctrl.Result{}, err
 		}
 		if classification != nil {
-			state, result, err = r.finishLPXPreflight(ctx, deployment, classification)
-			return result, err
+			state = lpxResult(classification)
+			return projectLPXLifecycleStatus(deployment, classification), nil
 		}
 	}
 	state, result, err = r.reconcileWorkload(ctx, deployment, source, selected)
 	return result, err
-}
-
-// finishLPXPreflight projects a non-nil classification and retires rejected workloads.
-func (r *graphReconciler) finishLPXPreflight(ctx context.Context, deployment *v1alpha1.LPXGraphDeployment, classification lpxClassification) (reconcileOutcome, ctrl.Result, error) {
-	state := lpxResult(classification)
-	if _, rejected := classification.(*lpxRejected); rejected {
-		result, err := r.retireInvalidWorkload(ctx, deployment, state.Message)
-		return state, result, err
-	}
-	return state, projectLPXLifecycleStatus(deployment, classification), nil
 }
 
 // reconcileWorkload publishes and observes the selected engine after source,
@@ -255,14 +251,6 @@ func (r *graphReconciler) reconcileWorkload(ctx context.Context, deployment *v1a
 	}
 	desired, resources, err := renderPodCliqueSet(ctx, source, r.Config, r.runtimeConfig, r.Client, r.DockerSecretRetriever, selected.workload, selected.plan, deployment)
 	if err != nil {
-		retiring, fenceErr := r.retireInvalidLPXWorkload(ctx, deployment, fmt.Sprintf("The current LPX workload can no longer be rendered safely: %v", err))
-		if fenceErr != nil {
-			return state, ctrl.Result{}, errors.Join(err, fenceErr)
-		}
-		if retiring != nil {
-			state = lpxResult(retiring)
-			return state, projectLPXLifecycleStatus(deployment, retiring), nil
-		}
 		return state, ctrl.Result{}, err
 	}
 	if err := r.validateLPXPublicationSource(ctx, deployment); err != nil {
@@ -273,20 +261,33 @@ func (r *graphReconciler) reconcileWorkload(ctx context.Context, deployment *v1a
 			return state, ctrl.Result{}, err
 		}
 	}
-	synced, changed, err := r.reconcileGrovePodCliqueSetForLPX(ctx, deployment, pcs, desired, selected)
+	synced, changed, err := r.reconcileGrovePodCliqueSetForLPX(ctx, deployment, pcs, desired)
 	if err != nil {
 		var retiring *lpxRetiring
 		if errors.As(err, &retiring) {
 			state = lpxResult(retiring)
 			return state, projectLPXLifecycleStatus(deployment, retiring), nil
 		}
-		if errors.Is(err, errLPXGrovePodCliqueSetRecreating) {
-			return state, ctrl.Result{RequeueAfter: lpxRetirementRequeueAfter}, nil
-		}
 		return state, ctrl.Result{}, err
 	}
 	if err := r.reconcileEndpoint(ctx, deployment, source); err != nil {
 		return state, ctrl.Result{}, err
+	}
+	// Grove seeds scaling groups once; only explicit component replicas override native scale.
+	if replicas := lpx.ServingComponent(source).Replicas; replicas != nil {
+		group := &grovev1alpha1.PodCliqueScalingGroup{}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: deployment.Namespace, Name: selected.plan.LPXScalingGroup}, group); err != nil {
+			if !apierrors.IsNotFound(err) {
+				return state, ctrl.Result{}, err
+			}
+		} else if !metav1.IsControlledBy(group, synced) || !group.DeletionTimestamp.IsZero() {
+			return state, ctrl.Result{}, fmt.Errorf("LPX scaling group lacks the current PCS owner")
+		} else if group.Spec.Replicas != *replicas {
+			group.Spec.Replicas = *replicas
+			if err := r.Update(ctx, group); err != nil {
+				return state, ctrl.Result{}, err
+			}
+		}
 	}
 	readiness, err := dynamo.EvaluateLPXGroveReadiness(ctx, r.Client, source, deployment, synced)
 	if err != nil {
@@ -375,13 +376,8 @@ func (r *graphReconciler) validateLPXDeploymentAuthority(ctx context.Context, de
 	if err := r.apiReader.Get(ctx, client.ObjectKeyFromObject(deployment), current); err != nil {
 		return err
 	}
-	if current.UID != deployment.UID || current.Generation != deployment.Generation || !apiequality.Semantic.DeepEqual(current.Spec, deployment.Spec) || !apiequality.Semantic.DeepEqual(current.OwnerReferences, deployment.OwnerReferences) || !current.DeletionTimestamp.IsZero() {
+	if current.UID != deployment.UID || current.ResourceVersion != deployment.ResourceVersion || !current.DeletionTimestamp.IsZero() {
 		return fmt.Errorf("LPXGraphDeployment authority changed before LPX resource mutation")
-	}
-	for _, key := range []string{dynamo.LPXRestartAnnotation, lpx.DGDGenerationAnnotation} {
-		if current.Annotations[key] != deployment.Annotations[key] {
-			return fmt.Errorf("LPXGraphDeployment publication metadata changed before LPX resource mutation")
-		}
 	}
 	return nil
 }
@@ -426,7 +422,7 @@ func (r *graphReconciler) syncLPXResource(ctx context.Context, deployment *v1alp
 func (r *graphReconciler) reconcileEndpoint(ctx context.Context, deployment *v1alpha1.LPXGraphDeployment, source *v1beta1.DynamoGraphDeployment) error {
 	// Use the same normalized identity for endpoint creation and retirement.
 	component := lpx.ServingComponent(source)
-	serviceName := dynamo.NormalizeKubeResourceName(dynamo.PCSNameForLPX(deployment, source) + "-" + component.ComponentName)
+	serviceName := dynamo.NormalizeKubeResourceName(dynamo.PCSNameForLPX(deployment) + "-" + component.ComponentName)
 
 	if !commoncontroller.IsK8sDiscoveryEnabled(r.Config.Discovery.Backend, source.Annotations) {
 		service := &corev1.Service{}
@@ -451,6 +447,6 @@ func (r *graphReconciler) reconcileEndpoint(ctx context.Context, deployment *v1a
 	}
 	// Keep the endpoint on this materialization even when another child shares the source.
 	service.Spec.Selector[dynamo.LPXServingLabel] = consts.KubeLabelValueTrue
-	service.Spec.Selector[grovecommon.LabelPartOfKey] = dynamo.PCSNameForLPX(deployment, source)
+	service.Spec.Selector[grovecommon.LabelPartOfKey] = dynamo.PCSNameForLPX(deployment)
 	return r.syncLPXResource(ctx, deployment, service)
 }

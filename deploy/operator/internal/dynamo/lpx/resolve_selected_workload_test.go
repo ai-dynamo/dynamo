@@ -46,6 +46,16 @@ func TestResolveSelectedWorkloadDerivesRuntimeShapeFromCompilationMode(t *testin
 	require.Equal(t, "lpx-ldr", plan.ConductorTemplate)
 	require.NotEmpty(t, plan.ConductorClique)
 
+	t.Log("Scale Nova engines without changing their model or workload digest")
+	for _, replicas := range []int32{2, 10, 12, 123} {
+		dgd.Spec.Components[0].Replicas = ptr.To(replicas)
+		scaled, err := ResolveSelectedWorkload(t.Context(), dgd, staticBuildSnapshotSource{"build": hxSnapshot})
+		require.NoError(t, err)
+		require.Equal(t, hx.Digest(), scaled.Digest())
+		require.Equal(t, replicas, scaled.scalingGroupReplicas)
+	}
+	dgd.Spec.Components[0].Replicas = nil
+
 	t.Log("Require hybrid conductor resources in either the explicit or inherited template")
 	fixture := newV2CompilerFixture()
 	fixture.compilationMode = manifestcapnp.CompilationMode_lpx

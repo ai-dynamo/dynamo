@@ -40,8 +40,6 @@ type LPXAttemptStatus struct {
 	DisarmedAt         *metav1.Time `json:"disarmedAt,omitempty"`
 	// +listType=map
 	// +listMapKey=name
-	// +kubebuilder:validation:MinItems=1
-	// +kubebuilder:validation:MaxItems=9
 	Requests []LPXAttemptRequestStatus `json:"requests"`
 }
 

@@ -1,50 +1,30 @@
 data:
-  lpu_servers-0: |-
-    lpu-0-lpu-wkr-m-0-0
-    lpu-0-lpu-wkr-m-0-1
-    lpu-0-lpu-wkr-m-0-2
-    lpu-0-lpu-wkr-m-0-3
-    lpu-0-lpu-wkr-m-0-4
-    lpu-0-lpu-wkr-m-0-5
-    lpu-0-lpu-wkr-m-0-6
-    lpu-0-lpu-wkr-m-0-7
-    lpu-0-lpu-wkr-m-0-8
-    lpu-0-lpu-wkr-m-0-9
-    lpu-0-lpu-wkr-m-0-10
-    lpu-0-lpu-wkr-m-0-11
-    lpu-0-lpu-wkr-m-0-12
-    lpu-0-lpu-wkr-m-0-13
-    lpu-0-lpu-wkr-m-0-14
-    lpu-0-lpu-wkr-m-0-15
-    lpu-0-lpu-wkr-m-0-16
-  lpu_servers-1: |-
-    lpu-1-lpu-wkr-m-0-0
-    lpu-1-lpu-wkr-m-0-1
-    lpu-1-lpu-wkr-m-0-2
-    lpu-1-lpu-wkr-m-0-3
-    lpu-1-lpu-wkr-m-0-4
-    lpu-1-lpu-wkr-m-0-5
-    lpu-1-lpu-wkr-m-0-6
-    lpu-1-lpu-wkr-m-0-7
-    lpu-1-lpu-wkr-m-0-8
-    lpu-1-lpu-wkr-m-0-9
-    lpu-1-lpu-wkr-m-0-10
-    lpu-1-lpu-wkr-m-0-11
-    lpu-1-lpu-wkr-m-0-12
-    lpu-1-lpu-wkr-m-0-13
-    lpu-1-lpu-wkr-m-0-14
-    lpu-1-lpu-wkr-m-0-15
-    lpu-1-lpu-wkr-m-0-16
+  lpu_servers: |-
+    lpu-${GROVE_PCSG_INDEX}-lpu-wkr-m-0-0
+    lpu-${GROVE_PCSG_INDEX}-lpu-wkr-m-0-1
+    lpu-${GROVE_PCSG_INDEX}-lpu-wkr-m-0-2
+    lpu-${GROVE_PCSG_INDEX}-lpu-wkr-m-0-3
+    lpu-${GROVE_PCSG_INDEX}-lpu-wkr-m-0-4
+    lpu-${GROVE_PCSG_INDEX}-lpu-wkr-m-0-5
+    lpu-${GROVE_PCSG_INDEX}-lpu-wkr-m-0-6
+    lpu-${GROVE_PCSG_INDEX}-lpu-wkr-m-0-7
+    lpu-${GROVE_PCSG_INDEX}-lpu-wkr-m-0-8
+    lpu-${GROVE_PCSG_INDEX}-lpu-wkr-m-0-9
+    lpu-${GROVE_PCSG_INDEX}-lpu-wkr-m-0-10
+    lpu-${GROVE_PCSG_INDEX}-lpu-wkr-m-0-11
+    lpu-${GROVE_PCSG_INDEX}-lpu-wkr-m-0-12
+    lpu-${GROVE_PCSG_INDEX}-lpu-wkr-m-0-13
+    lpu-${GROVE_PCSG_INDEX}-lpu-wkr-m-0-14
+    lpu-${GROVE_PCSG_INDEX}-lpu-wkr-m-0-15
+    lpu-${GROVE_PCSG_INDEX}-lpu-wkr-m-0-16
   tokenizer_dir: /testdata/llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c/tokenizer
+immutable: true
 metadata:
   annotations:
-    lpx.nvidia.com/deployment-generation: "1"
     lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-    lpx.nvidia.com/input-revision: sha256:7daf91bc2a789a171c747e9d93c3fed8cbd748b60888dc98cdcd795ee463a61b
-    scheduling.lpu.nvidia.com/dgd-generation: "1"
     scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
-  name: dgd-lpx-v2-94cdbc7c-lpx-decode
+  name: lstg3y7d-decode-cd1df68308eaf508
   namespace: inference-engine
 ---
 data:
@@ -196,29 +176,24 @@ data:
     URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
     URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
     URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
+immutable: true
 metadata:
   annotations:
-    lpx.nvidia.com/deployment-generation: "1"
     lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-    lpx.nvidia.com/input-revision: sha256:7daf91bc2a789a171c747e9d93c3fed8cbd748b60888dc98cdcd795ee463a61b
-    scheduling.lpu.nvidia.com/dgd-generation: "1"
     scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
-  name: dgd-lpx-v2-94cdbc7c-lpx-lpu
+  name: lstg3y7d-lpu-70f8ece55681fe1b
   namespace: inference-engine
 ---
 metadata:
   annotations:
-    lpx.nvidia.com/deployment-generation: "1"
     lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-    lpx.nvidia.com/input-revision: sha256:7daf91bc2a789a171c747e9d93c3fed8cbd748b60888dc98cdcd795ee463a61b
-    scheduling.lpu.nvidia.com/dgd-generation: "1"
     scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
     scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:12f2d0ae40fa84798f025eafc6bf5ecbe38cdc7adb797e3e41726b4c8c916114
   labels:
     nvidia.com/dynamo-graph-deployment-name: dgd-lpx-v2-vllm
-  name: dgd-lpx-v2-94cdbc7c-lpx
+  name: lstg3y7d
   namespace: inference-engine
 spec:
   replicas: 1
@@ -226,12 +201,9 @@ spec:
     cliqueStartupType: CliqueStartupTypeExplicit
     cliques:
     - annotations:
-        lpx.nvidia.com/deployment-generation: "1"
         lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        lpx.nvidia.com/input-revision: sha256:7daf91bc2a789a171c747e9d93c3fed8cbd748b60888dc98cdcd795ee463a61b
-        nvidia.com/extra-resources-hash: a9c40c6452f37713460176f888205de0185c5478ab3a4aa2a06936caa86ff0c4
-        scheduling.lpu.nvidia.com/dgd-generation: "1"
+        nvidia.com/extra-resources-hash: cd1df68308eaf508bdf4d2ab25abbdc0c374769b498191e1d9dcca12dbfa8d88
         scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:12f2d0ae40fa84798f025eafc6bf5ecbe38cdc7adb797e3e41726b4c8c916114
         scheduling.lpu.nvidia.com/role: cyborg-worker
@@ -260,6 +232,15 @@ spec:
                     - c1v2-b300n1-nic1
           containers:
           - args:
+            - |
+              : "${GROVE_PCSG_NAME:?missing GROVE_PCSG_NAME}" "${GROVE_PCSG_INDEX:?missing GROVE_PCSG_INDEX}" "${GROVE_HEADLESS_SERVICE:?missing GROVE_HEADLESS_SERVICE}"
+              sed -e "s|\${GROVE_PCSG_NAME}|${GROVE_PCSG_NAME}|g" -e "s|\${GROVE_PCSG_INDEX}|${GROVE_PCSG_INDEX}|g" -e "s|\${GROVE_HEADLESS_SERVICE}|${GROVE_HEADLESS_SERVICE}|g" "$1" > "$2"
+              shift 2
+              exec "$@"
+            - --
+            - /configs/lpu_servers
+            - /tmp/lpu_servers
+            - /usr/local/bin/cyborg
             - --dynamo-model-name
             - meta-llama/Llama-3.2-1B-Instruct
             - --model-card
@@ -269,6 +250,9 @@ spec:
             - HND
             - --num-layers
             - "16"
+            command:
+            - /bin/sh
+            - -ec
             env:
             - name: CYBORG_BATCH_SIZE
               value: "1"
@@ -308,10 +292,6 @@ spec:
               value: /nfs/llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c/manifest.v2.capnp.bin
             - name: GLUE_RDMA_PATH_MTU
               value: "1024"
-            - name: LPX_ENGINE_REPLICA
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.labels['grove.io/podcliquescalinggroup-replica-index']
             - name: NATS_SERVER
               value: nats-address
             - name: NIXL_TELEMETRY_ENABLE
@@ -335,12 +315,12 @@ spec:
             - name: RDMA_PORT
               value: "19877"
             - name: SERVER_HOSTS_FILE
-              value: /configs/lpu_servers-$(LPX_ENGINE_REPLICA)
+              value: /tmp/lpu_servers
             - name: TOKENIZER_DIR
               valueFrom:
                 configMapKeyRef:
                   key: tokenizer_dir
-                  name: dgd-lpx-v2-94cdbc7c-lpx-decode
+                  name: lstg3y7d-decode-cd1df68308eaf508
             - name: TOTAL_REPLICAS
               value: "1"
             image: us-docker.pkg.dev/nv-hwlpu-20260103060253/cyborg/cyborg:build-862
@@ -389,6 +369,8 @@ spec:
               name: config
             - mountPath: /dev/shm
               name: shared-memory
+            - mountPath: /tmp
+              name: tmp
           restartPolicy: Always
           schedulerName: default-scheduler
           securityContext:
@@ -410,23 +392,22 @@ spec:
               type: Directory
             name: infiniband
           - configMap:
-              name: dgd-lpx-v2-94cdbc7c-lpx-decode
+              name: lstg3y7d-decode-cd1df68308eaf508
             name: config
           - emptyDir:
               medium: Memory
               sizeLimit: 8Gi
             name: shared-memory
+          - emptyDir: {}
+            name: tmp
         replicas: 1
         roleName: lpu-engine-gpu
         startsAfter:
         - lpu-wkr-m-0
     - annotations:
-        lpx.nvidia.com/deployment-generation: "1"
         lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        lpx.nvidia.com/input-revision: sha256:7daf91bc2a789a171c747e9d93c3fed8cbd748b60888dc98cdcd795ee463a61b
-        nvidia.com/extra-resources-hash: d782ea49a4ae530a65fb915ae77c6d4b603d6bee3f5b336a52d026439b8f2d41
-        scheduling.lpu.nvidia.com/dgd-generation: "1"
+        nvidia.com/extra-resources-hash: 70f8ece55681fe1ba61a15bbecddf456fe9857e535d513e6ca0ac2fd00694a00
         scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:12f2d0ae40fa84798f025eafc6bf5ecbe38cdc7adb797e3e41726b4c8c916114
         scheduling.lpu.nvidia.com/model: default
@@ -516,7 +497,7 @@ spec:
               valueFrom:
                 configMapKeyRef:
                   key: gas_dir
-                  name: dgd-lpx-v2-94cdbc7c-lpx-lpu
+                  name: lstg3y7d-lpu-70f8ece55681fe1b
             - name: GLUE_RDMA_PATH_MTU
               value: "1024"
             - name: LPU_MODEL_NAME
@@ -550,7 +531,7 @@ spec:
               valueFrom:
                 configMapKeyRef:
                   key: topologies
-                  name: dgd-lpx-v2-94cdbc7c-lpx-lpu
+                  name: lstg3y7d-lpu-70f8ece55681fe1b
             - name: UCX_TLS
               value: tcp
             image: us-docker.pkg.dev/nv-hwlpu-20260103060253/lpu-monorepo/agent-hybrid-v2:steved-1node.dfefd5a16f
@@ -629,7 +610,7 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: dgd-lpx-v2-94cdbc7c-lpx-lpu
+              name: lstg3y7d-lpu-70f8ece55681fe1b
             name: config
           - emptyDir: {}
             name: tmp
@@ -654,11 +635,8 @@ spec:
       publishNotReadyAddresses: true
     podCliqueScalingGroups:
     - annotations:
-        lpx.nvidia.com/deployment-generation: "1"
         lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        lpx.nvidia.com/input-revision: sha256:7daf91bc2a789a171c747e9d93c3fed8cbd748b60888dc98cdcd795ee463a61b
-        scheduling.lpu.nvidia.com/dgd-generation: "1"
         scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:12f2d0ae40fa84798f025eafc6bf5ecbe38cdc7adb797e3e41726b4c8c916114
       cliqueNames:

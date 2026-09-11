@@ -68,11 +68,10 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			wantSchemaErr: `spec.components[0].roles[1].podTemplate.spec.containers[1]: Duplicate value: map[string]interface {}{"name":"main"}`,
 		},
 		{
-			name: "LPX replica bounds are enforced by the schema",
+			name: "LPX supports more than nine replicas",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Components[0].Replicas = k8sptr.To(int32(10))
 			}),
-			wantCELErr: "spec.components[0]: Invalid value: replicas must be between 1 and 9 when type is lpx",
 		},
 		{
 			name: "LPX autoscaling is rejected by the schema",
@@ -240,7 +239,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				setAlphaLPXSpecDec(dgd, k8sptr.To(int32(0)))
 			}),
-			wantCELErr: "spec.services[draft]: Invalid value: replicas must be between 1 and 9 when componentType is lpx",
+			wantCELErr: "spec.services[draft]: Invalid value: replicas must be positive when componentType is lpx",
 		},
 		// Engine-local template and build validation.
 		{

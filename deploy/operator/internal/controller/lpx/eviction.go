@@ -16,6 +16,7 @@ import (
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -133,7 +134,7 @@ func (r *lpuEvictionReconciler) runtimePartitionByPodIndex(ctx context.Context, 
 	if pcsName == "" {
 		return nil, fmt.Errorf("LPU-GPU eviction trigger pod %s/%s has no PodCliqueSet identity", trigger.Namespace, trigger.Name)
 	}
-	configName := dynamolpx.LPUConfigMapName(pcsName)
+	configName := dynamolpx.LPUConfigMapName(pcsName, triggerConfigHash)
 	var config corev1.ConfigMap
 	if err := r.Get(ctx, client.ObjectKey{Namespace: trigger.Namespace, Name: configName}, &config); err != nil {
 		return nil, fmt.Errorf("get LPU runtime ConfigMap %s/%s: %w", trigger.Namespace, configName, err)
@@ -192,9 +193,14 @@ func (r *lpuEvictionReconciler) allModelPods(ctx context.Context, trigger *corev
 	}
 
 	model := trigger.Annotations[lpxv1alpha1.PodModelAnnotation]
+	owner := metav1.GetControllerOf(trigger)
 
 	return slices.DeleteFunc(pods.Items, func(pod corev1.Pod) bool {
+		// Native updates can replace the clique or individual Pods within it.
+		candidateOwner := metav1.GetControllerOf(&pod)
 		return !r.isLPUAgentPod(&pod) ||
+			owner == nil || owner.UID == "" || candidateOwner == nil || owner.UID != candidateOwner.UID ||
+			pod.Labels[grovecommon.LabelPodTemplateHash] != trigger.Labels[grovecommon.LabelPodTemplateHash] ||
 			model != "" && pod.Annotations[lpxv1alpha1.PodModelAnnotation] != model
 	}), nil
 }

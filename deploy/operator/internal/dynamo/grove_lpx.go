@@ -90,7 +90,7 @@ func EvaluateLPXGroveReadiness(ctx context.Context, reader client.Reader, source
 		return result(false, v1beta1.DGDReadyReasonSomeResourcesNotReady, message)
 	}
 	if pcs == nil || !pcs.DeletionTimestamp.IsZero() || !metav1.IsControlledBy(pcs, deployment) ||
-		pcs.Annotations[LPXInputRevisionAnnotation] != deployment.Spec.InputRevision || len(pcs.Spec.Template.PodCliqueScalingGroupConfigs) != 1 {
+		len(pcs.Spec.Template.PodCliqueScalingGroupConfigs) != 1 {
 		return pending("Waiting for the exact LPX PodCliqueSet"), nil
 	}
 	hash := getAcceptedPCSRevisionHash(pcs)
@@ -113,7 +113,7 @@ func EvaluateLPXGroveReadiness(ctx context.Context, reader client.Reader, source
 		return pending("Waiting for the exact observed LPX scaling group"), nil
 	}
 	status.ScheduledReplicas = ptr.To(group.Status.ScheduledReplicas)
-	replicas := ptr.Deref(component.Replicas, 1)
+	replicas := ptr.Deref(component.Replicas, group.Spec.Replicas)
 	if group.Spec.Replicas != replicas || group.Status.CurrentPodCliqueSetGenerationHash == nil || *group.Status.CurrentPodCliqueSetGenerationHash != *hash {
 		return result(false, v1beta1.DGDReadyReasonUpdating, "LPX scaling group has not applied the desired revision and capacity"), nil
 	}
@@ -129,7 +129,7 @@ func EvaluateLPXGroveReadiness(ctx context.Context, reader client.Reader, source
 		for _, template := range pcs.Spec.Template.Cliques {
 			name := grovecommon.GeneratePodCliqueName(grovecommon.ResourceNameReplica{Name: groupName, Replica: int(replica)}, template.Name)
 			memberName := template.Labels[lpx.StageLabel]
-			readiness, err := observeLPXRole(ctx, reader, deployment, group, name, template.Spec.Replicas)
+			readiness, err := observeLPXRole(ctx, reader, group, name, template.Spec.Replicas)
 			if err != nil {
 				return GroveReadiness{}, err
 			}
@@ -166,7 +166,7 @@ func EvaluateLPXGroveReadiness(ctx context.Context, reader client.Reader, source
 // observeLPXRole fences one clique by ownership and revision, then reports its
 // counts in complete model instances. The group must already be observed at the
 // accepted PCS revision; all pointer inputs are non-nil.
-func observeLPXRole(ctx context.Context, reader client.Reader, deployment *v1alpha1.LPXGraphDeployment, group *grovev1alpha1.PodCliqueScalingGroup, name string, width int32) (groveComponentReadiness, error) {
+func observeLPXRole(ctx context.Context, reader client.Reader, group *grovev1alpha1.PodCliqueScalingGroup, name string, width int32) (groveComponentReadiness, error) {
 	role := groveComponentReadiness{}
 	clique := &grovev1alpha1.PodClique{}
 	if err := reader.Get(ctx, client.ObjectKey{Namespace: group.Namespace, Name: name}, clique); err != nil {
@@ -175,8 +175,7 @@ func observeLPXRole(ctx context.Context, reader client.Reader, deployment *v1alp
 		}
 		return role, err
 	}
-	if !metav1.IsControlledBy(clique, group) || !clique.DeletionTimestamp.IsZero() ||
-		clique.Annotations[LPXInputRevisionAnnotation] != deployment.Spec.InputRevision {
+	if !metav1.IsControlledBy(clique, group) || !clique.DeletionTimestamp.IsZero() {
 		return role.withResult(false, fmt.Sprintf("Waiting for exact LPX role %s", name), v1beta1.DGDReadyReasonSomeResourcesNotReady), nil
 	}
 	if clique.Spec.Replicas != width || clique.Status.CurrentPodCliqueSetGenerationHash == nil ||

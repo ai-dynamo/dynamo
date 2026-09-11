@@ -199,7 +199,9 @@ func configureNodeLocalConductorRuntime(
 
 	// Materialize the GPC conductor around the image's Nova binary.
 	setNodeLocalPodIPEnv(conductor, isXT)
-	addRuntimeTemporaryStorage(conductorPodSpec, conductor, !isXT)
+	if err := addRuntimeConfigStorage(conductorPodSpec, conductor, "datacenter.toml"); err != nil {
+		return err
+	}
 	updateLPUConductorContainer(conductor, allocation)
 	if targetFamily == BuildFamilyHX {
 		conductor.Args = append(conductor.Args, nodeLocalHXAgentEnvironmentArgs...)

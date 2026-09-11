@@ -46,6 +46,12 @@ func renderSelectedForTest(pcs *grovev1alpha1.PodCliqueSet, projections []*Model
 	if err != nil {
 		return nil, err
 	}
+	if workload.BuildFamily() == BuildFamilyXT && workload.Pipeline() == PipelineLPX {
+		input.CyborgConfigMap, err = workload.RenderCyborgConfigMap(pcs.Namespace, input.MaterializationName, input.Stages[testRenderComponentName].Spec)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if _, err := RenderSelectedNodeLocal(pcs, workload, plan, input); err != nil {
 		return nil, err
 	}
@@ -190,8 +196,8 @@ func TestRenderMaterializesAgentModelFromBasePodSpec(t *testing.T) {
 	conductor := namedClique(t, rendered, "lpu-ldr")
 	require.Nil(t, conductor.Spec.PodSpec.Affinity)
 	require.Equal(t, conductorPodSpec.NodeSelector, conductor.Spec.PodSpec.NodeSelector)
-	require.Equal(t, []string{"/bin/bash"}, conductor.Spec.PodSpec.Containers[0].Command)
-	require.Equal(t, []string{"-c", "custom-agent"}, conductor.Spec.PodSpec.Containers[0].Args[:2])
+	require.Equal(t, []string{"/bin/sh", "-ec"}, conductor.Spec.PodSpec.Containers[0].Command)
+	require.Equal(t, []string{"/bin/bash", "-c", "custom-agent"}, conductor.Spec.PodSpec.Containers[0].Args[4:7])
 	require.Equal(t, modelAnnotationSource, conductor.Spec.PodSpec.Containers[0].Env[0].ValueFrom)
 	require.Empty(t, conductor.Spec.PodSpec.Containers[0].Env[0].Value)
 
@@ -323,7 +329,9 @@ func renderTestPCS(hybrid bool) *grovev1alpha1.PodCliqueSet {
 			RoleName: "lpu-engine-gpu", Replicas: 1, MinAvailable: &one,
 			PodSpec: corev1.PodSpec{
 				SchedulerName: corev1.DefaultSchedulerName,
-				Containers:    []corev1.Container{{Name: "main", Image: "cyborg"}},
+				Containers: []corev1.Container{{Name: "main", Image: "cyborg", Env: []corev1.EnvVar{
+					{Name: selectedCyborgServerHostsFileEnv, Value: "/tmp/lpu_servers"},
+				}}},
 				ResourceClaims: []corev1.PodResourceClaim{{
 					Name:                      "candidate",
 					ResourceClaimTemplateName: ptr.To("candidate"),

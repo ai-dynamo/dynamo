@@ -19,8 +19,8 @@ func TestLPXAuxiliaryNamesAreBounded(t *testing.T) {
 	root := strings.Repeat("a", validation.DNS1123SubdomainMaxLength)
 
 	t.Log("Render the LPU and decode ConfigMap names")
-	lpuName := LPUConfigMapName(root)
-	decodeName := selectedCyborgConfigMapName(root)
+	lpuName := LPUConfigMapName(root, "0123456789abcdef")
+	decodeName := boundedAuxiliaryName(root, "-decode-0123456789abcdef")
 
 	t.Log("Keep names valid and distinct while leaving short names unchanged")
 	require.Len(t, lpuName, validation.DNS1123SubdomainMaxLength)
@@ -28,7 +28,7 @@ func TestLPXAuxiliaryNamesAreBounded(t *testing.T) {
 	require.Empty(t, validation.IsDNS1123Subdomain(lpuName))
 	require.Empty(t, validation.IsDNS1123Subdomain(decodeName))
 	require.NotEqual(t, lpuName, decodeName)
-	require.Equal(t, "short-lpu", LPUConfigMapName("short"))
+	require.Equal(t, "short-lpu-0123456789abcdef", LPUConfigMapName("short", "0123456789abcdef"))
 }
 
 func TestLPURuntimeBuildRef(t *testing.T) {
@@ -95,6 +95,8 @@ func TestRenderLPUConfigMapPreservesV2HybridGasDir(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, configMap.Data["model_config.toml"], "model_path = '/models/model-build'")
 	require.Equal(t, "/models/model-build", configMap.Data["gas_dir"])
+	require.True(t, *configMap.Immutable)
+	require.Equal(t, LPUConfigMapName("test-dgd", LPUConfigMapHash(configMap)), configMap.Name)
 
 	t.Log("Render the preserved runtime with an invalid snapshot build reference")
 	projection.configuredBuild.Path = "relative-build"

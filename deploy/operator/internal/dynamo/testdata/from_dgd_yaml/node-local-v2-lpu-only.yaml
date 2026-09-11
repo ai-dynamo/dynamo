@@ -44,29 +44,24 @@ data:
   topologies: |-
     URSA_V2__Q8__16C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA
     URSA_V2__Q8__16C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA
+immutable: true
 metadata:
   annotations:
-    lpx.nvidia.com/deployment-generation: "1"
     lpx.nvidia.com/deployment-name: node-local-v2-lpu-only
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-    lpx.nvidia.com/input-revision: sha256:3a66c573439fcd5c10ee0ac67f9e82ebee1cf652f15afc89847fe634151f562e
-    scheduling.lpu.nvidia.com/dgd-generation: "1"
     scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
-  name: node-local-33b11b4d-lpx-lpu
+  name: lgoyrwtj-lpu-62ffb8651b497e5f
   namespace: test
 ---
 metadata:
   annotations:
-    lpx.nvidia.com/deployment-generation: "1"
     lpx.nvidia.com/deployment-name: node-local-v2-lpu-only
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-    lpx.nvidia.com/input-revision: sha256:3a66c573439fcd5c10ee0ac67f9e82ebee1cf652f15afc89847fe634151f562e
-    scheduling.lpu.nvidia.com/dgd-generation: "1"
     scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
     scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:9818bb7546b87558d8e18acb0b27ad76009123f72fa25b89398759d6ee75ea18
   labels:
     nvidia.com/dynamo-graph-deployment-name: node-local-v2-lpu-only
-  name: node-local-33b11b4d-lpx
+  name: lgoyrwtj
   namespace: test
 spec:
   replicas: 1
@@ -74,12 +69,9 @@ spec:
     cliqueStartupType: CliqueStartupTypeExplicit
     cliques:
     - annotations:
-        lpx.nvidia.com/deployment-generation: "1"
         lpx.nvidia.com/deployment-name: node-local-v2-lpu-only
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        lpx.nvidia.com/input-revision: sha256:3a66c573439fcd5c10ee0ac67f9e82ebee1cf652f15afc89847fe634151f562e
-        nvidia.com/extra-resources-hash: c54666a901d96415ed0c340891f762a480f3a78ca4a04755d4ae3d02a1125512
-        scheduling.lpu.nvidia.com/dgd-generation: "1"
+        nvidia.com/extra-resources-hash: 62ffb8651b497e5f141bbf328eecc74fc4f1729d8314b66928832afd105631ee
         scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:9818bb7546b87558d8e18acb0b27ad76009123f72fa25b89398759d6ee75ea18
         scheduling.lpu.nvidia.com/role: conductor
@@ -99,6 +91,15 @@ spec:
         podSpec:
           containers:
           - args:
+            - |
+              : "${GROVE_PCSG_NAME:?missing GROVE_PCSG_NAME}" "${GROVE_PCSG_INDEX:?missing GROVE_PCSG_INDEX}" "${GROVE_HEADLESS_SERVICE:?missing GROVE_HEADLESS_SERVICE}"
+              sed -e "s|\${GROVE_PCSG_NAME}|${GROVE_PCSG_NAME}|g" -e "s|\${GROVE_PCSG_INDEX}|${GROVE_PCSG_INDEX}|g" -e "s|\${GROVE_HEADLESS_SERVICE}|${GROVE_HEADLESS_SERVICE}|g" "$1" > "$2"
+              shift 2
+              exec "$@"
+            - --
+            - /configs/datacenter.toml
+            - /tmp/datacenter.toml
+            - /opt/dynamo-lpu
             - serve
             - --agent-path
             - /bin/agent
@@ -111,7 +112,7 @@ spec:
             - --control-server-addr
             - $(POD_IP):51045
             - --datacenter-config-filepath
-            - /configs/datacenter.toml
+            - /tmp/datacenter.toml
             - --model-config-filepath
             - /configs/model_config.toml
             - --json-logs
@@ -144,7 +145,8 @@ spec:
             - --store-backend
             - kubernetes
             command:
-            - /opt/dynamo-lpu
+            - /bin/sh
+            - -ec
             env:
             - name: DYN_COMPONENT
               value: lpx
@@ -247,7 +249,7 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-33b11b4d-lpx-lpu
+              name: lgoyrwtj-lpu-62ffb8651b497e5f
             name: config
           - emptyDir: {}
             name: tmp
@@ -262,12 +264,9 @@ spec:
         startsAfter:
         - lpu-wkr-m-0
     - annotations:
-        lpx.nvidia.com/deployment-generation: "1"
         lpx.nvidia.com/deployment-name: node-local-v2-lpu-only
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        lpx.nvidia.com/input-revision: sha256:3a66c573439fcd5c10ee0ac67f9e82ebee1cf652f15afc89847fe634151f562e
-        nvidia.com/extra-resources-hash: c54666a901d96415ed0c340891f762a480f3a78ca4a04755d4ae3d02a1125512
-        scheduling.lpu.nvidia.com/dgd-generation: "1"
+        nvidia.com/extra-resources-hash: 62ffb8651b497e5f141bbf328eecc74fc4f1729d8314b66928832afd105631ee
         scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:9818bb7546b87558d8e18acb0b27ad76009123f72fa25b89398759d6ee75ea18
         scheduling.lpu.nvidia.com/model: default
@@ -393,7 +392,7 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-33b11b4d-lpx-lpu
+              name: lgoyrwtj-lpu-62ffb8651b497e5f
             name: config
           - emptyDir: {}
             name: tmp
@@ -418,11 +417,8 @@ spec:
       publishNotReadyAddresses: true
     podCliqueScalingGroups:
     - annotations:
-        lpx.nvidia.com/deployment-generation: "1"
         lpx.nvidia.com/deployment-name: node-local-v2-lpu-only
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        lpx.nvidia.com/input-revision: sha256:3a66c573439fcd5c10ee0ac67f9e82ebee1cf652f15afc89847fe634151f562e
-        scheduling.lpu.nvidia.com/dgd-generation: "1"
         scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:9818bb7546b87558d8e18acb0b27ad76009123f72fa25b89398759d6ee75ea18
       cliqueNames:

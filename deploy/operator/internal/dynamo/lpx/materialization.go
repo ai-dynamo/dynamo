@@ -22,6 +22,15 @@ const minimumHashedCliqueNameLength = 8
 
 const maximumCyborgPodIndex = math.MaxInt32
 
+// LPXAttemptRequestStatus stores a name (lpxRequestName uses at most 60 bytes),
+// sha256 digest, and server-issued UUID. Reserve a full DNS label plus JSON syntax
+// and an array separator; all generated values are ASCII.
+const maximumSchedulingAttemptRequestBytes = len(`{"name":"","attemptDigest":"","uid":""},`) +
+	validation.DNS1123LabelMaxLength + len("sha256:") + sha256.Size*2 + 36
+
+// Leave half the object allowance for the enclosing status, spec, and metadata.
+const schedulingAttemptRequestBytesBudget = MaxRenderedPodCliqueSetBytes / 2
+
 // ExpectedAgent binds one projected model to the exact Grove
 // PodClique identity that must materialize it. The controller uses this plan
 // to observe objects; it never reconstructs a row from a generated Pod name.
@@ -122,24 +131,32 @@ func (w *SelectedWorkload) PlanNodeLocalMaterialization(pcsName string) (*Materi
 	}
 	plan = plan.ForReplica(0)
 
-	// All admitted replica indices are 0..8, so their names have the same length.
-	// Validate final hostnames once, retaining conductor/Agent/Cyborg error order.
+	return plan, plan.ValidateReplicaCount()
+}
+
+// ValidateReplicaCount checks the longest engine names and bounds request/status allocation.
+func (p *MaterializationPlan) ValidateReplicaCount() error {
+	// Charge every model/replica for its complete persisted request identity.
+	if p.Replicas < 0 || int64(p.Replicas)*int64(len(p.Agents)) > int64(schedulingAttemptRequestBytesBudget/maximumSchedulingAttemptRequestBytes) {
+		return fmt.Errorf("LPX replica count exceeds the scheduling status size budget")
+	}
+	plan := p.ForReplica(max(0, p.Replicas-1))
 	if plan.ConductorClique != "" {
 		if err := validateMaterializedPodHostnameAtIndex("conductor", plan.ConductorClique, 0); err != nil {
-			return nil, err
+			return err
 		}
 	}
 	for _, agent := range plan.Agents {
 		if err := validateMaterializedPodHostnameAtIndex("Agent", agent.CliqueName, agent.Replicas-1); err != nil {
-			return nil, err
+			return err
 		}
 	}
 	if plan.CyborgClique != "" {
 		if err := validateMaterializedPodHostnameAtIndex("Cyborg", plan.CyborgClique, maximumCyborgPodIndex); err != nil {
-			return nil, err
+			return err
 		}
 	}
-	return plan, nil
+	return nil
 }
 
 // ForReplica returns the child clique identities for one scaling-group replica.

@@ -187,12 +187,12 @@ func TestLPXPodGangPredicateTracksOnlyMaterializationIdentity(t *testing.T) {
 	statusOnly.Status.Phase = groveschedulerv1alpha1.PodGangPhase("scheduled")
 	require.False(t, predicate.Update(event.UpdateEvent{ObjectOld: gang, ObjectNew: statusOnly}))
 
-	t.Log("Wake on PodGang spec and mirrored attempt-annotation convergence")
+	t.Log("Wake on PodGang spec and mirrored workload-annotation convergence")
 	specChange := gang.DeepCopy()
 	specChange.Generation++
 	require.True(t, predicate.Update(event.UpdateEvent{ObjectOld: gang, ObjectNew: specChange}))
 	annotationChange := gang.DeepCopy()
-	annotationChange.Annotations = map[string]string{lpxDeploymentGenerationAnnotation: "2"}
+	annotationChange.Annotations = map[string]string{dynamolpx.WorkloadDigestAnnotation: "sha256:updated"}
 	require.True(t, predicate.Update(event.UpdateEvent{ObjectOld: gang, ObjectNew: annotationChange}))
 
 	t.Log("Accept the ordinary scheduler witness and reject unrelated PodGangs")
@@ -263,7 +263,7 @@ func TestLPXWorkloadEventPredicates(t *testing.T) {
 				{"status noise", func(o client.Object) { o.SetResourceVersion("2") }, false},
 				{"status observed", test.observe, true},
 				{"stamp lost", func(o client.Object) { o.SetAnnotations(nil) }, true},
-				{"attempt changed", func(o client.Object) { o.GetAnnotations()[lpxDeploymentGenerationAnnotation] = "2" }, true},
+				{"workload changed", func(o client.Object) { o.GetAnnotations()[dynamolpx.WorkloadDigestAnnotation] = "sha256:updated" }, true},
 				{"labels changed", func(o client.Object) { o.SetLabels(map[string]string{"changed": "true"}) }, true},
 				{"owner changed", func(o client.Object) { o.SetOwnerReferences([]metav1.OwnerReference{{UID: "new-owner"}}) }, true},
 				{"deleting", func(o client.Object) { now := metav1.Now(); o.SetDeletionTimestamp(&now) }, true},

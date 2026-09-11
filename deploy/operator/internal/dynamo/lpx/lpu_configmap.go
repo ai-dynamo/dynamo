@@ -22,6 +22,7 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/utils/ptr"
 )
 
 const (
@@ -47,9 +48,9 @@ func boundedAuxiliaryName(root, suffix string) string {
 	return prefix + hashSuffix
 }
 
-// LPUConfigMapName returns the generated runtime ConfigMap name within the Kubernetes name limit.
-func LPUConfigMapName(root string) string {
-	return boundedAuxiliaryName(root, "-lpu")
+// LPUConfigMapName names the immutable runtime table using its Pod-template content hash.
+func LPUConfigMapName(root, configHash string) string {
+	return boundedAuxiliaryName(root, fmt.Sprintf("-lpu-%.16s", configHash))
 }
 
 func renderLPUConfigMap(
@@ -96,13 +97,15 @@ func renderLPUConfigMap(
 	}
 	data["model_config.toml"] = modelTOML.String()
 	data["datacenter.toml"] = datacenterTOML.String()
-	return &corev1.ConfigMap{
+	configMap := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      LPUConfigMapName(materializationName),
 			Namespace: namespace,
 		},
-		Data: data,
-	}, nil
+		Immutable: ptr.To(true),
+		Data:      data,
+	}
+	configMap.Name = LPUConfigMapName(materializationName, LPUConfigMapHash(configMap))
+	return configMap, nil
 }
 
 // LPUConfigMapHash returns the hash stamped on LPU runtime Pod templates.

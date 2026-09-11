@@ -37,29 +37,24 @@ data:
   partition_node_offsets: "0"
   partition_paths: part-1
   topologies: opaque-v3-topology
+immutable: true
 metadata:
   annotations:
-    lpx.nvidia.com/deployment-generation: "1"
     lpx.nvidia.com/deployment-name: node-local-v3-hx-hybrid
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-    lpx.nvidia.com/input-revision: sha256:2c69578d3223855a1909b27ea91ff120daa8d46c56d97eff4d20c89faa91439e
-    scheduling.lpu.nvidia.com/dgd-generation: "1"
     scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
-  name: node-local-be18433d-lpx-lpu
+  name: lxymegpm-lpu-40e022e2d45905fb
   namespace: test
 ---
 metadata:
   annotations:
-    lpx.nvidia.com/deployment-generation: "1"
     lpx.nvidia.com/deployment-name: node-local-v3-hx-hybrid
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-    lpx.nvidia.com/input-revision: sha256:2c69578d3223855a1909b27ea91ff120daa8d46c56d97eff4d20c89faa91439e
-    scheduling.lpu.nvidia.com/dgd-generation: "1"
     scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
     scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:8fdccd781b4850f821d63b39d26c3a176fc1a06c246b350af31af22c7542bd64
   labels:
     nvidia.com/dynamo-graph-deployment-name: node-local-v3-hx-hybrid
-  name: node-local-be18433d-lpx
+  name: lxymegpm
   namespace: test
 spec:
   replicas: 1
@@ -67,11 +62,8 @@ spec:
     cliqueStartupType: CliqueStartupTypeExplicit
     cliques:
     - annotations:
-        lpx.nvidia.com/deployment-generation: "1"
         lpx.nvidia.com/deployment-name: node-local-v3-hx-hybrid
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        lpx.nvidia.com/input-revision: sha256:2c69578d3223855a1909b27ea91ff120daa8d46c56d97eff4d20c89faa91439e
-        scheduling.lpu.nvidia.com/dgd-generation: "1"
         scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:8fdccd781b4850f821d63b39d26c3a176fc1a06c246b350af31af22c7542bd64
         scheduling.lpu.nvidia.com/role: cyborg-worker
@@ -211,12 +203,9 @@ spec:
         startsAfter:
         - lpu-wkr-m-0
     - annotations:
-        lpx.nvidia.com/deployment-generation: "1"
         lpx.nvidia.com/deployment-name: node-local-v3-hx-hybrid
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        lpx.nvidia.com/input-revision: sha256:2c69578d3223855a1909b27ea91ff120daa8d46c56d97eff4d20c89faa91439e
-        nvidia.com/extra-resources-hash: 8803dd921b1a97775b917767487276baa0462067b92142d4456e4409df78ee42
-        scheduling.lpu.nvidia.com/dgd-generation: "1"
+        nvidia.com/extra-resources-hash: 40e022e2d45905fb8bce9ead674fe7e847e78a5785b481ef8dbff443218d20e5
         scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:8fdccd781b4850f821d63b39d26c3a176fc1a06c246b350af31af22c7542bd64
         scheduling.lpu.nvidia.com/model: default
@@ -377,7 +366,7 @@ spec:
               valueFrom:
                 configMapKeyRef:
                   key: gas_dir
-                  name: node-local-be18433d-lpx-lpu
+                  name: lxymegpm-lpu-40e022e2d45905fb
             - name: GLUE_RDMA_PATH_MTU
               value: "1024"
             - name: LPU_MODEL_NAME
@@ -411,7 +400,7 @@ spec:
               valueFrom:
                 configMapKeyRef:
                   key: topologies
-                  name: node-local-be18433d-lpx-lpu
+                  name: lxymegpm-lpu-40e022e2d45905fb
             - name: UCX_TLS
               value: tcp
             image: example.invalid/lpu-runtime:test
@@ -564,7 +553,7 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-be18433d-lpx-lpu
+              name: lxymegpm-lpu-40e022e2d45905fb
             name: config
           - emptyDir: {}
             name: tmp
@@ -589,11 +578,8 @@ spec:
       publishNotReadyAddresses: true
     podCliqueScalingGroups:
     - annotations:
-        lpx.nvidia.com/deployment-generation: "1"
         lpx.nvidia.com/deployment-name: node-local-v3-hx-hybrid
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        lpx.nvidia.com/input-revision: sha256:2c69578d3223855a1909b27ea91ff120daa8d46c56d97eff4d20c89faa91439e
-        scheduling.lpu.nvidia.com/dgd-generation: "1"
         scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:8fdccd781b4850f821d63b39d26c3a176fc1a06c246b350af31af22c7542bd64
       cliqueNames:

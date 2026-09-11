@@ -14,25 +14,17 @@ import (
 )
 
 const (
-	lpuDatacenterConfigFilepath         = lpuConfigMountPath + "/datacenter.toml"
 	lpuModelConfigFilepath              = lpuConfigMountPath + "/model_config.toml"
 	lpuExpandedDatacenterConfigFilepath = runtimeTemporaryStorageMountPath + "/datacenter.toml"
-	lpuNovaEntrypointScript             = `set -euo pipefail; : "${GROVE_PCSG_NAME:?missing GROVE_PCSG_NAME}" "${GROVE_PCSG_INDEX:?missing GROVE_PCSG_INDEX}" "${GROVE_HEADLESS_SERVICE:?missing GROVE_HEADLESS_SERVICE}"; sed -e "s|\${GROVE_PCSG_NAME}|${GROVE_PCSG_NAME}|g" -e "s|\${GROVE_PCSG_INDEX}|${GROVE_PCSG_INDEX}|g" -e "s|\${GROVE_HEADLESS_SERVICE}|${GROVE_HEADLESS_SERVICE}|g" ` + lpuDatacenterConfigFilepath + ` > ` + lpuExpandedDatacenterConfigFilepath + `; exec /bin/nova "$@"`
 )
 
 func updateLPUConductorContainer(
 	container *corev1.Container,
 	allocation string,
 ) {
-	// Wrap image-only workloads so the role always starts Nova after config expansion.
+	// Expand this engine's topology before the default or explicitly authored command.
 	container.Name = "conductor"
-	datacenterConfigFilepath := lpuDatacenterConfigFilepath
-	if len(container.Command) == 0 {
-		args := container.Args
-		container.Command = []string{"/bin/bash"}
-		container.Args = append([]string{"-c", lpuNovaEntrypointScript, "--"}, args...)
-		datacenterConfigFilepath = lpuExpandedDatacenterConfigFilepath
-	}
+	wrapRuntimeStartup(container, "/bin/nova", "datacenter.toml", "")
 
 	// Nova and OpenMPI require root in the supported direct-DGD runtime.
 	if container.SecurityContext == nil {
@@ -57,7 +49,7 @@ func updateLPUConductorContainer(
 
 		// configmap
 		"--datacenter-config-filepath",
-		datacenterConfigFilepath,
+		lpuExpandedDatacenterConfigFilepath,
 		"--model-config-filepath",
 		lpuModelConfigFilepath,
 

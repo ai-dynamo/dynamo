@@ -90,7 +90,7 @@ type DynamoComponentDeploymentSpec struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.lpx) || (has(self.type) && self.type == 'lpx')",message="lpx may only be set when type is lpx"
 // +kubebuilder:validation:XValidation:rule="!(has(self.type) && self.type == 'lpx') || has(self.lpx)",message="lpx is required when type is lpx"
 // +kubebuilder:validation:XValidation:rule="!(has(self.type) && self.type == 'lpx') || !has(self.podTemplate)",message="LPX Pod templates belong to roles"
-// +kubebuilder:validation:XValidation:rule="!(has(self.type) && self.type == 'lpx' && has(self.replicas) && (self.replicas < 1 || self.replicas > 9))",message="replicas must be between 1 and 9 when type is lpx"
+// +kubebuilder:validation:XValidation:rule="!(has(self.type) && self.type == 'lpx' && has(self.replicas) && self.replicas < 1)",message="replicas must be positive when type is lpx"
 // +kubebuilder:validation:XValidation:rule="!(has(self.type) && self.type == 'lpx' && has(self.scalingAdapter))",message="scalingAdapter is not supported when type is lpx"
 type DynamoComponentDeploymentSharedSpec struct {
 	// providerOverride configures the primary Grove unit representing this DGD

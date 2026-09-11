@@ -15850,8 +15850,8 @@ spec:
                         rule: '!has(self.lpx) || (has(self.componentType) && self.componentType == ''lpx'')'
                       - message: lpx is required when componentType is lpx
                         rule: '!(has(self.componentType) && self.componentType == ''lpx'') || has(self.lpx)'
-                      - message: replicas must be between 1 and 9 when componentType is lpx
-                        rule: '!(has(self.componentType) && self.componentType == ''lpx'' && has(self.replicas) && (self.replicas < 1 || self.replicas > 9))'
+                      - message: replicas must be positive when componentType is lpx
+                        rule: '!(has(self.componentType) && self.componentType == ''lpx'' && has(self.replicas) && self.replicas < 1)'
                       - message: scalingAdapter is not supported when componentType is lpx
                         rule: '!(has(self.componentType) && self.componentType == ''lpx'' && has(self.scalingAdapter) && has(self.scalingAdapter.enabled) && self.scalingAdapter.enabled == true)'
                   description: Services are the services to deploy as part of this deployment.
@@ -16030,8 +16030,6 @@ spec:
                                   - attemptDigest
                                   - name
                                 type: object
-                              maxItems: 9
-                              minItems: 1
                               type: array
                               x-kubernetes-list-map-keys:
                                 - name
@@ -16111,8 +16109,6 @@ spec:
                               - attemptDigest
                               - name
                             type: object
-                          maxItems: 9
-                          minItems: 1
                           type: array
                           x-kubernetes-list-map-keys:
                             - name
@@ -25289,8 +25285,8 @@ spec:
                         rule: '!(has(self.type) && self.type == ''lpx'') || has(self.lpx)'
                       - message: LPX Pod templates belong to roles
                         rule: '!(has(self.type) && self.type == ''lpx'') || !has(self.podTemplate)'
-                      - message: replicas must be between 1 and 9 when type is lpx
-                        rule: '!(has(self.type) && self.type == ''lpx'' && has(self.replicas) && (self.replicas < 1 || self.replicas > 9))'
+                      - message: replicas must be positive when type is lpx
+                        rule: '!(has(self.type) && self.type == ''lpx'' && has(self.replicas) && self.replicas < 1)'
                       - message: scalingAdapter is not supported when type is lpx
                         rule: '!(has(self.type) && self.type == ''lpx'' && has(self.scalingAdapter))'
                   maxItems: 25
@@ -25888,8 +25884,6 @@ spec:
                                   - attemptDigest
                                   - name
                                 type: object
-                              maxItems: 9
-                              minItems: 1
                               type: array
                               x-kubernetes-list-map-keys:
                                 - name
@@ -25969,8 +25963,6 @@ spec:
                               - attemptDigest
                               - name
                             type: object
-                          maxItems: 9
-                          minItems: 1
                           type: array
                           x-kubernetes-list-map-keys:
                             - name

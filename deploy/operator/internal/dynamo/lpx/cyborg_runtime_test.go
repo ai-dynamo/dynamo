@@ -24,7 +24,7 @@ func TestWrapCyborgDecodeForSwaBatchSkipsBatchOne(t *testing.T) {
 	original := container.DeepCopy()
 
 	t.Log("Apply the batch-one runtime contract")
-	require.NoError(t, wrapCyborgDecodeForSwaBatch(container, 1))
+	wrapCyborgStartup(container, 1, "")
 
 	t.Log("Verify batch one leaves the container unchanged")
 	require.Equal(t, original, container)
@@ -66,7 +66,7 @@ func TestWrapCyborgDecodeForSwaBatch(t *testing.T) {
 			command := []string{"/bin/sh", "-c"}
 			args := []string{`printf '%s\n' "${CYBORG_SWA_CACHE_IDS}" "$@"`, "--", "argument with spaces", "literal '$HOME'", ""}
 			container := &corev1.Container{Command: command, Args: args}
-			require.NoError(t, wrapCyborgDecodeForSwaBatch(container, 2))
+			wrapCyborgStartup(container, 2, "")
 
 			t.Log("Changing caller-owned slices must not change the wrapped invocation")
 			command[0] = "mutated-command"
@@ -94,4 +94,13 @@ func TestConfiguredCyborgBatchSizeRejectsInvalidEnvironment(t *testing.T) {
 		_, err := configuredCyborgBatchSize(&corev1.Container{Env: []corev1.EnvVar{variable}}, 1)
 		require.Error(t, err)
 	}
+}
+
+func TestPinnedCyborgLauncher(t *testing.T) {
+	t.Log("Preserve the linked deployment's exact image and complete bash argument")
+	container := &corev1.Container{Image: pinnedCyborgImage, Command: []string{"/bin/bash", "-lc"}, Args: []string{pinnedCyborgLauncher}}
+	wrapCyborgStartup(container, 2, "lpu_servers")
+	require.Equal(t, pinnedCyborgImage, container.Image)
+	require.Equal(t, []string{"/bin/bash", "-lc", pinnedCyborgLauncher}, container.Args[4:])
+	require.Contains(t, container.Args[0], "export CYBORG_SWA_CACHE_IDS")
 }

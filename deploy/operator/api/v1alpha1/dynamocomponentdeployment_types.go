@@ -87,7 +87,7 @@ type DynamoComponentDeploymentSpec struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.componentType) || self.componentType != 'lpu'",message="componentType lpu is not supported; use lpx"
 // +kubebuilder:validation:XValidation:rule="!has(self.lpx) || (has(self.componentType) && self.componentType == 'lpx')",message="lpx may only be set when componentType is lpx"
 // +kubebuilder:validation:XValidation:rule="!(has(self.componentType) && self.componentType == 'lpx') || has(self.lpx)",message="lpx is required when componentType is lpx"
-// +kubebuilder:validation:XValidation:rule="!(has(self.componentType) && self.componentType == 'lpx' && has(self.replicas) && (self.replicas < 1 || self.replicas > 9))",message="replicas must be between 1 and 9 when componentType is lpx"
+// +kubebuilder:validation:XValidation:rule="!(has(self.componentType) && self.componentType == 'lpx' && has(self.replicas) && self.replicas < 1)",message="replicas must be positive when componentType is lpx"
 // +kubebuilder:validation:XValidation:rule="!(has(self.componentType) && self.componentType == 'lpx' && has(self.scalingAdapter) && has(self.scalingAdapter.enabled) && self.scalingAdapter.enabled == true)",message="scalingAdapter is not supported when componentType is lpx"
 type DynamoComponentDeploymentSharedSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster

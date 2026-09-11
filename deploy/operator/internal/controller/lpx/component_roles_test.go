@@ -72,7 +72,7 @@ func TestSpecDecodeStatusCountsCompleteDraftInstances(t *testing.T) {
 			case "foreign":
 				firstDraft.OwnerReferences = []metav1.OwnerReference{{UID: "foreign", Controller: ptr.To(true)}}
 			case "old revision":
-				firstDraft.Annotations[dynamo.LPXInputRevisionAnnotation] = "old"
+				firstDraft.Status.CurrentPodCliqueSetGenerationHash = ptr.To("old")
 			case "unobserved":
 				firstDraft.Status.ObservedGeneration = ptr.To(firstDraft.Generation - 1)
 			}

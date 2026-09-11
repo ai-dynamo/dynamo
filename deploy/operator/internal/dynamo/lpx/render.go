@@ -34,6 +34,8 @@ const (
 type RenderInput struct {
 	// MaterializationName is the owning LPXGraphDeployment's bounded identity root.
 	MaterializationName string
+	// CyborgConfigMap is rendered before the user's Cyborg defaults are merged.
+	CyborgConfigMap *corev1.ConfigMap
 	// MinAvailable is the minimum number of complete engine replicas in the gang.
 	MinAvailable *int32
 	// Stages contains an independently merged LPU template for every projected stage.
@@ -99,10 +101,7 @@ func RenderSelectedNodeLocal(
 		extraResources  []client.Object
 	)
 	if v2HybridRuntime {
-		cyborgConfigMap, err = renderSelectedCyborgConfigMap(namespace, input.MaterializationName, plan, modelStorage.mount.MountPath, &projections[0].configuredBuild)
-		if err != nil {
-			return nil, err
-		}
+		cyborgConfigMap = input.CyborgConfigMap
 		// Preserve the legacy graph order: Cyborg config first, LPU config last.
 		extraResources = []client.Object{cyborgConfigMap, configMap}
 	} else {

@@ -86,7 +86,7 @@ func TestRenderHybridProjectsManifestRuntimeIO(t *testing.T) {
 	require.Contains(t, cyborg.Spec.PodSpec.Containers[0].VolumeMounts, renderTestPodSpec().Containers[0].VolumeMounts[0])
 	require.Equal(t, []string{"/bin/sh", "-ec"}, cyborg.Spec.PodSpec.Containers[0].Command)
 	require.Contains(t, cyborg.Spec.PodSpec.Containers[0].Args[0], `export CYBORG_SWA_CACHE_IDS="${ids}"`)
-	require.Equal(t, []string{"--", "/usr/local/bin/dynamo_main"}, cyborg.Spec.PodSpec.Containers[0].Args[1:])
+	require.Equal(t, []string{"--", "/configs/lpu_servers", "/tmp/lpu_servers", "/usr/local/bin/dynamo_main"}, cyborg.Spec.PodSpec.Containers[0].Args[1:])
 
 	t.Log("Preserve an image-owned entrypoint")
 	imageEntrypointPCS := renderTestPCS(true)
@@ -99,10 +99,11 @@ func TestRenderHybridProjectsManifestRuntimeIO(t *testing.T) {
 		corev1.EnvVar{Name: CyborgBatchSizeEnv, Value: "3"},
 	)
 
-	t.Log("Render and verify rejection of an unwrappable image-owned entrypoint")
+	t.Log("Render the agreed Cyborg binary when the command is omitted")
 	input.Stages = map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}}
 	_, err = renderSelectedForTest(imageEntrypointPCS, []*ModelProjection{projection}, input)
-	require.ErrorContains(t, err, "cyborg command is empty; cannot wrap image entrypoint for SWA batch ID generation")
+	require.NoError(t, err)
+	require.Equal(t, []string{"/usr/local/bin/cyborg", "serve"}, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Args[4:])
 
 	t.Log("Reject incomplete endpoint and fanout coverage of the same split-I/O runtime")
 

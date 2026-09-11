@@ -261,6 +261,10 @@ func TestConfigureNodeLocalLPURuntimeRoles(t *testing.T) {
 	agent := *base.DeepCopy()
 
 	t.Log("Lower the image into the Nova conductor and privileged SSH worker roles")
+	require.ErrorContains(t, configureNodeLocalConductorRuntime(&conductor, BuildFamilyHX, "lpu-wkr-m-0", "ssh-secret"), "writable storage")
+	conductor = *base.DeepCopy()
+	conductor.Containers[0].VolumeMounts[0].ReadOnly = false
+	conductor.Volumes[2].VolumeSource = corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}
 	require.NoError(t, configureNodeLocalConductorRuntime(&conductor, BuildFamilyHX, "lpu-wkr-m-0", "ssh-secret"))
 	require.NoError(t, configureNodeLocalAgentRuntime(&agent, BuildFamilyHX, false, "ssh-secret"))
 
@@ -268,8 +272,8 @@ func TestConfigureNodeLocalLPURuntimeRoles(t *testing.T) {
 	require.Len(t, conductor.Containers, 1)
 	conductorContainer := conductor.Containers[0]
 	require.Equal(t, "conductor", conductorContainer.Name)
-	require.Equal(t, []string{"/bin/bash"}, conductorContainer.Command)
-	require.Equal(t, []string{"-c", lpuNovaEntrypointScript, "--"}, conductorContainer.Args[:3])
+	require.Equal(t, []string{"/bin/sh", "-ec"}, conductorContainer.Command)
+	require.Equal(t, []string{runtimeConfigExpansion + "exec \"$@\"\n", "--", "/configs/datacenter.toml", "/tmp/datacenter.toml", "/bin/nova"}, conductorContainer.Args[:5])
 	require.Contains(t, conductorContainer.Args, "--instance-model-name")
 	requireFlagValue(t, conductorContainer.Args, "--allocation", "lpu-wkr-m-0")
 	require.GreaterOrEqual(t, len(conductorContainer.Args), len(nodeLocalHXAgentEnvironmentArgs))

@@ -70,7 +70,7 @@ func TestLPXEngineOrderAndUnrelatedEditsPreservePublication(t *testing.T) {
 	require.Nil(t, rejected)
 	afterPCS := renderLPXTestPodCliqueSet(t, t.Context(), r, child, source, afterSelected)
 	require.Equal(t, beforePCS, afterPCS)
-	require.Equal(t, child.Annotations[lpx.DGDGenerationAnnotation], afterPCS.Annotations[lpx.DGDGenerationAnnotation])
+	require.NotContains(t, afterPCS.Annotations, lpx.DGDGenerationAnnotation)
 	_, err = r.reconcileSelectedLPX(t.Context(), child, afterSelected)
 	require.NoError(t, err)
 	afterRequests := &lpxv1alpha1.LPUPipelineRequestList{}
@@ -146,16 +146,16 @@ func TestLPXGPUCapacityReportsTheCompleteEngine(t *testing.T) {
 	}
 }
 
-func TestLPXTerminalFailureRetiresUnpublishedWorkload(t *testing.T) {
+func TestLPXInvalidEditsPreserveExistingWorkload(t *testing.T) {
 	for _, scenario := range []struct {
 		name, reason, message string
 		preserve              bool
 	}{
 		{name: "intent", reason: "LPXRejected", message: "providerOverride"},
 		{name: "name budget", reason: "LPXRejected", message: "spec.components[0].name: Invalid value"},
-		{name: "selected workload", reason: "LPXRejected", message: "scaling-group replicas"},
+		{name: "selected workload", reason: "LPXRejected", message: "replica count"},
 		{name: "render", reason: "LPXReconciliationFailed", message: "model storage volume mount"},
-		{name: "invalid source", reason: "LPXRejected", message: "source"},
+		{name: "invalid source", reason: "LPXReconciliationFailed", message: "source"},
 		{name: "transient snapshot", reason: "LPXReconciliationFailed", message: "temporary snapshot timeout", preserve: true},
 		{name: "inconsistent snapshot", reason: "LPXReconciliationFailed", message: "immutable LPX build snapshot"},
 	} {
@@ -168,7 +168,7 @@ func TestLPXTerminalFailureRetiresUnpublishedWorkload(t *testing.T) {
 			_, err := r.Reconcile(t.Context(), request)
 			require.NoError(t, err)
 			pcs := &grovev1alpha1.PodCliqueSet{}
-			pcsKey := client.ObjectKey{Namespace: child.Namespace, Name: dynamo.PCSNameForLPX(child, source)}
+			pcsKey := client.ObjectKey{Namespace: child.Namespace, Name: dynamo.PCSNameForLPX(child)}
 			require.NoError(t, r.Get(t.Context(), pcsKey, pcs))
 			pcs.UID = "staged-pcs"
 			require.NoError(t, r.Update(t.Context(), pcs))
@@ -200,7 +200,7 @@ func TestLPXTerminalFailureRetiresUnpublishedWorkload(t *testing.T) {
 			case "name budget":
 				component.ComponentName = "serving-engines"
 			case "selected workload":
-				component.Replicas = ptr.To(int32(2))
+				component.Replicas = ptr.To(int32(-1))
 			case "render":
 				component.ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.Containers[0].VolumeMounts = nil
 			case "invalid source":
@@ -219,7 +219,7 @@ func TestLPXTerminalFailureRetiresUnpublishedWorkload(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, r.Update(t.Context(), child))
 
-			t.Log("Converge cleanup and retain the original actionable failure on repeated reconciliation")
+			t.Log("Report the actionable failure without destroying existing resources")
 			for range 3 {
 				_, err = r.Reconcile(t.Context(), request)
 				if scenario.reason == "LPXReconciliationFailed" && err != nil {
@@ -236,15 +236,10 @@ func TestLPXTerminalFailureRetiresUnpublishedWorkload(t *testing.T) {
 			require.Equal(t, metav1.ConditionTrue, failure.Status)
 			require.Equal(t, scenario.reason, failure.Reason)
 			require.Contains(t, failure.Message, scenario.message)
-			if scenario.preserve {
-				require.NoError(t, r.Get(t.Context(), pcsKey, pcs))
-				require.NoError(t, r.Get(t.Context(), endpointKey, endpoint))
-				require.Equal(t, beforePCS, pcs)
-				require.Equal(t, beforeEndpoint, endpoint)
-			} else {
-				require.True(t, apierrors.IsNotFound(r.Get(t.Context(), pcsKey, pcs)), "terminal failure retained the staged PCS")
-				require.True(t, apierrors.IsNotFound(r.Get(t.Context(), endpointKey, endpoint)), "terminal failure retained the obsolete endpoint")
-			}
+			require.NoError(t, r.Get(t.Context(), pcsKey, pcs))
+			require.NoError(t, r.Get(t.Context(), endpointKey, endpoint))
+			require.Equal(t, beforePCS, pcs)
+			require.Equal(t, beforeEndpoint, endpoint)
 			require.NoError(t, r.List(t.Context(), requests))
 			require.Empty(t, requests.Items)
 		})
@@ -271,7 +266,7 @@ func TestLPXTerminalCleanupPreservesForeignObjectsAndNewerAuthority(t *testing.T
 			}}
 			foreignPCS, foreignEndpoint := pcs.DeepCopy(), endpoint.DeepCopy()
 			foreignPCS.UID, foreignEndpoint.UID = "foreign-pcs", "foreign-endpoint"
-			foreignPCS.Name = dynamo.PCSNameForLPX(child, source)
+			foreignPCS.Name = dynamo.PCSNameForLPX(child)
 			foreignEndpoint.Name = foreignPCS.Name + "-lpx"
 			foreignPCS.OwnerReferences, foreignEndpoint.OwnerReferences = ordinary.OwnerReferences, ordinary.OwnerReferences
 			if scenario == "pending finalizer" {
@@ -390,11 +385,11 @@ func TestLPXEndpointLifecycle(t *testing.T) {
 	t.Log("Publish the LPX-owned endpoint with its serving-role selector")
 	require.NoError(t, r.reconcileEndpoint(t.Context(), child, source))
 	service := &corev1.Service{}
-	key := client.ObjectKey{Namespace: source.Namespace, Name: dynamo.PCSNameForLPX(child, source) + "-lpx"}
+	key := client.ObjectKey{Namespace: source.Namespace, Name: dynamo.PCSNameForLPX(child) + "-lpx"}
 	require.NoError(t, r.Get(t.Context(), key, service))
 	require.True(t, metav1.IsControlledBy(service, child))
 	require.Equal(t, consts.KubeLabelValueTrue, service.Spec.Selector[dynamo.LPXServingLabel])
-	require.Equal(t, dynamo.PCSNameForLPX(child, source), service.Spec.Selector[grovecommon.LabelPartOfKey])
+	require.Equal(t, dynamo.PCSNameForLPX(child), service.Spec.Selector[grovecommon.LabelPartOfKey])
 
 	t.Log("Converge propagated endpoint metadata without losing identity, content or sync bookkeeping")
 	for _, value := range []string{"changed", ""} {
@@ -462,10 +457,10 @@ func TestLPXMaterializationUsesOwnerSourceAndChildIdentity(t *testing.T) {
 	_, err = r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)})
 	require.NoError(t, err)
 
-	root := dynamo.PCSNameForLPX(child, source)
+	root := dynamo.PCSNameForLPX(child)
 	for _, object := range []client.Object{
 		&grovev1alpha1.PodCliqueSet{ObjectMeta: metav1.ObjectMeta{Name: root, Namespace: child.Namespace}},
-		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: root + "-lpu", Namespace: child.Namespace}},
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: lpx.LPUConfigMapName(root, pcs.Spec.Template.Cliques[0].Annotations[consts.AnnotationExtraResourcesHash]), Namespace: child.Namespace}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: root + "-" + lpx.ServingComponent(source).ComponentName, Namespace: child.Namespace}},
 	} {
 		require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(object), object))
@@ -542,6 +537,7 @@ func TestLPXResourceSyncConvergesContentAndMetadataWithoutAdoption(t *testing.T)
 }
 
 func TestLPXValidatesIntentBeforeDownloadsOrPublication(t *testing.T) {
+	const componentProvider = "component provider"
 	for _, scenario := range []struct {
 		name, componentName string
 		sharedDraft         bool
@@ -556,7 +552,7 @@ func TestLPXValidatesIntentBeforeDownloadsOrPublication(t *testing.T) {
 			"spec.components[0].topologyConstraint: Forbidden:",
 		}},
 		{name: "disabled Grove", messages: []string{"Grove is disabled"}},
-		{name: "component provider", messages: []string{"requires the Grove workload provider"}},
+		{name: componentProvider, messages: []string{"requires the Grove workload provider"}},
 		{name: "too long serving name", componentName: "serving-engines", messages: []string{
 			"spec.components[0].name: Invalid value", "combined Grove resource name length 46 exceeds the 45-character limit",
 		}},
@@ -597,7 +593,7 @@ func TestLPXValidatesIntentBeforeDownloadsOrPublication(t *testing.T) {
 				component.Experimental = &v1beta1.ExperimentalSpec{Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true}}
 				source.Spec.TopologyConstraint = &v1beta1.SpecTopologyConstraint{ClusterTopologyName: "fabric"}
 				component.TopologyConstraint = &v1beta1.TopologyConstraint{PackDomain: "rack"}
-			case "component provider":
+			case componentProvider:
 				delete(source.Annotations, consts.KubeAnnotationLPXSchedulerBackend)
 				source.Annotations[consts.KubeAnnotationWorkloadProvider] = consts.WorkloadProviderComponent
 			}
@@ -620,7 +616,11 @@ func TestLPXValidatesIntentBeforeDownloadsOrPublication(t *testing.T) {
 
 			t.Log("Reject unsupported intent before downloads and let valid names reach the download gate")
 			_, err = r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)})
-			require.NoError(t, err)
+			if scenario.name == componentProvider {
+				require.ErrorContains(t, err, "requires the Grove workload provider")
+			} else {
+				require.NoError(t, err)
+			}
 			stored := &v1alpha1.LPXGraphDeployment{}
 			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(child), stored))
 			failed := meta.FindStatusCondition(stored.Status.Conditions, "Failed")
@@ -637,6 +637,8 @@ func TestLPXValidatesIntentBeforeDownloadsOrPublication(t *testing.T) {
 				require.Equal(t, metav1.ConditionTrue, failed.Status)
 				if scenario.name == "disabled Grove" {
 					require.Equal(t, "LPXUnavailable", failed.Reason)
+				} else if scenario.name == componentProvider {
+					require.Equal(t, "LPXReconciliationFailed", failed.Reason)
 				} else {
 					require.Equal(t, "LPXRejected", failed.Reason)
 				}
@@ -668,7 +670,7 @@ func TestLPXPublicationFencesLiveSourceAndChildMetadata(t *testing.T) {
 	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(source), liveSource))
 	liveSource.Annotations[consts.KubeAnnotationEnableMetrics] = "false"
 	require.NoError(t, r.Update(t.Context(), liveSource))
-	_, _, err := r.reconcileGrovePodCliqueSetForLPX(t.Context(), child, nil, pcs, selected)
+	_, _, err := r.reconcileGrovePodCliqueSetForLPX(t.Context(), child, nil, pcs)
 	require.ErrorContains(t, err, "input revision")
 	allPCS := &grovev1alpha1.PodCliqueSetList{}
 	require.NoError(t, r.List(t.Context(), allPCS))
@@ -679,5 +681,5 @@ func TestLPXPublicationFencesLiveSourceAndChildMetadata(t *testing.T) {
 	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(child), liveChild))
 	liveChild.Annotations[lpx.DGDGenerationAnnotation] = "999"
 	require.NoError(t, r.Update(t.Context(), liveChild))
-	require.ErrorContains(t, r.validateLPXPublicationSource(t.Context(), child), "publication metadata changed")
+	require.ErrorContains(t, r.validateLPXPublicationSource(t.Context(), child), "authority changed")
 }

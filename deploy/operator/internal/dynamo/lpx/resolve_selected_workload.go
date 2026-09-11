@@ -122,10 +122,6 @@ func ResolveSelectedWorkload(
 		// A sole component can flatten its replica axis into the outer scaling group.
 		scalingGroupReplicas = ptr.Deref(components[0].Replicas, 1)
 	}
-	if pipeline != PipelineLPX && scalingGroupReplicas != 1 {
-		return nil, fmt.Errorf("%w: scaling-group replicas above one currently require a hybrid engine", ErrUnsupportedRuntime)
-	}
-
 	// Canonical roles expand into default or draft0..draft7 followed by target.
 	digest, err := workloadSetDigest(projections)
 	if err != nil {

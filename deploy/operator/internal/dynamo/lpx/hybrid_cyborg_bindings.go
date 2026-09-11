@@ -13,24 +13,18 @@ import (
 	"strings"
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 )
 
 const (
-	selectedCyborgConfigSuffix       = "-decode"
 	selectedCyborgInfiniBandName     = "infiniband"
 	selectedCyborgInfiniBandPath     = "/dev/infiniband"
 	selectedCyborgServerHostsFileEnv = "SERVER_HOSTS_FILE"
 	selectedCyborgTokenizerDirEnv    = "TOKENIZER_DIR"
 	selectedCyborgTotalReplicasEnv   = "TOTAL_REPLICAS"
 )
-
-func selectedCyborgConfigMapName(dgdName string) string {
-	return boundedAuxiliaryName(dgdName, selectedCyborgConfigSuffix)
-}
 
 // ApplySelectedCyborgContainerDefaults installs the operator-owned V2 Cyborg
 // bindings before the user's main-container override is merged. container and
@@ -39,13 +33,12 @@ func selectedCyborgConfigMapName(dgdName string) string {
 func ApplySelectedCyborgContainerDefaults(
 	container *corev1.Container,
 	workload *SelectedWorkload,
-	dgdName string,
+	configMapName string,
 	totalReplicas int32,
 	lpxPodSpec corev1.PodSpec,
 ) error {
 	projection := workload.modelProjections[0]
 
-	configMapName := selectedCyborgConfigMapName(dgdName)
 	container.VolumeMounts = append(
 		container.VolumeMounts,
 		corev1.VolumeMount{Name: selectedCyborgInfiniBandName, MountPath: selectedCyborgInfiniBandPath},
@@ -83,21 +76,9 @@ func ApplySelectedCyborgContainerDefaults(
 	if err := applyCyborgManifestPath(container, projection, modelStoragePath); err != nil {
 		return err
 	}
-	hostsFile := lpuConfigMountPath + "/lpu_servers"
-	if workload.scalingGroupReplicas > 1 {
-		// Resolve the replica through the downward API before Kubernetes expands
-		// SERVER_HOSTS_FILE. The image entrypoint remains untouched.
-		container.Env = append(container.Env, corev1.EnvVar{
-			Name: "LPX_ENGINE_REPLICA",
-			ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{
-				FieldPath: "metadata.labels['" + grovecommon.LabelPodCliqueScalingGroupReplicaIndex + "']",
-			}},
-		})
-		hostsFile += "-$(LPX_ENGINE_REPLICA)"
-	}
 	container.Env = append(container.Env, corev1.EnvVar{
 		Name:  selectedCyborgServerHostsFileEnv,
-		Value: hostsFile,
+		Value: runtimeTemporaryStorageMountPath + "/lpu_servers",
 	})
 	return nil
 }
@@ -105,13 +86,13 @@ func ApplySelectedCyborgContainerDefaults(
 // ApplySelectedCyborgPodDefaults installs the operator-owned V2 Cyborg
 // volumes before the user's PodSpec override is merged. podSpec must be non-nil
 // and is mutated in place.
-func ApplySelectedCyborgPodDefaults(podSpec *corev1.PodSpec, dgdName string) {
+func ApplySelectedCyborgPodDefaults(podSpec *corev1.PodSpec, configMapName string) {
 	podSpec.Volumes = append(
 		podSpec.Volumes,
 		corev1.Volume{
 			Name: lpuConfigVolumeName,
 			VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
-				LocalObjectReference: corev1.LocalObjectReference{Name: selectedCyborgConfigMapName(dgdName)},
+				LocalObjectReference: corev1.LocalObjectReference{Name: configMapName},
 			}},
 		},
 		corev1.Volume{
@@ -124,53 +105,51 @@ func ApplySelectedCyborgPodDefaults(podSpec *corev1.PodSpec, dgdName string) {
 	)
 }
 
-// renderSelectedCyborgConfigMap requires a nonnil build and at least one Agent template name.
-func renderSelectedCyborgConfigMap(
+// RenderCyborgConfigMap renders the XT hybrid configuration before Cyborg defaults are merged.
+// The workload must contain the selected hybrid model; agentPodSpec supplies its merged storage.
+func (w *SelectedWorkload) RenderCyborgConfigMap(
 	namespace string,
-	dgdName string,
-	plan *MaterializationPlan,
-	modelStoragePath string,
-	build *Build,
+	root string,
+	agentPodSpec corev1.PodSpec,
 ) (*corev1.ConfigMap, error) {
+	storage, err := lpuModelStorageBinding(agentPodSpec)
+	if err != nil {
+		return nil, err
+	}
+	plan, err := w.PlanNodeLocalMaterialization(root)
+	if err != nil {
+		return nil, err
+	}
+	build := &w.modelProjections[0].configuredBuild
 	tokenizerDir := ""
 	if build.Path != "" {
 		tokenizerPath := build.RuntimeTokenizerPath
 		if strings.TrimSpace(tokenizerPath) == "" {
 			return nil, fmt.Errorf("capnp manifest build is missing model.tokenizer.path")
 		}
-		runtimePath, runtimeErr := buildRuntimePath(build.Path, modelStoragePath)
+		runtimePath, runtimeErr := buildRuntimePath(build.Path, storage.mount.MountPath)
 		if runtimeErr != nil {
 			return nil, fmt.Errorf("failed to determine tokenizer_dir: %w", runtimeErr)
 		}
 		tokenizerDir = filepath.Join(runtimePath, tokenizerPath)
 	}
 
-	data := map[string]string{"tokenizer_dir": tokenizerDir}
-	for replica := int32(0); replica < plan.Replicas; replica++ {
-		// Cyborg supplies the PCS prefix, so only materialize the relative Agent name.
-		serverPrefix := materializedCliqueNameForReplica(plan.LPXScalingGroupTemplate, plan.Agents[0].TemplateName, replica) + "-"
-		var servers strings.Builder
-		offset := 0
-		for index, partition := range build.Partitions {
-			if index != 0 {
-				servers.WriteByte('\n')
-			}
-			servers.WriteString(serverPrefix)
-			servers.WriteString(strconv.Itoa(offset))
-			offset += partition.effectiveNodeCount()
-		}
-		key := "lpu_servers"
-		if plan.Replicas > 1 {
-			key += "-" + strconv.Itoa(int(replica))
-		}
-		data[key] = servers.String()
+	// Cyborg supplies the PCS prefix; startup supplies this engine's Grove index.
+	serverPrefix := plan.LPXScalingGroupTemplate + "-${GROVE_PCSG_INDEX}-" + plan.Agents[0].TemplateName + "-"
+	servers := make([]string, len(build.Partitions))
+	offset := 0
+	for index, partition := range build.Partitions {
+		servers[index] = serverPrefix + strconv.Itoa(offset)
+		offset += partition.effectiveNodeCount()
 	}
 
-	return &corev1.ConfigMap{
+	configMap := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      selectedCyborgConfigMapName(dgdName),
 			Namespace: namespace,
 		},
-		Data: data,
-	}, nil
+		Immutable: ptr.To(true),
+		Data:      map[string]string{"tokenizer_dir": tokenizerDir, "lpu_servers": strings.Join(servers, "\n")},
+	}
+	configMap.Name = boundedAuxiliaryName(root, fmt.Sprintf("-decode-%.16s", LPUConfigMapHash(configMap)))
+	return configMap, nil
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	dynamolpx "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/operatorenv"
 	manifestcapnpv2 "github.com/ai-dynamo/dynamo/deploy/operator/internal/thirdparty/capnp/gbuild_manifest/v2"
@@ -250,14 +251,19 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 
 	t.Log("Release quota and observe alpha LGD ownership of the published PCS and runtime resources without waiting for scheduling")
 	require.NoError(t, env.Client().Delete(t.Context(), quota))
-	pcs := &grovev1alpha1.PodCliqueSet{ObjectMeta: metav1.ObjectMeta{Name: dynamo.PCSNameForLPX(child, source), Namespace: source.Namespace}}
-	configMap := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: pcs.Name + "-lpu", Namespace: source.Namespace}}
+	pcs := &grovev1alpha1.PodCliqueSet{ObjectMeta: metav1.ObjectMeta{Name: dynamo.PCSNameForLPX(child), Namespace: source.Namespace}}
+	configMap := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: source.Namespace}}
 	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: pcs.Name + "-lpx", Namespace: source.Namespace}}
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		if !assert.NoError(c, env.Client().Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs)) {
+			return
+		}
+		configMap.Name = dynamolpx.LPUConfigMapName(pcs.Name, pcs.Spec.Template.Cliques[0].Annotations[consts.AnnotationExtraResourcesHash])
 		for _, resource := range []client.Object{pcs, configMap, service} {
 			if assert.NoError(c, env.Client().Get(t.Context(), client.ObjectKeyFromObject(resource), resource)) {
 				assert.Equal(c, metav1.NewControllerRef(child, v1alpha1.LPXGraphDeploymentGVK), metav1.GetControllerOf(resource))
 			}
 		}
+		assert.Equal(c, ptr.To(true), configMap.Immutable)
 	}, 20*time.Second, 50*time.Millisecond)
 }

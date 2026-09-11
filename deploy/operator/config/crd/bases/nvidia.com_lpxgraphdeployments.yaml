@@ -299,8 +299,6 @@ spec:
                               - attemptDigest
                               - name
                             type: object
-                          maxItems: 9
-                          minItems: 1
                           type: array
                           x-kubernetes-list-map-keys:
                             - name

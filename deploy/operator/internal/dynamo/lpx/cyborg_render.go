@@ -6,6 +6,7 @@
 package lpx
 
 import (
+	"slices"
 	"strconv"
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -47,9 +48,16 @@ func configureHybridCyborg(
 	if err := applyCyborgManifestPath(container, projection, modelStorage.mount.MountPath); err != nil {
 		return err
 	}
-	if err := wrapCyborgDecodeForSwaBatch(container, cyborgBatchSize); err != nil {
-		return err
+	configFile := ""
+	if cyborgConfigMap != nil && slices.ContainsFunc(container.Env, func(variable corev1.EnvVar) bool {
+		return variable.Name == selectedCyborgServerHostsFileEnv && variable.Value == runtimeTemporaryStorageMountPath+"/lpu_servers" && variable.ValueFrom == nil
+	}) {
+		configFile = "lpu_servers"
+		if err := addRuntimeConfigStorage(&cyborg.Spec.PodSpec, container, configFile); err != nil {
+			return err
+		}
 	}
+	wrapCyborgStartup(container, cyborgBatchSize, configFile)
 
 	cyborg.Spec.PodSpec.SchedulerName = "default-scheduler"
 	delete(cyborg.Labels, commonconsts.KubeLabelKaiSchedulerQueue)

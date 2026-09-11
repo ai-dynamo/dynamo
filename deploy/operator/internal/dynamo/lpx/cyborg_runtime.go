@@ -8,7 +8,6 @@ package lpx
 import (
 	"fmt"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -64,7 +63,7 @@ func applyCyborgSWACacheIDs(container *corev1.Container, cyborgBatchSize int) {
 	}
 }
 
-const cyborgSwaBatchIDsEntrypointScript = `if [ -z "${CYBORG_SWA_CACHE_IDS+x}" ]; then
+const cyborgSwaBatchIDsInitialization = `if [ -z "${CYBORG_SWA_CACHE_IDS+x}" ]; then
 	: "${CYBORG_FPGA_GPI_REPLICA_INDEX:?CYBORG_FPGA_GPI_REPLICA_INDEX is required}"
 	: "${CYBORG_BATCH_SIZE:?CYBORG_BATCH_SIZE is required}"
 	base=$((CYBORG_FPGA_GPI_REPLICA_INDEX * CYBORG_BATCH_SIZE))
@@ -76,28 +75,19 @@ const cyborgSwaBatchIDsEntrypointScript = `if [ -z "${CYBORG_SWA_CACHE_IDS+x}" ]
 	done
 	export CYBORG_SWA_CACHE_IDS="${ids}"
 fi
-exec "$@"
 `
 
-// wrapCyborgDecodeForSwaBatch derives each batched replica's contiguous SWA cache IDs.
-func wrapCyborgDecodeForSwaBatch(container *corev1.Container, cyborgBatchSize int) error {
-	if cyborgBatchSize == 1 {
-		return nil
-	}
-	if len(container.Command) == 0 {
-		return fmt.Errorf("cyborg command is empty; cannot wrap image entrypoint for SWA batch ID generation")
+// wrapCyborgStartup prepares engine-local hosts and SWA IDs in one wrapper.
+func wrapCyborgStartup(container *corev1.Container, cyborgBatchSize int, configFile string) {
+	if cyborgBatchSize == 1 && configFile == "" {
+		return
 	}
 
-	// Preserve the complete image command while installing the batch-ID wrapper.
-	args := slices.Grow(
-		[]string{cyborgSwaBatchIDsEntrypointScript, "--"},
-		len(container.Command)+len(container.Args),
-	)
-	args = append(args, container.Command...)
-	args = append(args, container.Args...)
-	container.Command = []string{"/bin/sh", "-ec"}
-	container.Args = args
-	return nil
+	initialization := ""
+	if cyborgBatchSize > 1 {
+		initialization = cyborgSwaBatchIDsInitialization
+	}
+	wrapRuntimeStartup(container, "/usr/local/bin/cyborg", configFile, initialization)
 }
 
 // cyborgRuntimeIO requires a nonnil normalized build and validates its Cyborg replica domain.
