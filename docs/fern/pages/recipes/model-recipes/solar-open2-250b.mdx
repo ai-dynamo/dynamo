@@ -27,9 +27,9 @@ subtitle: "Serve Solar-Open2-250B-NVFP4 with Dynamo on B200, aggregated or disag
 ```bash
 kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=<token>
 ```
-- For the disaggregated profile, an RDMA/InfiniBand device plugin on the GPU nodes.
-  The recipe does not request the device, since its resource name differs between
-  clusters; see the disaggregated notes below for what to add.
+- For the disaggregated profile, an RDMA/InfiniBand device plugin exposing `rdma/ib`
+  on the GPU nodes. If your plugin advertises a different resource name, substitute it
+  in the worker resource requests.
 
 ## Prepare the model cache
 
@@ -190,31 +190,17 @@ carries no pull secret or other cluster-specific settings, so supply an
   register as SSM layers, and their convolution state must cross the KV-transfer
   boundary. Without this variable the engine asserts during initialization and
   the workers will not start.
-- **RDMA must be added for your cluster; the manifest does not request it.** The
-  device resource name is site-specific, so the recipe ships without it. Add to each
-  prefill and decode worker a request and limit for your RDMA resource, equal to the
-  worker's GPU count, together with these transport settings:
-
-  ```yaml
-  resources:
-    requests:
-      rdma/ib: '4'      # prefill: match the worker's GPU count; decode used 2
-    limits:
-      rdma/ib: '4'
-  env:
-    - {name: UCX_TLS, value: ^cuda_ipc}
-    - {name: UCX_RNDV_SCHEME, value: get_zcopy}
-    - {name: UCX_MAX_RNDV_RAILS, value: '4'}
-  ```
-
-  This is required, not optional: without the device request the plugin does not
-  inject `/dev/infiniband`, UCX falls back to TCP, and nothing logs an error. Verify
-  inside a running worker with `kubectl exec <pod> -c main -- ls /dev/infiniband` and
-  expect `uverbsN`, `umadN` and `rdma_cm`. One HCA per GPU is correct; requesting
-  more measured worse. `NCCL_IB_DISABLE=0` is already set in the manifest.
-  `UCX_NET_DEVICES` is deliberately left unset; pinning it produced
-  `NIXL_ERR_BACKEND`. The published figures were measured with these settings
-  applied.
+- **Each worker requests `rdma/ib` equal to its GPU count**, four on prefill and two
+  on each decode worker. This is required, not optional: without it the device plugin
+  does not inject `/dev/infiniband`, UCX falls back to TCP, and nothing logs an error.
+  Verify inside a running worker with `kubectl exec <pod> -c main -- ls /dev/infiniband`
+  and expect `uverbsN`, `umadN` and `rdma_cm`. One HCA per GPU is correct; requesting
+  more measured worse. If your RDMA device plugin advertises a different resource name
+  than `rdma/ib`, substitute it in both the requests and the limits.
+- Transport is configured with `NCCL_IB_DISABLE=0`, `UCX_TLS=^cuda_ipc`,
+  `UCX_RNDV_SCHEME=get_zcopy` and `UCX_MAX_RNDV_RAILS=4`. `UCX_MAX_RNDV_RAILS` tracks
+  the number of HCAs per worker; adjust it if your nodes differ. `UCX_NET_DEVICES` is
+  deliberately left unset; pinning it produced `NIXL_ERR_BACKEND`.
 - **Per-user output throughput runs close to the floor.** The disaggregated profile
   clears the 50 tok/s target with little margin, and individual runs on contended
   hardware may land at or below it.

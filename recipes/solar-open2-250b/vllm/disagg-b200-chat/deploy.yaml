@@ -28,6 +28,12 @@ spec:
     value: '1'
   - name: NCCL_NVLS_ENABLE
     value: '1'
+  - name: UCX_TLS
+    value: ^cuda_ipc
+  - name: UCX_RNDV_SCHEME
+    value: get_zcopy
+  - name: UCX_MAX_RNDV_RAILS
+    value: '4'
   - name: VLLM_SSM_CONV_STATE_LAYOUT
     value: DS
   - name: VLLM_ALLREDUCE_USE_SYMM_MEM
@@ -127,11 +133,13 @@ spec:
           resources:
             limits:
               nvidia.com/gpu: '4'
+              rdma/ib: '4'
             requests:
               cpu: '16'
               ephemeral-storage: 64Gi
               memory: 640Gi
               nvidia.com/gpu: '4'
+              rdma/ib: '4'
           volumeMounts:
           - name: shared-model-cache
             mountPath: /shared-model-cache
@@ -192,11 +200,13 @@ spec:
           resources:
             limits:
               nvidia.com/gpu: '2'
+              rdma/ib: '2'
             requests:
               cpu: '16'
               ephemeral-storage: 64Gi
               memory: 320Gi
               nvidia.com/gpu: '2'
+              rdma/ib: '2'
           volumeMounts:
           - name: shared-model-cache
             mountPath: /shared-model-cache
