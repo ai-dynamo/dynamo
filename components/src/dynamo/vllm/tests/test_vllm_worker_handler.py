@@ -2070,9 +2070,7 @@ class TestRLAdminRouteHardening:
         assert rpc_cancelled.is_set()
         handler.runtime.shutdown.assert_called_once_with()
         exit_mock.assert_called_once_with(1)
-        handler.runtime.end_health_check_maintenance.assert_called_once_with(
-            handler.runtime.begin_health_check_maintenance.return_value
-        )
+        handler.runtime.end_health_check_maintenance.assert_called_once_with(1)
 
     @pytest.mark.asyncio
     async def test_init_weights_update_group_returns_inner_timeout_error(
