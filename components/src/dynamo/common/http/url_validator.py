@@ -145,6 +145,11 @@ async def validate_url(url: str, policy: UrlValidationPolicy) -> str:
     if not url:
         raise UrlValidationError("URL is empty")
 
+    # Every message below is surfaced to the caller (the diffusion handlers
+    # turn it into a 400 body) and logged, so nothing client-supplied goes in
+    # at full length.
+    label = describe_media_source(url)
+
     parsed = urlparse(url)
     scheme = parsed.scheme.lower()
 
@@ -152,7 +157,9 @@ async def validate_url(url: str, policy: UrlValidationPolicy) -> str:
         return url
 
     if scheme not in ("http", "https"):
-        raise UrlValidationError(f"URL scheme '{scheme}' not allowed")
+        raise UrlValidationError(
+            f"URL scheme '{describe_media_source(scheme)}' not allowed"
+        )
 
     if scheme == "http" and not policy.allow_http:
         raise UrlValidationError(
@@ -161,11 +168,12 @@ async def validate_url(url: str, policy: UrlValidationPolicy) -> str:
 
     host = (parsed.hostname or "").lower()
     if not host:
-        raise UrlValidationError(f"URL has no host component: {url!r}")
+        raise UrlValidationError(f"URL has no host component: {label!r}")
 
     if not policy.allow_private_ips and host in _BLOCKED_HOSTS:
         raise UrlValidationError(
-            f"Host '{host}' is blocked (resolves to internal service)"
+            f"Host '{describe_media_source(host)}' is blocked "
+            "(resolves to internal service)"
         )
 
     try:
@@ -184,11 +192,15 @@ async def validate_url(url: str, policy: UrlValidationPolicy) -> str:
     try:
         infos = await loop.getaddrinfo(host, None)
     except socket.gaierror as exc:
-        raise UrlValidationError(f"Could not resolve host '{host}': {exc}") from exc
+        raise UrlValidationError(
+            f"Could not resolve host '{describe_media_source(host)}': {exc}"
+        ) from exc
     for info in infos:
         addr = info[4][0]
         if is_blocked_ip(addr):
-            raise UrlValidationError(f"Host '{host}' resolves to blocked IP '{addr}'")
+            raise UrlValidationError(
+                f"Host '{describe_media_source(host)}' resolves to blocked IP '{addr}'"
+            )
     return url
 
 

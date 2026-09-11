@@ -478,3 +478,42 @@ async def test_validate_media_reference_rejects_empty(tmp_path) -> None:
 
     with pytest.raises(UrlValidationError, match="empty"):
         await validate_media_reference("", policy)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https:///" + "A" * 200_000,  # no host component
+        "A" * 200_000 + "://x",  # scheme is client-supplied too
+    ],
+)
+async def test_validate_url_bounds_the_url_in_its_message(url) -> None:
+    """These messages became client-visible once the diffusion handlers
+    started mapping UrlValidationError to a 400 that carries the reason."""
+    with pytest.raises(UrlValidationError) as excinfo:
+        await validate_url(url, STRICT_HTTPS)
+
+    assert len(str(excinfo.value)) < 500
+
+
+async def test_redirect_chain_in_the_limit_message_is_bounded() -> None:
+    """The chain is entirely attacker-chosen URLs."""
+    from dynamo.common.http.base import HttpClient
+
+    long_hop = "https://example.com/" + "A" * 200_000
+
+    class _Client(HttpClient):
+        async def _fetch_simple(self, url, timeout, *, max_bytes=None):
+            raise AssertionError("unused")
+
+        async def _fetch_body_or_redirect(self, url, timeout, *, max_bytes=None):
+            return None, long_hop
+
+        async def close(self):
+            return None
+
+    policy = UrlValidationPolicy(allow_http=True, allow_private_ips=True)
+    with pytest.raises(UrlValidationError, match="Too many redirects") as excinfo:
+        await _Client().fetch_bytes(long_hop, 1.0, policy=policy)
+
+    assert len(str(excinfo.value)) < 1000

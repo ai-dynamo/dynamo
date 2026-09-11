@@ -144,8 +144,10 @@ class HttpClient(abc.ABC):
                 return body
 
             if hops_remaining <= 0:
+                # ``visited`` holds attacker-chosen URLs; describe each one.
+                chain = [describe_media_source(hop) for hop in visited]
                 raise UrlValidationError(
-                    f"Too many redirects (max={_MAX_REDIRECTS}); chain={visited}"
+                    f"Too many redirects (max={_MAX_REDIRECTS}); chain={chain}"
                 )
             hops_remaining -= 1
             current = redirect_to
