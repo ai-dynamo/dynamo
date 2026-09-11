@@ -229,7 +229,7 @@ async def test_chat_completion_success(http_server):
             assert content == "This is a mock response."
 
 
-HTTP_ERROR_CASES = [
+HTTP_ERROR_CASES = (
     (MSG_CONTAINS_ERROR, 400, MSG_CONTAINS_ERROR, "Bad Request"),
     (
         MSG_CONTAINS_STATUS_ERROR,
@@ -249,7 +249,7 @@ HTTP_ERROR_CASES = [
         "Internal server error",
         "Internal Server Error",
     ),
-]
+)
 
 
 def expected_error_body(status: int, message: str, error_type: str) -> Dict:
@@ -296,35 +296,30 @@ async def test_chat_completion_http_error(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("http_server", [WAIT_FOR_FIRST_ITEM], indirect=True)
-@pytest.mark.parametrize(
-    ("trigger", "status", "expected_message", "expected_type"), HTTP_ERROR_CASES
-)
 @pytest.mark.timeout(60)
 @pytest.mark.forked
-async def test_streaming_chat_completion_http_error_waits_for_first_item(
-    http_server,
-    trigger: str,
-    status: int,
-    expected_message: str,
-    expected_type: str,
-):
+async def test_streaming_chat_completion_http_error_waits_for_first_item(http_server):
     """With wait_for_first_item, an exception raised before the generator's first
     yield maps to the same HTTP error response for a streaming request as for a
-    non-streaming one."""
+    non-streaming one.
+
+    The status mapping itself belongs to test_chat_completion_http_error; this
+    pairs with test_streaming_chat_completion_http_error_default_commits_200 on
+    the same trigger, so the only difference is the option under test."""
     base_url, model_name = http_server
     url = f"{base_url}/v1/chat/completions"
     data = {
         "model": model_name,
-        "messages": [{"role": "user", "content": trigger}],
+        "messages": [{"role": "user", "content": MSG_CONTAINS_ERROR}],
         "stream": True,
     }
     async with aiohttp.ClientSession(
         timeout=aiohttp.ClientTimeout(total=10)
     ) as session:
         async with session.post(url, json=data) as response:
-            assert response.status == status
+            assert response.status == 400
             assert await response.json() == expected_error_body(
-                status, expected_message, expected_type
+                400, MSG_CONTAINS_ERROR, "Bad Request"
             )
 
 
