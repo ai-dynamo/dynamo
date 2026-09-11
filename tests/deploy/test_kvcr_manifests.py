@@ -51,9 +51,10 @@ def test_kvcr_variants_require_two_gpu_rdma_nodes(manifest_name: str) -> None:
 
 def test_process_local_variant_couples_state_agent_and_vllm() -> None:
     manifest = yaml.safe_load((_MANIFEST_DIR / "agg.yaml").read_text())
-    assert manifest["metadata"]["annotations"][
-        "nvidia.com/dynamo-discovery-backend"
-    ] == "etcd"
+    assert (
+        manifest["metadata"]["annotations"]["nvidia.com/dynamo-discovery-backend"]
+        == "etcd"
+    )
     pod_spec = _worker("agg.yaml")["podTemplate"]["spec"]
     main = pod_spec["containers"][0]
     command = main["args"][0]
@@ -64,7 +65,7 @@ def test_process_local_variant_couples_state_agent_and_vllm() -> None:
     assert "python3 -m dynamo.vllm" in command
     assert 'if [ "$POD_INDEX" = "0" ]' in command
     assert "DYN_DISCOVERY_BACKEND=etcd" in command
-    assert 'DYN_SYSTEM_PORT=9091' in command
+    assert "DYN_SYSTEM_PORT=9091" in command
     assert "--max-slots 2" in command
     assert 'wait -n "$state_agent_pid" "$vllm_pid"' in command
     assert "kvcr.kvcr_service" not in command
@@ -79,15 +80,15 @@ def test_process_local_variant_couples_state_agent_and_vllm() -> None:
 
 
 def test_memory_service_variant_keeps_guard_in_sidecar() -> None:
-    manifest = yaml.safe_load(
-        (_MANIFEST_DIR / "agg-memory-service.yaml").read_text()
+    manifest = yaml.safe_load((_MANIFEST_DIR / "agg-memory-service.yaml").read_text())
+    assert (
+        manifest["metadata"]["annotations"]["nvidia.com/dynamo-kube-discovery-mode"]
+        == "container"
     )
-    assert manifest["metadata"]["annotations"][
-        "nvidia.com/dynamo-kube-discovery-mode"
-    ] == "container"
-    assert manifest["metadata"]["annotations"][
-        "nvidia.com/dynamo-discovery-backend"
-    ] == "kubernetes"
+    assert (
+        manifest["metadata"]["annotations"]["nvidia.com/dynamo-discovery-backend"]
+        == "kubernetes"
+    )
     pod_spec = _worker("agg-memory-service.yaml")["podTemplate"]["spec"]
     main, sidecar = pod_spec["containers"]
     main_command = main["args"][0]
@@ -105,16 +106,12 @@ def test_memory_service_variant_keeps_guard_in_sidecar() -> None:
     assert "/run/kvcr/hold-engine-start" in main_command
     assert "owner_slot=00000000000000000000000000000000" in main_command
     assert "owner_slot=00000000000000000000000000000001" in main_command
-    assert all(
-        item["name"] != "POD_UID"
-        for container in (main, sidecar)
-        for item in container["env"]
-    )
+    assert all(item["name"] != "POD_UID" for item in main["env"])
+    pod_uid = next(item for item in sidecar["env"] if item["name"] == "POD_UID")
+    assert pod_uid["valueFrom"]["fieldRef"]["fieldPath"] == "metadata.uid"
 
     for resource_class in ("requests", "limits"):
-        assert sidecar["resources"][resource_class][
-            "${DYNAMO_RDMA_RESOURCE}"
-        ] == "1"
+        assert sidecar["resources"][resource_class]["${DYNAMO_RDMA_RESOURCE}"] == "1"
 
     for container in (main, sidecar):
         mounts = {mount["name"] for mount in container["volumeMounts"]}
@@ -161,8 +158,7 @@ def test_deploy_script_renders_selected_variant(memory_service: str) -> None:
         for container in component["podTemplate"]["spec"]["containers"]
     ]
     assert all(
-        container["image"] == "runtime:1.4.0@sha256:test"
-        for container in containers
+        container["image"] == "runtime:1.4.0@sha256:test" for container in containers
     )
     worker = next(
         component
@@ -170,9 +166,7 @@ def test_deploy_script_renders_selected_variant(memory_service: str) -> None:
         if component["name"] == "worker"
     )
     for container in worker["podTemplate"]["spec"]["containers"]:
-        env_by_name = {
-            item["name"]: item.get("value") for item in container["env"]
-        }
+        env_by_name = {item["name"]: item.get("value") for item in container["env"]}
         assert env_by_name["UCX_NET_DEVICES"] == "mlx5_test:1"
         assert container["resources"]["limits"]["rdma/test"] == "1"
     if memory_service == "true":
