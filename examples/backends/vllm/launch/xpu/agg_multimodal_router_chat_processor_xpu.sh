@@ -259,7 +259,8 @@ for f in $(seq 1 "${NUM_FRONTENDS}"); do
 
     echo
     echo "=== Starting frontend replica ${f} (HTTP ${FE_HTTP_PORT}) ==="
-    env "${COMMON_ENV[@]}" \
+    env -u DYN_SYSTEM_PORT -u DYN_SYSTEM_PORT1 -u DYN_SYSTEM_PORT2 -u DYN_SYSTEM_PORT3 \
+        "${COMMON_ENV[@]}" \
         "DYN_LOG=debug" \
         python -m dynamo.frontend \
             --http-port "${FE_HTTP_PORT}" \
