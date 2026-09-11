@@ -1095,14 +1095,10 @@ impl Worker {
             })?;
         }
         // Readiness is this worker's to publish: it is not serviceable until every
-        // mandatory endpoint is registered and the engine routes are open. Take the
-        // hold before registration, so the runtime's own transport-registration
-        // signal cannot report ready ahead of the gate below.
-        endpoint
-            .drt()
-            .system_health()
-            .lock()
-            .hold_endpoint_readiness(endpoint.name());
+        // mandatory endpoint is registered and the engine routes are open. The
+        // hold suppresses the whole process's readiness, so covering the primary
+        // endpoint also covers the RL endpoint registered further down.
+        let readiness_hold = ReadinessHold::take(&endpoint, endpoint.name());
 
         let start_fut = builder.start_with_registration();
         tokio::pin!(start_fut);
@@ -1186,8 +1182,10 @@ impl Worker {
 
         // First instant the worker is serviceable: every mandatory endpoint is
         // registered, the token is uncancelled, and engine routes are open. The
-        // readiness hold taken before registration is what keeps the runtime's
-        // transport-registration signal from reporting ready before this point.
+        // hold taken before registration is what kept the runtime from reporting
+        // ready before this point; drop it here, because the write below
+        // publishes readiness through the very signal it suppresses.
+        drop(readiness_hold);
         set_worker_health(&endpoint, HealthStatus::Ready);
 
         let serve_fut = primary_endpoint.wait();
@@ -1333,6 +1331,40 @@ impl Worker {
     }
 }
 
+/// Withholds the runtime's transport-registration readiness signal for one
+/// endpoint until dropped, so the worker's own gate decides when that endpoint
+/// counts as ready.
+///
+/// Taking the hold *before* the endpoint registers is what makes this race-free
+/// on both request planes: the NATS path publishes readiness from a spawned
+/// task, so a write issued after registration returns would race it.
+///
+/// Never let one drop while the `SystemHealth` mutex is held — `Drop` takes that
+/// lock and it is not reentrant.
+struct ReadinessHold {
+    system_health: Arc<parking_lot::Mutex<dynamo_runtime::SystemHealth>>,
+    endpoint: String,
+}
+
+impl ReadinessHold {
+    fn take(endpoint: &dynamo_runtime::component::Endpoint, name: &str) -> Self {
+        let system_health = endpoint.drt().system_health();
+        system_health.lock().hold_endpoint_readiness(name);
+        Self {
+            system_health,
+            endpoint: name.to_string(),
+        }
+    }
+}
+
+impl Drop for ReadinessHold {
+    fn drop(&mut self) {
+        self.system_health
+            .lock()
+            .release_endpoint_readiness(&self.endpoint);
+    }
+}
+
 /// Publish worker readiness on both layers the runtime's health route reads.
 ///
 /// `SystemHealth::get_health_status` consults `use_endpoint_health_status`, then
@@ -1348,10 +1380,6 @@ impl Worker {
 fn set_worker_health(endpoint: &dynamo_runtime::component::Endpoint, status: HealthStatus) {
     let system_health = endpoint.drt().system_health();
     let mut system_health = system_health.lock();
-    // This call *is* the worker's readiness decision, so the startup hold has
-    // served its purpose; drop it before writing so later transport signals
-    // behave normally.
-    system_health.release_endpoint_readiness(endpoint.name());
     match status {
         HealthStatus::Ready => system_health.set_endpoint_registered(endpoint.name()),
         HealthStatus::NotReady => {

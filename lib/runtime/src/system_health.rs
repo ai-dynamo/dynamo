@@ -121,11 +121,19 @@ impl SystemHealth {
         }
     }
 
-    /// Withhold readiness for `endpoint` until [`release_endpoint_readiness`]:
-    /// transport registration no longer marks it ready, so its owner decides when
-    /// it is serviceable. Take the hold *before* the endpoint registers with its
-    /// transport — that is what makes this race-free on both request planes, since
-    /// the NATS path publishes readiness from a spawned task.
+    /// Withhold readiness for `endpoint` until [`release_endpoint_readiness`].
+    ///
+    /// Two effects, because one alone is not enough: transport registration no
+    /// longer marks this endpoint ready, and while any hold is outstanding
+    /// [`get_health_status`] reports not-ready for the whole process. Without the
+    /// second, a sibling endpoint registering unheld would answer the health route
+    /// on the held endpoint's behalf.
+    ///
+    /// Take the hold *before* the endpoint registers with its transport — that is
+    /// what makes this race-free on both request planes, since the NATS path
+    /// publishes readiness from a spawned task.
+    ///
+    /// [`get_health_status`]: SystemHealth::get_health_status
     ///
     /// [`release_endpoint_readiness`]: SystemHealth::release_endpoint_readiness
     pub fn hold_endpoint_readiness(&self, endpoint: &str) {
@@ -168,6 +176,13 @@ impl SystemHealth {
                     "notready".to_string()
                 },
             );
+        }
+
+        // An owner that has withheld an endpoint's readiness has not yet declared
+        // itself serviceable. Report not-ready for the whole process rather than
+        // letting some other endpoint's registration answer for it.
+        if !self.readiness_holds.read().unwrap().is_empty() {
+            return (false, endpoints);
         }
 
         let healthy = if !self.use_endpoint_health_status.is_empty() {
@@ -422,9 +437,9 @@ mod tests {
         let health = system_health(false);
         health.hold_endpoint_readiness(ENDPOINT);
         health.set_endpoint_registered(ENDPOINT);
-        assert_eq!(
+        assert_ne!(
             health.get_endpoint_health_status(ENDPOINT),
-            None,
+            Some(HealthStatus::Ready),
             "a held endpoint must not be marked ready by transport registration"
         );
 
@@ -435,6 +450,28 @@ mod tests {
             Some(HealthStatus::Ready),
             "after release the owner's registration signal publishes readiness"
         );
+    }
+
+    /// A sibling endpoint registering while another is held must not answer the
+    /// health route on the held endpoint's behalf. With the canary on and no
+    /// registered target, `get_health_status` otherwise reduces to "every
+    /// endpoint present in the map is ready", which a held endpoint is absent
+    /// from.
+    #[test]
+    fn an_unheld_sibling_endpoint_cannot_report_the_worker_ready() {
+        let health = system_health(true);
+        health.hold_endpoint_readiness(ENDPOINT);
+        health.set_endpoint_registered(ENDPOINT);
+        health.set_endpoint_registered("rl_system");
+
+        assert!(
+            !health.get_health_status().0,
+            "a held endpoint must keep the worker not-ready however many siblings register"
+        );
+
+        health.release_endpoint_readiness(ENDPOINT);
+        health.set_endpoint_registered(ENDPOINT);
+        assert!(health.get_health_status().0);
     }
 
     /// The hold gates only the endpoint it names.
