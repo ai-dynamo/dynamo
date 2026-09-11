@@ -1058,8 +1058,10 @@ async fn encode_startup_rejects_non_multimodal_engine() {
 
 #[tokio::test]
 async fn generation_preserves_empty_engine_text_while_stop_text_is_buffered() {
-    // Empty engine text must stay present, or the frontend detokenizes these
-    // IDs before vLLM releases the buffered text and duplicates the prefix.
+    // Example: vLLM emits token 42 with `text: ""` while buffering a long,
+    // nonmatching stop string, then emits token 43 with `text: " buffered text"`.
+    // Expect the first delta to remain `Some("")`, so the frontend waits for
+    // vLLM's buffered text instead of detokenizing token 42 and duplicating it.
     let outputs = [
         (vec![42], ""),
         (vec![43], " buffered text"),
