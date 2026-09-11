@@ -29,23 +29,38 @@ pytestmark = [
 
 _AGENT_CONTEXT = {"session_id": "child-1", "parent_session_id": "root-0"}
 
+# Default for the stub's session kwargs, so a recorded call distinguishes a kwarg
+# the handler omitted from one it passed explicitly (even as None).
+_UNSET = object()
+
 
 class _SessionAwareEngine:
-    """Engine whose async_generate declares both session kwargs."""
+    """Engine whose async_generate declares both session kwargs.
+
+    Each recorded call holds only the session kwargs the handler actually passed.
+    """
 
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
 
     async def async_generate(
         self,
-        session_id: Optional[str] = None,
-        parent_session_id: Optional[str] = None,
+        session_id: Any = _UNSET,
+        parent_session_id: Any = _UNSET,
         **kwargs: Any,
     ):
-        # **kwargs absorbs the unrelated per-request arguments the handlers pass;
-        # the two session kwargs stay declared so the signature filter is exercised.
+        # **kwargs absorbs the unrelated per-request arguments the handlers pass.
+        # A **kwargs signature makes the compat filter pass every kwarg through, so
+        # the record below is exactly what the handler sent.
         self.calls.append(
-            {"session_id": session_id, "parent_session_id": parent_session_id}
+            {
+                name: value
+                for name, value in (
+                    ("session_id", session_id),
+                    ("parent_session_id", parent_session_id),
+                )
+                if value is not _UNSET
+            }
         )
 
         async def stream():
@@ -253,4 +268,4 @@ async def test_generate_without_agent_context_sends_no_session_kwargs():
     async for _ in handler.generate({}, _context()):  # noqa: B007
         pass
 
-    assert engine.calls == [{"session_id": None, "parent_session_id": None}]
+    assert engine.calls == [{}]
