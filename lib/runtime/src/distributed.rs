@@ -374,6 +374,7 @@ impl DistributedRuntime {
                         .expect("System status server info should only be set once");
                 }
                 Err(e) => {
+                    distributed_runtime.runtime.shutdown();
                     return Err(e.context("system status server startup failed"));
                 }
             }
