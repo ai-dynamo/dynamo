@@ -12,9 +12,9 @@ from unittest import mock
 from unittest.mock import MagicMock
 
 import pytest
+import torch
 
 from dynamo.llm.exceptions import InvalidArgument
-import torch
 
 if not torch.cuda.is_available():
     pytest.skip(
