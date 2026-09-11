@@ -107,10 +107,37 @@ pub(super) fn replay_slots(
     ))
 }
 
+/// Build the unseeded production selector.
+///
+/// See [`replay_selector_with_seed`] for what "unseeded" costs: this selector is
+/// **not** replay-reproducible on scored ties. Online replay uses it deliberately --
+/// it is a live wall-clock baseline that makes no reproducibility promise.
 pub(super) fn replay_selector(config: &KvRouterConfig) -> anyhow::Result<DefaultWorkerSelector> {
     replay_selector_with_seed(config, None)
 }
 
+/// Build the worker selector for a replay run.
+///
+/// `selector_seed` is what makes routing reproducible, and the difference is not
+/// cosmetic. Unseeded (`None`), `DefaultWorkerSelector` walks candidates in
+/// `HashMap<WorkerId, _>` iteration order (`kv-router` `scheduling/filter.rs`,
+/// `for (&worker_id, config) in workers`) and breaks scored ties with the
+/// process-global `fastrand::usize(0..tie_count)`; above zero temperature it
+/// softmax-samples from a vector built in that same order. `RandomState` reseeds
+/// per `HashMap` instance, so two routers built identically in one process can and
+/// do route the same trace differently -- see the eight-worker permutations in
+/// `a_fixed_selector_seed_reproduces_a_fixed_routing_sequence`.
+///
+/// Seeded (`Some(..)`), the selector sorts candidates by `(worker_id, dp_rank)`
+/// first and draws from its own `fastrand::Rng`, so the sequence is a pure
+/// function of the seed and the trace.
+///
+/// The seeded constructor is gated behind `dynamo-kv-router/bench`, which
+/// `dynamo-mocker`'s test/benchmark-only `replay-bench` feature selects. That
+/// gating is deliberate -- `Cargo.toml` states production replay keeps the random
+/// selector -- so this refuses rather than silently downgrading to an unseeded
+/// selector a caller asked not to have. Consumers that need byte-exact replay
+/// (`aiperf-simulate` `mode: offline`) enable `replay-bench` and require a seed.
 pub(super) fn replay_selector_with_seed(
     config: &KvRouterConfig,
     selector_seed: Option<u64>,

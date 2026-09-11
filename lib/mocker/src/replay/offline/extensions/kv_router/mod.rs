@@ -1252,10 +1252,10 @@ mod tests {
     use tempfile::NamedTempFile;
     use uuid::Uuid;
 
-    use super::{
-        KvRouterPlacement, OfflineReplayRouter, ReplayRequestHashes, SyncReplayIndexer,
-        WorkerAdmission,
-    };
+    // `KvRouterPlacement` is only reachable from the `cfg(not(replay-bench))` refusal test.
+    #[cfg(not(feature = "replay-bench"))]
+    use super::KvRouterPlacement;
+    use super::{OfflineReplayRouter, ReplayRequestHashes, SyncReplayIndexer, WorkerAdmission};
     use crate::common::protocols::{DirectRequest, MockEngineArgs};
     use crate::replay::ReplayPrefillLoadEstimator;
     use aisimulate_core::replay::{ReplayPromptTokenSource, ReplayRequestContext};
@@ -1303,6 +1303,60 @@ mod tests {
             Err(error) => error.to_string(),
         };
         assert!(error.contains("replay-bench"), "{error}");
+    }
+
+    /// The seeded selector is the only replay-reproducible one, and every
+    /// byte-exact-parity consumer depends on that. Nothing asserted it: the
+    /// nearest test (`kv_composition_uses_only_explicit_canonical_determinism`)
+    /// only checks that `CanonicalV1` yields the seed *value*, not that the
+    /// seed actually reproduces a routing sequence.
+    ///
+    /// Scored ties are where reproducibility is won or lost. Eight identical
+    /// idle workers make the first request a pure 8-way tie and each later
+    /// request a tie among the still-idle remainder, so the resulting
+    /// dispatch permutation is decided entirely by the selector's RNG.
+    #[cfg(feature = "replay-bench")]
+    #[test]
+    fn a_fixed_selector_seed_reproduces_a_fixed_routing_sequence() {
+        const WORKERS: usize = 8;
+
+        fn route_with_seed(seed: u64) -> Vec<usize> {
+            let mut router = OfflineReplayRouter::new_with_selector_seed(
+                &replay_args(),
+                Some(router_config()),
+                None,
+                WORKERS,
+                Some(seed),
+            )
+            .unwrap();
+            (0..WORKERS as u128)
+                .map(|index| {
+                    // Distinct tokens per request: no prefix cache overlap, so cost
+                    // is driven by load alone and the ties are genuine.
+                    let effects = router
+                        .on_request_arrival(&request(index + 1, index as u32 + 1), None, 0.0)
+                        .unwrap();
+                    assert_eq!(effects.admissions.len(), 1);
+                    effects.admissions[0].worker_idx
+                })
+                .collect()
+        }
+
+        let first = route_with_seed(0xd1a0_5eed);
+        let second = route_with_seed(0xd1a0_5eed);
+        assert_eq!(
+            first, second,
+            "the same selector seed must reproduce the same routing sequence"
+        );
+
+        // Control: if the sequence were seed-independent (e.g. every tie resolved
+        // to the lowest worker id) the assertion above would pass vacuously.
+        let other_seed = route_with_seed(0x1234_5678);
+        assert_ne!(
+            first, other_seed,
+            "a different seed must be able to produce a different routing sequence, \
+             otherwise the equality above proves nothing about the seed"
+        );
     }
 
     fn router_config() -> KvRouterConfig {
