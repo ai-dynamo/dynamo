@@ -39,7 +39,8 @@ while [[ $# -gt 0 ]]; do
             echo "  DYN_HTTP_PORT           Dynamo frontend port (default: 8000)"
             echo "  DYN_SYSTEM_PORT         Dynamo sidecar system port (default: 8081)"
             echo "  TRTLLM_GRPC_PORT        TensorRT-LLM gRPC port (default: 50051)"
-            echo "  TRTLLM_CONTEXT_LENGTH   Registered model context length (default: 4096)"
+            echo "  TRTLLM_CONTEXT_LENGTH   Model context length, applied to both the engine and the"
+            echo "                          sidecar (default: 4096; unset when --max_seq_len is given)"
             exit 0
             ;;
         *)
@@ -62,8 +63,28 @@ trap trtllm_exit_trap EXIT
 
 TRTLLM_PYTHON="${TRTLLM_PYTHON:-python3}"
 TRTLLM_GRPC_PORT="${TRTLLM_GRPC_PORT:-50051}"
-TRTLLM_CONTEXT_LENGTH="${TRTLLM_CONTEXT_LENGTH:-4096}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+
+# Keep the engine and the sidecar on one number. Started without `--max_seq_len`,
+# TensorRT-LLM reports its `max_input_len` default instead of a context length
+# and the sidecar discards it, so pass the same value to both. When the caller
+# supplies `--max_seq_len`, theirs wins and the sidecar adopts the engine's
+# report rather than overriding it with a default it was never told about.
+TRTLLM_MAX_SEQ_LEN_ARGS=()
+TRTLLM_CONTEXT_LENGTH_ARGS=()
+trtllm_max_seq_len_supplied=0
+for arg in "${EXTRA_ARGS[@]}"; do
+    case "$arg" in
+        --max_seq_len|--max_seq_len=*) trtllm_max_seq_len_supplied=1 ;;
+    esac
+done
+if [[ "$trtllm_max_seq_len_supplied" -eq 0 ]]; then
+    TRTLLM_CONTEXT_LENGTH="${TRTLLM_CONTEXT_LENGTH:-4096}"
+    TRTLLM_MAX_SEQ_LEN_ARGS=(--max_seq_len "$TRTLLM_CONTEXT_LENGTH")
+fi
+if [[ -n "$TRTLLM_CONTEXT_LENGTH" ]]; then
+    TRTLLM_CONTEXT_LENGTH_ARGS=(--context-length "$TRTLLM_CONTEXT_LENGTH")
+fi
 
 # `--grpc` needs `smg-grpc-proto`, which TRT-LLM keeps behind its optional
 # `grpc-smg` extra. Constraint copied from that extra so we resolve what
@@ -83,7 +104,7 @@ fi
 
 print_launch_banner "Launching TensorRT-LLM Native-gRPC Sidecar (1 GPU)" "$MODEL" "$HTTP_PORT" \
     "TensorRT-LLM gRPC: 127.0.0.1:${TRTLLM_GRPC_PORT}" \
-    "Context length:    ${TRTLLM_CONTEXT_LENGTH}"
+    "Context length:    ${TRTLLM_CONTEXT_LENGTH:-from engine report}"
 
 python3 -m dynamo.frontend &
 
@@ -93,6 +114,7 @@ CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
     --grpc \
     --host 127.0.0.1 \
     --port "$TRTLLM_GRPC_PORT" \
+    "${TRTLLM_MAX_SEQ_LEN_ARGS[@]}" \
     "${TRTLLM_GPU_MEM_ARGS[@]}" \
     "${EXTRA_ARGS[@]}" &
 
@@ -100,6 +122,6 @@ DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}" \
     dynamo-trtllm-sidecar \
     --grpc-endpoint "127.0.0.1:${TRTLLM_GRPC_PORT}" \
     --model-path "$MODEL" \
-    --context-length "$TRTLLM_CONTEXT_LENGTH" &
+    "${TRTLLM_CONTEXT_LENGTH_ARGS[@]}" &
 
 wait_any_exit
