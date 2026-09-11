@@ -19,11 +19,8 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
-    pytest.mark.framework_agnostic,
     pytest.mark.core,
-    pytest.mark.sglang,
-    pytest.mark.vllm,
-    pytest.mark.trtllm,
+    pytest.mark.parallel,
 ]
 
 
