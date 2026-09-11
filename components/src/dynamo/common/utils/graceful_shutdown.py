@@ -181,24 +181,47 @@ def install_signal_handlers(
     drain_callback: Optional[Callable[[], Coroutine]] = None,
     pre_shutdown_callback: Optional[Callable[[], Coroutine]] = None,
     cleanup_callback: Optional[Callable[[], Coroutine]] = None,
-) -> None:
+) -> Callable[[], Coroutine]:
+    """Install SIGTERM/SIGINT handlers and return an awaitable that joins the
+    shutdown once it has been triggered.
+
+    The caller **must** await the returned callable in a ``finally`` around its
+    serve loop. The shutdown runs as a detached task, and the sequence sets
+    ``shutdown_event`` before awaiting the runtime teardown — so the serve
+    coroutine wakes, returns, and ``asyncio.run`` closes the loop while the
+    teardown is still suspended. Without the join, the teardown this helper
+    exists to perform is destroyed pending.
+    """
     shutdown_task: Optional[asyncio.Task[None]] = None
 
     def _on_shutdown_done(task: asyncio.Task[None]) -> None:
-        nonlocal shutdown_task
         try:
             task.result()
         except asyncio.CancelledError:
             logger.info("Graceful shutdown task cancelled")
         except Exception:
             logger.exception("Graceful shutdown task failed")
-        finally:
-            if shutdown_task is task:
-                shutdown_task = None
+
+    async def wait_for_shutdown() -> None:
+        """Join the shutdown task, if a signal started one. No-op otherwise."""
+        task = shutdown_task
+        if task is None:
+            return
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # The joiner was cancelled, not the shutdown. `shield` keeps the
+            # teardown running; re-raise so the caller's own cancellation
+            # semantics are unchanged.
+            raise
+        except Exception:
+            # Already reported by the done-callback; never let a failed
+            # teardown mask the serve loop's own result.
+            pass
 
     def signal_handler() -> None:
         nonlocal shutdown_task
-        if shutdown_task is not None and not shutdown_task.done():
+        if shutdown_task is not None:
             logger.debug("Shutdown already in progress; ignoring duplicate signal")
             return
 
@@ -222,3 +245,5 @@ def install_signal_handlers(
         "Signal handlers set up for graceful shutdown "
         "(discovery unregister + grace period)"
     )
+
+    return wait_for_shutdown

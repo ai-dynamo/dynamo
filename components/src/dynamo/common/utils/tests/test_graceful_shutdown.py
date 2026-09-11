@@ -281,3 +281,65 @@ def test_cleanup_callback_timeout_does_not_block_shutdown(monkeypatch):
 
     asyncio.run(_run())
     mock_runtime.shutdown_and_wait.assert_awaited_once()
+
+
+def test_install_signal_handlers_returns_a_joinable_teardown():
+    """Regression: the shutdown task was detached and nothing joined it.
+
+    The sequence sets ``shutdown_event`` *before* awaiting the runtime
+    teardown, so the serve loop wakes and returns while the teardown is still
+    suspended; ``asyncio.run`` then closes the loop and destroys it pending.
+    The frontend grew a join for exactly this; the helper every backend uses
+    did not.
+
+    Asserts the teardown actually *completes*, not merely that a joiner exists.
+    """
+    _gs._shutdown_started.clear()
+    teardown_finished = False
+
+    async def slow_teardown():
+        nonlocal teardown_finished
+        await asyncio.sleep(0.05)
+        teardown_finished = True
+
+    runtime = MagicMock()
+    runtime.shutdown_and_wait = slow_teardown
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        shutdown_event = asyncio.Event()
+        wait_for_shutdown = install_signal_handlers(
+            loop, runtime, [], shutdown_event, grace_period_s=0
+        )
+        assert callable(wait_for_shutdown), "the caller needs something to join"
+
+        # Stand in for the signal: the handler is registered on the loop, and
+        # unit tests must not raise a real SIGTERM at the test runner.
+        for sig, handler in _installed_handlers(loop):
+            handler()
+            break
+
+        # The serve loop's wake-up, i.e. what the backend `main` awaits on.
+        await shutdown_event.wait()
+        assert not teardown_finished, "precondition: teardown still in flight"
+
+        await wait_for_shutdown()
+        assert teardown_finished, (
+            "wait_for_shutdown returned before the runtime teardown completed; "
+            "the event loop would close on a pending teardown"
+        )
+
+    asyncio.run(scenario())
+
+
+def _installed_handlers(loop):
+    """The SIGTERM/SIGINT callbacks `install_signal_handlers` registered."""
+    import signal as _signal
+
+    found = []
+    for sig in (_signal.SIGTERM, _signal.SIGINT):
+        handle = loop._signal_handlers.get(sig)  # type: ignore[attr-defined]
+        if handle is not None:
+            found.append((sig, handle._callback))
+    assert found, "no signal handler was installed"
+    return found

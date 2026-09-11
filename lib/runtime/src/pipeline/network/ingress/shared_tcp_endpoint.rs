@@ -21,6 +21,7 @@ use parking_lot::{Mutex, RwLock};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use std::time::Instant;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -478,7 +479,12 @@ impl SharedTcpServer {
         Ok(())
     }
 
-    pub async fn remove_handler(&self, endpoint_path: &str, endpoint_name: &str) {
+    pub async fn remove_handler(
+        &self,
+        endpoint_path: &str,
+        endpoint_name: &str,
+        drain_timeout: Duration,
+    ) {
         if let Some((_, handler)) = self.handlers.remove(endpoint_path) {
             handler
                 .system_health
@@ -494,7 +500,7 @@ impl SharedTcpServer {
                 handler.inflight.clone(),
                 handler.notify.clone(),
                 endpoint_name,
-                crate::runtime::graceful_shutdown_timeout(),
+                drain_timeout,
             )
             .await;
         }
@@ -755,7 +761,12 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
         .await
     }
 
-    async fn unregister_endpoint(&self, endpoint_name: &str, instance_id: u64) -> Result<()> {
+    async fn unregister_endpoint(
+        &self,
+        endpoint_name: &str,
+        instance_id: u64,
+        drain_timeout: Duration,
+    ) -> Result<()> {
         let path = {
             let mut matches = self.handlers.iter().filter(|entry| {
                 entry.value().endpoint_name == endpoint_name
@@ -769,7 +780,8 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
             path
         };
         if let Some(path) = path {
-            self.remove_handler(&path, endpoint_name).await;
+            self.remove_handler(&path, endpoint_name, drain_timeout)
+                .await;
         }
         Ok(())
     }
@@ -778,9 +790,14 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
         &self,
         endpoint_id: &EndpointId,
         instance_id: u64,
+        drain_timeout: Duration,
     ) -> Result<()> {
-        self.remove_handler(&instance_path(endpoint_id, instance_id), &endpoint_id.name)
-            .await;
+        self.remove_handler(
+            &instance_path(endpoint_id, instance_id),
+            &endpoint_id.name,
+            drain_timeout,
+        )
+        .await;
         Ok(())
     }
 
@@ -962,7 +979,9 @@ mod tests {
             let server = server.clone();
             let endpoint_path = endpoint_path.clone();
             async move {
-                server.remove_handler(&endpoint_path, "test_endpoint").await;
+                server
+                    .remove_handler(&endpoint_path, "test_endpoint", Duration::from_secs(5))
+                    .await;
                 Instant::now()
             }
         });
@@ -1105,7 +1124,7 @@ mod tests {
             if survivor_id == 0xa && survivor_endpoint.name == endpoint.name {
                 assert!(
                     plane
-                        .unregister_endpoint(&endpoint.name, 0xa)
+                        .unregister_endpoint(&endpoint.name, 0xa, Duration::from_secs(5))
                         .await
                         .is_err()
                 );
@@ -1130,7 +1149,7 @@ mod tests {
 
             // Removing one registration must preserve every distinct endpoint instance.
             plane
-                .unregister_endpoint_instance(&endpoint, 0xa)
+                .unregister_endpoint_instance(&endpoint, 0xa, Duration::from_secs(5))
                 .await
                 .unwrap();
             let address = format!("{addr}/{}", instance_path(&survivor_endpoint, survivor_id));
@@ -1150,7 +1169,7 @@ mod tests {
             );
             // With one match left, the original API must still remove that registration.
             plane
-                .unregister_endpoint(&survivor_endpoint.name, survivor_id)
+                .unregister_endpoint(&survivor_endpoint.name, survivor_id, Duration::from_secs(5))
                 .await
                 .unwrap();
             assert!(
@@ -1159,7 +1178,7 @@ mod tests {
                     .starts_with(crate::pipeline::network::ACK_UNAVAILABLE_PREFIX.as_bytes())
             );
             plane
-                .unregister_endpoint(&survivor_endpoint.name, survivor_id)
+                .unregister_endpoint(&survivor_endpoint.name, survivor_id, Duration::from_secs(5))
                 .await
                 .unwrap();
             cancel.cancel();
