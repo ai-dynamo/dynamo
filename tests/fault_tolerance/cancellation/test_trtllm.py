@@ -456,7 +456,7 @@ def test_request_cancellation_trtllm_decode_handoff_cancel(
 
     The decode-entry log is emitted before KV transfer begins, so this test does not prove that
     TRT-LLM supports an engine abort during transfer. It verifies Dynamo's deferred-abort behavior:
-    cancellation completes after the handoff, resources are cleaned up, and both workers remain usable.
+    the engine abort fires after the handoff and both workers remain usable.
 
     Timing (Last Run: 2025-12-09): ~115s total (2 workers at 45% GPU each)
     - Engine initialization: ~92s (frontend: 2s, prefill worker: 45s, decode worker: 45s sequential)
@@ -515,11 +515,21 @@ def test_request_cancellation_trtllm_decode_handoff_cancel(
                 logger.info(f"Cancelled request ID: {request_id} after decode handoff")
 
                 # Poll for "Aborted Request ID" in decode worker
-                _, decode_log_offset = poll_for_pattern(
+                poll_for_pattern(
                     process=decode_worker,
                     pattern=f"Aborted Request ID: {request_id}",
                     log_offset=decode_log_offset,
                     max_wait_ms=10_000,
+                )
+
+                # The request-level abort log above is emitted when the wrapper is
+                # invoked. Require the later engine-abort signal so a stuck deferred
+                # task cannot masquerade as successful cancellation.
+                _, decode_log_offset = poll_for_pattern(
+                    process=decode_worker,
+                    pattern="Deferred abort: engine abort fired",
+                    log_offset=decode_log_offset,
+                    max_wait_ms=30_000,
                 )
 
                 # Verify frontend log has kill message
@@ -543,7 +553,9 @@ def test_request_cancellation_trtllm_decode_handoff_cancel(
                     process=decode_worker,
                     pattern="Decode Request ID: ",
                     log_offset=decode_log_offset,
+                    max_wait_ms=30_000,
                     match_type="contains",
+                    cancellable_request=cancellable_req,
                 )
                 read_streaming_responses(
                     cancellable_req,

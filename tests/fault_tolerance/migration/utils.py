@@ -9,11 +9,10 @@ import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
-from dataclasses import dataclass, field
 
 import pytest
 import requests
-from openai import APIError, OpenAI
+from openai import APIError
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import (
@@ -22,18 +21,9 @@ from tests.utils.managed_process import (
 from tests.utils.managed_process import ManagedProcess, terminate_process_tree
 from tests.utils.prometheus import sum_metric_samples
 
+from .request_utils import start_request, validate_response, wait_for_response
+
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class MigrationResponse:
-    """Client-visible response state collected by the request thread."""
-
-    observations: list[tuple[str | None | Exception, float]] = field(
-        default_factory=list
-    )
-    finish_reason: str | None = None
-    completion_tokens: int | None = None
 
 
 @contextmanager
@@ -71,7 +61,7 @@ def managed_processes_concurrently(
         for index, process in enumerate(processes)
     ]
 
-    def cancel_startup(*, terminate_in_progress: bool = False) -> None:
+    def cancel_startup() -> None:
         startup_cancelled.set()
         for future in futures:
             future.cancel()
@@ -83,14 +73,10 @@ def managed_processes_concurrently(
                 process.__exit__(None, None, None)
             except Exception:
                 logger.exception("Failed to clean up a concurrently started process")
-        if terminate_in_progress:
-            for process, future in zip(processes, futures, strict=True):
-                if future.done() or process in started:
-                    continue
-                try:
-                    process.__exit__(None, None, None)
-                except Exception:
-                    logger.exception("Failed to terminate a process during startup")
+        for process, future in zip(processes, futures, strict=True):
+            if future.done() or process in started:
+                continue
+            process.cancel_startup()
         # Wait until every startup task has either observed the terminated child
         # or cleaned up a late start. This prevents fixture/port teardown from
         # racing a worker that is still inside ManagedProcess.__enter__().
@@ -103,7 +89,7 @@ def managed_processes_concurrently(
         cancel_startup()
         raise
     except BaseException:
-        cancel_startup(terminate_in_progress=True)
+        cancel_startup()
         raise
     else:
         executor.shutdown(wait=True)
@@ -142,211 +128,6 @@ class DynamoFrontendProcess(BaseDynamoFrontendProcess):
             display_name="frontend",
         )
         self.timeout = startup_timeout_s
-
-
-def _make_client(frontend_port: int) -> OpenAI:
-    """Build an OpenAI client pointed at the test frontend.
-
-    max_retries=0 so fault-tolerance tests see the first error instead of
-    silent retries; api_key is a placeholder since the frontend doesn't auth.
-    """
-    return OpenAI(
-        base_url=f"http://localhost:{frontend_port}/v1",
-        api_key="not-needed",
-        max_retries=0,
-        timeout=240,
-    )
-
-
-def start_completion_request(
-    frontend_port: int,
-    stream: bool,
-    use_long_prompt: bool = False,
-    max_tokens: int | None = None,
-    long_prompt_repetitions: int = 8_000,
-    force_max_output_tokens: bool = False,
-) -> tuple[threading.Thread, MigrationResponse]:
-    """
-    Start a long-running completion request in a separate thread.
-
-    Responses are processed internally to extract content and terminal metadata.
-    The first observation is ``(None, start_time)``; subsequent observations
-    contain extracted content or exceptions.
-
-    Args:
-        frontend_port: Port where the frontend is running
-        stream: Whether to use streaming responses
-        use_long_prompt: Whether to use a long prompt (~8000 tokens)
-        max_tokens: Explicit output-token cap, or the backend default when unset
-        long_prompt_repetitions: Number of repeated words in the long prompt
-        force_max_output_tokens: Disable EOS and require the full output-token
-            budget. Requires max_tokens.
-
-    Returns:
-        The request thread and its shared response state.
-    """
-    response = MigrationResponse()
-
-    def send_request():
-        prompt = "Tell me a long long long story about yourself?"
-        if use_long_prompt:
-            prompt += " Make sure it is" + " long" * long_prompt_repetitions + "!"
-
-        logger.info(
-            "Sending completion request (stream=%s) with prompt: '%s...'",
-            stream,
-            prompt[:50],
-        )
-
-        response.observations.append((None, time.monotonic()))
-
-        try:
-            client = _make_client(frontend_port)
-            request_args = {
-                "model": FAULT_TOLERANCE_MODEL_NAME,
-                "prompt": prompt,
-                "stream": stream,
-                "temperature": 0,
-                "seed": 0,
-            }
-            if max_tokens is not None:
-                request_args["max_tokens"] = max_tokens
-            if force_max_output_tokens:
-                if max_tokens is None:
-                    raise ValueError("force_max_output_tokens requires max_tokens")
-                request_args["extra_body"] = {
-                    "ignore_eos": True,
-                    "min_tokens": max_tokens,
-                }
-                if stream:
-                    request_args["stream_options"] = {"include_usage": True}
-            if stream:
-                for chunk in client.completions.create(**request_args):
-                    if chunk.usage is not None:
-                        response.completion_tokens = chunk.usage.completion_tokens
-                    choice = chunk.choices[0] if chunk.choices else None
-                    if choice is not None and choice.finish_reason is not None:
-                        response.finish_reason = choice.finish_reason
-                    text = choice.text if choice is not None else None
-                    # Match the original hand-rolled parser: keep empty strings,
-                    # drop only None. Empty chunks (e.g. the first stream frame)
-                    # still count as a response arrival for delay measurement.
-                    if text is not None:
-                        response.observations.append((text, time.monotonic()))
-            else:
-                resp = client.completions.create(**request_args)
-                choice = resp.choices[0]
-                response.finish_reason = choice.finish_reason
-                if resp.usage is not None:
-                    response.completion_tokens = resp.usage.completion_tokens
-                response.observations.append((choice.text, time.monotonic()))
-        except Exception as error:
-            # openai.APIError subclasses cover HTTP non-200, mid-stream
-            # structured `data: {"error": {...}}` frames, connection failures,
-            # and timeouts. Non-openai exceptions (network, etc.) also bubble.
-            logger.error("Request failed with error: %s", error)
-            response.observations.append((error, time.monotonic()))
-
-    request_thread = threading.Thread(target=send_request, daemon=True)
-    request_thread.start()
-
-    return request_thread, response
-
-
-def start_chat_completion_request(
-    frontend_port: int,
-    stream: bool,
-    use_long_prompt: bool = False,
-    max_tokens: int | None = None,
-    long_prompt_repetitions: int = 8_000,
-    force_max_output_tokens: bool = False,
-) -> tuple[threading.Thread, MigrationResponse]:
-    """
-    Start a long-running chat completion request in a separate thread.
-
-    Responses are processed internally to extract content and terminal metadata.
-    The first observation is ``(None, start_time)``; subsequent observations
-    contain extracted content or exceptions.
-
-    Args:
-        frontend_port: Port where the frontend is running
-        stream: Whether to use streaming responses
-        use_long_prompt: Whether to use a long prompt (~8000 tokens)
-        max_tokens: Explicit output-token cap, or the backend default when unset
-        long_prompt_repetitions: Number of repeated words in the long prompt
-        force_max_output_tokens: Disable EOS and require the full output-token
-            budget. Requires max_tokens.
-
-    Returns:
-        The request thread and its shared response state.
-    """
-    response = MigrationResponse()
-
-    def send_request():
-        prompt = "Tell me a long long long story about yourself?"
-        if use_long_prompt:
-            prompt += " Make sure it is" + " long" * long_prompt_repetitions + "!"
-
-        logger.info(
-            "Sending chat completion request (stream=%s) with prompt: '%s...'",
-            stream,
-            prompt[:50],
-        )
-
-        response.observations.append((None, time.monotonic()))
-
-        try:
-            client = _make_client(frontend_port)
-            request_args = {
-                "model": FAULT_TOLERANCE_MODEL_NAME,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": stream,
-                "temperature": 0,
-                "seed": 0,
-            }
-            if max_tokens is not None:
-                request_args["max_tokens"] = max_tokens
-            if force_max_output_tokens:
-                if max_tokens is None:
-                    raise ValueError("force_max_output_tokens requires max_tokens")
-                request_args["extra_body"] = {
-                    "ignore_eos": True,
-                    "min_tokens": max_tokens,
-                }
-                if stream:
-                    request_args["stream_options"] = {"include_usage": True}
-            if stream:
-                for chunk in client.chat.completions.create(**request_args):
-                    if chunk.usage is not None:
-                        response.completion_tokens = chunk.usage.completion_tokens
-                    choice = chunk.choices[0] if chunk.choices else None
-                    if choice is not None and choice.finish_reason is not None:
-                        response.finish_reason = choice.finish_reason
-                    content = choice.delta.content if choice is not None else None
-                    # Match the original hand-rolled parser: keep empty strings,
-                    # drop only None. Empty chunks (e.g. the first `role`-only
-                    # stream frame) still count as a response arrival for delay
-                    # measurement.
-                    if content is not None:
-                        response.observations.append((content, time.monotonic()))
-            else:
-                resp = client.chat.completions.create(**request_args)
-                choice = resp.choices[0]
-                response.finish_reason = choice.finish_reason
-                if resp.usage is not None:
-                    response.completion_tokens = resp.usage.completion_tokens
-                response.observations.append((choice.message.content, time.monotonic()))
-        except Exception as error:
-            # openai.APIError subclasses cover HTTP non-200, mid-stream
-            # structured `data: {"error": {...}}` frames, connection failures,
-            # and timeouts. Non-openai exceptions also bubble for visibility.
-            logger.error("Request failed with error: %s", error)
-            response.observations.append((error, time.monotonic()))
-
-    request_thread = threading.Thread(target=send_request, daemon=True)
-    request_thread.start()
-
-    return request_thread, response
 
 
 def determine_request_receiving_worker(
@@ -544,43 +325,6 @@ def wait_for_endpoint_instance_reduction(
     )
 
 
-def wait_for_response(
-    response: MigrationResponse,
-    num_responses: int = 5,
-    max_wait_time: float = 10.0,
-) -> None:
-    """
-    Block until at least ``num_responses`` non-empty payload chunks exist.
-
-    Args:
-        response: Response state being populated by the background thread
-        num_responses: Absolute minimum number of non-empty payload chunks (default 5)
-        max_wait_time: Maximum time to wait in seconds (default 10s)
-    """
-    poll_interval = 0.001  # 1ms
-    deadline = time.monotonic() + max_wait_time
-
-    while time.monotonic() < deadline:
-        content_count = sum(
-            1
-            for content, _ in response.observations
-            if isinstance(content, str) and content
-        )
-        if content_count >= num_responses:
-            return
-        time.sleep(poll_interval)
-
-    content_count = sum(
-        1
-        for content, _ in response.observations
-        if isinstance(content, str) and content
-    )
-    pytest.fail(
-        f"Only observed {content_count}/{num_responses} non-empty response chunks "
-        f"within {max_wait_time}s"
-    )
-
-
 def read_worker_generate_metrics(
     worker_system_port: int,
     component: str = "backend",
@@ -645,69 +389,6 @@ def wait_for_worker_generate_completion(
         f"baseline_response_bytes={baseline_response_bytes}, "
         f"response_bytes={response_bytes}, last_error={last_error}"
     )
-
-
-def validate_response(
-    request_thread: threading.Thread,
-    response: MigrationResponse,
-    expected_completion_tokens: int | None = None,
-) -> str:
-    """
-    Wait for and validate the response after migration.
-    Timing observations are logged for diagnosis, but they are not correctness
-    assertions. Loaded CI nodes and concurrent GPU tests can legitimately change
-    TTFT/TPOT without changing migration behavior.
-
-    Args:
-        request_thread: The thread running the request
-        response: Client-visible content and terminal response metadata.
-        expected_completion_tokens: When set, require a length-limited response
-            with exactly this many completion tokens.
-    """
-    request_thread.join(timeout=240)
-    assert not request_thread.is_alive(), "Request did not complete within 240 seconds"
-
-    observations = response.observations
-    assert observations, "Missing first entry with start timestamp"
-    assert observations[0][0] is None, "First entry should be start timestamp only"
-    prev_timestamp = observations[0][1]
-
-    response_words: list[str] = []
-    for res, timestamp in observations[1:]:
-        delay = timestamp - prev_timestamp
-        if delay > 2.0:
-            logger.info("Observed %.3fs before the next response chunk", delay)
-        prev_timestamp = timestamp
-
-        assert res is not None, "Response entry should not be None"
-        if isinstance(res, Exception):
-            raise res
-
-        # Content is already parsed - just collect it
-        response_words.append(res)
-
-    assert any(
-        response_words
-    ), "Request completed without any non-empty response content"
-    assert (
-        response.finish_reason is not None
-    ), "Request completed without a terminal finish reason"
-    if expected_completion_tokens is not None:
-        assert response.finish_reason == "length", (
-            "Forced-length request terminated unexpectedly: "
-            f"finish_reason={response.finish_reason!r}"
-        )
-        assert response.completion_tokens == expected_completion_tokens, (
-            "Forced-length request returned the wrong completion-token count: "
-            f"expected={expected_completion_tokens}, "
-            f"actual={response.completion_tokens}"
-        )
-    logger.info(
-        "Received %s response(s): %s...",
-        len(response_words),
-        "".join(response_words)[:100],
-    )
-    return "".join(response_words)
 
 
 def _parse_migration_metric(
@@ -852,6 +533,7 @@ def run_migration_test(
     verify_replacement_worker: bool = False,
     before_worker_fault: Callable[[], None] | None = None,
     force_max_output_tokens: bool = False,
+    expected_output_prefix: str | None = None,
 ) -> ManagedProcess:
     """
     Run the common migration test flow after frontend and workers are started.
@@ -885,6 +567,8 @@ def run_migration_test(
         force_max_output_tokens: Disable EOS and require the request's full
             max_tokens budget so state-based fault synchronization cannot race
             an early EOS.
+        expected_output_prefix: Deterministic fault-free output that must prefix
+            the migrated response.
 
     Returns:
         The surviving worker selected as the replacement target. Successful
@@ -898,24 +582,15 @@ def run_migration_test(
     )
 
     # Step 1: Send the request
-    if use_chat_completion:
-        request_thread, response = start_chat_completion_request(
-            frontend.frontend_port,
-            stream=stream,
-            use_long_prompt=use_long_prompt,
-            max_tokens=max_tokens,
-            long_prompt_repetitions=long_prompt_repetitions,
-            force_max_output_tokens=force_max_output_tokens,
-        )
-    else:
-        request_thread, response = start_completion_request(
-            frontend.frontend_port,
-            stream=stream,
-            use_long_prompt=use_long_prompt,
-            max_tokens=max_tokens,
-            long_prompt_repetitions=long_prompt_repetitions,
-            force_max_output_tokens=force_max_output_tokens,
-        )
+    request_thread, response = start_request(
+        frontend.frontend_port,
+        use_chat_completion=use_chat_completion,
+        stream=stream,
+        use_long_prompt=use_long_prompt,
+        max_tokens=max_tokens,
+        long_prompt_repetitions=long_prompt_repetitions,
+        force_max_output_tokens=force_max_output_tokens,
+    )
 
     # Step 2: Determine which worker received the request
     worker, worker_name, request_id = determine_request_receiving_worker(
@@ -984,6 +659,7 @@ def run_migration_test(
                 expected_completion_tokens=(
                     max_tokens if force_max_output_tokens else None
                 ),
+                expected_output_prefix=expected_output_prefix,
             )
             if verify_replacement_worker:
                 worker_system_port = getattr(replacement_worker, "system_port", None)

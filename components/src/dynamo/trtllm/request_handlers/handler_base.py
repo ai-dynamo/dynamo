@@ -208,7 +208,7 @@ class _DeferredAbort:
         """Abort immediately if first token received, otherwise defer."""
         if self._first_token_received:
             self._generation_result.abort()
-            logging.debug("Deferred abort: first token already received, aborting now")
+            logging.debug("Deferred abort: engine abort fired")
         else:
             logging.debug(
                 "Deferred abort: first token not received, spawning background task"
@@ -223,7 +223,7 @@ class _DeferredAbort:
         except Exception:
             pass
         self._generation_result.abort()
-        logging.debug("Deferred abort: background task completed, abort fired")
+        logging.debug("Deferred abort: engine abort fired")
 
 
 @dataclass

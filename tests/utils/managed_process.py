@@ -8,6 +8,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
@@ -187,6 +188,9 @@ class ManagedProcess:
     _log_path = None
     _tee_proc = None
     _sed_proc = None
+    _startup_cancelled: threading.Event = field(
+        default_factory=threading.Event, init=False, repr=False
+    )
 
     @property
     def log_path(self):
@@ -207,6 +211,7 @@ class ManagedProcess:
         return ""
 
     def __enter__(self):
+        self._startup_cancelled.clear()
         try:
             self._logger = logging.getLogger(self.__class__.__name__)
             # self._command_name = self.command[0]
@@ -244,6 +249,15 @@ class ManagedProcess:
                     "Error during cleanup in __enter__: %s", cleanup_err
                 )
             raise
+
+    def cancel_startup(self) -> None:
+        """Ask an in-progress ``__enter__`` call to stop and clean up.
+
+        Startup remains owned by the calling thread. Health-check loops observe
+        this signal and raise, which routes cleanup through ``__enter__``'s
+        existing exception path instead of racing a cross-thread ``__exit__``.
+        """
+        self._startup_cancelled.set()
 
     def _cleanup_stragglers(self):
         """Clean up straggler processes - called during exit and signal handling.
@@ -638,6 +652,8 @@ class ManagedProcess:
 
     def _check_process_alive(self, context=""):
         """Check if the main process is still alive. Raises RuntimeError if dead."""
+        if self._startup_cancelled.is_set():
+            raise RuntimeError("Managed process startup was cancelled")
         if self.proc and self.proc.poll() is not None:
             returncode = self.proc.returncode
             self._logger.error(
