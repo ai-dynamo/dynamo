@@ -39,16 +39,8 @@ KV_TRANSFER_MAX_TOKENS = 1536
 KV_TRANSFER_BASELINE_MAX_TOKENS = 256
 KV_TRANSFER_PROMPT_REPETITIONS = 128
 
-GRACEFUL_MIGRATION_SKIP = pytest.mark.skip(
-    reason=(
-        "TRT-LLM aggregate/decode graceful shutdown aborts the local request "
-        "without emitting a retryable migration error (1.3.0rc25)"
-    )
-)
-
 # Keep one active worker-failure case for every migration-policy outcome while
-# varying API, response, and request plane. Graceful-shutdown rows remain
-# explicit skips until TRT-LLM emits a retryable migration error.
+# varying API, response, and request plane.
 MIGRATION_CASES = [
     pytest.param(
         3,
@@ -60,16 +52,6 @@ MIGRATION_CASES = [
         id="migration_enabled-no_seq_cap-worker_failure-completion-stream-nats",
     ),
     pytest.param(
-        3,
-        None,
-        False,
-        "chat",
-        False,
-        "tcp",
-        marks=GRACEFUL_MIGRATION_SKIP,
-        id="migration_enabled-no_seq_cap-graceful_shutdown-chat-unary-tcp",
-    ),
-    pytest.param(
         0,
         None,
         True,
@@ -77,16 +59,6 @@ MIGRATION_CASES = [
         False,
         "tcp",
         id="migration_disabled-worker_failure-chat-unary-tcp",
-    ),
-    pytest.param(
-        0,
-        None,
-        False,
-        "completion",
-        True,
-        "nats",
-        marks=GRACEFUL_MIGRATION_SKIP,
-        id="migration_disabled-graceful_shutdown-completion-stream-nats",
     ),
     pytest.param(
         3,
@@ -99,16 +71,6 @@ MIGRATION_CASES = [
     ),
     pytest.param(
         3,
-        1,
-        False,
-        "chat",
-        False,
-        "nats",
-        marks=GRACEFUL_MIGRATION_SKIP,
-        id="max_seq_len_exceeded-graceful_shutdown-chat-unary-nats",
-    ),
-    pytest.param(
-        3,
         1_000_000,
         True,
         "completion",
@@ -116,20 +78,10 @@ MIGRATION_CASES = [
         "nats",
         id="max_seq_len_not_exceeded-worker_failure-completion-unary-nats",
     ),
-    pytest.param(
-        3,
-        1_000_000,
-        False,
-        "chat",
-        True,
-        "tcp",
-        marks=GRACEFUL_MIGRATION_SKIP,
-        id="max_seq_len_not_exceeded-graceful_shutdown-chat-stream-tcp",
-    ),
 ]
 
 # Decode migration must be streaming so the fault can be injected after
-# generation starts. Every migration-policy outcome below is runnable.
+# generation starts.
 DECODE_MIGRATION_CASES = [
     pytest.param(
         3,
