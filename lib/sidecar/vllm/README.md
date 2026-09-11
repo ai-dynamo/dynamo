@@ -66,13 +66,16 @@ control surface does not expose the primitives they need:
   request arrives because it forwards an adapter path in its internal `LoRARequest`.
   `GenerateRequest` carries only `lora_name`, and vLLM rejects names it has not already
   loaded, so every worker that may receive the adapter must load it up front.
-- **Hot swap is not supported.** The Python worker removes, reloads, resets the prefix cache,
-  and rolls back atomically. The gRPC API has no atomic replace and no cache-reset operation;
-  emulating it with `UnloadLora` followed by `LoadLora` would open a routing outage and leave
-  rollback unsafe. Loading a name that is already loaded is idempotent and returns the
-  existing ID, and `hot_swap` is reported as `false`.
+- **Hot swap is not supported.** Loading a name that is already loaded is idempotent
+  and returns the existing ID, and `hot_swap` is reported as `false`. The gRPC API
+  has no atomic adapter replacement. Its pause-and-clear operation affects the
+  whole worker and is not coordinated with adapter lifecycle operations here.
 
 Custom Python-only LoRA source schemes are not available in the sidecar implementation.
+
+LoRA requests retain normal prefix caching. Use a new adapter name for different weights:
+unloading an adapter does not invalidate KV cached under its name, so reusing that name
+for different weights can reuse stale results. Safe same-name replacement is not supported.
 
 LoRA lifecycle mutations are serialized per worker, including source resolution. Requests
 using other loaded adapters can continue during a load or unload. Multiple workers can
@@ -226,6 +229,8 @@ sidecar executables; these manifests run `dynamo-vllm-sidecar` as the container
 command.
 
 The sidecar waits for both the Control and Inference services through the standard gRPC health API before registering the worker. The deployment manifests retain lightweight socket probes for container lifecycle monitoring. The engine image must include a `vllm-rs` build compatible with the vendored protocol.
+
+The Dynamo vLLM CUDA runtime image exposes `vllm-rs` on `PATH`, linked from the `vllm` package that image installs, so `vllm-rs serve` runs there by name; that image fails to build if its `vllm` package ever stops shipping the binary. The XPU and CPU variants build from separate upstream vLLM distributions and link it the same way when it is present, but only warn when it is not, so check `command -v vllm-rs` before relying on it there. A stock upstream engine image ships the same binary inside the package but leaves it off `PATH`; `deploy/agg.yaml` and `deploy/disagg.yaml` run that image and resolve the path out of the package themselves.
 
 ### Prerequisites
 

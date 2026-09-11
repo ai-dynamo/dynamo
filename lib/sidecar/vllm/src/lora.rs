@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use dynamo_backend_common::DynamoError;
@@ -27,8 +27,6 @@ pub(crate) const LIST_LORAS: &str = "list_loras";
 pub(crate) fn is_lora_update(update: &str) -> bool {
     matches!(update, LOAD_LORA | UNLOAD_LORA | LIST_LORAS)
 }
-
-const RESERVED_BASE_SUFFIX: &str = "_base";
 
 pub(crate) type LoraGuard = OwnedMutexGuard<()>;
 
@@ -91,12 +89,6 @@ pub(crate) fn validate_adapter_name(
             "LoRA adapter `{name}` does not produce a usable discovery suffix"
         )));
     };
-    if suffix == RESERVED_BASE_SUFFIX {
-        return Err(client::invalid_argument(format!(
-            "LoRA adapter `{name}` derives the reserved `{RESERVED_BASE_SUFFIX}` discovery \
-             suffix, which identifies the base-model sibling"
-        )));
-    }
     if let Some(existing) = loaded.iter().find(|adapter| {
         adapter.lora_name != name
             && derive_lora_suffix(Some(&adapter.lora_name)).as_deref() == Some(suffix.as_str())
@@ -166,10 +158,6 @@ pub(crate) fn validate_inventory(
     let mut adapters = adapters;
     adapters.sort_by(|left, right| left.lora_name.cmp(&right.lora_name));
     Ok(adapters)
-}
-
-pub(crate) fn paths_agree(reported: &str, resolved: &Path) -> bool {
-    Path::new(reported) == resolved
 }
 
 #[derive(Debug, Eq, PartialEq)]

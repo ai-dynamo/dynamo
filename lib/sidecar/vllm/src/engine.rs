@@ -19,7 +19,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
 use crate::client::{self, CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
-use crate::convert::{ResponseState, build_generate_request, data_parallel_rank};
+use crate::convert::{
+    ResponseState, build_generate_request, data_parallel_rank, normalize_response_options,
+};
 use crate::lora::{self, build_downloader, parse_load_lora, parse_lora_name, resolve_source_path};
 use crate::model::DiscoveredModel;
 use crate::proto as pb;
@@ -273,6 +275,13 @@ impl VllmSidecarEngine {
                 let _update = self.lifecycle.updates.lock().await;
                 let endpoint = self.ready_endpoint()?;
                 let adapters = self.native_inventory().await?;
+                for adapter in &adapters {
+                    lora::validate_adapter_name(
+                        &adapter.lora_name,
+                        |name| self.model.is_base_model_name(name),
+                        &adapters,
+                    )?;
+                }
                 let mut records = std::collections::BTreeSet::new();
                 for adapter in &adapters {
                     lora::publish_lora_model(endpoint, adapter, self.model.max_loras())
@@ -318,10 +327,8 @@ impl VllmSidecarEngine {
         if let Some(existing) = existing {
             if self.hot_swap_requested {
                 return Err(client::invalid_argument(format!(
-                    "LoRA adapter `{}` is already loaded and hot swap is not supported by the \
-                     gRPC backend: it offers no atomic replace and no prefix-cache reset, so an \
-                     unload/load pair would open a routing outage with no safe rollback. Unload \
-                     the adapter explicitly, or load the new weights under a different name.",
+                    "LoRA adapter `{}` is already loaded; hot swap is not supported by the \
+                     gRPC backend. Load new weights under a different name.",
                     request.name
                 )));
             }
@@ -383,7 +390,9 @@ impl VllmSidecarEngine {
             Err(error) => {
                 tracing::warn!(%error, lora_name = %request.name, "LoadLora outcome is ambiguous; reconciling");
                 match self.find_loaded(&request.name).await? {
-                    Some(observed) if lora::paths_agree(&observed.source_path, &source_path) => {
+                    Some(observed)
+                        if std::path::Path::new(&observed.source_path) == source_path =>
+                    {
                         observed
                     }
                     Some(observed) => {
@@ -661,6 +670,7 @@ impl LLMEngine for VllmSidecarEngine {
             .get()
             .ok_or_else(|| client::engine_shutdown("vLLM sidecar is not started"))?;
         let request_id = ctx.id().to_string();
+        let request = normalize_response_options(request)?;
         let mut state = ResponseState::new(&request, self.mode);
         let data_parallel_rank = data_parallel_rank(&request, self.mode);
         let mut proto_request = build_generate_request(request, request_id, self.mode)?;
@@ -669,33 +679,27 @@ impl LLMEngine for VllmSidecarEngine {
             // Routers may address the base model by name through the adapter field.
             proto_request.lora_name.clear();
         }
-        // Held until the streaming RPC is accepted. vLLM resolves the adapter before
-        // it starts generating, so past that point an unload can no longer strand
-        // this request, and the guard is released while the stream continues.
-        let _admission = if proto_request.lora_name.is_empty() {
-            None
-        } else {
-            Some(self.admit_lora_request(&proto_request.lora_name).await?)
+        let submit = async {
+            let _admission = if proto_request.lora_name.is_empty() {
+                None
+            } else {
+                Some(self.admit_lora_request(&proto_request.lora_name).await?)
+            };
+            client
+                .generate_stream(proto_request, data_parallel_rank)
+                .await
         };
         let defer_request_cancellation = self.mode.is_decode();
         let stopped_ctx = ctx.inner_arc();
-        let shutdown = self.cancel.clone();
+        let shutdown = self.cancel.child_token();
         let mut request_cancellation = Box::pin(async move { stopped_ctx.stopped().await });
         let mut shutdown_cancellation = Box::pin(async move { shutdown.cancelled().await });
-        let stream = if defer_request_cancellation {
+        let stream = tokio::select! {
+            biased;
+            _ = shutdown_cancellation.as_mut() => None,
             // Decode must reach vLLM so NIXL can release transferred KV.
-            tokio::select! {
-                biased;
-                _ = shutdown_cancellation.as_mut() => None,
-                result = client.generate_stream(proto_request, data_parallel_rank) => Some(result?),
-            }
-        } else {
-            tokio::select! {
-                biased;
-                _ = shutdown_cancellation.as_mut() => None,
-                _ = request_cancellation.as_mut() => None,
-                result = client.generate_stream(proto_request, data_parallel_rank) => Some(result?),
-            }
+            _ = request_cancellation.as_mut(), if !defer_request_cancellation => None,
+            result = submit => Some(result?),
         };
         let Some(mut stream) = stream else {
             let output = cancelled(&state);
@@ -991,8 +995,6 @@ impl LLMEngine for VllmSidecarEngine {
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {
-        // The sidecar registers LoRA siblings itself, so the Worker's unregister of
-        // the base card leaves them behind unless we drop them here.
         self.unpublish_all_loras().await;
         self.cancel.cancel();
         Ok(())

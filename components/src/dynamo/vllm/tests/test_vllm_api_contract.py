@@ -161,6 +161,20 @@ def test_request_exposes_all_token_ids():
     )
 
 
+def test_model_config_exposes_get_vocab_size():
+    """``InstrumentedScheduler._bench_init`` bounds synthetic prompt token ids
+    with ``model_config.get_vocab_size()``. The call site degrades gracefully
+    (falls back to all-zero prompts), but that fallback reintroduces the MoE
+    routing-collapse bias the randomization exists to remove -- so a vLLM
+    rename must fail loudly here, not silently flip benchmarks back to
+    zeros."""
+    from vllm.config import ModelConfig
+
+    assert callable(
+        getattr(ModelConfig, "get_vocab_size", None)
+    ), "vLLM ModelConfig.get_vocab_size is gone — synthetic prompt randomization relies on it."
+
+
 def test_vllm_freezes_serving_heap_with_freeze_gc_heap():
     """``dynamo.vllm.gc_policy.stop_gc_policy`` re-establishes vLLM's serving
     freeze after a benchmark by mirroring ``freeze_gc_heap`` (collect, then
