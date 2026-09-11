@@ -52,10 +52,19 @@ def can_import_deps() -> bool:
     return _can_import_tritonclient() and _can_import_tritonserver()
 
 
-def pytest_ignore_collect(collection_path, config) -> bool:
-    """Skip collecting triton test files if triton deps aren't installed."""
+def pytest_ignore_collect(collection_path, config) -> bool | None:
+    """Skip collecting triton test files if triton deps aren't installed.
+
+    This module is registered as a global plugin via the ``pytest11`` entry
+    point, so this hook runs for every path in the repo. ``pytest_ignore_collect``
+    is a firstresult hook: returning ``False`` vetoes all other implementations,
+    including pytest's own handling of ``--ignore-glob`` and ``norecursedirs``.
+    Return ``None`` for paths this hook has no opinion on.
+    """
     filename = collection_path.name
-    return filename.startswith("test_triton_") and not can_import_deps()
+    if filename.startswith("test_triton_") and not can_import_deps():
+        return True
+    return None
 
 
 def make_cli_args_fixture(module_name: str):
