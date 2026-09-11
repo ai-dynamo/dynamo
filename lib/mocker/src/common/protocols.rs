@@ -722,7 +722,12 @@ pub struct MockEngineArgs {
 
     /// Reasoning/thinking token configuration.
     /// When set, the mocker wraps output in thinking boundary tokens.
+    ///
+    /// `nested` is what makes the `#[validate(..)]` bounds on `ReasoningConfig`
+    /// run at all: `validator` does not recurse into a field by default, so
+    /// without it every bound on the inner struct is dead code.
     #[builder(default = "None")]
+    #[validate(nested)]
     pub reasoning: Option<ReasoningConfig>,
 
     /// Optional Mooncake trace with exact output token IDs keyed by
@@ -755,10 +760,12 @@ pub struct MockEngineArgs {
 
     /// SGLang-specific configuration. Only used when `engine_type == Sglang`.
     #[builder(default = "None")]
+    #[validate(nested)]
     pub sglang: Option<SglangArgs>,
 
     /// TensorRT-LLM-specific configuration. Only used when `engine_type == Trtllm`.
     #[builder(default = "None")]
+    #[validate(nested)]
     pub trtllm: Option<TrtllmArgs>,
 }
 
@@ -1253,6 +1260,28 @@ mod tests {
 
         assert_eq!(error.to_string(), "injected raw sink failure");
         assert_eq!(*sink.attempts.lock().unwrap(), vec![1, 2, 3]);
+    }
+
+    /// `validator` does not recurse into a field without `#[validate(nested)]`,
+    /// so every range bound written on `SglangArgs`/`TrtllmArgs`/`ReasoningConfig`
+    /// was dead. `clip_max_new_tokens` is the one that matters most: it is passed
+    /// straight through to the engine and a zero would zero the whole SGLang
+    /// admission budget, and unlike its siblings aisimulate-core does not
+    /// re-check it.
+    #[test]
+    fn nested_backend_config_bounds_are_actually_enforced() {
+        let mut args = MockEngineArgs::builder().build().unwrap();
+        args.engine_type = EngineType::Sglang;
+        args.sglang = Some(SglangArgs {
+            clip_max_new_tokens: Some(0),
+            ..SglangArgs::default()
+        });
+
+        let error = match args.normalized() {
+            Ok(_) => panic!("clip_max_new_tokens = 0 must be rejected"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("clip_max_new_tokens"), "{error}");
     }
 
     #[test]
