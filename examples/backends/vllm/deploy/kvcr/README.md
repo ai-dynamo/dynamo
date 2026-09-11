@@ -166,6 +166,7 @@ python3 -m pytest tests/deploy/test_kvcr_guard.py \
 ```
 
 The namespace must be empty of an earlier deployment with the same name. The
-test captures every worker container's current and previous logs at the
-before-failure, failed, remote-delivery, and recovered phases under
-`DYN_TEST_OUTPUT_PATH` (or the standard `test_output` directory).
+test requires read-only `hostPath` access to InfiniBand counters and captures
+every worker container's current and previous logs at the before-failure,
+failed, remote-delivery, and recovered phases under `DYN_TEST_OUTPUT_PATH` (or
+the standard `test_output` directory).
