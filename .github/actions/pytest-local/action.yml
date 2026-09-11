@@ -311,6 +311,32 @@ runs:
         path: test-results/pytest_test_report_${{ inputs.test_suite_name }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
         retention-days: 7
 
+    # conftest.py's autouse `logger` fixture writes every test's full root-logger
+    # output (ManagedProcess/EngineProcess health-check status, retry reasons,
+    # subprocess log tails, ...) to /tmp/dynamo_tests/<test-name>/test.log.txt --
+    # a much richer trace than the JUnit XML's truncated captured-output, but
+    # nothing ever uploaded it. failure()-gated (not always()) to keep this
+    # opt-in-by-outcome: pytest-local is shared by every framework's CI, and
+    # most runs pass.
+    - name: Collect per-test log files
+      if: failure()
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p test-results/dynamo-tests-logs
+        if [ -d /tmp/dynamo_tests ]; then
+          cp -r /tmp/dynamo_tests/. test-results/dynamo-tests-logs/
+        fi
+
+    - name: Upload per-test log files
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      if: failure()
+      with:
+        name: dynamo-tests-logs-${{ inputs.test_suite_name }}-${{ env.STR_TEST_TYPE }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
+        path: test-results/dynamo-tests-logs/
+        retention-days: 7
+        if-no-files-found: ignore
+
     - name: Upload Coverage Data
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
       if: always() && inputs.enable_coverage == 'true'
