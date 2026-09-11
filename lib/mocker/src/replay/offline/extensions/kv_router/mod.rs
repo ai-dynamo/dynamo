@@ -5,6 +5,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -360,6 +361,11 @@ pub(crate) struct OfflineReplayRouter {
     pending: PolicyQueue<PendingRequest>,
     indexer: SyncReplayIndexer,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    /// Latches the first prefill-estimator failure so it is reported once at
+    /// `warn!` instead of once per admitted request at `debug!`. Per-router, not
+    /// a process-global `Once`, so a sweep running many replays in one process
+    /// still hears about each one.
+    prefill_estimator_failed: AtomicBool,
     decay_time_epoch: Instant,
     tracking_hash: TrackingHashContext,
 }
@@ -615,6 +621,7 @@ impl OfflineReplayRouter {
             pending: PolicyQueue::new(profile),
             indexer: SyncReplayIndexer::new(args.block_size as u32),
             prefill_load_estimator,
+            prefill_estimator_failed: AtomicBool::new(false),
             // This is only a base Instant for converting replay `now_ms` values into
             // synthetic `Instant`s. All subsequent decay/accounting uses virtual replay
             // time derived from this epoch, not wall-clock progression.
@@ -1265,12 +1272,31 @@ impl OfflineReplayRouter {
             Some(estimator) => match estimator.predict_prefill_duration(1, effective_isl, prefix) {
                 Ok(expected_prefill_duration) => Some(expected_prefill_duration),
                 Err(error) => {
-                    tracing::debug!(
-                        error = %error,
-                        effective_isl,
-                        prefix,
-                        "failed to predict replay prefill duration for active load tracking"
-                    );
+                    // The estimator is a caller-supplied `Arc<dyn
+                    // PrefillLoadEstimator>` crossing a public boundary, and its
+                    // usual failure (a misconfigured model) is permanent, not
+                    // transient -- so this used to route every single request of
+                    // the run without its prefill component, complete, and report
+                    // success, with the only trace a per-request `debug!` nobody
+                    // reads. Latch it to one `warn!`: visible at the default
+                    // level, and off the admission hot path after the first.
+                    //
+                    // Still not a hard failure: this crate cannot establish that
+                    // no legitimate request shape (an ISL outside the model's
+                    // interpolation grid, say) makes the estimator return `Err`,
+                    // and aborting a run on one such request would be worse than
+                    // degrading its hint. Escalating to fail-closed needs a
+                    // decision on whether `PrefillLoadEstimator::
+                    // predict_prefill_duration` is allowed to fail per-request.
+                    if !self.prefill_estimator_failed.swap(true, Ordering::Relaxed) {
+                        tracing::warn!(
+                            error = %error,
+                            effective_isl,
+                            prefix,
+                            "replay prefill-duration prediction failed; routing without prefill \
+                             load hints for the rest of this run"
+                        );
+                    }
                     None
                 }
             },
