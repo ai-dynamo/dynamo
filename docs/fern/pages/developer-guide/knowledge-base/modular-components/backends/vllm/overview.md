@@ -61,15 +61,17 @@ For development, use the [devcontainer](https://github.com/ai-dynamo/dynamo/tree
 | [**Disaggregated Serving**](../../../concepts/system-architecture/disaggregated-serving.md) | ✅ | Prefill/decode separation with NIXL KV transfer |
 | [**KV-Aware Routing**](../../router/overview.md) | ✅ | |
 | [**SLA-Based Planner**](../../planner/planner-guide.md) | ✅ | |
-| [**KVBM**](../../kvbm/overview.md) | ✅ | |
 | [**LMCache**](../../../../../cli/kv-cache-offloading/overview.mdx) | ✅ | CUDA 12.9 and arm64/aarch64 containers may require building LMCache from source |
 | [**FlexKV**](../../../../../cli/kv-cache-offloading/overview.mdx) | ✅ | Requires a separate FlexKV build |
 | [**Multimodal Support**](../../../../../use-cases/diffusion/overview.md) | ✅ | Via vLLM-Omni integration |
 | [**Observability**](observability.md) | ✅ | Metrics and monitoring |
 | **WideEP** | ✅ | Support for DeepEP |
 | **DP Rank Routing** | ✅ | [Hybrid load balancing](https://docs.vllm.ai/en/stable/serving/data_parallel_deployment/?h=external+dp#hybrid-load-balancing) via external DP rank control |
-| [**LoRA**](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/launch/lora/README.md) | ✅ | Dynamic loading/unloading from S3-compatible storage |
+| [**LoRA**](../../../../../cli/operations/lora-adapters.md) | ✅ | Dynamic loading/unloading from `file://`, `s3://`, and `hf://` sources; adapter-aware KV routing |
 | **GB200 Support** | ✅ | Container functional on main |
+
+> [!NOTE]
+> vLLM LoRA support applies to generative workers. `--enable-lora` cannot be combined with `--realtime` or `--classify-worker`; embedding and other pooling workers do not expose the LoRA lifecycle endpoints.
 
 ## Feature Interactions
 
@@ -124,7 +126,7 @@ bash launch/agg.sh
 
 - **[Reference Guide](reference-guide.md)**: Configuration, arguments, and operational details
 - **[Examples](../../../../../recipes/cli-templates/vllm.mdx)**: Local deployment launch scripts
-- **[KV Cache Offloading](kv-cache-offloading.md)**: KVBM, LMCache, and FlexKV integrations
+- **[KV Cache Offloading](kv-cache-offloading.md)**: LMCache and FlexKV integrations
 - **[Observability](observability.md)**: Metrics and monitoring
 - **[vLLM-Omni](../../../../../use-cases/diffusion/overview.md)**: Multimodal model serving
 - **[Kubernetes Deployment](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/README.md)**: Kubernetes deployment guide

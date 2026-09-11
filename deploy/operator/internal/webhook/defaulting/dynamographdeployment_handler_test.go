@@ -190,12 +190,12 @@ func TestDGDDefaulter_DefaultsNilReplicas(t *testing.T) {
 			op:   admissionv1.Create,
 			components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 				{ComponentName: "Frontend", Replicas: nil},
-				{ComponentName: "VllmWorker", Replicas: ptr.To(int32(3))},
+				{ComponentName: "worker", Replicas: ptr.To(int32(3))},
 				{ComponentName: "NewComponent", Replicas: nil},
 			},
 			wantReplicas: map[string]int32{
 				"Frontend":     1,
-				"VllmWorker":   3,
+				"worker":       3,
 				"NewComponent": 1,
 			},
 		},
@@ -262,6 +262,37 @@ func TestDGDDefaulter_DefaultsNilReplicas(t *testing.T) {
 	}
 }
 
+func TestDGDDefaulter_DefaultsMultinodeRoleReplicas(t *testing.T) {
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: "worker",
+					Multinode:     &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4},
+					Roles: []nvidiacomv1beta1.ComponentRoleSpec{
+						{Name: nvidiacomv1beta1.ComponentRoleLeader},
+						{Name: nvidiacomv1beta1.ComponentRoleWorker},
+					},
+				},
+			},
+		},
+	}
+
+	defaulter := NewDGDDefaulter("0.9.0")
+	if err := defaulter.Default(admissionCtx(admissionv1.Update, nvidiacomv1beta1.DynamoGraphDeploymentGVK), dgd); err != nil {
+		t.Fatalf("Default() unexpected error: %v", err)
+	}
+
+	roles := dgd.Spec.Components[0].Roles
+	if got := ptr.Deref(roles[0].Replicas, 0); got != 1 {
+		t.Fatalf("leader replicas = %d, want 1", got)
+	}
+	if got := ptr.Deref(roles[1].Replicas, 0); got != 3 {
+		t.Fatalf("worker replicas = %d, want 3", got)
+	}
+}
+
 func TestDGDDefaulter_DefaultsProviderOverrideTargets(t *testing.T) {
 	t.Log("Build a DGD with omitted targets at every supported provider context")
 	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
@@ -276,12 +307,14 @@ func TestDGDDefaulter_DefaultsProviderOverrideTargets(t *testing.T) {
 				{
 					ComponentName:    "worker",
 					ProviderOverride: providerOverrideForDefaulting(`{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"rack"}}}`),
-					Multinode: &nvidiacomv1beta1.MultinodeSpec{
-						NodeCount: 2,
-						Leader: &nvidiacomv1beta1.MultinodeRoleSpec{
+					Multinode:        &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
+					Roles: []nvidiacomv1beta1.ComponentRoleSpec{
+						{
+							Name:             nvidiacomv1beta1.ComponentRoleLeader,
 							ProviderOverride: providerOverrideForDefaulting(`{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"host"}}}`),
 						},
-						Worker: &nvidiacomv1beta1.MultinodeRoleSpec{
+						{
+							Name:             nvidiacomv1beta1.ComponentRoleWorker,
 							ProviderOverride: providerOverrideForDefaulting(`{"topologyConstraint":{"topologyName":"cluster","pack":{"required":"host"}}}`),
 						},
 					},
@@ -308,10 +341,10 @@ func TestDGDDefaulter_DefaultsProviderOverrideTargets(t *testing.T) {
 	if got := multinode.ProviderOverride.Target; got != provideroverride.TargetPodCliqueScalingGroupConfig {
 		t.Errorf("multinode component target = %q, want %q", got, provideroverride.TargetPodCliqueScalingGroupConfig)
 	}
-	if got := multinode.Multinode.Leader.ProviderOverride.Target; got != provideroverride.TargetPodCliqueTemplateSpec {
+	if got := multinode.Roles[0].ProviderOverride.Target; got != provideroverride.TargetPodCliqueTemplateSpec {
 		t.Errorf("leader target = %q, want %q", got, provideroverride.TargetPodCliqueTemplateSpec)
 	}
-	if got := multinode.Multinode.Worker.ProviderOverride.Target; got != provideroverride.TargetPodCliqueTemplateSpec {
+	if got := multinode.Roles[1].ProviderOverride.Target; got != provideroverride.TargetPodCliqueTemplateSpec {
 		t.Errorf("worker target = %q, want %q", got, provideroverride.TargetPodCliqueTemplateSpec)
 	}
 }

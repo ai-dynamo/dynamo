@@ -90,9 +90,7 @@ struct RegisterRequest {
     #[serde(default = "default_routing_group", rename = "tenant_id")]
     _tenant_id: String,
     block_size: u32,
-    #[serde(default)]
     dp_rank: Option<u32>,
-    #[serde(default)]
     replay_endpoint: Option<String>,
     /// Optional per-tenant salt (Mooncake RFC #1403 `additionalsalt`).
     /// Currently accepted but not yet mixed into hashes — engines apply
@@ -105,11 +103,9 @@ struct RegisterRequest {
 struct UnregisterRequest {
     instance_id: WorkerId,
     model_name: String,
-    #[serde(default)]
     routing_group: Option<String>,
     #[serde(default, rename = "tenant_id")]
     _tenant_id: Option<String>,
-    #[serde(default)]
     dp_rank: Option<u32>,
 }
 
@@ -121,10 +117,8 @@ struct QueryRequest {
     routing_group: String,
     #[serde(default = "default_routing_group", rename = "tenant_id")]
     _tenant_id: String,
-    #[serde(default)]
     lora_name: Option<String>,
     /// Optional per-request cache salt (Mooncake RFC #1403), mixed into `/query` hashes.
-    #[serde(default)]
     cache_salt: Option<String>,
 }
 
@@ -138,7 +132,6 @@ struct QueryByHashRequest {
     _tenant_id: String,
     /// Invalid for `/query_by_hash`. Callers must precompute `block_hashes` with the intended
     /// cache salt and omit this field; a non-null value is rejected.
-    #[serde(default)]
     cache_salt: Option<String>,
 }
 
@@ -397,7 +390,6 @@ async fn query_by_hash(
 #[derive(Deserialize)]
 struct ListenerControlRequest {
     instance_id: WorkerId,
-    #[serde(default)]
     dp_rank: Option<u32>,
 }
 

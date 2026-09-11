@@ -100,6 +100,8 @@ struct AttachmentDescriptorInput {
     #[serde(default)]
     image_token_id: Option<u32>,
     #[serde(default)]
+    video_token_id: Option<u32>,
+    #[serde(default)]
     router_hint_source: Option<dynamo_kv_router::protocols::RouterHintSourceMetadata>,
 }
 
@@ -134,6 +136,7 @@ impl KvStateAttachmentOwner {
                     raw_zmq_endpoint: input.raw_zmq_endpoint,
                     raw_topic: input.raw_topic,
                     image_token_id: input.image_token_id,
+                    video_token_id: input.video_token_id,
                     router_hint_source: input.router_hint_source,
                 })
             })

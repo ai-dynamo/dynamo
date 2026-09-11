@@ -892,6 +892,7 @@ jobs:
       dd_env: nightly
       dd_flaky_retry_enabled: 'false'
       test_suite_name: vllm
+      framework: vllm  # matches the framework passed to vllm-build
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
@@ -919,6 +920,7 @@ jobs:
       dd_env: nightly
       dd_flaky_retry_enabled: 'false'
       test_suite_name: vllm
+      framework: vllm  # matches the framework passed to vllm-build
       test_type: 2-GPU Test
       amd_runner: prod-tester-amd-gpu-2-v2
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
@@ -941,6 +943,7 @@ jobs:
       dd_env: nightly
       dd_flaky_retry_enabled: 'false'
       test_suite_name: vllm
+      framework: vllm  # matches the framework passed to vllm-build
       test_type: 4-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
@@ -964,6 +967,7 @@ jobs:
       dd_env: nightly
       dd_flaky_retry_enabled: 'false'
       test_suite_name: vllm
+      framework: vllm  # matches the framework passed to vllm-build
       test_type: H100 Test
       # 2x 80 GiB H100 lane; runs vllm single- and dual-GPU tests, incl. h100-only cases.
       amd_runner: aws-dev-02-tester-amd-gpu-v2
@@ -990,6 +994,7 @@ jobs:
       dd_env: nightly
       dd_flaky_retry_enabled: 'false'
       test_suite_name: sglang
+      framework: sglang  # matches the framework passed to sglang-build
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
@@ -1019,6 +1024,7 @@ jobs:
       dd_env: nightly
       dd_flaky_retry_enabled: 'false'
       test_suite_name: sglang
+      framework: sglang  # matches the framework passed to sglang-build
       test_type: 2-GPU Test
       amd_runner: prod-tester-amd-gpu-2-v2
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
@@ -1041,6 +1047,7 @@ jobs:
       dd_env: nightly
       dd_flaky_retry_enabled: 'false'
       test_suite_name: sglang
+      framework: sglang  # matches the framework passed to sglang-build
       test_type: 4-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
@@ -1063,6 +1070,7 @@ jobs:
       dd_env: nightly
       dd_flaky_retry_enabled: 'false'
       test_suite_name: sglang
+      framework: sglang  # matches the framework passed to sglang-build
       test_type: H100 Test
       # 2x 80 GiB H100 lane; runs sglang single- and dual-GPU tests, incl. h100-only cases.
       amd_runner: aws-dev-02-tester-amd-gpu-v2
@@ -1089,6 +1097,7 @@ jobs:
       dd_env: nightly
       dd_flaky_retry_enabled: 'false'
       test_suite_name: trtllm
+      framework: trtllm  # matches the framework passed to trtllm-build
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
@@ -1117,6 +1126,7 @@ jobs:
       dd_env: nightly
       dd_flaky_retry_enabled: 'false'
       test_suite_name: trtllm
+      framework: trtllm  # matches the framework passed to trtllm-build
       test_type: 2-GPU Test
       amd_runner: prod-tester-amd-gpu-2-v2
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
@@ -1139,6 +1149,7 @@ jobs:
       dd_env: nightly
       dd_flaky_retry_enabled: 'false'
       test_suite_name: trtllm
+      framework: trtllm  # matches the framework passed to trtllm-build
       test_type: H100 Test
       # 2x 80 GiB H100 lane; runs trtllm single- and dual-GPU tests, incl. h100-only cases.
       amd_runner: aws-dev-02-tester-amd-gpu-v2

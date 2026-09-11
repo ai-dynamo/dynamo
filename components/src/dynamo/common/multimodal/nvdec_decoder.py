@@ -33,6 +33,7 @@ from __future__ import annotations
 import functools
 import importlib.util
 import logging
+import math
 import os
 import tempfile
 import warnings
@@ -220,8 +221,22 @@ def _source_fps(decoder) -> float:
     return FALLBACK_FPS
 
 
+def _compute_num_frames(
+    num_frames: int, target_fps: float, total_frames: int, source_fps: float
+) -> int:
+    """How many frames to sample: the lower of the two caps, never below 1.
+
+    `target_fps` caps by duration (`total_frames / source_fps`), which is why
+    this runs against an already-open clip rather than in the caller.
+    """
+    n = min(num_frames, total_frames)
+    if target_fps > 0:
+        n = max(1, min(n, math.floor((total_frames / source_fps) * target_fps)))
+    return n
+
+
 def decode_video_nvdec(
-    data: bytes, num_frames: int, gpu_id: int | None = None
+    data: bytes, num_frames: int, gpu_id: int | None = None, fps: float = -1
 ) -> tuple[np.ndarray, dict]:
     """Decode H.264/H.265 (or any NVDEC-supported codec) bytes to sampled frames.
 
@@ -230,6 +245,10 @@ def decode_video_nvdec(
     clip, and ``metadata`` has ``fps``/``frames_indices``/``total_num_frames`` --
     the same contract as ``VideoLoader.load_video``. Raises on decode failure so
     the caller can fall back.
+
+    ``num_frames`` is a cap, and ``fps`` an optional second one: sample at most
+    that many frames per second of source, i.e. ``floor(duration * fps)``.
+    ``fps <= 0`` (the default) leaves sampling to ``num_frames`` alone.
     """
     import PyNvVideoCodec as nvc
 
@@ -252,10 +271,10 @@ def decode_video_nvdec(
         total = len(decoder)
         if total <= 0:
             raise RuntimeError("NVDEC decode produced no frames")
-        n = min(num_frames, total)
+        source_fps = _source_fps(decoder)
+        n = _compute_num_frames(num_frames, fps, total, source_fps)
         indices = np.unique(np.linspace(0, total - 1, n).astype(int))
         frames = [_frame_to_rgb_hwc(decoder[int(i)]) for i in indices]
-        fps = _source_fps(decoder)
 
     stacked = np.ascontiguousarray(np.stack(frames)).astype(np.uint8, copy=False)
     if stacked.ndim != 4 or stacked.shape[-1] != 3:
@@ -263,7 +282,7 @@ def decode_video_nvdec(
             f"NVDEC frames have unexpected shape {stacked.shape}; expected (T,H,W,3)"
         )
     metadata = {
-        "fps": fps,
+        "fps": source_fps,
         "frames_indices": indices.tolist(),
         "total_num_frames": int(total),
         # Whether the consumer may still sample these frames. vLLM's own video

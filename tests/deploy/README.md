@@ -54,6 +54,4 @@ python -m pytest tests/deploy/test_deploy_efa_sglang.py \
   --namespace=efa-test -v -s
 ```
 
-The Go package at `deploy/operator/test/e2e` is a deprecated, manual Kind smoke
-test for the legacy Kustomize installation path. New operator deployment tests
-belong here.
+New operator deployment tests belong in this directory.

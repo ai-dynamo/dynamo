@@ -42,17 +42,17 @@ from tests.deploy.efa_utils import EfaFrameworkProfile, run_efa_deployment_check
 VLLM_EFA_PROFILE = EfaFrameworkProfile(
     name="vLLM",
     manifest_name="disagg-efa.yaml",
-    prefill_service="VllmPrefillWorker",
-    decode_service="VllmDecodeWorker",
+    prefill_service="prefill",
+    decode_service="decode",
     backend_pin_hint=(
         "--kv-transfer-config still pins "
         "kv_connector_extra_config.backends=['LIBFABRIC']."
     ),
-    nixl_counter_service="VllmDecodeWorker",
+    nixl_counter_service="decode",
     nixl_counter_metric="agent_rx_bytes",
     efa_counter_by_role={
-        "VllmDecodeWorker": "node_amazonefa_rdma_read_bytes",
-        "VllmPrefillWorker": "node_amazonefa_rdma_read_resp_bytes",
+        "decode": "node_amazonefa_rdma_read_bytes",
+        "prefill": "node_amazonefa_rdma_read_resp_bytes",
     },
 )
 
