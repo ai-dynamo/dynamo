@@ -112,6 +112,7 @@ def test_memory_service_variant_keeps_guard_in_sidecar() -> None:
 
     for resource_class in ("requests", "limits"):
         assert sidecar["resources"][resource_class]["${DYNAMO_RDMA_RESOURCE}"] == "1"
+    assert "IPC_LOCK" in sidecar["securityContext"]["capabilities"]["add"]
 
     for container in (main, sidecar):
         mounts = {mount["name"] for mount in container["volumeMounts"]}

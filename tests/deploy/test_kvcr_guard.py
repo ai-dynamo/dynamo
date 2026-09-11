@@ -137,17 +137,17 @@ def _rdma_counter(
     namespace: str,
     pod_name: str,
     container: str,
+    device_port: str,
     counter: str,
 ) -> int:
-    pattern = f"/host/sys/class/infiniband/*/ports/*/counters/{counter}"
-    snippet = (
-        "import glob;"
-        f"paths=glob.glob('{pattern}');"
-        "assert paths, 'No host HCA counters found';"
-        "print(sum(int(open(path).read()) for path in paths)*4)"
-    )
-    result = _exec(namespace, pod_name, container, "python3", "-c", snippet)
-    return int(result.stdout.strip())
+    device, port = device_port.split(":", 1)
+    port_path = f"/host/sys/class/infiniband/{device}/ports/{port}"
+    state_path = f"{port_path}/state"
+    counter_path = f"{port_path}/counters/{counter}"
+    state = _exec(namespace, pod_name, container, "cat", state_path).stdout.strip()
+    assert state == "4: ACTIVE", f"{device_port} is not active: {state}"
+    result = _exec(namespace, pod_name, container, "cat", counter_path)
+    return int(result.stdout.strip()) * 4
 
 
 def _wait_until(predicate, description: str, timeout: int) -> None:
@@ -223,6 +223,33 @@ def _request(url: str) -> str:
     response = send_request(url, payload, timeout=120, log_level=logging.DEBUG)
     data = validate_chat_response(response, MODEL, min_content_length=1)
     return data["choices"][0]["message"]["content"]
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.gpu_0
+def test_rdma_counter_uses_configured_active_port(monkeypatch) -> None:
+    commands = []
+    port_state = {"value": "4: ACTIVE"}
+
+    def fake_exec(*args, **_kwargs):
+        commands.append(args)
+        stdout = port_state["value"] if args[-1].endswith("/state") else "1024"
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(f"{__name__}._exec", fake_exec)
+
+    value = _rdma_counter("test", "worker-0", "main", "mlx5_8:2", "port_rcv_data")
+
+    assert value == 4096
+    assert commands[0][-1] == "/host/sys/class/infiniband/mlx5_8/ports/2/state"
+    assert commands[1][-1] == (
+        "/host/sys/class/infiniband/mlx5_8/ports/2/counters/port_rcv_data"
+    )
+
+    port_state["value"] = "5: ACTIVE_DEFER"
+    with pytest.raises(AssertionError, match="mlx5_8:2 is not active"):
+        _rdma_counter("test", "worker-0", "main", "mlx5_8:2", "port_rcv_data")
 
 
 @pytest.mark.framework_with_kvcr
@@ -450,12 +477,14 @@ async def test_kvcr_memory_service_guard_serves_after_engine_restart(
             namespace,
             source.name,
             KVCR_SERVICES,
+            ucx_device,
             "port_xmit_data",
         )
         recv_before = _rdma_counter(
             namespace,
             target.name,
             MAIN,
+            ucx_device,
             "port_rcv_data",
         )
         recovered_content = _request(request_url)
@@ -504,6 +533,7 @@ async def test_kvcr_memory_service_guard_serves_after_engine_restart(
                 namespace,
                 source.name,
                 KVCR_SERVICES,
+                ucx_device,
                 "port_xmit_data",
             )
             - xmit_before
@@ -513,6 +543,7 @@ async def test_kvcr_memory_service_guard_serves_after_engine_restart(
                 namespace,
                 target.name,
                 MAIN,
+                ucx_device,
                 "port_rcv_data",
             )
             - recv_before
