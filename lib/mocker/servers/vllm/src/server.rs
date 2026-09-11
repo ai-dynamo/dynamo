@@ -92,11 +92,13 @@ impl VllmMockerService {
             served_model_aliases: Vec::new(),
             supports_text_input: false,
             supports_token_ids_input: true,
+            supports_lora: false,
             supports_multimodal: false,
             reasoning_parser: String::new(),
             tool_call_parser: String::new(),
         };
         let server_info = pb::ServerInfo {
+            max_loras: 0,
             engine_version: env!("CARGO_PKG_VERSION").to_string(),
             api_version: "vllm".to_string(),
             instance_id: format!("dynamo-vllm-mocker-{}", config.mode),
@@ -133,7 +135,6 @@ impl VllmMockerService {
                 })?
                 .unwrap_or_default(),
             rl_capabilities: None,
-            supports_native_sampling_params_json: false,
         };
         Ok(Self {
             config: Arc::new(config),
@@ -288,6 +289,33 @@ impl pb::inference_server::Inference for VllmMockerService {
 
 #[tonic::async_trait]
 impl pb::control_server::Control for VllmMockerService {
+    async fn load_lora(
+        &self,
+        _request: Request<pb::LoadLoraRequest>,
+    ) -> Result<Response<pb::LoadLoraResponse>, Status> {
+        Err(Status::unimplemented(
+            "LoRA is not supported by the mock server",
+        ))
+    }
+
+    async fn unload_lora(
+        &self,
+        _request: Request<pb::UnloadLoraRequest>,
+    ) -> Result<Response<pb::UnloadLoraResponse>, Status> {
+        Err(Status::unimplemented(
+            "LoRA is not supported by the mock server",
+        ))
+    }
+
+    async fn list_loras(
+        &self,
+        _request: Request<pb::ListLorasRequest>,
+    ) -> Result<Response<pb::ListLorasResponse>, Status> {
+        Err(Status::unimplemented(
+            "LoRA is not supported by the mock server",
+        ))
+    }
+
     async fn get_server_info(
         &self,
         _request: Request<pb::GetServerInfoRequest>,
