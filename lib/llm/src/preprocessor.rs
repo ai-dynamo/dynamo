@@ -9014,6 +9014,8 @@ mod tests {
 
     #[test]
     fn test_backend_extra_args_preserves_nvext_and_sampling_extensions() {
+        use crate::engines::ValidateRequest;
+
         let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
             "model": "test-model",
             "messages": [{"role": "user", "content": "hi"}],
@@ -9057,6 +9059,56 @@ mod tests {
             extra_args["sampling_options"]["logprob_token_ids"],
             serde_json::json!([14, 15])
         );
+
+        // Exercise the public request validators before converting backend args:
+        // a converter-only test misses null being rejected by the frontend.
+        for chat in [true, false] {
+            for (allowed_token_ids, valid) in [
+                (None, true),
+                (Some(serde_json::json!(null)), true),
+                (Some(serde_json::json!([10, 11])), true),
+                (Some(serde_json::json!([])), false),
+                (Some(serde_json::json!("bad")), false),
+                (Some(serde_json::json!([-1])), false),
+            ] {
+                let mut body = if chat {
+                    serde_json::json!({
+                        "model": "test-model",
+                        "messages": [{"role": "user", "content": "hi"}]
+                    })
+                } else {
+                    serde_json::json!({"model": "test-model", "prompt": [1, 2, 3]})
+                };
+                if let Some(value) = &allowed_token_ids {
+                    body["allowed_token_ids"] = value.clone();
+                }
+                let result = if chat {
+                    let request: NvCreateChatCompletionRequest =
+                        serde_json::from_value(body).unwrap();
+                    ValidateRequest::validate(&request)
+                        .map(|()| OpenAIPreprocessor::backend_extra_args(&request, false, None))
+                } else {
+                    let request: NvCreateCompletionRequest = serde_json::from_value(body).unwrap();
+                    ValidateRequest::validate(&request)
+                        .map(|()| OpenAIPreprocessor::backend_extra_args(&request, false, None))
+                };
+                if valid {
+                    let extra_args = result.unwrap_or_else(|error| {
+                        panic!("chat={chat}, allowed_token_ids={allowed_token_ids:?}: {error:?}")
+                    });
+                    assert_eq!(
+                        extra_args
+                            .as_ref()
+                            .and_then(|extra| extra.get("sampling_options"))
+                            .and_then(|sampling| sampling.get("allowed_token_ids")),
+                        allowed_token_ids.as_ref()
+                    );
+                } else {
+                    let error = result.expect_err("invalid allowlist must fail before dispatch");
+                    assert!(error.to_string().contains("allowed_token_ids"));
+                }
+            }
+        }
     }
 
     #[test]
