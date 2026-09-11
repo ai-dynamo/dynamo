@@ -245,29 +245,7 @@ const ALL_MODEL_TYPES: &[ModelType] = &[
 
 /// Returns true if no models in the manager support the given model type.
 fn is_model_type_list_empty(manager: &ModelManager, model_type: ModelType) -> bool {
-    if model_type == ModelType::Chat {
-        manager.list_chat_completions_models().is_empty()
-    } else if model_type == ModelType::Completions {
-        manager.list_completions_models().is_empty()
-    } else if model_type == ModelType::Embedding {
-        manager.list_embeddings_models().is_empty()
-    } else if model_type == ModelType::Images {
-        manager.list_images_models().is_empty()
-    } else if model_type == ModelType::Audios {
-        manager.list_audios_models().is_empty()
-    } else if model_type == ModelType::Videos {
-        manager.list_videos_models().is_empty()
-    } else if model_type == ModelType::TensorBased {
-        manager.list_tensor_models().is_empty()
-    } else if model_type == ModelType::Realtime {
-        manager.list_realtime_models().is_empty()
-    } else if model_type == ModelType::Classify {
-        manager.list_classify_models().is_empty()
-    } else if model_type == ModelType::Pooling {
-        manager.list_pooling_models().is_empty()
-    } else {
-        true
-    }
+    !manager.has_models_of_type(model_type)
 }
 
 fn removed_model_cards(
@@ -469,20 +447,26 @@ where
         let client = endpoint
             .client()
             .await?
-            .with_admitted_instances_and_cancellation(admitted_ids, cancellation.clone());
+            .with_admitted_instances_and_cancellation(admitted_ids.clone(), cancellation.clone());
         let instance_watcher = client.instance_avail_watcher();
         tracing::debug!(
             model_name = card.name(),
             namespace = mcid.namespace,
             "building worker set pipeline"
         );
-        let checksum = card.mdcsum();
         let namespace = mcid.namespace.clone();
         // Build the WorkerSet with all applicable engines
-        let mut worker_set = WorkerSet::new(namespace.clone(), checksum.to_string(), card.clone());
+        let mut worker_set =
+            WorkerSet::new(namespace.clone(), spec.mdc_checksum.clone(), card.clone());
         let allocator_trim = worker_set.initialize_allocator_trim_on_teardown();
         worker_set.set_lifecycle_cancellation(cancellation.clone());
-        worker_set.set_topology_endpoint(endpoint.clone());
+        worker_set.set_topology_target(super::CommittedWorkerSetTarget {
+            endpoint: endpoint.clone(),
+            group: spec.key.id(),
+            generation: spec.generation,
+            card: Arc::new(card.clone()),
+            admitted_ids,
+        });
         worker_set.set_instance_watcher(instance_watcher);
 
         // A surface-less Encode worker is reached only through EncoderRouter.
@@ -1061,7 +1045,7 @@ where
             model_name: card.name().to_string(),
             worker_set_key: worker_set_key(&endpoint_id, card.model_type, card.worker_type),
         };
-        let fingerprint = materialization_fingerprint(&card, &self.router_config)?;
+        let mdc_checksum = card.mdcsum().to_string();
         let projection_fingerprint = lora_projection_fingerprint(&card)?;
         Ok(Some(DesiredInstance {
             key: mcid.to_path(),
@@ -1069,7 +1053,7 @@ where
             endpoint_id,
             card,
             group_key,
-            fingerprint,
+            mdc_checksum,
             projection_fingerprint,
         }))
     }
@@ -1277,29 +1261,6 @@ fn validate_card_shape(card: &ModelDeploymentCard) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn materialization_fingerprint(
-    card: &ModelDeploymentCard,
-    default_router_config: &RouterConfig,
-) -> anyhow::Result<String> {
-    let effective_router = card.router_config.as_ref().unwrap_or(default_router_config);
-    let mut value = serde_json::to_value(card)?;
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("model card must serialize as an object"))?;
-    object.insert(
-        "worker_type".to_string(),
-        serde_json::to_value(effective_worker_type(card.worker_type, card.model_type))?,
-    );
-    object.remove("router_config");
-    let normalized: ModelDeploymentCard = serde_json::from_value(value)?;
-
-    let mut bytes = normalized.mdcsum().as_bytes().to_vec();
-    let mut router_value = serde_json::to_value(effective_router)?;
-    canonicalize_json(&mut router_value);
-    bytes.extend(serde_json::to_vec(&router_value)?);
-    Ok(blake3::hash(&bytes).to_string())
-}
-
 fn effective_router_config<'a>(
     worker_config: Option<&'a RouterConfig>,
     frontend_config: &'a RouterConfig,
@@ -1366,10 +1327,15 @@ fn canonicalize_json(value: &mut serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::discovery::Model;
     use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
     use crate::model_card::ModelDeploymentCard;
+    use crate::session_affinity::SessionAffinityMode;
+    use dynamo_runtime::discovery::DiscoveryEvent;
     use dynamo_runtime::engine::AsyncEngine;
     use dynamo_runtime::pipeline::Error;
+    use dynamo_runtime::{Runtime, distributed::DistributedConfig};
+    use futures::StreamExt;
 
     fn test_endpoint_id(name: &str) -> EndpointId {
         EndpointId {
@@ -1377,6 +1343,238 @@ mod tests {
             component: "workers".to_string(),
             name: name.to_string(),
         }
+    }
+
+    fn discovered_card(
+        namespace: &str,
+        instance_id: u64,
+        card: &ModelDeploymentCard,
+    ) -> DiscoveryEvent {
+        DiscoveryEvent::Added(DiscoveryInstance::Model {
+            namespace: namespace.to_string(),
+            component: "workers".to_string(),
+            endpoint: "generate".to_string(),
+            instance_id,
+            card_json: serde_json::to_value(card).unwrap(),
+            model_suffix: None,
+        })
+    }
+
+    type TestDiscoverySender =
+        tokio::sync::mpsc::UnboundedSender<(DiscoveryEvent, tokio::sync::oneshot::Sender<()>)>;
+
+    async fn apply_discovery_event(events: &TestDiscoverySender, event: DiscoveryEvent) {
+        let (applied, acknowledged) = tokio::sync::oneshot::channel();
+        events.send((event, applied)).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), acknowledged)
+            .await
+            .expect("controller stopped consuming discovery events")
+            .unwrap();
+    }
+
+    fn watch_test_cards(
+        drt: DistributedRuntime,
+        manager: Arc<ModelManager>,
+        router_config: RouterConfig,
+    ) -> (TestDiscoverySender, tokio::task::JoinHandle<()>) {
+        let watcher = Arc::new(ModelWatcher::new(
+            drt,
+            manager,
+            router_config,
+            0,
+            None,
+            None,
+            None,
+            Arc::new(Metrics::new()),
+        ));
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let stream = futures::stream::unfold(
+            (event_rx, None::<tokio::sync::oneshot::Sender<()>>),
+            |(mut receiver, applied)| async {
+                // The controller polls again only after applying the previous event.
+                if let Some(applied) = applied {
+                    let _ = applied.send(());
+                }
+                receiver
+                    .recv()
+                    .await
+                    .map(|(event, applied)| (Ok(event), (receiver, Some(applied))))
+            },
+        )
+        .boxed();
+        let task = tokio::spawn(watcher.watch(stream, NamespaceFilter::Global));
+        (event_tx, task)
+    }
+
+    async fn wait_for_model(
+        manager: &ModelManager,
+        name: &str,
+        ready: impl Fn(&Model) -> bool,
+    ) -> Arc<Model> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(model) = manager.get_committed_model(name)
+                    && ready(&model)
+                {
+                    return model;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("model did not reach the expected serving state")
+    }
+
+    #[tokio::test]
+    async fn incompatible_advertisements_preserve_the_incumbent_catalog_and_readiness() {
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        for difference in [
+            "source-path",
+            "explicit-default",
+            "overridden-policy",
+            "needs",
+        ] {
+            let endpoint = drt
+                .namespace(difference)
+                .unwrap()
+                .component("workers")
+                .unwrap()
+                .endpoint("generate");
+            endpoint.register_endpoint_instance().await.unwrap();
+            let worker_id = drt.discovery().instance_id();
+            let mut incumbent = ModelDeploymentCard::with_name_only(difference);
+            incumbent.model_input = ModelInput::Text;
+            incumbent.model_type = ModelType::Chat;
+            incumbent.worker_type = Some(WorkerType::Aggregated);
+            let mut newcomer = incumbent.clone();
+            match difference {
+                "source-path" => {
+                    incumbent.source_path = Some("/mounted/model".to_string());
+                    newcomer.source_path = Some("/streamer/cache/model".to_string());
+                }
+                "explicit-default" => newcomer.router_config = Some(RouterConfig::default()),
+                "overridden-policy" => {
+                    incumbent.router_config = Some(RouterConfig::default());
+                    newcomer.router_config = Some(RouterConfig {
+                        session_affinity_mode: SessionAffinityMode::Soft,
+                        ..Default::default()
+                    });
+                }
+                "needs" => newcomer.needs = vec![vec![WorkerType::Encode]],
+                _ => unreachable!(),
+            }
+            let manager = Arc::new(ModelManager::new());
+            let (events, task) = watch_test_cards(
+                drt.clone(),
+                manager.clone(),
+                RouterConfig {
+                    session_affinity_mode: SessionAffinityMode::Soft,
+                    ..Default::default()
+                },
+            );
+            apply_discovery_event(&events, discovered_card(difference, worker_id, &incumbent))
+                .await;
+            wait_for_model(&manager, difference, Model::is_ready_to_serve).await;
+            apply_discovery_event(
+                &events,
+                discovered_card(difference, worker_id + 1, &newcomer),
+            )
+            .await;
+
+            let model = manager.get_committed_model(difference).unwrap();
+            assert!(model.is_ready_to_serve(), "{difference}");
+            assert_eq!(model.total_workers(), 1, "{difference}");
+            assert_eq!(model.worker_set_count(), 1, "{difference}");
+            let cards = manager.get_model_cards();
+            assert_eq!(cards.len(), 1, "{difference}");
+            let card = &cards[0];
+            assert_eq!(card.mdcsum(), incumbent.mdcsum(), "{difference}");
+            assert_eq!(
+                manager.registered_model_readiness(),
+                [(difference.to_string(), true)]
+            );
+            drop(events);
+            task.await.unwrap();
+        }
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn frontends_keep_their_locally_first_configuration() {
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let mut first = ModelDeploymentCard::with_name_only("local-first");
+        first.model_input = ModelInput::Text;
+        first.model_type = ModelType::Chat;
+        first.worker_type = Some(WorkerType::Aggregated);
+        let mut second = first.clone();
+        first.source_path = Some("/model/one".to_string());
+        second.source_path = Some("/model/two".to_string());
+        for (incumbent_id, incumbent, newcomer_id, newcomer) in
+            [(1, &first, 2, &second), (2, &second, 1, &first)]
+        {
+            let manager = Arc::new(ModelManager::new());
+            let (events, task) =
+                watch_test_cards(drt.clone(), manager.clone(), RouterConfig::default());
+            apply_discovery_event(&events, discovered_card("dgd-v1", incumbent_id, incumbent))
+                .await;
+            wait_for_model(&manager, "local-first", |_| true).await;
+            apply_discovery_event(&events, discovered_card("dgd-v1", newcomer_id, newcomer)).await;
+            assert_eq!(manager.get_model_cards().len(), 1);
+            assert_eq!(
+                manager.get_model_cards()[0].source_path,
+                incumbent.source_path
+            );
+            drop(events);
+            task.await.unwrap();
+        }
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn versioned_namespaces_serve_different_configurations_concurrently() {
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let manager = Arc::new(ModelManager::new());
+        let (events, task) =
+            watch_test_cards(drt.clone(), manager.clone(), RouterConfig::default());
+        for namespace in ["dgd-v1", "dgd-v2"] {
+            let endpoint = drt
+                .namespace(namespace)
+                .unwrap()
+                .component("workers")
+                .unwrap()
+                .endpoint("generate");
+            endpoint.register_endpoint_instance().await.unwrap();
+            let mut card = ModelDeploymentCard::with_name_only("rolling-model");
+            card.model_input = ModelInput::Text;
+            card.model_type = ModelType::Chat;
+            card.worker_type = Some(WorkerType::Aggregated);
+            card.source_path = Some(format!("/models/{namespace}"));
+            apply_discovery_event(
+                &events,
+                discovered_card(namespace, drt.discovery().instance_id(), &card),
+            )
+            .await;
+        }
+        let model = wait_for_model(&manager, "rolling-model", |model| {
+            model.total_workers() == 2
+        })
+        .await;
+        assert_eq!(model.worker_set_count(), 2);
+        assert!(model.is_workers_ready("dgd-v1"));
+        assert!(model.is_workers_ready("dgd-v2"));
+        assert_eq!(manager.get_model_cards().len(), 2);
+        drop(events);
+        task.await.unwrap();
+        runtime.shutdown();
     }
 
     #[test]
@@ -1489,14 +1687,14 @@ mod tests {
             key: mcid.to_path(),
             mcid,
             endpoint_id,
-            fingerprint: materialization_fingerprint(&card, &router_config).unwrap(),
+            mdc_checksum: card.mdcsum().to_string(),
             projection_fingerprint: lora_projection_fingerprint(&card).unwrap(),
             card,
             group_key: key.clone(),
         };
         let spec = GroupSpec {
             key,
-            fingerprint: desired.fingerprint.clone(),
+            mdc_checksum: desired.mdc_checksum.clone(),
             generation: 1,
             representative: desired.clone(),
         };
@@ -1585,14 +1783,14 @@ mod tests {
             key: mcid.to_path(),
             mcid,
             endpoint_id,
-            fingerprint: materialization_fingerprint(&card, &router_config).unwrap(),
+            mdc_checksum: card.mdcsum().to_string(),
             projection_fingerprint: lora_projection_fingerprint(&card).unwrap(),
             card,
             group_key: key.clone(),
         };
         let spec = GroupSpec {
             key,
-            fingerprint: desired.fingerprint.clone(),
+            mdc_checksum: desired.mdc_checksum.clone(),
             generation: 1,
             representative: desired,
         };
@@ -1825,6 +2023,27 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_backed_model_types_emit_retraction_cards() {
+        let manager = ModelManager::new();
+        for unit in ModelType::all().units() {
+            if unit.as_endpoint_types_with_anthropic(true).is_empty() {
+                continue;
+            }
+
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.model_type = unit;
+            let removed_cards = removed_model_cards(&manager, &card);
+
+            assert!(
+                removed_cards
+                    .iter()
+                    .any(|removed| removed.model_type == unit),
+                "{unit:?} maps onto an HTTP endpoint but does not produce a retraction card"
+            );
+        }
+    }
+
+    #[test]
     fn removal_cards_contain_only_the_empty_model_type() {
         let mm = ModelManager::new();
         let mut card = ModelDeploymentCard::with_name_only("model");
@@ -1933,11 +2152,6 @@ mod tests {
                 .iter()
                 .any(|card| card.model_type == ModelType::Pooling)
         );
-    }
-
-    #[test]
-    fn test_realtime_in_all_model_types() {
-        assert!(ALL_MODEL_TYPES.contains(&ModelType::Realtime));
     }
 
     #[test]
@@ -2057,57 +2271,6 @@ mod tests {
     }
 
     #[test]
-    fn materialization_fingerprint_normalizes_legacy_prefill_topology() {
-        let mut legacy = ModelDeploymentCard::with_name_only("model");
-        legacy.model_type = ModelType::Prefill;
-        let mut current = legacy.clone();
-        current.worker_type = Some(WorkerType::Prefill);
-        current.needs = vec![vec![WorkerType::Decode]];
-
-        normalize_legacy_prefill_topology(&mut legacy);
-        assert_eq!(legacy.worker_type, Some(WorkerType::Prefill));
-        assert_eq!(legacy.needs, vec![vec![WorkerType::Decode]]);
-
-        assert_eq!(
-            materialization_fingerprint(&legacy, &RouterConfig::default()).unwrap(),
-            materialization_fingerprint(&current, &RouterConfig::default()).unwrap()
-        );
-
-        current.runtime_config.max_gpu_lora_count = Some(4);
-        current.runtime_config.kv_event_publishing_enabled = Some(true);
-        current.runtime_config.data_parallel_start_rank = 4;
-        assert_eq!(
-            materialization_fingerprint(&legacy, &RouterConfig::default()).unwrap(),
-            materialization_fingerprint(&current, &RouterConfig::default()).unwrap()
-        );
-
-        current.aliases.push("new-serving-name".to_string());
-        assert_ne!(
-            materialization_fingerprint(&legacy, &RouterConfig::default()).unwrap(),
-            materialization_fingerprint(&current, &RouterConfig::default()).unwrap()
-        );
-
-        let mut legacy_wire = ModelDeploymentCard::with_name_only("model");
-        legacy_wire.model_type = ModelType::Prefill;
-        let mut legacy_wire = serde_json::to_value(&legacy_wire).unwrap();
-        let object = legacy_wire.as_object_mut().unwrap();
-        object.remove("worker_type");
-        object.remove("needs");
-        legacy_wire["context_length"] = serde_json::json!(8_192);
-        let mut legacy_wire: ModelDeploymentCard = serde_json::from_value(legacy_wire).unwrap();
-        normalize_legacy_prefill_topology(&mut legacy_wire);
-        let mut current_wire = ModelDeploymentCard::with_name_only("model");
-        current_wire.model_type = ModelType::Prefill;
-        current_wire.worker_type = Some(WorkerType::Prefill);
-        current_wire.needs = vec![vec![WorkerType::Decode]];
-        current_wire.runtime_config.context_length = Some(8_192);
-        assert_eq!(
-            materialization_fingerprint(&legacy_wire, &RouterConfig::default()).unwrap(),
-            materialization_fingerprint(&current_wire, &RouterConfig::default()).unwrap()
-        );
-    }
-
-    #[test]
     fn worker_router_config_preserves_frontend_policy_selections() {
         let mut frontend = RouterConfig::default();
         frontend.kv_router_config.router_prefill_policy = Some("frontend-prefill".to_string());
@@ -2193,7 +2356,7 @@ mod tests {
         assert_eq!(legacy.card.worker_type, Some(WorkerType::Prefill));
         assert_eq!(legacy.card.needs, vec![vec![WorkerType::Decode]]);
         assert_eq!(legacy.group_key, current.group_key);
-        assert_eq!(legacy.fingerprint, current.fingerprint);
+        assert_eq!(legacy.mdc_checksum, current.mdc_checksum);
     }
 
     #[test]

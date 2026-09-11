@@ -981,6 +981,43 @@ mod remove_tests {
 mod structural_tests {
     use super::*;
 
+    #[test]
+    fn split_preserves_high_fanout_children_under_original_suffix() {
+        let index = ConcurrentRadixTreeCompressed::new();
+        let worker0 = worker(0);
+        let worker1 = worker(1);
+        let mut lookup0 = direct_lookup();
+        let mut lookup1 = direct_lookup();
+
+        apply_direct(&index, &mut lookup0, make_store_event(0, &[1, 2, 3, 4]));
+        for branch in 10..15 {
+            apply_direct(
+                &index,
+                &mut lookup0,
+                make_store_event_with_parent(0, &[1, 2, 3, 4], &[branch]),
+            );
+        }
+        let parent = index.root.child_snapshot(LocalBlockHash(1)).unwrap();
+        let original_children = parent.child_edges_snapshot();
+        assert_eq!(original_children.len(), 5);
+
+        apply_direct(&index, &mut lookup1, make_store_event(1, &[1, 2, 99]));
+
+        let suffix = parent.child_snapshot(LocalBlockHash(3)).unwrap();
+        assert_eq!(parent.edge_local_hashes_for_test(), vec![1, 2]);
+        assert_eq!(parent.child_edges_snapshot().len(), 2);
+        assert_eq!(suffix.edge_local_hashes_for_test(), vec![3, 4]);
+        assert_eq!(suffix.child_edges_snapshot().len(), original_children.len());
+        for (hash, original_child) in original_children {
+            assert!(Arc::ptr_eq(
+                &suffix.child_snapshot(hash).unwrap(),
+                &original_child,
+            ));
+            assert_direct_score(&index, &[1, 2, 3, 4, hash.0], worker0, 5);
+        }
+        assert_direct_score(&index, &[1, 2, 99], worker1, 3);
+    }
+
     #[tokio::test]
     async fn test_extends_decode_tail_in_place() {
         let index = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 1, 32);
