@@ -35,8 +35,8 @@ impl HttpService {
     pub fn new(port: Option<u16>, wait_for_first_item: bool) -> PyResult<Self> {
         let mut builder = service_v2::HttpService::builder().port(port.unwrap_or(8080));
         if wait_for_first_item {
-            builder =
-                builder.streaming_backend_error_check(service_v2::BackendErrorCheck::UntilFirstEvent);
+            builder = builder
+                .streaming_backend_error_check(service_v2::BackendErrorCheck::UntilFirstEvent);
         }
         let inner = builder.build().map_err(to_pyerr)?;
         Ok(Self {
