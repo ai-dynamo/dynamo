@@ -140,4 +140,4 @@ debug = true
 strip = false
 
 [patch.crates-io]
-dynamo-protocols = { git = "https://github.com/abatilo/frontend-crates.git", rev = "7b440444c9a296032386642bf6109bb700128632" }
+dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "bdb4d2f6a44e522a964be8b3a5fec34297d31afb" }
