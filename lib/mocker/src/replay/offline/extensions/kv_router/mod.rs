@@ -1174,6 +1174,14 @@ impl OfflineReplayRouter {
         })
     }
 
+    /// Deliberately broader than `admit_request`'s `eligibility`-scoped
+    /// `best_available_overlap_blocks`: this runs at arrival, before a
+    /// specific worker is chosen, to classify the request into a priority
+    /// queue by how much of it is *cacheable anywhere in the cluster* --
+    /// scoping it to this request's eligibility would make the classification
+    /// depend on routing constraints (LoRA, DP rank, ...) that have nothing
+    /// to do with cache-reuse potential, and could still be stale by the time
+    /// the request is actually dispatched from the queue.
     fn snapshot_for(&self, request: &PendingRequest) -> QueueSnapshot {
         let cached_tokens = request
             .overlaps
