@@ -1049,11 +1049,7 @@ shared:
   - frontend
   - multimodal
   - router
-- glob: lib/llm/src/preprocessor/media/decoded.rs
-  owners:
-  - multimodal
-  - router
-- glob: lib/llm/src/preprocessor/media/nixl.rs
+- glob: lib/llm/src/preprocessor/media/rdma.rs
   owners:
   - multimodal
   - router

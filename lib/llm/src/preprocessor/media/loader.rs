@@ -346,7 +346,7 @@ impl Resolve for BlocklistResolver {
 mod tests {
     use super::super::decoded::DataType;
     use super::super::decoders::ImageDecoder;
-    use super::super::nixl::MediaLoader;
+    use super::super::rdma::MediaLoader;
     use super::*;
     use dynamo_protocols::types::{ChatCompletionRequestMessageContentPartImage, ImageUrl};
 
@@ -655,7 +655,7 @@ mod tests {
 #[cfg(test)]
 mod tests_non_nixl {
     #[cfg(feature = "media-nixl")]
-    use super::super::nixl::MediaLoader;
+    use super::super::rdma::MediaLoader;
     use super::*;
 
     fn assert_invalid_argument_in_chain(error: &(dyn std::error::Error + 'static)) {

@@ -143,7 +143,7 @@ pub fn get_nixl_metadata(agent: &NixlAgent, _storage: &SystemStorage) -> Result<
 /// Create the process-local NIXL agent used for frontend media registration.
 pub fn get_nixl_agent() -> Result<NixlAgent> {
     let name = format!("media-loader-{}", uuid::Uuid::new_v4());
-    Ok(NixlAgent::with_backends(&name, &["UCX"])?)
+    NixlAgent::with_backends(&name, &["UCX"])
 }
 
 /// Frontend media decoder backed by NIXL-registered storage.
