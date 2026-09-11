@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::Arc;
+
 use dynamo_backend_common::{
     DisaggregationMode, DynamoError, GuidedDecodingOptions, LLMEngineOutput, MultimodalData,
     PrefillResult, PreprocessedRequest, StopReason, TopLogprob, usage,
@@ -53,7 +55,7 @@ pub(crate) fn build_generate_request(
     };
     let media = build_media(&request, forwarded_image_uuids.as_deref())?;
     let mut prefill_result = request.prefill_result;
-    let token_ids = request.token_ids;
+    let token_ids = Arc::unwrap_or_clone(request.token_ids);
     if mode.is_decode() && has_media {
         // Remove sidecar-private prefill metadata before the KV handoff is
         // serialized to vLLM. Decode rebuilds the expanded prompt and
