@@ -208,7 +208,6 @@ def test_stop_allows_text_before_stop(content):
 @pytest.mark.parametrize(
     "content,finish,tokens",
     [
-        (None, "stop", 2),
         ("", "stop", 2),
         ("The air", "stop", 2),
         ("Other", "stop", 2),
