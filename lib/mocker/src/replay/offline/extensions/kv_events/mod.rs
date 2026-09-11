@@ -18,8 +18,15 @@ use aisimulate_core::replay::{
     ReplaySpec, ReplayTopology, Replayer, WorkerPoolSpec, WorkerStage,
 };
 
+/// A step's worth of router-visible KV-cache events.
 #[derive(Debug, Default)]
-pub(in crate::replay) struct RouterEventBatch(pub Vec<RouterEvent>);
+pub struct RouterEventBatch(Vec<RouterEvent>);
+
+impl RouterEventBatch {
+    pub(in crate::replay) fn into_events(self) -> Vec<RouterEvent> {
+        self.0
+    }
+}
 
 impl EngineEventBatch for RouterEventBatch {
     #[inline]
@@ -33,8 +40,10 @@ impl EngineEventBatch for RouterEventBatch {
     }
 }
 
+/// The observation flavor that captures KV-cache events, so the KV router
+/// scores placements against real cache state rather than blind.
 #[derive(Debug, Default)]
-pub(in crate::replay) struct RouterEventObservation;
+pub struct RouterEventObservation;
 
 impl ReplayEngineObservation for RouterEventObservation {
     type Batch = RouterEventBatch;

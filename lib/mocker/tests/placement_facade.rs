@@ -30,7 +30,7 @@ fn placement_facade_builds_a_composition_and_names_its_provider() {
 #[test]
 fn placement_facade_constructs_a_kv_router_placement() {
     let args = MockEngineArgs::default();
-    KvRouterPlacement::new_with_selector_seed(&args, None, None, 1, None)
+    KvRouterPlacement::new(&args, None, None, 1, None)
         .expect("a default MockEngineArgs with one worker must construct a placement");
 }
 

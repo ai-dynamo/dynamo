@@ -43,3 +43,35 @@ fn offline_kv_router_crate_references_are_extension_owned() {
         );
     }
 }
+
+/// The `placement` facade re-exports `KvRouterConfig`, naming the router crate
+/// at the crate root -- outside the tree the firewall above scans. That is
+/// sanctioned: a consumer would otherwise need its own direct dependency on
+/// `dynamo-kv-router` just to tune scoring. Pinning it to exactly one line
+/// keeps the exemption from growing into a second, unscanned surface.
+#[test]
+fn lib_root_names_the_kv_router_crate_exactly_once() {
+    let lib = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs");
+    let source = fs::read_to_string(&lib).unwrap();
+    // Code lines only: prose naming the crate creates no dependency, and the
+    // facade's own doc has to be free to explain what it re-exports.
+    let references = source
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            !trimmed.starts_with("//") && trimmed.contains(concat!("dynamo_", "kv_router"))
+        })
+        .collect::<Vec<_>>();
+    // Built rather than written out, so this file does not itself contain the
+    // literal the scan above rejects.
+    let sanctioned = format!(
+        "    pub use {}::config::KvRouterConfig;",
+        concat!("dynamo_", "kv_router")
+    );
+    assert_eq!(
+        references,
+        vec![sanctioned.as_str()],
+        "src/lib.rs may name the KV-router crate only in the sanctioned \
+         `placement` facade re-export"
+    );
+}

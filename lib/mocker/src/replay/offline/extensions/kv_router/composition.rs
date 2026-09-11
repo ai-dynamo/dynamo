@@ -88,7 +88,7 @@ enum KvTopologyConfig {
 }
 
 /// KV-aware placement plus an optional Dynamo Planner scaling policy.
-pub(in crate::replay) struct KvReplayComposition {
+pub struct KvReplayComposition {
     topology: KvTopologyConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
@@ -98,7 +98,9 @@ pub(in crate::replay) struct KvReplayComposition {
 }
 
 impl KvReplayComposition {
-    pub(in crate::replay) fn aggregated(
+    /// `router_config`/`prefill_load_estimator`/`scaling_policy` are all
+    /// optional: `None` takes the router/estimator/Planner defaults.
+    pub fn aggregated(
         args: MockEngineArgs,
         num_workers: usize,
         router_config: Option<KvRouterConfig>,
@@ -119,7 +121,9 @@ impl KvReplayComposition {
         }
     }
 
-    pub(in crate::replay) fn disaggregated(
+    /// `router_config`/`prefill_load_estimator`/`scaling_policy` are all
+    /// optional: `None` takes the router/estimator/Planner defaults.
+    pub fn disaggregated(
         prefill_args: MockEngineArgs,
         decode_args: MockEngineArgs,
         num_prefill_workers: usize,
@@ -171,7 +175,7 @@ impl ReplayComposition for KvReplayComposition {
             bail!("disaggregated Router composition used for aggregated replay");
         };
         validate_runtime_topology("aggregated", args, *num_workers, dp_size, &topology)?;
-        KvRouterPlacement::new_with_selector_seed(
+        KvRouterPlacement::new(
             args,
             self.router_config.take(),
             self.prefill_load_estimator.take(),
@@ -211,7 +215,7 @@ impl ReplayComposition for KvReplayComposition {
             &decode_topology,
         )?;
         let router_config = self.router_config.take();
-        let prefill = KvRouterPlacement::new_with_selector_seed(
+        let prefill = KvRouterPlacement::new(
             prefill_args,
             Some(derive_prefill_router_config(
                 prefill_args,
@@ -222,7 +226,7 @@ impl ReplayComposition for KvReplayComposition {
             self.determinism.selector_seed(),
         )
         .context("constructing prefill KV Router placement")?;
-        let decode = KvRouterPlacement::new_with_selector_seed(
+        let decode = KvRouterPlacement::new(
             decode_args,
             Some(derive_decode_router_config(decode_args, router_config)),
             None,

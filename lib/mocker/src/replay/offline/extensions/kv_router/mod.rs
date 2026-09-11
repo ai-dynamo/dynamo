@@ -342,12 +342,16 @@ pub(crate) struct OfflineReplayRouter {
     tracking_hash: TrackingHashContext,
 }
 
+/// The Dynamo KV router as an aisimulate-core `PlacementPolicy`, scoring
+/// worker admission by cache overlap and predicted load.
 pub struct KvRouterPlacement {
     router: OfflineReplayRouter,
 }
 
 impl KvRouterPlacement {
-    pub fn new_with_selector_seed(
+    /// `selector_seed` makes tie-breaking among equally-scored workers
+    /// reproducible; pass `None` for an unseeded (non-reproducible) selector.
+    pub fn new(
         args: &MockEngineArgs,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
@@ -375,6 +379,7 @@ impl KvRouterPlacement {
             scheduler_id: admission.worker_idx,
             reported_overlap_tokens: admission.overlap_blocks as usize
                 * self.router.block_size as usize,
+            // No consumer reads this yet for offline replay; revisit if one starts branching on it.
             placement_replica_id: None,
             cache_sample: Some(PlacementCacheSample {
                 overlap_blocks: admission.overlap_blocks,
@@ -1495,7 +1500,7 @@ mod tests {
             .expect("first request is admitted")
             .worker_idx;
         // `worker_idx` is `worker_id * dp_size + dp_rank` (see `admit_request`),
-        // so this identity holds only at dp_size 1, which `replay_args` fixes.
+        // so this identity holds only at dp_size 1, which `queueing_args` fixes.
         assert_eq!(router.dp_size, 1, "fixture assumes one dp rank per worker");
         let occupied_worker_id = occupied as WorkerId;
 
