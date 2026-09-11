@@ -15,6 +15,8 @@ from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.common.multimodal import EMBEDDING_RECEIVER_FACTORIES, TransferRequest
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.engine_response import normalize_finish_reason
+from dynamo.llm.exceptions import InvalidArgument
+from dynamo.sglang._disagg import validate_disagg_parallel_sampling
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
     DisaggSglangMultimodalRequest,
@@ -76,14 +78,15 @@ class SglangUtils:
 
     @staticmethod
     def build_sampling_params(
-        request: SglangMultimodalRequest, *, use_sglang_tokenizer: bool
+        request: SglangMultimodalRequest, *, engine_skips_tokenizer: bool
     ) -> dict:
         """Build sampling parameters for SGLang engine (generic functionality)
 
         Args:
             request: Pre-tokenized multimodal request.
-            use_sglang_tokenizer: Whether the engine owns a tokenizer. When it does not,
-                min_tokens is enforced by Dynamo rather than forwarded to the engine.
+            engine_skips_tokenizer: Whether the engine was started without a
+                tokenizer. When it was, min_tokens is enforced by Dynamo rather
+                than forwarded to the engine.
         """
         sampling_params = {}
 
@@ -99,16 +102,19 @@ class SglangUtils:
             sampling_params["top_k"] = sampling_options.top_k
         if sampling_options.n is not None:
             sampling_params["n"] = sampling_options.n
-        if stop_conditions.max_tokens:
-            sampling_params["max_new_tokens"] = stop_conditions.max_tokens
-        # SGLang rejects min_new_tokens without a tokenizer, so Dynamo's decoder enforces
+        # Always set max_new_tokens, including when it is None: SGLang reads None
+        # as "generate until EOS or the context limit", whereas omitting the key
+        # falls back to a default of 128 and would cap a request that asked only
+        # for a floor.
+        sampling_params["max_new_tokens"] = stop_conditions.max_tokens
+        # A tokenizer-free SGLang rejects min_new_tokens, so Dynamo's decoder enforces
         # the floor and the engine is held open with ignore_eos until it stops the request.
         hold_engine_open = False
         if (stop_conditions.min_tokens or 0) > 0:
-            if use_sglang_tokenizer:
-                sampling_params["min_new_tokens"] = stop_conditions.min_tokens
-            else:
+            if engine_skips_tokenizer:
                 hold_engine_open = True
+            else:
+                sampling_params["min_new_tokens"] = stop_conditions.min_tokens
         if hold_engine_open or stop_conditions.ignore_eos:
             sampling_params["ignore_eos"] = True
 
@@ -219,18 +225,32 @@ class StreamProcessor:
     """Unified stream processing for SGLang responses"""
 
     @staticmethod
-    async def process_sglang_stream(stream_source) -> AsyncIterator[str]:
+    async def process_sglang_stream(
+        stream_source,
+        request_id_future: Optional["asyncio.Future[str]"] = None,
+    ) -> AsyncIterator[str]:
         """Process SGLang stream output.
 
         With stream_output=True (enforced by Dynamo), SGLang sends disjoint segments
         containing only new tokens since the last output. We pass these through directly.
+
+        Args:
+            stream_source: Async iterator of SGLang response dicts.
+            request_id_future: Resolved with the SGLang request id from the first
+                chunk that carries one, so a cancellation monitor can abort that
+                specific request.
         """
         try:
             async for res in stream_source:
                 try:
+                    meta_info = res.get("meta_info", {})
+                    if request_id_future is not None and not request_id_future.done():
+                        sglang_request_id = meta_info.get("id")
+                        if sglang_request_id:
+                            request_id_future.set_result(sglang_request_id)
                     # With stream_output=True, output_ids contains only new tokens (disjoint)
                     output_ids = res.get("output_ids", [])
-                    finish_reason = res.get("meta_info", {}).get("finish_reason")
+                    finish_reason = meta_info.get("finish_reason")
 
                     # Empty, non-final chunks can happen during scheduler idle ticks.
                     # Keep waiting for the next chunk.
@@ -530,6 +550,8 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
                 finally:
                     _nvtx.end_range(rng_agg)
 
+        except InvalidArgument:
+            raise
         except Exception as e:
             logger.error(f"Error in multimodal generation: {e}", exc_info=True)
             yield ErrorResponseBuilder.build_error_response(e)
@@ -549,8 +571,9 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
             raise ValueError("input_ids is required")
 
         sampling_params = SglangUtils.build_sampling_params(
-            request, use_sglang_tokenizer=self.use_sglang_tokenizer
+            request, engine_skips_tokenizer=self.engine_skips_tokenizer
         )
+        validate_disagg_parallel_sampling({"sampling_params": sampling_params})
 
         # Request bootstrap info from prefill worker
         bootstrap_info = await self._get_bootstrap_from_prefill(
@@ -575,13 +598,19 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
 
         rng_first = _nvtx.start_range("mm:dec:first_token", color="purple")
         first_token = True
+        request_id_future: "asyncio.Future[str]" = asyncio.Future()
         try:
-            async for output in StreamProcessor.process_sglang_stream(decode_stream):
-                if first_token:
-                    end_ttft()
-                    _nvtx.end_range(rng_first)
-                    first_token = False
-                yield output
+            async with self._engine_abort_on_cancel(request_id_future, context):
+                async for output in StreamProcessor.process_sglang_stream(
+                    decode_stream, request_id_future=request_id_future
+                ):
+                    if first_token:
+                        end_ttft()
+                        _nvtx.end_range(rng_first)
+                        first_token = False
+                    yield output
+                    if context is not None and context.is_stopped():
+                        break
         finally:
             if first_token:
                 end_ttft()
@@ -600,7 +629,7 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
         tensor_id: int | None = None
         try:
             sampling_params = SglangUtils.build_sampling_params(
-                request, use_sglang_tokenizer=self.use_sglang_tokenizer
+                request, engine_skips_tokenizer=self.engine_skips_tokenizer
             )
             with _nvtx.annotate("mm:pd:load_multimodal", color="cyan"):
                 (
@@ -639,16 +668,22 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
 
             rng_first = _nvtx.start_range("mm:dec:first_token", color="purple")
             first_token = True
+            request_id_future: "asyncio.Future[str]" = asyncio.Future()
             try:
-                async for output in StreamProcessor.process_sglang_stream(agg_stream):
-                    if first_token:
-                        if tensor_id is not None:
-                            self.embeddings_processor.release_embeddings(tensor_id)
-                            tensor_id = None
-                        end_ttft()
-                        _nvtx.end_range(rng_first)
-                        first_token = False
-                    yield output
+                async with self._engine_abort_on_cancel(request_id_future, context):
+                    async for output in StreamProcessor.process_sglang_stream(
+                        agg_stream, request_id_future=request_id_future
+                    ):
+                        if first_token:
+                            if tensor_id is not None:
+                                self.embeddings_processor.release_embeddings(tensor_id)
+                                tensor_id = None
+                            end_ttft()
+                            _nvtx.end_range(rng_first)
+                            first_token = False
+                        yield output
+                        if context is not None and context.is_stopped():
+                            break
             finally:
                 if first_token:
                     end_ttft()
@@ -763,6 +798,9 @@ class MultimodalPrefillWorkerHandler(
         try:
             # Validate and parse request
             disagg_request = self._validate_and_parse_disagg_request(disagg_request)
+            validate_disagg_parallel_sampling(
+                {"sampling_params": disagg_request.sampling_params}
+            )
 
             rid = context.trace_id or context.id()
             bootstrap_room = self._generate_bootstrap_room()

@@ -160,8 +160,17 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	MinAvailable *int32 `json:"minAvailable,omitempty"`
 
-	// Multinode is the configuration for multinode components.
+	// Multinode configures worker, prefill, or decode components that span
+	// multiple Pods.
 	Multinode *MultinodeSpec `json:"multinode,omitempty"`
+	// Roles expose the named Pod-producing parts inside a compound component.
+	// When set for a multinode component, this list must contain exactly one
+	// leader and one worker role. Their cardinality is derived from multinode.nodeCount.
+	// Omission preserves the implicit multinode role layout.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Roles []ComponentRoleSpec `json:"roles,omitempty"`
 	// ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.
 	// When enabled, replicas are managed by the DGDSA and external autoscalers scale the service
 	// via the Scale subresource; when disabled, replicas are set directly. Opt in with
@@ -216,14 +225,6 @@ type MultinodeSpec struct {
 	// Must be greater than 1.
 	// +kubebuilder:validation:Minimum=2
 	NodeCount int32 `json:"nodeCount"`
-
-	// Leader configures the generated multinode leader unit.
-	// +optional
-	Leader *MultinodeRoleSpec `json:"leader,omitempty"`
-
-	// Worker configures the generated multinode worker unit.
-	// +optional
-	Worker *MultinodeRoleSpec `json:"worker,omitempty"`
 }
 
 type IngressTLSSpec struct {

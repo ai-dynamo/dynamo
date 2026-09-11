@@ -12,7 +12,7 @@ the chat-shaped pipeline.
 """
 
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -59,11 +59,6 @@ def test_factory_returns_noop_logger_for_embedding_worker(monkeypatch):
     logger = factory.create_stat_logger(dp_rank=0)
 
     assert isinstance(logger, NoopStatLogger)
-    # Embedding factory never tracks a created chat logger, so the
-    # downstream ``init_publish`` / ``set_num_gpu_blocks_all`` calls in
-    # the chat path are safe no-ops if anyone ever wires them on the
-    # embedding branch by mistake.
-    assert factory.created_logger is None
 
 
 def test_noop_stat_logger_record_is_safe_with_none_stats():
@@ -125,3 +120,75 @@ def test_factory_default_is_chat_path(monkeypatch):
     assert constructed[0]["endpoint"] is endpoint
     assert constructed[0]["dp_rank"] == 3
     assert constructed[0]["component_gauges"] is component_gauges
+
+
+def test_factory_initializes_every_dp_rank_logger(monkeypatch):
+    loggers = []
+
+    def _fake_publisher(*args, **kwargs):
+        logger = Mock(spec=DynamoStatLoggerPublisher)
+        loggers.append(logger)
+        return logger
+
+    monkeypatch.setattr(publisher_mod, "DynamoStatLoggerPublisher", _fake_publisher)
+
+    factory = StatLoggerFactory(
+        endpoint=SimpleNamespace(), component_gauges=SimpleNamespace()
+    )
+    for dp_rank in range(3):
+        factory.create_stat_logger(dp_rank=dp_rank)
+
+    factory.set_num_gpu_blocks_all(4096)
+    factory.init_publish()
+
+    assert factory.created_loggers == dict(enumerate(loggers))
+    for logger in loggers:
+        logger.set_num_gpu_block.assert_called_once_with(4096)
+        logger.init_publish.assert_called_once_with()
+
+
+def test_factory_binds_deferred_endpoint_to_every_dp_rank_logger(monkeypatch):
+    loggers = []
+
+    def _fake_publisher(*args, **kwargs):
+        assert kwargs["endpoint"] is None
+        logger = Mock(spec=DynamoStatLoggerPublisher)
+        loggers.append(logger)
+        return logger
+
+    monkeypatch.setattr(publisher_mod, "DynamoStatLoggerPublisher", _fake_publisher)
+
+    factory = StatLoggerFactory(endpoint=None, component_gauges=SimpleNamespace())
+    factory.create_stat_logger(dp_rank=0)
+    factory.create_stat_logger(dp_rank=1)
+
+    endpoint = SimpleNamespace()
+    factory.bind_endpoint(endpoint)
+
+    assert factory.endpoint is endpoint
+    for logger in loggers:
+        logger.bind_endpoint.assert_called_once_with(endpoint)
+
+
+@pytest.mark.asyncio
+async def test_deferred_logger_starts_with_fresh_metrics_state(monkeypatch):
+    publishers = [Mock(create_endpoint=AsyncMock()), Mock(create_endpoint=AsyncMock())]
+    monkeypatch.setattr(
+        publisher_mod, "WorkerMetricsPublisher", Mock(side_effect=publishers)
+    )
+
+    logger = DynamoStatLoggerPublisher(
+        endpoint=None,
+        component_gauges=SimpleNamespace(),
+    )
+    logger.inner.publish(dp_rank=0, kv_used_blocks=7)
+
+    endpoint = SimpleNamespace()
+    logger.bind_endpoint(endpoint)
+    assert logger.inner is publishers[1]
+
+    assert logger._endpoint_task is not None
+    await logger._endpoint_task
+    publishers[0].publish.assert_called_once_with(dp_rank=0, kv_used_blocks=7)
+    publishers[0].create_endpoint.assert_not_called()
+    publishers[1].create_endpoint.assert_awaited_once_with(endpoint)

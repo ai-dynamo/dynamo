@@ -736,7 +736,7 @@ class DeploymentSpec:
         Add or override a command-line argument for a specific service
 
         Args:
-            service_name: Name of the service (e.g., "VllmDecodeWorker", "TRTLLMWorker")
+            service_name: Name of the service (e.g., "decode", "TRTLLMWorker")
             arg_name: Argument name (e.g., "--max-model-len", "--max-seq-len")
             arg_value: Argument value (e.g., "1024")
         """
@@ -1251,14 +1251,31 @@ class ManagedDeployment:
                         warning += f" lastExitCode={last_exit}"
 
                     prev_log = await self._fetch_previous_container_log(
-                        pod_name, cs.name, tail_lines=prev_log_tail_lines
+                        pod_name, cs.name
                     )
                     if prev_log:
+                        restart_log_dir = os.path.join(self.log_dir, "restarts")
+                        try:
+                            os.makedirs(restart_log_dir, exist_ok=True)
+                            restart_log_path = os.path.join(
+                                restart_log_dir,
+                                f"{pod_name}.{cs.name}.restart-{after}.previous.log",
+                            )
+                            with open(restart_log_path, "w") as f:
+                                f.write(prev_log)
+                        except OSError as e:
+                            self._logger.debug(
+                                "Failed to preserve previous log for %s: %s", key, e
+                            )
+
+                        prev_log_tail = "\n".join(
+                            prev_log.splitlines()[-prev_log_tail_lines:]
+                        )
                         warning += (
                             f"\n      --- last {prev_log_tail_lines} lines of "
                             f"previous {cs.name} log ({pod_name}) ---\n"
                         )
-                        for line in prev_log.splitlines():
+                        for line in prev_log_tail.splitlines():
                             warning += f"      {line}\n"
                         warning += f"      --- end of previous {cs.name} log ---"
                     else:
@@ -1287,15 +1304,12 @@ class ManagedDeployment:
         self,
         pod_name: str,
         container: str,
-        tail_lines: int = 100,
     ) -> Optional[str]:
-        """Fetch the previous (pre-restart) instance log for a container.
+        """Fetch a bounded previous-instance log for a container.
 
-        Returns the tail of the log as a single string, or None if no previous
-        instance exists or the API call fails. This is the artifact that
-        normally lives in ``<pod>.<container>.previous.log`` on disk; we
-        surface it inline so failed CI runs are self-diagnosing without
-        needing an artifact download.
+        Returns the log as a single string, or None if no previous instance
+        exists or the API call fails. The caller preserves it before a later
+        restart rotates it out of Kubernetes' single previous-log slot.
         """
         try:
             assert self._core_api is not None, "Kubernetes API not initialized"
@@ -1304,7 +1318,7 @@ class ManagedDeployment:
                 namespace=self.namespace,
                 container=container,
                 previous=True,
-                tail_lines=tail_lines,
+                tail_lines=50000,
             )
             return log if isinstance(log, str) else str(log)
         except exceptions.ApiException as e:
@@ -1657,7 +1671,7 @@ class ManagedDeployment:
                 # Check if port is assigned
                 if port_forward.local_port == 0:
                     self._logger.debug(
-                        f"Port not yet assigned for pod {pod.name} (attempt {attempt+1}/{max_connection_attempts})"
+                        f"Port not yet assigned for pod {pod.name} (attempt {attempt + 1}/{max_connection_attempts})"
                     )
                     continue
 
@@ -1671,7 +1685,7 @@ class ManagedDeployment:
                         return port_forward
                 except (requests.ConnectionError, requests.Timeout) as e:
                     self._logger.warning(
-                        f"Connection test failed for pod {pod.name} (attempt {attempt+1}/{max_connection_attempts}): {e}"
+                        f"Connection test failed for pod {pod.name} (attempt {attempt + 1}/{max_connection_attempts}): {e}"
                     )
 
             # All attempts failed

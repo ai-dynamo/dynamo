@@ -384,6 +384,24 @@ impl
                         data.stop_reason = stop_reason.or(data.stop_reason);
                     }
                     data.text = text;
+
+                    // A local stop can fire part-way through a chunk, in which
+                    // case `tokens` holds only the prefix the decoder consumed.
+                    // Every array indexed alongside it has to be cut to the same
+                    // length, or downstream counts token_ids and reports more
+                    // tokens than were emitted, and completion_token_ids carries
+                    // the tokens that came after the stop. `cum_log_probs` is one
+                    // value for the sequence, not per token, so it stays.
+                    let consumed = tokens.len();
+                    if consumed < data.token_ids.len() {
+                        data.token_ids.truncate(consumed);
+                        if let Some(log_probs) = data.log_probs.as_mut() {
+                            log_probs.truncate(consumed);
+                        }
+                        if let Some(top_logprobs) = data.top_logprobs.as_mut() {
+                            top_logprobs.truncate(consumed);
+                        }
+                    }
                     data.tokens = Some(tokens);
 
                     output.data = Some(data);
@@ -605,24 +623,35 @@ impl Decoder {
     /// In the future, this method may kick off async cpu/tokio tasks and or async cuda tasks to
     /// handle logits post-processing and/or other tasks.
     pub fn step(&mut self, token_id: TokenIdType) -> Result<StepResult> {
-        // increment the generated tokens
-        self.generated_tokens += 1;
+        // Decided before this token is counted, so a token the floor discards
+        // does not advance the floor.
+        let below_min_tokens = self.generated_tokens < self.min_tokens;
 
         // decode the token
-        let detokenize_start = Instant::now();
+        let detokenize_start = self.tracker.as_ref().map(|_| Instant::now());
         let token = {
             let _nvtx = dynamo_nvtx_range!("detokenize");
             self.decode_stream.step(token_id)?
         };
-        let detokenize_elapsed = detokenize_start.elapsed();
-        if let Some(tracker) = &self.tracker {
-            tracker.record_detokenize_latency(detokenize_elapsed);
+        if let (Some(start), Some(tracker)) = (detokenize_start, &self.tracker) {
+            tracker.record_detokenize_latency(start.elapsed());
         }
 
         // stop conditions to not apply until the minimum number of tokens have been generated
-        if self.generated_tokens < self.min_tokens {
+        if below_min_tokens {
+            // A hidden stop token never appears in the output. Below the floor
+            // the stop is not honored either, so the token is dropped rather
+            // than emitted as text — and it does not count toward the minimum,
+            // which is a floor on the tokens the caller actually receives.
+            if self.hidden_stop_ids.contains(&token_id) {
+                return Ok(StepResult::ok(None));
+            }
+            self.generated_tokens += 1;
             return Ok(StepResult::ok(token));
         }
+
+        // increment the generated tokens
+        self.generated_tokens += 1;
 
         // Check token stops. Visible token IDs are included in output.
         if self.visible_stop_ids.contains(&token_id) {
@@ -831,6 +860,8 @@ mod tests {
                 [] => "",
                 [101] => "Okay",
                 [102] => " Okay",
+                [103] => "<|user|>",
+                [101, 103] => "Okay<|user|>",
                 _ => anyhow::bail!("unexpected token IDs: {token_ids:?}"),
             };
             Ok(traits::DecodeResult::Complete(token.to_string()))
@@ -841,6 +872,73 @@ mod tests {
 
     struct SyntheticSglangEngine {
         engine_decodes_text: bool,
+    }
+
+    struct SyntheticSglangStopEngine;
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for SyntheticSglangStopEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let output = LLMEngineOutput {
+                // SGLang's output_ids_through_stop() includes the matched stop
+                // position. The frontend must hide its text without mutating
+                // this raw token sequence.
+                token_ids: vec![101, 103],
+                finish_reason: Some(FinishReason::Stop),
+                index: Some(0),
+                ..Default::default()
+            };
+
+            Ok(ResponseStream::new(
+                Box::pin(futures::stream::once(async move {
+                    Annotated::from_data(output)
+                })),
+                request.context(),
+            ))
+        }
+    }
+
+    struct SyntheticSglangStopWithSuffixEngine;
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for SyntheticSglangStopWithSuffixEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let candidate = |token_id| {
+                vec![TopLogprob {
+                    rank: 1,
+                    token_id,
+                    token: None,
+                    logprob: -0.5,
+                    bytes: None,
+                }]
+            };
+            let output = LLMEngineOutput {
+                // An engine held open past its stop token keeps decoding, so a
+                // single chunk can carry tokens from after the stop.
+                token_ids: vec![101, 103, 102],
+                log_probs: Some(vec![-0.1, -0.2, -0.3]),
+                top_logprobs: Some(vec![candidate(101), candidate(103), candidate(102)]),
+                index: Some(0),
+                ..Default::default()
+            };
+
+            Ok(ResponseStream::new(
+                Box::pin(futures::stream::once(async move {
+                    Annotated::from_data(output)
+                })),
+                request.context(),
+            ))
+        }
     }
 
     #[async_trait]
@@ -981,6 +1079,130 @@ mod tests {
     #[tokio::test]
     async fn test_sglang_top_logprobs_are_decoded_before_engine_text_fast_path() {
         assert_sglang_top_logprobs_are_decoded_in_openai_response(true).await;
+    }
+
+    #[tokio::test]
+    async fn test_sglang_hidden_stop_text_is_suppressed_without_mutating_tito_ids() {
+        use crate::protocols::common::extensions::NvExt;
+
+        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(CandidateDecoder);
+        let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
+        let request = PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(vec![])
+            .stop_conditions(StopConditions {
+                stop_token_ids_hidden: Some(vec![103]),
+                ..Default::default()
+            })
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .build()
+            .expect("valid preprocessed request");
+        let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            Arc::new(SyntheticSglangStopEngine);
+
+        let mut stream = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+            .await
+            .expect("backend generation succeeds");
+        let output = stream
+            .next()
+            .await
+            .expect("backend emits a response")
+            .data
+            .expect("response contains backend output");
+
+        assert_eq!(output.text.as_deref(), Some("Okay"));
+        assert_eq!(output.tokens, vec![Some("Okay".to_string()), None]);
+        assert_eq!(output.token_ids, vec![101, 103]);
+        assert_eq!(output.finish_reason, Some(FinishReason::Stop));
+
+        let nvext = NvExt::builder()
+            .extra_fields(vec!["completion_token_ids".to_string()])
+            .build()
+            .expect("valid nvext selection");
+        let options = DeltaGeneratorOptions::new(None, None, false, Some(&nvext));
+        let mut generator = DeltaGenerator::new(
+            "test-model".to_string(),
+            options,
+            "test-request".to_string(),
+        );
+        let response = generator
+            .choice_from_postprocessor(output)
+            .expect("OpenAI response conversion succeeds");
+
+        assert_eq!(
+            response
+                .nvext
+                .as_ref()
+                .and_then(|fields| fields.get("completion_token_ids")),
+            Some(&serde_json::json!([101, 103]))
+        );
+        assert_eq!(generator.get_usage().completion_tokens, 2);
+    }
+
+    #[tokio::test]
+    async fn test_local_stop_truncates_every_token_aligned_field() {
+        use crate::protocols::common::extensions::NvExt;
+
+        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(CandidateDecoder);
+        let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
+        let request = PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(vec![])
+            .stop_conditions(StopConditions {
+                stop_token_ids_hidden: Some(vec![103]),
+                ..Default::default()
+            })
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions {
+                logprobs: Some(1),
+                ..Default::default()
+            })
+            .build()
+            .expect("valid preprocessed request");
+        let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            Arc::new(SyntheticSglangStopWithSuffixEngine);
+
+        let mut stream = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+            .await
+            .expect("backend generation succeeds");
+        let output = stream
+            .next()
+            .await
+            .expect("backend emits a response")
+            .data
+            .expect("response contains backend output");
+
+        assert_eq!(output.text.as_deref(), Some("Okay"));
+        assert_eq!(output.tokens, vec![Some("Okay".to_string()), None]);
+        assert_eq!(output.token_ids, vec![101, 103]);
+        assert_eq!(output.log_probs, Some(vec![-0.1, -0.2]));
+        assert_eq!(output.top_logprobs.as_ref().map(Vec::len), Some(2));
+        assert_eq!(output.finish_reason, Some(FinishReason::Stop));
+
+        let nvext = NvExt::builder()
+            .extra_fields(vec!["completion_token_ids".to_string()])
+            .build()
+            .expect("valid nvext selection");
+        let options = DeltaGeneratorOptions::new(None, None, false, Some(&nvext));
+        let mut generator = DeltaGenerator::new(
+            "test-model".to_string(),
+            options,
+            "test-request".to_string(),
+        );
+        let response = generator
+            .choice_from_postprocessor(output)
+            .expect("OpenAI response conversion succeeds");
+
+        assert_eq!(
+            response
+                .nvext
+                .as_ref()
+                .and_then(|fields| fields.get("completion_token_ids")),
+            Some(&serde_json::json!([101, 103])),
+            "the token after the stop must not reach the client"
+        );
+        assert_eq!(generator.get_usage().completion_tokens, 2);
     }
 
     /// When the tokenizer's decode() returns Err, Decoder::process_token_ids()

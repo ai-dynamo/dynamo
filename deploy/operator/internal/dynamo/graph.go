@@ -198,41 +198,6 @@ func GetRestartOrder(dgd *v1beta1.DynamoGraphDeployment) []string {
 	return order
 }
 
-// ServiceConfig represents the YAML configuration structure for a service
-type DynamoConfig struct {
-	Enabled       bool   `yaml:"enabled"`
-	Namespace     string `yaml:"namespace"`
-	Name          string `yaml:"name"`
-	ComponentType string `yaml:"component_type,omitempty"`
-}
-
-type Traffic struct {
-	Timeout int `yaml:"timeout"`
-}
-
-type Autoscaling struct {
-	MinReplicas int `yaml:"min_replicas"`
-	MaxReplicas int `yaml:"max_replicas"`
-}
-
-type Config struct {
-	Dynamo       *DynamoConfig   `yaml:"dynamo,omitempty"`
-	Resources    *Resources      `yaml:"resources,omitempty"`
-	Traffic      *Traffic        `yaml:"traffic,omitempty"`
-	Autoscaling  *Autoscaling    `yaml:"autoscaling,omitempty"`
-	HttpExposed  bool            `yaml:"http_exposed,omitempty"`
-	ApiEndpoints []string        `yaml:"api_endpoints,omitempty"`
-	Workers      *int32          `yaml:"workers,omitempty"`
-	TotalGpus    *int32          `yaml:"total_gpus,omitempty"`
-	ExtraPodSpec *corev1.PodSpec `yaml:"extraPodSpec,omitempty"`
-}
-
-type ServiceConfig struct {
-	Name         string              `yaml:"name"`
-	Dependencies []map[string]string `yaml:"dependencies,omitempty"`
-	Config       Config              `yaml:"config"`
-}
-
 type Resources struct {
 	CPU    *string           `yaml:"cpu,omitempty" json:"cpu,omitempty"`
 	Memory *string           `yaml:"memory,omitempty" json:"memory,omitempty"`
@@ -242,7 +207,7 @@ type Resources struct {
 
 type DynDeploymentConfig = map[string]*DynDeploymentServiceConfig
 
-// ServiceConfig represents the configuration for a specific service
+// DynDeploymentServiceConfig represents the configuration for a specific service.
 type DynDeploymentServiceConfig struct {
 	ServiceArgs *ServiceArgs `json:"ServiceArgs,omitempty"`
 }
@@ -251,13 +216,6 @@ type DynDeploymentServiceConfig struct {
 type ServiceArgs struct {
 	Workers   *int32     `json:"workers,omitempty"`
 	Resources *Resources `json:"resources,omitempty"`
-}
-
-func (s ServiceConfig) GetNamespace() *string {
-	if s.Config.Dynamo == nil || s.Config.Dynamo.Namespace == "" {
-		return nil
-	}
-	return &s.Config.Dynamo.Namespace
 }
 
 func ParseDynDeploymentConfig(jsonContent []byte) (DynDeploymentConfig, error) {
@@ -1342,6 +1300,32 @@ func expandMultinodeRoles(componentName string, numberOfNodes int32) []ServiceRo
 	}
 }
 
+// ExplicitMultinodeRolesMatchImplicit reports whether the authored roles carry
+// exactly the established multinode structure without role-specific behavior.
+// component must not be nil.
+func ExplicitMultinodeRolesMatchImplicit(component *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+	if component.Multinode == nil || len(component.Roles) != 2 {
+		return false
+	}
+
+	// Require each role exactly once with no role-specific provider behavior.
+	seen := map[string]bool{}
+	for i := range component.Roles {
+		role := &component.Roles[i]
+		if seen[role.Name] || role.ProviderOverride != nil {
+			return false
+		}
+		seen[role.Name] = true
+
+		switch role.Name {
+		case v1beta1.ComponentRoleLeader, v1beta1.ComponentRoleWorker:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func expandSingleNodeGMSRoles(componentName string, totalEnginePods int32) []ServiceRole {
 	return []ServiceRole{
 		{Name: fmt.Sprintf("%s-%s-0", componentName, commonconsts.GroveRoleSuffixGMS), Role: RoleGMS, Replicas: 1, Rank: 0},
@@ -1433,45 +1417,6 @@ func PCSNameForDGD(dgdName string, components []v1beta1.DynamoComponentDeploymen
 	return dgdName[:pcsBudget-5] + "-" + suffix
 }
 
-func PCSNameForAlphaDGDServices(dgdName string, services map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec) string {
-	componentNames := make([]string, 0, len(services))
-	for componentName := range services {
-		componentNames = append(componentNames, componentName)
-	}
-	sort.Strings(componentNames)
-
-	components := make([]v1beta1.DynamoComponentDeploymentSharedSpec, 0, len(componentNames))
-	for _, componentName := range componentNames {
-		service := services[componentName]
-		component := v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: componentName}
-		if service != nil {
-			if service.Multinode != nil {
-				component.Multinode = &v1beta1.MultinodeSpec{}
-				v1alpha1.ConvertFromMultinodeSpec(service.Multinode, component.Multinode)
-			}
-			if service.Replicas != nil {
-				component.Replicas = ptr.To(*service.Replicas)
-			}
-			if service.GPUMemoryService != nil && service.GPUMemoryService.Enabled {
-				if component.Experimental == nil {
-					component.Experimental = &v1beta1.ExperimentalSpec{}
-				}
-				component.Experimental.GPUMemoryService = &v1beta1.GPUMemoryServiceSpec{}
-				v1alpha1.ConvertFromGPUMemoryServiceSpec(service.GPUMemoryService, component.Experimental.GPUMemoryService)
-			}
-			if service.Failover != nil && service.Failover.Enabled {
-				if component.Experimental == nil {
-					component.Experimental = &v1beta1.ExperimentalSpec{}
-				}
-				component.Experimental.Failover = &v1beta1.FailoverSpec{}
-				v1alpha1.ConvertFromFailoverSpec(service.Failover, component.Experimental.Failover)
-			}
-		}
-		components = append(components, component)
-	}
-	return PCSNameForDGD(dgdName, components)
-}
-
 // Define BackendFramework enum for sglang, vllm, trtllm
 
 type BackendFramework string
@@ -1482,18 +1427,6 @@ const (
 	BackendFrameworkTRTLLM BackendFramework = "trtllm"
 	BackendFrameworkNoop   BackendFramework = "noop"
 )
-
-// ParseBackendFramework converts a string to BackendFramework type.
-// Returns an error if the framework string is not recognized.
-func ParseBackendFramework(framework string) (BackendFramework, error) {
-	bf := BackendFramework(framework)
-	switch bf {
-	case BackendFrameworkVLLM, BackendFrameworkSGLang, BackendFrameworkTRTLLM, BackendFrameworkNoop:
-		return bf, nil
-	default:
-		return "", fmt.Errorf("unsupported backend framework: %s (valid values: vllm, sglang, trtllm)", framework)
-	}
-}
 
 // ContainerGPUCount lazily resolves the main container's scalar or DRA-backed
 // GPU count. The same resolver can be shared across all roles of a component.
@@ -1562,7 +1495,7 @@ func IsWorkerComponent(componentType string) bool {
 }
 
 // AddStandardEnvVars adds the standard environment variables that are common to
-// both checkpoint jobs and generated worker pods.
+// both SnapshotJob capture Pods and generated worker Pods.
 func AddStandardEnvVars(container *corev1.Container, operatorConfig *configv1alpha1.OperatorConfiguration) {
 	standardEnvVars := []corev1.EnvVar{}
 	if operatorConfig.Infrastructure.NATSAddress != "" {
@@ -1666,24 +1599,6 @@ func AddTransportTLSEnvVars(container *corev1.Container, operatorConfig *configv
 	container.Env = MergeEnvs(tlsEnvVars, container.Env)
 }
 
-func applyCheckpointProbeCadence(
-	container *corev1.Container,
-	component *v1beta1.DynamoComponentDeploymentSharedSpec,
-	checkpointInfo *checkpoint.CheckpointInfo,
-) {
-	if checkpointInfo != nil &&
-		checkpointInfo.Enabled &&
-		checkpointInfo.Ready &&
-		IsWorkerComponent(string(component.ComponentType)) {
-		if container.ReadinessProbe != nil {
-			container.ReadinessProbe.PeriodSeconds = 1
-		}
-		if container.StartupProbe != nil {
-			container.StartupProbe.PeriodSeconds = 1
-		}
-	}
-}
-
 // applyDefaultSecurityContext sets secure defaults for pod security context.
 // Currently only sets fsGroup to solve volume permission issues.
 // Does NOT set runAsUser/runAsGroup/runAsNonRoot to maintain backward compatibility
@@ -1725,7 +1640,6 @@ func GenerateBasePodSpec(
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
 	serviceName string,
-	checkpointInfo *checkpoint.CheckpointInfo, // Optional checkpoint info (resolved by ResolveCheckpointForService)
 	deployerOverride MultinodeDeployer, // Optional: overrides factory-created deployer when non-nil
 	containerGPUs ContainerGPUCount,
 ) (*corev1.PodSpec, error) {
@@ -1773,8 +1687,6 @@ func GenerateBasePodSpec(
 	if err := backend.UpdateContainer(&container, numberOfNodes, role, component, serviceName, multinodeDeployer, containerGPUs); err != nil {
 		return nil, fmt.Errorf("failed to update container for backend %s: %w", backendFramework, err)
 	}
-	applyCheckpointProbeCadence(&container, component, checkpointInfo)
-
 	// get base podspec from component
 	podSpec, err := componentDefaults.GetBasePodSpec(componentContext)
 	if err != nil {
@@ -2163,14 +2075,13 @@ func GeneratePodSpecForComponent(
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
 	serviceName string,
-	checkpointInfo *checkpoint.CheckpointInfo,
 	deployerOverride MultinodeDeployer,
 	containerGPUs ContainerGPUCount,
 ) (*corev1.PodSpec, error) {
 	return generatePodSpecForComponent(
 		component, backendFramework, secretsRetriever, dynamoDeployment,
 		role, numberOfNodes, operatorConfig, multinodeDeploymentType,
-		serviceName, checkpointInfo, deployerOverride, nil, containerGPUs,
+		serviceName, deployerOverride, nil, containerGPUs,
 	)
 }
 
@@ -2184,7 +2095,6 @@ func generatePodSpecForComponent(
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
 	serviceName string,
-	checkpointInfo *checkpoint.CheckpointInfo,
 	deployerOverride MultinodeDeployer,
 	groveClusterTopologyDomains []v1beta1.TopologyDomain,
 	containerGPUs ContainerGPUCount,
@@ -2201,7 +2111,7 @@ func generatePodSpecForComponent(
 		operatorConfig = &configv1alpha1.OperatorConfiguration{}
 	}
 
-	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, operatorConfig, multinodeDeploymentType, serviceName, checkpointInfo, deployerOverride, containerGPUs)
+	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, operatorConfig, multinodeDeploymentType, serviceName, deployerOverride, containerGPUs)
 	if err != nil {
 		return nil, err
 	}
@@ -2434,7 +2344,6 @@ type cliqueParams struct {
 	restartState                *RestartState
 	existingRestartAnnotations  map[string]string
 	validatedQueueName          string
-	checkpointRestore           *checkpoint.ResolvedPodSpecRestore
 	groveClusterTopologyDomains []v1beta1.TopologyDomain
 	containerGPUs               ContainerGPUCount
 }
@@ -2446,34 +2355,11 @@ type cliqueParams struct {
 func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, error) {
 	podSpec, err := generatePodSpecForRole(
 		p.r, p.component, p.backendFramework, p.secretsRetriever,
-		p.dynamoDeployment, p.numberOfNodes, p.operatorConfig, p.componentName, p.checkpointInfo,
+		p.dynamoDeployment, p.numberOfNodes, p.operatorConfig, p.componentName,
 		p.groveClusterTopologyDomains, p.containerGPUs,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate podSpec for role %s: %w", p.r.Name, err)
-	}
-
-	// GMS weight servers load weights fresh from disk and are not CRIU targets.
-	checkpointEnabled := p.runtimeConfig.Gate.Enabled(features.Checkpoint)
-	shouldUseAdmissionRestore := checkpointEnabled &&
-		p.r.Role != RoleGMS &&
-		p.checkpointInfo != nil &&
-		(p.checkpointInfo.StartupPolicy == "" ||
-			p.checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyImmediate)
-	if checkpointEnabled && p.r.Role != RoleGMS && !shouldUseAdmissionRestore {
-		if p.checkpointInfo != nil &&
-			p.checkpointInfo.Enabled &&
-			p.checkpointInfo.Ready &&
-			p.checkpointRestore == nil {
-			return nil, fmt.Errorf("resolved checkpoint restore is required for role %s", p.r.Name)
-		}
-		if err := checkpoint.InjectResolvedCheckpointIntoPodSpec(
-			podSpec,
-			p.checkpointRestore,
-			p.operatorConfig.Checkpoint.EffectiveSeccompProfile(),
-		); err != nil {
-			return nil, fmt.Errorf("failed to inject checkpoint config for role %s: %w", p.r.Name, err)
-		}
 	}
 
 	// MinAvailable serves two purposes for Grove PCLQ:
@@ -2551,13 +2437,9 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		applyKvTransferPolicyTopologyAnnotations(annotations, p.dynamoDeployment.Spec.Experimental.KvTransferPolicy)
 	}
 	if p.r.Role != RoleGMS {
-		if shouldUseAdmissionRestore {
-			if err := checkpoint.ApplyRestoreCandidateMetadata(labels, annotations, p.checkpointInfo); err != nil {
+		if p.runtimeConfig.Gate.Enabled(features.Checkpoint) {
+			if err := checkpoint.ApplyRestoreCandidateMetadata(annotations, p.checkpointInfo); err != nil {
 				return nil, fmt.Errorf("failed to apply checkpoint candidate metadata for role %s: %w", p.r.Name, err)
-			}
-		} else {
-			if err := checkpoint.ApplyRestorePodMetadataWithStorageConfig(labels, annotations, p.checkpointInfo, p.operatorConfig.Checkpoint.Storage); err != nil {
-				return nil, fmt.Errorf("failed to apply checkpoint metadata for role %s: %w", p.r.Name, err)
 			}
 		}
 	}
@@ -2753,23 +2635,6 @@ func GenerateGrovePodCliqueSet(
 		if checkpointInfoByComponent != nil {
 			checkpointInfo = checkpointInfoByComponent[componentName]
 		}
-		var checkpointRestore *checkpoint.ResolvedPodSpecRestore
-		if runtimeConfig.Gate.Enabled(features.Checkpoint) &&
-			checkpointInfo != nil &&
-			checkpointInfo.StartupPolicy != "" &&
-			checkpointInfo.StartupPolicy != v1alpha1.CheckpointStartupPolicyImmediate {
-			checkpointRestore, err = checkpoint.ResolvePodSpecRestore(
-				ctx,
-				reader,
-				dynamoDeployment.Namespace,
-				checkpointInfo,
-				operatorConfig.Checkpoint.Storage,
-			)
-			if err != nil {
-				return nil, fmt.Errorf("failed to resolve checkpoint restore for component %s: %w", componentName, err)
-			}
-		}
-
 		numberOfNodes := component.GetNumberOfNodes()
 		isMultinode := numberOfNodes > 1
 		containerGPUs := sync.OnceValues(func() (int64, error) {
@@ -2802,7 +2667,6 @@ func GenerateGrovePodCliqueSet(
 				restartState:                restartState,
 				existingRestartAnnotations:  existingRestartAnnotations,
 				validatedQueueName:          validatedQueueName,
-				checkpointRestore:           checkpointRestore,
 				groveClusterTopologyDomains: groveClusterTopologyDomains,
 				containerGPUs:               containerGPUs,
 			})
@@ -2917,7 +2781,6 @@ func generatePodSpecForRole(
 	numberOfNodes int32,
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	serviceName string,
-	checkpointInfo *checkpoint.CheckpointInfo,
 	groveClusterTopologyDomains []v1beta1.TopologyDomain,
 	containerGPUs ContainerGPUCount,
 ) (*corev1.PodSpec, error) {
@@ -2928,7 +2791,7 @@ func generatePodSpecForRole(
 		basePodSpec, err := generatePodSpecForComponent(
 			component, backendFramework, secretsRetriever, dynamoDeployment,
 			RoleMain, 1, operatorConfig,
-			commonconsts.MultinodeDeploymentTypeGrove, serviceName, checkpointInfo, nil,
+			commonconsts.MultinodeDeploymentTypeGrove, serviceName, nil,
 			groveClusterTopologyDomains, containerGPUs,
 		)
 		if err != nil {
@@ -2950,7 +2813,7 @@ func generatePodSpecForRole(
 	podSpec, err := generatePodSpecForComponent(
 		component, backendFramework, secretsRetriever, dynamoDeployment,
 		r.Role, numberOfNodes, operatorConfig,
-		commonconsts.MultinodeDeploymentTypeGrove, serviceName, checkpointInfo, deployer,
+		commonconsts.MultinodeDeploymentTypeGrove, serviceName, deployer,
 		groveClusterTopologyDomains, containerGPUs,
 	)
 	if err != nil {
@@ -3265,7 +3128,6 @@ func GenerateBasePodSpecForController(
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	role Role,
 	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
-	checkpointInfo *checkpoint.CheckpointInfo, // Optional checkpoint info (resolved by caller)
 	containerGPUs ContainerGPUCount,
 	options GenerateBasePodSpecForControllerOptions,
 ) (*corev1.PodSpec, error) {
@@ -3304,7 +3166,6 @@ func GenerateBasePodSpecForController(
 		operatorConfig,
 		multinodeDeploymentType,
 		componentName,
-		checkpointInfo,
 		nil, // use default deployer
 		containerGPUs,
 	)

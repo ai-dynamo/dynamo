@@ -74,7 +74,7 @@ vllm = [
 
 sglang = [
     "uvloop",
-    "sglang[diffusion]==0.5.18",
+    "sglang[diffusion]==0.5.19",
     # sglang[diffusion] dropped accelerate in 0.5.12; diffusers still needs it.
     "accelerate>=0.17.0",
     "blake3>=1.0.0,<2.0.0",
@@ -355,7 +355,7 @@ markers = [
     "framework_only: marks standard framework deployment tests (vllm, sglang, trtllm)",
     "framework_with_gaie: marks tests for GAIE (Gateway API Inference Extension) deployment",
     "framework_with_efa: marks deployment tests that require an EFA-capable cluster and an -efa image",
-    "dynamocheckpoint: marks tests for the DynamoCheckpoint controller deploy path",
+    "snapshot_restore: marks standalone Snapshot checkpoint/restore deployment tests",
     "unified: marks common backend-interface e2e tests (BaseEngine + Worker)",
     # Built-in markers
     "skip: skip this test",

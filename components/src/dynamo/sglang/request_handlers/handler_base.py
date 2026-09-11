@@ -6,6 +6,7 @@ import inspect
 import json
 import logging
 import random
+import re
 import threading
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
@@ -586,6 +587,14 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             self.kv_publisher = publisher.kv_publisher
         self.serving_mode = config.serving_mode
         self.use_sglang_tokenizer = config.dynamo_args.use_sglang_tokenizer
+        # Whether the engine itself was started without a tokenizer. This is a
+        # different fact from use_sglang_tokenizer, which only records who owns
+        # preprocessing: --dyn-chat-processor sglang leaves preprocessing to
+        # Dynamo while the engine keeps its tokenizer. Read defensively — the
+        # diffusion workers pass a SimpleNamespace stub for server_args.
+        self.engine_skips_tokenizer = bool(
+            getattr(config.server_args, "skip_tokenizer_init", False)
+        )
         self.enable_trace = getattr(config.server_args, "enable_trace", False)
         self._max_input_token_id: Optional[int] = None
 
@@ -1149,18 +1158,48 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
     def _get_guided_decoding_params(
         guided_decoding: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """Extract guided decoding params (e.g. json_schema) for SGLang sampling_params."""
-        if isinstance(guided_decoding, dict):
-            json_schema = guided_decoding.get("json")
-            if json_schema is not None:
-                reject_nonprogressing_guided_json_ref_cycles(json_schema)
-                return {"json_schema": json.dumps(json_schema)}
-            regex = guided_decoding.get("regex")
-            if regex is not None:
-                return {"regex": regex}
-            structural_tag = guided_decoding.get("structural_tag")
-            if structural_tag is not None:
-                return {"structural_tag": serialize_structural_tag(structural_tag)}
+        """Map one guided-decoding constraint to SGLang sampling_params.
+
+        Upstream validation admits at most one constraint, so the order below is a
+        formality rather than a precedence policy.
+
+        whitespace_pattern and backend are deliberately absent. SGLang exposes both
+        as server options (server_args.constrained_json_whitespace_pattern and the
+        --grammar-backend flag); SamplingParams has no field for either and raises
+        TypeError on an unknown keyword rather than ignoring it.
+        """
+        if not isinstance(guided_decoding, dict):
+            return {}
+
+        json_schema = guided_decoding.get("json")
+        if json_schema is not None:
+            reject_nonprogressing_guided_json_ref_cycles(json_schema)
+            return {"json_schema": json.dumps(json_schema)}
+
+        regex = guided_decoding.get("regex")
+        if regex is not None:
+            return {"regex": regex}
+
+        # SGLang has no choice constraint, so an alternation stands in for one.
+        # Its regex is a full-match FSM, so no anchors are needed.
+        choices = [
+            str(value)
+            for value in guided_decoding.get("choice") or []
+            if value is not None
+        ]
+        if choices:
+            return {
+                "regex": "(" + "|".join(re.escape(value) for value in choices) + ")"
+            }
+
+        grammar = guided_decoding.get("grammar")
+        if grammar is not None:
+            return {"ebnf": grammar}
+
+        structural_tag = guided_decoding.get("structural_tag")
+        if structural_tag is not None:
+            return {"structural_tag": serialize_structural_tag(structural_tag)}
+
         return {}
 
     @staticmethod
@@ -1297,6 +1336,22 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
                     await awaitable
                 except (asyncio.CancelledError, Exception):
                     pass
+
+    @asynccontextmanager
+    async def _engine_abort_on_cancel(
+        self, request_id_future: asyncio.Future, context: Optional[Context]
+    ) -> AsyncGenerator[None, None]:
+        """Abort the engine request once the caller stops consuming the stream.
+
+        This is ``_cancellation_monitor`` for callers that want the abort but
+        have no use for the monitoring task, and that may be handed no context
+        at all — in which case there is nothing to watch and nothing to abort.
+        """
+        if context is None:
+            yield
+            return
+        async with self._cancellation_monitor(request_id_future, context):
+            yield
 
     @asynccontextmanager
     async def _cancellation_monitor(

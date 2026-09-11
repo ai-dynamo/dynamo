@@ -514,6 +514,9 @@ async def get_runtime_config(
         return runtime_config
 
     try:
+        # TODO(rank-aware-kv-capacity): scheduler_infos[0] is only a representative rank.
+        # Collect every declared rank before the create-only MDC registration and publish one
+        # atomic rank-capacity snapshot; the card cannot be enriched after registration.
         scheduler_info = engine._scheduler_init_result.scheduler_infos[0]
         capacity = runtime_capacity(server_args, scheduler_info)
         max_total_tokens = scheduler_info.get("max_total_num_tokens")
