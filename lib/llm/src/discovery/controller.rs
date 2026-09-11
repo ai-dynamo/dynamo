@@ -707,8 +707,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             };
             let committed_members = match &group.status {
                 GroupStatus::Queued {
-                    committed_members,
-                    ..
+                    committed_members, ..
                 } => committed_members.clone(),
                 _ => unreachable!("queued status was checked above"),
             };
@@ -764,9 +763,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 });
                 let outcome = match future.catch_unwind().await {
                     Ok(outcome) => outcome,
-                    Err(_) => BuildOutcome::Failed(anyhow::anyhow!(
-                        "model materialization panicked"
-                    )),
+                    Err(_) => BuildOutcome::Failed(anyhow::anyhow!("model materialization panicked")),
                 };
                 BuildResult {
                     spec: task_spec,
@@ -804,8 +801,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 });
         let committed_members = match &group.status {
             GroupStatus::Building {
-                committed_members,
-                ..
+                committed_members, ..
             } => committed_members.clone(),
             _ => None,
         };
@@ -828,12 +824,8 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 let adapters = self.adapters_for_members(&member_keys);
                 group.admission_tx.send_replace(admitted_ids(&members));
                 let commit_result = if committed_members.is_some() {
-                    self.host.replace_prepared_group(
-                        &result.spec,
-                        prepared,
-                        &members,
-                        &adapters,
-                    )
+                    self.host
+                        .replace_prepared_group(&result.spec, prepared, &members, &adapters)
                 } else {
                     self.host
                         .commit_group(&result.spec, prepared, &members, &adapters)
