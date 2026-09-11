@@ -176,6 +176,7 @@ func reconcileAutomaticSnapshotJobForTest(
 		string(dgd.UID),
 		componentName,
 		workerHash,
+		commonconsts.SnapshotCompatibilityVersion,
 	)
 	job := &snapshotv1alpha1.SnapshotJob{}
 	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKey{
@@ -282,6 +283,7 @@ func TestDGDCheckpointsReconciler_SnapshotJobPreservesGMSSaverClient(t *testing.
 		string(dgd.UID),
 		"worker",
 		workerHash,
+		commonconsts.SnapshotCompatibilityVersion,
 	)
 	claimTemplateName := checkpointGMSResourceClaimTemplateName(checkpointID)
 	assert.Contains(t, job.Spec.PodTemplate.Spec.ResourceClaims, corev1.PodResourceClaim{
@@ -635,6 +637,173 @@ func TestDGDCheckpointsReconciler_AutomaticCaptureWaitsForActiveWorkerHash(t *te
 	require.NoError(t, reconciler.List(ctx, jobs, client.InNamespace("default")))
 	require.Len(t, jobs.Items, 1)
 	assert.Equal(t, workerHash, jobs.Items[0].Labels[commonconsts.KubeLabelDynamoWorkerHash])
+}
+
+func TestDGDCheckpointsReconciler_CompatibilityVersionUpgradeRecaptures(t *testing.T) {
+	t.Log("Build an automatic checkpoint DGD with a completed pre-versioned SnapshotJob")
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+			UID:       types.UID("dgd-uid"),
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: string(commonconsts.ComponentTypeWorker),
+					ExtraPodSpec: &v1alpha1.ExtraPodSpec{MainContainer: &corev1.Container{
+						Name:  commonconsts.MainContainerName,
+						Image: "worker:latest",
+					}},
+					Checkpoint: &v1alpha1.ServiceCheckpointConfig{
+						Enabled: true,
+						Mode:    v1alpha1.CheckpointModeAuto,
+					},
+				},
+			},
+		},
+	})
+	workerHash := betaDGDWorkersSpecHash(t, dgd)
+	dgd.Annotations = map[string]string{commonconsts.AnnotationCurrentWorkerHashV2: workerHash}
+	legacyCheckpointID := checkpoint.DGDCheckpointID(
+		dgd.Namespace,
+		dgd.Name,
+		string(dgd.UID),
+		"worker",
+		workerHash,
+		"",
+	)
+	legacyJob := &snapshotv1alpha1.SnapshotJob{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "checkpoint-" + legacyCheckpointID,
+			Namespace: dgd.Namespace,
+			UID:       types.UID("legacy-job-uid"),
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+				commonconsts.KubeLabelDynamoComponent:           "worker",
+				commonconsts.KubeLabelDynamoWorkerHash:          workerHash,
+			},
+			Annotations: map[string]string{
+				commonconsts.CheckpointAutoAnnotation:           commonconsts.KubeLabelValueTrue,
+				commonconsts.CheckpointDeletionPolicyAnnotation: string(v1alpha1.CheckpointDeletionPolicyDelete),
+				commonconsts.CheckpointOwnerUIDAnnotation:       string(dgd.UID),
+			},
+		},
+		Spec: snapshotv1alpha1.SnapshotJobSpec{
+			PodSnapshotTemplate: snapshotv1alpha1.PodSnapshotTemplate{
+				Metadata: &snapshotv1alpha1.PodSnapshotTemplateMetadata{Annotations: map[string]string{
+					commonconsts.SnapshotCompatibilityVersionAnnotation: "v1",
+					"nvidia.com/dynamo-snapshot-worker-hash":            workerHash,
+				}},
+				TargetContainers: []string{commonconsts.MainContainerName},
+			},
+		},
+		Status: snapshotv1alpha1.SnapshotJobStatus{
+			PodSnapshotName: "legacy-snapshot",
+			PodSnapshotUID:  types.UID("legacy-snapshot-uid"),
+			Conditions: []metav1.Condition{{
+				Type:   snapshotv1alpha1.SnapshotJobConditionCompleted,
+				Status: metav1.ConditionTrue,
+			}},
+		},
+	}
+	legacySnapshot := &snapshotv1alpha1.PodSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      legacyJob.Status.PodSnapshotName,
+			Namespace: dgd.Namespace,
+			UID:       legacyJob.Status.PodSnapshotUID,
+			Labels: map[string]string{
+				snapshotv1alpha1.SnapshotJobOwnerLabel:    legacyJob.Name,
+				snapshotv1alpha1.SnapshotJobOwnerUIDLabel: string(legacyJob.UID),
+			},
+			Annotations: map[string]string{
+				commonconsts.CheckpointAutoAnnotation:               commonconsts.KubeLabelValueTrue,
+				commonconsts.CheckpointOwnerUIDAnnotation:           string(dgd.UID),
+				commonconsts.SnapshotCompatibilityVersionAnnotation: "v1",
+				"nvidia.com/dynamo-snapshot-worker-hash":            workerHash,
+				commonconsts.SnapshotGMSModeAnnotation:              commonconsts.SnapshotGMSModeDisabled,
+				commonconsts.CheckpointDeletionPolicyAnnotation:     string(v1alpha1.CheckpointDeletionPolicyDelete),
+			},
+		},
+		Spec: snapshotv1alpha1.PodSnapshotSpec{Source: snapshotv1alpha1.PodSnapshotSource{
+			PodRef: snapshotv1alpha1.PodReference{
+				Name:       "legacy-capture-worker",
+				Containers: []string{commonconsts.MainContainerName},
+			},
+		}},
+		Status: snapshotv1alpha1.PodSnapshotStatus{
+			BoundPodSnapshotContentName: ptr.To("legacy-content"),
+			Conditions: []metav1.Condition{{
+				Type:   snapshotv1alpha1.PodSnapshotConditionReady,
+				Status: metav1.ConditionTrue,
+			}},
+		},
+	}
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(testScheme).
+			WithObjects(legacyJob, legacySnapshot).
+			Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
+	}
+	checkpointReconciler := newTestDGDCheckpointsReconciler(reconciler)
+
+	t.Log("Reconcile after the compatibility contract upgrade")
+	result, err := checkpointReconciler.Reconcile(ctx, dgd)
+	require.NoError(t, err)
+	require.NotNil(t, result.Infos["worker"])
+	assert.False(t, result.Infos["worker"].Ready)
+
+	t.Log("Verify v2 selects a fresh immutable job without deleting the legacy capture")
+	currentCheckpointID := checkpoint.DGDCheckpointID(
+		dgd.Namespace,
+		dgd.Name,
+		string(dgd.UID),
+		"worker",
+		workerHash,
+		commonconsts.SnapshotCompatibilityVersion,
+	)
+	currentJob := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, reconciler.Get(ctx, client.ObjectKey{
+		Namespace: dgd.Namespace,
+		Name:      "checkpoint-" + currentCheckpointID,
+	}, currentJob))
+	require.NotNil(t, currentJob.Spec.PodSnapshotTemplate.Metadata)
+	assert.Equal(t, commonconsts.SnapshotCompatibilityVersion,
+		currentJob.Spec.PodSnapshotTemplate.Metadata.Annotations[commonconsts.SnapshotCompatibilityVersionAnnotation])
+	require.NoError(t, reconciler.Get(ctx, client.ObjectKeyFromObject(legacyJob), &snapshotv1alpha1.SnapshotJob{}))
+	require.NoError(t, reconciler.Get(ctx, client.ObjectKeyFromObject(legacySnapshot), &snapshotv1alpha1.PodSnapshot{}))
+
+	t.Log("Complete the replacement capture and verify reconciliation converges on v2")
+	currentJob.UID = types.UID("current-job-uid")
+	currentSnapshot := dgdTestPodSnapshot("current-snapshot", dgdTestSnapshotCompatibilityHash(t, dgd), true)
+	currentSnapshot.UID = types.UID("current-snapshot-uid")
+	currentSnapshot.Labels = map[string]string{
+		snapshotv1alpha1.SnapshotJobOwnerLabel:    currentJob.Name,
+		snapshotv1alpha1.SnapshotJobOwnerUIDLabel: string(currentJob.UID),
+	}
+	currentSnapshot.Annotations[commonconsts.CheckpointAutoAnnotation] = commonconsts.KubeLabelValueTrue
+	currentSnapshot.Annotations[commonconsts.CheckpointOwnerUIDAnnotation] = string(dgd.UID)
+	currentJob.Status = snapshotv1alpha1.SnapshotJobStatus{
+		PodSnapshotName: currentSnapshot.Name,
+		PodSnapshotUID:  currentSnapshot.UID,
+		Conditions: []metav1.Condition{{
+			Type:   snapshotv1alpha1.SnapshotJobConditionCompleted,
+			Status: metav1.ConditionTrue,
+		}},
+	}
+	require.NoError(t, reconciler.Update(ctx, currentJob))
+	require.NoError(t, reconciler.Create(ctx, currentSnapshot))
+	result, err = checkpointReconciler.Reconcile(ctx, dgd)
+	require.NoError(t, err)
+	require.NotNil(t, result.Infos["worker"])
+	assert.True(t, result.Infos["worker"].Ready)
+	require.NotNil(t, result.Infos["worker"].NativeSnapshot)
+	assert.Equal(t, currentSnapshot.UID, result.Infos["worker"].NativeSnapshot.UID)
 }
 
 func TestDGDCheckpointsReconciler_ExplicitRestoreDoesNotDependOnActiveWorkerHash(t *testing.T) {

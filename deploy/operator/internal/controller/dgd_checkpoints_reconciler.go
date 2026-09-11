@@ -262,6 +262,7 @@ func (r *dgdCheckpointsReconciler) reconcileAutomaticSnapshotJob(
 		string(dynamoDeployment.UID),
 		componentName,
 		workerHash,
+		consts.SnapshotCompatibilityVersion,
 	)
 
 	backendFramework, err := dynamo.BackendFrameworkForComponent(component, dynamoDeployment)

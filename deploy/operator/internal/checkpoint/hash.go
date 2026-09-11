@@ -26,20 +26,23 @@ import (
 // DGDCheckpointID returns the snapshot artifact ID for an automatic DGD-owned
 // checkpoint. The DGD UID prevents cross-DGD reuse; the component name and
 // worker hash/generation prevent reuse across incompatible worker generations
-// inside the same DGD.
-func DGDCheckpointID(namespace, dgdName, dgdUID, componentName, workerHash string) string {
+// inside the same DGD. The compatibility version forces a fresh immutable
+// SnapshotJob when the persisted snapshot contract changes.
+func DGDCheckpointID(namespace, dgdName, dgdUID, componentName, workerHash, compatibilityVersion string) string {
 	data, _ := json.Marshal(struct {
-		Namespace     string `json:"namespace,omitempty"`
-		DGDName       string `json:"dgdName"`
-		DGDUID        string `json:"dgdUID,omitempty"`
-		ComponentName string `json:"componentName"`
-		WorkerHash    string `json:"workerHash,omitempty"`
+		Namespace            string `json:"namespace,omitempty"`
+		DGDName              string `json:"dgdName"`
+		DGDUID               string `json:"dgdUID,omitempty"`
+		ComponentName        string `json:"componentName"`
+		WorkerHash           string `json:"workerHash,omitempty"`
+		CompatibilityVersion string `json:"compatibilityVersion,omitempty"`
 	}{
-		Namespace:     namespace,
-		DGDName:       dgdName,
-		DGDUID:        dgdUID,
-		ComponentName: componentName,
-		WorkerHash:    workerHash,
+		Namespace:            namespace,
+		DGDName:              dgdName,
+		DGDUID:               dgdUID,
+		ComponentName:        componentName,
+		WorkerHash:           workerHash,
+		CompatibilityVersion: compatibilityVersion,
 	})
 	hash := sha256.Sum256(data)
 	return hex.EncodeToString(hash[:])[:32]

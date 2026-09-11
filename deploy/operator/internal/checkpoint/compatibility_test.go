@@ -16,6 +16,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/utils/ptr"
 )
 
 func TestValidateCheckpointCompatibility(t *testing.T) {
@@ -71,6 +73,119 @@ func TestValidateCheckpointCompatibility(t *testing.T) {
 			assert.Equal(t, test.wantErrs, gotErrs)
 		})
 	}
+}
+
+func TestComputeSnapshotCompatibilityHashV2KnownAnswer(t *testing.T) {
+	t.Log("Build a representative v2 contract fixture")
+	claimName := "gpu-claim"
+	template := corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name:            "main",
+			Image:           "registry.example/worker@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+			ImagePullPolicy: corev1.PullIfNotPresent,
+			Command:         []string{"python3", "-m", "dynamo.vllm"},
+			Args:            []string{"--model", "/models/model", "--tensor-parallel-size", "1"},
+			WorkingDir:      "/workspace",
+			Env: []corev1.EnvVar{
+				{Name: "MODEL_ROOT", Value: "/models"},
+				{Name: "MODEL_PATH", Value: "$(MODEL_ROOT)/model"},
+				{Name: "DYN_NAMESPACE", Value: "capture-runtime"},
+			},
+			EnvFrom: []corev1.EnvFromSource{{
+				Prefix: "WORKER_",
+				ConfigMapRef: &corev1.ConfigMapEnvSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "worker-config"},
+				},
+			}},
+			Resources: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1"),
+					corev1.ResourceMemory:                 resource.MustParse("64Gi"),
+				},
+				Requests: corev1.ResourceList{
+					corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1"),
+					corev1.ResourceMemory:                 resource.MustParse("32Gi"),
+				},
+				Claims: []corev1.ResourceClaim{{Name: "accelerator", Request: "gpu"}},
+			},
+			VolumeMounts: []corev1.VolumeMount{
+				{Name: "models", MountPath: "/models", ReadOnly: true},
+				{Name: "config", MountPath: "/etc/worker", ReadOnly: true},
+			},
+			SecurityContext: &corev1.SecurityContext{
+				RunAsNonRoot:             ptr.To(true),
+				AllowPrivilegeEscalation: ptr.To(false),
+			},
+		}},
+		InitContainers: []corev1.Container{{
+			Name:            "prepare",
+			Image:           "registry.example/prepare@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+			ImagePullPolicy: corev1.PullIfNotPresent,
+			Command:         []string{"/bin/sh", "-c"},
+			Args:            []string{"cp /input/config.yaml /output/config.yaml"},
+			VolumeMounts: []corev1.VolumeMount{
+				{Name: "config", MountPath: "/input", ReadOnly: true},
+				{Name: "models", MountPath: "/output"},
+			},
+		}},
+		Volumes: []corev1.Volume{
+			{
+				Name: "models",
+				VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: "model-cache",
+					ReadOnly:  true,
+				}},
+			},
+			{
+				Name: "config",
+				VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "worker-config"},
+				}},
+			},
+		},
+		HostNetwork:           true,
+		HostPID:               true,
+		ShareProcessNamespace: ptr.To(true),
+		SecurityContext: &corev1.PodSecurityContext{
+			RunAsNonRoot: ptr.To(true),
+			FSGroup:      ptr.To[int64](1000),
+		},
+		RuntimeClassName: ptr.To("nvidia"),
+		NodeName:         "gpu-node-07",
+		NodeSelector: map[string]string{
+			"kubernetes.io/arch":     "amd64",
+			"nvidia.com/gpu.product": "H100",
+		},
+		Affinity: &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+				NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+					MatchExpressions: []corev1.NodeSelectorRequirement{{
+						Key:      "nvidia.com/gpu.memory",
+						Operator: corev1.NodeSelectorOpGt,
+						Values:   []string{"70000"},
+					}},
+				}},
+			},
+		}},
+		SchedulerName: "gpu-scheduler",
+		ResourceClaims: []corev1.PodResourceClaim{{
+			Name:              "accelerator",
+			ResourceClaimName: &claimName,
+		}},
+	}}
+
+	t.Log("Hash the fixture with the persisted protocol inputs")
+	got, err := ComputeSnapshotCompatibilityHash(
+		&template,
+		"main",
+		"vllm",
+		"IntraPod",
+		"gpu.nvidia.com/h100",
+	)
+	require.NoError(t, err)
+
+	t.Log("Require an explicit fixture update when the v2 wire contract changes")
+	assert.Equal(t, "bdd84a0ec0b3c59217f168356fd65f64507e30de28e7d4fe2eda7290dd9f80f1", got)
 }
 
 func TestComputeSnapshotCompatibilityHashIsPortableAcrossGraphIdentity(t *testing.T) {
