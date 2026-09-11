@@ -102,8 +102,6 @@ spec:
             value: "1"
           - name: TRANSFORMERS_OFFLINE
             value: "1"
-          - name: HF_HOME
-            value: /shared-model-cache
           - name: DYN_ROUTER_MODE
             value: kv
           image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0-deepseek-v4.1-flash-dev.1
@@ -117,13 +115,6 @@ spec:
             requests:
               cpu: "16"
               memory: 128Gi
-          volumeMounts:
-          - mountPath: /shared-model-cache
-            name: shared-model-cache
-        volumes:
-        - name: shared-model-cache
-          persistentVolumeClaim:
-            claimName: shared-model-cache
     replicas: 1
     type: frontend
   - name: PrefillWorker
