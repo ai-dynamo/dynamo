@@ -698,6 +698,34 @@ impl OfflineReplayRouter {
                     WorkerPlacement::Any,
                     pending,
                 )
+                // KNOWN GAP, deliberately not fixed here: a `QueueRejection` is a normal
+                // per-request outcome -- the live router answers this exact condition with
+                // one HTTP 503 -- but converting it to `anyhow::Error` and `?`-ing it makes
+                // it fatal. It surfaces as `PlacementPolicy::place()` returning `Err`, which
+                // `aisimulate_core`'s `replay/agg.rs` `?`-propagates, aborting the whole
+                // simulation and dropping this request's payload.
+                //
+                // The fix is a `PlacementDecision::Rejected` variant in `aisimulate-core`.
+                // That is a public API change to the byte-exact-parity oracle crate and is
+                // not this crate's call to make unilaterally. Scoped cost, so the decision
+                // does not need re-deriving: three exhaustive `match` sites break
+                // (`replay/agg.rs`, and two in `replay/disagg.rs`); `aiperf-simulate` has
+                // zero sites; and the downstream reporting already exists
+                // (`ReplayTerminalStatus::Rejected`, `TraceCollector::on_terminal`,
+                // exclusion from `completed_requests`) as used by the engine-side rejection
+                // path. The open question is report shape -- whether an
+                // admission-rejected request is `on_arrival` + `on_terminal(Rejected)`, and
+                // whether that matches aisimulate native -- which is a parity decision, not
+                // a refactor.
+                //
+                // Bounded today: `queueing_enabled()` requires an explicit
+                // `router_queue_threshold` or per-class busy threshold, both absent from
+                // `KvRouterConfig::default()`, so this block is unreachable in a
+                // default-configured run and in `aiperf-simulate` (which passes
+                // `router_config: None`).
+                //
+                // `policy_mapping_and_model_selection_use_shared_replay_queue_logic` asserts
+                // the current typed-`Err` contract and would need updating with the fix.
                 .map_err(|(rejection, _)| anyhow::Error::new(rejection))?;
             return Ok(RouterEffects::default());
         }
