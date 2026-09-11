@@ -123,7 +123,9 @@ def test_cancel_startup_is_owned_by_startup_thread(tmp_path):
         pid = mp.proc.pid
     finally:
         mp.cancel_startup()
-        startup_thread.join(timeout=5)
+        # Cancellation exits through normal cleanup, whose process-group grace
+        # period is eight seconds before forceful termination.
+        startup_thread.join(timeout=15)
 
     assert not startup_thread.is_alive(), "Cancelled startup did not return"
     assert len(startup_errors) == 1
