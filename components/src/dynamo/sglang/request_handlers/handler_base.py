@@ -980,6 +980,9 @@ class BaseWorkerHandler(
     def cleanup(self) -> None:
         """Cleanup resources. Override in subclasses as needed."""
         self._cancel_abort_tasks()
+        watchdog = getattr(self, "_gms_failover_child_watchdog", None)
+        if watchdog is not None:
+            watchdog.stop()
         if self.publisher is not None:
             self.publisher.cleanup()
 
