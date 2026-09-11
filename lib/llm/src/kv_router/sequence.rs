@@ -24,7 +24,6 @@ use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::{
     EventPublisher, EventSubscriber, EventTransportKind, TypedEventSubscriber,
 };
-use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::Arc;
@@ -43,104 +42,53 @@ use dynamo_runtime::transports::event_plane::MsgpackCodec;
 // if the queue is full, the newest event is dropped without blocking the local mutation.
 const REPLICA_EVENT_CHANNEL_CAPACITY: usize = 100_000;
 
-enum DeferredReplicaLeaseEvent {
-    Admitted(SchedulerBookingDescriptor),
-    Progressed(SchedulerBookingDescriptor),
-    Completed(SchedulerBookingDescriptor),
-}
-
-enum DeferredReplicaLeaseState {
-    Buffering(Vec<DeferredReplicaLeaseEvent>),
-    Installing {
-        target: Arc<dyn ReplicaRequestLeaseObserver>,
-        pending: Vec<DeferredReplicaLeaseEvent>,
-    },
-    Installed(Arc<dyn ReplicaRequestLeaseObserver>),
-}
-
-impl Default for DeferredReplicaLeaseState {
-    fn default() -> Self {
-        Self::Buffering(Vec::new())
-    }
-}
-
-/// Buffers the construction-time event window until `KvRouter` installs its
-/// request lease manager. After installation, calls pass through directly.
+/// The partition's lease observer until the router's `RequestLeaseManager`
+/// exists; an event before `install` is a wiring bug and is dropped loudly.
 #[derive(Default)]
-pub(crate) struct DeferredReplicaRequestLeaseObserver {
-    state: Mutex<DeferredReplicaLeaseState>,
+pub(crate) struct LateBoundLeaseObserver {
+    target: std::sync::OnceLock<Arc<dyn ReplicaRequestLeaseObserver>>,
 }
 
-impl DeferredReplicaRequestLeaseObserver {
-    pub(crate) fn install(&self, target: Arc<dyn ReplicaRequestLeaseObserver>) -> bool {
-        let mut pending = {
-            let mut state = self.state.lock();
-            let DeferredReplicaLeaseState::Buffering(pending) = &mut *state else {
-                return false;
-            };
-            let pending = std::mem::take(pending);
-            *state = DeferredReplicaLeaseState::Installing {
-                target: Arc::clone(&target),
-                pending: Vec::new(),
-            };
-            pending
-        };
-
-        loop {
-            for event in pending {
-                Self::notify(&target, event);
-            }
-            let mut state = self.state.lock();
-            let DeferredReplicaLeaseState::Installing {
-                target: installing_target,
-                pending: queued,
-            } = &mut *state
-            else {
-                unreachable!("observer installation state changed unexpectedly");
-            };
-            if queued.is_empty() {
-                *state = DeferredReplicaLeaseState::Installed(Arc::clone(installing_target));
-                return true;
-            }
-            pending = std::mem::take(queued);
-        }
+impl LateBoundLeaseObserver {
+    pub(crate) fn install(&self, target: Arc<dyn ReplicaRequestLeaseObserver>) {
+        let installed = self.target.set(target).is_ok();
+        debug_assert!(installed, "request lease manager installed twice");
     }
 
-    fn observe(&self, event: DeferredReplicaLeaseEvent) {
-        let target = {
-            let mut state = self.state.lock();
-            match &mut *state {
-                DeferredReplicaLeaseState::Buffering(pending)
-                | DeferredReplicaLeaseState::Installing { pending, .. } => {
-                    pending.push(event);
-                    return;
-                }
-                DeferredReplicaLeaseState::Installed(target) => Arc::clone(target),
-            }
-        };
-        Self::notify(&target, event);
-    }
-
-    fn notify(target: &Arc<dyn ReplicaRequestLeaseObserver>, event: DeferredReplicaLeaseEvent) {
-        match event {
-            DeferredReplicaLeaseEvent::Admitted(booking) => target.admitted(booking),
-            DeferredReplicaLeaseEvent::Progressed(booking) => target.progressed(&booking),
-            DeferredReplicaLeaseEvent::Completed(booking) => target.completed(&booking),
+    fn target(
+        &self,
+        event: &str,
+        booking: &SchedulerBookingDescriptor,
+    ) -> Option<&Arc<dyn ReplicaRequestLeaseObserver>> {
+        let target = self.target.get();
+        if target.is_none() {
+            tracing::error!(
+                request_id = %booking.request_id,
+                event,
+                "request lifecycle event before the lease manager was installed; the manager will not track this mirrored booking"
+            );
         }
+        target
     }
 }
 
-impl ReplicaRequestLeaseObserver for DeferredReplicaRequestLeaseObserver {
+impl ReplicaRequestLeaseObserver for LateBoundLeaseObserver {
     fn admitted(&self, booking: SchedulerBookingDescriptor) {
-        self.observe(DeferredReplicaLeaseEvent::Admitted(booking));
+        if let Some(target) = self.target("admitted", &booking) {
+            target.admitted(booking);
+        }
     }
 
     fn progressed(&self, booking: &SchedulerBookingDescriptor) {
-        self.observe(DeferredReplicaLeaseEvent::Progressed(booking.clone()));
+        if let Some(target) = self.target("progressed", booking) {
+            target.progressed(booking);
+        }
     }
 
     fn completed(&self, booking: &SchedulerBookingDescriptor) {
-        self.observe(DeferredReplicaLeaseEvent::Completed(booking.clone()));
+        if let Some(target) = self.target("completed", booking) {
+            target.completed(booking);
+        }
     }
 }
 
@@ -467,13 +415,18 @@ impl SequenceSubscriber for RuntimeSequenceSubscriber {
 /// peer and worker events on `ACTIVE_SEQUENCES_SUBJECT` are always forwarded
 /// to the partition (worker-origin completion marks are needed even without
 /// router-to-router sync); outbound events are published only when
-/// `publishes_outbound` is set.
+/// `publishes_outbound` is set. The outbound publisher runs from here; the
+/// inbound leg runs when the returned [`ReplicaIngress`] is started, so the
+/// caller can install every consumer of lifecycle events first.
 pub(crate) async fn host_replica_channels(
     endpoint: &Endpoint,
     router_id: u64,
     publishes_outbound: bool,
     cancellation_token: CancellationToken,
-) -> Result<dynamo_kv_router::services::selection::HostReplicaChannels> {
+) -> Result<(
+    dynamo_kv_router::services::selection::HostReplicaChannels,
+    ReplicaIngress,
+)> {
     let transport_kind = endpoint.drt().default_event_transport_kind();
     let outbound = if publishes_outbound {
         let (outbound, outbound_rx) = mpsc::channel(REPLICA_EVENT_CHANNEL_CAPACITY);
@@ -505,39 +458,62 @@ pub(crate) async fn host_replica_channels(
     };
 
     let (inbound_tx, inbound_rx) = mpsc::channel(REPLICA_EVENT_CHANNEL_CAPACITY);
-    let direct = direct_zmq::DirectZmqSequenceConfig::from_env();
-    let ingress_result = if direct.should_use_direct(transport_kind) {
-        direct_zmq::start(
-            endpoint.clone(),
-            inbound_tx.clone(),
-            direct.rcvhwm,
-            cancellation_token,
-        )
-        .await
-        .map(|_supervisor| ())
-    } else {
-        RuntimeSequenceSubscriber::for_endpoint(endpoint)
-            .await
-            .map(|subscriber| {
-                tokio::spawn(forward_replica_events(
-                    subscriber,
-                    inbound_tx.clone(),
-                    cancellation_token,
-                ));
-            })
+    let ingress = ReplicaIngress {
+        endpoint: endpoint.clone(),
+        inbound_tx: inbound_tx.clone(),
+        cancellation_token,
     };
-    if let Err(error) = ingress_result {
-        tracing::warn!(
-            %error,
-            "active-sequence event ingress unavailable; continuing with response-side cleanup"
-        );
+    Ok((
+        dynamo_kv_router::services::selection::HostReplicaChannels {
+            outbound,
+            inbound_tx,
+            inbound_rx,
+            process_id: router_id,
+        },
+        ingress,
+    ))
+}
+
+/// The inbound leg of [`host_replica_channels`]: peer replica events and
+/// worker-origin completion marks feed `inbound_tx` from the direct-ZMQ
+/// fan-in or the runtime subscriber, whichever the transport selects.
+pub(crate) struct ReplicaIngress {
+    endpoint: Endpoint,
+    inbound_tx: mpsc::Sender<ActiveSequenceEvent>,
+    cancellation_token: CancellationToken,
+}
+
+impl ReplicaIngress {
+    pub(crate) async fn start(self) {
+        let transport_kind = self.endpoint.drt().default_event_transport_kind();
+        let direct = direct_zmq::DirectZmqSequenceConfig::from_env();
+        let ingress_result = if direct.should_use_direct(transport_kind) {
+            direct_zmq::start(
+                self.endpoint,
+                self.inbound_tx,
+                direct.rcvhwm,
+                self.cancellation_token,
+            )
+            .await
+            .map(|_supervisor| ())
+        } else {
+            RuntimeSequenceSubscriber::for_endpoint(&self.endpoint)
+                .await
+                .map(|subscriber| {
+                    tokio::spawn(forward_replica_events(
+                        subscriber,
+                        self.inbound_tx,
+                        self.cancellation_token,
+                    ));
+                })
+        };
+        if let Err(error) = ingress_result {
+            tracing::warn!(
+                %error,
+                "active-sequence event ingress unavailable; continuing with response-side cleanup"
+            );
+        }
     }
-    Ok(dynamo_kv_router::services::selection::HostReplicaChannels {
-        outbound,
-        inbound_tx,
-        inbound_rx,
-        process_id: router_id,
-    })
 }
 
 async fn forward_replica_events(
@@ -568,6 +544,7 @@ async fn forward_replica_events(
 mod tests {
     use super::*;
     use dynamo_kv_router::protocols::ActiveSequenceEventData;
+    use parking_lot::Mutex;
     use std::sync::Arc;
     use tokio::time::Instant;
 
@@ -860,20 +837,20 @@ mod tests {
         );
     }
     #[test]
-    fn deferred_replica_observer_flushes_completed_startup_attempts_in_order() {
+    fn late_bound_observer_drops_before_install_and_forwards_after() {
         use dynamo_kv_router::sequences::NoopSequencePublisher;
         use std::collections::HashMap;
         #[derive(Default)]
-        struct Observer(Mutex<Vec<(&'static str, SchedulerBookingDescriptor)>>);
+        struct Observer(Mutex<Vec<(&'static str, String)>>);
         impl ReplicaRequestLeaseObserver for Observer {
             fn admitted(&self, booking: SchedulerBookingDescriptor) {
-                self.0.lock().push(("add", booking));
+                self.0.lock().push(("add", booking.request_id));
             }
             fn progressed(&self, booking: &SchedulerBookingDescriptor) {
-                self.0.lock().push(("progress", booking.clone()));
+                self.0.lock().push(("progress", booking.request_id.clone()));
             }
             fn completed(&self, booking: &SchedulerBookingDescriptor) {
-                self.0.lock().push(("free", booking.clone()));
+                self.0.lock().push(("free", booking.request_id.clone()));
             }
         }
         let slots = ActiveSequencesMultiWorker::new_without_expiry(
@@ -884,27 +861,26 @@ mod tests {
             0,
             "test",
         );
-        let deferred = Arc::new(DeferredReplicaRequestLeaseObserver::default());
-        assert!(slots.set_replica_request_lease_observer(deferred.clone()));
-        slots.apply_replica_batch(vec![add_event("startup"), free_event("startup")]);
+        let late = Arc::new(LateBoundLeaseObserver::default());
+        assert!(slots.set_replica_request_lease_observer(late.clone()));
+        // Dropped: no target installed.
+        slots.apply_replica_batch(vec![
+            add_event("before-install"),
+            free_event("before-install"),
+        ]);
         let observer = Arc::new(Observer::default());
-        assert!(deferred.install(observer.clone()));
-        {
-            let events = observer.0.lock();
-            assert_eq!(events.len(), 2);
-            let booking = &events[0].1;
-            assert_eq!(booking.request_id, "startup");
-            assert_eq!(
-                *events,
-                vec![("add", booking.clone()), ("free", booking.clone())]
-            );
-        }
-        slots.apply_replica_batch(vec![add_event("after-install")]);
+        late.install(observer.clone());
+        slots.apply_replica_batch(vec![
+            add_event("after-install"),
+            free_event("after-install"),
+        ]);
         assert_eq!(
-            observer.0.lock().last().unwrap().1.request_id,
-            "after-install"
+            *observer.0.lock(),
+            vec![
+                ("add", "after-install".to_string()),
+                ("free", "after-install".to_string())
+            ]
         );
-        assert!(!deferred.install(observer));
     }
 
     #[tokio::test]
@@ -924,9 +900,10 @@ mod tests {
             .component("workers")?
             .endpoint("generate");
         let cancel = CancellationToken::new();
-        let mut channels =
+        let (mut channels, ingress) =
             host_replica_channels(&endpoint, 99, false, cancel.child_token()).await?;
         assert!(channels.outbound.is_none());
+        ingress.start().await;
 
         let publisher = ActiveSequenceEventPublisher::for_endpoint(&endpoint, 16).await?;
         let received = tokio::time::timeout(std::time::Duration::from_secs(5), async {

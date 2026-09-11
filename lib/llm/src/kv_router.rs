@@ -793,8 +793,7 @@ impl KvRouter {
         let available_worker_provider: WorkerAvailabilityProvider =
             Arc::new(move || client_for_availability.available_instance_ids());
 
-        let replica_leases = Arc::new(sequence::DeferredReplicaRequestLeaseObserver::default());
-        let scheduler = embedded::EmbeddedSelection::start(
+        let (scheduler, replica_ingress) = embedded::EmbeddedSelection::start(
             embedded::EmbeddedSelectionArgs {
                 kv_router_config: kv_router_config.clone(),
                 worker_role,
@@ -815,7 +814,6 @@ impl KvRouter {
                 endpoint: endpoint.clone(),
                 router_id: endpoint.drt().discovery().instance_id(),
                 policy_factory,
-                request_leases: replica_leases.clone(),
             },
             workers_with_configs.clone(),
             cancellation_token.child_token(),
@@ -825,7 +823,10 @@ impl KvRouter {
             scheduler.booking_cleanup(),
             cancellation_token.child_token(),
         );
-        replica_leases.install(Arc::new(request_leases.clone()));
+        // Inbound lifecycle events start only now that their consumer exists.
+        replica_ingress
+            .start(Arc::new(request_leases.clone()))
+            .await;
         tracing::info!("KV Routing initialized");
         let cancellation_token = cancellation_guard.disarm();
         Ok(Self {

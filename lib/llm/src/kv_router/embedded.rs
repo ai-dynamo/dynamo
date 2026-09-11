@@ -68,7 +68,6 @@ pub(crate) struct EmbeddedSelectionArgs {
     /// Builds the partition's worker-selection policy (see
     /// `SelectionPolicySource::resolve`).
     pub policy_factory: WorkerSelectionPolicyFactory,
-    pub request_leases: Arc<dyn dynamo_kv_router::sequences::ReplicaRequestLeaseObserver>,
 }
 
 fn record_queue_rejection(
@@ -176,6 +175,24 @@ pub(crate) struct EmbeddedSelection {
     queue_metric_indices: HashMap<String, usize>,
 }
 
+/// The partition's inbound replica ingress, not yet running. Starting it
+/// installs the router's lease manager first, so no lifecycle event reaches
+/// the partition before its consumer exists.
+pub(crate) struct PendingReplicaIngress {
+    ingress: crate::kv_router::sequence::ReplicaIngress,
+    leases: Arc<crate::kv_router::sequence::LateBoundLeaseObserver>,
+}
+
+impl PendingReplicaIngress {
+    pub(crate) async fn start(
+        self,
+        leases: Arc<dyn dynamo_kv_router::sequences::ReplicaRequestLeaseObserver>,
+    ) {
+        self.leases.install(leases);
+        self.ingress.start().await;
+    }
+}
+
 static INSTALLED_POLICY_REGISTRY: std::sync::OnceLock<WorkerSelectionPolicyRegistry> =
     std::sync::OnceLock::new();
 
@@ -224,7 +241,7 @@ impl EmbeddedSelection {
         args: EmbeddedSelectionArgs,
         workers_with_configs: RuntimeConfigWatch,
         cancellation_token: CancellationToken,
-    ) -> Result<Self> {
+    ) -> Result<(Self, PendingReplicaIngress)> {
         let worker_type = args.worker_role.unwrap_or(WorkerType::Aggregated);
         let key = RoutingPartitionId::new(
             args.model_name
@@ -236,7 +253,7 @@ impl EmbeddedSelection {
         // Replica sync rides the runtime event plane. Worker-origin completion
         // marks are consumed even when router-to-router replica sync is
         // disabled; only publishing is gated.
-        let channels = crate::kv_router::sequence::host_replica_channels(
+        let (channels, replica_ingress) = crate::kv_router::sequence::host_replica_channels(
             &args.endpoint,
             args.router_id,
             args.kv_router_config.router_replica_sync,
@@ -244,6 +261,7 @@ impl EmbeddedSelection {
         )
         .await
         .context("start replica sync for the embedded selection partition")?;
+        let leases = Arc::new(crate::kv_router::sequence::LateBoundLeaseObserver::default());
         let slot = std::sync::Mutex::new(Some(channels));
         let replica_sync: Option<dynamo_kv_router::services::selection::HostReplicaSyncFactory> =
             Some(Arc::new(move |_partition| {
@@ -278,7 +296,7 @@ impl EmbeddedSelection {
             },
             replication: HostReplication {
                 channels: replica_sync,
-                request_leases: Some(args.request_leases),
+                request_leases: Some(leases.clone()),
             },
         })
         .build()
@@ -349,14 +367,20 @@ impl EmbeddedSelection {
             worker_type = %worker_type,
             "KvRouter scheduling on embedded selection partition"
         );
-        Ok(Self {
-            service,
-            partition,
-            affinity: std::sync::OnceLock::new(),
-            worker_type: args.metric_worker_type,
-            queue_metrics,
-            queue_metric_indices,
-        })
+        Ok((
+            Self {
+                service,
+                partition,
+                affinity: std::sync::OnceLock::new(),
+                worker_type: args.metric_worker_type,
+                queue_metrics,
+                queue_metric_indices,
+            },
+            PendingReplicaIngress {
+                ingress: replica_ingress,
+                leases,
+            },
+        ))
     }
 
     fn observe_queue(&self, rejection: Option<&QueueRejection>) {
