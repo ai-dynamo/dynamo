@@ -637,6 +637,18 @@ jobs:
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
     secrets: inherit
 
+  cross-version-compatibility:
+    name: SGLang nightly N-2 compatibility
+    needs: [compute-release-mode, resolve-source-sha, deploy-operator, frontend-copy-to-acr, sglang-copy-to-acr, deploy-test-sglang]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' && needs.deploy-test-sglang.result == 'success' }}
+    uses: $/.github/workflows/cross-version-compatibility.yml
+    with:
+      frontend_tag: ${{ needs.frontend-copy-to-acr.outputs.image_tag }}
+      worker_tag: ${{ needs.sglang-copy-to-acr.outputs.image_tag }}
+      operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+    secrets: inherit
+
   deploy-cleanup:
     name: Nightly Deploy Cleanup
     if: always()
