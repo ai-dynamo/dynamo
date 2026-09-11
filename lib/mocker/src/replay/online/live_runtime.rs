@@ -24,7 +24,7 @@ use super::state::{
     now_ms,
 };
 use super::task::{
-    InFlightGuard, RequestTaskContext, run_request_task, wait_for_workload_progress,
+    InFlightGuard, RequestTaskContext, route_request, run_request_task, wait_for_workload_progress,
 };
 
 pub(super) struct LiveRuntime {
@@ -363,9 +363,12 @@ impl LiveRuntime {
                     if session.task_ctx.cancel.is_cancelled() {
                         bail!("online replay cancelled");
                     }
+                    // Routed here, in trace order, before the task is spawned -- see
+                    // `route_request`.
+                    let routed = route_request(&session.task_ctx, request).await?;
                     session
                         .tasks
-                        .spawn(run_request_task(session.task_ctx.clone(), request, None));
+                        .spawn(run_request_task(session.task_ctx.clone(), routed, None));
                 }
             }
             LiveReplayMode::Concurrency { max_in_flight } => {
@@ -394,10 +397,13 @@ impl LiveRuntime {
                     if session.task_ctx.cancel.is_cancelled() {
                         bail!("online replay cancelled");
                     }
+                    // Routed here, in submission order, before the task is spawned -- see
+                    // `route_request`.
+                    let routed = route_request(&session.task_ctx, request).await?;
                     let task_ctx = session.task_ctx.clone();
                     session.tasks.spawn(async move {
                         let _permit = permit;
-                        run_request_task(task_ctx, request, None).await
+                        run_request_task(task_ctx, routed, None).await
                     });
                 }
             }
@@ -481,11 +487,12 @@ impl LiveRuntime {
                 if session.task_ctx.cancel.is_cancelled() {
                     bail!("online replay cancelled");
                 }
-                session.tasks.spawn(run_request_task(
-                    session.task_ctx.clone(),
-                    ready_turn.request,
-                    guard,
-                ));
+                // Routed here, in pop_ready order, before the task is spawned -- see
+                // `route_request`.
+                let routed = route_request(&session.task_ctx, ready_turn.request).await?;
+                session
+                    .tasks
+                    .spawn(run_request_task(session.task_ctx.clone(), routed, guard));
                 tokio::task::yield_now().await;
                 continue;
             }

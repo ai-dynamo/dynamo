@@ -85,11 +85,39 @@ pub(super) async fn wait_for_workload_progress<F>(
     }
 }
 
-pub(super) async fn run_request_task(
-    ctx: RequestTaskContext,
+/// One request with its routing decision already made.
+///
+/// Routing is resolved by [`route_request`] on the submission path and carried into
+/// the spawned task, so a task never makes a routing decision itself.
+pub(super) struct RoutedRequest {
     request: DirectRequest,
-    mut guard: Option<InFlightGuard>,
-) -> Result<()> {
+    uuid: Uuid,
+    worker_idx: usize,
+    dp_rank: usize,
+    engine_idx: usize,
+}
+
+/// Resolve one request's placement.
+///
+/// This MUST stay on the submission path, awaited in trace order, and must not move
+/// back inside [`run_request_task`]. Request tasks are spawned onto a multi-thread
+/// runtime, so two rows with coincident or near-coincident arrivals would otherwise
+/// race into the router with no ordering guarantee: round-robin's shared
+/// `AtomicUsize` and the KV router's shared scheduler would both hand out
+/// assignments in OS-scheduler order rather than trace order, making the resulting
+/// cache-hit structure depend on thread timing. Resolving here makes the routing
+/// decision a function of the trace; only the per-request work after it stays
+/// concurrent.
+///
+/// This does not make an online KV run fully reproducible -- `on_first_token` and
+/// `on_complete` still mutate shared scheduler state from concurrent tasks at
+/// wall-clock-dependent instants, which is inherent to a live replay. Offline
+/// replay is the deterministic path. It does remove the dispatch-order race, which
+/// is the part that has no business being nondeterministic.
+pub(super) async fn route_request(
+    ctx: &RequestTaskContext,
+    request: DirectRequest,
+) -> Result<RoutedRequest> {
     if ctx.cancel.is_cancelled() {
         bail!("online replay cancelled");
     }
@@ -120,6 +148,34 @@ pub(super) async fn run_request_task(
         engine_idx < ctx.engines.len(),
         "online replay has no rank handle for worker {worker_idx}, DP rank {dp_rank}"
     );
+    // Recorded here, not after `submit`, so `dispatch_history` is the routing
+    // sequence in trace order rather than whichever task won the race to submit.
+    ctx.stats.record_dispatch(worker_idx);
+    ctx.recorder.record_decode_assignment(uuid, worker_idx)?;
+    Ok(RoutedRequest {
+        request,
+        uuid,
+        worker_idx,
+        dp_rank,
+        engine_idx,
+    })
+}
+
+pub(super) async fn run_request_task(
+    ctx: RequestTaskContext,
+    routed: RoutedRequest,
+    mut guard: Option<InFlightGuard>,
+) -> Result<()> {
+    let RoutedRequest {
+        request,
+        uuid,
+        worker_idx,
+        dp_rank,
+        engine_idx,
+    } = routed;
+    if ctx.cancel.is_cancelled() {
+        bail!("online replay cancelled");
+    }
 
     let mut live_request = ctx.engines[engine_idx]
         .submit(request)
@@ -132,8 +188,6 @@ pub(super) async fn run_request_task(
     if ctx.cancel.is_cancelled() {
         bail!("online replay cancelled");
     }
-    ctx.stats.record_dispatch(worker_idx);
-    ctx.recorder.record_decode_assignment(uuid, worker_idx)?;
 
     let mut first_token_seen = false;
     let mut token_times_ms = Vec::new();

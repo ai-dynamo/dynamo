@@ -550,6 +550,42 @@ fn test_online_trace_replay_uses_round_robin_dispatch() {
     assert_eq!(stats.dispatch_history, vec![0, 1, 2, 0, 1]);
 }
 
+/// The fixture above spaces arrivals 100ms apart, which dodges the dispatch-order
+/// race rather than proving its absence. Coincident arrivals are the real case: all
+/// deadlines have already passed, so every request is submitted back-to-back and,
+/// before routing was hoisted onto the submission path, the spawned tasks raced into
+/// the shared round-robin counter on a multi-thread runtime. Worker assignment must
+/// follow trace order, not OS-scheduler order.
+#[test]
+fn coincident_arrivals_dispatch_in_trace_order() {
+    const REQUESTS: u128 = 24;
+    const WORKERS: usize = 3;
+
+    let expected = (0..REQUESTS as usize)
+        .map(|index| index % WORKERS)
+        .collect::<Vec<_>>();
+
+    // Repeated: a single pass can win the race by luck, so one pass is not evidence.
+    for attempt in 0..40 {
+        let requests = (1..=REQUESTS)
+            .map(|index| request(index, index as u32, Some(0.0)))
+            .collect::<Vec<_>>();
+        let (_, stats) = simulate_trace_requests_with_stats(
+            replay_args(),
+            requests,
+            WORKERS,
+            1.0,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        assert_eq!(
+            stats.dispatch_history, expected,
+            "attempt {attempt}: coincident arrivals must dispatch in trace order"
+        );
+    }
+}
+
 #[tokio::test]
 async fn test_online_trace_replay_uses_grouped_attention_dp_engine() {
     let mut args = replay_args();
