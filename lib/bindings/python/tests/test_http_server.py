@@ -111,14 +111,14 @@ def test_batch_endpoint_cannot_be_changed_at_runtime():
 
 
 @pytest.fixture(scope="function", autouse=False)
-async def http_server(request, runtime: DistributedRuntime):
+async def http_server(request, unused_tcp_port: int, runtime: DistributedRuntime):
     """Fixture to start a mock HTTP server using HttpService, contributed by Baseten.
 
     Parametrize indirectly with a bool to set ``wait_for_first_item`` on the
     service; the default is False.
     """
     wait_for_first_item = getattr(request, "param", False)
-    port = 8008
+    port = unused_tcp_port
     model_name = "test_model"
     start_done = asyncio.Event()
     checksum = "abc123"  # Checksum of ModelDeplomentCard for that model
@@ -196,6 +196,7 @@ DEFAULT_SERVICE = pytest.param(False, id="default")
 @pytest.mark.parametrize(
     "http_server", [DEFAULT_SERVICE, WAIT_FOR_FIRST_ITEM], indirect=True
 )
+@pytest.mark.timeout(60)
 @pytest.mark.forked
 async def test_chat_completion_success(http_server):
     """A streaming completion arrives in full, including its first chunk, whether
@@ -267,6 +268,7 @@ def expected_error_body(status: int, message: str, error_type: str) -> Dict:
 @pytest.mark.parametrize(
     ("trigger", "status", "expected_message", "expected_type"), HTTP_ERROR_CASES
 )
+@pytest.mark.timeout(60)
 @pytest.mark.forked
 async def test_chat_completion_http_error(
     http_server,
@@ -297,6 +299,7 @@ async def test_chat_completion_http_error(
 @pytest.mark.parametrize(
     ("trigger", "status", "expected_message", "expected_type"), HTTP_ERROR_CASES
 )
+@pytest.mark.timeout(60)
 @pytest.mark.forked
 async def test_streaming_chat_completion_http_error_waits_for_first_item(
     http_server,
@@ -326,6 +329,7 @@ async def test_streaming_chat_completion_http_error_waits_for_first_item(
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(60)
 @pytest.mark.forked
 async def test_streaming_chat_completion_http_error_default_commits_200(http_server):
     """Without wait_for_first_item, a streaming request commits HTTP 200 before
@@ -344,3 +348,15 @@ async def test_streaming_chat_completion_http_error_default_commits_200(http_ser
         async with session.post(url, json=data) as response:
             assert response.status == 200
             assert response.content_type == "text/event-stream"
+            body = await response.text()
+
+    # The frame carries the sanitized stream error, not the backend's own
+    # message: HTTP 200 is already committed, so there is no status left to
+    # carry the 400, and the stream formatter does not forward backend text.
+    assert (
+        '"error"' in body
+    ), f"the pre-yield failure must arrive as an SSE error frame; got: {body}"
+    assert "mock response" not in body, (
+        f"the generator raised before its first yield, so the stream must "
+        f"carry no content; got: {body}"
+    )

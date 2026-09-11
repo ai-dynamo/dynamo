@@ -25,6 +25,7 @@ use base64::Engine as _;
 use bytes::Bytes;
 use dynamo_runtime::config::{env_is_truthy, environment_names::llm as env_llm};
 use dynamo_runtime::{
+    engine::AsyncEngineContext,
     pipeline::{AsyncEngineContextProvider, Context},
     protocols::annotated::AnnotationsProvider,
 };
@@ -380,6 +381,28 @@ impl ErrorMessage {
                 code: code.as_u16(),
                 details: None,
                 metric_error_type: Some(ErrorType::Unavailable),
+            }),
+        )
+    }
+
+    /// Client Closed Request — nginx's 499 convention, which
+    /// [`classify_error_for_metrics`] already maps to [`ErrorType::Cancelled`].
+    ///
+    /// Returned when the client goes away while a handler is still waiting for
+    /// the backend's first event. Nobody reads this response; it exists so the
+    /// handler stops there instead of finishing a stream for a connection that
+    /// is gone. See [`until_client_disconnects`].
+    pub fn client_disconnected() -> ErrorResponse {
+        let code = StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST);
+        let reason = map_error_code_to_error_type(code);
+        (
+            code,
+            Json(ErrorMessage {
+                message: reason.clone(),
+                error_type: reason,
+                code: code.as_u16(),
+                details: None,
+                metric_error_type: Some(ErrorType::Cancelled),
             }),
         )
     }
@@ -1005,13 +1028,15 @@ async fn completions_single(
         // Same pre-commit check as chat_completions: a backend error before
         // the first item maps to its HTTP status instead of an SSE frame
         // behind an HTTP 200.
-        let stream = check_for_backend_error(stream, state.streaming_backend_error_check())
-            .await
-            .map_err(|error_response| {
-                tracing::error!(request_id, "Backend error detected: {:?}", error_response);
-                inflight_guard.mark_error(extract_error_type_from_response(&error_response));
-                error_response
-            })?;
+        let stream = until_client_disconnects(
+            check_for_backend_error(stream, state.streaming_backend_error_check()),
+            &ctx,
+        )
+        .await
+        .inspect_err(|error_response| {
+            log_pre_commit_error(&request_id, error_response);
+            inflight_guard.mark_error(extract_error_type_from_response(error_response));
+        })?;
 
         // For streaming, we'll drop the http_queue_guard on the first token
         let mut http_queue_guard = Some(http_queue_guard);
@@ -1177,7 +1202,7 @@ fn aggregate_batch_completion_usage(
 type BoxedCompletionResponseStream =
     std::pin::Pin<Box<dyn futures::Stream<Item = Annotated<NvCreateCompletionResponse>> + Send>>;
 
-/// Check each prompt stream before merging a non-streaming completion batch.
+/// Check each prompt stream before merging a completion batch, streaming or not.
 ///
 /// `select_all` cannot safely provide this check after merging because a normal
 /// event from one prompt may arrive before a typed backend error from another.
@@ -1246,9 +1271,14 @@ async fn completions_batch(
     // prepare to process any annotations
     let annotations = request.annotations();
 
-    // Generate streams for each prompt in the batch
+    // Generate streams for each prompt in the batch.
+    //
+    // Each prompt runs under its own context so it can carry its own request
+    // id, but every one is linked to the request context: `kill` cascades to
+    // linked children, so a client disconnect or a failed preflight stops all
+    // of them rather than only the prompt that happened to be first.
     let mut all_streams = Vec::new();
-    let mut first_ctx = None;
+    let parent_ctx = request.context();
 
     for prompt_idx in 0..batch_size {
         // Extract single prompt at this index
@@ -1279,10 +1309,7 @@ async fn completions_batch(
             err_response
         })?;
 
-        // Capture context from first stream
-        if first_ctx.is_none() {
-            first_ctx = Some(stream.context());
-        }
+        parent_ctx.link_child(stream.context());
 
         // Remap choice indices: choice.index += prompt_idx * n
         let prompt_idx_u32 = prompt_idx as u32;
@@ -1304,21 +1331,29 @@ async fn completions_batch(
     } else {
         BackendErrorCheck::UntilFirstEvent
     };
-    let all_streams = check_completion_batch_streams(all_streams, check)
-        .await
-        .map_err(|error_response| {
-            tracing::error!(request_id, "Backend error detected: {:?}", error_response);
-            inflight_guard.mark_error(extract_error_type_from_response(&error_response));
-            error_response
-        })?;
+    let all_streams = until_client_disconnects(
+        check_completion_batch_streams(all_streams, check),
+        &parent_ctx,
+    )
+    .await
+    .inspect_err(|error_response| {
+        log_pre_commit_error(&request_id, error_response);
+        inflight_guard.mark_error(extract_error_type_from_response(error_response));
+        // One prompt's error abandons the whole batch, so stop the siblings
+        // still running behind it instead of leaving them to generate for a
+        // response that will never be sent.
+        parent_ctx.kill();
+    })?;
 
     // Merge all streams after every prompt has passed its own backend-error
     // check.
     let merged_stream = stream::select_all(all_streams);
     let merged_stream = aggregate_batch_completion_usage(merged_stream, request_id.clone());
 
-    // capture the context to cancel the stream if the client disconnects
-    let ctx = first_ctx.expect("At least one stream should be generated");
+    // The request context cancels every prompt on client disconnect, through
+    // the child links established above. It is also what the route's connection
+    // monitor kills, so the monitor below observes the same stop signal.
+    let ctx = parent_ctx;
 
     let annotations_vec = annotations.map_or(Vec::new(), |annotations| {
         annotations
@@ -2530,6 +2565,43 @@ where
     }
 }
 
+/// Abandon `check` if the client disconnects before it resolves.
+///
+/// Route handlers run in a detached `tokio::spawn`, so a handler outlives the
+/// connection that asked for it. Without this arm, a disconnect during the
+/// pre-commit wait is recorded twice: once when the armed connection handle
+/// drops, and again when the finished response — built for a client that is
+/// already gone — is dropped unpolled with its stream handle armed. Ending the
+/// wait keeps it inside the lifetime of its connection.
+///
+/// `biased` so a check that has already resolved wins a tie: a real backend
+/// status is worth more than a synthetic 499 nobody will read.
+pub(super) async fn until_client_disconnects<T>(
+    check: impl std::future::Future<Output = Result<T, ErrorResponse>>,
+    ctx: &Arc<dyn AsyncEngineContext>,
+) -> Result<T, ErrorResponse> {
+    tokio::select! {
+        biased;
+        result = check => result,
+        () = ctx.killed() => Err(ErrorMessage::client_disconnected()),
+    }
+}
+
+/// Log a failed pre-commit check.
+///
+/// A client that hung up is an expected outcome rather than a backend fault, so
+/// it must not raise the log level on a busy frontend.
+fn log_pre_commit_error(request_id: &str, error_response: &ErrorResponse) {
+    if error_response.1.metric_error_type == Some(ErrorType::Cancelled) {
+        tracing::debug!(
+            request_id,
+            "Client disconnected before the first backend event"
+        );
+    } else {
+        tracing::error!(request_id, "Backend error detected: {:?}", error_response);
+    }
+}
+
 /// Convert a `BackendErrorInfo` from `extract_backend_error_if_present` into the
 /// wire `ErrorResponse`. Shared between the non-streaming preflight
 /// (`check_for_backend_error`) and the streaming preflight so both paths speak
@@ -2949,13 +3021,15 @@ async fn chat_completions(
         // to wait is service configuration; with a bounded window and no
         // signal, fall through to SSE, and `monitor_for_disconnects` owns the
         // long backend-inactivity timeout from there.
-        let stream = check_for_backend_error(stream, state.streaming_backend_error_check())
-            .await
-            .map_err(|err_response| {
-                tracing::error!(request_id = %request_id, "Backend error detected: {:?}", err_response);
-                inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-                err_response
-            })?;
+        let stream = until_client_disconnects(
+            check_for_backend_error(stream, state.streaming_backend_error_check()),
+            &ctx,
+        )
+        .await
+        .inspect_err(|err_response| {
+            log_pre_commit_error(&request_id, err_response);
+            inflight_guard.mark_error(extract_error_type_from_response(err_response));
+        })?;
 
         let mut http_queue_guard = Some(http_queue_guard);
         let tool_dispatch_enabled = state.streaming_tool_dispatch_enabled();
@@ -3563,15 +3637,14 @@ async fn responses(
         // error before committing HTTP 200 — same rationale as
         // chat_completions above. The long backend-inactivity safety net
         // lives in `monitor_for_disconnects`.
-        let engine_stream = check_for_backend_error(
-            engine_stream,
-            state.streaming_backend_error_check(),
+        let engine_stream = until_client_disconnects(
+            check_for_backend_error(engine_stream, state.streaming_backend_error_check()),
+            &ctx,
         )
         .await
-        .map_err(|err_response| {
-            tracing::error!(request_id = %request_id, "Backend error detected: {:?}", err_response);
-            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-            err_response
+        .inspect_err(|err_response| {
+            log_pre_commit_error(&request_id, err_response);
+            inflight_guard.mark_error(extract_error_type_from_response(err_response));
         })?;
 
         // Streaming path: convert chat completion stream chunks to Responses API SSE events.
@@ -7429,6 +7502,56 @@ mod tests {
         assert_eq!(first.event.as_deref(), Some(ANNOTATION_REQUEST_ID));
         let second = returned.remove(0);
         assert_eq!(second.id, Some("msg-1".to_string()));
+    }
+
+    /// The timeout branch of a `Bounded` check is the one path that hands back
+    /// annotations it has already taken off the stream. Dropping them there
+    /// loses the request-id frame silently, behind an HTTP 200 that still
+    /// looks healthy.
+    #[tokio::test]
+    async fn test_check_for_backend_error_bounded_replays_annotations_after_window() {
+        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use futures::stream::StreamExt;
+
+        let annotation = Annotated::<NvCreateChatCompletionStreamResponse>::from_annotation(
+            ANNOTATION_REQUEST_ID,
+            &"req-123".to_string(),
+        )
+        .expect("annotation construction should succeed");
+        let window = std::time::Duration::from_millis(20);
+        let stream = async_stream::stream! {
+            yield annotation;
+            // Outlast the window, so the check hands the stream over before
+            // the first data event arrives.
+            tokio::time::sleep(window * 10).await;
+            yield Annotated::<NvCreateChatCompletionStreamResponse> {
+                data: None,
+                id: Some("msg-1".to_string()),
+                event: None,
+                comment: None,
+                error: None,
+            };
+        };
+
+        let started = tokio::time::Instant::now();
+        let result = check_for_backend_error(stream, BackendErrorCheck::Bounded(window)).await;
+        let waited = started.elapsed();
+
+        assert!(
+            waited < window * 5,
+            "the check waited {waited:?}, past its {window:?} window"
+        );
+        let returned: Vec<_> = result
+            .expect("an elapsed window is not an error")
+            .collect()
+            .await;
+        assert_eq!(
+            returned.len(),
+            2,
+            "buffered annotation must survive the window"
+        );
+        assert_eq!(returned[0].event.as_deref(), Some(ANNOTATION_REQUEST_ID));
+        assert_eq!(returned[1].id.as_deref(), Some("msg-1"));
     }
 
     #[tokio::test]
