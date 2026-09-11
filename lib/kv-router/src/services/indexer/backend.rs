@@ -1309,6 +1309,14 @@ mod tests {
         }
     }
 
+    impl Indexer {
+        /// Test-only: wait until every locally enqueued event and routing
+        /// decision is applied.
+        pub(crate) async fn flush(&self) {
+            flush(self).await
+        }
+    }
+
     #[tokio::test]
     async fn event_driven_policy_ignores_routing_decisions() {
         let indexer = policy_indexer(1, IndexerPolicy::event_driven());

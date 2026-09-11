@@ -3,6 +3,38 @@
 
 //! One selection, end to end: the wire adapters, `run_selection`, the
 //! lookups that feed the scheduler, and the session binding around it.
+//!
+//! # Booking lifecycle invariants
+//!
+//! A booking is `(request_id, worker, attempt_id)` in the partition scheduler.
+//! Both booking paths, `run_selection_inner` here and `finalize_reservation`
+//! in `core/reservations.rs`, hold it through these invariants; the named
+//! tests in `core/tests.rs` pin each one.
+//!
+//! - A booking is released exactly once, by whichever owner holds it when the
+//!   request ends (`dropped_selection_future_frees_its_booking`,
+//!   `reservation_index_tracks_bookings_until_freed`).
+//! - Release ownership moves in one direction: the scheduler actor books, hands
+//!   the armed lease to this run, and the run hands it to the index row for
+//!   `Book` (`claim.install`) or to the host for `Lease` (`Selected::lease`)
+//!   (`dropped_selection_future_frees_its_booking`,
+//!   `lease_admission_installs_no_index_row_and_records_nothing`).
+//! - The session hold is taken before the booking is made
+//!   (`session_worker_departing_after_the_hold_reinitializes_the_session`) and
+//!   the binding is committed while the booking is held. The commit never
+//!   waits: `commit_session` is a synchronous fn that re-binds only through
+//!   `try_acquire`, so when the table cannot bind at commit time (`try_acquire`
+//!   returns `Wait`, or the table is full) it returns `Ok(None)` and the
+//!   request routes unpinned rather than waiting on a request queued behind
+//!   this booking. A rejected commit frees the booking
+//!   (`two_phase_replay_rejects_a_worker_the_session_left`).
+//! - A `Lease` admission installs no index row and records no routing hashes
+//!   in the core; the host owns both
+//!   (`lease_admission_installs_no_index_row_and_records_nothing`).
+//! - Dropping the run at any await after the booking lands and before the
+//!   index row is installed frees the booking and releases the id claim
+//!   (`dropped_selection_future_frees_its_booking`,
+//!   `dropped_book_selection_during_routing_record_frees_booking_and_claim`).
 
 use super::hint::transfer_hint_for_selection;
 use super::reservations::{Reservation, missing_booking};

@@ -2692,6 +2692,106 @@ mod tests {
         assert!(router.scheduler.has_request("kept"));
     }
 
+    /// A public enrollment cancelled while its routing update is in flight
+    /// frees the booking through the detached enrollment's drop.
+    #[tokio::test]
+    async fn enroll_public_request_attempt_cancelled_during_routing_update_frees_booking() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use dynamo_kv_router::indexer::TieredMatchDetails;
+        use dynamo_kv_router::protocols::LocalBlockHash;
+        use dynamo_kv_router::services::indexer::backend::RemotePrimary;
+
+        /// Records park until `release` is notified.
+        struct PausedRecord {
+            entered: AtomicBool,
+            release: tokio::sync::Notify,
+        }
+        #[async_trait]
+        impl RemotePrimary for PausedRecord {
+            async fn find_matches_by_tier(
+                &self,
+                _: Vec<LocalBlockHash>,
+                _: bool,
+            ) -> anyhow::Result<TieredMatchDetails> {
+                Ok(TieredMatchDetails::default())
+            }
+            async fn record_routing_decision(
+                &self,
+                _: WorkerWithDpRank,
+                _: RoutingDecisionHashes,
+            ) -> anyhow::Result<()> {
+                self.entered.store(true, Ordering::Release);
+                self.release.notified().await;
+                Ok(())
+            }
+            fn use_kv_events(&self) -> bool {
+                false
+            }
+        }
+
+        let mut router = differential_router("enroll").await;
+        let record = Arc::new(PausedRecord {
+            entered: AtomicBool::new(false),
+            release: tokio::sync::Notify::new(),
+        });
+        router.indexer = Indexer::Remote {
+            primary: record.clone(),
+            approx: None,
+            primary_records_routing_decisions: true,
+        };
+        let router = router;
+        let prompt = golden_prefix(1);
+        let outcome = router
+            .find_best_match_details_with_policy_class_inner(
+                Some("cancelled"),
+                &prompt,
+                None,
+                None,
+                true,
+                false,
+                None,
+                None,
+                0.0,
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                RoutingConstraints::default(),
+                FindBestMatchAdmission::WithAdmission,
+            )
+            .await
+            .unwrap();
+        let FindBestMatchInnerOutcome::WithAdmission(admitted) = outcome else {
+            panic!("admitted routing returned advisory outcome");
+        };
+        let lease = admitted
+            .lease
+            .expect("tracked selection carries its booking lease");
+
+        // Park the routing update after `register_detached` has run.
+        let mut enroll = Box::pin(
+            router.enroll_public_request_attempt(lease, Some(TokensWithHashes::new(prompt, 2))),
+        );
+        assert!(futures::poll!(&mut enroll).is_pending());
+        assert!(
+            record.entered.load(Ordering::Acquire),
+            "routing update is in flight"
+        );
+        assert!(router.scheduler.has_request("cancelled"));
+        drop(enroll);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while router.scheduler.has_request("cancelled") {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled enrollment released its booking");
+    }
+
     async fn make_test_router_with_workers(
         policy: SelectionPolicySource,
         shared_cache: Option<Arc<dyn SharedKvCache>>,

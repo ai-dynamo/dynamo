@@ -1280,6 +1280,76 @@ async fn lease_admission_keeps_a_selection_whose_worker_drained_while_queued() {
     wait_until("booking release", || !entry.scheduler.has_request("queued")).await;
 }
 
+/// A `Lease` admission hands the booking to the host: no index row, no
+/// booked hashes, and nothing recorded into the approximate primary that
+/// `Book` feeds.
+#[tokio::test]
+async fn lease_admission_installs_no_index_row_and_records_nothing() {
+    let core = SelectionCore::try_new_local(
+        test_config(false),
+        1,
+        CancellationToken::new(),
+        SelectionCacheConfig::default(),
+    )
+    .expect("valid test config");
+    core.upsert_worker(worker(1)).await.expect("worker upsert");
+    let key = RoutingPartitionId::new("model", "default");
+    let entry = core.entry(&key).expect("entry");
+
+    let req = reserve_request("leased");
+    let run = core
+        .run_selection(SelectionOperation {
+            key: key.clone(),
+            prompt: req.prompt.view(),
+            router_config_override: None,
+            expected_output_tokens: None,
+            priority_jump: 0.0,
+            strict_priority: 0,
+            policy_class: None,
+            session_context: None,
+            session: SessionBinding::None,
+            affinity_target: None,
+            pinned_worker: None,
+            allowed_worker_ids: None,
+            routing_constraints: RoutingConstraints::default(),
+            admission: SelectionAdmission::Lease {
+                request_id: "leased".to_string(),
+            },
+            track_active_blocks: true,
+            return_routing_hashes: false,
+            replay_id: None,
+        })
+        .await;
+    let Ok(SelectionOutcome::Selected(selected)) = run.result else {
+        panic!("lease selection failed");
+    };
+    assert!(entry.scheduler.has_request("leased"));
+    assert!(
+        core.reservation_index.read().is_empty(),
+        "a lease admission installs no index row"
+    );
+    assert!(
+        selected.lease.is_some(),
+        "the booking's lease goes to the host"
+    );
+    assert!(selected.sequence_hashes.is_none());
+    assert!(selected.routing_hashes.is_none());
+    // Nothing was recorded for the leased prompt: once the indexer has
+    // applied everything enqueued so far, a query restricted to the booked
+    // worker sees no cached blocks.
+    entry.indexer.flush().await;
+    let mut probe = select_request();
+    probe.allowed_worker_ids = Some(HashSet::from([1]));
+    let probe = core.select(probe).await.expect("select");
+    assert_eq!(
+        probe.overlap.longest_matched, 0,
+        "a lease admission records nothing into the indexer"
+    );
+
+    drop(selected);
+    wait_until("booking release", || !entry.scheduler.has_request("leased")).await;
+}
+
 #[tokio::test]
 async fn dropped_selection_future_frees_its_booking() {
     let core = SelectionCore::try_new_local(
@@ -1322,6 +1392,126 @@ async fn dropped_selection_future_frees_its_booking() {
     })
     .await;
     assert!(core.reservation_index.read().get("dropped").is_none());
+}
+
+/// The routing-decision record is an await between the booking (and the
+/// session commit) and the index install; the armed lease, not lock
+/// discipline, covers it. Dropping the run there frees the booking and
+/// releases the id claim.
+#[tokio::test]
+async fn dropped_book_selection_during_routing_record_frees_booking_and_claim() {
+    use crate::indexer::TieredMatchDetails;
+    use crate::services::indexer::backend::RemotePrimary;
+    struct PausedRecord {
+        entered: AtomicBool,
+        release: tokio::sync::Notify,
+    }
+    #[async_trait::async_trait]
+    impl RemotePrimary for PausedRecord {
+        async fn find_matches_by_tier(
+            &self,
+            _: Vec<LocalBlockHash>,
+            _: bool,
+        ) -> anyhow::Result<TieredMatchDetails> {
+            Ok(TieredMatchDetails::default())
+        }
+        async fn record_routing_decision(
+            &self,
+            _: WorkerWithDpRank,
+            _: RoutingDecisionHashes,
+        ) -> anyhow::Result<()> {
+            self.entered.store(true, Ordering::Release);
+            self.release.notified().await;
+            Ok(())
+        }
+        fn use_kv_events(&self) -> bool {
+            false
+        }
+    }
+    struct PausedRecordIngress(Arc<PausedRecord>);
+    #[async_trait::async_trait]
+    impl KvEventIngress for PausedRecordIngress {
+        fn open(&self, _: &WorkerRegistry, _: &RoutingPartitionId, _: u32) -> Indexer {
+            Indexer::Remote {
+                primary: self.0.clone(),
+                approx: None,
+                primary_records_routing_decisions: true,
+            }
+        }
+    }
+    let record = Arc::new(PausedRecord {
+        entered: AtomicBool::new(false),
+        release: tokio::sync::Notify::new(),
+    });
+    let config = test_config(false);
+    let tracking_hash = Arc::new(
+        TrackingHashContext::from_config(&config).expect("valid tracking hash configuration"),
+    );
+    let indexer_policy = IndexerPolicy::from_router_config(&config).expect("indexer policy");
+    let core = SelectionCore::new_inner(
+        config,
+        1,
+        CancellationToken::new(),
+        None,
+        None,
+        SelectionHost {
+            cache: HostCache {
+                index: KvIndexSource::Owned(Arc::new(PausedRecordIngress(record.clone()))),
+                shared: None,
+            },
+            ..SelectionHost::default()
+        },
+        WorkerType::Aggregated,
+        true,
+        SelectionCacheConfig::default(),
+        tracking_hash,
+        indexer_policy,
+        Some(
+            SessionAffinityConfig::new(Duration::from_secs(10))
+                .with_mode(SessionAffinityMode::Hard),
+        ),
+    );
+    core.upsert_worker(worker(1)).await.expect("worker upsert");
+    let key = RoutingPartitionId::new("model", "default");
+    let entry = core.entry(&key).expect("entry");
+
+    // Poll by hand until the booking exists and the record is awaited.
+    let mut selection = Box::pin(core.select_and_reserve(session_reservation("recording", "s")));
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    wait_until("routing record entered", || {
+        if record.entered.load(Ordering::Acquire) {
+            return true;
+        }
+        assert!(
+            selection.as_mut().poll(&mut context).is_pending(),
+            "selection completed before the routing record was entered"
+        );
+        false
+    })
+    .await;
+    assert!(entry.scheduler.has_request("recording"));
+    assert!(
+        core.reservation_index
+            .read()
+            .get("recording")
+            .is_some_and(|reservation| reservation.booking.is_none()),
+        "the id is still a claim while the record is in flight"
+    );
+    assert_eq!(
+        bound_worker(&core, "s"),
+        Some(1),
+        "the session commits before the record"
+    );
+    drop(selection);
+
+    wait_until("booking release", || {
+        !entry.scheduler.has_request("recording")
+    })
+    .await;
+    assert!(
+        core.reservation_index.read().get("recording").is_none(),
+        "the claim is released with the booking"
+    );
 }
 
 #[tokio::test]
