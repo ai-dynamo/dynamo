@@ -314,6 +314,31 @@ class TestAlreadyDeadProcess:
         # No exception = pass
 
 
+class TestStartupFailureDiagnostics:
+    def test_dead_process_error_includes_child_log_tail(self, tmp_path):
+        """Startup failures retain the child diagnostic when CI cannot archive /tmp."""
+        log_path = tmp_path / "child.log"
+        log_path.write_text("first line\ncritical startup diagnostic\n")
+        proc = subprocess.Popen(["bash", "-c", "exit 7"])
+        proc.wait(timeout=5)
+
+        mp = ManagedProcess(
+            command=["true"],
+            timeout=10,
+            display_output=False,
+            terminate_all_matching_process_names=False,
+            log_dir=str(tmp_path),
+        )
+        mp.proc = proc
+        mp._log_path = str(log_path)
+
+        with pytest.raises(
+            RuntimeError,
+            match=r"(?s)child process log tail.*critical startup diagnostic",
+        ):
+            mp._check_process_alive("while waiting for readiness")
+
+
 # ---------------------------------------------------------------------------
 # Scenario 6: SIGTERM grace period — process that traps SIGTERM
 # ---------------------------------------------------------------------------

@@ -618,23 +618,26 @@ class ManagedProcess:
         except (OSError, IOError) as e:
             self._logger.warning("Warning: Failed to remove directory %s: %s", path, e)
 
-    def _log_tail_on_error(self, lines=20):
-        """Print the last few lines of the log file when process dies."""
+    def _log_tail_on_error(self, lines: int = 20) -> str:
+        """Log and return the bounded child-log tail when a process dies."""
         if self._log_path and os.path.exists(self._log_path):
             try:
                 with open(self._log_path, "r") as f:
                     log_lines = f.readlines()
                     if log_lines:
+                        tail = "".join(log_lines[-lines:]).rstrip()
                         self._logger.error(
                             "=== Last %d lines from %s ===",
                             min(lines, len(log_lines)),
                             self._log_path,
                         )
-                        for line in log_lines[-lines:]:
+                        for line in tail.splitlines():
                             self._logger.error(line.rstrip())
                         self._logger.error("=== End of log tail ===")
+                        return tail
             except Exception as e:
                 self._logger.warning("Could not read log file: %s", e)
+        return ""
 
     def _check_process_alive(self, context=""):
         """Check if the main process is still alive. Raises RuntimeError if dead."""
@@ -646,10 +649,14 @@ class ManagedProcess:
                 f" {context}" if context else "",
             )
             # Try to get last few lines from log for debugging
-            self._log_tail_on_error()
-            raise RuntimeError(
-                f"Main server process exited with code {returncode}{f' {context}' if context else ''}"
+            log_tail = self._log_tail_on_error()
+            message = (
+                f"Main server process exited with code {returncode}"
+                f"{f' {context}' if context else ''}"
             )
+            if log_tail:
+                message += f"\n--- child process log tail ---\n{log_tail}"
+            raise RuntimeError(message)
 
     def _check_ports(self, timeout):
         elapsed = 0.0
