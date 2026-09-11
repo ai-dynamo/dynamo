@@ -702,8 +702,18 @@ async fn anthropic_messages(
             &ctx,
         )
         .await
-        .map_err(|(status, _json_err)| {
-            anthropic_backend_error(status).into_marked_response(&mut inflight_guard)
+        .map_err(|error_response| {
+            // Classify before the body is rewritten: only the status survives
+            // into Anthropic's error format, and the status alone cannot tell a
+            // capacity rejection from a validation failure, or a client hangup
+            // from a backend fault. Mark the guard from the typed error the
+            // response carries rather than letting `into_marked_response`
+            // re-derive it from the status.
+            super::openai::log_pre_commit_error(&request_id, &error_response);
+            inflight_guard.mark_error(super::openai::extract_error_type_from_response(
+                &error_response,
+            ));
+            anthropic_backend_error(error_response.0).into_response()
         })?;
 
         stream_handle.arm();
