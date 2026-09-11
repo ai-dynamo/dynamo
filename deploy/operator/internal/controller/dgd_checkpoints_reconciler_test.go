@@ -99,14 +99,13 @@ func dgdTestPodSnapshot(name string, compatibilityHash string, ready bool) *snap
 func dgdTestSnapshotCompatibilityHash(
 	t *testing.T,
 	dgd *v1beta1.DynamoGraphDeployment,
-	componentName string,
 ) string {
 	t.Helper()
-	component := dgd.GetComponentByName(componentName)
+	component := dgd.GetComponentByName("worker")
 	require.NotNil(t, component)
 	hash, err := (&dgdCheckpointsReconciler{
 		config: &configv1alpha1.OperatorConfiguration{},
-	}).snapshotCompatibilityHashForComponent(dgd, componentName, component)
+	}).snapshotCompatibilityHashForComponent(dgd, "worker", component)
 	require.NoError(t, err)
 	require.NotEmpty(t, hash)
 	return hash
@@ -624,7 +623,7 @@ func TestDGDCheckpointsReconciler_ExplicitRestoreDoesNotDependOnActiveWorkerHash
 	}
 
 	t.Log("Create a referenced PodSnapshot carrying the independent compatibility hash")
-	referenced := dgdTestPodSnapshot(ref, dgdTestSnapshotCompatibilityHash(t, dgd, "worker"), true)
+	referenced := dgdTestPodSnapshot(ref, dgdTestSnapshotCompatibilityHash(t, dgd), true)
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client:        fake.NewClientBuilder().WithScheme(testScheme).WithObjects(referenced).Build(),
 		Config:        &configv1alpha1.OperatorConfiguration{},
@@ -677,8 +676,8 @@ func TestDGDCheckpointsReconciler_ExplicitRestoreIsPortableAcrossDGDIdentity(t *
 
 	t.Log("Verify the rollout identities differ while the snapshot contract remains portable")
 	assert.NotEqual(t, betaDGDWorkersSpecHash(t, source), betaDGDWorkersSpecHash(t, target))
-	sourceCompatibilityHash := dgdTestSnapshotCompatibilityHash(t, source, "worker")
-	assert.Equal(t, sourceCompatibilityHash, dgdTestSnapshotCompatibilityHash(t, target, "worker"))
+	sourceCompatibilityHash := dgdTestSnapshotCompatibilityHash(t, source)
+	assert.Equal(t, sourceCompatibilityHash, dgdTestSnapshotCompatibilityHash(t, target))
 
 	t.Log("Resolve the source snapshot from the target DGD without initializing its rollout hash")
 	referenced := dgdTestPodSnapshot(ref, sourceCompatibilityHash, true)
@@ -964,7 +963,7 @@ func TestDGDCheckpointsReconciler_CheckpointRefSkipsAutoCreateWhilePodSnapshotIs
 	dgd.Annotations = map[string]string{
 		commonconsts.AnnotationCurrentWorkerHashV2: betaDGDWorkersSpecHash(t, dgd),
 	}
-	referenced := dgdTestPodSnapshot(ref, dgdTestSnapshotCompatibilityHash(t, dgd, "worker"), false)
+	referenced := dgdTestPodSnapshot(ref, dgdTestSnapshotCompatibilityHash(t, dgd), false)
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client: fake.NewClientBuilder().
 			WithScheme(testScheme).
@@ -1037,7 +1036,7 @@ func TestDGDCheckpointsReconciler_CheckpointRefUsesReadyPodSnapshot(t *testing.T
 	dgd.Annotations = map[string]string{
 		commonconsts.AnnotationCurrentWorkerHashV2: betaDGDWorkersSpecHash(t, dgd),
 	}
-	referenced := dgdTestPodSnapshot(ref, dgdTestSnapshotCompatibilityHash(t, dgd, "worker"), true)
+	referenced := dgdTestPodSnapshot(ref, dgdTestSnapshotCompatibilityHash(t, dgd), true)
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client: fake.NewClientBuilder().
 			WithScheme(testScheme).
@@ -1123,7 +1122,7 @@ func TestDGDCheckpointsReconciler_OverlaysServiceGMSLoader(t *testing.T) {
 	dgd.Annotations = map[string]string{
 		commonconsts.AnnotationCurrentWorkerHashV2: betaDGDWorkersSpecHash(t, dgd),
 	}
-	referenced := dgdTestPodSnapshot(ref, dgdTestSnapshotCompatibilityHash(t, dgd, "worker"), true)
+	referenced := dgdTestPodSnapshot(ref, dgdTestSnapshotCompatibilityHash(t, dgd), true)
 	referenced.Annotations[commonconsts.SnapshotGMSModeAnnotation] = string(v1alpha1.GMSModeIntraPod)
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client:   fake.NewClientBuilder().WithScheme(testScheme).WithObjects(referenced).Build(),
@@ -1188,7 +1187,7 @@ func TestDGDCheckpointsReconciler_RejectsServiceGMSWithNonGMSCheckpoint(t *testi
 	dgd.Annotations = map[string]string{
 		commonconsts.AnnotationCurrentWorkerHashV2: betaDGDWorkersSpecHash(t, dgd),
 	}
-	referenced := dgdTestPodSnapshot(ref, dgdTestSnapshotCompatibilityHash(t, dgd, "worker"), true)
+	referenced := dgdTestPodSnapshot(ref, dgdTestSnapshotCompatibilityHash(t, dgd), true)
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client:        fake.NewClientBuilder().WithScheme(testScheme).WithObjects(referenced).Build(),
 		Config:        &configv1alpha1.OperatorConfiguration{},
@@ -1252,7 +1251,7 @@ func TestDGDCheckpointsReconciler_AutomaticRestoreWaitsForSnapshotJobCompletion(
 	job := jobs.Items[0].DeepCopy()
 	// controller-runtime's fake client does not assign API-server UIDs.
 	job.UID = types.UID("snapshot-job-uid")
-	snapshot := dgdTestPodSnapshot(job.Name, dgdTestSnapshotCompatibilityHash(t, dgd, "worker"), true)
+	snapshot := dgdTestPodSnapshot(job.Name, dgdTestSnapshotCompatibilityHash(t, dgd), true)
 	snapshot.Labels = map[string]string{
 		snapshotv1alpha1.SnapshotJobOwnerLabel:    job.Name,
 		snapshotv1alpha1.SnapshotJobOwnerUIDLabel: string(job.UID),

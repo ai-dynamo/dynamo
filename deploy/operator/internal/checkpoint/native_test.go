@@ -176,7 +176,7 @@ func TestResolvePodSnapshotForServiceRejectsIncompatibleReferences(t *testing.T)
 			mutate: func(snapshot *snapshotv1alpha1.PodSnapshot) {
 				snapshot.Annotations[consts.SnapshotCompatibilityHashAnnotation] = "compatibility-v2"
 			},
-			wantErr: "does not match expected hash",
+			wantErr: "including PVC claim names",
 		},
 		{
 			name: "unsupported GMS mode",

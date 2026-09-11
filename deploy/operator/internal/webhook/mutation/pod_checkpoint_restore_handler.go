@@ -330,9 +330,6 @@ func validateNativeSnapshotCandidate(annotations map[string]string, resolved *ch
 	if annotations[consts.SnapshotCandidateVersionAnnotation] != resolved.CompatibilityVersion {
 		return fmt.Errorf("PodSnapshot compatibility version changed after workload reconciliation")
 	}
-	if annotations[consts.SnapshotCandidateCompatibilityHashAnnotation] != resolved.CompatibilityHash {
-		return fmt.Errorf("PodSnapshot compatibility hash changed after workload reconciliation")
-	}
 	if annotations[consts.SnapshotCandidateGMSModeAnnotation] != resolved.GMSMode {
 		return fmt.Errorf("PodSnapshot GMS mode changed after workload reconciliation")
 	}

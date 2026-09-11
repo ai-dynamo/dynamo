@@ -6,6 +6,10 @@
 package checkpoint
 
 import (
+	"os"
+	"path/filepath"
+	"regexp"
+	"runtime"
 	"testing"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -73,6 +77,8 @@ func TestComputeSnapshotCompatibilityHashIsPortableAcrossGraphIdentity(t *testin
 	t.Log("Given equivalent capture targets rendered for two different DGD identities")
 	first := snapshotCompatibilityTestPodTemplate("capture-dgd", "capture-ns", "worker-a")
 	second := snapshotCompatibilityTestPodTemplate("restore-dgd", "restore-ns", "worker-b")
+	first.Spec.ResourceClaims = []corev1.PodResourceClaim{{Name: "network"}, {Name: "accelerator"}}
+	second.Spec.ResourceClaims = []corev1.PodResourceClaim{{Name: "accelerator"}, {Name: "network"}}
 	first.Spec.Volumes = append(first.Spec.Volumes, corev1.Volume{Name: "helper-only"})
 	first.Spec.Containers = append(first.Spec.Containers, corev1.Container{
 		Name:         "checkpoint-helper",
@@ -127,6 +133,39 @@ func TestComputeSnapshotCompatibilityHashRejectsProcessContractChanges(t *testin
 			gmsMode: "disabled",
 		},
 		{
+			name: "GPU node selector",
+			mutate: func(template *corev1.PodTemplateSpec) {
+				template.Spec.NodeSelector = map[string]string{"nvidia.com/gpu.product": "H100"}
+			},
+			backend: "vllm",
+			gmsMode: "disabled",
+		},
+		{
+			name: "DRA resource claim",
+			mutate: func(template *corev1.PodTemplateSpec) {
+				template.Spec.ResourceClaims = []corev1.PodResourceClaim{{Name: "accelerator"}}
+			},
+			backend: "vllm",
+			gmsMode: "disabled",
+		},
+		{
+			name: "PVC claim identity",
+			mutate: func(template *corev1.PodTemplateSpec) {
+				template.Spec.Containers[0].VolumeMounts = append(
+					template.Spec.Containers[0].VolumeMounts,
+					corev1.VolumeMount{Name: "model-cache", MountPath: "/models"},
+				)
+				template.Spec.Volumes = append(template.Spec.Volumes, corev1.Volume{
+					Name: "model-cache",
+					VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: "capture-dgd-model-cache",
+					}},
+				})
+			},
+			backend: "vllm",
+			gmsMode: "disabled",
+		},
+		{
 			name:    "backend",
 			mutate:  func(*corev1.PodTemplateSpec) {},
 			backend: "sglang",
@@ -149,6 +188,55 @@ func TestComputeSnapshotCompatibilityHashRejectsProcessContractChanges(t *testin
 			assert.NotEqual(t, baseHash, changedHash)
 		})
 	}
+}
+
+func TestComputeSnapshotCompatibilityHashPreservesEnvironmentOrder(t *testing.T) {
+	ordered := snapshotCompatibilityTestPodTemplate("capture-dgd", "capture-ns", "worker-a")
+	ordered.Spec.Containers[0].Env = []corev1.EnvVar{
+		{Name: "MODEL_ROOT", Value: "/models"},
+		{Name: "MODEL_PATH", Value: "$(MODEL_ROOT)/model"},
+		{Name: "DYN_NAMESPACE", Value: "capture-runtime"},
+	}
+	reordered := ordered.DeepCopy()
+	reordered.Spec.Containers[0].Env[0], reordered.Spec.Containers[0].Env[1] =
+		reordered.Spec.Containers[0].Env[1], reordered.Spec.Containers[0].Env[0]
+
+	orderedHash, err := ComputeSnapshotCompatibilityHash(&ordered, "main", "vllm", "disabled")
+	require.NoError(t, err)
+	reorderedHash, err := ComputeSnapshotCompatibilityHash(reordered, "main", "vllm", "disabled")
+	require.NoError(t, err)
+
+	assert.NotEqual(t, orderedHash, reorderedHash,
+		"Kubernetes expands $(VAR_NAME) from earlier entries, so environment order is part of the process contract")
+}
+
+func TestSnapshotRestoreEnvironmentNamesMatchPythonRuntime(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	require.True(t, ok)
+	constantsPath := filepath.Join(
+		filepath.Dir(thisFile),
+		"../../../../components/src/dynamo/common/snapshot/constants.py",
+	)
+	contents, err := os.ReadFile(constantsPath)
+	require.NoError(t, err)
+
+	pythonNames := map[string]struct{}{}
+	quotedName := regexp.MustCompile(`"([A-Z][A-Z0-9_]*)"`)
+	for _, variable := range []string{
+		"KUBERNETES_REQUIRED_ENV_NAMES",
+		"KUBERNETES_OPTIONAL_ENV_NAMES",
+		"RESTORE_RUNTIME_ENV_NAMES",
+	} {
+		assignment := regexp.MustCompile(`(?ms)^` + regexp.QuoteMeta(variable) + `\s*=\s*\{(.*?)\}`)
+		match := assignment.FindSubmatch(contents)
+		require.Len(t, match, 2, "find Python assignment for %s", variable)
+		for _, name := range quotedName.FindAllSubmatch(match[1], -1) {
+			pythonNames[string(name[1])] = struct{}{}
+		}
+	}
+
+	assert.Equal(t, pythonNames, snapshotRestoreEnvironmentNames,
+		"Go compatibility filtering must track the Python restore-context allowlist")
 }
 
 func snapshotCompatibilityTestPodTemplate(dgdName, namespace, workerSuffix string) corev1.PodTemplateSpec {

@@ -157,7 +157,7 @@ func ResolvePodSnapshotForService(
 	compatibilityHash := annotations[consts.SnapshotCompatibilityHashAnnotation]
 	if compatibilityHash != expectedCompatibilityHash {
 		return nil, fmt.Errorf(
-			"referenced PodSnapshot %s/%s compatibility hash %q does not match expected hash %q",
+			"referenced PodSnapshot %s/%s compatibility hash %q does not match expected hash %q; compare the target image, command and args, non-restored environment, init containers, mounted volumes (including PVC claim names), accelerator placement and claims, Pod security/runtime settings, backend, and GMS mode",
 			namespace,
 			snapshotName,
 			compatibilityHash,

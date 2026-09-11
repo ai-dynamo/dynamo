@@ -43,10 +43,11 @@ func ValidateCheckpointCompatibility(experimental *nvidiacomv1beta1.Experimental
 	return violations
 }
 
-// snapshotRestoreEnvironmentNames must match the environment restored by
-// components/src/dynamo/common/snapshot/restore_context.py. Those values name
-// the destination Pod and runtime, so they are intentionally not part of a
-// portable snapshot's compatibility identity.
+// snapshotRestoreEnvironmentNames must match KUBERNETES_REQUIRED_ENV_NAMES,
+// KUBERNETES_OPTIONAL_ENV_NAMES, and RESTORE_RUNTIME_ENV_NAMES in
+// components/src/dynamo/common/snapshot/constants.py. Those values name the
+// destination Pod and runtime, so they are intentionally not part of a portable
+// snapshot's compatibility identity.
 var snapshotRestoreEnvironmentNames = map[string]struct{}{
 	"CONTAINER_NAME":                        {},
 	"DYN_COMPONENT":                         {},
@@ -96,6 +97,11 @@ type snapshotCompatibilityContract struct {
 	ShareProcessNamespace *bool                      `json:"shareProcessNamespace,omitempty"`
 	SecurityContext       *corev1.PodSecurityContext `json:"securityContext,omitempty"`
 	RuntimeClassName      *string                    `json:"runtimeClassName,omitempty"`
+	NodeName              string                     `json:"nodeName,omitempty"`
+	NodeSelector          map[string]string          `json:"nodeSelector,omitempty"`
+	NodeAffinity          *corev1.NodeAffinity       `json:"nodeAffinity,omitempty"`
+	SchedulerName         string                     `json:"schedulerName,omitempty"`
+	ResourceClaims        []corev1.PodResourceClaim  `json:"resourceClaims,omitempty"`
 }
 
 // ComputeSnapshotCompatibilityHash returns the portable v1 compatibility
@@ -137,7 +143,18 @@ func ComputeSnapshotCompatibilityHash(
 		ShareProcessNamespace: podTemplate.Spec.ShareProcessNamespace,
 		SecurityContext:       podTemplate.Spec.SecurityContext,
 		RuntimeClassName:      podTemplate.Spec.RuntimeClassName,
+		NodeName:              podTemplate.Spec.NodeName,
+		NodeSelector:          podTemplate.Spec.NodeSelector,
+		SchedulerName:         podTemplate.Spec.SchedulerName,
+		ResourceClaims:        podTemplate.Spec.ResourceClaims,
 	}
+	if podTemplate.Spec.Affinity != nil {
+		contract.NodeAffinity = podTemplate.Spec.Affinity.NodeAffinity
+	}
+	contract.ResourceClaims = append([]corev1.PodResourceClaim(nil), contract.ResourceClaims...)
+	sort.Slice(contract.ResourceClaims, func(i, j int) bool {
+		return contract.ResourceClaims[i].Name < contract.ResourceClaims[j].Name
+	})
 	for _, container := range podTemplate.Spec.InitContainers {
 		contract.InitContainers = append(contract.InitContainers, canonicalSnapshotContainer(container, true))
 	}
@@ -182,14 +199,13 @@ func canonicalSnapshotContainer(container corev1.Container, keepName bool) corev
 		container.Name = ""
 	}
 
-	env := container.Env[:0]
+	env := make([]corev1.EnvVar, 0, len(container.Env))
 	for _, variable := range container.Env {
 		if _, restored := snapshotRestoreEnvironmentNames[variable.Name]; !restored {
 			env = append(env, variable)
 		}
 	}
 	container.Env = env
-	sort.SliceStable(container.Env, func(i, j int) bool { return container.Env[i].Name < container.Env[j].Name })
 	sort.SliceStable(container.VolumeMounts, func(i, j int) bool {
 		if container.VolumeMounts[i].MountPath != container.VolumeMounts[j].MountPath {
 			return container.VolumeMounts[i].MountPath < container.VolumeMounts[j].MountPath
