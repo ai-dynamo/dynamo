@@ -474,10 +474,6 @@ class TestVllmRendererApi:
             base_output_fields,
             cached_token_output_fields,
         )
-        core_output_fields = core_output_fields + tuple(
-            fields + ("mm_cache_miss_hashes", "new_sampling_mask")
-            for fields in core_output_fields
-        )
         core_output_fields += (
             base_output_fields
             + ("mm_cache_miss_hashes", "new_sampling_mask", "spec_decode_metrics"),
