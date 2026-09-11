@@ -19,6 +19,7 @@ ARG PYTHON_VERSION
 ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG VLLM_OMNI_REF
+ARG ENABLE_VLLM_OMNI
 ARG TRANSFORMERS_VERSION
 ARG NIXL_REF
 {% if device == "cuda" %}
@@ -185,13 +186,16 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 
 # The vLLM 0.28.0 release images resolve the unbounded `transformers>=5.5.3`
 # requirement to 5.15.1, but vLLM-Omni 0.28.0rc1 caps Transformers below 5.15.
-# Omni is layered against the installed Transformers version, so install the
-# compatible release first and its dependency solve sees the final Transformers
-# invariant instead of resolving against 5.15.1.
+# When Omni is enabled, install its compatible Transformers release before the
+# Omni solve. The DeepSeek V4.1 Flash preview keeps its vendor-provided
+# Transformers/tokenizers pair because it is language-model-only and Omni is
+# deliberately disabled for that scoped runtime.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
-    export UV_CACHE_DIR=/root/.cache/uv && \
-    uv pip install {{ pip_target }} --no-deps \
-        "transformers==${TRANSFORMERS_VERSION}"
+    if [ "${ENABLE_VLLM_OMNI}" = "true" ]; then \
+        export UV_CACHE_DIR=/root/.cache/uv && \
+        uv pip install {{ pip_target }} --no-deps \
+            "transformers==${TRANSFORMERS_VERSION}"; \
+    fi
 
 {% if device != "cuda" %}
 # NIXL meta package always tries to find a cuda-backend
@@ -240,6 +244,17 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
         if [ -n "$GMS_WHEEL" ]; then uv pip install {{ pip_target }} --no-deps "$GMS_WHEEL"; fi; \
     fi
 
+# The preview image is only useful for DeepSeek V4.1 Flash if the Dynamo wheel
+# contains the native unified tool and reasoning parser. Keep this close to the
+# wheel installation so a stale wheel or frontend-crates regression fails the
+# image build before it can be published.
+RUN {{ python_executable }} - <<'PY'
+from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
+
+assert "deepseek_v41" in get_tool_parser_names(), "DeepSeek V4.1 tool parser missing"
+assert "deepseek_v41" in get_reasoning_parser_names(), "DeepSeek V4.1 reasoning parser missing"
+PY
+
 # Launch-script examples use jq for readable curl output like the upstream omni
 # image. SoX is intentionally NOT installed: vLLM-Omni replaced its sox audio path
 # with a pure-numpy peak_normalize() (vllm_omni/utils/audio.py), pysox isn't
@@ -261,14 +276,18 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*
 
 # Layer the released vLLM-Omni package matching the pinned upstream ref while
-# constraining packages already solved in the upstream vLLM image.
+# constraining packages already solved in the upstream vLLM image. The
+# DeepSeek V4.1 Flash preview is explicitly text-only, so it skips this
+# unrelated multimodal layer and retains the vendor's dependency solution.
 RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target=/tmp/vllm_omni_protected_packages.txt \
     --mount=type=bind,source=./container/deps/vllm/install_vllm_omni.sh,target=/tmp/install_vllm_omni.sh \
     --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
-    set -eux; \
-    export UV_CACHE_DIR=/root/.cache/uv; \
-    export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
-    bash /tmp/install_vllm_omni.sh
+    if [ "${ENABLE_VLLM_OMNI}" = "true" ]; then \
+        set -eux; \
+        export UV_CACHE_DIR=/root/.cache/uv; \
+        export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
+        bash /tmp/install_vllm_omni.sh; \
+    fi
 
 {% if device == "xpu" %}
 # Remove conflicting standard triton package for XPU and reinstall triton-xpu
@@ -521,14 +540,15 @@ assert eps, 'modelexpress vllm.general_plugins entry point not found'; \
 # silently replace the vLLM-Omni-compatible Transformers release. A global
 # `uv pip check` is not appropriate here: the upstream runtime and Dynamo's
 # deliberate --no-deps layers contain unrelated package-metadata conflicts.
-RUN {{ python_executable }} - "${TRANSFORMERS_VERSION}" <<'PY'
+RUN {{ python_executable }} - "${ENABLE_VLLM_OMNI}" "${TRANSFORMERS_VERSION}" <<'PY'
 import importlib.metadata as md
 import sys
 
-actual = md.version("transformers")
-expected = sys.argv[1]
-if actual != expected:
-    raise RuntimeError(f"expected transformers {expected}, found {actual}")
+if sys.argv[1] == "true":
+    actual = md.version("transformers")
+    expected = sys.argv[2]
+    if actual != expected:
+        raise RuntimeError(f"expected transformers {expected}, found {actual}")
 PY
 
 # `vllm-rs` ships inside the installed `vllm` package, not as a console script;
