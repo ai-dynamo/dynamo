@@ -540,8 +540,7 @@ PY
 
 # `vllm-rs` ships inside the installed `vllm` package, not as a console script;
 # putting it on PATH keeps the binary at that package's vLLM revision. Fatal on
-# cuda only. The shell branches on a rendered flag rather than a `{% raw %}{% if %}{% endraw %}` in the
-# middle of the `\`-continued command, for the reason given above the vLLM install.
+# cuda only.
 RUN set -eu; \
     pkg="$({{ python_executable }} -c 'import os, vllm; print(os.path.dirname(vllm.__file__))')"; \
     if [ -f "${pkg}/vllm-rs" ] && [ -x "${pkg}/vllm-rs" ]; then \
