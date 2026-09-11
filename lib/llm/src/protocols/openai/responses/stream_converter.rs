@@ -1787,9 +1787,6 @@ mod tests {
 
     #[test]
     fn test_reasoning_without_requested_summary_still_streams_raw_reasoning() {
-        // Regression test for #14069: reasoning.summary is not the only way to
-        // preserve reasoning_content. When the backend returns it, the raw-reasoning
-        // lifecycle should stream even without reasoning.summary in the request.
         let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
 
         let reasoning_events = conv.process_chunk(&reasoning_chunk("private reasoning"));
