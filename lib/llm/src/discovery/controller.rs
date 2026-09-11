@@ -829,8 +829,12 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 let adapters = self.adapters_for_members(&member_keys);
                 group.admission_tx.send_replace(admitted_ids(&members));
                 let commit_result = if committed_members.is_some() {
-                    self.host
-                        .replace_prepared_group(&result.spec, prepared, &members, &adapters)
+                    self.host.replace_prepared_group(
+                        &result.spec,
+                        prepared,
+                        &members,
+                        &adapters,
+                    )
                 } else {
                     self.host
                         .commit_group(&result.spec, prepared, &members, &adapters)
