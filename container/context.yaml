@@ -80,6 +80,10 @@ vllm:
     # DeepSeek V4.1 Flash requires vLLM's model-preview runtime. Keep the
     # Dynamo wheel-builder on the standard CUDA 13.0 development image above.
     runtime_image_tag: deepseekv41-flash-0909@sha256:00d577a6a63281e15336029d5bcee4e9a2cf182214a4f20ba6111b1c8e79893d
+    # vLLM-Omni requires Transformers <5.15, so do not layer it onto this
+    # preview image's Transformers 5.17.0 environment.
+    transformers_version: "5.17.0"
+    install_vllm_omni: "false"
     # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
     # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
     # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM
@@ -109,7 +113,7 @@ vllm:
   # Omni is layered against the installed Transformers version, so without
   # this pin its dependency solve is unsatisfiable. Remove the pin once
   # vLLM-Omni lifts its <5.15 upper bound.
-  transformers_version: "5.17.0"
+  transformers_version: "5.14.1"
   nixl_ref: v1.3.2
   max_jobs: "10"
   enable_media_ffmpeg: "true"
