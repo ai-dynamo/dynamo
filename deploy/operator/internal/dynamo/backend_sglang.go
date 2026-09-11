@@ -102,18 +102,19 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 	}
 
 	// Only the Prometheus exporter binds a port per rank, so activate on the
-	// same pair of variables nixl_prometheus_base_port() reads: an absent
-	// selection is the Prometheus default, any other literal selection needs no
-	// ports at all, and a sourced one joins an unreadable enable value in
-	// reserving a range this code cannot rule out.
+	// same pair of variables nixl_prometheus_base_port() reads. An absent
+	// selection or any other literal selection needs no ports at all, while a
+	// sourced one joins an unreadable enable value in reserving a range this
+	// code cannot rule out.
 	exporter := findEnvVar(container.Env, "NIXL_TELEMETRY_EXPORTER")
-	if exporter != nil {
-		if exporter.ValueFrom != nil {
-			prometheusOn = false
-			sourced = append(sourced, "NIXL_TELEMETRY_EXPORTER")
-		} else if !strings.EqualFold(strings.TrimSpace(exporter.Value), "prometheus") {
-			return nil
-		}
+	if exporter == nil {
+		return nil
+	}
+	if exporter.ValueFrom != nil {
+		prometheusOn = false
+		sourced = append(sourced, "NIXL_TELEMETRY_EXPORTER")
+	} else if !strings.EqualFold(strings.TrimSpace(exporter.Value), "prometheus") {
+		return nil
 	}
 
 	containerGPUs, err := containerGPUCount()

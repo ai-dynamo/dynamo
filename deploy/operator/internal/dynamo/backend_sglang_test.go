@@ -821,12 +821,12 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 			expectedPorts: map[string]int32{"nixl": 19090},
 		},
 		{
-			name:            "no exporter selection is the Prometheus default",
+			name:            "no exporter selection reserves no additional ports",
 			ports:           workerPorts,
 			telemetryEnable: "y",
 			exporterAbsent:  true,
 			containerGPUs:   8,
-			expectedPorts:   allEightPorts,
+			expectedPorts:   map[string]int32{"nixl": 19090},
 		},
 		{
 			name:            "a sourced exporter reserves the range it cannot read",
@@ -905,8 +905,7 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 				{Name: "DYN_SYSTEM_PORT", Value: strconv.Itoa(commonconsts.DynamoSystemPort)},
 				{Name: "NIXL_TELEMETRY_ENABLE", Value: tt.telemetryEnable, ValueFrom: tt.telemetryValueFrom},
 			}
-			// An older deployment predating the exporter selection leaves the
-			// variable off entirely, which the runtime reads as Prometheus.
+			// Leave the exporter variable absent for the no-exporter case.
 			if !tt.exporterAbsent {
 				env = append(env, corev1.EnvVar{Name: "NIXL_TELEMETRY_EXPORTER", Value: telemetryExporter, ValueFrom: tt.exporterValueFrom})
 			}
