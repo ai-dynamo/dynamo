@@ -51,6 +51,10 @@ def create_config() -> DynamoVllmConfig:
     config.benchmark_mode = None
     config.use_vllm_tokenizer = False
     config.frontend_decoding = False
+    # parse_args attaches this before validate() runs, so mirror that shape
+    # here to keep the LoRA exclusivity rules on their real code path. The
+    # rules still tolerate its absence, matching a config built by hand.
+    config.engine_args = SimpleNamespace(enable_lora=False)
     return config
 
 
@@ -359,6 +363,17 @@ class TestRealtimeWorkerExclusivity:
         with pytest.raises(ValueError, match=option):
             config._validate_realtime_worker_exclusivity()
 
+    def test_absent_engine_args_reads_as_lora_disabled(self):
+        """Only parse_args attaches engine_args, so a config assembled in code
+        never has one. Treat that as LoRA disabled rather than failing on the
+        missing attribute."""
+        config = create_config()
+        del config.engine_args
+        config.realtime = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+
+        config._validate_realtime_worker_exclusivity()
+
 
 class TestClassifyWorkerExclusivity:
     """--classify-worker mirrors the embedding-worker constraints (both are
@@ -379,6 +394,16 @@ class TestClassifyWorkerExclusivity:
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
         with pytest.raises(ValueError, match="mutually exclusive"):
             config._validate_classify_worker_exclusivity()
+
+    def test_absent_engine_args_reads_as_lora_disabled(self):
+        """Kept alongside the --realtime case: the two rules read engine_args
+        independently, so each needs its own missing-attribute check."""
+        config = create_config()
+        del config.engine_args
+        config.classify_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+
+        config._validate_classify_worker_exclusivity()
 
     @pytest.mark.parametrize(
         "mode",
@@ -439,6 +464,46 @@ class TestClassifyWorkerExclusivity:
         config.benchmark_mode = "agg"
         config.headless = True
         config._validate_classify_worker_exclusivity()
+
+
+@pytest.mark.usefixtures("vllm_cpu_platform_when_no_accelerator")
+class TestParseArgsLoraExclusivity:
+    """The --enable-lora exclusivity rules must fire on the real CLI path.
+
+    The tests above call the validators directly with engine_args already set,
+    so they pass even when parse_args never supplies engine_args before
+    validate() runs. These drive the whole command line instead, which is the
+    only place that ordering is observable.
+    """
+
+    @staticmethod
+    def _parse(extra_argv):
+        # Imported here, not at module top: dynamo.vllm.args pulls in vllm at
+        # import time and the release/1.5.0 dynamo-runtime image has no vllm,
+        # which broke collection of this module in the runtime-only CI jobs.
+        from dynamo.vllm.args import parse_args
+
+        return parse_args(["--model", "Qwen/Qwen3-0.6B", *extra_argv])
+
+    def test_realtime_with_enable_lora_is_rejected(self):
+        with pytest.raises(ValueError, match="enable-lora"):
+            self._parse(["--realtime", "--enable-lora"])
+
+    def test_classify_worker_with_enable_lora_is_rejected(self):
+        """Kept separate from the --realtime case: the classify rule may be
+        removed once LoRA is supported on pooling-family workers, and the
+        --realtime rule is independent of that."""
+        with pytest.raises(ValueError, match="enable-lora"):
+            self._parse(["--classify-worker", "--enable-lora"])
+
+    def test_enable_lora_alone_is_accepted(self):
+        config = self._parse(["--enable-lora"])
+        assert config.engine_args.enable_lora is True
+
+    def test_realtime_alone_is_accepted(self):
+        config = self._parse(["--realtime"])
+        assert config.realtime is True
+        assert not config.engine_args.enable_lora
 
 
 class TestValidateCustomEncoder:
