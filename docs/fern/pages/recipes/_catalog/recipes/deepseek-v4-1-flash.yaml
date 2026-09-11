@@ -10,8 +10,6 @@ model:
   hf_id: deepseek-ai/DeepSeek-V4.1-Flash
   precision: FP8 dense, FP4 MoE experts, FP8 KV cache
 status: experimental  # Day-0
-# The runtime image nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0-deepseek-v4.1-flash-dev.1
-# gets its `artifacts` provenance block in a follow-up, once its source revision exists.
 targets:
 - id: sglang-agg-gb200
   recommended: true
