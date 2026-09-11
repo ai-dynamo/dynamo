@@ -855,8 +855,7 @@ impl ModelManager {
 
         if replacing_worker_set {
             let primary_model = self.get_or_create_model(&primary);
-            if let Some(displaced_worker_set) = primary_model.get_worker_set(&worker_set_key)
-            {
+            if let Some(displaced_worker_set) = primary_model.get_worker_set(&worker_set_key) {
                 Self::clear_worker_set_targets(&displaced_worker_set);
             }
             primary_model.add_worker_set(worker_set_key.clone(), worker_set.clone());
