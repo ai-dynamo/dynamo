@@ -1666,7 +1666,7 @@ pub fn simulate_concurrency_requests_with_router_mode_and_scaling_policy(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-    requests: Vec<DirectRequest>,
+    requests: impl Into<super::ReplayConcurrencyRequests>,
     max_in_flight: usize,
     num_workers: usize,
     router_mode: ReplayRouterMode,
@@ -1682,6 +1682,7 @@ pub fn simulate_concurrency_requests_with_router_mode_and_scaling_policy(
         router_mode,
         scaling_policy.is_some(),
     )?;
+    let requests = requests.into();
     if requests.is_empty() {
         bail!("concurrency replay requires at least one request");
     }
@@ -1690,7 +1691,7 @@ pub fn simulate_concurrency_requests_with_router_mode_and_scaling_policy(
         args,
         router_config,
         prefill_load_estimator,
-        requests,
+        requests.into_runtime_input(),
         max_in_flight,
         num_workers,
         router_mode,
@@ -1729,7 +1730,7 @@ pub fn simulate_concurrency_requests_disagg_with_router_mode_and_scaling_policy(
     config: OfflineDisaggReplayConfig,
     router_config: Option<KvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-    requests: Vec<DirectRequest>,
+    requests: impl Into<super::ReplayConcurrencyRequests>,
     max_in_flight: usize,
     router_mode: ReplayRouterMode,
     record_per_request: bool,
@@ -1738,6 +1739,7 @@ pub fn simulate_concurrency_requests_disagg_with_router_mode_and_scaling_policy(
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
     validate_offline_disagg_concurrency_args(&config, max_in_flight, router_mode)?;
+    let requests = requests.into();
     if requests.is_empty() {
         bail!("concurrency replay requires at least one request");
     }
@@ -1746,7 +1748,7 @@ pub fn simulate_concurrency_requests_disagg_with_router_mode_and_scaling_policy(
         config,
         router_config,
         prefill_load_estimator,
-        requests,
+        requests.into_runtime_input(),
         max_in_flight,
         router_mode,
         record_per_request,
@@ -2335,6 +2337,112 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
     use uuid::Uuid;
+
+    #[test]
+    fn generated_requests_match_eager_replay_across_backends_and_topologies() {
+        fn request(index: usize) -> DirectRequest {
+            DirectRequest {
+                tokens: vec![index as u32 + 1; 16],
+                max_output_tokens: 3,
+                uuid: Some(Uuid::from_u128(index as u128 + 1)),
+                ..Default::default()
+            }
+        }
+        for engine_type in [EngineType::Vllm, EngineType::Sglang] {
+            for disagg in [false, true] {
+                for capture in [false, true] {
+                    let run = |requests: super::super::ReplayConcurrencyRequests| {
+                        let mut args = replay_test_args();
+                        args.engine_type = engine_type;
+                        args.sglang = Some(SglangArgs {
+                            page_size: Some(4),
+                            ..Default::default()
+                        });
+                        if disagg {
+                            let config = OfflineDisaggReplayConfig {
+                                prefill_args: MockEngineArgs {
+                                    worker_type: WorkerType::Prefill,
+                                    ..args.clone()
+                                },
+                                decode_args: MockEngineArgs {
+                                    worker_type: WorkerType::Decode,
+                                    ..args
+                                },
+                                num_prefill_workers: 1,
+                                num_decode_workers: 1,
+                            };
+                            simulate_concurrency_requests_disagg_with_router_mode_and_scaling_policy(
+                                config, None, None, requests, 4, ReplayRouterMode::RoundRobin,
+                                capture, SlaThresholds::default(), None,
+                            ).unwrap()
+                        } else {
+                            simulate_concurrency_requests_with_router_mode_and_scaling_policy(
+                                args,
+                                None,
+                                None,
+                                requests,
+                                4,
+                                1,
+                                ReplayRouterMode::RoundRobin,
+                                capture,
+                                SlaThresholds::default(),
+                                None,
+                            )
+                            .unwrap()
+                        }
+                    };
+                    let eager = run((0..32).map(request).collect::<Vec<_>>().into());
+                    let generated =
+                        run(super::super::GeneratedRequests::new(32, |i| Ok(request(i))).into());
+                    assert_eq!(
+                        serde_json::to_value(eager.clone().with_wall_time_ms(0.0)).unwrap(),
+                        serde_json::to_value(generated.clone().with_wall_time_ms(0.0)).unwrap()
+                    );
+                    assert_eq!(
+                        serde_json::to_value(eager.per_request).unwrap(),
+                        serde_json::to_value(generated.per_request).unwrap()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn huge_generated_population_reaches_only_the_admission_window() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        let requests = super::super::GeneratedRequests::new(6_451_200, move |index| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            if index == 4 {
+                anyhow::bail!("bounded sentinel");
+            }
+            Ok(DirectRequest {
+                tokens: vec![1; 16],
+                max_output_tokens: 3,
+                uuid: Some(Uuid::from_u128(index as u128 + 1)),
+                ..Default::default()
+            })
+        });
+        let error = simulate_concurrency_requests_with_router_mode_and_scaling_policy(
+            replay_test_args(),
+            None,
+            None,
+            requests,
+            4,
+            1,
+            ReplayRouterMode::RoundRobin,
+            false,
+            SlaThresholds::default(),
+            None,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("bounded sentinel"));
+        assert_eq!(calls.load(Ordering::SeqCst), 5);
+    }
 
     fn replay_test_args() -> MockEngineArgs {
         MockEngineArgs::builder()

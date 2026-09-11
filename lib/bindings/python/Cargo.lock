@@ -34,9 +34,8 @@ dependencies = [
 
 [[package]]
 name = "aisimulate-core"
-version = "0.1.0-dev.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3aa0422f239fd9b9ca92d4a57fe7069771e158293d266e05a20fde477d15b9af"
+version = "0.12.0"
+source = "git+https://github.com/ai-dynamo/aisimulate.git?rev=0480320fdd20c2e063a28a90faa111180fce8e47#0480320fdd20c2e063a28a90faa111180fce8e47"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -45,17 +44,21 @@ dependencies = [
  "derive_builder",
  "flate2",
  "indicatif 0.18.4",
+ "log",
  "parquet",
  "pep440_rs",
  "pyo3",
  "quick_cache",
+ "rand 0.8.6",
  "rand 0.9.4",
+ "rand_chacha 0.3.1",
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
  "serde_yaml",
  "sha2 0.10.9",
  "slotmap",
+ "tempfile",
  "thiserror 2.0.18",
  "tracing",
  "uuid",
