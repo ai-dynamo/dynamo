@@ -2263,6 +2263,31 @@ class TestRLAdminRouteHardening:
         handler.runtime.end_health_check_maintenance.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_failed_finish_weight_update_releases_the_lease(self):
+        """A finish that failed still terminates the transfer. Holding the window
+        would hide a worker the failure left unhealthy until the deadline."""
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._paused = True
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+        handler.engine_client.reset_prefix_cache = AsyncMock()
+
+        await handler.init_weights_update_group(
+            {"engine_rpc": "init_weight_transfer_engine"}
+        )
+        handler.engine_client.collective_rpc = AsyncMock(
+            side_effect=RuntimeError("broadcast never completed")
+        )
+        resp = await handler.update_weights_from_distributed(
+            {"engine_rpc": "finish_weight_update"}
+        )
+
+        assert resp["status"] == "error"
+        handler.runtime.end_health_check_maintenance.assert_called_once_with(1)
+        assert handler._rl_maintenance_lease is None
+
+    @pytest.mark.asyncio
     async def test_reaching_both_terminators_releases_the_lease_once(self):
         """A transfer can reach finish_weight_update and then destroy. The second
         terminator must not release a lease the transfer no longer owns."""

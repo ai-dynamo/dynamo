@@ -2115,10 +2115,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             }
             try:
                 await self.engine_client.collective_rpc(rpc, kwargs=rpc_kwargs)
-                if rpc == "finish_weight_update":
-                    # The other terminator of a weight-transfer transaction: a
-                    # controller may end here and never call destroy.
-                    self._end_rl_maintenance()
                 if reset_prefix_cache:
                     # Weights changed: stale prefix/KV cache must be invalidated
                     # before resume so it is not reused under the new weights.
@@ -2134,6 +2130,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             except Exception as e:
                 logger.error(f"[RL] update_weights_from_distributed failed: {e}")
                 return {"status": "error", "message": str(e)}
+            finally:
+                if rpc == "finish_weight_update":
+                    # The other terminator of a weight-transfer transaction: a
+                    # controller may end here and never call destroy. A finish
+                    # that failed still ends it — a worker the failure left
+                    # unhealthy needs probing more than a healthy one, not less.
+                    self._end_rl_maintenance()
 
     async def update_weights_from_tensor(self, body: dict) -> dict:
         """Not implemented: in-process tensor transfer is not yet supported."""
