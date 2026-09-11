@@ -220,4 +220,19 @@ async def test_http_status_error_bounds_both_halves_of_its_message() -> None:
     err = base.HttpStatusError(404, "Not Found " + "m" * 200_000, url)
 
     assert len(str(err)) < 500
-    assert err.url == url  # the attribute still carries the full value
+    # The binding reads .message off this class by name and forwards it
+    # verbatim to the client on a 4xx (errors.rs extract_http_like_error), so
+    # bounding only the rendered string leaves the client-facing path open.
+    assert len(err.message) < 500
+    # .url is not part of that protocol and keeps its full value.
+    assert err.url == url
+
+
+async def test_http_status_error_keeps_both_ends_of_a_long_detail() -> None:
+    """aiohttp renders the client-supplied host before the errno, so a
+    head-only bound would keep the attacker's string and drop the reason."""
+    detail = "Cannot connect to host " + "h" * 40_000 + ":80 [nodename not known]"
+    err = base.HttpStatusError(400, detail, "https://example.com/x")
+
+    assert "Cannot connect" in err.message
+    assert "nodename not known" in err.message

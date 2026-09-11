@@ -21,6 +21,7 @@ from .url_validator import (
     _MAX_REDIRECTS,
     UrlValidationError,
     UrlValidationPolicy,
+    describe_error_detail,
     describe_media_source,
     validate_url,
 )
@@ -44,12 +45,16 @@ class HttpStatusError(HttpError):
     def __init__(self, status: int, message: str, url: str) -> None:
         # Both halves are client-supplied: ``url`` directly, and ``message``
         # because httpx's own HTTPStatusError text repeats the URL. The video
-        # diffusion handler puts str(exc) in its response body, so neither can
-        # be unbounded. The attributes keep the full values for callers.
-        super().__init__(
-            f"HTTP {status} for {describe_media_source(url)}: "
-            f"{describe_media_source(message)}"
-        )
+        # diffusion handler puts str(exc) in its response body.
+        #
+        # ``message`` is bounded in the *attribute*, not just in the rendered
+        # string: errors.rs::extract_http_like_error reads ``.status`` and
+        # ``.message`` off this class by name and, per the SECURITY note there,
+        # forwards ``.message`` verbatim to the client on a 4xx. Nothing in the
+        # rendered text reaches that path. ``url`` is not part of that protocol,
+        # so it keeps its full value for debugging.
+        message = describe_error_detail(message)
+        super().__init__(f"HTTP {status} for {describe_media_source(url)}: {message}")
         self.status = status
         self.message = message
         self.url = url

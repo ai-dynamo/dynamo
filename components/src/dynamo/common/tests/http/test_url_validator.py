@@ -22,6 +22,7 @@ from dynamo.common.http import url_validator
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
+    describe_error_detail,
     is_blocked_ip,
     validate_local_path,
     validate_media_reference,
@@ -550,3 +551,17 @@ def test_missing_allowed_dir_does_not_name_it(tmp_path) -> None:
         validate_local_path(str(media), policy)
 
     assert "gone" not in str(excinfo.value)
+
+
+def test_describe_error_detail_keeps_a_short_detail_intact() -> None:
+    assert describe_error_detail("[Errno 8] not known") == "[Errno 8] not known"
+
+
+def test_describe_error_detail_bounds_from_both_ends() -> None:
+    detail = "head-of-the-message " + "x" * 40_000 + " tail-of-the-message"
+    label = describe_error_detail(detail)
+
+    assert len(label) < 300
+    assert label.startswith("head-of-the-message")
+    assert label.endswith("tail-of-the-message")
+    assert str(len(detail)) in label  # true size stays visible

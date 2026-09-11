@@ -35,7 +35,7 @@ from .base import (
     HttpTimeoutError,
     collect_capped,
 )
-from .url_validator import describe_media_source
+from .url_validator import describe_error_detail, describe_media_source
 
 logger = logging.getLogger(__name__)
 
@@ -136,11 +136,11 @@ class HttpxClient(HttpClient):
                 ) from e
             except (httpx.ConnectError, httpx.NetworkError) as e:
                 raise HttpConnectionError(
-                    f"Connection error loading {describe_media_source(url)}: {e}"
+                    f"Connection error loading {describe_media_source(url)}: {describe_error_detail(str(e))}"
                 ) from e
             except httpx.HTTPError as e:
                 raise HttpConnectionError(
-                    f"HTTP error loading {describe_media_source(url)}: {e}"
+                    f"HTTP error loading {describe_media_source(url)}: {describe_error_detail(str(e))}"
                 ) from e
 
     async def _fetch_body_or_redirect(
@@ -163,11 +163,11 @@ class HttpxClient(HttpClient):
                 ) from e
             except (httpx.ConnectError, httpx.NetworkError) as e:
                 raise HttpConnectionError(
-                    f"Connection error loading {describe_media_source(url)}: {e}"
+                    f"Connection error loading {describe_media_source(url)}: {describe_error_detail(str(e))}"
                 ) from e
             except httpx.HTTPError as e:
                 raise HttpConnectionError(
-                    f"HTTP error loading {describe_media_source(url)}: {e}"
+                    f"HTTP error loading {describe_media_source(url)}: {describe_error_detail(str(e))}"
                 ) from e
 
             try:

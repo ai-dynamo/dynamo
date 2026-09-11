@@ -101,6 +101,22 @@ def describe_media_source(source: str, limit: int = SOURCE_LABEL_LIMIT) -> str:
     return source
 
 
+def describe_error_detail(detail: str, limit: int = SOURCE_LABEL_LIMIT) -> str:
+    """Bound a backend exception's text, keeping both ends.
+
+    Unlike a media source, the useful part of one of these is usually at the
+    end: aiohttp renders the client-supplied host *before* the errno, so a
+    head-only truncation would keep the attacker's string and drop the
+    diagnosis.
+    """
+    if not isinstance(detail, str):
+        return "<non-string error detail>"
+    if len(detail) <= limit:
+        return detail
+    head = limit // 2
+    return f"{detail[:head]}... ({len(detail)} chars) ...{detail[-(limit - head):]}"
+
+
 def is_blocked_ip(ip_text: str) -> bool:
     """Return True if ``ip_text`` parses as an IP inside one of the blocked ranges."""
     try:

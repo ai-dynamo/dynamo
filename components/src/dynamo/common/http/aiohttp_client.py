@@ -24,7 +24,7 @@ from .base import (
     HttpTimeoutError,
     collect_capped,
 )
-from .url_validator import describe_media_source
+from .url_validator import describe_error_detail, describe_media_source
 
 logger = logging.getLogger(__name__)
 
@@ -109,11 +109,11 @@ class AiohttpClient(HttpClient):
             aiohttp.ServerDisconnectedError,
         ) as e:
             raise HttpConnectionError(
-                f"Connection error loading {describe_media_source(url)}: {e}"
+                f"Connection error loading {describe_media_source(url)}: {describe_error_detail(str(e))}"
             ) from e
         except aiohttp.ClientError as e:
             raise HttpConnectionError(
-                f"HTTP error loading {describe_media_source(url)}: {e}"
+                f"HTTP error loading {describe_media_source(url)}: {describe_error_detail(str(e))}"
             ) from e
 
     async def _fetch_body_or_redirect(
@@ -157,11 +157,11 @@ class AiohttpClient(HttpClient):
             aiohttp.ServerDisconnectedError,
         ) as e:
             raise HttpConnectionError(
-                f"Connection error loading {describe_media_source(url)}: {e}"
+                f"Connection error loading {describe_media_source(url)}: {describe_error_detail(str(e))}"
             ) from e
         except aiohttp.ClientError as e:
             raise HttpConnectionError(
-                f"HTTP error loading {describe_media_source(url)}: {e}"
+                f"HTTP error loading {describe_media_source(url)}: {describe_error_detail(str(e))}"
             ) from e
 
     async def close(self) -> None:
