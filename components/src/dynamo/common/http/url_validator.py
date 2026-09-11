@@ -20,6 +20,7 @@ import os
 import socket
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Final
 from urllib.parse import unquote, urlparse
 
 
@@ -70,6 +71,34 @@ _BLOCKED_HOSTS: frozenset[str] = frozenset(
         "kubernetes.default.svc",
     }
 )
+
+
+# Longest a media source may render as inside an error message or log line.
+# Generous enough to keep an ordinary URL intact and identifiable.
+SOURCE_LABEL_LIMIT: Final = 120
+
+
+def describe_media_source(source: str, limit: int = SOURCE_LABEL_LIMIT) -> str:
+    """Render ``source`` as a bounded label safe to put in an error or log.
+
+    A ``data:`` URI carries the whole media payload inline, so echoing one into
+    an error message serializes megabytes of base64 -- to the client, and to
+    every log sink that records the failure. Describe those by media type and
+    size instead, never by content. Other sources are truncated, since a URL
+    identifies the request without being unbounded.
+
+    Lives here rather than in ``multimodal.media_source`` so the validators
+    below can bound their own messages: importing that package pulls in torch.
+    """
+    if not isinstance(source, str):
+        return "<non-string media source>"
+    if source.startswith("data:"):
+        meta = source[len("data:") :].partition(",")[0]
+        media_type = meta.split(";")[0] or "application/octet-stream"
+        return f"data:{media_type} ({len(source)} chars, payload elided)"
+    if len(source) > limit:
+        return f"{source[:limit]}... ({len(source)} chars)"
+    return source
 
 
 def is_blocked_ip(ip_text: str) -> bool:
@@ -178,12 +207,23 @@ def validate_local_path(path: str, policy: UrlValidationPolicy) -> Path:
             "Local media paths are not permitted; set " "DYN_MM_LOCAL_PATH to enable"
         )
 
+    # ``path`` is client-supplied and unbounded: describe_media_source keeps it
+    # out of an error response and a log line at full length. Short, ordinary
+    # paths render unchanged.
+    label = describe_media_source(path)
+
     try:
         resolved = Path(path).expanduser().resolve(strict=True)
     except FileNotFoundError as exc:
-        raise UrlValidationError(f"File not found: {path}") from exc
+        raise UrlValidationError(f"File not found: {label}") from exc
     except OSError as exc:
-        raise UrlValidationError(f"Could not resolve path '{path}': {exc}") from exc
+        raise UrlValidationError(f"Could not resolve path '{label}': {exc}") from exc
+    except ValueError as exc:
+        # An embedded NUL makes lstat() raise ValueError, not OSError. Reachable
+        # since file:// paths are percent-decoded, so %00 becomes a real NUL.
+        # Callers map UrlValidationError to a client error; a bare ValueError
+        # would reach them as a server error instead.
+        raise UrlValidationError(f"Invalid path '{label}': {exc}") from exc
 
     try:
         allowed = Path(policy.allowed_local_path).expanduser().resolve(strict=True)
@@ -195,8 +235,10 @@ def validate_local_path(path: str, policy: UrlValidationPolicy) -> Path:
     try:
         resolved.relative_to(allowed)
     except ValueError as exc:
+        # The configured directory is deployment detail; naming it here puts
+        # it in the client's error body, since callers surface this message.
         raise UrlValidationError(
-            f"Path '{path}' is outside the allowed directory '{policy.allowed_local_path}'"
+            f"Path '{label}' is outside the allowed directory"
         ) from exc
 
     return resolved
@@ -233,6 +275,9 @@ async def validate_media_reference(reference: str, policy: UrlValidationPolicy) 
     local references instead of a ``file://`` URI, for callers that pass the
     result to a loader expecting a bare path.
     """
+    if not reference:
+        raise UrlValidationError("Media reference is empty")
+
     parsed = urlparse(reference)
     if parsed.scheme.lower() in ("", "file"):
         # file:// paths are percent-encoded; a bare path is literal.

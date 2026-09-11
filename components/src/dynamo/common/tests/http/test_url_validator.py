@@ -24,6 +24,7 @@ from dynamo.common.http.url_validator import (
     UrlValidationPolicy,
     is_blocked_ip,
     validate_local_path,
+    validate_media_reference,
     validate_media_url,
     validate_url,
 )
@@ -430,3 +431,50 @@ async def test_validate_media_url_rejects_file_uri_outside_prefix(tmp_path) -> N
 
     with pytest.raises(UrlValidationError, match="outside the allowed directory"):
         await validate_media_url(other.resolve().as_uri(), policy)
+
+
+async def test_validate_media_url_rejects_a_percent_encoded_nul(tmp_path) -> None:
+    """%00 must stay a UrlValidationError, not leak out as a bare ValueError.
+
+    file:// paths are percent-decoded, so %00 reaches Path.resolve() as a real
+    NUL and lstat() raises ValueError rather than OSError. Callers key their
+    4xx-vs-5xx decision on the UrlValidationError type (see image_loader and
+    video_loader), so letting a plain ValueError escape turns a rejected input
+    into a server error.
+    """
+    policy = UrlValidationPolicy(allowed_local_path=str(tmp_path))
+
+    with pytest.raises(UrlValidationError):
+        await validate_media_url(f"file://{tmp_path}/x%00.png", policy)
+
+
+def test_validate_local_path_bounds_the_path_in_its_message(tmp_path) -> None:
+    """The rejected path is client-supplied and unbounded; the message is not.
+
+    It lands in an error response and in a log line, so one request would
+    otherwise amplify into that much text at every sink.
+    """
+    policy = UrlValidationPolicy(allowed_local_path=str(tmp_path))
+    path = "/nope/" + "A" * 200_000 + ".png"
+
+    with pytest.raises(UrlValidationError) as excinfo:
+        validate_local_path(path, policy)
+
+    assert len(str(excinfo.value)) < 500
+    assert "200010 chars" in str(excinfo.value)  # true size stays visible
+
+
+def test_validate_local_path_keeps_an_ordinary_path_intact(tmp_path) -> None:
+    """Control: bounding must not change the message for a normal path."""
+    policy = UrlValidationPolicy(allowed_local_path=str(tmp_path))
+
+    with pytest.raises(UrlValidationError, match=r"Path '/etc/passwd' is outside"):
+        validate_local_path("/etc/passwd", policy)
+
+
+async def test_validate_media_reference_rejects_empty(tmp_path) -> None:
+    """Parity with validate_media_url, which guards the empty string."""
+    policy = UrlValidationPolicy(allowed_local_path=str(tmp_path))
+
+    with pytest.raises(UrlValidationError, match="empty"):
+        await validate_media_reference("", policy)
