@@ -114,9 +114,7 @@ func TestDGDSharedResourcesReconciler_PreservesCheckpointResultOnLaterFailure(t 
 	dgd.Annotations = map[string]string{
 		consts.AnnotationCurrentWorkerHashV2: betaDGDWorkersSpecHash(t, dgd),
 	}
-	workerHash, err := checkpointWorkerHashForComponent(dgd, "worker")
-	require.NoError(t, err)
-	referenced := dgdTestPodSnapshot(reference, workerHash, true)
+	referenced := dgdTestPodSnapshot(reference, betaDGDCheckpointCompatHash(t, dgd, "worker"), true)
 	s := newDynamoGraphDeploymentControllerTestScheme(t)
 	kubeClient := fake.NewClientBuilder().
 		WithScheme(s).

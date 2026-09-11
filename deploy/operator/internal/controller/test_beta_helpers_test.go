@@ -86,6 +86,15 @@ func betaDGDWorkersSpecHash(t testing.TB, dgd *v1beta1.DynamoGraphDeployment) st
 	return hash
 }
 
+func betaDGDCheckpointCompatHash(t testing.TB, dgd *v1beta1.DynamoGraphDeployment, componentName string) string {
+	t.Helper()
+	hash, err := dynamo.ComputeDGDWorkerCheckpointCompatHash(dgd, componentName)
+	if err != nil {
+		t.Fatalf("compute v1beta1 DGD checkpoint compatibility hash: %v", err)
+	}
+	return hash
+}
+
 func legacyDGDWorkersSpecHash(t testing.TB, dgd *v1beta1.DynamoGraphDeployment) string {
 	t.Helper()
 	alpha := &v1alpha1.DynamoGraphDeployment{}

@@ -116,15 +116,25 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 			startupPolicy = nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
 		}
 
-		// Derive the compatibility identity expected by captured and restored workers.
+		// Derive the active worker generation, which names the capture and gates
+		// it until Grove has committed a generation.
 		workerHash, err := checkpointWorkerHashForComponent(dgd, componentName)
 		if err != nil {
 			return dgdCheckpointsResult{}, fmt.Errorf("failed to compute checkpoint worker hash for component %s: %w", componentName, err)
 		}
+
+		// Derive the restore compatibility identity, which is scoped to this
+		// component and independent of the owning graph and of the checkpoint
+		// selection fields.
 		workerComponent := dynamo.IsWorkerComponent(string(component.ComponentType))
 		var expectedWorkerHash *string
+		var compatHash string
 		if workerComponent {
-			expectedWorkerHash = &workerHash
+			compatHash, err = dynamo.ComputeDGDWorkerCheckpointCompatHash(dgd, componentName)
+			if err != nil {
+				return dgdCheckpointsResult{}, fmt.Errorf("failed to compute checkpoint compatibility hash for component %s: %w", componentName, err)
+			}
+			expectedWorkerHash = &compatHash
 		}
 
 		var info *checkpoint.CheckpointInfo
@@ -152,6 +162,7 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 				componentName,
 				component,
 				workerHash,
+				compatHash,
 				startupPolicy,
 			)
 		} else {
@@ -212,6 +223,7 @@ func (r *dgdCheckpointsReconciler) reconcileAutomaticSnapshotJob(
 	componentName string,
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	workerHash string,
+	compatHash string,
 	startupPolicy nvidiacomv1alpha1.CheckpointStartupPolicy,
 ) (*checkpoint.CheckpointInfo, error) {
 	checkpointConfig := dynamo.GetCheckpoint(component)
@@ -319,6 +331,7 @@ func (r *dgdCheckpointsReconciler) reconcileAutomaticSnapshotJob(
 		componentName,
 		checkpointID,
 		workerHash,
+		compatHash,
 		podTemplate,
 		targetContainerName,
 		deletionPolicy,
@@ -344,7 +357,7 @@ func (r *dgdCheckpointsReconciler) reconcileAutomaticSnapshotJob(
 
 	var expectedWorkerHash *string
 	if dynamo.IsWorkerComponent(string(component.ComponentType)) {
-		expectedWorkerHash = &workerHash
+		expectedWorkerHash = &compatHash
 	}
 	return r.resolveAutomaticSnapshotJob(
 		ctx,
@@ -362,6 +375,7 @@ func buildAutomaticSnapshotJob(
 	componentName string,
 	checkpointID string,
 	workerHash string,
+	compatHash string,
 	podTemplate corev1.PodTemplateSpec,
 	targetContainerName string,
 	deletionPolicy nvidiacomv1alpha1.CheckpointDeletionPolicy,
@@ -392,7 +406,7 @@ func buildAutomaticSnapshotJob(
 		consts.CheckpointDeletionPolicyAnnotation:     string(deletionPolicy),
 		consts.CheckpointOwnerUIDAnnotation:           string(dgd.UID),
 		consts.SnapshotCompatibilityVersionAnnotation: consts.SnapshotCompatibilityVersion,
-		consts.SnapshotWorkerHashAnnotation:           workerHash,
+		consts.SnapshotWorkerHashAnnotation:           compatHash,
 		consts.SnapshotGMSModeAnnotation:              gmsMode,
 	}
 
