@@ -16,6 +16,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+import aiohttp
 import yaml
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import exceptions
@@ -38,7 +39,6 @@ _MAX_DGDR_NAME_LENGTH = (
 )
 _MAX_LABEL_VALUE_LENGTH = 63
 _NAME_DIGEST_LENGTH = 6
-
 PHASE_ORDER = {
     "Pending": 0,
     "Profiling": 1,
@@ -377,11 +377,35 @@ class ManagedDGDR:
     async def _wait_for_phase(
         self, name: str, target: str, at_least: bool, timeout: int | None
     ) -> dict[str, Any]:
+        poll_interval_seconds = 5
+        vcluster_connection_retry_limit = 3
         timeout = timeout or self.config.profiling_timeout
         deadline = time.monotonic() + timeout
         last_phase: str | None = None
+        vcluster_connection_failures = 0
         while time.monotonic() < deadline:
-            result = await self.get(name)
+            # Give the vCluster watchdog a bounded window to restore its tunnel.
+            try:
+                result = await self.get(name)
+            except aiohttp.ClientConnectorError as error:
+                vcluster_connection_failures += 1
+                if vcluster_connection_failures > vcluster_connection_retry_limit:
+                    raise
+                logger.warning(
+                    "vCluster API connection failed while waiting for DGDR %s/%s; "
+                    "the port-forward watchdog may restore the tunnel, retrying in "
+                    "%ss (%s/%s): %s",
+                    self.config.namespace,
+                    name,
+                    poll_interval_seconds,
+                    vcluster_connection_failures,
+                    vcluster_connection_retry_limit,
+                    error,
+                )
+                await asyncio.sleep(poll_interval_seconds)
+                continue
+
+            vcluster_connection_failures = 0
             phase = result.get("status", {}).get("phase") if result else None
             if phase != last_phase:
                 logger.info("DGDR %s/%s phase: %s", self.config.namespace, name, phase)
@@ -401,7 +425,7 @@ class ManagedDGDR:
                 )
             ):
                 return result
-            await asyncio.sleep(5)
+            await asyncio.sleep(poll_interval_seconds)
         raise TimeoutError(
             f"Timed out after {timeout}s waiting for DGDR "
             f"{self.config.namespace}/{name} to reach {target}; last phase={last_phase}"

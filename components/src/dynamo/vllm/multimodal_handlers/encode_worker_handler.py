@@ -13,6 +13,10 @@ from transformers import AutoImageProcessor
 from vllm.engine.arg_utils import AsyncEngineArgs
 
 import dynamo.nixl_connect as connect
+from dynamo.common.memory.multimodal_embedding_cache_manager import (
+    CachedEmbedding,
+    MultimodalEmbeddingCacheManager,
+)
 from dynamo.common.multimodal import (
     LocalEmbeddingSender,
     NixlReadEmbeddingSender,
@@ -29,16 +33,14 @@ from ..constants import EmbeddingTransferMode
 from ..multimodal_utils import (
     ImageLoader,
     encode_image_embeddings,
+    get_embedding_hash,
     get_encoder_components,
     load_vision_model,
     vLLMMultimodalRequest,
 )
-from ..multimodal_utils.embedding_cache import EmbeddingCache
 from ..multimodal_utils.model import ModelFamily, resolve_model_family
 
 logger = logging.getLogger(__name__)
-
-CACHE_SIZE_MAXIMUM = 8
 
 # [gluo WIP] now it's time to revisit
 # Both embedding transfer suffers from increasing latency as
@@ -46,6 +48,21 @@ CACHE_SIZE_MAXIMUM = 8
 # scale worse than local. Need to investigate why.
 # [gluo NOTE] default off to benchmark standalone encoder
 ENABLE_ENCODER_CACHE = int(os.getenv("ENABLE_ENCODER_CACHE", 1))
+SPLIT_ENCODE = int(os.getenv("DYN_SPLIT_ENCODE", 1))
+
+
+def _load_image_processor(engine_args: AsyncEngineArgs):
+    processor_kwargs = getattr(engine_args, "mm_processor_kwargs", None) or {}
+    processor = AutoImageProcessor.from_pretrained(
+        engine_args.model,
+        trust_remote_code=engine_args.trust_remote_code,
+        **processor_kwargs,
+    )
+    logger.info(
+        "Encode worker image processor initialized with mm_processor_kwargs=%s",
+        processor_kwargs,
+    )
+    return processor
 
 
 @dataclass
@@ -57,25 +74,90 @@ class EmbeddingItem:
     embeddings: torch.Tensor
 
 
+def _prepare_embedding_transfers(
+    embedding_items: list[EmbeddingItem],
+    *,
+    coalesce: bool,
+    combined_embedding: torch.Tensor | None = None,
+) -> tuple[list[torch.Tensor], list[int | None]]:
+    """Return the tensors to transfer for one encode response.
+
+    Qwen-VL stores each image as ``[1, visual_tokens, hidden]``. When the
+    request is not split across encode workers, concatenate the token axis so
+    the response needs one transfer instead of one transfer per image.
+    """
+    tensors = [item.embeddings for item in embedding_items]
+    if not coalesce or len(tensors) <= 1:
+        return tensors, list(range(len(tensors)))
+
+    first = tensors[0]
+    if any(
+        tensor.ndim != 3 or tensor.shape[0] != 1 or tensor.shape[2] != first.shape[2]
+        for tensor in tensors
+    ):
+        raise ValueError(
+            "Coalesced embedding transfer requires matching "
+            "[1, visual_tokens, hidden] tensors"
+        )
+
+    expected_shape = (1, sum(tensor.shape[1] for tensor in tensors), first.shape[2])
+    if combined_embedding is not None:
+        if tuple(combined_embedding.shape) != expected_shape:
+            raise ValueError(
+                "Combined Qwen-VL embedding does not match its per-image views: "
+                f"expected={expected_shape}, actual={tuple(combined_embedding.shape)}"
+            )
+        transfer_tensor = combined_embedding
+    else:
+        transfer_tensor = torch.cat(tensors, dim=1)
+
+    return [transfer_tensor], [0, *([None] * (len(tensors) - 1))]
+
+
+def _build_embedding_cache(
+    capacity_gb: float,
+) -> MultimodalEmbeddingCacheManager | None:
+    """Build the encode worker's embedding cache, or ``None`` when disabled.
+
+    ``--multimodal-embedding-cache-capacity-gb`` defaults to 0 and documents 0 as
+    disabled, so a stock deployment runs without this cache, as it does on the
+    other backends. ``ENABLE_ENCODER_CACHE`` turns the cache off independently of
+    the capacity.
+    """
+    if not ENABLE_ENCODER_CACHE or capacity_gb <= 0:
+        return None
+    logger.info("Encode worker embedding cache enabled: %.2f GB", capacity_gb)
+    return MultimodalEmbeddingCacheManager(int(capacity_gb * 1024**3))
+
+
+def _should_coalesce_embedding_transfers(model: str, item_count: int) -> bool:
+    return (
+        not SPLIT_ENCODE
+        and item_count > 1
+        and resolve_model_family(model) is ModelFamily.QWEN_VL
+    )
+
+
 class EncodeWorkerHandler:
     def __init__(
         self,
         engine_args: AsyncEngineArgs,
         embedding_transfer_mode: EmbeddingTransferMode,
         enable_frontend_decoding: bool = False,
+        *,
+        embedding_cache_capacity_gb: float = 0.0,
     ) -> None:
         self.engine_args = engine_args
         self.model = self.engine_args.model
 
         self._enable_frontend_decoding = enable_frontend_decoding
         self._decoded_content_hash_warning_emitted = False
+        # No cache_size: ImageLoader's default reads DYN_MM_IMAGE_CACHE_SIZE,
+        # so passing one here would ignore the operator's setting.
         self.image_loader = ImageLoader(
-            cache_size=CACHE_SIZE_MAXIMUM,
             enable_frontend_decoding=enable_frontend_decoding,
         )
-        self.image_processor = AutoImageProcessor.from_pretrained(
-            self.model, trust_remote_code=self.engine_args.trust_remote_code
-        )
+        self.image_processor = _load_image_processor(self.engine_args)
         self.vision_model = load_vision_model(
             self.model,
             enforce_eager=self.engine_args.enforce_eager,
@@ -97,7 +179,11 @@ class EncodeWorkerHandler:
         self._accumulated_time = 0.0
         self._processed_requests = 0
         self.readables: list[Any] = []
-        self.embedding_cache = EmbeddingCache() if ENABLE_ENCODER_CACHE else None
+        # Named embedding_cache_manager to match the prefill and decode
+        # handlers, which call their MultimodalEmbeddingCacheManager the same.
+        self.embedding_cache_manager = _build_embedding_cache(
+            embedding_cache_capacity_gb
+        )
         self.embedding_sender: AbstractEmbeddingSender
         if embedding_transfer_mode == EmbeddingTransferMode.LOCAL:
             self.embedding_sender = LocalEmbeddingSender()
@@ -153,7 +239,7 @@ class EncodeWorkerHandler:
                 "encode worker."
             )
         if has_url:
-            return EmbeddingCache.generate_hash_key(group_input.image_url)
+            return get_embedding_hash(group_input.image_url)
         if not self._enable_frontend_decoding:
             raise ValueError(
                 "Received a frontend-decoded image but --frontend-decoding is "
@@ -163,7 +249,7 @@ class EncodeWorkerHandler:
         cache_key = decoded_content_hash_key(group_input.image_decoded)
         if (
             cache_key is None
-            and self.embedding_cache is not None
+            and self.embedding_cache_manager is not None
             and not self._decoded_content_hash_warning_emitted
         ):
             logger.warning(
@@ -174,6 +260,56 @@ class EncodeWorkerHandler:
             )
             self._decoded_content_hash_warning_emitted = True
         return cache_key
+
+    def _lookup_embedding_item(self, key: str | None) -> EmbeddingItem | None:
+        """Return the cached embedding for ``key``, or ``None`` on a miss.
+
+        One ``get()`` and no membership probe: the manager counts a hit or a
+        miss per ``get()``, so probing twice would record every hit as a miss
+        followed by a hit.
+        """
+        if self.embedding_cache_manager is None or key is None:
+            return None
+        cached = self.embedding_cache_manager.get(key)
+        if cached is None:
+            return None
+        return EmbeddingItem(key, cached.image_grid_thw or [], cached.tensor)
+
+    def _store_embedding_item(self, item: EmbeddingItem) -> None:
+        """Cache one freshly encoded embedding. Unkeyed items are skipped.
+
+        Uses ``set()`` rather than ``set_with_delta()``: ``set()`` is defined as
+        ``set_with_delta(...).stored`` and this worker has no cache-event
+        publisher to consume the delta.
+        """
+        if self.embedding_cache_manager is None or item.key is None:
+            return
+        # Size the incoming view, not the copy, so admission is decided before
+        # the copy exists: clone(memory_format=torch.contiguous_format) keeps
+        # dtype and element count, so the two are the same number of bytes.
+        # The view's own size is computed here rather than through the manager,
+        # whose sizing asserts contiguity that a view need not have.
+        size_bytes = item.embeddings.element_size() * item.embeddings.numel()
+        # An entry over capacity is rejected outright, and a cache with no room
+        # for one under capacity evicts first, so the device never holds the
+        # whole cache plus this copy at once.
+        if not self.embedding_cache_manager.make_room_for(
+            item.key, size_bytes
+        ).admitted:
+            return
+        # These arrive as split views over one encoder output, and the manager
+        # sizes an entry from its own element count. Caching a view would charge
+        # for the view while pinning the whole batch's storage, so an entry gets
+        # storage of its own. clone() also satisfies the manager's contiguity
+        # assertion in one copy, which contiguous() would not: on an already
+        # contiguous view it returns the view itself.
+        self.embedding_cache_manager.set(
+            item.key,
+            CachedEmbedding(
+                tensor=item.embeddings.clone(memory_format=torch.contiguous_format),
+                image_grid_thw=item.image_grid_thw,
+            ),
+        )
 
     async def async_init(self, runtime: DistributedRuntime):
         """Initialize the connector for RDMA transfers"""
@@ -212,6 +348,7 @@ class EncodeWorkerHandler:
 
         try:
             time_start = time.perf_counter()
+            encoded_embeddings: torch.Tensor | None = None
 
             with _nvtx.annotate("mm:enc:cache_check", color="cyan"):
                 # Before batch process images, check cache first
@@ -222,17 +359,9 @@ class EncodeWorkerHandler:
                 for idx in range(len(request.multimodal_inputs)):
                     group_input = request.multimodal_inputs[idx].multimodal_input
                     embedding_key = self._image_cache_key(group_input)
-                    if (
-                        self.embedding_cache is not None
-                        and embedding_key is not None
-                        and self.embedding_cache.has_key(embedding_key)
-                    ):
-                        (image_grid_thw, embeddings) = self.embedding_cache.get(
-                            embedding_key
-                        )
-                        embedding_lists[idx] = EmbeddingItem(
-                            embedding_key, image_grid_thw, embeddings
-                        )
+                    cached_item = self._lookup_embedding_item(embedding_key)
+                    if cached_item is not None:
+                        embedding_lists[idx] = cached_item
                     # compute
                     else:
                         # keep track of key to avoid recompute of it
@@ -281,6 +410,7 @@ class EncodeWorkerHandler:
                         vision_encoder=self.vision_encoder,
                         projector=self.projector,
                     )
+                    encoded_embeddings = embeddings
                     # Sync XPU to ensure kernels complete before NIXL transfer.
                     if embeddings.device.type == "xpu":
                         torch.xpu.synchronize()
@@ -314,41 +444,55 @@ class EncodeWorkerHandler:
 
             # fill in the embedding_lists with new computed embeddings and cache them
             for split_idx, (list_idx, key) in enumerate(need_encode_indexes):
-                embedding_lists[list_idx] = EmbeddingItem(
+                item = EmbeddingItem(
                     key,
                     [image_grid_thw[split_idx]] if image_grid_thw else [],
                     splitted_embeddings[split_idx].unsqueeze(0),
                 )
-                # Cache the computed value for future use (unkeyed items skip)
-                if self.embedding_cache is not None and key is not None:
-                    self.embedding_cache.set(
-                        embedding_lists[list_idx].key,  # type: ignore
-                        (
-                            embedding_lists[list_idx].image_grid_thw,  # type: ignore
-                            embedding_lists[list_idx].embeddings,  # type: ignore
-                        ),
-                    )
+                embedding_lists[list_idx] = item
+                self._store_embedding_item(item)
 
             before_transfer_time = time.perf_counter()
 
             with _nvtx.annotate("mm:enc:embedding_transfer", color="purple"):
-                # Prepare transfer
+                complete_items = [
+                    embedding_item
+                    for embedding_item in embedding_lists
+                    if embedding_item is not None
+                ]
+                if len(complete_items) != len(request.multimodal_inputs):
+                    raise RuntimeError(
+                        "Encode worker did not produce one embedding for every "
+                        f"multimodal input: expected={len(request.multimodal_inputs)}, "
+                        f"actual={len(complete_items)}"
+                    )
+
+                coalesce = _should_coalesce_embedding_transfers(
+                    self.model, len(complete_items)
+                )
+                combined_embedding = (
+                    encoded_embeddings
+                    if coalesce and len(need_encode_indexes) == len(complete_items)
+                    else None
+                )
+                transfer_tensors, transfer_indices = _prepare_embedding_transfers(
+                    complete_items,
+                    coalesce=coalesce,
+                    combined_embedding=combined_embedding,
+                )
                 send_tasks = [
                     asyncio.create_task(
                         self.embedding_sender.send_embeddings(
-                            embedding_item.embeddings, stage_embeddings=True
+                            transfer_tensor, stage_embeddings=True
                         )
                     )
-                    for embedding_item in embedding_lists
-                    if embedding_item is not None
+                    for transfer_tensor in transfer_tensors
                 ]
                 transfer_requests = await asyncio.gather(*send_tasks)
 
                 after_transfer_time = time.perf_counter()
 
-                for idx, item in enumerate(zip(embedding_lists, transfer_requests)):
-                    embedding_item, transfer_request = item
-                    assert embedding_item is not None
+                for idx, embedding_item in enumerate(complete_items):
                     logger.debug(
                         f"{embedding_item.embeddings.shape} prepared for transfer."
                     )
@@ -361,11 +505,19 @@ class EncodeWorkerHandler:
                     group.multimodal_input.image_decoded = None
                     group.image_grid_thw = embedding_item.image_grid_thw
                     group.embeddings_shape = tuple(embedding_item.embeddings.shape)  # type: ignore[assignment]
-                    group.serialized_request = transfer_request[0]
+                    transfer_idx = transfer_indices[idx]
+                    group.serialized_request = (
+                        None
+                        if transfer_idx is None
+                        else transfer_requests[transfer_idx][0]
+                    )
 
-                    # Keep a reference of the embedding and only drop reference when the transfer is done
+                for transfer_request, transfer_tensor in zip(
+                    transfer_requests, transfer_tensors, strict=True
+                ):
+                    # Keep the transfer buffer alive until the transfer completes.
                     self.send_complete_queue.put_nowait(
-                        (transfer_request[1], embedding_item.embeddings)
+                        (transfer_request[1], transfer_tensor)
                     )
 
             payload = request.model_dump_json()

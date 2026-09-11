@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import pytest
 
+from tests.utils import vram_utils
 from tests.utils.pytest_parallel_gpu import (
     _GpuState,
     _priority_key,
@@ -379,28 +380,57 @@ def test_full_change_beats_status_quo():
     assert shipped <= 0.85 * status_quo  # >= 15% end-to-end makespan reduction
 
 
-# --------------------------------------------------------------------------- #
-# effective_cpu_budget: don't let -n auto (host os.cpu_count) oversubscribe CPU
-# --------------------------------------------------------------------------- #
-def test_effective_cpu_budget_prefers_num_cpus_env():
-    import os
+def test_effective_cpu_budget_caps_num_cpus_at_detected_quota(monkeypatch):
+    monkeypatch.setattr(vram_utils, "_cgroup_cpu_budget", lambda: 1)
+    monkeypatch.setenv("NUM_CPUS", "2")
+    assert vram_utils.effective_cpu_budget() == 1
 
-    from tests.utils.vram_utils import effective_cpu_budget
+    monkeypatch.setattr(vram_utils, "_cgroup_cpu_budget", lambda: 96)
+    assert vram_utils.effective_cpu_budget() == 2
 
-    old = os.environ.get("NUM_CPUS")
-    try:
-        os.environ["NUM_CPUS"] = "4"
-        assert effective_cpu_budget() == 4
-        os.environ["NUM_CPUS"] = "7"
-        assert effective_cpu_budget() == 7
-        # Invalid value falls through to cgroup/os.cpu_count() and stays positive.
-        os.environ["NUM_CPUS"] = "bogus"
-        assert effective_cpu_budget() >= 1
-    finally:
-        if old is None:
-            os.environ.pop("NUM_CPUS", None)
-        else:
-            os.environ["NUM_CPUS"] = old
+
+@pytest.mark.parametrize("invalid_budget", ["bogus", "inf", "1e309", "0", "-1"])
+def test_effective_cpu_budget_warns_for_invalid_num_cpus(
+    monkeypatch, caplog, invalid_budget
+):
+    monkeypatch.setattr(vram_utils, "_cgroup_cpu_budget", lambda: 96)
+    monkeypatch.setenv("NUM_CPUS", invalid_budget)
+
+    assert vram_utils.effective_cpu_budget() == 96
+    assert f"Ignoring invalid NUM_CPUS='{invalid_budget}'" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("cpu_max", "expected"),
+    [
+        ("400000 100000", 4),
+        ("50000 100000", 1),
+        ("max 100000", None),
+        ("invalid", None),
+    ],
+)
+def test_cgroup_v2_cpu_budget(tmp_path, cpu_max, expected):
+    (tmp_path / "cpu.max").write_text(cpu_max)
+
+    assert vram_utils._cgroup_cpu_budget(tmp_path) == expected
+
+
+@pytest.mark.parametrize(
+    ("quota", "period", "expected"),
+    [
+        ("400000", "100000", 4),
+        ("50000", "100000", 1),
+        ("-1", "100000", None),
+        ("400000", "0", None),
+    ],
+)
+def test_cgroup_v1_cpu_budget(tmp_path, quota, period, expected):
+    cpu_root = tmp_path / "cpu"
+    cpu_root.mkdir()
+    (cpu_root / "cpu.cfs_quota_us").write_text(quota)
+    (cpu_root / "cpu.cfs_period_us").write_text(period)
+
+    assert vram_utils._cgroup_cpu_budget(tmp_path) == expected
 
 
 def test_simulation_conserves_work_and_respects_budget():

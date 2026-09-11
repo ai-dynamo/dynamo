@@ -68,6 +68,7 @@ class DistributedRuntime:
         enable_nats: Optional[bool] = None,
         *,
         event_plane: Optional[str] = None,
+        response_plane: Optional[str] = None,
     ) -> "DistributedRuntime":
         """
         Create a new DistributedRuntime.
@@ -78,6 +79,7 @@ class DistributedRuntime:
             request_plane: Request plane transport ("tcp" or "nats")
             enable_nats: Deprecated; NATS enablement is inferred from runtime config
             event_plane: Event plane transport ("nats" or "zmq")
+            response_plane: Response plane transport ("tcp" or "quic")
         """
         ...
 
@@ -1181,6 +1183,7 @@ class KvEventPublisher:
         batching_timeout_ms: Optional[int] = None,
         image_token_id: Optional[int] = None,
         kv_state_endpoint: Optional[str] = None,
+        video_token_id: Optional[int] = None,
     ) -> None:
         """
         Create a `KvEventPublisher` object.
@@ -1201,7 +1204,9 @@ class KvEventPublisher:
             zmq_topic: ZMQ topic to subscribe to (defaults to "" when zmq_endpoint is set)
             batching_timeout_ms: Cross-list batching timeout in milliseconds. None/0
                 flushes at each submitted source-list boundary.
+            image_token_id: Optional model image-placeholder token for exact MM routing.
             kv_state_endpoint: KV event ownership endpoint; defaults to endpoint.
+            video_token_id: Optional model video-placeholder token for exact MM routing.
         """
 
     def publish_stored(
@@ -1713,6 +1718,7 @@ class RouterConfig:
         active_prefill_tokens_threshold_frac: Optional[float] = None,
         enforce_disagg: bool = False,
         session_affinity_ttl_secs: Optional[int] = None,
+        session_affinity_mode: str = "hard",
     ) -> None:
         """
         Create a RouterConfig.
@@ -1725,6 +1731,7 @@ class RouterConfig:
             active_prefill_tokens_threshold_frac: Fraction of max_num_batched_tokens for busy detection
             enforce_disagg: Deprecated and ignored. Routing topology and readiness come from registered worker types.
             session_affinity_ttl_secs: Router-local session-affinity idle TTL in seconds.
+            session_affinity_mode: Session binding behavior: ``hard`` or ``soft``.
         """
         ...
 
@@ -2487,6 +2494,7 @@ def run_mocker_trace_replay(
         "mooncake_delta",
         "agentic_mooncake",
         "agentic-mooncake",
+        "weka",
         "applied_compute_agentic",
         "dynamo",
     ] = "mooncake",
@@ -2501,6 +2509,7 @@ def run_mocker_trace_replay(
     capture_per_request: bool = False,
     capture_planner_details: bool = True,
     scaling_policy: Optional[Any] = None,
+    agentic_lanes: Optional[int] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 
@@ -2819,6 +2828,13 @@ class KvDcRelay:
         publication_threshold: int = 16,
         publication_delay_ms: int = 1,
         recovery_attempt_timeout_ms: int = 30_000,
+        *,
+        namespaces: Optional[List[str]] = None,
+        endpoint_prefixes: Optional[List[str]] = None,
+        watch_all: Optional[bool] = None,
+        expected_unique_blocks: int = 1_048_576,
+        bind: Optional[str] = None,
+        tuning: Optional[Dict[str, int]] = None,
     ) -> None:
         ...
 
@@ -2826,6 +2842,14 @@ class KvDcRelay:
         ...
 
     async def health(self) -> Dict[str, Any]:
+        ...
+
+    async def stats(self) -> Dict[str, Any]:
+        """Available only in builds with the ckf-diagnostics Cargo feature."""
+        ...
+
+    async def snapshot(self, serving_endpoint: str) -> Dict[str, Any]:
+        """Available only in builds with the ckf-diagnostics Cargo feature."""
         ...
 
     async def flush(self) -> None:
@@ -2880,6 +2904,7 @@ class KvRouter:
         session_affinity_ttl_secs: Optional[int] = None,
         *,
         load_threshold_config: Optional[LoadThresholdConfig] = None,
+        session_affinity_mode: str = "hard",
     ) -> None:
         """
         Create a new KvRouter instance.
@@ -2891,6 +2916,7 @@ class KvRouter:
             aic_perf_config: Optional AIC perf-model config for effective prefill load tracking
             session_affinity_ttl_secs: Optional router-local session-affinity idle TTL in seconds
             load_threshold_config: Optional overload-admission thresholds; all checks are disabled when omitted
+            session_affinity_mode: Session binding behavior: ``hard`` or ``soft``
         """
         ...
 
@@ -3368,6 +3394,7 @@ class backend:
             data_parallel_start_rank: Optional[int] = None,
             bootstrap_host: Optional[str] = None,
             bootstrap_port: Optional[int] = None,
+            enable_eagle: bool = False,
         ) -> None: ...
         @property
         def context_length(self) -> Optional[int]: ...
@@ -3387,6 +3414,8 @@ class backend:
         def bootstrap_host(self) -> Optional[str]: ...
         @property
         def bootstrap_port(self) -> Optional[int]: ...
+        @property
+        def enable_eagle(self) -> bool: ...
 
     class EngineConfig:
         def __init__(

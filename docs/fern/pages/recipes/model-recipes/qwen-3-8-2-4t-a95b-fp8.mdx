@@ -81,7 +81,7 @@ Each target below is a Dynamo + vLLM or SGLang deployment of [Qwen3.8-2.4T-A95B]
 
 <div data-sku="gb300">
 
-- A Kubernetes cluster with the Dynamo platform installed and GB300 GPUs available — 16x (4 nodes). See the [Kubernetes Deployment Guide](../kubernetes/quickstart.mdx).
+- A Kubernetes cluster with the Dynamo platform installed and GB300 GPUs available — 16x (4 nodes). See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
 - The NVIDIA DRA driver with ComputeDomain support installed (required for multi-node NVLink).
 - A Hugging Face token with access to `Qwen/Qwen3.8-2.4T-A95B-FP8`.
 
@@ -89,7 +89,7 @@ Each target below is a Dynamo + vLLM or SGLang deployment of [Qwen3.8-2.4T-A95B]
 
 <div data-sku="gb200">
 
-- A Kubernetes cluster with the Dynamo platform installed and GB200 GPUs available — 16x (4 nodes) for aggregated; 48x (12 nodes, 2×4 prefill + 4 decode) for 2P1D disaggregated. See the [Kubernetes Deployment Guide](../kubernetes/quickstart.mdx).
+- A Kubernetes cluster with the Dynamo platform installed and GB200 GPUs available — 16x (4 nodes) for aggregated; 48x (12 nodes, 2×4 prefill + 4 decode) for 2P1D disaggregated. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
 - The NVIDIA DRA driver with ComputeDomain support installed (required for multi-node NVLink).
 - A Hugging Face token with access to `Qwen/Qwen3.8-2.4T-A95B-FP8`.
 - The `model-cache` PVC, populated by the model-download Job (see step 3 below).

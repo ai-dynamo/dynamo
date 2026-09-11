@@ -31,7 +31,7 @@ Each backend decodes such input through a specific Python package whose wheel bu
 | SGLang | video | `decord2>=3.4.0,<4` | `decord` |
 | TensorRT-LLM | video | `opencv-python-headless>=4.13.0.92,<5` | `cv2` |
 
-The lower bound of each spec is the version validated against Dynamo's multimodal test suite; the upper bound excludes the next major release so an install cannot silently pick up an unvalidated version. PyNvVideoCodec is not in this list because the images already ship it — it is the NVDEC path, not a fallback, so there is nothing to install. torchcodec is left out because no Dynamo decode path imports it.
+The lower bound of each spec is the version validated against Dynamo's multimodal test suite; the upper bound excludes the next major release so an install cannot silently pick up an unvalidated version. PyNvVideoCodec is not in this list because every CUDA runtime image already ships it — it is the NVDEC path, not a fallback, so there is nothing to install. torchcodec is left out because no Dynamo decode path imports it.
 
 ## Install with pip
 
