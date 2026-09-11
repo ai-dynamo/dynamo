@@ -19,7 +19,7 @@ use dynamo_kv_router::scheduling::TierOverlapBlocks;
 use dynamo_kv_router::{
     ConcurrentRadixTree, RoutingPartitionRef, TrackingHashContext, TrackingHashScope,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -92,17 +92,36 @@ fn create_replay_indexer(block_size: u32, num_threads: usize) -> ReplayIndexer {
     ))
 }
 
+/// Work item on the replay router's KV event lane.
+///
+/// `Barrier` rides the same channel as the events it orders behind. Because the
+/// channel is FIFO, a barrier queued after a batch of events is only acknowledged
+/// once every one of them has been applied -- which is what
+/// [`KvReplayRouter::await_indexed`] needs and what a bare `flush()` cannot give,
+/// since `flush()` only settles the indexer's own internal queue and knows nothing
+/// about events still sitting in this channel.
+enum ReplayIndexerMessage {
+    Event(Box<RouterEvent>),
+    Barrier(oneshot::Sender<()>),
+}
+
 #[derive(Clone)]
 struct ReplayKvEventSink {
     worker_id: WorkerId,
-    event_tx: mpsc::UnboundedSender<RouterEvent>,
+    event_tx: mpsc::UnboundedSender<ReplayIndexerMessage>,
+}
+
+impl ReplayKvEventSink {
+    fn send(&self, event: RouterEvent) -> anyhow::Result<()> {
+        self.event_tx
+            .send(ReplayIndexerMessage::Event(Box::new(event)))
+            .map_err(|_| anyhow!("replay router event channel closed"))
+    }
 }
 
 impl KvCacheEventSink for ReplayKvEventSink {
     fn publish(&self, event: dynamo_kv_router::protocols::KvCacheEvent) -> anyhow::Result<()> {
-        self.event_tx
-            .send(RouterEvent::new(self.worker_id, event))
-            .map_err(|_| anyhow!("replay router event channel closed"))
+        self.send(RouterEvent::new(self.worker_id, event))
     }
 
     fn publish_with_storage_tier(
@@ -110,13 +129,11 @@ impl KvCacheEventSink for ReplayKvEventSink {
         event: dynamo_kv_router::protocols::KvCacheEvent,
         storage_tier: StorageTier,
     ) -> anyhow::Result<()> {
-        self.event_tx
-            .send(RouterEvent::with_storage_tier(
-                self.worker_id,
-                event,
-                storage_tier,
-            ))
-            .map_err(|_| anyhow!("replay router event channel closed"))
+        self.send(RouterEvent::with_storage_tier(
+            self.worker_id,
+            event,
+            storage_tier,
+        ))
     }
 }
 
@@ -175,7 +192,7 @@ pub(crate) struct KvReplayRouter {
     block_size: u32,
     scheduler: Arc<ReplayScheduler>,
     scheduler_cancel: CancellationToken,
-    event_tx: Mutex<Option<mpsc::UnboundedSender<RouterEvent>>>,
+    event_tx: Mutex<Option<mpsc::UnboundedSender<ReplayIndexerMessage>>>,
     event_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     indexer: ReplayIndexer,
     tracking_hash: TrackingHashContext,
@@ -224,8 +241,19 @@ impl KvReplayRouter {
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
         let indexer_clone = indexer.clone();
         let event_task = tokio::spawn(async move {
-            while let Some(event) = event_rx.recv().await {
-                indexer_clone.apply_event(event).await;
+            while let Some(message) = event_rx.recv().await {
+                match message {
+                    ReplayIndexerMessage::Event(event) => {
+                        indexer_clone.apply_event(*event).await;
+                    }
+                    ReplayIndexerMessage::Barrier(ack) => {
+                        // Flush before acking: the events above are handed to the
+                        // indexer asynchronously, so draining this channel alone does
+                        // not mean they are queryable yet.
+                        let _ = indexer_clone.flush().await;
+                        let _ = ack.send(());
+                    }
+                }
             }
             let _ = indexer_clone.flush().await;
         });
@@ -260,10 +288,47 @@ impl KvReplayRouter {
         })
     }
 
+    /// Wait until every KV event published before this call is visible to the indexer.
+    ///
+    /// Engines publish store/remove events into an unbounded channel drained by a
+    /// detached task. Without this barrier, whether a routing decision sees a prefix
+    /// that a just-completed request published is decided by when that task happened
+    /// to get scheduled -- so the same trace could route to a warm or a cold worker
+    /// run to run. `ReplayIndexer::flush` alone is not enough: it settles the
+    /// indexer's internal queue but not events still in this channel.
+    ///
+    /// This makes visibility a function of publish order rather than of task
+    /// scheduling. It does not make online KV replay reproducible on its own --
+    /// whether a completing request publishes before the next routing decision is
+    /// still wall-clock dependent, which is inherent to a live replay.
+    async fn await_indexed(&self) -> Result<()> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        // Scoped so the std mutex guard is dropped before the await below.
+        let queued = {
+            let event_tx = self
+                .event_tx
+                .lock()
+                .map_err(|_| anyhow!("replay router event channel lock poisoned"))?;
+            match event_tx.as_ref() {
+                Some(event_tx) => event_tx.send(ReplayIndexerMessage::Barrier(ack_tx)).is_ok(),
+                // `shutdown` already took the sender; the forwarder has drained and
+                // flushed, so there is nothing left to wait for.
+                None => false,
+            }
+        };
+        if !queued {
+            return Ok(());
+        }
+        ack_rx
+            .await
+            .map_err(|_| anyhow!("replay router event task dropped an indexer barrier"))
+    }
+
     async fn select_worker(&self, request: &DirectRequest) -> Result<ReplayPlacement> {
         let uuid = request
             .uuid
             .ok_or_else(|| anyhow!("online replay requires requests to have stable UUIDs"))?;
+        self.await_indexed().await?;
         let overlaps = self
             .indexer
             .find_matches_for_request(&request.tokens, None)

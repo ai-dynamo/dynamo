@@ -777,6 +777,71 @@ fn test_online_trace_replay_kv_router_prefers_cached_worker() {
     assert_eq!(stats.dispatch_history[0], stats.dispatch_history[1]);
 }
 
+/// The fixture above leaves 500ms between arrivals, which gives the detached KV
+/// event forwarder ample time to drain -- it dodges the visibility race rather than
+/// proving its absence.
+///
+/// `publish` is a synchronous send onto the forwarder's channel, so this drives the
+/// narrowest window there is: publish, then route with no intervening await. The
+/// routing decision must observe the freshly published prefix and pick that worker
+/// rather than a cold one.
+#[tokio::test]
+async fn a_routing_decision_observes_kv_events_published_just_before_it() {
+    const CACHED_WORKER: u64 = 1;
+
+    // Repeated with a fresh router each pass: the forwarder usually wins this race
+    // on its own, so a single pass is not evidence that the barrier is doing
+    // anything.
+    for attempt in 0..40 {
+        let args = replay_args();
+        let router = ReplayRouter::new(ReplayRouterMode::KvRouter, &args, None, None, 2).unwrap();
+
+        let target = request(1, 88, Some(0.0));
+        let block_hashes = dynamo_kv_router::protocols::compute_block_hash_for_seq(
+            &target.tokens,
+            args.block_size as u32,
+            dynamo_kv_router::protocols::BlockHashOptions::default(),
+        );
+        assert_eq!(
+            block_hashes.len(),
+            1,
+            "fixture must produce exactly one block"
+        );
+
+        router
+            .sink(CACHED_WORKER)
+            .publish(
+                dynamo_kv_router::protocols::KvCacheEvent {
+                    event_id: 1,
+                    data: dynamo_kv_router::protocols::KvCacheEventData::Stored(
+                        dynamo_kv_router::protocols::KvCacheStoreData {
+                            parent_hash: None,
+                            start_position: None,
+                            blocks: vec![dynamo_kv_router::protocols::KvCacheStoredBlockData {
+                                block_hash: dynamo_kv_router::protocols::ExternalSequenceBlockHash(
+                                    1,
+                                ),
+                                tokens_hash: block_hashes[0],
+                                mm_extra_info: None,
+                            }],
+                        },
+                    ),
+                    dp_rank: 0,
+                },
+                None,
+            )
+            .unwrap();
+
+        // No yield between the publish above and the routing decision below.
+        let placement = router.select_worker(&target, 2, 1).await.unwrap();
+        assert_eq!(
+            placement.worker_idx, CACHED_WORKER as usize,
+            "attempt {attempt}: routing must see the KV event published immediately before it"
+        );
+        router.shutdown().await.unwrap();
+    }
+}
+
 #[test]
 fn test_online_trace_replay_sglang_single_worker_completes() {
     let args = sglang_replay_args();
