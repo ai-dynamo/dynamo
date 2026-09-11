@@ -448,7 +448,13 @@ impl AsyncEngineContext for Controller {
             child.stop_generating();
         }
 
-        let _ = self.tx.send(State::Stopped);
+        self.tx.send_if_modified(|state| {
+            let was_live = *state == State::Live;
+            if was_live {
+                *state = State::Stopped;
+            }
+            was_live
+        });
     }
 
     fn stop(&self) {
@@ -464,7 +470,13 @@ impl AsyncEngineContext for Controller {
             child.stop();
         }
 
-        let _ = self.tx.send(State::Stopped);
+        self.tx.send_if_modified(|state| {
+            let was_live = *state == State::Live;
+            if was_live {
+                *state = State::Stopped;
+            }
+            was_live
+        });
     }
 
     fn kill(&self) {
@@ -501,6 +513,21 @@ impl AsyncEngineContext for Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graceful_stop_cannot_undo_a_kill() {
+        let parent = Controller::new("parent".into());
+        let child: Arc<dyn AsyncEngineContext> = Arc::new(Controller::new("child".into()));
+        parent.link_child(child.clone());
+        child.kill();
+        parent.stop();
+        assert!(child.is_killed());
+        parent.kill();
+        parent.stop_generating();
+        parent.stop();
+        assert!(parent.is_killed());
+        assert!(child.is_killed());
+    }
 
     #[derive(Debug, Clone)]
     struct Input {
