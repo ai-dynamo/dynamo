@@ -834,7 +834,9 @@ def build_sampling_params(
     output_options = request.get("output_options", {}) or {}
     logprobs, prompt_logprobs = _shared_logprobs.parse_logprob_options(output_options)
     logprobs = -1 if logprobs == _FULL_VOCAB_LOGPROBS_SENTINEL else logprobs
-    prompt_logprobs = -1 if prompt_logprobs == _FULL_VOCAB_LOGPROBS_SENTINEL else prompt_logprobs
+    prompt_logprobs = (
+        -1 if prompt_logprobs == _FULL_VOCAB_LOGPROBS_SENTINEL else prompt_logprobs
+    )
     # Explicit `logprob_token_ids` replace vLLM's natural top-k selection, so the
     # requested width no longer applies. vLLM's own OpenAI adapters null `logprobs`
     # in this case and let `num_logprobs` derive the width from the id list; mirror
