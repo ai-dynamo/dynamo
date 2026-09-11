@@ -152,6 +152,13 @@ const sidecarScriptTemplate = `
 set -e
 set -o pipefail
 
+# Without kubectl the sidecar would poll forever and strand the DGDR in
+# Profiling; fail the Job instead so the controller can move it to Failed.
+if ! command -v kubectl >/dev/null 2>&1; then
+  echo "ERROR: kubectl not found in the output-copier image. The image set for the output-copier container through spec.overrides.profilingJob must contain kubectl." >&2
+  exit 1
+fi
+
 STATUS_FILE="{{.OutputPath}}/profiler_status.yaml"
 LAST_PHASE=""
 START_TIME=$(date +%s)
