@@ -475,19 +475,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn automatic_publisher_honors_explicit_replay_port() {
+    async fn automatic_replay_port_serves_events_and_rejects_a_second_bind() {
         use std::time::Duration;
         use tmq::dealer::dealer;
 
-        let reserved = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let replay_port = reserved.local_addr().unwrap().port();
-        drop(reserved);
-        let sink = ZmqKvEventSink::bind(None, Some(replay_port), 0, 4)
-            .await
-            .unwrap();
-        assert_eq!(
-            sink.replay_endpoint(),
-            Some(format!("tcp://0.0.0.0:{replay_port}").as_str())
+        let sink = ZmqKvEventSink::bind(None, Some(0), 0, 4).await.unwrap();
+        let replay_endpoint = sink.replay_endpoint().unwrap();
+        let replay_port: u16 = replay_endpoint.rsplit_once(':').unwrap().1.parse().unwrap();
+        assert_ne!(replay_port, 0);
+        assert!(
+            ZmqKvEventSink::bind(None, Some(replay_port), 0, 4)
+                .await
+                .is_err()
         );
         sink.publish(RawKvEvent {
             event: stored_event(),
@@ -498,7 +497,7 @@ mod tests {
         let ctx = Context::new();
         let mut replay = dealer(&ctx)
             .set_linger(0)
-            .connect(&format!("tcp://127.0.0.1:{replay_port}"))
+            .connect(&replay_endpoint.replace("0.0.0.0", "127.0.0.1"))
             .unwrap();
         let frames = tokio::time::timeout(Duration::from_secs(5), async {
             loop {

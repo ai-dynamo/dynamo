@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 fn admitting_args() -> MockEngineArgs {
     MockEngineArgs::builder()
         .block_size(4)
+        .enable_prefix_caching(false)
         .num_gpu_blocks(4096)
         .max_num_seqs(Some(64))
         .max_num_batched_tokens(Some(1024))
@@ -157,10 +158,12 @@ fn text_prompts_fail_with_an_actionable_status() {
 
 #[tokio::test]
 async fn service_rejects_non_vllm_or_multi_rank_engines() {
-    let sglang = MockEngineArgs::builder()
+    let mut sglang = MockEngineArgs::builder()
         .engine_type(EngineType::Sglang)
         .build()
         .unwrap();
+    // Service-specific errors must take priority over general validation.
+    sglang.num_gpu_blocks = 0;
     assert!(
         VllmMockerService::new(MockerServerConfig::default(), sglang)
             .await
@@ -170,7 +173,8 @@ async fn service_rejects_non_vllm_or_multi_rank_engines() {
             .contains("engine_type")
     );
 
-    let multi_rank = MockEngineArgs::builder().dp_size(2).build().unwrap();
+    let mut multi_rank = MockEngineArgs::builder().dp_size(2).build().unwrap();
+    multi_rank.num_gpu_blocks = 0;
     assert!(
         VllmMockerService::new(MockerServerConfig::default(), multi_rank)
             .await
@@ -180,10 +184,11 @@ async fn service_rejects_non_vllm_or_multi_rank_engines() {
             .contains("dp_size")
     );
 
-    let disaggregated = MockEngineArgs::builder()
+    let mut disaggregated = MockEngineArgs::builder()
         .worker_type(WorkerType::Prefill)
         .build()
         .unwrap();
+    disaggregated.num_gpu_blocks = 0;
     assert!(
         VllmMockerService::new(MockerServerConfig::default(), disaggregated)
             .await
@@ -205,6 +210,17 @@ async fn service_rejects_non_vllm_or_multi_rank_engines() {
             .to_string()
             .contains("max_concurrent_requests")
     );
+
+    let mut invalid = admitting_args();
+    invalid.num_gpu_blocks = 0;
+    assert!(
+        VllmMockerService::new(MockerServerConfig::default(), invalid)
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("num_gpu_blocks")
+    );
 }
 
 /// Regression: a mocker without RL capabilities could classify an unsupported
@@ -212,7 +228,7 @@ async fn service_rejects_non_vllm_or_multi_rank_engines() {
 /// capability absence; this test catches it at the Control RPC boundary.
 #[tokio::test]
 async fn unsupported_rl_control_reports_unimplemented() {
-    let service = VllmMockerService::new(MockerServerConfig::default(), MockEngineArgs::default())
+    let service = VllmMockerService::new(MockerServerConfig::default(), admitting_args())
         .await
         .unwrap();
     let server_info = pb::control_server::Control::get_server_info(
@@ -240,6 +256,7 @@ async fn unsupported_rl_control_reports_unimplemented() {
 async fn unary_generate_maps_capacity_rejection_to_resource_exhausted() {
     let args = MockEngineArgs::builder()
         .block_size(4)
+        .enable_prefix_caching(false)
         .num_gpu_blocks(1)
         .max_num_seqs(Some(8))
         .max_num_batched_tokens(Some(64))
@@ -264,6 +281,7 @@ async fn unary_generate_maps_capacity_rejection_to_resource_exhausted() {
 async fn concurrent_request_limit_rejects_a_stalled_stream() {
     let args = MockEngineArgs::builder()
         .block_size(4)
+        .enable_prefix_caching(false)
         .num_gpu_blocks(128)
         .max_num_seqs(Some(1))
         .speedup_ratio(0.01)
@@ -394,6 +412,7 @@ async fn streaming_generate_maps_capacity_rejection_to_resource_exhausted() {
     // the rejection arrives as a later stream item after prompt info.
     let args = MockEngineArgs::builder()
         .block_size(4)
+        .enable_prefix_caching(false)
         .num_gpu_blocks(1)
         .max_num_seqs(Some(8))
         .max_num_batched_tokens(Some(64))
@@ -512,6 +531,7 @@ async fn kv_event_discovery_follows_regular_mocker_rules() {
 async fn failed_kv_publisher_is_not_advertised() {
     let occupied = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
     let mut args = admitting_args();
+    args.enable_prefix_caching = true;
     args.zmq_kv_events_port = Some(occupied.local_addr().unwrap().port());
     let service = VllmMockerService::new(MockerServerConfig::default(), args)
         .await

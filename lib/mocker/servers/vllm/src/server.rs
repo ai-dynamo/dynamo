@@ -79,7 +79,6 @@ impl VllmMockerService {
         config: MockerServerConfig,
         engine_args: MockEngineArgs,
     ) -> anyhow::Result<Self> {
-        let engine_args = engine_args.normalized()?;
         anyhow::ensure!(
             engine_args.engine_type == EngineType::Vllm,
             "Mocker engine_type must be vllm"
@@ -93,6 +92,7 @@ impl VllmMockerService {
             engine_args.worker_type == WorkerType::Aggregated,
             "Mocker worker_type must be aggregated; use the server mode for the emulated wire role"
         );
+        let engine_args = engine_args.normalized()?;
         let max_concurrent_requests = config.max_concurrent_requests;
         let model_info = pb::ModelInfo {
             model_id: config.model.clone(),
@@ -149,7 +149,7 @@ impl VllmMockerService {
                 engine_args.zmq_kv_events_port,
                 engine_args.zmq_replay_port,
                 DP_RANK,
-                u32::try_from(engine_args.block_size)?,
+                server_info.kv_block_size,
             )
             .await
             {

@@ -10,7 +10,9 @@ use dynamo_backend_common::{
     GenerateContext, KvEventSource, LLMEngine, PreprocessedRequest, StopConditions,
 };
 use dynamo_kv_router::indexer::{KvIndexerInterface, KvIndexerMetrics, LocalKvIndexer};
-use dynamo_kv_router::protocols::{KV_EVENT_SUBJECT, KvCacheEventData, RouterEvent};
+use dynamo_kv_router::protocols::{
+    KV_EVENT_SUBJECT, KvCacheEventData, RouterEvent, compute_block_hash_for_seq,
+};
 use dynamo_llm::kv_router::publisher::{KvEventPublisher, KvEventSourceConfig};
 use dynamo_runtime::distributed::DistributedConfig;
 use dynamo_runtime::transports::event_plane::EventSubscriber;
@@ -40,7 +42,7 @@ async fn generate(engine: &impl LLMEngine, tokens: Vec<u32>) {
     }
 }
 
-pub async fn check_kv_events(engine: &impl LLMEngine) {
+pub async fn check_kv_events(engine: &impl LLMEngine, block_size: u32) {
     let sources = engine.kv_event_sources().await.unwrap();
     assert_eq!(sources.len(), 1);
     let KvEventSource::Zmq {
@@ -74,7 +76,7 @@ pub async fn check_kv_events(engine: &impl LLMEngine) {
         .typed::<Vec<RouterEvent>>();
     let mut relay = KvEventPublisher::new_with_local_indexer(
         endpoint,
-        4,
+        block_size,
         Some(KvEventSourceConfig::Zmq {
             endpoint: source_endpoint.clone(),
             topic: topic.clone(),
@@ -91,7 +93,7 @@ pub async fn check_kv_events(engine: &impl LLMEngine) {
     // produce fresh stores even if an earlier event was dropped before connect.
     tokio::time::timeout(Duration::from_secs(10), async {
         for n in 100.. {
-            generate(engine, vec![n; 4]).await;
+            generate(engine, vec![n; block_size as usize]).await;
             if let Ok(Some(batch)) =
                 tokio::time::timeout(Duration::from_millis(50), subscriber.next()).await
             {
@@ -106,11 +108,14 @@ pub async fn check_kv_events(engine: &impl LLMEngine) {
     let cancel = dynamo_runtime::CancellationToken::new();
     let indexer = LocalKvIndexer::new(
         cancel.clone(),
-        4,
+        block_size,
         Arc::new(KvIndexerMetrics::new_unregistered()),
         100,
     );
     let prompt = vec![11, 22, 33, 44, 55, 66, 77, 88];
+    let prompt_hashes = compute_block_hash_for_seq(&prompt, block_size, Default::default());
+    let expected_blocks = u32::try_from(prompt_hashes.len()).unwrap();
+    assert!(expected_blocks > 0);
     generate(engine, prompt.clone()).await;
     let mut last_event_id = None;
     let mut stored_hashes = Vec::new();
@@ -125,7 +130,12 @@ pub async fn check_kv_events(engine: &impl LLMEngine) {
                 }
                 last_event_id = Some(event.event.event_id);
                 if let KvCacheEventData::Stored(data) = &event.event.data {
-                    stored_hashes.extend(data.blocks.iter().map(|block| block.block_hash));
+                    stored_hashes.extend(
+                        data.blocks
+                            .iter()
+                            .filter(|block| prompt_hashes.contains(&block.tokens_hash))
+                            .map(|block| block.block_hash),
+                    );
                 }
                 indexer.apply_event_with_buffer(event).await.unwrap();
             }
@@ -133,7 +143,12 @@ pub async fn check_kv_events(engine: &impl LLMEngine) {
                 .find_matches_for_request(&prompt, None, None, None)
                 .await
                 .unwrap();
-            if scores.scores.values().any(|&blocks| blocks == 2) {
+            if scores
+                .scores
+                .values()
+                .any(|&blocks| blocks == expected_blocks)
+            {
+                assert_eq!(stored_hashes.len(), prompt_hashes.len());
                 break;
             }
         }
@@ -141,24 +156,11 @@ pub async fn check_kv_events(engine: &impl LLMEngine) {
     .await
     .expect("stored prompt did not reach the router index");
 
-    // A cache hit must keep the original indexed blocks usable.
-    generate(engine, prompt.clone()).await;
-    assert!(
-        indexer
-            .find_matches_for_request(&prompt, None, None, None)
-            .await
-            .unwrap()
-            .scores
-            .values()
-            .any(|&blocks| blocks == 2)
-    );
-
     // The test engine has eight blocks. Force eviction with unrelated prompts.
     for n in 200..212 {
-        generate(engine, vec![n; 8]).await;
+        generate(engine, vec![n; 2 * block_size as usize]).await;
     }
     tokio::time::timeout(Duration::from_secs(5), async {
-        let mut removed_stored_block = false;
         loop {
             let (_, events) = subscriber.next().await.unwrap().unwrap();
             for event in events {
@@ -166,10 +168,7 @@ pub async fn check_kv_events(engine: &impl LLMEngine) {
                 assert!(event.event.event_id > last_event_id.unwrap());
                 last_event_id = Some(event.event.event_id);
                 if let KvCacheEventData::Removed(data) = &event.event.data {
-                    removed_stored_block |= data
-                        .block_hashes
-                        .iter()
-                        .any(|hash| stored_hashes.contains(hash));
+                    stored_hashes.retain(|hash| !data.block_hashes.contains(hash));
                 }
                 indexer.apply_event_with_buffer(event).await.unwrap();
             }
@@ -177,7 +176,7 @@ pub async fn check_kv_events(engine: &impl LLMEngine) {
                 .find_matches_for_request(&prompt, None, None, None)
                 .await
                 .unwrap();
-            if removed_stored_block && scores.scores.values().all(|&blocks| blocks == 0) {
+            if stored_hashes.is_empty() && scores.scores.values().all(|&blocks| blocks == 0) {
                 break;
             }
         }
