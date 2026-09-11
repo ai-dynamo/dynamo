@@ -443,6 +443,11 @@ impl KvReplayRouter {
     }
 
     #[cfg(test)]
+    fn debug_pending_count(&self) -> usize {
+        self.scheduler.pending_count()
+    }
+
+    #[cfg(test)]
     fn fail_mark_prefill(&self) {
         self.fail_mark_prefill.store(true, Ordering::Release);
     }
@@ -543,6 +548,20 @@ impl ReplayRouter {
         match self {
             Self::RoundRobin(_) => Vec::new(),
             Self::Kv(router) => router.debug_potential_loads(isl_tokens, track_prefill_tokens),
+        }
+    }
+
+    /// Number of requests the KV scheduler currently has queued.
+    ///
+    /// Tests that need one request to be *in the queue* before submitting the next
+    /// must poll this rather than counting `yield_now()` calls: `select_worker`
+    /// awaits an indexer barrier before it ever reaches the scheduler, so the number
+    /// of yields it takes to get queued is not a stable property.
+    #[cfg(test)]
+    pub(crate) fn debug_pending_count(&self) -> usize {
+        match self {
+            Self::RoundRobin(_) => 0,
+            Self::Kv(router) => router.debug_pending_count(),
         }
     }
 
@@ -690,6 +709,27 @@ mod tests {
         router.shutdown().await.unwrap();
     }
 
+    /// Wait until the KV scheduler has exactly `expected` requests queued.
+    ///
+    /// Mirrors kv-router's own `wait_for_pending_count` helper. Polling a real
+    /// observable is required here: `select_worker` awaits an indexer barrier before
+    /// reaching the scheduler, so "one `yield_now` gets a spawned task queued" is not
+    /// a property the runtime guarantees.
+    async fn wait_for_pending_count(router: &ReplayRouter, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while router.debug_pending_count() != expected {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "scheduler never reached {expected} pending request(s); saw {}",
+                router.debug_pending_count()
+            )
+        });
+    }
+
     #[tokio::test]
     async fn online_replay_forwards_priorities_to_scheduler_queue() {
         let args = MockEngineArgs::builder()
@@ -719,7 +759,7 @@ mod tests {
                 completed_tx.send(2).unwrap();
             })
         };
-        tokio::task::yield_now().await;
+        wait_for_pending_count(&router, 1).await;
         let high_task = {
             let router = Arc::clone(&router);
             tokio::spawn(async move {
@@ -728,7 +768,7 @@ mod tests {
                 completed_tx.send(3).unwrap();
             })
         };
-        tokio::task::yield_now().await;
+        wait_for_pending_count(&router, 2).await;
 
         router.on_complete(Uuid::from_u128(1)).await.unwrap();
         let first = tokio::time::timeout(Duration::from_secs(1), completed_rx.recv())
