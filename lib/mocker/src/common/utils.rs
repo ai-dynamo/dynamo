@@ -3,6 +3,8 @@
 
 use std::time::{Duration, Instant};
 
+use tokio::time::Instant as TokioInstant;
+
 #[cfg(target_os = "linux")]
 use std::sync::Once;
 
@@ -125,21 +127,41 @@ impl Default for ReusablePreciseTimer {
 }
 
 impl ReusablePreciseTimer {
-    pub(crate) async fn sleep_until(&mut self, deadline: Instant) {
+    /// Sleep until `deadline` on the **Tokio** clock.
+    ///
+    /// The parameter is deliberately `tokio::time::Instant`, not
+    /// `std::time::Instant`. Callers build these deadlines from
+    /// `tokio::time::Instant::now()`, which under a paused clock is virtual time;
+    /// converting to `std::time::Instant` loses the domain but keeps the value, so
+    /// comparing the result against the real clock silently answers a different
+    /// question -- "has `virtual_offset` of *real* time elapsed since the runtime
+    /// was built?" -- and degrades a long virtual sleep into a bare `yield_now()`
+    /// once the process has been alive that long. That is not a benign
+    /// imprecision: a pass deadline that resolves instantly lets the grouped
+    /// actor reach its pass boundary before it ever drains `command_rx`,
+    /// deadlocking any caller that awaits a command acknowledgement mid-pass.
+    /// Keeping one clock domain from the caller through to the comparison is what
+    /// makes that unrepresentable.
+    ///
+    /// The timerfd path below still converts, because a timerfd is armed against
+    /// the OS clock and is only meaningful when the Tokio clock *is* the real
+    /// clock. A paused clock never reaches it under test (the Tokio test mode
+    /// short-circuits above).
+    pub(crate) async fn sleep_until(&mut self, deadline: TokioInstant) {
         #[cfg(all(test, target_os = "linux"))]
         if self.test_mode == TimerTestMode::Tokio {
             sleep_until_tokio(deadline).await;
             return;
         }
 
-        if deadline <= Instant::now() {
+        if deadline <= TokioInstant::now() {
             tokio::task::yield_now().await;
             return;
         }
 
         #[cfg(target_os = "linux")]
         {
-            match self.arm_timerfd(deadline) {
+            match self.arm_timerfd(deadline.into_std()) {
                 Ok(true) => {}
                 Ok(false) => {
                     sleep_until_tokio(deadline).await;
@@ -224,11 +246,11 @@ impl ReusablePreciseTimer {
     }
 }
 
-async fn sleep_until_tokio(deadline: Instant) {
-    if deadline <= Instant::now() {
+async fn sleep_until_tokio(deadline: TokioInstant) {
+    if deadline <= TokioInstant::now() {
         tokio::task::yield_now().await;
     } else {
-        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+        tokio::time::sleep_until(deadline).await;
     }
 }
 
@@ -237,8 +259,13 @@ async fn sleep_until_tokio(deadline: Instant) {
 /// Unlike `sleep_precise`, this accounts for time already elapsed since the
 /// deadline's reference point, making it suitable for simulation loops where
 /// computation time should be subtracted from the sleep.
+/// The public entry point keeps its real-clock `std::time::Instant` signature:
+/// its callers (`sleep_precise`) build the deadline from `Instant::now()`, so the
+/// conversion here is between two readings of the same clock.
 pub async fn sleep_until_precise(deadline: Instant) {
-    ReusablePreciseTimer::default().sleep_until(deadline).await;
+    ReusablePreciseTimer::default()
+        .sleep_until(TokioInstant::from_std(deadline))
+        .await;
 }
 
 #[cfg(test)]
@@ -257,6 +284,35 @@ mod tests {
         sleep.await;
     }
 
+    /// A virtual deadline must not be resolved against the real clock.
+    ///
+    /// `sleep_until` used to take a `std::time::Instant`, so a deadline built from
+    /// the paused Tokio clock was compared against `std::time::Instant::now()`.
+    /// Both are offsets from the same runtime base, so the comparison reduced to
+    /// "has `virtual_offset` of *real* time elapsed?" -- and once it had, the
+    /// sleep collapsed into `yield_now()` and returned without advancing virtual
+    /// time at all. That silently deleted a modeled pass duration and deadlocked
+    /// the grouped live actor, which reached its pass boundary before draining
+    /// `command_rx`.
+    ///
+    /// Asserting `Pending` on the first poll would not catch it -- `yield_now()`
+    /// is Pending once too. The discriminator is whether the clock moved.
+    #[tokio::test(start_paused = true)]
+    async fn sleep_until_honors_a_virtual_deadline_after_real_time_has_elapsed() {
+        let mut timer = ReusablePreciseTimer::default();
+        // Burn real wall time without moving the paused clock: `thread::sleep`
+        // never parks the runtime, so auto-advance cannot run.
+        std::thread::sleep(Duration::from_millis(50));
+
+        let deadline = TokioInstant::now() + Duration::from_millis(10);
+        timer.sleep_until(deadline).await;
+
+        assert!(
+            TokioInstant::now() >= deadline,
+            "sleep_until returned without advancing virtual time to its deadline"
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "current_thread")]
     async fn reusable_precise_timer_reuses_its_timerfd() {
@@ -264,7 +320,7 @@ mod tests {
 
         for _ in 0..2 {
             let started = Instant::now();
-            let deadline = started + Duration::from_millis(5);
+            let deadline = TokioInstant::from_std(started + Duration::from_millis(5));
             tokio::time::timeout(Duration::from_secs(1), timer.sleep_until(deadline))
                 .await
                 .expect("reusable precise timer did not complete");
@@ -280,7 +336,7 @@ mod tests {
         let mut timer = ReusablePreciseTimer::with_timerfd_for_test();
         let cancelled_deadline = Instant::now() + Duration::from_millis(50);
         {
-            let wait = timer.sleep_until(cancelled_deadline);
+            let wait = timer.sleep_until(TokioInstant::from_std(cancelled_deadline));
             tokio::pin!(wait);
             tokio::select! {
                 biased;
@@ -295,7 +351,7 @@ mod tests {
         .await;
 
         let rearmed_at = Instant::now();
-        let rearmed_deadline = rearmed_at + Duration::from_millis(30);
+        let rearmed_deadline = TokioInstant::from_std(rearmed_at + Duration::from_millis(30));
         tokio::time::timeout(Duration::from_secs(1), timer.sleep_until(rearmed_deadline))
             .await
             .expect("rearmed precise timer did not complete");
@@ -314,7 +370,9 @@ mod tests {
 
         for _ in 0..2 {
             let started = Instant::now();
-            timer.sleep_until(started + Duration::from_millis(2)).await;
+            timer
+                .sleep_until(TokioInstant::from_std(started + Duration::from_millis(2)))
+                .await;
             assert!(started.elapsed() >= Duration::from_millis(1));
         }
 

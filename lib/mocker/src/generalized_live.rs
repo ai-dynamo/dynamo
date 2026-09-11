@@ -715,8 +715,12 @@ async fn sleep_until_ms(
         std::future::pending::<()>().await;
         return;
     };
+    // No `into_std()`: `origin` is a Tokio instant, so the deadline is too, and
+    // under a paused clock its value is virtual. Handing it to a real-clock
+    // comparison makes a 100ms virtual pass sleep return instantly once the
+    // process has been alive 100ms -- see `ReusablePreciseTimer::sleep_until`.
     let deadline = origin + Duration::from_secs_f64(deadline_ms.max(0.0) / 1_000.0);
-    timer.sleep_until(deadline.into_std()).await;
+    timer.sleep_until(deadline).await;
 }
 
 #[cfg(test)]
