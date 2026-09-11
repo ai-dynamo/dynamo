@@ -26,6 +26,14 @@ from .url_validator import (
     validate_url,
 )
 
+# Longest a client-supplied reason may render as inside an HttpStatusError.
+# Matches ``dynamo.llm.exceptions.HttpError._MAX_MESSAGE_LENGTH``, which the
+# binding applies to the other class it forwards on a 4xx. Generous on purpose:
+# callers build real guidance here -- the trtllm decoder hint is ~480 characters
+# and its test allows 2000 -- so a tight bound silently deletes the actionable
+# part and leaves only a truncated prefix.
+_MAX_MESSAGE_LENGTH = 8192
+
 
 class HttpError(Exception):
     """Base class for all HTTP fetch failures."""
@@ -53,7 +61,7 @@ class HttpStatusError(HttpError):
         # forwards ``.message`` verbatim to the client on a 4xx. Nothing in the
         # rendered text reaches that path. ``url`` is not part of that protocol,
         # so it keeps its full value for debugging.
-        message = describe_error_detail(message)
+        message = describe_error_detail(message, _MAX_MESSAGE_LENGTH)
         super().__init__(f"HTTP {status} for {describe_media_source(url)}: {message}")
         self.status = status
         self.message = message

@@ -113,8 +113,14 @@ def describe_error_detail(detail: str, limit: int = SOURCE_LABEL_LIMIT) -> str:
         return "<non-string error detail>"
     if len(detail) <= limit:
         return detail
-    head = limit // 2
-    return f"{detail[:head]}... ({len(detail)} chars) ...{detail[-(limit - head):]}"
+    # The marker comes out of the budget, not on top of it: a caller that sizes
+    # a buffer by ``limit`` should not be handed something longer.
+    marker = f"... ({len(detail)} chars) ..."
+    budget = limit - len(marker)
+    if budget <= 0:
+        return marker
+    head = budget // 2
+    return f"{detail[:head]}{marker}{detail[-(budget - head):]}"
 
 
 def is_blocked_ip(ip_text: str) -> bool:

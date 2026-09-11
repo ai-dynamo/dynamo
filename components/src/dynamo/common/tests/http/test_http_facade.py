@@ -219,11 +219,11 @@ async def test_http_status_error_bounds_both_halves_of_its_message() -> None:
     url = "https://example.com/" + "u" * 200_000
     err = base.HttpStatusError(404, "Not Found " + "m" * 200_000, url)
 
-    assert len(str(err)) < 500
     # The binding reads .message off this class by name and forwards it
     # verbatim to the client on a 4xx (errors.rs extract_http_like_error), so
     # bounding only the rendered string leaves the client-facing path open.
-    assert len(err.message) < 500
+    assert len(err.message) <= base._MAX_MESSAGE_LENGTH
+    assert len(str(err)) < 2 * base._MAX_MESSAGE_LENGTH
     # .url is not part of that protocol and keeps its full value.
     assert err.url == url
 
@@ -236,3 +236,35 @@ async def test_http_status_error_keeps_both_ends_of_a_long_detail() -> None:
 
     assert "Cannot connect" in err.message
     assert "nodename not known" in err.message
+
+
+async def test_http_status_error_keeps_a_real_guidance_message_intact() -> None:
+    """Callers build actionable guidance in ``message``; bounding must not eat it.
+
+    The trtllm video-decoder hint is ~480 characters of spec, installer command
+    and vendor cause, and its own test allows 2000. A tight bound here deletes
+    all of that and leaves a truncated prefix, which is how this class was
+    broken once already.
+    """
+    guidance = (
+        "Cannot decode video: this video (an undetected codec) has no decoder "
+        "in this image: shipped images decode only H.264/H.265 (in hardware, "
+        "via NVDEC), and the software decoder 'cv2' is deliberately not "
+        "installed. Re-encode the input to H.264/H.265, or install the "
+        "validated decoder with `pip install --no-deps "
+        "'opencv-python-headless==4.13.0.90'` (or `python -m "
+        "dynamo.common.utils.install_media_decoders trtllm`) "
+        "(decoder reported: OpenCV (cv2) is required for video decoding)"
+    )
+    err = base.HttpStatusError(
+        500, guidance, "data:video/mp4 (90022 chars, payload elided)"
+    )
+
+    assert err.message == guidance, "legitimate guidance must survive untouched"
+    for needle in (
+        "install_media_decoders trtllm",
+        "opencv-python-headless",
+        "OpenCV (cv2) is required for video decoding",
+    ):
+        assert needle in str(err), f"{needle!r} was truncated away"
+    assert len(str(err)) < 2_000
