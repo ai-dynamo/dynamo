@@ -134,8 +134,9 @@ import torch
 devices = [torch.cuda.get_device_name(index) for index in range(torch.cuda.device_count())]
 if len(devices) != 4:
     raise SystemExit(f"Expected exactly 4 visible GPUs, found {len(devices)}: {devices}")
-if any("B200" not in device.upper() for device in devices):
-    raise SystemExit(f"Expected 4 B200 GPUs, found: {devices}")
+supported_products = ("B200", "GB300")
+if not any(all(product in device.upper() for device in devices) for product in supported_products):
+    raise SystemExit(f"Expected 4 identical B200 or GB300 GPUs, found: {devices}")
 
 with open(sys.argv[1], "w", encoding="utf-8") as output:
     json.dump({"visible_gpu_count": len(devices), "devices": devices}, output, indent=2)
