@@ -746,11 +746,11 @@ mod tests {
     #[test]
     fn pre_stream_failure_with_migration_sensitive_cause_is_still_migratable() {
         use dynamo_runtime::pipeline::network::StreamPrologueError;
-        use dynamo_runtime::pipeline::network::egress::addressed_router::{
-            MIGRATION_SENSITIVE_ERROR_TYPES, pre_stream_failure_error,
+        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::{
+            migration_sensitive_error_types, pre_stream_failure_error,
         };
 
-        for &error_type in MIGRATION_SENSITIVE_ERROR_TYPES {
+        for &error_type in migration_sensitive_error_types() {
             let worker_error = DynamoError::builder()
                 .error_type(error_type)
                 .message("no capacity on the downstream worker")
@@ -796,13 +796,14 @@ mod tests {
     // a copy. This fails when the two drift, naming the missing entries.
     #[test]
     fn migration_sensitive_types_match_the_exclusion_set() {
-        use dynamo_runtime::pipeline::network::egress::addressed_router::MIGRATION_SENSITIVE_ERROR_TYPES;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::migration_sensitive_error_types;
 
+        let router_types = migration_sensitive_error_types();
         let missing_from_router: Vec<_> = NON_MIGRATABLE
             .iter()
-            .filter(|t| !MIGRATION_SENSITIVE_ERROR_TYPES.contains(t))
+            .filter(|t| !router_types.contains(t))
             .collect();
-        let missing_from_here: Vec<_> = MIGRATION_SENSITIVE_ERROR_TYPES
+        let missing_from_here: Vec<_> = router_types
             .iter()
             .filter(|t| !NON_MIGRATABLE.contains(t))
             .collect();

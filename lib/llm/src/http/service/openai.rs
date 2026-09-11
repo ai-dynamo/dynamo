@@ -6148,7 +6148,7 @@ mod tests {
     fn test_pre_stream_refusal_surfaces_as_400() {
         use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
         use dynamo_runtime::pipeline::network::StreamPrologueError;
-        use dynamo_runtime::pipeline::network::egress::addressed_router::pre_stream_failure_error;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
 
         let prologue_error = StreamPrologueError::new(
             "Generate Error: multimodal input is not supported by this backend",
@@ -6180,7 +6180,7 @@ mod tests {
     fn test_pre_stream_connect_failure_still_surfaces_as_500() {
         use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
         use dynamo_runtime::pipeline::network::StreamPrologueError;
-        use dynamo_runtime::pipeline::network::egress::addressed_router::pre_stream_failure_error;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
 
         // The worker died rather than refused: typed, but not a request problem.
         let engine_shutdown = StreamPrologueError::new(

@@ -12,7 +12,7 @@ use crate::component::Instance;
 use crate::discovery::EndpointInstanceId;
 use crate::dynamo_nvtx_range;
 use crate::engine::{AsyncEngine, AsyncEngineContextProvider, Data, EngineContextGuard};
-use crate::error::{DynamoError, ErrorType};
+use crate::error::{DynamoError, ErrorType, match_error_chain};
 use crate::logging::inject_trace_headers_into_map;
 use crate::metrics::frontend_perf::STAGE_DURATION_SECONDS;
 use crate::metrics::request_plane::{
@@ -56,25 +56,17 @@ use tracing::Instrument;
 /// `dynamo-runtime` and not the reverse.
 /// `migration_sensitive_types_match_the_exclusion_set` there fails if the two
 /// lists ever disagree.
-pub const MIGRATION_SENSITIVE_ERROR_TYPES: &[ErrorType] =
+pub(crate) const MIGRATION_SENSITIVE_ERROR_TYPES: &[ErrorType] =
     &[ErrorType::Cancelled, ErrorType::ResourceExhausted];
 
 /// Whether any link of `err`'s chain carries a migration-sensitive type.
 ///
-/// The walk mirrors [`crate::error::match_error_chain`] exactly, because that
-/// is the walk whose behavior must not change: an excluded type nested one link
-/// down short-circuits it just as an outer one does.
+/// An empty exclude set reduces [`crate::error::match_error_chain`] to "does
+/// any link match", and that is deliberately the same walk migration
+/// classification runs: an excluded type nested one link down short-circuits it
+/// just as an outer one does.
 fn chain_is_migration_sensitive(err: &DynamoError) -> bool {
-    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
-    while let Some(e) = current {
-        if let Some(dynamo_err) = e.downcast_ref::<DynamoError>()
-            && MIGRATION_SENSITIVE_ERROR_TYPES.contains(&dynamo_err.error_type())
-        {
-            return true;
-        }
-        current = e.source();
-    }
-    false
+    match_error_chain(err, MIGRATION_SENSITIVE_ERROR_TYPES, &[])
 }
 
 /// Build the error returned when the worker fails before any response bytes.
@@ -88,7 +80,7 @@ fn chain_is_migration_sensitive(err: &DynamoError) -> bool {
 /// the outer type, so causes typed one of [`MIGRATION_SENSITIVE_ERROR_TYPES`]
 /// are withheld rather than attached. The worker's text stays in the message
 /// either way; only the machine-readable type is withheld.
-pub fn pre_stream_failure_error(error: &StreamPrologueError) -> DynamoError {
+pub(crate) fn pre_stream_failure_error(error: &StreamPrologueError) -> DynamoError {
     let builder = DynamoError::builder()
         .error_type(ErrorType::CannotConnect)
         .message(format!(
@@ -98,6 +90,24 @@ pub fn pre_stream_failure_error(error: &StreamPrologueError) -> DynamoError {
     match &error.typed_error {
         Some(typed) if !chain_is_migration_sensitive(typed) => builder.cause(typed.clone()).build(),
         _ => builder.build(),
+    }
+}
+
+/// White-box handles for the cross-crate tests in `dynamo-llm`. Gated so a
+/// normal build of this crate exposes no public API for them.
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub mod testing {
+    use super::{DynamoError, ErrorType, StreamPrologueError};
+
+    /// The set `migration_sensitive_types_match_the_exclusion_set` in
+    /// `lib/llm/src/migration.rs` pins against its `NON_MIGRATABLE`.
+    pub fn migration_sensitive_error_types() -> &'static [ErrorType] {
+        super::MIGRATION_SENSITIVE_ERROR_TYPES
+    }
+
+    pub fn pre_stream_failure_error(error: &StreamPrologueError) -> DynamoError {
+        super::pre_stream_failure_error(error)
     }
 }
 
