@@ -103,10 +103,7 @@ pub struct SglangMockerService {
 }
 
 impl SglangMockerService {
-    pub async fn new(
-        config: MockerServerConfig,
-        engine_args: MockEngineArgs,
-    ) -> anyhow::Result<Self> {
+    pub fn new(config: MockerServerConfig, engine_args: MockEngineArgs) -> anyhow::Result<Self> {
         anyhow::ensure!(!config.model.trim().is_empty(), "model must not be empty");
         anyhow::ensure!(
             config.context_length > 0,
@@ -154,9 +151,7 @@ impl SglangMockerService {
                 engine_args.zmq_replay_port,
                 DP_RANK,
                 page_size,
-            )
-            .await
-            {
+            ) {
                 Ok(sink) => Some(sink),
                 Err(error) => {
                     tracing::error!(dp_rank = DP_RANK, %error, "Failed to create ZMQ KV event sink");
