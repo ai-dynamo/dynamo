@@ -1367,13 +1367,23 @@ mod tests {
     #[test]
     fn decay_now_never_panics_on_non_finite_input() {
         let router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
-        for now_ms in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, 0.0] {
-            let decayed = router.decay_now(now_ms);
-            assert!(
-                decayed >= router.decay_time_epoch,
-                "{now_ms} must not decay before epoch"
+        // NaN, -inf, and negative all clamp to the floor (epoch itself); +inf
+        // clamps to the upper bound. Pin the exact clamp, not just "no panic
+        // and doesn't decay before epoch" -- otherwise a future change to the
+        // clamp bounds could silently regress without failing this test.
+        for now_ms in [f64::NAN, f64::NEG_INFINITY, -1.0, 0.0] {
+            assert_eq!(
+                router.decay_now(now_ms),
+                router.decay_time_epoch,
+                "{now_ms} must clamp to exactly the epoch"
             );
         }
+        assert_eq!(
+            router.decay_now(f64::INFINITY),
+            router.decay_time_epoch
+                + std::time::Duration::from_secs_f64(OfflineReplayRouter::now_secs(f64::INFINITY)),
+            "+infinity must clamp to exactly the upper bound"
+        );
     }
 
     #[test]
