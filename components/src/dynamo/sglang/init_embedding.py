@@ -12,7 +12,7 @@ from dynamo.common.utils.prometheus import register_engine_metrics_callback
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
-from dynamo.sglang.health_check import SglangHealthCheckPayload
+from dynamo.sglang.health_check import SglangEmbeddingHealthCheckPayload
 from dynamo.sglang.publisher import (
     set_forward_pass_metrics_worker_id,
     setup_sgl_metrics,
@@ -69,8 +69,10 @@ async def init_embedding(
     ready_event = asyncio.Event()
 
     handler = EmbeddingWorkerHandler(engine, config, publisher, shutdown_event)
-    health_check_payload = SglangHealthCheckPayload(
-        engine, use_text_input=dynamo_args.use_sglang_tokenizer
+    health_check_payload = SglangEmbeddingHealthCheckPayload(
+        server_args.served_model_name,
+        engine,
+        use_text_input=dynamo_args.use_sglang_tokenizer,
     ).to_dict()
 
     register_model_taint_route(runtime, generate_endpoint)
