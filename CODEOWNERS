@@ -622,6 +622,7 @@ requirements.txt                                                                
 /lib/kvbm-config/src/messenger.rs                                                                       @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/src/system_health.rs                                                                       @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /tests/serve/multimodal_profiles/                                                                       @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/.github/review-prompts/runtime.md                                                                      @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-runtime-codeowners
 /docs/fern/pages/use-cases/agents/                                                                      @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-agents-codeowners
 /examples/deployments/**/sglang/**                                                                      @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners
 /lib/backend-common/src/metrics.rs                                                                      @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
