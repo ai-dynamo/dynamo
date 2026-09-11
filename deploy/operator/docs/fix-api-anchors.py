@@ -62,7 +62,7 @@ def project_standalone_dcd_schema(markdown: str) -> str:
             )
             if "Standalone DCD roles accept only" not in columns[1]:
                 columns[1] += (
-                    " Standalone DCD roles accept only `name`; "
+                    " Standalone DCD roles accept only `name` and `replicas`; "
                     "`providerOverride` is a DGD-only provider context."
                 )
             line = " | ".join(columns) + "\n"

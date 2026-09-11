@@ -2214,6 +2214,7 @@ dependencies = [
  "futures",
  "futures-util",
  "galil-seiferas",
+ "half",
  "hf-hub 0.4.3",
  "http-body-util",
  "image",
@@ -2500,6 +2501,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
+ "opentelemetry-proto",
  "opentelemetry_sdk",
  "parking_lot",
  "percent-encoding",
@@ -2524,6 +2526,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-stream",
  "tokio-util",
+ "tonic 0.14.6",
  "tower-http",
  "tracing",
  "tracing-opentelemetry",
@@ -3569,6 +3572,7 @@ dependencies = [
  "cfg-if",
  "crunchy",
  "num-traits",
+ "serde",
  "zerocopy",
 ]
 

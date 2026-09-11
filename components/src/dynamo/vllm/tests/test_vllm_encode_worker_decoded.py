@@ -11,13 +11,16 @@ import pytest
 import torch
 from PIL import Image
 
+from dynamo.common.memory.multimodal_embedding_cache_manager import (
+    MultimodalEmbeddingCacheManager,
+)
 from dynamo.vllm.constants import EmbeddingTransferMode
 from dynamo.vllm.multimodal_handlers import encode_worker_handler
 from dynamo.vllm.multimodal_handlers.encode_worker_handler import (
     EmbeddingItem,
     EncodeWorkerHandler,
 )
-from dynamo.vllm.multimodal_utils.embedding_cache import EmbeddingCache
+from dynamo.vllm.multimodal_utils.encode_utils import get_embedding_hash
 from dynamo.vllm.multimodal_utils.protocol import MultiModalInput
 
 pytestmark = [
@@ -29,11 +32,19 @@ pytestmark = [
 ]
 
 
-def _handler(*, frontend_decoding: bool) -> EncodeWorkerHandler:
+def _handler(
+    *, frontend_decoding: bool, capacity_bytes: int = 1 << 20
+) -> EncodeWorkerHandler:
+    """Build a handler without running __init__.
+
+    The real __init__ loads an image processor and a vision tower from a
+    checkpoint, which a unit test has no way to provide; every attribute the
+    cache paths touch is set here instead.
+    """
     handler = EncodeWorkerHandler.__new__(EncodeWorkerHandler)
     handler._enable_frontend_decoding = frontend_decoding
     handler._decoded_content_hash_warning_emitted = False
-    handler.embedding_cache = EmbeddingCache()
+    handler.embedding_cache_manager = MultimodalEmbeddingCacheManager(capacity_bytes)
     return handler
 
 
@@ -180,12 +191,14 @@ def test_image_processor_receives_engine_mm_processor_kwargs(monkeypatch):
 
 
 def test_cache_key_for_url_image_is_unchanged():
+    # Pinned literal, not a call to the helper under test: this digest is a
+    # persisted cache key that must stay stable across releases.
+    expected = "494a30704d4f32ac0b81739d18a66d3638d440cbc6f5669f6af66f840edee5ab"
     handler = _handler(frontend_decoding=False)
     group_input = MultiModalInput(image_url="https://example.com/a.png")
 
-    assert handler._image_cache_key(group_input) == EmbeddingCache.generate_hash_key(
-        "https://example.com/a.png"
-    )
+    assert handler._image_cache_key(group_input) == expected
+    assert get_embedding_hash("https://example.com/a.png") == expected
 
 
 def test_cache_key_for_decoded_image_uses_content_hash():
@@ -236,3 +249,276 @@ def test_group_with_url_and_decoded_image_rejected():
 
     with pytest.raises(ValueError, match="Exactly one"):
         handler._image_cache_key(group_input)
+
+
+def test_configured_capacity_sizes_the_cache(monkeypatch):
+    monkeypatch.setattr(encode_worker_handler, "ENABLE_ENCODER_CACHE", 1)
+
+    cache = encode_worker_handler._build_embedding_cache(0.25)
+
+    assert isinstance(cache, MultimodalEmbeddingCacheManager)
+    assert cache.stats["capacity_bytes"] == int(0.25 * 1024**3)
+
+
+@pytest.mark.parametrize("capacity_gb", [0, -1.0])
+def test_non_positive_capacity_disables_the_cache(monkeypatch, capacity_gb):
+    # 0 is the flag's default and its documented 'disabled' value, so a stock
+    # deployment runs without this cache rather than with an implicit one.
+    monkeypatch.setattr(encode_worker_handler, "ENABLE_ENCODER_CACHE", 1)
+
+    assert encode_worker_handler._build_embedding_cache(capacity_gb) is None
+
+
+def test_encoder_cache_switch_disables_the_cache(monkeypatch):
+    monkeypatch.setattr(encode_worker_handler, "ENABLE_ENCODER_CACHE", 0)
+
+    assert encode_worker_handler._build_embedding_cache(1.0) is None
+
+
+def test_store_path_evicts_instead_of_growing_past_capacity():
+    entry_bytes = 256 * 1024
+    element_count = entry_bytes // torch.tensor([], dtype=torch.float32).element_size()
+    handler = _handler(frontend_decoding=False, capacity_bytes=4 * entry_bytes)
+
+    for index in range(5):
+        handler._store_embedding_item(
+            EmbeddingItem(
+                key=f"key-{index}",
+                image_grid_thw=[[1, 2, 2]],
+                embeddings=torch.full((1, element_count), float(index)),
+            )
+        )
+
+    stats = handler.embedding_cache_manager.stats
+    assert stats["current_bytes"] <= stats["capacity_bytes"]
+    assert stats["entries"] == 4
+    assert stats["evictions"] == 1
+    assert handler._lookup_embedding_item("key-0") is None
+    assert handler._lookup_embedding_item("key-4") is not None
+
+
+class _RecordingEmbedding:
+    """Stand-in embedding that records cache state at the moment it is copied.
+
+    Whether the cache had room before the copy was made is not recoverable
+    from its final state, so the assertion has to be made between the
+    admission decision and the copy. Only the three members the store path
+    uses are implemented; everything else about a tensor is out of scope.
+    """
+
+    def __init__(
+        self, tensor: torch.Tensor, manager: MultimodalEmbeddingCacheManager
+    ) -> None:
+        self._tensor = tensor
+        self._manager = manager
+        self.clone_calls = 0
+        self.stats_at_clone: dict | None = None
+
+    def element_size(self) -> int:
+        return self._tensor.element_size()
+
+    def numel(self) -> int:
+        return self._tensor.numel()
+
+    def clone(self, memory_format=None) -> torch.Tensor:
+        self.clone_calls += 1
+        self.stats_at_clone = self._manager.stats
+        return self._tensor.clone(memory_format=memory_format)
+
+
+def _float32_element_count(entry_bytes: int) -> int:
+    return entry_bytes // torch.tensor([], dtype=torch.float32).element_size()
+
+
+def _fill_cache(handler: EncodeWorkerHandler, count: int, element_count: int) -> None:
+    for index in range(count):
+        handler._store_embedding_item(
+            EmbeddingItem(
+                key=f"key-{index}",
+                image_grid_thw=[[1, 2, 2]],
+                embeddings=torch.full((1, element_count), float(index)),
+            )
+        )
+
+
+def test_store_path_makes_room_before_copying_into_the_cache():
+    entry_bytes = 256 * 1024
+    element_count = _float32_element_count(entry_bytes)
+    handler = _handler(frontend_decoding=False, capacity_bytes=4 * entry_bytes)
+    _fill_cache(handler, 4, element_count)
+    assert handler.embedding_cache_manager.stats["current_bytes"] == 4 * entry_bytes
+
+    probe = _RecordingEmbedding(
+        torch.full((1, element_count), 4.0), handler.embedding_cache_manager
+    )
+    handler._store_embedding_item(
+        EmbeddingItem(key="key-4", image_grid_thw=[[1, 2, 2]], embeddings=probe)
+    )
+
+    assert probe.clone_calls == 1
+    # The bytes this entry needs were already free when the copy was made, so a
+    # full cache never holds its whole capacity and the new copy at once.
+    assert (
+        probe.stats_at_clone["current_bytes"] + entry_bytes
+        <= probe.stats_at_clone["capacity_bytes"]
+    )
+    assert probe.stats_at_clone["evictions"] == 1
+    # Evicting early neither counts the eviction twice nor changes what the
+    # cache ends up holding.
+    stats = handler.embedding_cache_manager.stats
+    assert stats["evictions"] == 1
+    assert stats["entries"] == 4
+    assert stats["current_bytes"] == stats["capacity_bytes"]
+    assert handler._lookup_embedding_item("key-0") is None
+    assert handler._lookup_embedding_item("key-4") is not None
+
+
+def test_store_path_rejects_an_oversize_entry_without_copying_it():
+    entry_bytes = 256 * 1024
+    element_count = _float32_element_count(entry_bytes)
+    handler = _handler(frontend_decoding=False, capacity_bytes=entry_bytes // 2)
+    probe = _RecordingEmbedding(
+        torch.zeros(1, element_count), handler.embedding_cache_manager
+    )
+
+    handler._store_embedding_item(
+        EmbeddingItem(key="key", image_grid_thw=[[1, 2, 2]], embeddings=probe)
+    )
+
+    # Rejected on its byte count alone, so the copy that the cache would have
+    # refused to keep is never allocated.
+    assert probe.clone_calls == 0
+    stats = handler.embedding_cache_manager.stats
+    assert stats["entries"] == 0
+    assert stats["current_bytes"] == 0
+    assert stats["evictions"] == 0
+
+
+def test_restoring_a_cached_key_frees_the_old_entry_before_copying():
+    # One request can carry the same uncached image twice: both misses are
+    # queued for encoding and stored in turn, so the second store re-stores a
+    # key the first just made resident. Deducting the old entry's bytes without
+    # releasing them would keep its storage alive across the copy, and a full
+    # cache would peak at capacity plus one entry after all.
+    entry_bytes = 256 * 1024
+    element_count = _float32_element_count(entry_bytes)
+    handler = _handler(frontend_decoding=False, capacity_bytes=4 * entry_bytes)
+    _fill_cache(handler, 4, element_count)
+    assert handler.embedding_cache_manager.stats["current_bytes"] == 4 * entry_bytes
+
+    probe = _RecordingEmbedding(
+        torch.full((1, element_count), 9.0), handler.embedding_cache_manager
+    )
+    handler._store_embedding_item(
+        EmbeddingItem(key="key-1", image_grid_thw=[[1, 2, 2]], embeddings=probe)
+    )
+
+    assert probe.clone_calls == 1
+    # The replaced entry is gone before the copy is taken, not merely promised
+    # back, so the bytes the copy needs are genuinely free.
+    assert probe.stats_at_clone["entries"] == 3
+    assert (
+        probe.stats_at_clone["current_bytes"] + entry_bytes
+        <= probe.stats_at_clone["capacity_bytes"]
+    )
+    # Dropping the replaced entry is not an eviction: nothing was displaced for
+    # want of capacity, and no other key was touched.
+    assert probe.stats_at_clone["evictions"] == 0
+    stats = handler.embedding_cache_manager.stats
+    assert stats["evictions"] == 0
+    assert stats["entries"] == 4
+    assert stats["current_bytes"] == 4 * entry_bytes
+    assert handler._lookup_embedding_item("key-0") is not None
+
+
+def test_restoring_a_cached_key_evicts_nothing():
+    # Making room for a re-store frees the entry being replaced, so its bytes
+    # cover the incoming entry and no other key has to go.
+    entry_bytes = 256 * 1024
+    element_count = _float32_element_count(entry_bytes)
+    handler = _handler(frontend_decoding=False, capacity_bytes=4 * entry_bytes)
+    _fill_cache(handler, 4, element_count)
+
+    handler._store_embedding_item(
+        EmbeddingItem(
+            key="key-1",
+            image_grid_thw=[[1, 2, 2]],
+            embeddings=torch.full((1, element_count), 9.0),
+        )
+    )
+
+    stats = handler.embedding_cache_manager.stats
+    assert stats["evictions"] == 0
+    assert stats["entries"] == 4
+    assert stats["current_bytes"] == 4 * entry_bytes
+    assert handler._lookup_embedding_item("key-0") is not None
+    assert torch.equal(
+        handler._lookup_embedding_item("key-1").embeddings,
+        torch.full((1, element_count), 9.0),
+    )
+
+
+def test_store_path_does_not_pin_the_encoder_batch():
+    # Embeddings reach the cache as split views over one encoder output, which
+    # are already contiguous. Storing the view would charge the manager for one
+    # image while keeping the whole batch's storage alive.
+    handler = _handler(frontend_decoding=False)
+    batch = torch.arange(8 * 1024, dtype=torch.float32).reshape(8, 1024)
+    view = batch.split([1] * 8)[1].unsqueeze(0)
+    assert view.is_contiguous()
+
+    handler._store_embedding_item(
+        EmbeddingItem(key="key", image_grid_thw=[[1, 1, 1]], embeddings=view)
+    )
+
+    cached = handler._lookup_embedding_item("key").embeddings
+    assert torch.equal(cached, view)
+    assert cached.untyped_storage().data_ptr() != batch.untyped_storage().data_ptr()
+    # The entry owns exactly the bytes the manager charged for it.
+    assert cached.untyped_storage().nbytes() == cached.element_size() * cached.numel()
+    assert handler.embedding_cache_manager.stats["current_bytes"] == (
+        cached.element_size() * cached.numel()
+    )
+
+
+def test_store_then_lookup_round_trips_tensor_and_grid():
+    handler = _handler(frontend_decoding=False)
+    embeddings = torch.arange(8, dtype=torch.float32).reshape(1, 8)
+    handler._store_embedding_item(
+        EmbeddingItem(key="k", image_grid_thw=[[1, 4, 4]], embeddings=embeddings)
+    )
+
+    item = handler._lookup_embedding_item("k")
+
+    assert item is not None
+    assert item.key == "k"
+    assert item.image_grid_thw == [[1, 4, 4]]
+    assert torch.equal(item.embeddings, embeddings)
+    assert handler.embedding_cache_manager.stats["hits"] == 1
+
+
+def test_unkeyed_item_is_not_cached():
+    handler = _handler(frontend_decoding=True)
+
+    handler._store_embedding_item(
+        EmbeddingItem(key=None, image_grid_thw=[], embeddings=torch.zeros(1, 4))
+    )
+
+    assert handler.embedding_cache_manager.stats["entries"] == 0
+    assert handler._lookup_embedding_item(None) is None
+
+
+def test_non_contiguous_embedding_is_stored():
+    # The manager asserts contiguity when sizing an entry; the old dict cache
+    # never did, so a transposed view must be made contiguous on the way in.
+    handler = _handler(frontend_decoding=False)
+    view = torch.arange(8, dtype=torch.float32).reshape(2, 4).t()
+    assert not view.is_contiguous()
+
+    handler._store_embedding_item(
+        EmbeddingItem(key="k", image_grid_thw=[], embeddings=view)
+    )
+
+    item = handler._lookup_embedding_item("k")
+    assert item is not None
+    assert torch.equal(item.embeddings, view)

@@ -32,15 +32,7 @@ from .constants import DisaggregationMode, EmbeddingTransferMode
 logger = logging.getLogger(__name__)
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
 MAX_PORT = 65535
-
-# NIXL's own truthy tokens for NIXL_TELEMETRY_ENABLE, compared case-insensitively.
-# Restated here because NIXL exposes no predicate Dynamo could ask instead.
-_NIXL_TELEMETRY_ENABLED_VALUES = frozenset({"y", "1", "yes", "on", "true", "enable"})
-
-# Port NIXL's Prometheus exporter binds when NIXL_TELEMETRY_PROMETHEUS_PORT is
-# unset. Distinct from Dynamo's 19090 convention, and equal to the operator's
-# DYN_SYSTEM_PORT preset, so leaving the variable unset is a real collision.
-_NIXL_DEFAULT_PROMETHEUS_PORT = 9090
+DEFAULT_NIXL_PROMETHEUS_PORT = 19090
 
 
 def _configured_fixed_port(env_name: str, *, default: int | None = None) -> int | None:
@@ -56,30 +48,15 @@ def _configured_fixed_port(env_name: str, *, default: int | None = None) -> int 
 
 
 def _nixl_prometheus_port() -> int | None:
-    """Return the NIXL Prometheus listener port when it is enabled.
-
-    Only return a port when NIXL will actually bind one, and only the port NIXL
-    will bind. NIXL does not default the exporter to Prometheus, so an unset
-    exporter means no listener. With the exporter selected, an unset port falls
-    back to the exporter's own default rather than Dynamo's 19090, while a value
-    NIXL cannot parse as a port leaves it exporting nothing at all.
-    """
+    """Return the NIXL Prometheus listener port when it is enabled."""
     enabled = os.environ.get("NIXL_TELEMETRY_ENABLE", "").strip().lower()
-    exporter = os.environ.get("NIXL_TELEMETRY_EXPORTER", "").strip().lower()
-    if enabled not in _NIXL_TELEMETRY_ENABLED_VALUES or exporter != "prometheus":
+    exporter = os.environ.get("NIXL_TELEMETRY_EXPORTER", "prometheus")
+    if enabled != "y" or exporter.strip().lower() != "prometheus":
         return None
-    port = _configured_fixed_port(
-        "NIXL_TELEMETRY_PROMETHEUS_PORT", default=_NIXL_DEFAULT_PROMETHEUS_PORT
+    return _configured_fixed_port(
+        "NIXL_TELEMETRY_PROMETHEUS_PORT",
+        default=DEFAULT_NIXL_PROMETHEUS_PORT,
     )
-    if port is None:
-        logger.warning(
-            "NIXL telemetry is enabled with the Prometheus exporter, but "
-            "NIXL_TELEMETRY_PROMETHEUS_PORT is not a usable port. NIXL then "
-            "binds no exporter, so no listener is reserved for it. Set "
-            "NIXL_TELEMETRY_PROMETHEUS_PORT to a port in 1-%d.",
-            MAX_PORT,
-        )
-    return port
 
 
 def _is_intra_pod_failover_engine() -> bool:
