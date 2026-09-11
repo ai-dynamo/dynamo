@@ -135,16 +135,22 @@ impl DiscoveredModel {
             .map_err(|error| client::protocol_error(error.to_string()))
     }
 
-    pub(crate) fn engine_config(&self) -> EngineConfig {
+    pub(crate) fn engine_config(
+        &self,
+        enable_kv_routing: bool,
+    ) -> Result<EngineConfig, DynamoError> {
         let parallelism = self.server.parallelism.as_ref();
-        EngineConfig {
+        let kv_cache_block_size = enable_kv_routing
+            .then(|| self.kv_cache_block_size())
+            .transpose()?;
+        Ok(EngineConfig {
             model: self.source.clone(),
             served_model_name: Some(self.served_name.clone()),
             model_aliases: self.identity.aliases.clone(),
             runtime_data: Default::default(),
             llm: Some(LlmRegistration {
                 context_length: nonzero(self.server.max_model_len),
-                kv_cache_block_size: nonzero(self.server.kv_block_size),
+                kv_cache_block_size,
                 total_kv_blocks: self.total_kv_blocks_per_rank(),
                 max_num_seqs: nonzero(self.server.max_running_requests),
                 max_num_batched_tokens: nonzero(self.server.max_batched_tokens),
@@ -153,7 +159,23 @@ impl DiscoveredModel {
                 data_parallel_start_rank: parallelism.map(|_| 0),
                 ..Default::default()
             }),
-        }
+        })
+    }
+
+    fn kv_cache_block_size(&self) -> Result<u32, DynamoError> {
+        let block_size = self.server.effective_attention_block_size.ok_or_else(|| {
+            client::protocol_error(
+                "KV routing requires Control.ServerInfo.effective_attention_block_size; use compatible Python vLLM and vllm-rs builds that report the effective attention block size",
+            )
+        })?;
+        u32::try_from(block_size)
+            .ok()
+            .and_then(nonzero)
+            .ok_or_else(|| {
+                client::protocol_error(format!(
+                    "invalid effective_attention_block_size {block_size}; KV routing requires a nonzero size that fits u32"
+                ))
+            })
     }
 
     pub(crate) fn data_parallel_size(&self) -> u32 {

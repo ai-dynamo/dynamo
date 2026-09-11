@@ -259,6 +259,27 @@ impl pb::control_server::Control for FakeVllm {
         Ok(Response::new(pb::AbortResponse {}))
     }
 
+    async fn load_lora(
+        &self,
+        _request: Request<pb::LoadLoraRequest>,
+    ) -> Result<Response<pb::LoadLoraResponse>, Status> {
+        Err(Status::unimplemented("LoRA is not supported"))
+    }
+
+    async fn unload_lora(
+        &self,
+        _request: Request<pb::UnloadLoraRequest>,
+    ) -> Result<Response<pb::UnloadLoraResponse>, Status> {
+        Err(Status::unimplemented("LoRA is not supported"))
+    }
+
+    async fn list_loras(
+        &self,
+        _request: Request<pb::ListLorasRequest>,
+    ) -> Result<Response<pb::ListLorasResponse>, Status> {
+        Err(Status::unimplemented("LoRA is not supported"))
+    }
+
     async fn get_kv_event_sources(
         &self,
         _request: Request<pb::GetKvEventSourcesRequest>,
@@ -438,6 +459,7 @@ fn model_info() -> pb::ModelInfo {
         served_model_aliases: vec!["model-alias".to_string()],
         supports_text_input: true,
         supports_token_ids_input: true,
+        supports_lora: false,
         supports_multimodal: false,
         reasoning_parser: "deepseek_r1".to_string(),
         tool_call_parser: "hermes".to_string(),
@@ -459,6 +481,8 @@ fn server_info() -> pb::ServerInfo {
         }),
         max_model_len: 8192,
         kv_block_size: 16,
+        max_loras: 0,
+        effective_attention_block_size: Some(16),
         total_kv_blocks: 4096,
         max_running_requests: 128,
         max_batched_tokens: 2048,
@@ -981,6 +1005,46 @@ fn discovery_rejects_incompatible_model_metadata() {
 }
 
 #[test]
+fn engine_config_uses_effective_attention_block_size() {
+    for (case, dcp, reported, expected) in [
+        ("DCP=1", 1, Some(16), Ok(16)),
+        ("DCP=2", 2, Some(32), Ok(32)),
+        ("engine is authoritative", 2, Some(64), Ok(64)),
+        ("missing", 1, None, Err("effective_attention_block_size")),
+        ("zero", 1, Some(0), Err("nonzero size")),
+        ("overflow", 1, Some(u64::from(u32::MAX) + 1), Err("fits u32")),
+    ] {
+        let mut server = server_info();
+        server
+            .parallelism
+            .as_mut()
+            .unwrap()
+            .decode_context_parallel_size = dcp;
+        server.effective_attention_block_size = reported;
+        let model = DiscoveredModel::from_proto(model_info(), server).unwrap();
+        let result = model.engine_config(true);
+        match expected {
+            Ok(size) => {
+                let registration = result.unwrap().llm.unwrap();
+                assert_eq!(registration.kv_cache_block_size, Some(size), "{case}");
+                assert_eq!(registration.total_kv_blocks, Some(2048), "{case}");
+            }
+            Err(message) => assert!(result.unwrap_err().to_string().contains(message), "{case}"),
+        }
+        assert_eq!(
+            model
+                .engine_config(false)
+                .unwrap()
+                .llm
+                .unwrap()
+                .kv_cache_block_size,
+            None,
+            "{case}: KV routing disabled"
+        );
+    }
+}
+
+#[test]
 fn engine_config_normalizes_total_kv_blocks_per_dp_rank() {
     let mut server = server_info();
     server
@@ -992,7 +1056,11 @@ fn engine_config_normalizes_total_kv_blocks_per_dp_rank() {
 
     let model =
         DiscoveredModel::from_proto(model_info(), server).expect("valid discovery metadata");
-    let registration = model.engine_config().llm.expect("LLM registration");
+    let registration = model
+        .engine_config(true)
+        .expect("valid KV metadata")
+        .llm
+        .expect("LLM registration");
 
     assert_eq!(registration.total_kv_blocks, Some(2048));
 }
@@ -1005,7 +1073,11 @@ fn engine_config_handles_zero_and_inexact_aggregate_kv_capacity() {
 
         let model =
             DiscoveredModel::from_proto(model_info(), server).expect("valid discovery metadata");
-        let registration = model.engine_config().llm.expect("LLM registration");
+        let registration = model
+            .engine_config(true)
+            .expect("valid KV metadata")
+            .llm
+            .expect("LLM registration");
 
         assert_eq!(
             registration.total_kv_blocks, expected_per_rank_blocks,
