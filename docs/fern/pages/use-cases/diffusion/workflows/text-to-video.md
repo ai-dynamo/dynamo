@@ -56,27 +56,51 @@ The response returns a video URL or base64 data depending on `response_format` (
 
 ## MiniMax-H3
 
-The initial MiniMax-H3 qualification serves text-to-video-and-audio (T2VA) with
-one aggregated diffusion worker. The launcher passes `--task-type t2va`, which
+**Experimental.** The initial MiniMax-H3 qualification serves text-to-video-and-audio (T2VA) with
+one aggregated diffusion worker. The launcher passes `--task-type fl2va`, which
 loads only H3's FL2VA checkpoint partition. Dynamo's standard image stays on
 its VP9-only media stack, so build the opt-in video-audio overlay to mux H.264
 video and AAC audio:
 
 ```bash
+export DYN_H3_DYNAMO_REVISION="$(git rev-parse HEAD)"
+export DYN_H3_BASE_IMAGE="dynamo:${DYN_H3_DYNAMO_REVISION}-vllm-runtime"
+export DYN_H3_IMAGE="dynamo:minimax-h3-${DYN_H3_DYNAMO_REVISION}"
+
+python container/render.py --framework vllm --target runtime --output-short-filename
+docker build -t "$DYN_H3_BASE_IMAGE" -f container/rendered.Dockerfile .
 docker build \
-  --build-arg BASE_IMAGE=<dynamo-vllm-local-dev-image> \
+  --build-arg BASE_IMAGE="$DYN_H3_BASE_IMAGE" \
   -f examples/backends/vllm/omni/video_audio.Dockerfile \
-  -t dynamo-vllm-minimax-h3 .
+  -t "$DYN_H3_IMAGE" .
+export DYN_H3_IMAGE_REF="$(docker image inspect --format '{{.Id}}' "$DYN_H3_IMAGE")"
 ```
 
-Launch the four-B200 profile. It uses four-way Ulysses and text-encoder tensor
+Start a shell with exactly four B200 GPUs visible. The commands pass the tested
+source revision and image ID into the qualification record:
+
+```bash
+container/run.sh \
+  --image "$DYN_H3_IMAGE" \
+  --gpus device=0,1,2,3 \
+  --mount-workspace \
+  -e DYN_H3_DYNAMO_REVISION \
+  -e DYN_H3_IMAGE_REF \
+  -e DYN_H3_MODEL \
+  -e DYN_H3_MODEL_REVISION \
+  -e HF_TOKEN \
+  -it
+```
+
+Launch the profile inside the container. It uses four-way Ulysses and text-encoder tensor
 parallelism while keeping VAE patch parallelism at one, so small supported
 resolutions such as 448x256 still have at least one tile per participating
 rank. Larger resolutions can opt into four-way VAE patch parallelism with
 `DYN_H3_VAE_PATCH_PARALLEL_SIZE=4`:
 
 ```bash
-bash examples/backends/vllm/launch/agg_omni_minimax_h3.sh
+bash examples/backends/vllm/launch/agg_omni_minimax_h3.sh \
+  > /tmp/dynamo-minimax-h3.log 2>&1 &
 ```
 
 Run the supplied end-to-end qualification against the same worker. It requests
@@ -96,6 +120,7 @@ bash examples/backends/vllm/launch/validate_omni_minimax_h3.sh
   "response_format": "url",
   "output_format": "mp4",
   "nvext": {
+    "fps": 24,
     "num_inference_steps": 50,
     "seed": 42
   },
@@ -107,13 +132,15 @@ bash examples/backends/vllm/launch/validate_omni_minimax_h3.sh
 }
 ```
 
-The request deliberately omits `fps`, so the upstream H3 pipeline keeps its
-native 24-FPS default. Dynamo preserves unrecognized top-level video fields and
-the vLLM-Omni adapter merges them into the pipeline's `extra_args`, where the
-upstream model validates them. Client libraries that expose an `extra_body`
-option can use it to add these top-level fields; do not send a literal nested
-`extra_body` object. Generated responses report `fps` and `audio_sample_rate`
-for each MP4.
+The launcher pins model revision `42ed227ee7df40d41602854ae760620d6eb651fe`.
+Set `DYN_H3_MODEL_REVISION` to test another revision. Dynamo preserves
+unrecognized top-level video fields and the vLLM-Omni adapter merges them into
+the pipeline's `extra_args`, where the upstream model validates them. Client
+libraries that expose an `extra_body` option can use it to add these top-level
+fields; do not send a literal nested `extra_body` object. Generated responses
+report `fps` and `audio_sample_rate` for each MP4. The qualification output
+records the exact Dynamo revision, container image ID, model revision, package
+versions, visible GPU models, request, media checksum, and stream probe data.
 
 First/last-frame FL2VA and reference-driven Ref2VA are not part of this initial
 qualification. They additionally require typed image, video, and audio input

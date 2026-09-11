@@ -1,5 +1,5 @@
 #!/bin/bash
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 # Launch one aggregated vLLM-Omni worker that serves MiniMax-H3 T2VA.
@@ -9,7 +9,11 @@ trap 'echo Cleaning up...; kill 0' EXIT
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
+# MiniMax-H3 uses the four visible B200s for diffusion parallelism. The
+# text-generation KV-cache flags from gpu_utils.sh do not apply to this worker.
+
 MODEL="${DYN_H3_MODEL:-MiniMaxAI/MiniMax-H3}"
+MODEL_REVISION="${DYN_H3_MODEL_REVISION:-42ed227ee7df40d41602854ae760620d6eb651fe}"
 ULYSSES_DEGREE="${DYN_H3_ULYSSES_DEGREE:-4}"
 TEXT_ENCODER_TP_SIZE="${DYN_H3_TEXT_ENCODER_TP_SIZE:-4}"
 # H3's native patch-parallel VAE requires at least one spatial tile per rank.
@@ -30,6 +34,14 @@ while [[ $# -gt 0 ]]; do
             MODEL="$2"
             shift 2
             ;;
+        --model-revision)
+            if [[ $# -lt 2 || "$2" == --* ]]; then
+                echo "Error: --model-revision requires a value" >&2
+                exit 1
+            fi
+            MODEL_REVISION="$2"
+            shift 2
+            ;;
         *)
             EXTRA_ARGS+=("$1")
             shift
@@ -39,7 +51,7 @@ done
 
 command -v ffmpeg >/dev/null
 command -v ffprobe >/dev/null
-ffmpeg -hide_banner -encoders 2>/dev/null | grep libx264rgb >/dev/null
+ffmpeg -hide_banner -encoders 2>/dev/null | grep -E '(^| )libx264( |$)' >/dev/null
 python -c 'import av; av.codec.Codec("h264", "w"); av.codec.Codec("aac", "w")'
 
 export VLLM_WORKER_MULTIPROC_METHOD="${VLLM_WORKER_MULTIPROC_METHOD:-spawn}"
@@ -57,6 +69,7 @@ curl -sS http://localhost:${HTTP_PORT}/v1/videos \\
     "response_format": "url",
     "output_format": "mp4",
     "nvext": {
+      "fps": 24,
       "num_inference_steps": 50,
       "seed": 42
     },
@@ -70,16 +83,20 @@ CURL
 
 python -m dynamo.frontend &
 
-sleep 2
+if ! wait_for_ready "http://localhost:${HTTP_PORT}/health" 60; then
+    echo "Frontend failed to become ready; stopping launch." >&2
+    exit 1
+fi
 
 echo "Starting MiniMax-H3 T2VA Omni worker..."
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}" \
     python -m dynamo.vllm.omni \
     --model "$MODEL" \
+    --revision "$MODEL_REVISION" \
     --output-modalities video \
     --media-output-fs-url file:///tmp/dynamo_media \
     --trust-remote-code \
-    --task-type t2va \
+    --task-type fl2va \
     --ulysses-degree "$ULYSSES_DEGREE" \
     --text-encoder-tp-size "$TEXT_ENCODER_TP_SIZE" \
     --vae-patch-parallel-size "$VAE_PATCH_PARALLEL_SIZE" \
