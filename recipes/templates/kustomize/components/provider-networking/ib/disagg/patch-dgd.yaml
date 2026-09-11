@@ -30,14 +30,23 @@ spec:
             - name: main
               env:
                 - name: NCCL_SOCKET_IFNAME
-                  value: "your-prefill-socket-interface"
+                  value: "your-prefill-nccl-socket-interface"
                 - name: GLOO_SOCKET_IFNAME
-                  value: "your-prefill-socket-interface"
+                  value: "your-prefill-gloo-socket-interface"
+                - name: UCX_NET_DEVICES
+                  value: "your-prefill-ucx-device-list"
               resources:
                 requests:
-                  your-rdma.example.com/device: "your-prefill-rdma-resource-count"
+                  your-prefill-rdma.example.com/resource: "your-prefill-rdma-resource-quantity"
                 limits:
-                  your-rdma.example.com/device: "your-prefill-rdma-resource-count"
+                  your-prefill-rdma.example.com/resource: "your-prefill-rdma-resource-quantity"
+              volumeMounts:
+                - name: ib
+                  mountPath: /dev/infiniband
+          volumes:
+            - name: ib
+              hostPath:
+                path: /dev/infiniband
     - name: DecodeWorker
       podTemplate:
         spec:
@@ -45,11 +54,20 @@ spec:
             - name: main
               env:
                 - name: NCCL_SOCKET_IFNAME
-                  value: "your-decode-socket-interface"
+                  value: "your-decode-nccl-socket-interface"
                 - name: GLOO_SOCKET_IFNAME
-                  value: "your-decode-socket-interface"
+                  value: "your-decode-gloo-socket-interface"
+                - name: UCX_NET_DEVICES
+                  value: "your-decode-ucx-device-list"
               resources:
                 requests:
-                  your-rdma.example.com/device: "your-decode-rdma-resource-count"
+                  your-decode-rdma.example.com/resource: "your-decode-rdma-resource-quantity"
                 limits:
-                  your-rdma.example.com/device: "your-decode-rdma-resource-count"
+                  your-decode-rdma.example.com/resource: "your-decode-rdma-resource-quantity"
+              volumeMounts:
+                - name: ib
+                  mountPath: /dev/infiniband
+          volumes:
+            - name: ib
+              hostPath:
+                path: /dev/infiniband
