@@ -116,52 +116,49 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 			startupPolicy = nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
 		}
 
-		// Derive the compatibility identity expected by captured and restored workers.
-		workerHash, err := checkpointWorkerHashForComponent(dgd, componentName)
-		if err != nil {
-			return dgdCheckpointsResult{}, fmt.Errorf("failed to compute checkpoint worker hash for component %s: %w", componentName, err)
-		}
-		workerComponent := dynamo.IsWorkerComponent(string(component.ComponentType))
-		var expectedWorkerHash *string
-		if workerComponent {
-			expectedWorkerHash = &workerHash
-		}
-
 		var info *checkpoint.CheckpointInfo
-		if workerComponent && workerHash == "" {
-			// Grove records the active worker generation after synchronizing its
-			// first PodCliqueSet. Do not capture or resolve a generation-less
-			// worker while that durable identity is still being initialized.
-			logger.Info("Waiting for active worker hash before checkpoint reconciliation", "component", componentName)
-			info = &checkpoint.CheckpointInfo{
-				Enabled:        true,
-				CheckpointName: checkpointName,
-				StartupPolicy:  startupPolicy,
+		var err error
+		if !hasCheckpointRef {
+			// The rollout hash remains the automatic-capture generation key. It is
+			// deliberately separate from the portable snapshot compatibility hash.
+			workerHash, hashErr := checkpointWorkerHashForComponent(dgd, componentName)
+			if hashErr != nil {
+				return dgdCheckpointsResult{}, fmt.Errorf("failed to compute checkpoint worker hash for component %s: %w", componentName, hashErr)
 			}
-			if hasCheckpointRef {
-				// Explicit restore must remain fail-closed while compatibility
-				// identity is unavailable, even when Immediate was requested.
-				info.StartupPolicy = nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint
+			workerComponent := dynamo.IsWorkerComponent(string(component.ComponentType))
+			if workerComponent && workerHash == "" {
+				// Grove records the active worker generation after synchronizing its
+				// first PodCliqueSet. Do not capture or resolve a generation-less
+				// worker while that durable identity is still being initialized.
+				logger.Info("Waiting for active worker hash before checkpoint reconciliation", "component", componentName)
+				info = &checkpoint.CheckpointInfo{
+					Enabled:          true,
+					CheckpointName:   checkpointName,
+					StartupPolicy:    startupPolicy,
+					AutomaticCapture: true,
+				}
 			} else {
-				info.AutomaticCapture = true
+				info, err = r.reconcileAutomaticSnapshotJob(
+					ctx,
+					dgd,
+					componentName,
+					component,
+					workerHash,
+					startupPolicy,
+				)
 			}
-		} else if !hasCheckpointRef {
-			info, err = r.reconcileAutomaticSnapshotJob(
-				ctx,
-				dgd,
-				componentName,
-				component,
-				workerHash,
-				startupPolicy,
-			)
 		} else {
+			compatibilityHash, hashErr := r.snapshotCompatibilityHashForComponent(dgd, componentName, component)
+			if hashErr != nil {
+				return dgdCheckpointsResult{}, fmt.Errorf("failed to compute snapshot compatibility hash for component %s: %w", componentName, hashErr)
+			}
 			// Resolve explicit references against the standalone PodSnapshot API.
 			info, err = checkpoint.ResolvePodSnapshotForService(
 				ctx,
 				r.Client,
 				dgd.Namespace,
 				alphaCheckpointConfig,
-				expectedWorkerHash,
+				compatibilityHash,
 				checkpoint.ExplicitPodSnapshotUse(),
 			)
 		}
@@ -200,6 +197,43 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 	}
 
 	return result, nil
+}
+
+func (r *dgdCheckpointsReconciler) snapshotCompatibilityHashForComponent(
+	dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	componentName string,
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+) (string, error) {
+	backendFramework, err := dynamo.BackendFrameworkForComponent(component, dynamoDeployment)
+	if err != nil {
+		return "", fmt.Errorf("determine backend framework: %w", err)
+	}
+	if backendFramework == "" || backendFramework == dynamo.BackendFrameworkNoop {
+		return "", fmt.Errorf("backend framework could not be determined; set spec.backendFramework or use a recognizable worker command")
+	}
+	podTemplate, err := r.buildCheckpointJobPodTemplate(
+		dynamoDeployment,
+		component,
+		componentName,
+		backendFramework,
+	)
+	if err != nil {
+		return "", fmt.Errorf("build compatibility pod template: %w", err)
+	}
+	targetContainerName := consts.MainContainerName
+	if checkpointConfig := dynamo.GetCheckpoint(component); checkpointConfig != nil && checkpointConfig.TargetContainerName != "" {
+		targetContainerName = checkpointConfig.TargetContainerName
+	}
+	gmsMode, err := automaticSnapshotGMSMode(gms.ToAlphaSpec(dynamo.GetGPUMemoryService(component)))
+	if err != nil {
+		return "", err
+	}
+	return checkpoint.ComputeSnapshotCompatibilityHash(
+		&podTemplate,
+		targetContainerName,
+		string(backendFramework),
+		gmsMode,
+	)
 }
 
 // reconcileAutomaticSnapshotJob converges one DGD-managed automatic capture
@@ -273,6 +307,19 @@ func (r *dgdCheckpointsReconciler) reconcileAutomaticSnapshotJob(
 			gmsSpec.ExtraClientContainers = append([]string(nil), checkpointConfig.Job.GMSClientContainers...)
 		}
 	}
+	gmsMode, err := automaticSnapshotGMSMode(gmsSpec)
+	if err != nil {
+		return nil, err
+	}
+	compatibilityHash, err := checkpoint.ComputeSnapshotCompatibilityHash(
+		&podTemplate,
+		targetContainerName,
+		string(backendFramework),
+		gmsMode,
+	)
+	if err != nil {
+		return nil, err
+	}
 	var checkpointGMSClaimTemplateName string
 	if gmsSpec != nil && gmsSpec.Enabled {
 		checkpointGMSClaimTemplateName = checkpointGMSResourceClaimTemplateName(checkpointID)
@@ -307,11 +354,6 @@ func (r *dgdCheckpointsReconciler) reconcileAutomaticSnapshotJob(
 		deletionPolicy = nvidiacomv1alpha1.CheckpointDeletionPolicyDelete
 	}
 
-	gmsMode, err := automaticSnapshotGMSMode(gmsSpec)
-	if err != nil {
-		return nil, err
-	}
-
 	// SnapshotJob owns the one-shot capture state machine while Dynamo supplies
 	// the rendered workload and compatibility metadata.
 	desired := buildAutomaticSnapshotJob(
@@ -319,6 +361,7 @@ func (r *dgdCheckpointsReconciler) reconcileAutomaticSnapshotJob(
 		componentName,
 		checkpointID,
 		workerHash,
+		compatibilityHash,
 		podTemplate,
 		targetContainerName,
 		deletionPolicy,
@@ -342,15 +385,11 @@ func (r *dgdCheckpointsReconciler) reconcileAutomaticSnapshotJob(
 		return nil, err
 	}
 
-	var expectedWorkerHash *string
-	if dynamo.IsWorkerComponent(string(component.ComponentType)) {
-		expectedWorkerHash = &workerHash
-	}
 	return r.resolveAutomaticSnapshotJob(
 		ctx,
 		snapshotJob,
 		dynamo.ToAlphaCheckpointConfig(checkpointConfig),
-		expectedWorkerHash,
+		compatibilityHash,
 		startupPolicy,
 	)
 }
@@ -362,6 +401,7 @@ func buildAutomaticSnapshotJob(
 	componentName string,
 	checkpointID string,
 	workerHash string,
+	compatibilityHash string,
 	podTemplate corev1.PodTemplateSpec,
 	targetContainerName string,
 	deletionPolicy nvidiacomv1alpha1.CheckpointDeletionPolicy,
@@ -392,7 +432,7 @@ func buildAutomaticSnapshotJob(
 		consts.CheckpointDeletionPolicyAnnotation:     string(deletionPolicy),
 		consts.CheckpointOwnerUIDAnnotation:           string(dgd.UID),
 		consts.SnapshotCompatibilityVersionAnnotation: consts.SnapshotCompatibilityVersion,
-		consts.SnapshotWorkerHashAnnotation:           workerHash,
+		consts.SnapshotCompatibilityHashAnnotation:    compatibilityHash,
 		consts.SnapshotGMSModeAnnotation:              gmsMode,
 	}
 
@@ -550,14 +590,15 @@ func (r *dgdCheckpointsReconciler) resolveAutomaticSnapshotJob(
 	ctx context.Context,
 	snapshotJob *snapshotv1alpha1.SnapshotJob,
 	config *nvidiacomv1alpha1.ServiceCheckpointConfig,
-	expectedWorkerHash *string,
+	expectedCompatibilityHash string,
 	startupPolicy nvidiacomv1alpha1.CheckpointStartupPolicy,
 ) (*checkpoint.CheckpointInfo, error) {
 	info := &checkpoint.CheckpointInfo{
-		Enabled:          true,
-		AutomaticCapture: true,
-		CheckpointName:   snapshotJob.Status.PodSnapshotName,
-		StartupPolicy:    startupPolicy,
+		Enabled:                   true,
+		AutomaticCapture:          true,
+		CheckpointName:            snapshotJob.Status.PodSnapshotName,
+		StartupPolicy:             startupPolicy,
+		SnapshotCompatibilityHash: expectedCompatibilityHash,
 	}
 	if snapshotv1alpha1.IsSnapshotJobFailed(snapshotJob) {
 		failed := meta.FindStatusCondition(snapshotJob.Status.Conditions, snapshotv1alpha1.SnapshotJobConditionFailed)
@@ -592,7 +633,7 @@ func (r *dgdCheckpointsReconciler) resolveAutomaticSnapshotJob(
 		r.Client,
 		snapshotJob.Namespace,
 		refConfig,
-		expectedWorkerHash,
+		expectedCompatibilityHash,
 		checkpoint.ManagedPodSnapshotUse(types.UID(snapshotJob.Annotations[consts.CheckpointOwnerUIDAnnotation])),
 	)
 	if apierrors.IsNotFound(err) {

@@ -24,6 +24,7 @@ type ResolvedPodSnapshot struct {
 	BoundContentName     string
 	SourceContainer      string
 	CompatibilityVersion string
+	CompatibilityHash    string
 	GMSMode              string
 }
 
@@ -62,14 +63,14 @@ func ManagedPodSnapshotUse(ownerUID types.UID) PodSnapshotUse {
 // but not-yet-ready snapshot is returned with Ready=false so callers can gate
 // workloads while retaining an admission-time reference to the same object.
 // A nil config means checkpointing is disabled. Reader must be non-nil when
-// checkpointing is enabled. A nil expectedWorkerHash means the target is not a
-// worker-class component; a non-nil value must contain its generation hash.
+// checkpointing is enabled. expectedCompatibilityHash must contain the
+// independently rendered compatibility identity for the restore target.
 func ResolvePodSnapshotForService(
 	ctx context.Context,
 	reader client.Reader,
 	namespace string,
 	config *nvidiacomv1alpha1.ServiceCheckpointConfig,
-	expectedWorkerHash *string,
+	expectedCompatibilityHash string,
 	use PodSnapshotUse,
 ) (*CheckpointInfo, error) {
 	if config == nil || !config.Enabled {
@@ -81,8 +82,8 @@ func ResolvePodSnapshotForService(
 	if config.CheckpointRef == nil || strings.TrimSpace(*config.CheckpointRef) == "" {
 		return nil, fmt.Errorf("checkpointRef is required for native PodSnapshot restore")
 	}
-	if expectedWorkerHash != nil && *expectedWorkerHash == "" {
-		return nil, fmt.Errorf("worker compatibility hash is required for native PodSnapshot restore")
+	if expectedCompatibilityHash == "" {
+		return nil, fmt.Errorf("snapshot compatibility hash is required for native PodSnapshot restore")
 	}
 
 	// Read the referenced standalone Snapshot object directly.
@@ -153,14 +154,14 @@ func ResolvePodSnapshotForService(
 			version,
 		)
 	}
-	workerHash := annotations[consts.SnapshotWorkerHashAnnotation]
-	if expectedWorkerHash != nil && workerHash != *expectedWorkerHash {
+	compatibilityHash := annotations[consts.SnapshotCompatibilityHashAnnotation]
+	if compatibilityHash != expectedCompatibilityHash {
 		return nil, fmt.Errorf(
-			"referenced PodSnapshot %s/%s worker hash %q does not match expected hash %q",
+			"referenced PodSnapshot %s/%s compatibility hash %q does not match expected hash %q",
 			namespace,
 			snapshotName,
-			workerHash,
-			*expectedWorkerHash,
+			compatibilityHash,
+			expectedCompatibilityHash,
 		)
 	}
 	gmsMode := annotations[consts.SnapshotGMSModeAnnotation]
@@ -185,17 +186,19 @@ func ResolvePodSnapshotForService(
 		startupPolicy = nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
 	}
 	info := &CheckpointInfo{
-		Enabled:          true,
-		Exists:           true,
-		GPUMemoryService: gmsSpec,
-		CheckpointName:   snapshot.Name,
-		Ready:            ready,
-		StartupPolicy:    startupPolicy,
+		Enabled:                   true,
+		Exists:                    true,
+		GPUMemoryService:          gmsSpec,
+		CheckpointName:            snapshot.Name,
+		Ready:                     ready,
+		StartupPolicy:             startupPolicy,
+		SnapshotCompatibilityHash: compatibilityHash,
 		NativeSnapshot: &ResolvedPodSnapshot{
 			UID:                  snapshot.UID,
 			BoundContentName:     contentName,
 			SourceContainer:      containers[0],
 			CompatibilityVersion: version,
+			CompatibilityHash:    compatibilityHash,
 			GMSMode:              gmsMode,
 		},
 	}
