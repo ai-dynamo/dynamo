@@ -94,8 +94,9 @@ func TestGroveScaler_ReconcileTargetsExpectedGroveChildren(t *testing.T) {
 
 // TestGroveScaler_ReconcileKeepsRenderedTopologyConstraint pins the operator's
 // half of the packDomain guarantee: a replica-count change must not disturb the
-// rendered Grove `topologyConstraint.pack.required` domain, so the replicas a
-// scale-up adds stay bound to the domain the running replicas already occupy.
+// rendered Grove `topologyConstraint.pack.required` domain, which is what keeps
+// the constraint applying to the replicas a scale-up adds. Where those replicas
+// then land is Grove's and the backend scheduler's, and is not asserted here.
 func TestGroveScaler_ReconcileKeepsRenderedTopologyConstraint(t *testing.T) {
 	t.Log("Given a constrained deployment whose components are scaled up")
 	dgd := betaDGD(t, &nvidiacomv1alpha1.DynamoGraphDeployment{

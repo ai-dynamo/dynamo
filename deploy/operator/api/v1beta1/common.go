@@ -548,10 +548,11 @@ type SpecTopologyConstraint struct {
 	// The operator renders this as the Grove `topologyConstraint.pack.required`
 	// domain and leaves that constraint in place when the replica count later
 	// changes: a scale only writes the new replica count to the `scale`
-	// subresource of the Grove child. Replicas added by a scale-up are therefore
-	// expected to be placed in the same domain instance that already holds the
-	// running replicas, and to stay Pending while that instance has no room for
-	// them, rather than being placed in a different instance.
+	// subresource of the Grove child. Grove and the backend scheduler enforce
+	// the constraint, and it is required rather than preferred, so a scale-up
+	// places the added replicas in the domain instance that already holds the
+	// running replicas and leaves them Pending while that instance has no room
+	// for them, rather than placing them in a different instance.
 	// +optional
 	PackDomain TopologyDomain `json:"packDomain,omitempty"`
 }
@@ -566,10 +567,11 @@ type TopologyConstraint struct {
 	// The operator renders this as the Grove `topologyConstraint.pack.required`
 	// domain and leaves that constraint in place when the replica count later
 	// changes: a scale only writes the new replica count to the `scale`
-	// subresource of the Grove child. Replicas added by a scale-up are therefore
-	// expected to be placed in the same domain instance that already holds the
-	// running replicas, and to stay Pending while that instance has no room for
-	// them, rather than being placed in a different instance.
+	// subresource of the Grove child. Grove and the backend scheduler enforce
+	// the constraint, and it is required rather than preferred, so a scale-up
+	// places the added replicas in the domain instance that already holds the
+	// running replicas and leaves them Pending while that instance has no room
+	// for them, rather than placing them in a different instance.
 	PackDomain TopologyDomain `json:"packDomain"`
 }
 
