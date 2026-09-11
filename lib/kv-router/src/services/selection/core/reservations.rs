@@ -353,9 +353,9 @@ impl SelectionCore {
             _ => None,
         };
         // Strict booking: never lazily recreate a worker/rank removed since the
-        // reservation was resolved. The lease frees the booking if this future
+        // reservation was resolved. The handle frees the booking if this future
         // is dropped before `install`.
-        let lease = entry
+        let booking = entry
             .scheduler
             .add_request_if_registered_guarded(SequenceRequest {
                 request_id: selection_id.clone(),
@@ -377,7 +377,7 @@ impl SelectionCore {
         }
         claim.install(Reservation {
             partition: key.clone(),
-            booking: Some(lease.commit().ok_or_else(missing_booking)?),
+            booking: Some(booking.commit()),
             _affinity_lease: affinity_lease,
         });
 
@@ -538,10 +538,6 @@ pub(super) fn sweep_reservation_index(
     // after both locks are gone.
     drop(removed);
     swept
-}
-
-pub(super) fn missing_booking() -> SelectionError {
-    SelectionError::Internal("booking lease holds no booking".to_string())
 }
 
 pub(super) fn spawn_reservation_index_sweep(

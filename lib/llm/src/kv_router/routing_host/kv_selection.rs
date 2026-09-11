@@ -10,9 +10,7 @@ use dynamo_kv_router::{
     protocols::{
         BlockExtraInfo, RoutingConstraints, WorkerAffinityTarget, WorkerId, WorkerWithDpRank,
     },
-    scheduling::{
-        AdvisoryWorkerLoad, QueueRejection, RoutingEligibility, queue::RequestLifecycleLease,
-    },
+    scheduling::{AdvisoryWorkerLoad, QueueRejection, RoutingEligibility, queue::BookingHandle},
 };
 use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
 
@@ -31,8 +29,8 @@ use crate::{
 
 pub(super) struct WorkerSelection {
     pub(super) worker: WorkerWithDpRank,
-    /// The booking's lifecycle lease until the request's cleanup takes it over.
-    pub(super) lease: Option<Box<RequestLifecycleLease>>,
+    /// The booking's handle until the request's cleanup takes it over.
+    pub(super) booking: Option<BookingHandle>,
     pub(super) overlap_amount: u32,
     pub(super) effective_overlap_blocks: f64,
     pub(super) cached_tokens: usize,
@@ -42,6 +40,8 @@ pub(super) struct WorkerSelection {
     pub(super) kv_hint: Option<KvHint>,
 }
 
+// Transient return value; `Routed` is moved into `WorkerSelection` right away.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum SelectionOutcome {
     Routed(WorkerSelection),
     QueueRejected(QueueRejection),
@@ -138,7 +138,7 @@ impl RoutingHost {
                     kv_hint,
                 } => Ok(SelectionOutcome::Routed(WorkerSelection {
                     worker,
-                    lease: admitted.lease,
+                    booking: admitted.booking,
                     overlap_amount: overlap_blocks,
                     effective_overlap_blocks,
                     cached_tokens,
@@ -162,7 +162,7 @@ impl RoutingHost {
                     routing_hashes,
                 } => Ok(SelectionOutcome::Routed(WorkerSelection {
                     worker,
-                    lease: None,
+                    booking: None,
                     overlap_amount: overlap_blocks,
                     effective_overlap_blocks,
                     cached_tokens,

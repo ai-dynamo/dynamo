@@ -203,7 +203,7 @@ impl RoutingHost {
                 Arc::clone(self.kv_router()),
                 request.context().id().to_string(),
                 selection.worker,
-                selection.lease.take(),
+                selection.booking.take(),
             ),
             selection,
             affinity,
@@ -337,7 +337,7 @@ impl RoutingHost {
                 self.request_metrics.clone(),
                 context_id.clone(),
                 selected_worker,
-                selection.lease.take(),
+                selection.booking.take(),
                 request,
             ),
         };

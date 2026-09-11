@@ -362,9 +362,58 @@ impl SchedulerBookingCleanup {
     }
 }
 
-/// Single-owner cleanup lease for one scheduler-tracked request.
+/// A booking whose release this handle owns until `commit` hands it over.
+/// Dropping an armed handle frees the booking through the scheduler's cleanup queue.
 #[doc(hidden)]
-pub struct RequestLifecycleLease {
+#[must_use]
+pub struct BookingHandle {
+    booking: SchedulerBookingDescriptor,
+    cleanup: SchedulerBookingCleanup,
+    armed: bool,
+}
+
+impl std::fmt::Debug for BookingHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BookingHandle")
+            .field("booking", &self.booking)
+            .field("armed", &self.armed)
+            .finish()
+    }
+}
+
+impl BookingHandle {
+    pub fn descriptor(&self) -> &SchedulerBookingDescriptor {
+        &self.booking
+    }
+
+    /// Hand the booking to a longer-lived owner; the handle stops guarding it.
+    #[must_use]
+    pub fn commit(mut self) -> SchedulerBookingDescriptor {
+        self.armed = false;
+        self.booking.clone()
+    }
+
+    /// Free the booking now and wait for the scheduler to acknowledge it.
+    pub async fn release(mut self) -> Result<(), SequenceError> {
+        self.armed = false;
+        self.cleanup
+            .enqueue_acknowledged(self.booking.clone())
+            .wait()
+            .await
+    }
+}
+
+impl Drop for BookingHandle {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cleanup.enqueue(self.booking.clone());
+        }
+    }
+}
+
+/// Single-owner cleanup lease for one scheduler-tracked request.
+pub(crate) struct RequestLifecycleLease {
     cleanup: Arc<AdmissionCleanup>,
     actor_tx: mpsc::Sender<AdmissionCommand>,
     transfer: Option<Arc<AdmissionLifecycleTransfer>>,
@@ -738,18 +787,13 @@ impl<
         }
     }
 
-    /// An armed lease for a booking made outside the admission actor.
-    pub(crate) fn lease_for_booking(
-        &self,
-        booking: SchedulerBookingDescriptor,
-    ) -> Box<RequestLifecycleLease> {
-        let transfer = AdmissionLifecycleTransfer::new(booking.request_id.clone());
-        transfer.arm_booking(booking);
-        Box::new(RequestLifecycleLease {
-            cleanup: Arc::clone(&self.cleanup),
-            actor_tx: self.admission_tx.clone(),
-            transfer: Some(Arc::new(transfer)),
-        })
+    /// An armed handle for an existing booking.
+    pub(crate) fn booking_handle(&self, booking: SchedulerBookingDescriptor) -> BookingHandle {
+        BookingHandle {
+            booking,
+            cleanup: self.booking_cleanup(),
+            armed: true,
+        }
     }
 
     /// Select a worker from current scheduler state without entering admission.
@@ -1726,6 +1770,79 @@ mod tests {
             panic!("admitted cleanup must carry the exact booking");
         };
         assert_eq!(cleanup, booking);
+    }
+
+    fn book_directly(
+        slots: &ActiveSequencesMultiWorker<NoopSequencePublisher>,
+        request_id: &str,
+    ) -> SchedulerBookingDescriptor {
+        let worker = WorkerWithDpRank::new(0, 0);
+        let attempt_id = slots
+            .add_request_admitted(
+                crate::sequences::SequenceRequest {
+                    request_id: request_id.to_string(),
+                    token_sequence: None,
+                    track_prefill_tokens: true,
+                    expected_output_tokens: None,
+                    prefill_load_hint: None,
+                    worker,
+                    lora_name: None,
+                },
+                Instant::now(),
+            )
+            .expect("worker 0 is registered");
+        SchedulerBookingDescriptor {
+            request_id: request_id.to_string(),
+            worker,
+            attempt_id,
+        }
+    }
+
+    async fn wait_freed(
+        slots: &ActiveSequencesMultiWorker<NoopSequencePublisher>,
+        booking: &SchedulerBookingDescriptor,
+    ) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while slots.has_booking(booking) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("booking was freed");
+    }
+
+    /// The handle frees its booking exactly when it is dropped armed; `commit`
+    /// hands the booking over untouched and `release` frees it with an ack.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn booking_handle_frees_only_while_armed() {
+        let (queue, slots) = make_queue(1, 16, 512, Some(0.0));
+
+        let armed = book_directly(&slots, "armed");
+        drop(queue.booking_handle(armed.clone()));
+        wait_freed(&slots, &armed).await;
+
+        let committed = book_directly(&slots, "committed");
+        let descriptor = queue.booking_handle(committed.clone()).commit();
+        assert_eq!(descriptor, committed);
+
+        // The cleanup queue drains in order, so an acknowledged release
+        // enqueued after the commit proves the commit enqueued nothing.
+        let released = book_directly(&slots, "released");
+        queue
+            .booking_handle(released.clone())
+            .release()
+            .await
+            .expect("acknowledged release");
+        assert!(
+            !slots.has_booking(&released),
+            "release frees before it returns"
+        );
+        assert!(
+            slots.has_booking(&committed),
+            "a committed handle leaves the booking to its new owner"
+        );
+        slots.free(&committed.request_id, decay_now()).unwrap();
+        slots.assert_completely_drained(decay_now());
     }
 
     struct DropResponseOnLoadPublisher {

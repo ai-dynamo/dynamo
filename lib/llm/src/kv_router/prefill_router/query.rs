@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use anyhow::Result;
 use dynamo_kv_router::{
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId, WorkerWithDpRank},
-    scheduling::queue::{SchedulerBookingCleanup, SchedulerBookingDescriptor},
+    scheduling::queue::BookingHandle,
 };
 
 use super::{PrefillError, PrefillLifecycleState, PrefillQueryOutcome, PrefillRouter};
@@ -21,15 +21,7 @@ use super::{PrefillError, PrefillLifecycleState, PrefillQueryOutcome, PrefillRou
 pub struct PrefillReservation {
     worker: WorkerWithDpRank,
     dp_rank: Option<u32>,
-    release: ReservationRelease,
-}
-
-enum ReservationRelease {
-    Kv {
-        cleanup: SchedulerBookingCleanup,
-        booking: Option<SchedulerBookingDescriptor>,
-    },
-    None,
+    booking: Option<BookingHandle>,
 }
 
 impl PrefillReservation {
@@ -43,22 +35,10 @@ impl PrefillReservation {
 
     /// Release this booking and wait for the scheduler to acknowledge it.
     pub async fn release(mut self) -> Result<()> {
-        if let ReservationRelease::Kv { cleanup, booking } = &mut self.release
-            && let Some(booking) = booking.take()
-        {
-            cleanup.enqueue_acknowledged(booking).wait().await?;
+        if let Some(booking) = self.booking.take() {
+            booking.release().await?;
         }
         Ok(())
-    }
-}
-
-impl Drop for PrefillReservation {
-    fn drop(&mut self) {
-        if let ReservationRelease::Kv { cleanup, booking } = &mut self.release
-            && let Some(booking) = booking.take()
-        {
-            cleanup.enqueue(booking);
-        }
     }
 }
 
@@ -103,7 +83,7 @@ impl PrefillRouter {
             return Ok(PrefillReservation {
                 worker: WorkerWithDpRank::new(worker_id, 0),
                 dp_rank: None,
-                release: ReservationRelease::None,
+                booking: None,
             });
         };
         let admitted = chooser
@@ -125,19 +105,16 @@ impl PrefillRouter {
                 routing_constraints,
             )
             .await?;
-        let (outcome, lease) = admitted.into_parts();
+        let (outcome, booking) = admitted.into_parts();
         match outcome {
             crate::kv_router::FindBestMatchOutcome::Routed { worker, .. } => {
-                let Some(booking) = lease.and_then(|lease| lease.commit()) else {
+                let Some(booking) = booking else {
                     anyhow::bail!("prefill reservation admission did not return a booking");
                 };
                 Ok(PrefillReservation {
                     worker,
                     dp_rank: Some(worker.dp_rank),
-                    release: ReservationRelease::Kv {
-                        cleanup: chooser.booking_cleanup(),
-                        booking: Some(booking),
-                    },
+                    booking: Some(booking),
                 })
             }
             crate::kv_router::FindBestMatchOutcome::QueueRejected { rejection } => {

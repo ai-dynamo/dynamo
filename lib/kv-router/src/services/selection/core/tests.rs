@@ -1258,7 +1258,7 @@ async fn lease_admission_keeps_a_selection_whose_worker_drained_while_queued() {
             Ok(SelectionOutcome::Selected(selected)) => (
                 selected.response.best_worker.worker_id,
                 selected.endpoint,
-                selected.lease.is_some(),
+                selected.booking.is_some(),
             ),
             Ok(SelectionOutcome::QueueRejected { .. }) => panic!("queue rejected"),
             Err(error) => panic!("lease selection failed: {error:?}"),
@@ -1329,8 +1329,8 @@ async fn lease_admission_installs_no_index_row_and_records_nothing() {
         "a lease admission installs no index row"
     );
     assert!(
-        selected.lease.is_some(),
-        "the booking's lease goes to the host"
+        selected.booking.is_some(),
+        "the booking's handle goes to the host"
     );
     assert!(selected.sequence_hashes.is_none());
     assert!(selected.routing_hashes.is_none());

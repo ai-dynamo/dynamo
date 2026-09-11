@@ -16,7 +16,7 @@ use crate::protocols::{
     WorkerWithDpRank,
 };
 use crate::scheduling::config::RouterConfigOverride;
-use crate::scheduling::queue::RequestLifecycleLease;
+use crate::scheduling::queue::BookingHandle;
 use crate::scheduling::{AdvisoryWorkerLoad, QueueRejection, SchedulingResponse, SessionContext};
 
 use super::super::error::SelectionError;
@@ -56,8 +56,8 @@ pub enum SelectionAdmission {
     /// Queue admission with a booking the core records as a reservation under
     /// `selection_id` and releases through its lifecycle calls.
     Book { selection_id: String },
-    /// Queue admission with a booking the caller owns: its lifecycle lease is
-    /// returned armed in [`Selected::lease`].
+    /// Queue admission with a booking the caller owns: its booking handle is
+    /// returned armed in [`Selected::booking`].
     Lease { request_id: String },
     /// Skip queue admission and report the chosen worker's load.
     Advisory { request_id: Option<String> },
@@ -142,7 +142,7 @@ pub struct Selected {
     pub kv_hint: Option<KvHint>,
     pub routing_hashes: Option<Vec<LocalBlockHash>>,
     pub shared_cache_hits: Option<SharedCacheHits>,
-    /// The booking's lifecycle lease; `Lease` admission only. Dropping it frees
-    /// the booking, `commit` hands it to the caller's own cleanup.
-    pub lease: Option<Box<RequestLifecycleLease>>,
+    /// The booking's handle; `Lease` admission only. Dropping it frees the
+    /// booking, `commit` hands it to the caller's own cleanup.
+    pub booking: Option<BookingHandle>,
 }

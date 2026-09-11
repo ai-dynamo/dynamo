@@ -22,7 +22,7 @@ use dynamo_kv_router::{
         BlockExtraInfo, BlockHashOptions, WorkerWithDpRank, compute_block_hash_for_seq,
         compute_next_seq_hash,
     },
-    scheduling::queue::RequestLifecycleLease,
+    scheduling::queue::BookingHandle,
 };
 use dynamo_runtime::{
     error::DynamoError,
@@ -396,15 +396,15 @@ pub(super) struct KvRequestCleanup {
 }
 
 impl KvRequestCleanup {
-    /// Takes the booking over from `lease`: from here the request's cleanup
+    /// Takes the booking over from `booking`: from here the request's cleanup
     /// owns it.
     pub(super) fn new(
         chooser: Arc<KvRouter>,
         context_id: String,
         worker: WorkerWithDpRank,
-        lease: Option<Box<RequestLifecycleLease>>,
+        booking: Option<BookingHandle>,
     ) -> Self {
-        let booking = lease.and_then(|lease| lease.commit());
+        let booking = booking.map(BookingHandle::commit);
         let approximate_lru = booking.as_ref().and_then(|booking| {
             let registration = chooser.approximate_lru_rank_registration(worker)?;
             chooser.indexer().begin_approximate_lru_request(
@@ -562,12 +562,12 @@ impl RequestGuard {
         request_metrics: Arc<RouterRequestMetrics>,
         context_id: String,
         worker: WorkerWithDpRank,
-        lease: Option<Box<RequestLifecycleLease>>,
+        booking: Option<BookingHandle>,
         request: &PreprocessedRequest,
     ) -> Self {
         Self::new_kv_with_cleanup(
             request_metrics,
-            KvRequestCleanup::new(chooser, context_id, worker, lease),
+            KvRequestCleanup::new(chooser, context_id, worker, booking),
             request,
         )
     }

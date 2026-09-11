@@ -2523,7 +2523,7 @@ impl KvRouter {
                 )
                 .await
                 .map_err(to_pyerr)?;
-            let (outcome, lease) = admitted.into_parts();
+            let (outcome, booking) = admitted.into_parts();
             let (best_worker, overlap_blocks) = match outcome {
                 llm_rs::kv_router::FindBestMatchOutcome::Routed {
                     worker,
@@ -2559,9 +2559,9 @@ impl KvRouter {
                 None
             };
 
-            if let Some(lease) = lease {
+            if let Some(booking) = booking {
                 chooser
-                    .enroll_public_request_attempt(lease, routing_decision)
+                    .enroll_public_request_attempt(booking, routing_decision)
                     .await
                     .map_err(to_pyerr)?;
             } else if let Some(tokens_with_hashes) = routing_decision {

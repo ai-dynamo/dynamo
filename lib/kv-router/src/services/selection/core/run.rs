@@ -15,8 +15,8 @@
 //!   request ends (`dropped_selection_future_frees_its_booking`,
 //!   `reservation_index_tracks_bookings_until_freed`).
 //! - Release ownership moves in one direction: the scheduler actor books, hands
-//!   the armed lease to this run, and the run hands it to the index row for
-//!   `Book` (`claim.install`) or to the host for `Lease` (`Selected::lease`)
+//!   the armed handle to this run, and the run hands it to the index row for
+//!   `Book` (`claim.install`) or to the host for `Lease` (`Selected::booking`)
 //!   (`dropped_selection_future_frees_its_booking`,
 //!   `lease_admission_installs_no_index_row_and_records_nothing`).
 //! - The session hold is taken before the booking is made
@@ -37,7 +37,7 @@
 //!   `dropped_book_selection_during_routing_record_frees_booking_and_claim`).
 
 use super::hint::transfer_hint_for_selection;
-use super::reservations::{Reservation, missing_booking};
+use super::reservations::Reservation;
 use super::*;
 
 /// Action id of the single `kv.fetch` action a selection's KV hint carries.
@@ -185,7 +185,7 @@ impl SelectionCore {
             kv_hint,
             routing_hashes: _,
             shared_cache_hits: _,
-            lease: _,
+            booking: _,
         } = selected;
         let booked = sequence_hashes.is_some();
         let potential_decode_blocks = response.potential_decode_blocks as u64;
@@ -418,7 +418,7 @@ impl SelectionCore {
             routing_constraints,
             shared_cache_hits,
         };
-        // `lease` guards the booking until it is installed below: any early
+        // `booking` guards the booking until it is installed below: any early
         // return or drop before then frees it.
         let scheduled = tokio::select! {
             biased;
@@ -438,14 +438,14 @@ impl SelectionCore {
                 } else {
                     entry
                         .scheduler
-                        .schedule_request_with_lease(schedule_request)
+                        .schedule_request_with_booking(schedule_request)
                         .instrument(tracing::info_span!("kv_router.schedule"))
                         .await
-                        .map(|(admitted, lease)| (admitted.response, None, lease))
+                        .map(|(admitted, booking)| (admitted.response, None, booking))
                 }
             } => result,
         };
-        let (response, advisory_load, lease) = match scheduled {
+        let (response, advisory_load, booking) = match scheduled {
             Ok(scheduled) => scheduled,
             Err(KvSchedulerError::QueueRejected(rejection)) => {
                 return Ok(SelectionOutcome::QueueRejected { rejection });
@@ -488,13 +488,13 @@ impl SelectionCore {
         // The routing hashes go to exactly one of: the reservation recorded
         // now, or the replay cache a later reservation records from.
         let mut routing_hashes = routing_hashes;
-        let lease = if let Some(claim) = claim {
-            let Some(lease) = lease else {
+        let booking = if let Some(claim) = claim {
+            let Some(booking) = booking else {
                 return Err(SelectionError::Internal(
-                    "booked selection has no lifecycle lease".to_string(),
+                    "booked selection has no booking handle".to_string(),
                 ));
             };
-            // A rejected affinity commit returns while the lease is still armed,
+            // A rejected affinity commit returns while the handle is still armed,
             // so the booking is freed and nothing below is recorded.
             let affinity_lease = match (affinity_hold, managed_session) {
                 (Some(hold), Some((table, session_id))) => {
@@ -508,12 +508,12 @@ impl SelectionCore {
             }
             claim.install(Reservation {
                 partition: key.clone(),
-                booking: Some(lease.commit().ok_or_else(missing_booking)?),
+                booking: Some(booking.commit()),
                 _affinity_lease: affinity_lease,
             });
             None
         } else {
-            lease
+            booking
         };
 
         if let Some((cache_id, sequence_hashes, lora_name, track_prefill_tokens, session_id)) =
@@ -550,7 +550,7 @@ impl SelectionCore {
             kv_hint,
             routing_hashes: returned_routing_hashes,
             shared_cache_hits: host_shared_cache_hits,
-            lease,
+            booking,
         }))
     }
 

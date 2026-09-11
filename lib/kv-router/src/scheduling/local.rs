@@ -17,7 +17,7 @@ use super::overlap_refresh::{NoopOverlapScoresRefresh, OverlapScoresRefresh};
 use super::policy_config::PolicyProfile;
 use super::prefill_load::PrefillLoadEstimator;
 use super::queue::{
-    ClassQueueStats, RequestLifecycleLease, SchedulerBookingCleanup, SchedulerBookingDescriptor,
+    BookingHandle, ClassQueueStats, SchedulerBookingCleanup, SchedulerBookingDescriptor,
     SchedulerQueue,
 };
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
@@ -291,27 +291,21 @@ where
         &self,
         request: ScheduleRequest,
     ) -> Result<AdmittedSchedulingResponse, KvSchedulerError> {
-        let (admitted, lease) = self.schedule_request_with_lease(request).await?;
-        if let Some(lease) = lease {
-            let _ = lease.commit();
+        let (admitted, booking) = self.schedule_request_with_booking(request).await?;
+        if let Some(booking) = booking {
+            let _ = booking.commit();
         }
         Ok(admitted)
     }
 
-    /// Schedule a request and keep its lifecycle lease armed: dropping the
-    /// lease frees the booking, `commit` hands it to a longer-lived owner.
-    /// The lease is `None` unless the mode is `TrackedWithLifecycle`.
+    /// Schedule a request and return an armed handle for its booking: dropping
+    /// the handle frees the booking, `commit` hands it to a longer-lived owner.
+    /// The handle is `None` unless the mode is `TrackedWithLifecycle`.
     #[doc(hidden)]
-    pub async fn schedule_request_with_lease(
+    pub async fn schedule_request_with_booking(
         &self,
         request: ScheduleRequest,
-    ) -> Result<
-        (
-            AdmittedSchedulingResponse,
-            Option<Box<RequestLifecycleLease>>,
-        ),
-        KvSchedulerError,
-    > {
+    ) -> Result<(AdmittedSchedulingResponse, Option<BookingHandle>), KvSchedulerError> {
         let tracked = request.mode.is_tracked();
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let (attempt_tx, attempt_rx) = tokio::sync::oneshot::channel();
@@ -342,10 +336,12 @@ where
         } else {
             AdmissionAttempt::Untracked
         };
-        Ok((
-            AdmittedSchedulingResponse { response, attempt },
-            lifecycle_lease,
-        ))
+        // No await between `commit()` and the handle build: the booking is
+        // always guarded by exactly one of the lease and the handle.
+        let booking = lifecycle_lease
+            .and_then(|lease| lease.commit())
+            .map(|booking| self.queue.booking_handle(booking));
+        Ok((AdmittedSchedulingResponse { response, attempt }, booking))
     }
 
     /// Select a worker from current scheduler state without queue admission or booking.
@@ -527,19 +523,19 @@ where
 
     /// Book a request only when its worker is already registered, so a request
     /// racing worker removal cannot lazily recreate the removed worker/rank.
-    /// The returned lease guards the booking: dropping it frees the booking,
+    /// The returned handle guards the booking: dropping it frees the booking,
     /// `commit` hands it over.
     #[doc(hidden)]
     pub fn add_request_if_registered_guarded(
         &self,
         req: SequenceRequest,
-    ) -> Result<Box<RequestLifecycleLease>, SequenceError> {
+    ) -> Result<BookingHandle, SequenceError> {
         let request_id = req.request_id.clone();
         let worker = req.worker;
         let attempt_id = self
             .slots
             .add_request_if_registered_admitted(req, Instant::now())?;
-        Ok(self.queue.lease_for_booking(SchedulerBookingDescriptor {
+        Ok(self.queue.booking_handle(SchedulerBookingDescriptor {
             request_id,
             worker,
             attempt_id,

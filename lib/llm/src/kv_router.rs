@@ -27,7 +27,7 @@ use dynamo_kv_router::{
     scheduling::{
         CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, WorkerAvailabilityProvider,
         effective_prefill_tokens, overlap::cache_hit_estimates_from_tiered_matches,
-        queue::RequestLifecycleLease,
+        queue::BookingHandle,
     },
     selector::WorkerInputs,
     services::selection::{
@@ -432,19 +432,19 @@ pub(super) enum FindBestMatchAdmission {
     WithoutAdmission,
 }
 
-/// A routed outcome with the booking's lifecycle lease, when the request was
-/// booked. Dropping the lease frees the booking; the caller commits it into
-/// its own cleanup.
+/// A routed outcome with the booking's handle, when the request was booked.
+/// Dropping the handle frees the booking; the caller commits it into its own
+/// cleanup.
 #[doc(hidden)]
 pub struct AdmittedFindBestMatchOutcome {
     pub(super) outcome: FindBestMatchOutcome,
-    pub(super) lease: Option<Box<RequestLifecycleLease>>,
+    pub(super) booking: Option<BookingHandle>,
 }
 
 impl AdmittedFindBestMatchOutcome {
     #[doc(hidden)]
-    pub fn into_parts(self) -> (FindBestMatchOutcome, Option<Box<RequestLifecycleLease>>) {
-        (self.outcome, self.lease)
+    pub fn into_parts(self) -> (FindBestMatchOutcome, Option<BookingHandle>) {
+        (self.outcome, self.booking)
     }
 }
 
@@ -1013,13 +1013,11 @@ impl KvRouter {
     #[doc(hidden)]
     pub async fn enroll_public_request_attempt(
         &self,
-        lease: Box<RequestLifecycleLease>,
+        booking: BookingHandle,
         routing_decision: Option<TokensWithHashes>,
     ) -> Result<(), KvRouterError> {
         // Nothing awaits between taking the booking over and registering it.
-        let booking = lease.commit().ok_or_else(|| {
-            KvRouterError::Unsupported("booking lease holds no booking".to_string())
-        })?;
+        let booking = booking.commit();
         let worker = booking.worker;
         let lru_registration = self.approximate_lru_rank_registration(worker);
         let approximate_lru = lru_registration.and_then(|registration| {
@@ -1230,14 +1228,14 @@ impl KvRouter {
                 routing_constraints,
             )
             .await?;
-        if let Some(lease) = admitted.lease {
-            self.enroll_public_request_attempt(lease, None).await?;
+        if let Some(booking) = admitted.booking {
+            self.enroll_public_request_attempt(booking, None).await?;
         }
         Ok(admitted.outcome)
     }
 
-    /// Return the admitted routing wrapper without enrolling it in a detached
-    /// lifecycle lease. Internal bindings use this to attach optional LRU state
+    /// Return the admitted routing wrapper without enrolling its booking handle
+    /// in a detached lease. Internal bindings use this to attach optional LRU state
     /// before installing the one shared request lease.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
@@ -1375,7 +1373,7 @@ impl KvRouter {
                     FindBestMatchAdmission::WithAdmission => {
                         FindBestMatchInnerOutcome::WithAdmission(AdmittedFindBestMatchOutcome {
                             outcome: FindBestMatchOutcome::QueueRejected { rejection },
-                            lease: None,
+                            booking: None,
                         })
                     }
                     FindBestMatchAdmission::WithoutAdmission => {
@@ -1400,11 +1398,11 @@ impl KvRouter {
             kv_hint,
             routing_hashes,
             shared_cache_hits,
-            lease,
+            booking,
             ..
         } = selected;
-        if update_states && is_admitted_routing && lease.is_none() {
-            anyhow::bail!("booked selection returned no lifecycle lease");
+        if update_states && is_admitted_routing && booking.is_none() {
+            anyhow::bail!("booked selection returned no booking handle");
         }
         let routing_hashes = routing_hashes.map(RoutingDecisionHashes::from_local_hashes);
         let overlap_blocks = response.effective_overlap_blocks.round() as u32;
@@ -1449,7 +1447,7 @@ impl KvRouter {
                         routing_hashes,
                         kv_hint,
                     },
-                    lease,
+                    booking,
                 })
             }
             FindBestMatchAdmission::WithoutAdmission => {
@@ -1598,10 +1596,6 @@ impl KvRouter {
         mode: crate::session_affinity::SessionAffinityMode,
     ) -> anyhow::Result<crate::session_affinity::AffinityCoordinator> {
         self.scheduler.affinity_coordinator(ttl, mode)
-    }
-
-    pub(crate) fn booking_cleanup(&self) -> scheduler::SchedulerBookingCleanup {
-        self.scheduler.booking_cleanup()
     }
 
     pub(crate) fn request_lease_manager(&self) -> &request_lease::RequestLeaseManager {
@@ -2621,9 +2615,9 @@ mod tests {
             trace.push(GoldenDecision::from_outcome(&admitted.outcome));
             // Keep the booking: later rows are scored against its load.
             let booking = admitted
-                .lease
-                .and_then(|lease| lease.commit())
-                .expect("tracked selection carries its booking lease");
+                .booking
+                .map(BookingHandle::commit)
+                .expect("tracked selection carries its booking handle");
             assert_eq!(booking.request_id, context_id);
         }
 
@@ -2677,10 +2671,7 @@ mod tests {
         let FindBestMatchInnerOutcome::WithAdmission(kept) = select("kept").await.unwrap() else {
             panic!("admitted routing returned advisory outcome");
         };
-        let _booking = kept
-            .lease
-            .and_then(|lease| lease.commit())
-            .expect("booking");
+        let _booking = kept.booking.map(BookingHandle::commit).expect("booking");
 
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while router.scheduler.has_request("dropped") {
@@ -2768,13 +2759,13 @@ mod tests {
         let FindBestMatchInnerOutcome::WithAdmission(admitted) = outcome else {
             panic!("admitted routing returned advisory outcome");
         };
-        let lease = admitted
-            .lease
-            .expect("tracked selection carries its booking lease");
+        let booking = admitted
+            .booking
+            .expect("tracked selection carries its booking handle");
 
         // Park the routing update after `register_detached` has run.
         let mut enroll = Box::pin(
-            router.enroll_public_request_attempt(lease, Some(TokensWithHashes::new(prompt, 2))),
+            router.enroll_public_request_attempt(booking, Some(TokensWithHashes::new(prompt, 2))),
         );
         assert!(futures::poll!(&mut enroll).is_pending());
         assert!(
