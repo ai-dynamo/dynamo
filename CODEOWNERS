@@ -288,6 +288,7 @@
 /container/Dockerfile.docs                                                   @ai-dynamo/dynamo-ops-codeowners
 /container/Dockerfile.test                                                   @ai-dynamo/dynamo-ops-codeowners
 /container/launch_message/                                                   @ai-dynamo/dynamo-ops-codeowners
+/container/patches/vllm/axk2/                                                @ai-dynamo/dynamo-ops-codeowners
 /container/Dockerfile.template                                               @ai-dynamo/dynamo-ops-codeowners
 
 # === docs  (@ai-dynamo/dynamo-docs-codeowners) ===

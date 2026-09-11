@@ -1,0 +1,60 @@
+From 038b5006511c286b2d7baeaa76881af6972c1c4d Mon Sep 17 00:00:00 2001
+From: "Kim, Jin" <jinn.kim@sk.com>
+Date: Tue, 28 Jul 2026 07:16:10 +0000
+Subject: [PATCH 2/2] [Model] axk2: reject non-fused attention-gate checkpoints
+ explicitly
+
+Only the fused attention-output-gate layout is implemented: q_b_proj takes a
+doubled input and produces a per-head interleaved [q | gate]. That is not just
+a packing choice. The head stride is qk_head_dim + v_head_dim = 320, which is
+not a multiple of the 128-wide fp8 scale block, so the q/gate boundary straddles
+scale blocks and the weight cannot be split losslessly -- a checkpoint storing
+the gate separately would be a different quantization, not a rearrangement.
+
+config.attn_gate_fused was never read, so such a checkpoint got as far as
+loading weights and then died on a bare shape mismatch against the doubled
+q_b_proj input. Read the flag and refuse up front with a message that says what
+is wrong and what to do about it.
+
+Defaults to True when the key is absent, so configs that predate the flag keep
+loading exactly as before.
+
+Verified on 4x B300 at TP=4: with attn_gate_fused=False the four workers raise
+this error during model construction, before any weight loading starts; with
+the released config (attn_gate_fused=True) the greedy output is byte-identical
+to a build without this change.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ vllm/model_executor/models/axk2.py | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/vllm/model_executor/models/axk2.py b/vllm/model_executor/models/axk2.py
+index 94beea6a8..fa51c7cad 100644
+--- a/vllm/model_executor/models/axk2.py
++++ b/vllm/model_executor/models/axk2.py
+@@ -1554,6 +1554,24 @@ class AXK2MLAAttention(nn.Module):
+                 "attention_output_gate requires q_lora_rank (fused gate rides "
+                 "inside q_b_proj)"
+             )
++            # A checkpoint that stores the gate separately cannot be served
++            # here: only the fused layout is implemented, and it is not merely
++            # a packing choice. The fused output is per-head interleaved
++            # [q | gate] with a head stride of qk_head_dim + v_head_dim, which
++            # is not a multiple of the 128-wide fp8 scale block, so the q/gate
++            # boundary straddles scale blocks and the weight cannot be split
++            # losslessly. Reject it up front -- otherwise the only symptom is a
++            # bare shape mismatch on q_b_proj (the fused projection takes
++            # 2 * q_lora_rank inputs) once the weights start loading.
++            if not getattr(config, "attn_gate_fused", True):
++                raise ValueError(
++                    "This checkpoint sets attn_gate_fused=False, i.e. the "
++                    "attention output gate is stored as a separate projection. "
++                    "Only the fused layout is supported: q_b_proj must already "
++                    "absorb the gate (doubled input, per-head interleaved "
++                    "output). Re-export the checkpoint with the offline merge "
++                    "step applied."
++                )
+ 
+         # AXK2 always uses q-lora MLA; the q-lora-less (q_proj) path is removed.
+         assert self.q_lora_rank is not None, (
