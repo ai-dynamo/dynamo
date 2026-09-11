@@ -95,7 +95,8 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		logger.Error(err, "failed to generate the Grove GangSet")
 		return ReconcileResult{}, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
 	}
-	if len(renderedPodCliqueSet.desired.Spec.Template.Cliques) == 0 {
+	// Retire the exact owned observation when the desired ordinary workload is absent.
+	if renderedPodCliqueSet.desired == nil {
 		if existing := renderedPodCliqueSet.existing; existing != nil {
 			if !metav1.IsControlledBy(existing, source) {
 				return ReconcileResult{}, fmt.Errorf("refusing to delete a foreign empty-graph PodCliqueSet %q", existing.Name)

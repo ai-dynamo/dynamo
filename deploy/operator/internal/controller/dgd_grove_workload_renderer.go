@@ -95,6 +95,14 @@ func (r *groveWorkloadRenderer) Render(
 		existingPodCliqueSet = nil
 	}
 
+	// Represent an empty ordinary projection as no desired PodCliqueSet.
+	if len(ordinary.Spec.Components) == 0 {
+		return &grovePodCliqueSetRender{
+			existing:         existingPodCliqueSet,
+			renderDeployment: ordinary,
+		}, nil
+	}
+
 	workerHashSuffixNeeded := shouldRenderGroveWorkerHashSuffix(ordinary, existingPodCliqueSet, workerGenerationChanged)
 	renderDeployment, err := groveRenderDeployment(ordinary, source, existingPodCliqueSet, workerHashSuffixNeeded)
 	if err != nil {

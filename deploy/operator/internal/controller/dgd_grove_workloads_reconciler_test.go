@@ -136,6 +136,49 @@ func TestGroveWorkloadsReconciler_EvaluatesReadinessOnce(t *testing.T) {
 	assert.Equal(t, *wantSpec, dgd.Spec)
 }
 
+func TestGroveWorkloadsReconcilerUsesStableReadinessWithoutOrdinaryPodCliqueSet(t *testing.T) {
+	t.Log("Project an LPX-only graph with an obsolete ordinary PodCliqueSet")
+	const dgdName = "graph"
+	source := newLPXHandoffSource(t, "node-local-v2-lpu-only")
+	source.Name, source.Namespace, source.UID = dgdName, corev1.NamespaceDefault, "dgd-uid"
+	ordinary := projectOrdinaryGroveDeployment(source)
+	owned := &grovev1alpha1.PodCliqueSet{ObjectMeta: metav1.ObjectMeta{
+		Name:            dynamo.PCSNameForDGD(ordinary.Name, ordinary.Spec.Components),
+		Namespace:       source.Namespace,
+		UID:             "pcs-uid",
+		ResourceVersion: "1",
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(source, nvidiacomv1beta1.DynamoGraphDeploymentGVK)},
+	}}
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+		WithRESTMapper(groveScaleRESTMapper()).
+		WithObjects(source, owned).
+		Build()
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:        kubeClient,
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		Recorder:      events.NewFakeRecorder(10),
+		RuntimeConfig: &commoncontroller.RuntimeConfig{},
+		DockerSecretRetriever: &mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) {
+			return nil, nil
+		}},
+	}
+
+	t.Log("Retire the obsolete workload under the compatible public condition reason")
+	result, err := reconciler.newGroveProgram().workloads.Reconcile(t.Context(), source, ordinary, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, nvidiacomv1beta1.DGDStatePending, result.State)
+	require.Equal(t, Reason("RemovingEmptyPodCliqueSet"), result.Reason)
+
+	t.Log("Report stable-resource readiness after observing the PodCliqueSet absent")
+	result, err = reconciler.newGroveProgram().workloads.Reconcile(t.Context(), source, ordinary, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, nvidiacomv1beta1.DGDStateSuccessful, result.State)
+	pcsList := &grovev1alpha1.PodCliqueSetList{}
+	require.NoError(t, kubeClient.List(t.Context(), pcsList))
+	require.Empty(t, pcsList.Items)
+}
+
 func TestGroveWorkloadsReconciler_DoesNotCommitWorkerHashWhenPodCliqueSetSyncFails(t *testing.T) {
 	tests := []struct {
 		name        string
