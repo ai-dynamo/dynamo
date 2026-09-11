@@ -16,7 +16,7 @@
 //! System health monitoring and health check management
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, OnceLock},
     time::Instant,
 };
@@ -45,6 +45,9 @@ pub struct SystemHealth {
     health_check_targets: Arc<std::sync::RwLock<HashMap<String, HealthCheckTarget>>>,
     /// Maps endpoint subject to its specific health check notifier
     health_check_notifiers: Arc<std::sync::RwLock<HashMap<String, Arc<tokio::sync::Notify>>>>,
+    /// Endpoints whose owner publishes readiness itself. Transport registration
+    /// does not mark these ready; see [`SystemHealth::hold_endpoint_readiness`].
+    readiness_holds: Arc<std::sync::RwLock<HashSet<String>>>,
     /// Channel for new endpoint registrations
     /// This solves the race condition where HealthCheckManager starts before endpoints are registered
     /// Using a channel ensures no registrations are lost.
@@ -85,6 +88,7 @@ impl SystemHealth {
             endpoint_health: Arc::new(std::sync::RwLock::new(endpoint_health)),
             health_check_targets: Arc::new(std::sync::RwLock::new(HashMap::new())),
             health_check_notifiers: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            readiness_holds: Arc::new(std::sync::RwLock::new(HashSet::new())),
             new_endpoint_tx: tx,
             new_endpoint_rx: Arc::new(parking_lot::Mutex::new(Some(rx))),
             use_endpoint_health_status,
@@ -104,6 +108,9 @@ impl SystemHealth {
     /// NotReady until verification succeeds. Payload-less endpoints cannot run a
     /// canary, so transport registration is their readiness signal.
     pub fn set_endpoint_registered(&self, endpoint: &str) {
+        if self.readiness_holds.read().unwrap().contains(endpoint) {
+            return;
+        }
         let has_health_check_target = self
             .health_check_targets
             .read()
@@ -112,6 +119,28 @@ impl SystemHealth {
         if !self.health_check_enabled || !has_health_check_target {
             self.set_endpoint_health_status(endpoint, HealthStatus::Ready);
         }
+    }
+
+    /// Withhold readiness for `endpoint` until [`release_endpoint_readiness`]:
+    /// transport registration no longer marks it ready, so its owner decides when
+    /// it is serviceable. Take the hold *before* the endpoint registers with its
+    /// transport — that is what makes this race-free on both request planes, since
+    /// the NATS path publishes readiness from a spawned task.
+    ///
+    /// [`release_endpoint_readiness`]: SystemHealth::release_endpoint_readiness
+    pub fn hold_endpoint_readiness(&self, endpoint: &str) {
+        self.readiness_holds
+            .write()
+            .unwrap()
+            .insert(endpoint.to_string());
+    }
+
+    /// Drop a [`hold_endpoint_readiness`] hold. Readiness is not published here —
+    /// the owner writes it.
+    ///
+    /// [`hold_endpoint_readiness`]: SystemHealth::hold_endpoint_readiness
+    pub fn release_endpoint_readiness(&self, endpoint: &str) {
+        self.readiness_holds.write().unwrap().remove(endpoint);
     }
 
     pub fn set_health_status(&mut self, status: HealthStatus) {
@@ -383,6 +412,40 @@ mod tests {
             !healthy,
             "with no health-check target the endpoint's readiness is ignored and \
              the worker falls back to system_health (NotReady) — this is the 503"
+        );
+    }
+
+    /// A held endpoint does not become ready on transport registration, so its
+    /// owner can keep the route at 503 until every mandatory endpoint is up.
+    #[test]
+    fn held_endpoint_is_not_ready_on_transport_registration() {
+        let health = system_health(false);
+        health.hold_endpoint_readiness(ENDPOINT);
+        health.set_endpoint_registered(ENDPOINT);
+        assert_eq!(
+            health.get_endpoint_health_status(ENDPOINT),
+            None,
+            "a held endpoint must not be marked ready by transport registration"
+        );
+
+        health.release_endpoint_readiness(ENDPOINT);
+        health.set_endpoint_registered(ENDPOINT);
+        assert_eq!(
+            health.get_endpoint_health_status(ENDPOINT),
+            Some(HealthStatus::Ready),
+            "after release the owner's registration signal publishes readiness"
+        );
+    }
+
+    /// The hold gates only the endpoint it names.
+    #[test]
+    fn a_hold_does_not_leak_to_other_endpoints() {
+        let health = system_health(false);
+        health.hold_endpoint_readiness(ENDPOINT);
+        health.set_endpoint_registered("other");
+        assert_eq!(
+            health.get_endpoint_health_status("other"),
+            Some(HealthStatus::Ready)
         );
     }
 
