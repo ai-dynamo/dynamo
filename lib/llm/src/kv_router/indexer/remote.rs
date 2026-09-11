@@ -22,7 +22,7 @@ use dynamo_runtime::pipeline::{
 use dynamo_runtime::stream;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_tokens::SequenceHash;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt, future::BoxFuture, future::Shared};
 use parking_lot::RwLock;
 use tokio::sync::Mutex;
 
@@ -244,6 +244,35 @@ struct ServedIndexerService {
     // Set under the bindings lock and never cleared.
     retired: AtomicBool,
     endpoints: parking_lot::Mutex<Vec<StartedEndpoint>>,
+    endpoint_retirement: parking_lot::Mutex<Option<Shared<BoxFuture<'static, HashSet<u64>>>>>,
+}
+
+struct EndpointStartup {
+    endpoints: Vec<StartedEndpoint>,
+}
+
+impl EndpointStartup {
+    fn new() -> Self {
+        Self {
+            endpoints: Vec::new(),
+        }
+    }
+
+    fn into_endpoints(mut self) -> Vec<StartedEndpoint> {
+        std::mem::take(&mut self.endpoints)
+    }
+}
+
+impl Drop for EndpointStartup {
+    fn drop(&mut self) {
+        if self.endpoints.is_empty() {
+            return;
+        }
+
+        drop(tokio::spawn(shutdown_endpoints(std::mem::take(
+            &mut self.endpoints,
+        ))));
+    }
 }
 
 impl ServedIndexerService {
@@ -255,23 +284,22 @@ impl ServedIndexerService {
         verify_service_topology(&component, mode, ignored_instance_ids).await?;
 
         let bindings = Arc::new(RwLock::new(HashMap::new()));
-        let mut endpoints = vec![start_query_endpoint(component.clone(), bindings.clone()).await?];
+        let mut startup = EndpointStartup::new();
+        startup
+            .endpoints
+            .push(start_query_endpoint(component.clone(), bindings.clone()).await?);
         if mode == ServedIndexerMode::Approximate {
-            match start_record_endpoint(component.clone(), bindings.clone()).await {
-                Ok(endpoint) => endpoints.push(endpoint),
-                Err(error) => {
-                    // A partial start must not leave the query endpoint registered.
-                    shutdown_endpoints(endpoints).await;
-                    return Err(error);
-                }
-            }
+            startup
+                .endpoints
+                .push(start_record_endpoint(component.clone(), bindings.clone()).await?);
         }
 
         Ok(Arc::new(Self {
             mode,
             bindings,
             retired: AtomicBool::new(false),
-            endpoints: parking_lot::Mutex::new(endpoints),
+            endpoints: parking_lot::Mutex::new(startup.into_endpoints()),
+            endpoint_retirement: parking_lot::Mutex::new(None),
         }))
     }
 
@@ -293,18 +321,29 @@ impl ServedIndexerService {
         self.retired.load(Ordering::SeqCst)
     }
 
-    // Pop one at a time so cancellation leaves unreached endpoints owned by the service.
+    // Store the shared completion future before awaiting it so cancellation of a caller cannot
+    // lose ownership of an in-flight retirement or permit a replacement to start early.
     async fn stop_endpoints(&self) -> HashSet<u64> {
-        let mut instance_ids = HashSet::new();
-        while let Some(endpoint) = self.take_endpoint() {
-            instance_ids.insert(endpoint.instance().instance_id);
-            shutdown_endpoint(endpoint).await;
-        }
-        instance_ids
-    }
+        let retirement = {
+            let mut retirement = self.endpoint_retirement.lock();
+            retirement
+                .get_or_insert_with(|| {
+                    let endpoints = std::mem::take(&mut *self.endpoints.lock());
+                    async move {
+                        let mut instance_ids = HashSet::new();
+                        for endpoint in endpoints {
+                            instance_ids.insert(endpoint.instance().instance_id);
+                            shutdown_endpoint(endpoint).await;
+                        }
+                        instance_ids
+                    }
+                    .boxed()
+                    .shared()
+                })
+                .clone()
+        };
 
-    fn take_endpoint(&self) -> Option<StartedEndpoint> {
-        self.endpoints.lock().pop()
+        retirement.await
     }
 }
 
