@@ -18,7 +18,9 @@ use axum::{
     routing::get,
 };
 use dynamo_llm::http::service::metrics::generate_log_buckets;
-use prometheus::{Encoder, HistogramOpts, HistogramVec, Registry, TEXT_FORMAT, TextEncoder};
+use prometheus::{
+    Encoder, HistogramOpts, HistogramVec, IntCounterVec, Opts, Registry, TEXT_FORMAT, TextEncoder,
+};
 
 /// Port the `/metrics` endpoint binds to unless `DYN_EPP_METRICS_PORT` says
 /// otherwise. Distinct from the ext_proc gRPC port (9002) and the health port
@@ -87,6 +89,40 @@ pub fn observe_cached_tokens(cached_tokens: u64) {
     CACHED_TOKENS
         .with_label_values(&[served_model_label()])
         .observe(cached_tokens as f64);
+}
+
+/// Requests the data plane served from an endpoint other than the one the EPP
+/// picked, counted from the GAIE `x-gateway-destination-endpoint-served`
+/// metadata on the response.
+///
+/// A non-zero value means the router's load accounting is describing the wrong
+/// worker for those requests: the booking is made against the picked endpoint
+/// at `pick()` time and never re-attributed. Silent before this counter
+/// existed, because nothing compared the two.
+static ENDPOINT_MISMATCH: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    let counter = IntCounterVec::new(
+        Opts::new(
+            "dynamo_epp_endpoint_mismatch_total",
+            "Requests the data plane served from an endpoint other than the one the EPP picked",
+        ),
+        &["model"],
+    )
+    .expect("endpoint_mismatch counter options are statically valid");
+    REGISTRY
+        .register(Box::new(counter.clone()))
+        .expect("endpoint_mismatch is the only registrant of its name");
+    counter
+});
+
+/// Count one picked-vs-served endpoint mismatch against the model bound by
+/// [`set_served_model`].
+///
+/// A non-blocking atomic increment on a pre-registered series, safe to call on
+/// the response-header path.
+pub fn inc_endpoint_mismatch() {
+    ENDPOINT_MISMATCH
+        .with_label_values(&[served_model_label()])
+        .inc();
 }
 
 /// Serve `/metrics` until the process exits.
