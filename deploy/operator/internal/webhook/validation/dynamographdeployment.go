@@ -71,6 +71,7 @@ type dynamoGraphDeploymentSpecValidationOptions struct {
 	workloadProvider        string
 	grovePathway            bool
 	grovePathwayRequirement string
+	oldComponents           map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
 }
 
 // Validate performs stateless validation on the v1beta1 DynamoGraphDeployment.
@@ -80,12 +81,13 @@ func (v *DynamoGraphDeploymentValidator) Validate(
 	deployment *nvidiacomv1beta1.DynamoGraphDeployment,
 	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
-	return v.validate(ctx, deployment, runtimeVersionSource, false)
+	return v.validate(ctx, deployment, nil, runtimeVersionSource, false)
 }
 
 func (v *DynamoGraphDeploymentValidator) validate(
 	ctx context.Context,
 	deployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	oldDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
 	runtimeVersionSource runtimeVersionValidationSource,
 	ratchetRuntimeVersion bool,
 ) (admission.Warnings, error) {
@@ -98,7 +100,7 @@ func (v *DynamoGraphDeploymentValidator) validate(
 		},
 	}
 
-	allErrs := validation.validateDynamoGraphDeployment(deployment)
+	allErrs := validation.validateDynamoGraphDeployment(deployment, oldDeployment)
 	alpha, err := alphaDynamoGraphDeploymentForValidation(deployment)
 	if err != nil {
 		return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoGraphDeployment fields: %w", err)
@@ -193,6 +195,7 @@ func (v *DynamoGraphDeploymentValidator) ValidateTerminatingUpdate(
 // validateDynamoGraphDeployment validates dgd. dgd must not be nil.
 func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	oldDGD *nvidiacomv1beta1.DynamoGraphDeployment,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	allErrs = append(allErrs, v.validateObjectMeta(
@@ -204,12 +207,17 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 	groveEnabled := features.MustGateFrom(v.ctx).Enabled(features.Grove)
 	grovePathway, grovePathwayRequirement := grovePathwayForDynamoGraphDeployment(groveEnabled, dgd)
 	workloadProvider := dgd.Annotations[consts.KubeAnnotationWorkloadProvider]
+	var oldComponents map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+	if oldDGD != nil {
+		oldComponents = componentsByName(oldDGD.Spec.Components)
+	}
 	specOpts := dynamoGraphDeploymentSpecValidationOptions{
 		dgdName:                 dgd.Name,
 		generation:              dgd.Generation,
 		workloadProvider:        workloadProvider,
 		grovePathway:            grovePathway,
 		grovePathwayRequirement: grovePathwayRequirement,
+		oldComponents:           oldComponents,
 	}
 	allErrs = append(allErrs, v.validateDynamoGraphDeploymentSpec(&dgd.Spec, field.NewPath("spec"), specOpts)...)
 
@@ -367,6 +375,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 				validateInferencePoolAvailability: validateInferencePoolAvailability,
 				providerOverridesSupported:        true,
 				workloadProvider:                  opts.workloadProvider,
+				oldComponent:                      opts.oldComponents[component.ComponentName],
 			},
 		)...)
 	}
@@ -776,6 +785,14 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 		if !exists {
 			continue
 		}
+
+		// Ratchet the shared multinode type contract because DGD updates skip the stateless traversal.
+		allErrs = append(allErrs, validateMultinodeComponentType(
+			newComponent,
+			oldComponent,
+			componentsPath.Index(i).Child("multinode"),
+		)...)
+
 		allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpecUpdate(
 			newComponent,
 			oldComponent,
