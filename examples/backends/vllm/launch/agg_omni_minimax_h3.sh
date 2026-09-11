@@ -9,7 +9,7 @@ trap 'echo Cleaning up...; kill 0' EXIT
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
-# MiniMax-H3 uses the four visible B200s for diffusion parallelism. The
+# MiniMax-H3 uses the four visible GPUs for diffusion parallelism. The
 # text-generation KV-cache flags from gpu_utils.sh do not apply to this worker.
 
 MODEL="${DYN_H3_MODEL:-MiniMaxAI/MiniMax-H3}"
@@ -100,7 +100,10 @@ if [[ "$FASTH3_VARIANT" == vsa-* ]]; then
         exit 1
     fi
     python -c 'import fastvideo_kernel'
-    export FASTVIDEO_VSA_SM100A="${DYN_H3_FASTVIDEO_VSA_SM100A:-1}"
+    # The published fastvideo-kernel wheel provides the portable Triton VSA
+    # route used by B300/SM103. The native SM100a extension is source-built
+    # and must be opted into explicitly on compatible B200/SM100 systems.
+    export FASTVIDEO_VSA_SM100A="${DYN_H3_FASTVIDEO_VSA_SM100A:-0}"
     FASTH3_ARGS+=(--fastvideo-vsa-topk "$FASTVIDEO_VSA_TOPK")
 else
     ATTENTION_BACKEND="${ATTENTION_BACKEND:-TRTLLM_ATTN}"
