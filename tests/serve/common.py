@@ -224,12 +224,33 @@ def _prepare_deployment(
 
         # KV-event ports are allocated with the rest of the deployment and have
         # the same worker cardinality as system ports.
+        if len(ports.kv_event_ports) != len(dynamic_system_ports):
+            raise ValueError(
+                "KV-event port count must match system port count: "
+                f"{len(ports.kv_event_ports)} != {len(dynamic_system_ports)}"
+            )
+        for key in list(merged_env):
+            if key == "DYN_VLLM_KV_EVENT_PORT":
+                merged_env.pop(key)
+                continue
+            if key.startswith("DYN_VLLM_KV_EVENT_PORT"):
+                suffix = key.removeprefix("DYN_VLLM_KV_EVENT_PORT")
+                if suffix.isdigit():
+                    merged_env.pop(key)
         for idx, port in enumerate(ports.kv_event_ports, start=1):
             merged_env[f"DYN_VLLM_KV_EVENT_PORT{idx}"] = str(port)
-        if ports.kv_event_ports:
-            merged_env["DYN_VLLM_KV_EVENT_PORT"] = str(ports.kv_event_ports[0])
 
         # Per-worker NIXL side-channel ports (avoids xdist collisions on 20097).
+        if len(ports.nixl_side_channel_ports) != len(dynamic_system_ports):
+            raise ValueError(
+                "NIXL side-channel port count must match system port count: "
+                f"{len(ports.nixl_side_channel_ports)} != {len(dynamic_system_ports)}"
+            )
+        for key in list(merged_env):
+            if key.startswith("DYN_VLLM_NIXL_SIDE_CHANNEL_PORT"):
+                suffix = key.removeprefix("DYN_VLLM_NIXL_SIDE_CHANNEL_PORT")
+                if suffix.isdigit():
+                    merged_env.pop(key)
         for idx, port in enumerate(ports.nixl_side_channel_ports, start=1):
             merged_env[f"DYN_VLLM_NIXL_SIDE_CHANNEL_PORT{idx}"] = str(port)
 
