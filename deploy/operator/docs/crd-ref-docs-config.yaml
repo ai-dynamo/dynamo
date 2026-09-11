@@ -42,6 +42,27 @@ processor:
     - "ExcludedNamespacesChecker"
 
 render:
+  # Preserve package identity before the Markdown renderer drops it.
+  knownTypes:
+    - name: DynamoGraphDeploymentRequest
+      package: github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1
+      link: "#v1beta1-dynamographdeploymentrequest"
+    - name: DynamoGraphDeploymentRequestSpec
+      package: github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1
+      link: "#v1beta1-dynamographdeploymentrequestspec"
+    - name: DynamoGraphDeploymentRequestStatus
+      package: github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1
+      link: "#v1beta1-dynamographdeploymentrequeststatus"
+    - name: DynamoGraphDeploymentStatus
+      package: github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1
+      link: "#v1beta1-dynamographdeploymentstatus"
+    - name: DynamoGraphDeploymentSpec
+      package: github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1
+      link: "#v1beta1-dynamographdeploymentspec"
+    - name: DynamoComponentDeploymentSharedSpec
+      package: github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1
+      link: "#v1beta1-dynamocomponentdeploymentsharedspec"
+
   # Output format - use markdown instead of default asciidoc
   format: markdown
 

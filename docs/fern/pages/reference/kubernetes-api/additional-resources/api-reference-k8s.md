@@ -1019,7 +1019,7 @@ _Appears in:_
 | `deadlineAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ |  |  |  |
 | `exceededAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ |  |  |  |
 | `disarmedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ |  |  |  |
-| `requests` _[LPXAttemptRequestStatus](#lpxattemptrequeststatus) array_ |  |  | MaxItems: 9 <br />MinItems: 1 <br /> |
+| `requests` _[LPXAttemptRequestStatus](#lpxattemptrequeststatus) array_ |  |  |  |
 
 
 
@@ -1664,7 +1664,7 @@ users do not need to hand-wire them into the pod template.
 
 
 _Appears in:_
-- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 | Field | Description | Default | Validation |
@@ -1722,7 +1722,7 @@ ComponentCheckpointStatus contains checkpoint information for a single component
 
 
 _Appears in:_
-- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+- [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -1761,7 +1761,7 @@ ComponentReplicaStatus contains replica information for a single component.
 
 
 _Appears in:_
-- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+- [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -1788,7 +1788,7 @@ The enclosing component type defines the allowed role names and cardinality.
 
 
 _Appears in:_
-- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -1812,7 +1812,7 @@ _Validation:_
 - Enum: [frontend worker prefill decode planner epp lpx]
 
 _Appears in:_
-- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 | Field | Description |
@@ -1858,7 +1858,7 @@ _Validation:_
 - Enum: [initializing pending successful failed]
 
 _Appears in:_
-- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+- [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)
 
 | Field | Description |
 | --- | --- |
@@ -1932,7 +1932,7 @@ operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 | `spec` _[DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)_ | spec defines the desired state for this Dynamo component deployment. |  |  |
 
 
-#### DynamoComponentDeploymentSharedSpec
+#### v1beta1 DynamoComponentDeploymentSharedSpec
 
 
 
@@ -1952,7 +1952,7 @@ pod-level configuration directly in `podTemplate` without any
 
 
 _Appears in:_
-- [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
+- [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -2031,8 +2031,8 @@ operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 | `apiVersion` _string_ | `nvidia.com/v1beta1` | | |
 | `kind` _string_ | `DynamoGraphDeployment` | | |
 | `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
-| `spec` _[DynamoGraphDeploymentSpec](#dynamographdeploymentspec)_ | spec defines the desired state for this graph deployment. |  |  |
-| `status` _[DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)_ | status reflects the current observed state of this graph deployment. |  |  |
+| `spec` _[DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)_ | spec defines the desired state for this graph deployment. |  |  |
+| `status` _[DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)_ | status reflects the current observed state of this graph deployment. |  |  |
 
 
 #### DynamoGraphDeploymentComponentRef
@@ -2067,7 +2067,7 @@ v1beta1 releases. Component-level experimental features live under
 
 
 _Appears in:_
-- [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
+- [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -2085,7 +2085,7 @@ Both served DGD versions use this type, so conversion preserves its live fields 
 
 _Appears in:_
 - [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
-- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+- [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -2240,7 +2240,7 @@ _Appears in:_
 | `lastScaleTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | lastScaleTime is the last time the adapter scaled the target component. |  | Optional: \{\} <br /> |
 
 
-#### DynamoGraphDeploymentSpec
+#### v1beta1 DynamoGraphDeploymentSpec
 
 
 
@@ -2258,7 +2258,7 @@ _Appears in:_
 | `annotations` _object (keys:string, values:string)_ | annotations to propagate to all child resources (PCS, DCD, Deployments,<br />and pod templates). Component-level (`podTemplate`) values take precedence<br />on conflict. |  | Optional: \{\} <br /> |
 | `labels` _object (keys:string, values:string)_ | labels to propagate to all child resources. Same precedence rules as `annotations`. |  | Optional: \{\} <br /> |
 | `priorityClassName` _string_ | priorityClassName is the name of the PriorityClass to use for Grove PodCliqueSets.<br />Requires the Grove pathway. |  | Optional: \{\} <br /> |
-| `components` _[DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec) array_ | components are the components deployed as part of this graph. Each entry<br />carries its own stable logical `name`, and names must be unique within<br />the list. Component types are generally repeatable, except `type: epp`<br />which may appear at most once. |  | MaxItems: 25 <br />Optional: \{\} <br /> |
+| `components` _[DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec) array_ | components are the components deployed as part of this graph. Each entry<br />carries its own stable logical `name`, and names must be unique within<br />the list. Component types are generally repeatable, except `type: epp`<br />which may appear at most once. |  | MaxItems: 25 <br />Optional: \{\} <br /> |
 | `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | env is prepended to every component's environment. Component-specific<br />env entries with the same name take precedence and may reference values<br />from this list. |  | Optional: \{\} <br /> |
 | `backendFramework` _string_ | backendFramework specifies the backend framework (e.g. "sglang", "vllm", "trtllm"). |  | Enum: [sglang vllm trtllm] <br /> |
 | `restart` _[Restart](#restart)_ | restart specifies the restart policy for the graph deployment. |  | Optional: \{\} <br /> |
@@ -2266,7 +2266,7 @@ _Appears in:_
 | `experimental` _[DynamoGraphDeploymentExperimentalSpec](#dynamographdeploymentexperimentalspec)_ | experimental groups graph-level preview features whose API shape and<br />behavior may change in breaking ways between v1beta1 releases. |  | Optional: \{\} <br /> |
 
 
-#### DynamoGraphDeploymentStatus
+#### v1beta1 DynamoGraphDeploymentStatus
 
 
 
@@ -2305,7 +2305,7 @@ explicitly by clearing `eppConfig` (and updating the image).
 
 
 _Appears in:_
-- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 | Field | Description | Default | Validation |
@@ -2329,7 +2329,7 @@ spec) once their API is considered stable.
 
 
 _Appears in:_
-- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 | Field | Description | Default | Validation |
@@ -2350,7 +2350,7 @@ _Validation:_
 - Enum: [override strategic]
 
 _Appears in:_
-- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 | Field | Description |
@@ -2625,7 +2625,7 @@ _Appears in:_
 | `deadlineAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ |  |  |  |
 | `exceededAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ |  |  |  |
 | `disarmedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ |  |  |  |
-| `requests` _[LPXAttemptRequestStatus](#lpxattemptrequeststatus) array_ |  |  | MaxItems: 9 <br />MinItems: 1 <br /> |
+| `requests` _[LPXAttemptRequestStatus](#lpxattemptrequeststatus) array_ |  |  |  |
 
 
 #### LPXConfig
@@ -2638,7 +2638,7 @@ LPXConfig identifies the component's compiled model and runtime settings.
 
 _Appears in:_
 - [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
-- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -2707,7 +2707,7 @@ When specified, a headless service is created for endpoint discovery.
 
 
 _Appears in:_
-- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 | Field | Description | Default | Validation |
@@ -2725,7 +2725,7 @@ MultinodeSpec configures a multinode component.
 
 
 _Appears in:_
-- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 | Field | Description | Default | Validation |
@@ -2833,7 +2833,7 @@ current LPX placement.
 
 _Appears in:_
 - [DynamoGraphDeploymentLPXStatus](#dynamographdeploymentlpxstatus)
-- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+- [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -2902,8 +2902,8 @@ All other providers, versions, targets, and fields are rejected.
 
 _Appears in:_
 - [ComponentRoleSpec](#componentrolespec)
-- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
-- [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
+- [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -2921,7 +2921,7 @@ Restart specifies the restart policy for a graph deployment.
 
 
 _Appears in:_
-- [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
+- [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -2958,7 +2958,7 @@ RestartStatus contains the status of a graph-level restart.
 
 
 _Appears in:_
-- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+- [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -3031,7 +3031,7 @@ RollingUpdateStatus tracks the progress of an operator-managed rolling update.
 
 
 _Appears in:_
-- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+- [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -3073,7 +3073,7 @@ Omit the field to opt out.
 
 
 _Appears in:_
-- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 
@@ -3088,7 +3088,7 @@ SchedulingSpec configures LPX scheduling attempts.
 
 _Appears in:_
 - [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
-- [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
+- [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -3122,7 +3122,7 @@ SpecTopologyConstraint defines deployment-level topology placement requirements.
 
 
 _Appears in:_
-- [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
+- [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -3141,7 +3141,7 @@ The topology profile is inherited from the deployment-level
 
 
 _Appears in:_
-- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 | Field | Description | Default | Validation |

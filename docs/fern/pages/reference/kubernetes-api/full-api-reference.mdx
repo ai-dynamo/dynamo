@@ -1577,7 +1577,6 @@ See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#
 
 <ParamField path="requests" type="LPXAttemptRequestStatus array">
 See [LPXAttemptRequestStatus](#lpxattemptrequeststatus).
-**Validation:** MaxItems: 9  MinItems: 1
 </ParamField>
 </Accordion>
 
@@ -2703,7 +2702,7 @@ See [DynamoComponentDeploymentSpec](#v1beta1-dynamocomponentdeploymentspec).
 </ParamField>
 </Accordion>
 
-<Accordion id="v1beta1-dynamocomponentdeploymentsharedspec" title="DynamoComponentDeploymentSharedSpec">
+<Accordion id="v1beta1-dynamocomponentdeploymentsharedspec" title="v1beta1 DynamoComponentDeploymentSharedSpec">
 DynamoComponentDeploymentSharedSpec is the shared configuration used by both
 standalone DCDs and by the components embedded in a DynamoGraphDeployment.
 
@@ -3028,7 +3027,7 @@ Both served DGD versions use this type, so conversion preserves its live fields 
 
 
 **Kind:** `type`
-**Appears in:** [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)
+**Appears in:** [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus), [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)
 
 <ParamField path="modelDownload" type="ModelDownloadStatus">
 modelDownload contains the model download status for remote builds.
@@ -3296,7 +3295,7 @@ See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#
 </ParamField>
 </Accordion>
 
-<Accordion id="v1beta1-dynamographdeploymentspec" title="DynamoGraphDeploymentSpec">
+<Accordion id="v1beta1-dynamographdeploymentspec" title="v1beta1 DynamoGraphDeploymentSpec">
 DynamoGraphDeploymentSpec defines the desired state of a DynamoGraphDeployment.
 
 
@@ -3366,7 +3365,7 @@ See [DynamoGraphDeploymentExperimentalSpec](#v1beta1-dynamographdeploymentexperi
 </ParamField>
 </Accordion>
 
-<Accordion id="v1beta1-dynamographdeploymentstatus" title="DynamoGraphDeploymentStatus">
+<Accordion id="v1beta1-dynamographdeploymentstatus" title="v1beta1 DynamoGraphDeploymentStatus">
 DynamoGraphDeploymentStatus defines the observed state of a DynamoGraphDeployment.
 Unchanged between v1alpha1 and v1beta1.
 
@@ -3819,7 +3818,6 @@ See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#
 
 <ParamField path="requests" type="LPXAttemptRequestStatus array">
 See [LPXAttemptRequestStatus](#v1beta1-lpxattemptrequeststatus).
-**Validation:** MaxItems: 9  MinItems: 1
 </ParamField>
 </Accordion>
 
@@ -3828,7 +3826,7 @@ LPXConfig identifies the component's compiled model and runtime settings.
 
 
 **Kind:** `type`
-**Appears in:** [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
+**Appears in:** [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
 
 <ParamField path="buildId" type="string">
 buildId references the immutable model build.
@@ -4303,7 +4301,7 @@ SchedulingSpec configures LPX scheduling attempts.
 
 
 **Kind:** `type`
-**Appears in:** [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
+**Appears in:** [DynamoGraphDeploymentSpec](#dynamographdeploymentspec), [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 <ParamField path="attemptDeadlineSeconds" type="integer">
 attemptDeadlineSeconds limits one aggregate LPX scheduling attempt. Omission means unlimited; the value is not a solver budget.
