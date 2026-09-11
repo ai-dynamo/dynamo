@@ -95,6 +95,8 @@ spec:
                   value: "1"
                 - name: TRANSFORMERS_OFFLINE
                   value: "1"
+                - name: HF_HOME
+                  value: /shared-model-cache
                 # One decode worker makes this a no-op today. Keep it, so the
                 # router is already KV-aware when decode replicas grow.
                 - name: DYN_ROUTER_MODE
@@ -107,6 +109,13 @@ spec:
                 requests:
                   cpu: "16"
                   memory: 128Gi
+              volumeMounts:
+                - name: shared-model-cache
+                  mountPath: /shared-model-cache
+          volumes:
+            - name: shared-model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache
     - name: PrefillWorker
       type: prefill
       replicas: 1
