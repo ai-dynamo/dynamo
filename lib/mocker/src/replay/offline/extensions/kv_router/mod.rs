@@ -1125,7 +1125,19 @@ impl OfflineReplayRouter {
             };
             let request = popped.into_payload();
             let uuid = request.uuid;
-            let outcome = self.admit_request(request, decay_now)?;
+            // If this admission fails, the whole drain call errors and the
+            // caller aborts the run (this crate's fail-loud doctrine) -- but
+            // without this context, the error carries no indication of which
+            // request was being admitted, or how many others in this same
+            // drain batch were already admitted (and had their `slots` side
+            // effects applied) before it (round-12 L1).
+            let outcome = self.admit_request(request, decay_now).with_context(|| {
+                format!(
+                    "failed to admit queued request {uuid} (drain batch already admitted {} \
+                     other request(s) before this failure)",
+                    admissions.len()
+                )
+            })?;
             admissions.push(WorkerAdmission {
                 uuid,
                 worker_idx: outcome.worker_idx,
