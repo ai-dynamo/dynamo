@@ -11,17 +11,30 @@ use ipnet::IpNet;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::redirect::Policy;
 
+#[cfg(feature = "media-nixl")]
 use dynamo_memory::nixl::NixlAgent;
 use dynamo_protocols::types::ChatCompletionRequestUserMessageContentPart;
 use dynamo_runtime::error::{DynamoError, ErrorType};
 
+#[cfg(feature = "media-nixl")]
 use super::common::EncodedMediaData;
-use super::decoders::{Decoder, MediaDecoder};
-use super::rdma::{DataType, RdmaMediaDataDescriptor, get_nixl_agent};
+#[cfg(feature = "media-nixl")]
+use super::decoders::Decoder;
+use super::decoders::MediaDecoder;
+#[cfg(feature = "media-nixl")]
+use super::rdma::DataType;
+use super::rdma::RdmaMediaDataDescriptor;
+#[cfg(feature = "media-nixl")]
+use super::rdma::get_nixl_agent;
+#[cfg(feature = "media-nixl")]
 use super::require_image_url;
+#[cfg(feature = "media-nixl")]
 use lru::LruCache;
+#[cfg(feature = "media-nixl")]
 use parking_lot::Mutex;
+#[cfg(any(feature = "media-nixl", test))]
 use std::collections::hash_map::DefaultHasher;
+#[cfg(any(feature = "media-nixl", test))]
 use std::hash::{Hash, Hasher};
 
 const DEFAULT_HTTP_USER_AGENT: &str = "dynamo-ai/dynamo";
@@ -161,6 +174,7 @@ impl MediaFetcher {
 }
 
 impl MediaFetcher {
+    #[cfg(any(feature = "media-nixl", feature = "mm-routing", test))]
     pub(crate) fn is_policy_rejection(error: &anyhow::Error) -> bool {
         error.chain().any(|cause| {
             cause
@@ -170,6 +184,7 @@ impl MediaFetcher {
     }
 
     /// Restore policy classification when reqwest hides a redirect cause.
+    #[cfg(any(feature = "media-nixl", feature = "mm-routing", test))]
     pub(crate) fn map_fetch_error(error: anyhow::Error) -> anyhow::Error {
         if Self::is_policy_rejection(&error) {
             return error;
@@ -356,12 +371,14 @@ impl Resolve for BlocklistResolver {
 /// `tensor_info.shape * dtype`). Insertion evicts oldest entries until the
 /// running total fits the budget; entries larger than the whole budget are
 /// inserted and immediately evicted (i.e. effectively not cached).
+#[cfg(feature = "media-nixl")]
 struct LoaderCache {
     lru: LruCache<u64, RdmaMediaDataDescriptor>,
     bytes_used: u64,
     budget_bytes: u64,
 }
 
+#[cfg(feature = "media-nixl")]
 impl LoaderCache {
     fn new(budget_bytes: u64) -> Self {
         // `unbounded` capacity — eviction is driven by the byte budget.
@@ -402,6 +419,7 @@ impl LoaderCache {
 /// Raw decoded byte size of a descriptor — what the NIXL registration holds.
 /// Per-entry bookkeeping (struct fields, NIXL metadata string) is negligible
 /// compared to a single decoded image.
+#[cfg(feature = "media-nixl")]
 fn descriptor_bytes(d: &RdmaMediaDataDescriptor) -> u64 {
     let elem = match d.tensor_info.dtype {
         DataType::UINT8 => 1u64,
@@ -421,16 +439,19 @@ pub struct MediaLoader {
     http_client: reqwest::Client,
     #[allow(dead_code)]
     media_fetcher: MediaFetcher,
+    #[cfg(feature = "media-nixl")]
     nixl_agent: NixlAgent,
     /// Optional byte-budgeted LRU cache of decoded + NIXL-registered media,
     /// keyed by URL hash. Each cache entry is shared via Arc; the underlying
     /// NIXL registration is kept alive as long as any clone (in cache or
     /// in-flight) holds it. Eviction just drops the cache's reference.
     /// `None` when caching is disabled (budget = 0).
+    #[cfg(feature = "media-nixl")]
     cache: Option<Arc<Mutex<LoaderCache>>>,
 }
 
 impl MediaLoader {
+    #[cfg(any(feature = "media-nixl", test))]
     fn cache_budget_bytes(value: Option<&str>) -> u64 {
         let gb = value
             .and_then(|s| s.parse::<f64>().ok())
@@ -442,12 +463,14 @@ impl MediaLoader {
     /// Read the cache budget (in bytes) from `DYN_MULTIMODAL_LOADER_CACHE_GB`.
     /// Value parses as a float number of gibibytes (1 GiB = 1024^3 bytes).
     /// Default `0` (disabled) — opt-in only.
+    #[cfg(feature = "media-nixl")]
     fn cache_budget_bytes_from_env() -> u64 {
         let value = std::env::var("DYN_MULTIMODAL_LOADER_CACHE_GB").ok();
         Self::cache_budget_bytes(value.as_deref())
     }
 
     /// Hash a URL/datauri string into a stable u64 cache key.
+    #[cfg(any(feature = "media-nixl", test))]
     fn cache_key(url: &str) -> u64 {
         let mut h = DefaultHasher::new();
         url.hash(&mut h);
@@ -462,8 +485,10 @@ impl MediaLoader {
         let media_fetcher = media_fetcher.unwrap_or_else(MediaFetcher::from_env);
         let http_client = media_fetcher.build_http_client()?;
 
+        #[cfg(feature = "media-nixl")]
         let nixl_agent = get_nixl_agent()?;
 
+        #[cfg(feature = "media-nixl")]
         let cache = match Self::cache_budget_bytes_from_env() {
             0 => {
                 tracing::debug!(
@@ -484,7 +509,9 @@ impl MediaLoader {
             media_decoder,
             http_client,
             media_fetcher,
+            #[cfg(feature = "media-nixl")]
             nixl_agent,
+            #[cfg(feature = "media-nixl")]
             cache,
         })
     }
@@ -492,7 +519,7 @@ impl MediaLoader {
     /// Test-only constructor that lets a unit test build a `MediaLoader` with
     /// an explicit byte budget (bypassing the env-var read in `new`).
     /// Pass 0 to disable.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "media-nixl"))]
     pub fn with_cache_budget_bytes(
         media_decoder: MediaDecoder,
         media_fetcher: Option<MediaFetcher>,
@@ -508,6 +535,7 @@ impl MediaLoader {
     }
 
     /// Number of entries currently held in the cache (test/observability helper).
+    #[cfg(feature = "media-nixl")]
     pub fn cache_len(&self) -> usize {
         self.cache.as_ref().map(|c| c.lock().len()).unwrap_or(0)
     }
@@ -521,6 +549,19 @@ impl MediaLoader {
             .await
     }
 
+    #[cfg(not(feature = "media-nixl"))]
+    pub(crate) async fn fetch_and_decode_media_part_with_video_hash(
+        &self,
+        oai_content_part: &ChatCompletionRequestUserMessageContentPart,
+        media_io_kwargs: Option<&MediaDecoder>,
+        _hash_video: bool,
+    ) -> Result<RdmaMediaDataDescriptor> {
+        anyhow::bail!(
+            "frontend media decoding requires the 'media-nixl' feature; cannot decode {oai_content_part:?} with media_io_kwargs {media_io_kwargs:?}"
+        );
+    }
+
+    #[cfg(feature = "media-nixl")]
     pub(crate) async fn fetch_and_decode_media_part_with_video_hash(
         &self,
         oai_content_part: &ChatCompletionRequestUserMessageContentPart,
@@ -635,7 +676,7 @@ impl MediaLoader {
     }
 }
 
-#[cfg(all(test, feature = "testing-nixl"))]
+#[cfg(all(test, feature = "media-nixl", feature = "testing-nixl"))]
 mod tests {
     use super::super::decoders::ImageDecoder;
     use super::super::rdma::DataType;

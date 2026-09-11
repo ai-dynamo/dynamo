@@ -1,16 +1,26 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+#[cfg(all(
+    feature = "media-nixl",
+    feature = "mm-routing",
+    feature = "media-ffmpeg"
+))]
 use anyhow::Context;
 use anyhow::Result;
+#[cfg(feature = "media-nixl")]
 use base64::{Engine as _, engine::general_purpose};
+#[cfg(feature = "media-nixl")]
 use dynamo_memory::SystemStorage;
+#[cfg(feature = "media-nixl")]
 use dynamo_memory::nixl::{self, NixlAgent, NixlDescriptor, RegisteredView};
+#[cfg(feature = "media-nixl")]
 use flate2::{Compression, write::ZlibEncoder};
 use ndarray::{ArrayBase, Dimension, OwnedRepr};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "media-nixl")]
 use std::io::Write;
+#[cfg(feature = "media-nixl")]
 use std::sync::Arc;
 
 use super::decoders::DecodedMediaMetadata;
@@ -31,6 +41,7 @@ pub struct MediaTensorInfo {
 // Decoded media data (image RGB, video frames pixels, ...)
 #[derive(Debug)]
 pub struct DecodedMediaData {
+    #[cfg(feature = "media-nixl")]
     pub(crate) data: SystemStorage,
     pub(crate) tensor_info: MediaTensorInfo,
     pub(crate) content_hash: Option<u64>,
@@ -41,8 +52,10 @@ pub struct DecodedMediaData {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RdmaMediaDataDescriptor {
     // b64 agent metadata
+    #[cfg(feature = "media-nixl")]
     pub(crate) nixl_metadata: String,
     // tensor descriptor
+    #[cfg(feature = "media-nixl")]
     pub(crate) nixl_descriptor: NixlDescriptor,
 
     #[serde(flatten)]
@@ -57,11 +70,16 @@ pub struct RdmaMediaDataDescriptor {
     // reference to the actual data, kept alive while the rdma descriptor is alive
     #[serde(skip, default)]
     #[allow(dead_code)]
+    #[cfg(feature = "media-nixl")]
     pub(crate) source_storage: Option<Arc<nixl::NixlRegistered<SystemStorage>>>,
 }
 
 impl RdmaMediaDataDescriptor {
-    #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+    #[cfg(all(
+        feature = "media-nixl",
+        feature = "mm-routing",
+        feature = "media-ffmpeg"
+    ))]
     fn local_payload(&self) -> Option<&[u8]> {
         use dynamo_memory::actions::Slice;
         let registered = self.source_storage.as_ref()?;
@@ -191,6 +209,7 @@ fn update_len_prefixed(hasher: &mut xxhash_rust::xxh3::Xxh3, bytes: &[u8]) {
     hasher.update(bytes);
 }
 
+#[cfg(any(feature = "media-nixl", test))]
 fn canonical_content_hash(shape: &[usize], dtype: DataType, bytes: &[u8]) -> u64 {
     use xxhash_rust::xxh3::Xxh3;
 
@@ -210,6 +229,7 @@ fn canonical_content_hash(shape: &[usize], dtype: DataType, bytes: &[u8]) -> u64
     hasher.digest()
 }
 
+#[cfg(feature = "media-nixl")]
 fn content_hash_for_storage(
     tensor_info: &MediaTensorInfo,
     storage: &SystemStorage,
@@ -253,9 +273,18 @@ impl DecodedMediaData {
     /// thread. Images are always hashed; videos are hashed only when the
     /// request is eligible for exact MM routing.
     pub(crate) fn compute_content_hash(&mut self, hash_video: bool) {
-        self.content_hash = content_hash_for_storage(&self.tensor_info, &self.data, hash_video);
+        #[cfg(feature = "media-nixl")]
+        {
+            self.content_hash = content_hash_for_storage(&self.tensor_info, &self.data, hash_video);
+        }
+        #[cfg(not(feature = "media-nixl"))]
+        {
+            let _ = hash_video;
+            self.content_hash = None;
+        }
     }
 
+    #[cfg(feature = "media-nixl")]
     pub fn into_rdma_descriptor(self, nixl_agent: &NixlAgent) -> Result<RdmaMediaDataDescriptor> {
         let source_storage = self.data;
         let content_hash = self.content_hash.map(|hash| format!("{hash:016x}"));
@@ -285,13 +314,19 @@ impl<D: Dimension> TryFrom<ArrayBase<OwnedRepr<u8>, D>> for DecodedMediaData {
     fn try_from(array: ArrayBase<OwnedRepr<u8>, D>) -> Result<Self, Self::Error> {
         let shape = array.shape().to_vec();
 
+        #[cfg(feature = "media-nixl")]
         let (data_vec, _) = array.into_raw_vec_and_offset();
+        #[cfg(feature = "media-nixl")]
         let mut storage = SystemStorage::new(data_vec.len())?;
+        #[cfg(feature = "media-nixl")]
         unsafe {
             std::ptr::copy_nonoverlapping(data_vec.as_ptr(), storage.as_mut_ptr(), data_vec.len());
         }
+        #[cfg(not(feature = "media-nixl"))]
+        let _ = array;
 
         Ok(Self {
+            #[cfg(feature = "media-nixl")]
             data: storage,
             tensor_info: MediaTensorInfo {
                 shape,
@@ -307,6 +342,7 @@ impl<D: Dimension> TryFrom<ArrayBase<OwnedRepr<u8>, D>> for DecodedMediaData {
 // Returns zlib-compressed, base64-encoded metadata in format: "b64:<compressed_base64>"
 // This format matches what Python nixl_connect expects for RdmaMetadata.nixl_metadata
 // TODO: pre-allocate a fixed NIXL-registered RAM pool so metadata can be cached on the target?
+#[cfg(feature = "media-nixl")]
 pub fn get_nixl_metadata(agent: &NixlAgent, _storage: &SystemStorage) -> Result<String> {
     // WAR: Until https://github.com/ai-dynamo/nixl/pull/970 is merged, can't use get_local_partial_md
     let nixl_md = agent.raw_agent().get_local_md()?;
@@ -323,6 +359,7 @@ pub fn get_nixl_metadata(agent: &NixlAgent, _storage: &SystemStorage) -> Result<
     Ok(format!("b64:{}", b64_encoded))
 }
 
+#[cfg(feature = "media-nixl")]
 pub fn get_nixl_agent() -> Result<NixlAgent> {
     let name = format!("media-loader-{}", uuid::Uuid::new_v4());
     let nixl_agent = NixlAgent::with_backends(&name, &["UCX"])?;

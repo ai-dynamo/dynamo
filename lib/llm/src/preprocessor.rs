@@ -2329,9 +2329,19 @@ impl OpenAIPreprocessor {
                 )
             });
 
+        #[cfg(feature = "media-nixl")]
         let media_loader = match mdc.media_decoder {
             Some(media_decoder) => Some(MediaLoader::new(media_decoder, mdc.media_fetcher)?),
             None => None,
+        };
+        #[cfg(not(feature = "media-nixl"))]
+        let media_loader = {
+            if mdc.media_decoder.is_some() {
+                anyhow::bail!(
+                    "frontend media decoding was requested by the model deployment card, but dynamo-llm was built without the 'media-nixl' feature"
+                );
+            }
+            None
         };
 
         #[cfg(feature = "mm-routing")]

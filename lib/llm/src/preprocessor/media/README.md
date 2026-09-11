@@ -3,6 +3,8 @@
 
 This component performs media download, base64 decoding, media decoding and NIXL registration. Today, this is used in the OpenAI preprocessor, to transform multimodal inputs (image_url, video_url, audio_url) into fully decoded data (pixel values, ...) accessible to the backends via NIXL.
 
+Build `dynamo-llm` with the default `media-nixl` feature to include frontend media decoding. Consumers that only pass media URLs through to backend workers can disable default features and omit `media-nixl`, avoiding the `dynamo-memory` and `nixl-sys` dependencies.
+
 ## Usage
 
 Media decoding is enabled when registering the MDC:

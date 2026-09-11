@@ -12,22 +12,23 @@ repository.workspace = true
 description = "Dynamo LLM Library"
 
 [features]
-default = ["block-manager"]
+default = ["block-manager", "media-nixl"]
 # todo(ops): get this working in CI as a default.
 # default = ["block-manager", "testing-full"]
 
 testing-full = ["testing-cuda", "testing-nixl"]
 testing-cuda = ["dep:cudarc", "dynamo-memory/testing-cuda"]
-testing-nixl = ["dep:nixl-sys", "dynamo-memory/testing-nixl"]
+testing-nixl = ["media-nixl", "dep:nixl-sys", "dynamo-memory/testing-nixl"]
 testing-etcd = []
 # Forward the NVTX feature to dynamo-runtime (build with --features nvtx or dynamo-llm/nvtx)
 nvtx = ["dynamo-runtime/nvtx"]
-block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:nix", "dep:aligned-vec"]
+block-manager = ["dep:dynamo-memory", "dep:nixl-sys", "dep:cudarc", "dep:nix", "dep:aligned-vec"]
 nccl = ["dep:cudarc", "cudarc/nccl"]  # Enable NCCL collective operations
 block-manager-bench = ["block-manager", "testing-full", "dep:clap", "dep:indicatif"]
 cuda = ["dep:cudarc"]
 integration = ["dynamo-runtime/integration"]
-media-ffmpeg = ["dep:video-rs", "dep:ffmpeg-next", "dep:memfile"]
+media-nixl = ["dep:dynamo-memory"]
+media-ffmpeg = ["media-nixl", "dep:video-rs", "dep:ffmpeg-next", "dep:memfile"]
 bench = ["dynamo-kv-router/bench"]
 # Pull-only CKF Relay stats and snapshots. Keep this separate from `metrics`, which
 # is enabled by normal `dynamo-llm` builds and must not retain diagnostic hot-path work.
@@ -73,7 +74,7 @@ required-features = ["media-ffmpeg"]
 [dependencies]
 # repo
 dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols"] }
-dynamo-memory = { workspace = true }
+dynamo-memory = { workspace = true, optional = true }
 dynamo-mocker = { workspace = true, features = ["zmq-events"] }
 dynamo-rl = { workspace = true }
 dynamo-runtime = { workspace = true }
