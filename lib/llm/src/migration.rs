@@ -763,9 +763,9 @@ mod tests {
             // attach really would flip the classification.
             assert!(!is_migratable(&worker_error), "{error_type:?} setup");
 
-            let err = pre_stream_failure_error(&StreamPrologueError::new(
+            let err = pre_stream_failure_error(StreamPrologueError::new(
                 format!("Generate Error: {worker_error}"),
-                worker_error.clone(),
+                worker_error,
             ));
             assert!(
                 is_migratable(&err),
@@ -785,7 +785,7 @@ mod tests {
                     .build(),
             )
             .build();
-        let err = pre_stream_failure_error(&StreamPrologueError::new(
+        let err = pre_stream_failure_error(StreamPrologueError::new(
             "Generate Error: downstream worker rejected the request",
             nested,
         ));

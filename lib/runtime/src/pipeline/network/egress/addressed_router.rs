@@ -68,7 +68,7 @@ pub(crate) const MIGRATION_SENSITIVE_ERROR_TYPES: &[ErrorType] =
 /// any link match", and that is deliberately the same walk migration
 /// classification runs: an excluded type nested one link down short-circuits it
 /// just as an outer one does.
-fn chain_is_migration_sensitive(err: &DynamoError) -> bool {
+fn is_migration_sensitive(err: &DynamoError) -> bool {
     match_error_chain(err, MIGRATION_SENSITIVE_ERROR_TYPES, &[])
 }
 
@@ -83,15 +83,15 @@ fn chain_is_migration_sensitive(err: &DynamoError) -> bool {
 /// the outer type, so causes typed one of [`MIGRATION_SENSITIVE_ERROR_TYPES`]
 /// are withheld rather than attached. The worker's text stays in the message
 /// either way; only the machine-readable type is withheld.
-pub(crate) fn pre_stream_failure_error(error: &StreamPrologueError) -> DynamoError {
+pub(crate) fn pre_stream_failure_error(error: StreamPrologueError) -> DynamoError {
     let builder = DynamoError::builder()
         .error_type(ErrorType::CannotConnect)
         .message(format!(
             "Worker generate() failed before response stream: {error}"
         ));
 
-    match &error.typed_error {
-        Some(typed) if !chain_is_migration_sensitive(typed) => builder.cause(typed.clone()).build(),
+    match error.typed_error {
+        Some(typed) if !is_migration_sensitive(&typed) => builder.cause(typed).build(),
         _ => builder.build(),
     }
 }
@@ -109,7 +109,7 @@ pub mod testing {
         super::MIGRATION_SENSITIVE_ERROR_TYPES
     }
 
-    pub fn pre_stream_failure_error(error: &StreamPrologueError) -> DynamoError {
+    pub fn pre_stream_failure_error(error: StreamPrologueError) -> DynamoError {
         super::pre_stream_failure_error(error)
     }
 }
@@ -839,7 +839,7 @@ impl AddressedPushRouter {
         let response_stream = match response_stream_provider.await {
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) => {
-                return Err(anyhow::anyhow!(pre_stream_failure_error(&e)));
+                return Err(anyhow::anyhow!(pre_stream_failure_error(e)));
             }
             Err(_recv_err) => {
                 // oneshot dropped: either the discovery watcher cancelled

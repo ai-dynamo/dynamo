@@ -1118,14 +1118,15 @@ async fn tcp_listener(
         // note: this second control message might be delayed, but the expensive part of setting up the connection
         // is both complete and ready for data flow; awaiting here is not a performance hit or problem and it allows
         // us to trace the initial setup time vs the time to prologue
-        if let Some(error) = &prologue.error {
+        if let Some(error) = prologue.error {
+            let returned = error!("Received error prologue: {error}");
             // Forward the worker's typed error so the requesting side can classify
             // the failure instead of parsing the message. An older worker sends none.
             let _ = connection.send(Err(StreamPrologueError {
-                message: error.clone(),
-                typed_error: prologue.typed_error.clone(),
+                message: error,
+                typed_error: prologue.typed_error,
             }));
-            return Err(error!("Received error prologue: {}", error));
+            return Err(returned);
         }
 
         // Buffer size is driven by the registration options
@@ -2400,9 +2401,8 @@ mod tests {
 
     /// A prologue that arrives well-framed but undecodable -- the shape a worker
     /// newer than this build produces when it types an error with an `ErrorType`
-    /// variant this build lacks -- must still reach the requester. Before the
-    /// notify was added it returned on `?` and dropped the oneshot, so the
-    /// requester saw a bare disconnect instead of the reason.
+    /// variant this build lacks -- must still reach the requester rather than
+    /// leaving it with a bare disconnect.
     #[tokio::test]
     async fn test_undecodable_prologue_still_reaches_the_requester() {
         let options = ServerOptions::builder().port(0).build().unwrap();
@@ -2540,20 +2540,17 @@ mod tests {
             .message("multimodal input is not supported by this backend")
             .build();
 
-        let client = tokio::spawn(async move {
-            let mut sender =
-                TcpClient::create_response_stream(client_context.context(), connection_info, None)
-                    .await
-                    .unwrap();
-            sender
-                .send_prologue_typed(Some(StreamPrologueError::new(
-                    "Generate Error: multimodal input is not supported by this backend",
-                    worker_error,
-                )))
+        let mut sender =
+            TcpClient::create_response_stream(client_context.context(), connection_info, None)
                 .await
                 .unwrap();
-        });
-        client.await.unwrap();
+        sender
+            .send_prologue_typed(Some(StreamPrologueError::new(
+                "Generate Error: multimodal input is not supported by this backend",
+                worker_error,
+            )))
+            .await
+            .unwrap();
 
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), stream_provider)
             .await

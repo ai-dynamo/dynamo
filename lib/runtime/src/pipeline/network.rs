@@ -340,9 +340,10 @@ impl From<&str> for StreamPrologueError {
     }
 }
 
-/// The error type widened from `String` to [`StreamPrologueError`] so a
-/// pre-stream failure keeps the worker's [`crate::error::ErrorType`] instead of
-/// only its display text.
+/// Resolves once the worker's response stream is established, or with a
+/// [`StreamPrologueError`] carrying both the failure's display text and, when
+/// the worker sent one, its [`crate::error::ErrorType`], so the requesting side
+/// can classify a pre-stream failure without parsing the message.
 pub type StreamProvider<T> = tokio::sync::oneshot::Receiver<Result<T, StreamPrologueError>>;
 
 /// Owning `Drop` here (rather than on `RegisteredStream`) lets `into_parts()`
