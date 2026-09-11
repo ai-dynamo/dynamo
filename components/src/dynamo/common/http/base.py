@@ -42,7 +42,14 @@ class HttpStatusError(HttpError):
     """Server responded with a non-2xx status."""
 
     def __init__(self, status: int, message: str, url: str) -> None:
-        super().__init__(f"HTTP {status} for {url}: {message}")
+        # Both halves are client-supplied: ``url`` directly, and ``message``
+        # because httpx's own HTTPStatusError text repeats the URL. The video
+        # diffusion handler puts str(exc) in its response body, so neither can
+        # be unbounded. The attributes keep the full values for callers.
+        super().__init__(
+            f"HTTP {status} for {describe_media_source(url)}: "
+            f"{describe_media_source(message)}"
+        )
         self.status = status
         self.message = message
         self.url = url
@@ -138,7 +145,7 @@ class HttpClient(abc.ABC):
             if redirect_to is None:
                 if body is None:
                     raise HttpError(
-                        f"Backend returned (None, None) for {current}; "
+                        f"Backend returned (None, None) for {describe_media_source(current)}; "
                         "expected bytes on a terminal (2xx or 3xx-without-Location) response"
                     )
                 return body

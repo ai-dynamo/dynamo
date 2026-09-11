@@ -52,8 +52,11 @@ def _streaming(body: bytes):
     """``aiter_bytes`` stand-in — the seam the download cap reads through."""
 
     async def _iter(*args, **kwargs):
-        yield body
+        _iter.call_kwargs = kwargs
+        for i in range(0, len(body), kwargs.get("chunk_size") or len(body) or 1):
+            yield body[i : i + (kwargs.get("chunk_size") or len(body))]
 
+    _iter.call_kwargs = {}
     return _iter
 
 
@@ -88,6 +91,10 @@ async def test_fetch_bytes_returns_body_on_200() -> None:
     client = _make_client_with_inner(_inner_sending(response))
     result = await client.fetch_bytes("https://h/x", 30.0)
     assert result == b"hello"
+    # Without stream=True httpx reads the whole body into response.content
+    # before the cap ever looks at it; the cap still raises, so nothing else
+    # here would notice.
+    assert client._client.send.call_args.kwargs["stream"] is True
 
 
 async def test_fetch_bytes_refuses_a_body_over_the_cap() -> None:
@@ -98,6 +105,9 @@ async def test_fetch_bytes_refuses_a_body_over_the_cap() -> None:
     client = _make_client_with_inner(_inner_sending(response))
     with pytest.raises(UrlValidationError, match="download limit"):
         await client.fetch_bytes("https://h/x", 30.0, max_bytes=512)
+    # The reader has to be handed a granularity, or one decompressed chunk is
+    # buffered whole before the running total is checked.
+    assert response.aiter_bytes.call_kwargs["chunk_size"] > 0
 
 
 async def test_fetch_bytes_maps_timeout() -> None:

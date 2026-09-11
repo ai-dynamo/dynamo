@@ -535,6 +535,42 @@ class TestImageDiffusionWorkerHandler:
         handler.generator.generate.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_generate_i2i_maps_a_4xx_fetch_to_invalid_argument(
+        self, handler, mock_context, tmp_path, monkeypatch
+    ):
+        """A 4xx from the origin the client chose is the client's problem.
+
+        Everything that is not an InvalidArgument becomes a sanitized 500, so
+        without this the caller is told nothing about their own dead URL. The
+        URL is not echoed back -- it has no length limit and the video handler
+        puts str(exc) straight in its response body.
+        """
+        from dynamo.common.http.base import HttpStatusError
+
+        handler.generator.generate = Mock()
+        monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
+        url = "http://example.com/" + "u" * 5000
+
+        async def fake_fetch(u, timeout, *, policy=None, max_bytes=None):
+            raise HttpStatusError(404, "Not Found", u)
+
+        monkeypatch.setattr("dynamo.common.http.fetch_bytes", fake_fetch)
+        request = {
+            "prompt": "x",
+            "model": "test-model",
+            "size": "256x256",
+            "response_format": "b64_json",
+            "input_reference": url,
+        }
+
+        with pytest.raises(InvalidArgument, match="HTTP 404") as excinfo:
+            async for _ in handler.generate(request, mock_context):
+                pass
+
+        assert "uuuu" not in str(excinfo.value)
+        handler.generator.generate.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_generate_t2i_no_image_path(self, handler, mock_context):
         """Test that image_path is NOT passed when input_reference is absent."""
         test_image = Image.new("RGB", (256, 256), color="red")

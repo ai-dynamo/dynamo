@@ -15,6 +15,7 @@ import torch
 from PIL import Image
 
 from dynamo._core import Context
+from dynamo.common.http.base import HttpStatusError
 from dynamo.common.http.media_reference import local_media_reference
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.protocols.image_protocol import ImageNvExt
@@ -189,11 +190,22 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
                     )
                 except UrlValidationError as exc:
                     # A policy verdict on a client-supplied reference is a bad
-                    # request, not a server fault: InvalidArgument makes it a
-                    # 400 carrying the reason instead of a sanitized 500.
-                    # Transport failures (timeout, 404) stay as they are — they
-                    # are not necessarily the client's fault.
+                    # request. UrlValidationError is a ValueError, which the
+                    # binding already maps to InvalidArgument
+                    # (backend.rs py_err_to_dynamo) — this says so at the call
+                    # site rather than relying on that fallback.
                     raise InvalidArgument(str(exc)) from exc
+                except HttpStatusError as exc:
+                    if not 400 <= exc.status < 500:
+                        raise
+                    # The origin the client picked answered 4xx. image_loader
+                    # takes the same line for an unreachable user-supplied URL
+                    # ("a client error (400) rather than an internal server
+                    # fault"). The URL is not echoed back: the client sent it,
+                    # and it has no length limit.
+                    raise InvalidArgument(
+                        f"input_reference could not be fetched (HTTP {exc.status})"
+                    ) from exc
 
             result = await asyncio.to_thread(
                 self.generator.generate,

@@ -145,16 +145,19 @@ async def validate_url(url: str, policy: UrlValidationPolicy) -> str:
     if not url:
         raise UrlValidationError("URL is empty")
 
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+
+    # Before the label: describe_media_source copies the source, and a data:
+    # URI carries the whole payload inline, so building one for the branch that
+    # returns without using it dominates the call (98% of it at 32 MiB).
+    if scheme == "data":
+        return url
+
     # Every message below is surfaced to the caller (the diffusion handlers
     # turn it into a 400 body) and logged, so nothing client-supplied goes in
     # at full length.
     label = describe_media_source(url)
-
-    parsed = urlparse(url)
-    scheme = parsed.scheme.lower()
-
-    if scheme == "data":
-        return url
 
     if scheme not in ("http", "https"):
         raise UrlValidationError(
@@ -240,8 +243,10 @@ def validate_local_path(path: str, policy: UrlValidationPolicy) -> Path:
     try:
         allowed = Path(policy.allowed_local_path).expanduser().resolve(strict=True)
     except FileNotFoundError as exc:
+        # Same reason as the message below: callers put this in a client
+        # response, and the configured directory is deployment detail.
         raise UrlValidationError(
-            f"Configured allowed_local_path does not exist: {policy.allowed_local_path}"
+            "Configured allowed_local_path does not exist"
         ) from exc
 
     try:

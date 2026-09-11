@@ -24,6 +24,7 @@ from .base import (
     HttpTimeoutError,
     collect_capped,
 )
+from .url_validator import describe_media_source
 
 logger = logging.getLogger(__name__)
 
@@ -99,15 +100,21 @@ class AiohttpClient(HttpClient):
         except aiohttp.ClientResponseError as e:
             raise HttpStatusError(e.status, e.message or "", url) from e
         except (asyncio.TimeoutError, aiohttp.ServerTimeoutError) as e:
-            raise HttpTimeoutError(f"Timeout loading {url}") from e
+            raise HttpTimeoutError(
+                f"Timeout loading {describe_media_source(url)}"
+            ) from e
         except (
             aiohttp.ClientConnectionError,
             aiohttp.ClientConnectorError,
             aiohttp.ServerDisconnectedError,
         ) as e:
-            raise HttpConnectionError(f"Connection error loading {url}: {e}") from e
+            raise HttpConnectionError(
+                f"Connection error loading {describe_media_source(url)}: {e}"
+            ) from e
         except aiohttp.ClientError as e:
-            raise HttpConnectionError(f"HTTP error loading {url}: {e}") from e
+            raise HttpConnectionError(
+                f"HTTP error loading {describe_media_source(url)}: {e}"
+            ) from e
 
     async def _fetch_body_or_redirect(
         self, url: str, timeout: float, *, max_bytes: Optional[int] = None
@@ -141,15 +148,21 @@ class AiohttpClient(HttpClient):
                     None,
                 )
         except (asyncio.TimeoutError, aiohttp.ServerTimeoutError) as e:
-            raise HttpTimeoutError(f"Timeout loading {url}") from e
+            raise HttpTimeoutError(
+                f"Timeout loading {describe_media_source(url)}"
+            ) from e
         except (
             aiohttp.ClientConnectionError,
             aiohttp.ClientConnectorError,
             aiohttp.ServerDisconnectedError,
         ) as e:
-            raise HttpConnectionError(f"Connection error loading {url}: {e}") from e
+            raise HttpConnectionError(
+                f"Connection error loading {describe_media_source(url)}: {e}"
+            ) from e
         except aiohttp.ClientError as e:
-            raise HttpConnectionError(f"HTTP error loading {url}: {e}") from e
+            raise HttpConnectionError(
+                f"HTTP error loading {describe_media_source(url)}: {e}"
+            ) from e
 
     async def close(self) -> None:
         async with self._lock:

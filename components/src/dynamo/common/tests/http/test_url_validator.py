@@ -517,3 +517,36 @@ async def test_redirect_chain_in_the_limit_message_is_bounded() -> None:
         await _Client().fetch_bytes(long_hop, 1.0, policy=policy)
 
     assert len(str(excinfo.value)) < 1000
+
+
+async def test_a_data_uri_does_not_pay_for_a_label_it_cannot_use(monkeypatch) -> None:
+    """describe_media_source copies the source, and a data: URI is the payload.
+
+    The data branch returns before any message is built, so building the label
+    first made validate_url O(payload): 1.35 ms for a 32 MiB URI against
+    0.03 ms after.
+    """
+    calls = []
+    monkeypatch.setattr(
+        url_validator,
+        "describe_media_source",
+        lambda src, *a, **kw: calls.append(src) or src,
+    )
+
+    url = "data:image/png;base64,AAAA"
+    assert await url_validator.validate_url(url, STRICT_HTTPS) == url
+    assert calls == []
+
+
+def test_missing_allowed_dir_does_not_name_it(tmp_path) -> None:
+    """Same disclosure as the 'outside the allowed directory' message below it:
+    this one reaches the client too, on an ordinary misconfiguration."""
+    policy = UrlValidationPolicy(allowed_local_path=str(tmp_path / "gone"))
+    # The input itself must resolve, or "File not found" fires first.
+    media = tmp_path / "x.png"
+    media.write_bytes(b"x")
+
+    with pytest.raises(UrlValidationError, match="does not exist") as excinfo:
+        validate_local_path(str(media), policy)
+
+    assert "gone" not in str(excinfo.value)
