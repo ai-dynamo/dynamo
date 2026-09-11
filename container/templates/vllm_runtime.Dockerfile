@@ -185,8 +185,16 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 {# EngineCore msgpack is positional, so any auto-loaded plugin that extends
    vllm.v1.engine.EngineCoreOutput makes every engine output the wrong length for
    the strict Rust decoder in `vllm-rs`. vLLM-Omni appends three fields and is
-   installed in this image, so the wrapper below allowlists only the plugins that
-   decoder tolerates. #}
+   installed in this image, so the wrapper below pins VLLM_PLUGINS.
+   The allowlist is deliberately minimal: it names only the plugin this image
+   installs on purpose, so it also excludes vLLM's own in-tree general plugins
+   (lora_filesystem_resolver, lora_hf_hub_resolver), which the decoder does
+   tolerate but which the sidecar protocol has no LoRA support to use. The same
+   variable is the shared gate for vllm.platform_plugins, vllm.io_processor_plugins,
+   vllm.stat_logger_plugins, and vllm.endpoint_plugins. Without ModelExpress this
+   renders the empty string, which vLLM reads as an allowlist matching no plugin
+   at all rather than as unset. A caller who wants any of them back exports
+   VLLM_PLUGINS itself. #}
 {% set vllm_rs_plugins = "modelexpress" if context.vllm.enable_modelexpress == "true" else "" %}
 
 # The vLLM 0.28.0 release images resolve the unbounded `transformers>=5.5.3`
@@ -551,8 +559,10 @@ RUN set -eu; \
             '# names an allowlist. vLLM-Omni appends three fields to' \
             '# vllm.v1.engine.EngineCoreOutput, and EngineCore msgpack is positional,' \
             '# so the strict Rust decoder in this binary then rejects every engine' \
-            '# output as the wrong length. Allow only the plugins it tolerates. An' \
-            '# exported VLLM_PLUGINS, the empty allowlist included, still wins.' \
+            '# output as the wrong length. This allowlist is deliberately minimal:' \
+            '# it excludes every plugin this image does not install on purpose,' \
+            '# including the LoRA resolvers that vLLM itself ships. An exported' \
+            '# VLLM_PLUGINS, the empty allowlist included, still wins.' \
             'VLLM_PLUGINS="${VLLM_PLUGINS-{{ vllm_rs_plugins }}}"' \
             'export VLLM_PLUGINS' \
             "exec \"${pkg}/vllm-rs\" \"\$@\"" \
