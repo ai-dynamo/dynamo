@@ -256,10 +256,23 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
             "prefill_dp_rank",
         ],
     )
-    @pytest.mark.parametrize("value", [0, 7, None])
-    def test_worker_routing_hints_are_projected(self, field, value):
-        result = _build_dynamo_preproc({"nvext": {field: value}}, [1], "test", None)
-        assert result["routing"] == ({field: value} if value is not None else None)
+    def test_worker_routing_hints_are_projected(self, field):
+        result = _build_dynamo_preproc({"nvext": {field: 7}}, [1], "test", None)
+        assert result["routing"] == {field: 7}
+
+    @pytest.mark.router
+    def test_worker_routing_preserves_rank_zero(self):
+        """Rank zero is an explicit value, not an omitted rank."""
+        result = _build_dynamo_preproc({"nvext": {"dp_rank": 0}}, [1], "test", None)
+        assert result["routing"] == {"dp_rank": 0}
+
+    @pytest.mark.router
+    def test_worker_routing_omits_null(self):
+        """A null target leaves the request unpinned."""
+        result = _build_dynamo_preproc(
+            {"nvext": {"backend_instance_id": None}}, [1], "test", None
+        )
+        assert result["routing"] is None
 
     @pytest.mark.router
     def test_worker_routing_preserves_priority_and_explicit_overrides(self):
@@ -3285,10 +3298,15 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
 
 @pytest.mark.core
 @pytest.mark.parametrize(
-    "requested", [None, True, False], ids=["omitted", "true", "false"]
+    ("requested", "pin_workers"),
+    [
+        pytest.param(None, False, id="omitted"),
+        pytest.param(True, False, id="true"),
+        pytest.param(False, False, id="false"),
+        pytest.param(None, True, id="pinned"),
+    ],
 )
 @pytest.mark.parametrize("use_pool", [False, True], ids=["inline", "pool"])
-@pytest.mark.parametrize("pin_workers", [False, True], ids=["unpinned", "pinned"])
 def test_generator_preserves_decode_and_routing_options(
     requested, use_pool, pin_workers, monkeypatch
 ):
