@@ -715,11 +715,33 @@ async fn sleep_until_ms(
         std::future::pending::<()>().await;
         return;
     };
-    // No `into_std()`: `origin` is a Tokio instant, so the deadline is too, and
-    // under a paused clock its value is virtual. Handing it to a real-clock
-    // comparison makes a 100ms virtual pass sleep return instantly once the
-    // process has been alive 100ms -- see `ReusablePreciseTimer::sleep_until`.
-    let deadline = origin + Duration::from_secs_f64(deadline_ms.max(0.0) / 1_000.0);
+    // `try_from_secs_f64`/`checked_add`, not `from_secs_f64`/`+`: `deadline_ms`
+    // comes from `execute_pass(..).end_ms` and `next_internal_deadline_ms()`,
+    // which aisimulate-core only guarantees finite and non-negative -- not
+    // bounded. A `TimingModel` returning something like 1e18 ms clears that gate
+    // and then panics here ("overflow when adding duration to instant"), inside
+    // the actor task, surfacing as an opaque "grouped scheduler supervisor task
+    // panicked". The external provider is `DynamoPerfTimingModel`, which
+    // forwards NPZ-interpolated or AIC-callback output with no local bound.
+    //
+    // An unrepresentable deadline is one further away than this clock can name,
+    // so it degrades to the same "no deadline" branch as `None` above rather
+    // than inventing a nearer one. Worth a `warn!` because it means the timing
+    // model produced a value no pass can honor.
+    //
+    // NaN cannot reach here: `f64::max` returns the non-NaN operand, so
+    // `deadline_ms.max(0.0)` is 0.0 for NaN.
+    let offset = Duration::try_from_secs_f64(deadline_ms.max(0.0) / 1_000.0)
+        .ok()
+        .and_then(|offset| origin.checked_add(offset));
+    let Some(deadline) = offset else {
+        tracing::warn!(
+            deadline_ms,
+            "grouped pass deadline is not representable on the run clock; waiting indefinitely"
+        );
+        std::future::pending::<()>().await;
+        return;
+    };
     timer.sleep_until(deadline).await;
 }
 
