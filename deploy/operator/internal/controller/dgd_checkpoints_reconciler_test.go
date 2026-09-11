@@ -40,6 +40,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
@@ -367,6 +368,21 @@ func TestDGDCheckpointsReconciler_SnapshotJobAppliesDGDDefaults(t *testing.T) {
 		discovery.GetK8sDiscoveryServiceAccountName("test-dgd"),
 		job.Spec.PodTemplate.Spec.ServiceAccountName,
 	)
+
+	t.Log("Verify the SnapshotJob retains the default shared-memory volume")
+	sharedMemoryVolume := findVolume(job.Spec.PodTemplate.Spec.Volumes, commonconsts.KubeValueNameSharedMemory)
+	require.NotNil(t, sharedMemoryVolume)
+	require.NotNil(t, sharedMemoryVolume.EmptyDir)
+	assert.Equal(t, corev1.StorageMediumMemory, sharedMemoryVolume.EmptyDir.Medium)
+	require.NotNil(t, sharedMemoryVolume.EmptyDir.SizeLimit)
+	assert.Equal(t,
+		resource.MustParse(commonconsts.DefaultSharedMemorySize),
+		*sharedMemoryVolume.EmptyDir.SizeLimit,
+	)
+	assert.Contains(t, main.VolumeMounts, corev1.VolumeMount{
+		Name:      commonconsts.KubeValueNameSharedMemory,
+		MountPath: commonconsts.DefaultSharedMemoryMountPath,
+	})
 }
 
 func TestDGDCheckpointsReconciler_SnapshotJobUsesTargetContainer(t *testing.T) {

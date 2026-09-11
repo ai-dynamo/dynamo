@@ -42,7 +42,7 @@ spec:
                   cpu: "1"
                 limits:
                   cpu: "2"
-    - name: VllmDecodeWorker
+    - name: worker
       type: worker
       replicas: 1
       podTemplate:
