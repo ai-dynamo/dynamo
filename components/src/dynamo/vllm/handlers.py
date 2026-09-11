@@ -2493,6 +2493,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             base_model_path=self.config.model,
             worker_type=lora_worker_type,
             needs=lora_needs,
+            # LoRA cards need base-model metadata, not weights.
+            ignore_weights=True,
             max_gpu_lora_count=getattr(self.config.engine_args, "max_loras", None),
         )
 
