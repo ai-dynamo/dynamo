@@ -16,7 +16,7 @@ from PIL import Image
 
 from dynamo._core import Context
 from dynamo.common.http.media_reference import local_media_reference
-from dynamo.common.http.url_validator import UrlValidationPolicy
+from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.protocols.image_protocol import ImageNvExt
 from dynamo.common.storage import upload_to_fs
 from dynamo.llm.exceptions import InvalidArgument
@@ -181,11 +181,19 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             if input_reference is not None:
                 if not input_reference.strip():
                     raise InvalidArgument("input_reference must be a non-empty string")
-                args["image_path"] = await stack.enter_async_context(
-                    local_media_reference(
-                        input_reference, UrlValidationPolicy.from_env()
+                try:
+                    args["image_path"] = await stack.enter_async_context(
+                        local_media_reference(
+                            input_reference, UrlValidationPolicy.from_env()
+                        )
                     )
-                )
+                except UrlValidationError as exc:
+                    # A policy verdict on a client-supplied reference is a bad
+                    # request, not a server fault: InvalidArgument makes it a
+                    # 400 carrying the reason instead of a sanitized 500.
+                    # Transport failures (timeout, 404) stay as they are — they
+                    # are not necessarily the client's fault.
+                    raise InvalidArgument(str(exc)) from exc
 
             result = await asyncio.to_thread(
                 self.generator.generate,

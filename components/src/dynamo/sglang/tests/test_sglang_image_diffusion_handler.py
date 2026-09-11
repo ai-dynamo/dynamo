@@ -442,7 +442,12 @@ class TestImageDiffusionWorkerHandler:
     async def test_generate_i2i_passes_image_path(
         self, handler, mock_context, tmp_path, monkeypatch
     ):
-        """input_reference inside DYN_MM_LOCAL_PATH is resolved and passed as image_path."""
+        """The generator gets the *resolved* path, never the raw reference.
+
+        Resolution is what makes the confinement check meaningful: the string
+        handed to the generator has to be the one that was checked against
+        DYN_MM_LOCAL_PATH, not the one the client sent.
+        """
         test_image = Image.new("RGB", (256, 256), color="green")
 
         handler.generator.generate = Mock(
@@ -450,14 +455,19 @@ class TestImageDiffusionWorkerHandler:
         )
 
         monkeypatch.setenv("DYN_MM_LOCAL_PATH", str(tmp_path))
+        (tmp_path / "sub").mkdir()
         input_ref = tmp_path / "test_input.png"
         input_ref.write_bytes(b"x")
+        # A "sub/.." segment so the resolved form differs from what was sent;
+        # on Linux an already-normalized tmp_path resolves to itself, and the
+        # assertion below would hold even with no resolution at all.
+        sent = str(tmp_path / "sub" / ".." / "test_input.png")
         request = {
             "prompt": "Transform this image",
             "model": "test-model",
             "size": "256x256",
             "response_format": "b64_json",
-            "input_reference": str(input_ref),
+            "input_reference": sent,
         }
 
         results = []
@@ -467,13 +477,19 @@ class TestImageDiffusionWorkerHandler:
         sampling_params = handler.generator.generate.call_args[1][
             "sampling_params_kwargs"
         ]
+        assert sampling_params["image_path"] != sent
         assert sampling_params["image_path"] == str(input_ref.resolve())
 
     @pytest.mark.asyncio
     async def test_generate_i2i_rejects_path_outside_allowed_dir(
         self, handler, mock_context, tmp_path, monkeypatch
     ):
-        """A path outside DYN_MM_LOCAL_PATH is rejected before the generator runs."""
+        """A rejected reference must be a 400, not a sanitized 500.
+
+        UrlValidationError is a policy verdict on client input. It is also a
+        plain ValueError, so without the explicit mapping it reaches the runtime
+        as an unexpected failure and the client is told nothing.
+        """
         handler.generator.generate = Mock()
         monkeypatch.setenv("DYN_MM_LOCAL_PATH", str(tmp_path))
         request = {
@@ -484,9 +500,38 @@ class TestImageDiffusionWorkerHandler:
             "input_reference": "/etc/passwd",
         }
 
-        results = [r async for r in handler.generate(request, mock_context)]
+        with pytest.raises(InvalidArgument, match="outside the allowed directory"):
+            async for _ in handler.generate(request, mock_context):
+                pass
 
-        assert any("error" in r for r in results)
+        handler.generator.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_generate_i2i_rejection_message_is_bounded(
+        self, handler, mock_context, tmp_path, monkeypatch
+    ):
+        """A rejected reference is echoed back bounded, not at full length.
+
+        input_reference has no length limit, and the 400 body plus the error log
+        are two sinks per request: echoing it verbatim turns one request into an
+        arbitrarily large amplification.
+        """
+        handler.generator.generate = Mock()
+        monkeypatch.setenv("DYN_MM_LOCAL_PATH", str(tmp_path))
+        reference = "/nope/" + "A" * 200_000 + ".png"
+        request = {
+            "prompt": "x",
+            "model": "test-model",
+            "size": "256x256",
+            "response_format": "b64_json",
+            "input_reference": reference,
+        }
+
+        with pytest.raises(InvalidArgument) as excinfo:
+            async for _ in handler.generate(request, mock_context):
+                pass
+
+        assert len(str(excinfo.value)) < 500, "client-visible message is unbounded"
         handler.generator.generate.assert_not_called()
 
     @pytest.mark.asyncio
