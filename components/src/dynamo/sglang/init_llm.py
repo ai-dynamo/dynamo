@@ -11,10 +11,19 @@ import sglang as sgl
 from sglang.srt.observability.trace import set_global_trace_level
 
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.gms_failover import (
+    acquire_gms_failover_lock_before_init,
+    prepare_gms_failover,
+    run_gms_failover_promotion_warmup,
+)
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
+from dynamo.sglang.failover_watchdog import (
+    maybe_start_gms_failover_child_watchdog,
+    maybe_start_rank_liveness,
+)
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
     SglangHealthCheckPayload,
@@ -27,6 +36,122 @@ from dynamo.sglang.publisher import (
 )
 from dynamo.sglang.register import register_model_with_readiness_gate
 from dynamo.sglang.request_handlers import DecodeWorkerHandler, PrefillWorkerHandler
+from dynamo.sglang.request_handlers.handler_base import SGLangEnginePauseController
+
+
+def _enable_gms_nccl_prewarm(server_args) -> None:
+    """Pay lazy TP communicator setup at startup, before standby quiesce."""
+
+    shadow = os.environ.get("DYN_GMS_FAILOVER_SHADOW_MODE", "").lower()
+    if shadow not in {"1", "true", "yes", "on"}:
+        return
+    if int(getattr(server_args, "nnodes", 1) or 1) <= 1:
+        return
+    if getattr(server_args, "pre_warm_nccl", False):
+        return
+    server_args.pre_warm_nccl = True
+    logging.info("[GMS failover] enabled SGLang NCCL pre-warm for multi-node standby")
+
+
+def _uses_mapped_sleeping_standby() -> bool:
+    """Keep KV mapped only on the explicit post-init standby path."""
+
+    lock_before_init = os.environ.get("DYN_SGLANG_GMS_LOCK_BEFORE_INIT", "1")
+    return lock_before_init.strip().lower() in {"0", "false", "no", "off"}
+
+
+def _can_prewarm_mapped_standby() -> bool:
+    if not _uses_mapped_sleeping_standby():
+        return False
+    enabled = os.environ.get(
+        "GMS_SGLANG_KV_LEASES", os.environ.get("GMS_KV_LEASES", "")
+    )
+    return enabled.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _rank_liveness_leader_host(server_args) -> Optional[str]:
+    """Leader host that worker nodes heartbeat — derived from --dist-init-addr."""
+    addr = getattr(server_args, "dist_init_addr", None)
+    if not addr:
+        return None
+    return addr.rsplit(":", 1)[0].strip("[]")
+
+
+class _NonLeaderFailoverController:
+    """Rank-local failover controller for SGLang non-leader nodes."""
+
+    def __init__(self, engine: sgl.Engine) -> None:
+        # On the post-init TP path the leader owns request quiescence. Keep
+        # worker schedulers collective-ready so the leader can run one
+        # lease-protected standby warmup before waiting for the lock.
+        mapped_standby = _uses_mapped_sleeping_standby()
+        self._delegate = (
+            SGLangEnginePauseController(engine)
+            if not mapped_standby
+            and getattr(engine, "tokenizer_manager", None) is not None
+            else None
+        )
+        self._is_quiesced = False
+
+    async def quiesce(self, tags: Optional[list[str]] = None) -> bool:
+        # The delegate only handles quiesce when it actually implements it (the
+        # leader rank's request handler). A standby whose delegate has no quiesce
+        # (e.g. a DecodeWorkerHandler) falls through to the lock-only path.
+        if self._delegate is not None and hasattr(self._delegate, "quiesce"):
+            return await self._delegate.quiesce(tags)
+        if self._is_quiesced:
+            return False
+        logging.info(
+            "[GMS failover] sglang rank has no quiesce-capable handler; "
+            "using lock-only quiesce"
+        )
+        self._is_quiesced = True
+        return True
+
+    async def resume(self, tags: Optional[list[str]] = None) -> bool:
+        if self._delegate is not None and hasattr(self._delegate, "resume"):
+            return await self._delegate.resume(tags)
+        if not self._is_quiesced:
+            return False
+        self._is_quiesced = False
+        return True
+
+    def mark_resumed(self) -> None:
+        if self._delegate is not None and hasattr(self._delegate, "mark_resumed"):
+            self._delegate.mark_resumed()
+        self._is_quiesced = False
+
+
+class _NonLeaderFailoverOwner:
+    """Failover owner for SGLang multinode ranks that do not publish endpoints."""
+
+    def __init__(self, engine: sgl.Engine) -> None:
+        self._quiesce_controller = _NonLeaderFailoverController(engine)
+
+
+async def _prepare_non_leader_failover(
+    engine: sgl.Engine,
+    runtime: DistributedRuntime,
+    early_failover_activation,
+) -> _NonLeaderFailoverOwner | None:
+    owner = _NonLeaderFailoverOwner(engine)
+    if early_failover_activation is not None and early_failover_activation.enabled:
+        early_failover_activation.attach_to(owner)
+        maybe_start_gms_failover_child_watchdog(owner, engine)
+        return owner
+
+    failover_activation = await prepare_gms_failover(
+        owner,
+        runtime,
+        backend_name="sglang",
+        tags=["kv_cache"],
+        promotion_warmup=None,
+    )
+    if not failover_activation.enabled:
+        return None
+    failover_activation.attach_to(owner)
+    maybe_start_gms_failover_child_watchdog(owner, engine)
+    return owner
 
 
 async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
@@ -50,6 +175,7 @@ async def init_decode(
     snapshot_engine: Optional[sgl.Engine] = None,
 ) -> None:
     server_args, dynamo_args = config.server_args, config.dynamo_args
+    _enable_gms_nccl_prewarm(server_args)
 
     if server_args.node_rank >= 1:
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
@@ -60,6 +186,13 @@ async def init_decode(
     clear_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.clear_kv_blocks"
     )
+
+    early_failover_activation = None
+    lock_before_init = os.environ.get("DYN_SGLANG_GMS_LOCK_BEFORE_INIT", "1").lower()
+    if lock_before_init not in {"0", "false", "no", "off"}:
+        early_failover_activation = await acquire_gms_failover_lock_before_init(
+            backend_name="sglang"
+        )
 
     # Use pre-created engine if provided (snapshot mode)
     if snapshot_engine is not None:
@@ -104,6 +237,20 @@ async def init_decode(
     logging.debug(f"SGLang model load time: {load_time:.2f}s")
 
     if server_args.node_rank >= 1:
+        non_leader_failover_owner = await _prepare_non_leader_failover(
+            engine, runtime, early_failover_activation
+        )
+        # Heartbeat the leader over ZMQ so a crash of this worker node is detected
+        # in ~one heartbeat-timeout instead of via the NCCL collective timeout.
+        maybe_start_rank_liveness(
+            non_leader_failover_owner,
+            engine,
+            node_rank=server_args.node_rank,
+            leader_host=_rank_liveness_leader_host(server_args),
+        )
+        # Keep the owner alive for the non-leader loop. Its attached lock fd is
+        # the local primary/shadow fencing token.
+        _ = non_leader_failover_owner
         await handle_non_leader_node(engine, publisher, metrics_task)
         return
 
@@ -138,6 +285,79 @@ async def init_decode(
         health_check_payload = SglangHealthCheckPayload(
             engine, use_text_input=dynamo_args.use_sglang_tokenizer
         ).to_dict()
+
+    async def promotion_warmup() -> None:
+        await run_gms_failover_promotion_warmup(
+            handler.generate, health_check_payload, backend_name="sglang"
+        )
+
+    rank_liveness_monitor = None
+    if early_failover_activation is not None and early_failover_activation.enabled:
+        early_failover_activation.attach_to(handler)
+        await promotion_warmup()
+    else:
+        # Give the serving handler a quiesce-capable failover controller so a
+        # shadow can quiesce (pause/release memory) before discovery; without it
+        # gms_failover falls back to the raw handler, which has no quiesce.
+        if getattr(handler, "_quiesce_controller", None) is None:
+            handler._quiesce_controller = SGLangEnginePauseController(
+                engine,
+                release_memory_on_quiesce=not _uses_mapped_sleeping_standby(),
+            )
+        activation_barrier = None
+        if server_args.nnodes and server_args.nnodes > 1:
+            # Bind the shadow leader's liveness endpoint before waiting for its
+            # pod-local lock. Non-leaders heartbeat only after their own lock and
+            # lease reclaim finish, so registration is a fail-closed TP barrier.
+            rank_liveness_monitor = maybe_start_rank_liveness(
+                handler,
+                engine,
+                node_rank=0,
+                leader_host=None,
+                expected_ranks=None,
+            )
+            if rank_liveness_monitor is not None:
+                expected_ranks = frozenset(range(1, server_args.nnodes))
+
+                async def activation_barrier() -> None:
+                    from dynamo.common import rank_liveness
+
+                    ready = await asyncio.to_thread(
+                        rank_liveness_monitor.wait_for_ranks,
+                        expected_ranks,
+                        rank_liveness.startup_grace_ms() / 1000.0,
+                    )
+                    if not ready:
+                        raise RuntimeError(
+                            "SGLang TP failover activation timed out waiting for "
+                            f"locally fenced ranks {sorted(expected_ranks)}"
+                        )
+                    logging.info(
+                        "[GMS failover] sglang all non-leader ranks fenced and ready"
+                    )
+
+        failover_activation = await prepare_gms_failover(
+            handler,
+            runtime,
+            backend_name="sglang",
+            # GMS weights are immutable, shared, and already coexist mapped in
+            # primary and shadow during prewarm.  Quiesce only the private KV
+            # namespace so promotion does not remap weights on the hot path.
+            tags=["kv_cache"],
+            promotion_warmup=promotion_warmup,
+            warm_standby_before_quiesce=_can_prewarm_mapped_standby(),
+            activation_barrier=activation_barrier,
+        )
+        failover_activation.attach_to(handler)
+    maybe_start_gms_failover_child_watchdog(handler, engine)
+    if server_args.nnodes and server_args.nnodes > 1 and rank_liveness_monitor is None:
+        rank_liveness_monitor = maybe_start_rank_liveness(
+            handler,
+            engine,
+            node_rank=0,
+            leader_host=None,
+            expected_ranks=range(1, server_args.nnodes),
+        )
 
     logging.info(f"Registering model with endpoint types: {dynamo_args.endpoint_types}")
     if dynamo_args.custom_jinja_template and "chat" not in dynamo_args.endpoint_types:
@@ -209,6 +429,7 @@ async def init_prefill(
     snapshot_engine: Optional[sgl.Engine] = None,
 ) -> None:
     server_args, dynamo_args = config.server_args, config.dynamo_args
+    _enable_gms_nccl_prewarm(server_args)
 
     if server_args.node_rank >= 1:
         os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
