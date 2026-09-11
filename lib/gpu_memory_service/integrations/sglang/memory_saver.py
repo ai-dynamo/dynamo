@@ -19,12 +19,14 @@ from __future__ import annotations
 import gc
 import logging
 from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Optional
 
 import torch
 from gpu_memory_service.client.torch.allocator import (
     get_or_create_gms_client_memory_manager,
     gms_use_mem_pool,
+    gms_use_persistent_pool,
 )
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.utils import GMS_TAGS, get_socket_path
@@ -35,6 +37,19 @@ logger = logging.getLogger(__name__)
 # Published weights must come back RO, while KV cache always resumes in a fresh
 # RW epoch so the restored engine can rebuild mutable cache state.
 _TAG_LOCK_TYPES = {"weights": RequestedLockType.RO, "kv_cache": RequestedLockType.RW}
+_PERSISTENT_KV_TAG: ContextVar[str | None] = ContextVar(
+    "gms_sglang_persistent_kv_tag", default=None
+)
+
+
+@contextmanager
+def persistent_kv_pool_scope(tag: str):
+    """Route only a native physical KV-pool constructor to ``tag``."""
+    token = _PERSISTENT_KV_TAG.set(tag)
+    try:
+        yield
+    finally:
+        _PERSISTENT_KV_TAG.reset(token)
 
 
 def _pause_resume_tags(tag: Optional[str]) -> tuple[str, ...]:
@@ -139,7 +154,13 @@ class GMSMemorySaverImpl:
         self._active_region_depth += 1
         clean_exit = False
         try:
-            with gms_use_mem_pool(tag, self._device):
+            persistent_tag = _PERSISTENT_KV_TAG.get() if tag == "kv_cache" else None
+            pool = (
+                gms_use_persistent_pool(persistent_tag, self._device)
+                if persistent_tag is not None
+                else gms_use_mem_pool(tag, self._device)
+            )
+            with pool:
                 yield
             clean_exit = True
         finally:
