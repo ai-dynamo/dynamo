@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! End-to-end assertions for native vLLM KV events through sidecar.
+//! End-to-end assertions for native KV events through sidecar.
 
 use std::sync::Arc;
 use std::time::Duration;
