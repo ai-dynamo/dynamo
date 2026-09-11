@@ -781,6 +781,7 @@ jobs:
     uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: vllm
+      framework: vllm  # matches the framework passed to vllm-build
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
@@ -814,6 +815,7 @@ jobs:
     uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: vllm
+      framework: vllm  # matches the framework passed to vllm-build
       test_type: 2-GPU Test
       amd_runner: prod-tester-amd-gpu-2-v2
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
@@ -831,6 +833,7 @@ jobs:
     uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: sglang
+      framework: sglang  # matches the framework passed to sglang-build
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
@@ -857,6 +860,7 @@ jobs:
     uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: sglang
+      framework: sglang  # matches the framework passed to sglang-build
       test_type: 2-GPU Test
       amd_runner: prod-tester-amd-gpu-2-v2
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
@@ -874,6 +878,7 @@ jobs:
     uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: trtllm
+      framework: trtllm  # matches the framework passed to trtllm-build
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
@@ -900,6 +905,7 @@ jobs:
     uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: trtllm
+      framework: trtllm  # matches the framework passed to trtllm-build
       test_type: 2-GPU Test
       amd_runner: prod-tester-amd-gpu-2-v2
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
@@ -917,6 +923,7 @@ jobs:
     uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: planner
+      framework: dynamo  # matches the framework passed to planner-build
       test_type: CPU Test
       amd_runner: prod-tester-amd-v2
       target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
