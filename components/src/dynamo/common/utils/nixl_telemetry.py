@@ -107,15 +107,10 @@ def derive_nixl_prometheus_port(
     offset on every node.
 
     ``max_ranks`` is how wide that reservation is. A caller that knows how many
-    ranks its launch actually places on a node should pass that count, because
-    the checks below are all range checks: assuming the maximum turns a base
-    port that leaves room for this launch into a rejected one, and widens the
-    span compared against every other listener in the container.
+    ranks its launch actually places on a node should pass that count rather
+    than the maximum, because every check below measures that whole span.
 
-    Raises ValueError rather than returning a port that would leave the
-    reserved range or land on another listener. A rank that cannot be given a
-    port of its own must say so; falling back to the base port would recreate
-    the bind collision this module exists to prevent.
+    Raises ValueError rather than returning a port outside the reservation.
     """
     # A narrower reservation is the caller describing its own launch, but a
     # wider one would hand out ports past the range the operator declares as

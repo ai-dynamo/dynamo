@@ -85,8 +85,14 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 	}
 	// The operator cannot resolve valueFrom, so reserve the range rather than
 	// assume telemetry is off: an unused declaration is harmless, a missing one
-	// leaves every rank past the base unscrapeable.
+	// leaves every rank past the base unscrapeable. Name each setting it cannot
+	// read, because the diagnostic below is the only place a deployment learns
+	// which one left telemetry undecided.
+	var sourced []string
 	prometheusOn := enabled.ValueFrom == nil
+	if !prometheusOn {
+		sourced = append(sourced, "NIXL_TELEMETRY_ENABLE")
+	}
 	if prometheusOn && !strings.EqualFold(strings.TrimSpace(enabled.Value), "y") {
 		return nil
 	}
@@ -100,6 +106,7 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 	if exporter != nil {
 		if exporter.ValueFrom != nil {
 			prometheusOn = false
+			sourced = append(sourced, "NIXL_TELEMETRY_EXPORTER")
 		} else if !strings.EqualFold(strings.TrimSpace(exporter.Value), "prometheus") {
 			return nil
 		}
@@ -145,8 +152,8 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 	// Every co-located rank needs a port of its own, and the runtime refuses a
 	// rank past the reserved range rather than share one: truncating the count
 	// here would fail startup on the ranks that lost their port. An unreadable
-	// enable value is exempt, because refusing a deployment that may not use
-	// telemetry at all costs more than the over-declaration above.
+	// telemetry setting is exempt, because refusing a deployment that may not
+	// use telemetry at all costs more than the over-declaration above.
 	colocatedRanks := containerGPUs
 	if colocatedRanks > int64(commonconsts.DynamoMaxNixlPorts) {
 		if prometheusOn {
@@ -159,13 +166,15 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 
 		// Admitting the deployment leaves one outcome admission cannot rule
 		// out, so say so here rather than let it surface as an unexplained
-		// startup failure: an enable value that resolves to y gives the ranks
-		// past the reserved range no port, and each of those refuses to start.
+		// startup failure: settings that resolve to an enabled Prometheus
+		// exporter give the ranks past the reserved range no port, and each of
+		// those refuses to start.
 		log.Log.WithName("sglang-backend").Info(
-			"co-located GPUs exceed the NIXL exporter ports the operator declares, and NIXL_TELEMETRY_ENABLE is set through valueFrom, "+
-				"so the deployment is admitted with the supported range reserved; if that value resolves to y, the ranks past it fail to start",
+			"co-located GPUs exceed the NIXL exporter ports the operator declares, and the settings named below are set through valueFrom, "+
+				"so the deployment is admitted with the supported range reserved; if they resolve to a Prometheus exporter, the ranks past it fail to start",
 			"colocatedGPUs", colocatedRanks,
-			"reservedPorts", commonconsts.DynamoMaxNixlPorts)
+			"reservedPorts", commonconsts.DynamoMaxNixlPorts,
+			"unresolvedSettings", strings.Join(sourced, ", "))
 
 		colocatedRanks = int64(commonconsts.DynamoMaxNixlPorts)
 	}

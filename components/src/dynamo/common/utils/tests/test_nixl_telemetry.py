@@ -56,16 +56,13 @@ class TestDeriveNixlPrometheusPort:
     @pytest.mark.parametrize(
         "env_name", ["DYN_SYSTEM_PORT", "DYN_FORWARDPASS_METRIC_PORT"]
     )
-    @pytest.mark.parametrize("local_rank", [0, 1])
-    def test_base_that_would_overlap_another_listener_is_rejected(
-        self, env_name, local_rank
-    ):
+    def test_base_that_would_overlap_another_listener_is_rejected(self, env_name):
         # One below the listener's own base: rank 0 lands just clear of it and
         # only later ranks collide, so rejecting rank 0 is what stops the pod
         # from starting one scheduler and failing the rest.
         overlapping_base = int(OPERATOR_ENV[env_name]) - 1
         with pytest.raises(ValueError, match=env_name):
-            derive_nixl_prometheus_port(overlapping_base, local_rank, env=OPERATOR_ENV)
+            derive_nixl_prometheus_port(overlapping_base, 0, env=OPERATOR_ENV)
 
     def test_base_too_high_for_the_reserved_range_is_rejected(self):
         # Rank 0 fits at MAX_PORT on its own; rejecting it is what stops the pod

@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import dynamo.sglang._compat as sglang_compat
 from dynamo.common.utils.nixl_telemetry import NIXL_TELEMETRY_PROMETHEUS_PORT_ENV
 from dynamo.sglang.nixl_telemetry import (
     _assign_nixl_prometheus_port,
@@ -181,6 +182,10 @@ def telemetry_env(monkeypatch):
     monkeypatch.setenv(NIXL_TELEMETRY_PROMETHEUS_PORT_ENV, str(BASE_PORT))
     monkeypatch.setenv("DYN_SYSTEM_PORT", "9090")
     monkeypatch.setenv("DYN_FORWARDPASS_METRIC_PORT", "20380")
+    # The stubs below carry effective values already, so pin resolution to the
+    # identity rather than let the installed SGLang project a stand-in object.
+    # The resolved-configuration case supplies its own projection.
+    monkeypatch.setattr(sglang_compat, "sglang_resolved_view", None)
     return monkeypatch
 
 
@@ -258,6 +263,27 @@ class TestPerRankPortAssignment:
     def test_disabled_telemetry_leaves_the_environment_alone(self, telemetry_env):
         telemetry_env.setenv("NIXL_TELEMETRY_ENABLE", "n")
         assert _ports_for_launch(_server_args(tp_size=8)) == [BASE_PORT] * 8
+
+
+class TestResolvedLaunchConfiguration:
+    def test_ranks_are_numbered_from_the_resolved_configuration(self, telemetry_env):
+        """``--tp-size 8 --dwdp-size 8`` turns attention DP on during resolution.
+
+        The scheduler is handed the raw arguments, where ``dp_size`` still reads
+        1 and ``enable_dp_attention`` still reads False, while the launch places
+        one group of eight schedulers and derives each ``dp_rank`` from its
+        ``tp_rank``. Numbering from the raw values folds ``dp_rank`` in a second
+        time, so the scheduler at ``tp_rank=1, dp_rank=1`` claims node-local
+        rank 9 and is refused a port instead of taking 19091.
+        """
+        raw = _server_args(tp_size=8)
+        resolved = _server_args(tp_size=8, dp_size=8, enable_dp_attention=True)
+        telemetry_env.setattr(
+            sglang_compat, "sglang_resolved_view", lambda server_args: resolved
+        )
+
+        ports = [_port_for_scheduler(raw, *call) for call in _scheduler_calls(resolved)]
+        assert ports == list(range(BASE_PORT, BASE_PORT + 8))
 
 
 class TestInstall:
