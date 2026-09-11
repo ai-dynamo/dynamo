@@ -87,7 +87,8 @@ vLLM container restart leaves the service, Guard, and pool running. The
 sidecar's probes check the KVCR Unix socket. The state agent runs in worker 0's
 sidecar, and that sidecar's probe also checks state-agent health. Kubernetes
 container discovery gives `main` and the real `kvcr-services` sidecar separate
-metadata writers.
+metadata writers. The explicit sidecar supplies its own downward-API Pod UID;
+the operator injects that identity only into its generated `main` container.
 
 The state agent carries routing and residency information; it does not move
 KV payloads. KVCR uses NIXL and UCX for the remote payload transfer.
@@ -99,12 +100,12 @@ Use the memory-service variant for this workflow:
 Use separate shells to forward each worker's metrics port to a distinct local
 port, for example `kubectl port-forward pod/$POD 19090:9090`.
 
-1. Record `vllm:request_success_total` and the three counters below on both
-   workers, then send a long-prefix request with temperature zero. The source
-   Pod is the one whose request-success counter increases.
-2. Repeat the request to confirm a cache hit. Record the three transfer
-   counters again; use this second snapshot as the pre-failure baseline. Then
-   terminate the `VLLM::EngineCore` process in that source Pod's `main`
+1. Record `vllm:kvcr_transfer_blocks_total{operation="local_fill"}` and
+   `vllm:kv_offload_tiering_write_bytes_total{tier="1:kvcr"}` on both workers,
+   then send a long-prefix request with temperature zero. The source Pod is the
+   one whose local-fill blocks and tier-write bytes increase. The other Pod's
+   values must remain unchanged.
+2. Terminate the `VLLM::EngineCore` process in that source Pod's `main`
    container:
 
    ```bash
@@ -152,3 +153,19 @@ kubectl exec "$SOURCE_POD" -c kvcr-services -- \
 
 The standard Kubernetes and Prometheus interfaces expose every required MVP
 signal, so these examples do not add a separate Guard-checking utility.
+
+The same workflow is automated by the opt-in live-cluster test:
+
+```bash
+export DYNAMO_UCX_NET_DEVICES=REPLACE_WITH_GPU_LOCAL_HCA:1
+export DYNAMO_KVCR_COMPATIBILITY_DIGEST=qwen3-0.6b-example-v1
+python3 -m pytest tests/deploy/test_kvcr_guard.py \
+  -m framework_with_kvcr \
+  --image="$DYNAMO_VLLM_IMAGE" \
+  --namespace="$NAMESPACE" --skip-service-restart -v -s
+```
+
+The namespace must be empty of an earlier deployment with the same name. The
+test captures every worker container's current and previous logs at the
+before-failure, failed, remote-delivery, and recovered phases under
+`DYN_TEST_OUTPUT_PATH` (or the standard `test_output` directory).
