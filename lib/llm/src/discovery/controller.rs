@@ -576,6 +576,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                         GroupStatus::Blocked {
                             mdc_checksum: fingerprint,
                             deadline: Instant::now() + retry_delay(group.retry_attempt),
+                            committed_members: None,
                         }
                     }
                 }
