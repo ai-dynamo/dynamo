@@ -124,16 +124,11 @@ class DiffusionFormatter:
         media_fs: Any,
         media_http_url: Optional[str],
         default_fps: int = 16,
-        model_config: Any = None,
     ) -> None:
         self._model_name = model_name
         self._media_fs = media_fs
         self._media_http_url = media_http_url
         self._default_fps = default_fps
-        self._default_audio_sample_rate = (
-            self._extract_audio_sample_rate_from_config(model_config)
-            or DEFAULT_AUDIO_SAMPLE_RATE
-        )
 
     async def format(
         self, stage_output: Any, request_id: str, *, request_type: Any, **ctx: Any
@@ -169,17 +164,15 @@ class DiffusionFormatter:
         response_format: Optional[str] = None,
         output_format: Optional[str] = None,
     ) -> Dict[str, Any] | None:
-        requested_output_format = output_format
-        output_format = "mp4"
+        output_format = output_format or "mp4"
         response_format = response_format or "url"
         if response_format not in ("url", "b64_json"):
             raise ValueError(
                 f"Unsupported response_format: {response_format!r}; expected 'url' or 'b64_json'"
             )
-        if requested_output_format not in (None, "mp4"):
-            logger.warning(
-                "Ignoring unsupported video output_format hint %r; encoding MP4",
-                requested_output_format,
+        if output_format != "mp4":
+            raise ValueError(
+                f"Unsupported output_format: {output_format!r}; only 'mp4' is supported"
             )
         try:
             start_time = time.time()
@@ -335,19 +328,24 @@ class DiffusionFormatter:
                 )
             if video.shape[-1] in (1, 3, 4):
                 frames = video
-            elif video.shape[0] in (1, 3, 4):
-                # vLLM-Omni's channel-first 4-D convention is CFHW. Prefer
-                # that interpretation when both leading dimensions are
-                # channel-sized; FCHW remains unambiguous for other frame
-                # counts.
-                frames = video.transpose(1, 2, 3, 0)
-            elif video.shape[1] in (1, 3, 4):
-                frames = video.transpose(0, 2, 3, 1)
             else:
-                raise ValueError(
-                    "Video tensor must use CFHW, FCHW, or FHWC channel layout, "
-                    f"got shape {video.shape}"
-                )
+                is_cfhw = video.shape[0] in (1, 3, 4)
+                is_fchw = video.shape[1] in (1, 3, 4)
+                if is_cfhw and is_fchw:
+                    raise ValueError(
+                        "Ambiguous channel-first video tensor; expected an "
+                        "unambiguous CFHW or FCHW shape, "
+                        f"got {video.shape}"
+                    )
+                if is_cfhw:
+                    frames = video.transpose(1, 2, 3, 0)
+                elif is_fchw:
+                    frames = video.transpose(0, 2, 3, 1)
+                else:
+                    raise ValueError(
+                        "Video tensor must use CFHW, FCHW, or FHWC channel layout, "
+                        f"got shape {video.shape}"
+                    )
             if frames.shape[-1] == 1:
                 frames = np.repeat(frames, 3, axis=-1)
             elif frames.shape[-1] == 4:
@@ -388,7 +386,7 @@ class DiffusionFormatter:
         if audio is None:
             return [None] * expected_count
         if isinstance(audio, (np.ndarray, torch.Tensor)):
-            if audio.ndim > 1 and audio.shape[0] == expected_count:
+            if audio.ndim >= 3 and audio.shape[0] == expected_count:
                 return [audio[index] for index in range(expected_count)]
             if expected_count == 1:
                 return [audio]
@@ -397,7 +395,9 @@ class DiffusionFormatter:
                 return list(audio)
             if expected_count == 1:
                 return [audio]
-        return [audio] + [None] * (expected_count - 1)
+        raise ValueError(
+            f"Expected {expected_count} audio outputs for {expected_count} videos"
+        )
 
     @staticmethod
     def _audio_to_numpy(audio: Any) -> np.ndarray:
@@ -450,58 +450,7 @@ class DiffusionFormatter:
                 if sample_rate is not None:
                     return sample_rate
 
-        return self._default_audio_sample_rate
-
-    @classmethod
-    def _extract_audio_sample_rate_from_config(
-        cls, config: Any, seen: set[int] | None = None
-    ) -> int | None:
-        if config is None:
-            return None
-
-        seen = seen or set()
-        if id(config) in seen:
-            return None
-        seen.add(id(config))
-
-        if isinstance(config, Mapping):
-            values = config
-        else:
-            values = getattr(config, "__dict__", {})
-            if not isinstance(values, Mapping):
-                return None
-
-        for key in (
-            "output_sampling_rate",
-            "audio_sample_rate",
-            "sample_rate",
-            "sampling_rate",
-        ):
-            sample_rate = cls._coerce_positive_int(values.get(key))
-            if sample_rate is not None:
-                return sample_rate
-
-        for component_name in ("vocoder", "audio_vae"):
-            component = values.get(component_name)
-            sample_rate = cls._extract_audio_sample_rate_from_config(component, seen)
-            if sample_rate is not None:
-                return sample_rate
-            if isinstance(component, Mapping):
-                component_config = component.get("config")
-            else:
-                component_values = getattr(component, "__dict__", {})
-                component_config = (
-                    component_values.get("config")
-                    if isinstance(component_values, Mapping)
-                    else None
-                )
-            sample_rate = cls._extract_audio_sample_rate_from_config(
-                component_config, seen
-            )
-            if sample_rate is not None:
-                return sample_rate
-
-        return None
+        return DEFAULT_AUDIO_SAMPLE_RATE
 
     @staticmethod
     def _coerce_positive_int(value: Any) -> int | None:
@@ -1025,10 +974,9 @@ class OutputFormatter:
         media_fs: Any = None,
         media_http_url: Optional[str] = None,
         default_fps: int = 16,
-        model_config: Any = None,
     ) -> None:
         diffusion_formatter = DiffusionFormatter(
-            model_name, media_fs, media_http_url, default_fps, model_config
+            model_name, media_fs, media_http_url, default_fps
         )
         self._formatters: Dict[str, Any] = {
             "text": TextFormatter(model_name),

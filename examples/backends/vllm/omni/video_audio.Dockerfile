@@ -1,10 +1,22 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 # Opt-in development and qualification overlay for vLLM-Omni models that
 # generate joint video and audio. The standard Dynamo image intentionally
 # remains on its royalty-free VP9-only media stack.
-ARG BASE_IMAGE
+ARG BASE_IMAGE=dynamo:latest-vllm-runtime
 FROM ${BASE_IMAGE}
 
 USER root
@@ -17,14 +29,14 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 RUN uv pip install \
-        --python /opt/dynamo/venv/bin/python \
+        --system \
         --no-deps \
         av==18.0.0 \
-    && ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libx264rgb \
-    && /opt/dynamo/venv/bin/python -c \
+    && ffmpeg -hide_banner -encoders 2>/dev/null | grep -Eq '(^| )libx264( |$)' \
+    && python3 -c \
         'import av; av.codec.Codec("h264", "w"); av.codec.Codec("aac", "w")'
 
-RUN /opt/dynamo/venv/bin/python <<'PY'
+RUN python3 <<'PY'
 import io
 
 import av

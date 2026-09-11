@@ -275,6 +275,7 @@ class TestDiffusionFormatterVideo:
         assert result["data"][0]["audio_sample_rate"] == 32000
         assert result["data"][0]["b64_json"] is not None
         assert mux.call_count == 1
+        assert mux.call_args.args[1].shape == (2, 128)
         assert mux.call_args.kwargs["fps"] == 24.0
         assert mux.call_args.kwargs["audio_sample_rate"] == 32000
 
@@ -309,15 +310,7 @@ class TestDiffusionFormatterVideo:
         assert mux.call_args.kwargs["audio_sample_rate"] == sample_rate
 
     @pytest.mark.asyncio
-    async def test_uses_model_audio_sample_rate_then_generic_fallback(self):
-        configured = DiffusionFormatter(
-            model_name="test-model",
-            media_fs=None,
-            media_http_url=None,
-            model_config=SimpleNamespace(
-                audio_vae=SimpleNamespace(config=SimpleNamespace(sampling_rate=48000))
-            ),
-        )
+    async def test_uses_default_audio_sample_rate_when_metadata_is_absent(self):
         audio = {"audio": np.zeros((1, 2, 128), dtype=np.float32)}
         video = [np.zeros((2, 4, 4, 3), dtype=np.float32)]
 
@@ -325,14 +318,7 @@ class TestDiffusionFormatterVideo:
             "dynamo.vllm.omni.output_formatter.mux_video_audio_bytes",
             return_value=b"muxed-mp4",
         ) as mux:
-            configured_result = await configured._encode_video(
-                video,
-                "req-configured-rate",
-                fps=24,
-                multimodal_output=audio,
-                response_format="b64_json",
-            )
-            fallback_result = await _make_diffusion_formatter()._encode_video(
+            result = await _make_diffusion_formatter()._encode_video(
                 video,
                 "req-fallback-rate",
                 fps=24,
@@ -340,12 +326,8 @@ class TestDiffusionFormatterVideo:
                 response_format="b64_json",
             )
 
-        assert configured_result["data"][0]["audio_sample_rate"] == 48000
-        assert fallback_result["data"][0]["audio_sample_rate"] == 24000
-        assert [call.kwargs["audio_sample_rate"] for call in mux.call_args_list] == [
-            48000,
-            24000,
-        ]
+        assert result["data"][0]["audio_sample_rate"] == 24000
+        assert mux.call_args.kwargs["audio_sample_rate"] == 24000
 
     @pytest.mark.asyncio
     async def test_returns_every_generated_video(self):
@@ -400,23 +382,16 @@ class TestDiffusionFormatterVideo:
         mux.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_unsupported_output_format_hint_falls_back_to_mp4(self):
+    async def test_unsupported_output_format_is_rejected(self):
         f = _make_diffusion_formatter()
-        with patch(
-            "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
-            return_value=b"vp9-mp4",
-        ) as encode:
-            result = await f._encode_video(
+        with pytest.raises(ValueError, match="only 'mp4' is supported"):
+            await f._encode_video(
                 [np.zeros((4, 4, 3), dtype=np.float32)],
                 "req-output-hint",
                 fps=16,
                 response_format="b64_json",
                 output_format="webm",
             )
-
-        assert result["status"] == "completed"
-        assert result["data"][0]["output_format"] == "mp4"
-        assert encode.call_args.kwargs["output_format"] == "mp4"
 
     @pytest.mark.asyncio
     async def test_normalizes_direct_fchw_torch_video(self):
@@ -484,7 +459,7 @@ class TestDiffusionFormatterVideo:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("as_tensor", [False, True])
-    @pytest.mark.parametrize("num_frames", [1, 3, 4, 8])
+    @pytest.mark.parametrize("num_frames", [2, 8])
     async def test_normalizes_cfhw_negative_one_to_one_video(
         self, as_tensor, num_frames
     ):
@@ -511,6 +486,17 @@ class TestDiffusionFormatterVideo:
         assert frames.dtype == np.uint8
         assert frames.min() == 0
         assert frames.max() == 255
+
+    @pytest.mark.parametrize("shape", [(4, 3, 8, 10), (3, 4, 8, 10)])
+    def test_rejects_ambiguous_channel_first_video(self, shape):
+        with pytest.raises(ValueError, match="Ambiguous channel-first"):
+            DiffusionFormatter._video_to_numpy_frames(np.zeros(shape, dtype=np.float32))
+
+    def test_rejects_mismatched_audio_batch(self):
+        with pytest.raises(ValueError, match="Expected 2 audio outputs"):
+            DiffusionFormatter._split_audio_outputs(
+                np.zeros((2, 128), dtype=np.float32), expected_count=2
+            )
 
 
 class TestBuildCompletionUsage:
