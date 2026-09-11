@@ -46,7 +46,6 @@ support text generation, reasoning, and tool calling.
   aggregated serving or twelve for disaggregated serving.
 - A ReadWriteMany storage class for model weights.
 - A Hugging Face token with access to `skt/A.X-K2-NVFP4` and `skt/A.X-K2-EAGLE3`.
-- Pull access to the runtime image below in `dynamoci.azurecr.io`.
 
 <div data-variant="disagg">
 
@@ -54,15 +53,6 @@ Disaggregated serving also requires InfiniBand with one `rdma/shared_ib`
 device resource available per worker for NIXL/UCX KV transfer.
 
 </div>
-
-<Note>
-These profiles pin a CI runtime image. Accuracy and throughput results from
-other images do not validate this build.
-</Note>
-
-```text
-dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-30282ab72cc420f8bd7d0d509cb04a1637b80754-vllm-runtime
-```
 
 ## Deploy
 
@@ -166,10 +156,29 @@ configuration for accuracy evaluation.
 
 The checked-in benchmark job targets the aggregate frontend. To benchmark
 the disaggregated profile, update its endpoint and frontend selector to this
-deployment before applying the job. No disaggregated throughput result for
-this runtime is published here.
+deployment before applying the job.
 
 </div>
+
+### Performance Results
+
+Benchmarking uses synthetic EAGLE3 acceptance length 2.12.
+
+| Workload | Framework | Recipe | SKU | Concurrency | System output tok/s/GPU | User output tok/s (mean) | TTFT P50 (seconds) |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: |
+| Chat (15% subset) | vLLM | Aggregated (2 workers) | B200 | 16 | 76.49 | 55.83 | 0.525 |
+| Chat (15% subset) | vLLM | Disaggregated (2P1D) | B200 | 16 | 61.97 | 83 | 3.879 |
+
+GPU throughput is output-token throughput divided by all serving GPUs:
+eight for aggregated serving and twelve for disaggregated serving.
+Per-user throughput is the mean request output-token rate. TTFT means time
+to first token; the table reports its median in seconds. The 15% subset
+of the 8K/1K Mooncake chat trace retains 70% KV reuse.
+
+The aggregate run completed all 1,765 requests; the disaggregated run completed 1,755 of 1,765, with 10 failed
+requests. Warmup differed: 20 requests for aggregate and 32 for disaggregate.
+The checked-in benchmark job runs the full eligible trace at C=32; this table
+reports the short trace at C=16.
 
 ## Compare All Targets
 
@@ -186,15 +195,6 @@ this runtime is published here.
 | Context length | 262,144 tokens | 262,144 tokens |
 | Routing | KV-aware | KV-aware |
 | KV transfer | N/A | NIXL/UCX over InfiniBand |
-
-## Notes
-
-- Autotuning is disabled with `--kernel-config '{"enable_flashinfer_autotune": false}'`
-  on every vLLM worker.
-- Target, tokenizer, and EAGLE3 revisions are pinned in the manifests and
-  download job. Disaggregated roles use matching draft configurations.
-- To clean up, delete the selected DGD. Preserve benchmark artifacts before
-  removing the benchmark job or model cache.
 
 ## Source
 
