@@ -509,7 +509,11 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
         // call -- but until it does, don't read a populated `released` from
         // this call as evidence of such a change.
         let mut decision = PlacementDecision::Queued;
-        let mut released = Vec::with_capacity(admissions.len().saturating_sub(1));
+        // Always ends up empty per the comment above; Vec::new() over
+        // with_capacity(admissions.len().saturating_sub(1)) -- which is
+        // always 0 -- makes that explicit instead of implying a nonzero
+        // reservation might ever be needed.
+        let mut released = Vec::new();
         for admission in admissions {
             let placement = self.placement(admission);
             if placement.request_id == request_id {
@@ -798,13 +802,11 @@ impl OfflineReplayRouter {
     /// Register a new worker with the router without disturbing existing slot state.
     pub(crate) fn add_worker(&mut self, worker_id: usize) -> Result<()> {
         let wid = worker_id as WorkerId;
-        if self
-            .workers_with_configs
-            .insert(wid, self.worker_config_template.clone())
-            .is_some()
-        {
+        if self.workers_with_configs.contains_key(&wid) {
             return Err(anyhow!("router worker {worker_id} already exists"));
         }
+        self.workers_with_configs
+            .insert(wid, self.worker_config_template.clone());
         if let Err(error) = self
             .slots
             .upsert_worker(WorkerDpRange::new(wid, 0, self.dp_size))
@@ -916,8 +918,12 @@ impl OfflineReplayRouter {
         // still overflow the `Instant` addition below.
         const MAX_DECAY_SECS: f64 = 100.0 * 365.25 * 24.0 * 3600.0;
         let secs = (now_ms.max(0.0) / 1000.0).min(MAX_DECAY_SECS);
+        // secs is provably finite, non-negative, and <= MAX_DECAY_SECS here,
+        // so try_from_secs_f64 cannot fail; expect instead of a dead
+        // unwrap_or fallback that would otherwise be built on every call.
         self.decay_time_epoch
-            + Duration::try_from_secs_f64(secs).unwrap_or(Duration::from_secs_f64(MAX_DECAY_SECS))
+            + Duration::try_from_secs_f64(secs)
+                .expect("secs is clamped finite and non-negative above")
     }
 
     fn build_pending_request<Request: PlacementRequestView>(
