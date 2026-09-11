@@ -6,8 +6,10 @@
 package lpx
 
 import (
+	"context"
 	"errors"
 	"testing"
+	"time"
 
 	modelpb "github.com/ai-dynamo/modelexpress/modelexpress_client/go/gen/modelexpress/model"
 	"github.com/stretchr/testify/require"
@@ -89,8 +91,17 @@ func TestGCSModelRegistrySnapshotUsesManifestV2FromModelExpress(t *testing.T) {
 
 	t.Log("Serve a valid revision-2 compiler manifest through Model Express")
 	payload := manifestV2Payload(t)
-	for _, ref := range []string{"model/build", "gs://bucket/registry/model/build"} {
-		t.Run(ref, func(t *testing.T) {
+	shortCtx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	for _, testCase := range []struct {
+		ref string
+		ctx context.Context
+	}{
+		{ref: "model/build", ctx: t.Context()},
+		{ref: "gs://bucket/registry/model/build", ctx: t.Context()},
+		{ref: "model/build", ctx: shortCtx},
+	} {
+		t.Run(testCase.ref, func(t *testing.T) {
 			t.Log("Create an independent client and registry for this reference form")
 			client := &fakeModelServiceClient{
 				fileStreams: []*fakeModelFileStream{
@@ -103,7 +114,8 @@ func TestGCSModelRegistrySnapshotUsesManifestV2FromModelExpress(t *testing.T) {
 			require.NoError(t, err)
 
 			t.Log("Normalize the manifest and retain the current registry locator")
-			build, err := normalizeRegistryFixtureBuild(t.Context(), registry, ref)
+			started := time.Now()
+			build, err := normalizeRegistryFixtureBuild(testCase.ctx, registry, testCase.ref)
 			require.NoError(t, err)
 			require.Equal(t, "gs://bucket/registry/model/build", build.Path)
 			require.Equal(t, 8, build.BatchSize)
@@ -114,6 +126,23 @@ func TestGCSModelRegistrySnapshotUsesManifestV2FromModelExpress(t *testing.T) {
 			for _, request := range client.filesRequests {
 				require.Equal(t, []string{gbuildManifestV2CapnpFile}, request.GetFileSelector().GetPaths())
 			}
+
+			t.Log("Share a finite deadline across all metadata RPCs and release only their contexts")
+			require.Len(t, client.metadataContexts, 4)
+			deadline, ok := client.metadataContexts[0].Deadline()
+			require.True(t, ok)
+			if parentDeadline, hasDeadline := testCase.ctx.Deadline(); hasDeadline {
+				require.Equal(t, parentDeadline, deadline)
+			} else {
+				require.WithinRange(t, deadline, started.Add(30*time.Second), time.Now().Add(30*time.Second))
+			}
+			for _, rpcCtx := range client.metadataContexts {
+				rpcDeadline, hasDeadline := rpcCtx.Deadline()
+				require.True(t, hasDeadline)
+				require.Equal(t, deadline, rpcDeadline)
+				require.ErrorIs(t, rpcCtx.Err(), context.Canceled)
+			}
+			require.NoError(t, testCase.ctx.Err())
 		})
 	}
 }

@@ -45,6 +45,8 @@ type fakeModelServiceClient struct {
 	listRequests  []*modelpb.ModelFilesRequest
 	list          *modelpb.ModelFileList
 	listErr       error
+
+	metadataContexts []context.Context
 }
 
 func (c *fakeModelServiceClient) EnsureModelDownloaded(
@@ -65,6 +67,7 @@ func (c *fakeModelServiceClient) StreamModelFiles(
 	_ ...grpc.CallOption,
 ) (grpc.ServerStreamingClient[modelpb.FileChunk], error) {
 	c.filesRequests = append(c.filesRequests, request)
+	c.metadataContexts = append(c.metadataContexts, ctx)
 	c.filesContext = ctx
 	if c.filesErr != nil {
 		return nil, c.filesErr
@@ -75,11 +78,12 @@ func (c *fakeModelServiceClient) StreamModelFiles(
 }
 
 func (c *fakeModelServiceClient) ListModelFiles(
-	_ context.Context,
+	ctx context.Context,
 	request *modelpb.ModelFilesRequest,
 	_ ...grpc.CallOption,
 ) (*modelpb.ModelFileList, error) {
 	c.listRequests = append(c.listRequests, request)
+	c.metadataContexts = append(c.metadataContexts, ctx)
 	if c.listErr != nil {
 		return nil, c.listErr
 	}

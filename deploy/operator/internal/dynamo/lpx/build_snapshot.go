@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -38,6 +39,7 @@ const (
 	// metadata budget instead of permitting an unbounded sum of streamed
 	// chunks or local files.
 	maxBuildSnapshotMetadataBytes = modelExpressMaxMessageSize
+	buildSnapshotTimeout          = 30 * time.Second
 )
 
 // BuildSnapshot is a provider-fenced copy of the exact manifest consumed by
@@ -51,6 +53,10 @@ type BuildSnapshot struct {
 // AcquireBuildSnapshot fences the required manifest-v2 compiler metadata with inventories
 // and duplicate reads. The receiver must be non-nil and is not mutated.
 func (r *ModelRegistry) AcquireBuildSnapshot(ctx context.Context, id string) (*BuildSnapshot, error) {
+	// Bound all metadata RPCs for one snapshot acquisition.
+	ctx, cancel := context.WithTimeout(ctx, buildSnapshotTimeout)
+	defer cancel()
+
 	refURL, err := r.BuildURL(id)
 	if err != nil {
 		return nil, err
