@@ -8,8 +8,15 @@
 # and decode disaggregation for this model. The aggregated recipe ships it.
 #
 # Each worker needs TP4 and a GB200 node holds 4 GPUs. So prefill and decode
-# always sit on different nodes, and KV must cross nodes. Mooncake carries KV
-# over the NVLink fabric with an NVLINK memory pool and an IMEX channel.
+# always sit on different nodes, and KV must cross nodes. Mooncake picks the
+# transport: TCP here, RDMA where the cluster attaches RDMA devices.
+#
+# KV does NOT ride the NVLink fabric. The fabric is faster, but it needs both
+# workers in one NVLink clique, because a fabric memory handle cannot be
+# imported across cliques. A split gives no error: the deployment reports
+# Ready and chat completions return HTTP 200 with content null. This recipe
+# takes the transport that works on any clique layout. To opt into the
+# fabric, read the documentation page.
 #
 # Do not set the attention, MoE, or GEMM backend flags. SGLang resolves them for
 # this model. A hand-set backend flag selects a slower fallback.
@@ -145,18 +152,13 @@ spec:
                 # Thinking is off by default. Then reasoning_content is empty.
                 - name: SGLANG_DEFAULT_THINKING
                   value: "true"
-                # These four put the Mooncake KV pool on the NVLink fabric.
-                # Without them KV falls back to TCP, which is about 80x slower.
+                # NCCL collectives only. These do not move KV.
                 - name: NCCL_MNNVL_ENABLE
                   value: "1"
                 - name: NCCL_NVLS_ENABLE
                   value: "1"
                 - name: NCCL_CUMEM_ENABLE
                   value: "1"
-                - name: SGLANG_MOONCAKE_CUSTOM_MEM_POOL
-                  value: NVLINK
-                - name: MC_FORCE_MNNVL
-                  value: "true"
                 # Loading 510 GB of weights can outrun the default timeouts.
                 - name: NCCL_STORE_TIMEOUT
                   value: "7200"
