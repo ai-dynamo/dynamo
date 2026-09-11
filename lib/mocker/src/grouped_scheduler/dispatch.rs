@@ -74,6 +74,7 @@ pub(super) async fn run_effect_dispatcher(
                     &compatibility,
                     &pending,
                     &mut deferred_commands,
+                    &cancel,
                 )
                 .await?;
             }
@@ -187,7 +188,9 @@ async fn dispatch_pass_completion(
 
         for publication in publications {
             let dispatch = rank_dispatch(ranks, publication.dp_rank)?;
-            dispatch.publish_lifecycle(publication.lifecycle).await;
+            dispatch
+                .publish_lifecycle(publication.lifecycle, cancel)
+                .await;
             dispatch.publish_metrics(publication.metrics);
         }
         Ok(CompletionDispatch::Completed)
@@ -282,6 +285,7 @@ pub(super) async fn dispatch_command_effects(
     compatibility: &CompatibilityState,
     pending: &Mutex<HashMap<u64, PendingCommand>>,
     deferred_commands: &mut [DeferredCommandPublication],
+    cancel: &CancellationToken,
 ) -> Result<()> {
     ensure!(
         effects.by_rank.len() == 1,
@@ -336,7 +340,7 @@ pub(super) async fn dispatch_command_effects(
             }));
         }
         if !pass_in_flight {
-            dispatch.publish_lifecycle(lifecycle).await;
+            dispatch.publish_lifecycle(lifecycle, cancel).await;
             dispatch.publish_metrics(effects.metrics);
         }
         if effects.suppressed_pending_output {
@@ -348,7 +352,7 @@ pub(super) async fn dispatch_command_effects(
             compatibility.apply_cleanup(cleanup);
         }
     } else if !pass_in_flight {
-        dispatch.publish_lifecycle(lifecycle).await;
+        dispatch.publish_lifecycle(lifecycle, cancel).await;
         dispatch.publish_metrics(effects.metrics);
     }
     if let Some(metrics) = immediate_empty_metrics {
@@ -481,10 +485,31 @@ impl RankDispatch {
         }
     }
 
-    async fn publish_lifecycle(&self, events: Vec<SchedulerLifecycleEvent>) {
+    /// Publish lifecycle events, giving up if the run is cancelled.
+    ///
+    /// `lifecycle_tx` is bounded at `control_capacity`, and this used to handle
+    /// only a *closed* receiver, not a *full* one. `take_lifecycle_receiver`
+    /// returns an `Option`, so a consumer that never takes the receiver leaves it
+    /// alive and undrained on the handle -- the send then blocks rather than
+    /// erroring. This runs on the effect dispatcher, so blocking here means
+    /// `boundary.finish()` is never called, the actor stalls at its pass
+    /// boundary, and the whole grouped engine wedges. It was the one await in the
+    /// dispatcher with no cancellation branch, so shutdown could not break it
+    /// either. `finish_boundary_or_cancel` already establishes this pattern.
+    async fn publish_lifecycle(
+        &self,
+        events: Vec<SchedulerLifecycleEvent>,
+        cancel: &CancellationToken,
+    ) {
         for event in events {
-            if self.lifecycle_tx.send(event).await.is_err() {
-                return;
+            tokio::select! {
+                biased;
+                result = self.lifecycle_tx.send(event) => {
+                    if result.is_err() {
+                        return;
+                    }
+                }
+                _ = cancel.cancelled() => return,
             }
         }
     }

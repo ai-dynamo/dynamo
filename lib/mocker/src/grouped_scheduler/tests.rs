@@ -165,6 +165,7 @@ async fn noop_cancellation_only_cleans_metadata_when_output_is_discarded() {
             &compatibility,
             &pending,
             &mut [DeferredCommandPublication::default()],
+            &CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -534,6 +535,7 @@ async fn applied_midpass_cancellation_publishes_empty_occupancy_immediately() {
         &compatibility,
         &pending,
         &mut deferred,
+        &CancellationToken::new(),
     )
     .await
     .unwrap();
@@ -614,6 +616,7 @@ async fn synthetic_midpass_kv_is_deferred_until_completion_before_fpm() {
         &compatibility,
         &pending,
         &mut deferred,
+        &CancellationToken::new(),
     )
     .await
     .unwrap();
