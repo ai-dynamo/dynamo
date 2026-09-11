@@ -191,16 +191,12 @@ async def test_owner_separate_instance(lock_path):
 # ── Test 5: cross-process race ───────────────────────────────────────
 
 
-# How long each racer keeps the lock once it has it. The second acquirer's
-# measured wait is bounded below by this hold, so the 0.1 s floor asserted
-# below keeps a 2x margin on an exact bound rather than on a timing guess.
+# How long each racer keeps the lock; the 0.1 s wait floor asserted below is
+# half of it, a 2x margin on an exact bound.
 HOLD_S = 0.2
 
-# DYN-4307: the original test started both children back to back and assumed
-# they would collide. On a loaded runner they often did not, and the second
-# acquirer reported an uncontended acquire of a few microseconds. This stagger
-# reproduces that scheduling skew on every run, so the handshake below is
-# actually exercised rather than merely present.
+# Without this skew both children can acquire uncontended on a loaded runner,
+# leaving the readiness handshake below unexercised.
 START_STAGGER_S = 0.3
 
 
@@ -215,10 +211,8 @@ def _racer(
 
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
 
-    # t0 is stamped before the ready announcement, never after. The parent
-    # releases the lock only once both announcements have arrived, so every t0
-    # precedes that release, and the second acquirer's wait is therefore at
-    # least HOLD_S however the two children happen to be scheduled.
+    # t0 is stamped before the ready announcement, so it precedes the parent's
+    # release and the second acquirer's wait is at least HOLD_S.
     t0 = time.monotonic()
     ready_queue.put(engine_id)
 
@@ -232,8 +226,7 @@ def _racer(
     time.sleep(HOLD_S)
 
     # Stamped before the close, so the reported hold is a subset of the real
-    # one. Stamping it after the close would let the other child acquire in
-    # between and fail the non-overlap assertion on a lock that worked.
+    # one; stamping after would let the other child acquire inside the gap.
     released_at = time.monotonic()
     os.close(fd)
 
@@ -262,9 +255,8 @@ async def test_cross_process_race(lock_path):
         target=_racer, args=(lock_path, "p2", ready_queue, result_queue)
     )
 
-    # Hold the lock here until both children are parked in flock(), so that the
-    # contention under test is structural instead of a race between two process
-    # starts that the kernel is free to lose.
+    # Hold the lock here until both children are parked in flock(), so the
+    # contention under test is structural rather than a start-order race.
     gate_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
     try:
         fcntl.flock(gate_fd, fcntl.LOCK_EX)
@@ -276,10 +268,8 @@ async def test_cross_process_race(lock_path):
         ready_queue.get(timeout=10)
         ready_queue.get(timeout=10)
     finally:
-        # LOCK_UN, not os.close(gate_fd): an flock belongs to the open file
-        # description, and children forked from here inherit a duplicate of
-        # gate_fd referring to that same description. Closing only this copy
-        # would leave the lock held and park both children until join timeout.
+        # LOCK_UN, not os.close(): forked children inherit a duplicate of
+        # gate_fd on the same open file description, so a close leaves it held.
         fcntl.flock(gate_fd, fcntl.LOCK_UN)
         os.close(gate_fd)
 
@@ -292,9 +282,8 @@ async def test_cross_process_race(lock_path):
     assert p1.exitcode == 0
     assert p2.exitcode == 0
 
-    # time.monotonic() is CLOCK_MONOTONIC on Linux, which is system-wide, so
-    # stamps taken in the two children are comparable. This module is already
-    # Linux-only by virtue of fcntl.flock.
+    # CLOCK_MONOTONIC is system-wide on Linux, so the two children's stamps are
+    # comparable; fcntl.flock already makes this module Linux-only.
     results.sort(key=lambda r: r["acquired_at"])
     first, second = results
 
