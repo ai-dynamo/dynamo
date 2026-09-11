@@ -114,14 +114,16 @@ class TestDiffusionParallelConfigCoverage:
             OmniDiffusionKwargs(),
             task_type="fl2va",
             lora_path=["/models/fasth3/adapter_model.safetensors"],
-            diffusion_attention_backend="TRTLLM_ATTN",
+            diffusion_attention_backend="FASTVIDEO_VSA",
+            fastvideo_vsa_topk=64,
         )
 
         kwargs = _build_kwargs(config)
 
         assert kwargs["task_type"] == "fl2va"
         assert kwargs["lora_path"] == ["/models/fasth3/adapter_model.safetensors"]
-        assert kwargs["diffusion_attention_backend"] == "TRTLLM_ATTN"
+        assert kwargs["diffusion_attention_backend"] == "FASTVIDEO_VSA"
+        assert kwargs["fastvideo_vsa_topk"] == 64
 
     def test_lora_disabled_resolves_no_capacity(self):
         config = _make_config()
