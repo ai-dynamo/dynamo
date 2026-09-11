@@ -1707,11 +1707,10 @@ mod tests {
 
     #[test]
     fn policy_mapping_and_model_selection_use_shared_replay_queue_logic() {
-        let path =
-            std::env::temp_dir().join(format!("dynamo-replay-policy-{}.yaml", Uuid::new_v4()));
-        std::fs::write(
-            &path,
-            r#"
+        let mut policy_file = NamedTempFile::new().unwrap();
+        policy_file
+            .write_all(
+                r#"
 default_policy_family: root
 uncached_isl_buckets:
   - min_tokens: 0
@@ -1752,16 +1751,16 @@ models:
         cache_bucket: uncached
         quantum: 4
         prefill_busy_threshold: 1024
-"#,
-        )
-        .unwrap();
+"#
+                .as_bytes(),
+            )
+            .unwrap();
         let config = KvRouterConfig {
-            router_policy_config: Some(path.display().to_string()),
+            router_policy_config: Some(policy_file.path().display().to_string()),
             ..KvRouterConfig::default()
         }
         .with_policy_model_name(Some("replay-model".to_string()));
         let mut router = OfflineReplayRouter::new(&queueing_args(), Some(config), None, 1).unwrap();
-        std::fs::remove_file(path).unwrap();
 
         let mut active = request(1, 1);
         active.policy_class = Some("latency".to_string());
@@ -1848,11 +1847,10 @@ models:
 
     #[test]
     fn replay_cache_bucket_ignores_removed_worker_entries() {
-        let path =
-            std::env::temp_dir().join(format!("dynamo-replay-policy-{}.yaml", Uuid::new_v4()));
-        std::fs::write(
-            &path,
-            r#"
+        let mut policy_file = NamedTempFile::new().unwrap();
+        policy_file
+            .write_all(
+                r#"
 default_policy_family: standard
 uncached_isl_buckets:
   - min_tokens: 0
@@ -1870,15 +1868,15 @@ policy_classes:
     cache_bucket: uncached
     quantum: 1
     prefill_busy_threshold: 1024
-"#,
-        )
-        .unwrap();
+"#
+                .as_bytes(),
+            )
+            .unwrap();
         let config = KvRouterConfig {
-            router_policy_config: Some(path.display().to_string()),
+            router_policy_config: Some(policy_file.path().display().to_string()),
             ..KvRouterConfig::default()
         };
         let mut router = OfflineReplayRouter::new(&queueing_args(), Some(config), None, 2).unwrap();
-        std::fs::remove_file(path).unwrap();
 
         let target = request(2, 2);
         let target_hashes = ReplayRequestHashes::from_tokens(&target.tokens, router.block_size);
