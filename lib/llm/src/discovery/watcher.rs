@@ -1348,7 +1348,7 @@ fn lora_projection_fingerprint(card: &ModelDeploymentCard) -> anyhow::Result<Str
     Ok(blake3::hash(&serde_json::to_vec(&value)?).to_string())
 }
 
-/// Digest the Qwen video prompt-expansion contract, when published.
+/// Hashes the published Qwen video prompt-expansion contract.
 fn qwen_video_contract_digest(card: &ModelDeploymentCard) -> Option<String> {
     let mut contract = card
         .runtime_config
@@ -2261,15 +2261,13 @@ mod tests {
         assert_eq!(
             qwen_video_contract_digest(&ModelDeploymentCard::with_name_only("model")),
             None,
-            "a worker that predates the contract publishes none"
         );
         assert_ne!(
             qwen_video_contract_digest(&card_with_contract(legacy_ceil.clone())),
             qwen_video_contract_digest(&card_with_contract(round_ties_even)),
         );
 
-        // `serde_json` preserves key order in this workspace, so the same
-        // contract written in a different key order must still agree.
+        // Canonicalization makes key order irrelevant.
         assert_eq!(
             qwen_video_contract_digest(&card_with_contract(legacy_ceil)),
             qwen_video_contract_digest(&card_with_contract(serde_json::json!({

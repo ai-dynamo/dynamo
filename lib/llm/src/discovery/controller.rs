@@ -47,9 +47,7 @@ pub(crate) struct DesiredInstance {
     pub(crate) group_key: GroupKey,
     pub(crate) fingerprint: String,
     pub(crate) projection_fingerprint: String,
-    /// Digest of the Qwen video prompt-expansion contract this worker
-    /// published, or `None` when it published none. Deliberately not part of
-    /// `fingerprint`: it is resolved across the cohort rather than per card.
+    /// Digest of this worker's Qwen video prompt-expansion contract.
     pub(crate) video_contract: Option<String>,
 }
 
@@ -59,14 +57,10 @@ impl DesiredInstance {
     }
 }
 
-/// The Qwen video prompt-expansion contract every member of the cohort
-/// published, or `None` when they do not all publish the same one.
+/// Returns the cohort's shared contract, if every member publishes one.
 ///
-/// A WorkerSet is served by a single video-routing processor, so it may only
-/// use a contract the whole cohort agrees on. Members can legitimately
-/// disagree: workers older than the contract publish nothing, and engine-level
-/// `--mm-processor-kwargs` can change the video token layout between two
-/// workers of the same version.
+/// A WorkerSet has one video-routing processor, so exact video routing is
+/// enabled only when all members agree.
 fn cohort_video_contract(members: &[DesiredInstance]) -> Option<String> {
     let mut members = members.iter();
     let agreed = members.next()?.video_contract.clone()?;
@@ -75,7 +69,7 @@ fn cohort_video_contract(members: &[DesiredInstance]) -> Option<String> {
         .then_some(agreed)
 }
 
-/// Add the agreed contract to the status-machine fingerprint.
+/// Identifies a cohort's active video contract.
 fn cohort_fingerprint(fingerprint: &str, video_contract: Option<&str>) -> String {
     match video_contract {
         Some(contract) => format!("{fingerprint}\0video_contract\0{contract}"),
@@ -89,7 +83,7 @@ pub(crate) struct GroupSpec {
     pub(crate) fingerprint: String,
     pub(crate) generation: u64,
     pub(crate) representative: DesiredInstance,
-    /// The cohort-wide contract, if any.
+    /// Contract shared by the cohort, if any.
     pub(crate) video_contract: Option<String>,
 }
 
@@ -638,7 +632,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 continue;
             };
             let fingerprint = fingerprint.clone();
-            // The status fingerprint includes the contract; take the sole cohort.
+            // The status fingerprint identifies one contract cohort.
             let Some((_, member_keys)) = group.sole_cohort() else {
                 continue;
             };
@@ -1338,13 +1332,11 @@ mod tests {
                 controller.groups[&group_key()].status,
                 GroupStatus::Conflict
             ),
-            "a member that publishes no contract must not conflict with one that does"
         );
         controller.start_queued_builds();
         assert_eq!(
             starts.recv().await.unwrap().video_contract,
             None,
-            "the group must rebuild without a contract it cannot serve to every member"
         );
         host.release.add_permits(1);
         finish_build(&mut controller).await;
@@ -1358,7 +1350,6 @@ mod tests {
         assert_eq!(
             starts.recv().await.unwrap().video_contract.as_deref(),
             Some("contract-a"),
-            "draining the older worker restores exact video routing"
         );
         host.release.add_permits(1);
         finish_build(&mut controller).await;
@@ -1404,13 +1395,11 @@ mod tests {
 
         assert!(
             controller.apply_added(instance_with_contract(1, "spec", "contract-b")),
-            "a contract-only change must not be discarded as a duplicate"
         );
         controller.start_queued_builds();
         assert_eq!(
             starts.recv().await.unwrap().video_contract.as_deref(),
             Some("contract-b"),
-            "the group must rebuild with the contract the worker now publishes"
         );
         host.release.add_permits(1);
         finish_build(&mut controller).await;
