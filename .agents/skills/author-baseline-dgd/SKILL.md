@@ -64,9 +64,13 @@ prefer aggregated unless the user's SLOs demand otherwise).
    workloads; raise TP above `min_tp` only when headroom demands it, recording the replica cost).
 2. **Choose topology conservatively**: an aggregated single-node layout unless the user's hardware or SLOs force
    otherwise. The baseline's job is to run and measure, not to win; the optimization loop owns improvement.
-3. **Scaffold from the nearest recipe**: copy its structure (components, probes, service wiring, image versions
-   for the chosen backend) and replace model, parallelism, resources, and any hardware-bound fields, naming every
-   replacement. Never carry a hardware-bound topology, transport, or checkpoint choice across without evidence it
+3. **Scaffold from the nearest recipe**: copy its structure (components, probes, service wiring) and replace
+   model, parallelism, resources, and any hardware-bound fields, naming every replacement. Image versions are NOT
+   copied blindly: when a recipe dossier snapshot exists (`<EXP_ROOT>/analysis/recipe-dossier/`), read the
+   scaffold candidate's recorded verdict and failed conditions, and never carry forward an image the dossier
+   marked mutable, unresolved, stale, or quarantined (Tier 4); choose an image that resolves to an immutable
+   release tag or digest for the chosen backend and record the resolution in the evidence table. A draft whose
+   image fails that gate is not ready for confirmation. Never carry a hardware-bound topology, transport, or checkpoint choice across without evidence it
    fits the target. A manifest expresses REQUIREMENTS (GPU type, count, memory), never observed cluster state:
    do not pin node names or encode which nodes happen to be free, and preserve the recipe's scheduling
    MECHANISMS (tolerations, product-label node selectors) while retargeting their VALUES to the contract's

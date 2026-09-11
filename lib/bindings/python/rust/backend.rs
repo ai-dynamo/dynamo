@@ -229,6 +229,7 @@ impl LlmRegistration {
         data_parallel_start_rank = None,
         bootstrap_host = None,
         bootstrap_port = None,
+        enable_eagle = false,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -241,6 +242,7 @@ impl LlmRegistration {
         data_parallel_start_rank: Option<u32>,
         bootstrap_host: Option<String>,
         bootstrap_port: Option<u16>,
+        enable_eagle: bool,
     ) -> Self {
         Self {
             inner: RsLlmRegistration {
@@ -251,6 +253,7 @@ impl LlmRegistration {
                 max_num_batched_tokens,
                 data_parallel_size,
                 data_parallel_start_rank,
+                enable_eagle,
                 bootstrap_host,
                 bootstrap_port,
             },
@@ -292,6 +295,11 @@ impl LlmRegistration {
     #[getter]
     fn bootstrap_port(&self) -> Option<u16> {
         self.inner.bootstrap_port
+    }
+
+    #[getter]
+    fn enable_eagle(&self) -> bool {
+        self.inner.enable_eagle
     }
 }
 
@@ -554,11 +562,6 @@ pub struct Worker {
     engine: Arc<PyObject>,
     event_loop: Arc<PyObject>,
     config: RsWorkerConfig,
-    /// `true` if this `Worker` instance constructed the dynamo runtime
-    /// itself (no `DistributedRuntime` already existed in this process).
-    /// Determines whether `run()` should call `runtime.shutdown()` at the
-    /// end — we only want to tear down a runtime we own.
-    owns_runtime: bool,
     /// Single-shot guard — flipped to `true` on the first `run()` call.
     /// The Rust `Worker` underneath consumes `self`; calling `run()`
     /// twice from Python would build a second `RsWorker` and call
@@ -574,6 +577,8 @@ pub struct Worker {
 
 #[pymethods]
 impl Worker {
+    /// Create a single-use worker and offer the process runtime to the PyO3 bridge.
+    /// Transport overrides are resolved when the worker starts, without env writes.
     #[new]
     #[pyo3(signature = (engine, config, event_loop, raw = false))]
     fn new(
@@ -582,43 +587,16 @@ impl Worker {
         event_loop: PyObject,
         raw: bool,
     ) -> PyResult<Self> {
-        // True existing-only check — `runtime_from_existing()` would
-        // synthesize a fresh runtime here and falsely mark us as shared.
-        let owns_runtime = !rs::Worker::has_existing_runtime();
-
-        if owns_runtime {
-            // Apply RuntimeConfig env overrides synchronously, on the
-            // calling thread, before any tokio worker threads spawn.
-            // Setting env vars from inside the future-into-py block would
-            // race with concurrent env reads in already-running tokio
-            // tasks (NATS / etcd setup).
-            config.inner.runtime.apply_to_env();
-
-            let worker = rs::Worker::from_settings().map_err(to_pyerr)?;
-            let primary = worker.tokio_runtime().map_err(to_pyerr)?;
-            // `init_with_runtime` errors if already initialized; that case
-            // means someone called us in a process where the OnceCell was
-            // populated between our check and now. Idempotent — ignore.
-            let _ = pyo3_async_runtimes::tokio::init_with_runtime(primary);
-        } else if config.inner.runtime.has_overrides() {
-            // The shared runtime was constructed before our caller, so its
-            // env-driven config (`DYN_DISCOVERY_BACKEND` etc.) is already
-            // baked in. Setting env vars now wouldn't change the runtime
-            // — surface the silent-drop loudly so operators don't assume
-            // their override took effect.
-            tracing::warn!(
-                "Worker received RuntimeConfig overrides but the dynamo \
-                 runtime was already constructed elsewhere; overrides ignored. \
-                 Set DYN_DISCOVERY_BACKEND / DYN_REQUEST_PLANE / DYN_EVENT_PLANE \
-                 in the environment instead."
-            );
-        }
+        // Fetching may already have initialized Tokio. Transport options belong
+        // to the worker's DistributedRuntime, not the process-wide executor, and
+        // are resolved directly by RsWorker without changing environment vars.
+        let primary = rs::Worker::ensure_process_runtime().map_err(to_pyerr)?;
+        let _ = pyo3_async_runtimes::tokio::init_with_runtime(primary);
 
         Ok(Self {
             engine: Arc::new(engine),
             event_loop: Arc::new(event_loop),
             config: config.inner,
-            owns_runtime,
             consumed: AtomicBool::new(false),
             raw,
         })
@@ -645,7 +623,6 @@ impl Worker {
         let engine = self.engine.clone();
         let event_loop = self.event_loop.clone();
         let config = self.config.clone();
-        let owns_runtime = self.owns_runtime;
         let raw = self.raw;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -695,18 +672,11 @@ impl Worker {
 
             let result = worker.run(runtime.clone()).await.map_err(to_pyerr);
 
-            // Only tear the runtime down if we constructed it. When a
-            // `DistributedRuntime` was already in scope (HTTP frontend,
-            // tests, etc.) it owns the shutdown lifecycle and we'd be
-            // pulling the rug out from other tasks if we called shutdown.
-            if owns_runtime {
-                runtime.shutdown();
-            } else {
-                tracing::debug!(
-                    "Worker.run skipping runtime.shutdown(); runtime is \
-                     shared with another caller"
-                );
-            }
+            // runtime_from_existing() shares Tokio but creates independent
+            // cancellation tokens and a graceful-shutdown tracker. This run
+            // owns that wrapper, including cleanup on engine startup failure;
+            // shutting it down does not cancel another DistributedRuntime.
+            runtime.shutdown();
 
             result
         })
@@ -928,6 +898,7 @@ impl PyEngineCore {
                     max_num_batched_tokens: opt_attr::<u64>(&v, "max_num_batched_tokens")?,
                     data_parallel_size: opt_attr::<u32>(&v, "data_parallel_size")?,
                     data_parallel_start_rank: opt_attr::<u32>(&v, "data_parallel_start_rank")?,
+                    enable_eagle: opt_attr::<bool>(&v, "enable_eagle")?.unwrap_or(false),
                     bootstrap_host: opt_attr::<String>(&v, "bootstrap_host")?,
                     bootstrap_port: opt_attr::<u16>(&v, "bootstrap_port")?,
                 }),

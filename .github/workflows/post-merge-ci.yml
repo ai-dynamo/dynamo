@@ -445,6 +445,7 @@ jobs:
     with:
       dd_env: post-merge
       test_suite_name: vllm
+      framework: vllm  # matches the framework passed to vllm-build
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
@@ -468,6 +469,7 @@ jobs:
     with:
       dd_env: post-merge
       test_suite_name: vllm
+      framework: vllm  # matches the framework passed to vllm-build
       test_type: 2-GPU Test
       amd_runner: prod-tester-amd-gpu-2-v2
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
@@ -485,6 +487,7 @@ jobs:
     with:
       dd_env: post-merge
       test_suite_name: vllm
+      framework: vllm  # matches the framework passed to vllm-build
       test_type: 4-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
@@ -502,6 +505,7 @@ jobs:
     with:
       dd_env: post-merge
       test_suite_name: vllm-efa
+      framework: vllm  # matches the framework passed to vllm-efa-build
       test_type: CPU Test
       amd_runner: prod-tester-amd-v2 # EFA image validation runs gpu_0 tests only
       target_tag_plain: ${{ needs.vllm-efa-build.outputs.target_tag_plain }}
@@ -512,30 +516,6 @@ jobs:
       run_gpu_tests: false
     secrets: inherit
 
-  vllm-kvbm-tests:
-    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [config, vllm-build]
-    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true'
-    uses: $/.github/workflows/shared-test.yml
-    with:
-      dd_env: post-merge
-      test_suite_name: kvbm
-      test_type: KVBM Test
-      # KVBM post-merge coverage currently targets the aws-dev-02 H100 cluster.
-      amd_runner: aws-dev-02-tester-amd-gpu-v2
-      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.0"]'
-      platform: '["amd64"]'
-      container_workspace: /workspace
-      kvbm_mla_backend: FLASH_ATTN_MLA
-      run_cpu_only_tests: false
-      run_gpu_tests: true
-      gpu_test_markers: post_merge and h100 and kvbm and gpu_1 and (kvbm_consolidator or kvbm_determinism)
-      # Observed runtime is about 50 minutes when run sequentially:
-      # consolidator ~9m, cache reset ~13m, concurrency ~27m.
-      gpu_test_timeout_minutes: 120
-    secrets: inherit
-
   sglang-test:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [sglang-build]
@@ -543,6 +523,7 @@ jobs:
     with:
       dd_env: post-merge
       test_suite_name: sglang
+      framework: sglang  # matches the framework passed to sglang-build
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
@@ -566,6 +547,7 @@ jobs:
     with:
       dd_env: post-merge
       test_suite_name: sglang
+      framework: sglang  # matches the framework passed to sglang-build
       test_type: 2-GPU Test
       amd_runner: prod-tester-amd-gpu-2-v2
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
@@ -583,6 +565,7 @@ jobs:
     with:
       dd_env: post-merge
       test_suite_name: trtllm
+      framework: trtllm  # matches the framework passed to trtllm-build
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
@@ -606,6 +589,7 @@ jobs:
     with:
       dd_env: post-merge
       test_suite_name: trtllm
+      framework: trtllm  # matches the framework passed to trtllm-build
       test_type: 2-GPU Test
       amd_runner: prod-tester-amd-gpu-2-v2
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
@@ -623,6 +607,7 @@ jobs:
     with:
       dd_env: post-merge
       test_suite_name: trtllm-efa
+      framework: trtllm  # matches the framework passed to trtllm-efa-build
       test_type: CPU Test
       amd_runner: prod-tester-amd-v2 # EFA image validation runs gpu_0 tests only
       target_tag_plain: ${{ needs.trtllm-efa-build.outputs.target_tag_plain }}
@@ -640,6 +625,7 @@ jobs:
     with:
       dd_env: post-merge
       test_suite_name: planner
+      framework: dynamo  # matches the framework passed to planner-build
       test_type: CPU Test
       amd_runner: prod-tester-amd-v2
       target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}

@@ -11210,14 +11210,16 @@ spec:
                     - name
                   type: object
                 multinode:
-                  description: Multinode is the configuration for multinode components.
+                  description: |-
+                    Multinode configures worker, prefill, or decode components that span
+                    multiple Pods.
                   properties:
                     nodeCount:
                       default: 2
                       description: |-
                         Indicates the number of nodes to deploy for multinode components.
                         Total number of GPUs is NumberOfNodes * GPU limit.
-                        Must be greater than 1.
+                        Must be greater than 1 and is immutable after creation.
                       format: int32
                       minimum: 2
                       type: integer
@@ -11456,6 +11458,43 @@ spec:
                           type: string
                       type: object
                   type: object
+                roles:
+                  description: |-
+                    Roles expose the named Pod-producing parts inside a compound component.
+                    When set for a multinode component, this list must contain exactly one
+                    leader and one worker role. Admission defaults omitted replicas to 1 for
+                    leader and multinode.nodeCount minus 1 for worker. Omitting the roles list
+                    preserves the implicit multinode role layout.
+                  items:
+                    description: |-
+                      ComponentRoleSpec configures one named Pod-producing role inside a compound component.
+                      The enclosing component type defines the allowed role names and cardinality.
+                    properties:
+                      name:
+                        description: |-
+                          Name identifies the role within the enclosing component independently of
+                          generated provider resource names.
+                        maxLength: 63
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                      replicas:
+                        description: |-
+                          Replicas is the logical cardinality of this role in one complete component
+                          instance. The enclosing component type defines the cardinality. For
+                          multinode components, admission defaults and persists omitted values from
+                          Multinode.NodeCount; leader must be 1 and worker must be
+                          Multinode.NodeCount minus 1.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                    required:
+                      - name
+                    type: object
+                  type: array
+                  x-kubernetes-list-map-keys:
+                    - name
+                  x-kubernetes-list-type: map
                 runtimeVersionOverride:
                   description: |-
                     RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's
@@ -12242,6 +12281,8 @@ spec:
                             deployment. `false` or omitted means automatic selection (multi-node
                             and inter-pod GMS components use a scaling group, other single-node
                             components a standalone PodClique), not "force PodClique".
+                            The pointer preserves field presence on the wire: `nil` and `false` are
+                            semantically identical, and consumers must dereference with `false`.
                             Immutable after creation.
                           type: boolean
                       type: object
@@ -12301,13 +12342,16 @@ spec:
                     - name
                   type: object
                 multinode:
-                  description: multinode configures multinode components.
+                  description: |-
+                    multinode configures worker, prefill, or decode components that span
+                    multiple Pods.
                   properties:
                     nodeCount:
                       default: 2
                       description: |-
                         nodeCount is the number of nodes to deploy for the multinode component.
-                        Total GPUs used is `nodeCount * container GPU request`.
+                        Total GPUs used is `nodeCount * container GPU request`. The value is
+                        immutable after creation.
                       format: int32
                       minimum: 2
                       type: integer
@@ -20473,6 +20517,43 @@ spec:
                   format: int32
                   minimum: 0
                   type: integer
+                roles:
+                  description: |-
+                    roles expose the named Pod-producing parts inside a compound component.
+                    When set for a multinode component, this list must contain exactly one
+                    leader and one worker role. Admission defaults omitted replicas to 1 for
+                    leader and multinode.nodeCount minus 1 for worker. Omitting the roles list
+                    preserves the implicit multinode role layout.
+                  items:
+                    description: |-
+                      ComponentRoleSpec configures one named Pod-producing role inside a compound component.
+                      The enclosing component type defines the allowed role names and cardinality.
+                    properties:
+                      name:
+                        description: |-
+                          name identifies the role within the enclosing component independently of
+                          generated provider resource names.
+                        maxLength: 63
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                      replicas:
+                        description: |-
+                          replicas is the logical cardinality of this role in one complete component
+                          instance. The enclosing component type defines the cardinality. For
+                          multinode components, admission defaults and persists omitted values from
+                          multinode.nodeCount; leader must be 1 and worker must be
+                          multinode.nodeCount minus 1.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                    required:
+                      - name
+                    type: object
+                  type: array
+                  x-kubernetes-list-map-keys:
+                    - name
+                  x-kubernetes-list-type: map
                 runtimeVersionOverride:
                   description: |-
                     RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's

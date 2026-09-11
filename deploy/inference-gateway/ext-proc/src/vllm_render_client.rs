@@ -14,14 +14,15 @@ use std::time::Duration;
 
 use anyhow::Context;
 use bytes::Bytes;
-use futures::StreamExt;
 use reqwest::header::CONTENT_TYPE;
-use reqwest::{Client, StatusCode, Url};
+use reqwest::{Client, Url};
 use serde::Deserialize;
-use thiserror::Error;
+
+use crate::render_http::{
+    RenderError, check_content_length, classify_transport_error, read_error_body, read_success_body,
+};
 
 const CHAT_RENDER_PATH: &str = "/v1/chat/completions/render";
-const MAX_ERROR_BODY_BYTES: usize = 1024;
 
 /// A reusable client for vLLM's `/v1/chat/completions/render` endpoint.
 #[derive(Clone, Debug)]
@@ -32,50 +33,9 @@ pub struct VllmRenderClient {
     max_response_bytes: usize,
 }
 
-/// Failures returned by [`VllmRenderClient::render_chat`].
-#[derive(Debug, Error)]
-pub enum VllmRenderError {
-    /// The renderer could not be reached or the connection failed.
-    #[error("vLLM renderer is unavailable: {source}")]
-    Unavailable {
-        #[source]
-        source: reqwest::Error,
-    },
-    /// The renderer did not complete the request before the configured deadline.
-    #[error("vLLM render request timed out after {timeout:?}: {source}")]
-    Timeout {
-        timeout: Duration,
-        #[source]
-        source: reqwest::Error,
-    },
-    /// The renderer returned an HTTP error response.
-    #[error("vLLM renderer returned {status}: {body}")]
-    UpstreamStatus { status: StatusCode, body: String },
-    /// The renderer returned a successful response that did not match its contract.
-    #[error("vLLM renderer returned an invalid response: {source}")]
-    InvalidResponse {
-        #[source]
-        source: serde_json::Error,
-    },
-    /// The renderer returned a successful response larger than the configured limit.
-    #[error("vLLM renderer response is too large: {received} bytes exceeds the {limit}-byte limit")]
-    ResponseTooLarge { limit: usize, received: u64 },
-}
-
 #[derive(Debug, Deserialize)]
 struct VllmRenderResponse {
     token_ids: Vec<u32>,
-}
-
-/// Parse and validate a tokenizer service base URL.
-pub(crate) fn parse_tokenizer_service_base_url(base_url: &str) -> anyhow::Result<Url> {
-    let url = Url::parse(base_url)
-        .with_context(|| format!("invalid tokenizer service base URL {base_url:?}"))?;
-    anyhow::ensure!(
-        matches!(url.scheme(), "http" | "https") && url.host_str().is_some(),
-        "tokenizer service base URL must be an absolute HTTP(S) URL"
-    );
-    Ok(url)
 }
 
 impl VllmRenderClient {
@@ -98,7 +58,7 @@ impl VllmRenderClient {
             "vLLM render maximum response bytes must be greater than zero"
         );
 
-        let mut endpoint = parse_tokenizer_service_base_url(base_url)?;
+        let mut endpoint = crate::render_http::parse_render_base_url(base_url)?;
         {
             let mut path_segments = endpoint.path_segments_mut().map_err(|_| {
                 anyhow::anyhow!("vLLM renderer base URL cannot be used as a base URL")
@@ -126,7 +86,7 @@ impl VllmRenderClient {
     ///
     /// The body is sent unchanged so vLLM remains responsible for validating
     /// engine-specific request fields and applying the chat template.
-    pub async fn render_chat(&self, request_body: Bytes) -> Result<Vec<u32>, VllmRenderError> {
+    pub async fn render_chat(&self, request_body: Bytes) -> Result<Vec<u32>, RenderError> {
         let response = self
             .client
             .post(self.endpoint.clone())
@@ -134,83 +94,22 @@ impl VllmRenderClient {
             .body(request_body)
             .send()
             .await
-            .map_err(|source| self.classify_transport_error(source))?;
+            .map_err(|e| classify_transport_error(e, self.timeout))?;
 
         let status = response.status();
         if !status.is_success() {
-            return Err(VllmRenderError::UpstreamStatus {
+            return Err(RenderError::UpstreamStatus {
                 status,
                 body: read_error_body(response).await,
             });
         }
 
-        match response.content_length() {
-            Some(received) if received > self.max_response_bytes as u64 => {
-                return Err(VllmRenderError::ResponseTooLarge {
-                    limit: self.max_response_bytes,
-                    received,
-                });
-            }
-            _ => {}
-        }
-
-        let body = self.read_success_body(response).await?;
-        let response: VllmRenderResponse = serde_json::from_slice(&body)
-            .map_err(|source| VllmRenderError::InvalidResponse { source })?;
-
-        Ok(response.token_ids)
+        check_content_length(&response, self.max_response_bytes)?;
+        let body = read_success_body(response, self.max_response_bytes, self.timeout).await?;
+        serde_json::from_slice::<VllmRenderResponse>(&body)
+            .map(|r| r.token_ids)
+            .map_err(|source| RenderError::InvalidResponse { source })
     }
-
-    async fn read_success_body(
-        &self,
-        response: reqwest::Response,
-    ) -> Result<Vec<u8>, VllmRenderError> {
-        let mut body = Vec::new();
-        let mut stream = response.bytes_stream();
-
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|source| self.classify_transport_error(source))?;
-            let received = body.len().saturating_add(chunk.len());
-            if received > self.max_response_bytes {
-                return Err(VllmRenderError::ResponseTooLarge {
-                    limit: self.max_response_bytes,
-                    received: received as u64,
-                });
-            }
-            body.extend_from_slice(&chunk);
-        }
-
-        Ok(body)
-    }
-
-    fn classify_transport_error(&self, source: reqwest::Error) -> VllmRenderError {
-        if source.is_timeout() {
-            VllmRenderError::Timeout {
-                timeout: self.timeout,
-                source,
-            }
-        } else {
-            VllmRenderError::Unavailable { source }
-        }
-    }
-}
-
-async fn read_error_body(response: reqwest::Response) -> String {
-    let mut body = Vec::new();
-    let mut stream = response.bytes_stream();
-
-    while body.len() < MAX_ERROR_BODY_BYTES {
-        let Some(chunk) = stream.next().await else {
-            break;
-        };
-        let Ok(chunk) = chunk else {
-            break;
-        };
-        let remaining = MAX_ERROR_BODY_BYTES - body.len();
-        body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-    }
-
-    String::from_utf8_lossy(&body).into_owned()
 }
 
 #[cfg(test)]
@@ -230,6 +129,7 @@ mod tests {
     use tokio::task::JoinHandle;
 
     use super::*;
+    use crate::render_http::RenderError;
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(5);
     const TEST_MAX_RESPONSE_BYTES: usize = 1024;
@@ -317,7 +217,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            VllmRenderError::Timeout {
+            RenderError::Timeout {
                 timeout: actual,
                 ..
             } if actual == timeout
@@ -344,20 +244,20 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(error, VllmRenderError::Unavailable { .. }));
+        assert!(matches!(error, RenderError::Unavailable { .. }));
         server.await.unwrap();
     }
 
     #[tokio::test]
     async fn classifies_upstream_status_and_bounds_body() {
-        let response_body = Arc::new("x".repeat(MAX_ERROR_BODY_BYTES * 2));
+        let response_body = Arc::new("x".repeat(TEST_MAX_RESPONSE_BYTES * 2));
         let router = Router::new().route(
             CHAT_RENDER_PATH,
             post(move || {
                 let response_body = response_body.clone();
                 async move {
                     (
-                        StatusCode::SERVICE_UNAVAILABLE,
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
                         response_body.as_str().to_owned(),
                     )
                 }
@@ -373,9 +273,9 @@ mod tests {
             .unwrap_err();
 
         match error {
-            VllmRenderError::UpstreamStatus { status, body } => {
-                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-                assert_eq!(body.len(), MAX_ERROR_BODY_BYTES);
+            RenderError::UpstreamStatus { status, body } => {
+                assert_eq!(status, reqwest::StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(body.len(), TEST_MAX_RESPONSE_BYTES);
             }
             other => panic!("expected upstream status error, got {other:?}"),
         }
@@ -406,7 +306,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            VllmRenderError::ResponseTooLarge {
+            RenderError::ResponseTooLarge {
                 limit: actual_limit,
                 received,
             } if actual_limit == limit && received == RESPONSE_BODY.len() as u64
@@ -441,7 +341,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            VllmRenderError::ResponseTooLarge {
+            RenderError::ResponseTooLarge {
                 limit: actual_limit,
                 received,
             } if actual_limit == limit
@@ -488,7 +388,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(error, VllmRenderError::InvalidResponse { .. }));
+        assert!(matches!(error, RenderError::InvalidResponse { .. }));
         server.abort();
     }
 

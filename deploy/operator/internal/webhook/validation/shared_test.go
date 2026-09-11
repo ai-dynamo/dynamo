@@ -251,12 +251,34 @@ func TestValidateDynamoComponentDeploymentSharedSpecFieldPaths(t *testing.T) {
 	assertFieldPaths(t, errs, []string{
 		"spec.components[0].minAvailable",
 		"spec.components[0].sharedMemorySize",
-		"spec.components[0].type",
 		"spec.components[0].multinode",
+		"spec.components[0].type",
 		"spec.components[0].replicas",
 		"spec.components[0].eppConfig.configMapRef.name",
 		"spec.components[0].frontendSidecar",
 	})
+}
+
+func TestSupportsMultinodeComponentType(t *testing.T) {
+	tests := []struct {
+		componentType nvidiacomv1beta1.ComponentType
+		allowed       bool
+	}{
+		{componentType: nvidiacomv1beta1.ComponentTypeWorker, allowed: true},
+		{componentType: nvidiacomv1beta1.ComponentTypePrefill, allowed: true},
+		{componentType: nvidiacomv1beta1.ComponentTypeDecode, allowed: true},
+		{componentType: nvidiacomv1beta1.ComponentTypeFrontend},
+		{componentType: nvidiacomv1beta1.ComponentTypePlanner},
+		{componentType: nvidiacomv1beta1.ComponentTypeEPP},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.componentType), func(t *testing.T) {
+			if got := supportsMultinodeComponentType(tt.componentType); got != tt.allowed {
+				t.Fatalf("supportsMultinodeComponentType(%q) = %t, want %t", tt.componentType, got, tt.allowed)
+			}
+		})
+	}
 }
 
 func TestValidateProviderOverrideOutsideDGD(t *testing.T) {
@@ -284,6 +306,32 @@ func TestValidateProviderOverrideOutsideDGD(t *testing.T) {
 	if len(errs) != 1 || errs[0].Field != "spec.providerOverride" {
 		t.Fatalf("validation errors = %v, want one error for spec.providerOverride", errs)
 	}
+}
+
+func TestValidateComponentRolesRejectsDuplicateMultinodeRole(t *testing.T) {
+	t.Log("Build an explicit multinode role list with the leader declared twice")
+	component := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+		Multinode: &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
+		Roles: []nvidiacomv1beta1.ComponentRoleSpec{
+			{Name: nvidiacomv1beta1.ComponentRoleLeader},
+			{Name: nvidiacomv1beta1.ComponentRoleLeader},
+		},
+	}
+	validation := &sharedValidation{ctx: context.Background()}
+
+	t.Log("Validate the closed multinode role schema independently of OpenAPI list-map checks")
+	errs := validation.validateComponentRoles(
+		component,
+		field.NewPath("spec", "components").Index(0).Child("roles"),
+		false,
+		"",
+	)
+
+	t.Log("Report both the duplicate entry and the missing mandatory worker role")
+	assertFieldPaths(t, errs, []string{
+		"spec.components[0].roles[1].name",
+		"spec.components[0].roles",
+	})
 }
 
 func TestValidateDynamoComponentDeploymentSharedSpecFrontendSidecar(t *testing.T) {
