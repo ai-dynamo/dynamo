@@ -112,25 +112,17 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 			)
 		}
 
-		// Default the explicit leader and worker provider contexts for multinode components.
-		if component.Multinode != nil {
-			if component.Multinode.Leader != nil && component.Multinode.Leader.ProviderOverride != nil {
-				provideroverride.DefaultTarget(
-					component.Multinode.Leader.ProviderOverride,
-					provider,
-					provideroverride.ScopeMultinodeLeader,
-					component,
-				)
+		// Default each explicit role's provider context independently.
+		for roleIndex := range component.Roles {
+			role := &component.Roles[roleIndex]
+			if role.ProviderOverride == nil {
+				continue
 			}
-
-			if component.Multinode.Worker != nil && component.Multinode.Worker.ProviderOverride != nil {
-				provideroverride.DefaultTarget(
-					component.Multinode.Worker.ProviderOverride,
-					provider,
-					provideroverride.ScopeMultinodeWorker,
-					component,
-				)
+			scope, ok := provideroverride.ScopeForComponentRole(role.Name)
+			if !ok {
+				continue
 			}
+			provideroverride.DefaultTarget(role.ProviderOverride, provider, scope, component)
 		}
 	}
 
