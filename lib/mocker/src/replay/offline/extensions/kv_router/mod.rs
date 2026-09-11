@@ -494,6 +494,20 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
                 now_ms,
             )?
             .admissions;
+        // `on_compact_request_arrival_for_session` returns either an empty
+        // `admissions` (the request queued -- `should_queue` above) or a
+        // singleton whose one entry is always `pending.uuid`, i.e. this same
+        // request (the immediate-admission path). It never releases a
+        // *different*, previously-queued request as a side effect of this
+        // arrival -- that only happens on completion, through
+        // `drain_pending`, whose caller reads admissions off `RouterEffects`
+        // directly rather than through this function. `released` therefore
+        // always stays empty here today. The loop still matches on
+        // `request_id` rather than assuming the first (only) admission is
+        // this request, so it stays correct without silent mislabeling if
+        // that contract ever widens to admit other requests in the same
+        // call -- but until it does, don't read a populated `released` from
+        // this call as evidence of such a change.
         let mut decision = PlacementDecision::Queued;
         let mut released = Vec::with_capacity(admissions.len().saturating_sub(1));
         for admission in admissions {
