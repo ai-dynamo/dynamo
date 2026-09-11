@@ -1061,9 +1061,20 @@ async fn tcp_listener(
         // deserialize prologue
         let prologue = match prologue.into_message_type() {
             TwoPartMessageType::HeaderOnly(header) => {
-                let prologue: ResponseStreamPrologue = serde_json::from_slice(&header)
-                    .map_err(|e| error!("Failed to deserialize ControlMessage: {}", e))?;
-                prologue
+                match serde_json::from_slice::<ResponseStreamPrologue>(&header) {
+                    Ok(prologue) => prologue,
+                    Err(e) => {
+                        // Notify the requester as the sibling arm does. Returning on
+                        // `?` alone drops the oneshot un-sent, and the requester then
+                        // reports a bare disconnect that names neither the worker's
+                        // failure nor this one. A newer worker sending an
+                        // `ErrorType` variant this build does not know lands here.
+                        let msg = format!("malformed prologue: {e}");
+                        let _ =
+                            connection.send(Err(StreamPrologueError::from_message(msg.clone())));
+                        return Err(error!(msg));
+                    }
+                }
             }
             _ => {
                 // Worker sent a non-HeaderOnly frame in the prologue slot
@@ -2375,6 +2386,68 @@ mod tests {
                 "expected malformed-prologue error, got: {err}"
             ),
             Ok(_) => panic!("invalid prologue should produce an error, but got Ok"),
+        }
+    }
+
+    /// A prologue that arrives well-framed but undecodable -- the shape a worker
+    /// newer than this build produces when it types an error with an `ErrorType`
+    /// variant this build lacks -- must still reach the requester. Before the
+    /// notify was added it returned on `?` and dropped the oneshot, so the
+    /// requester saw a bare disconnect instead of the reason.
+    #[tokio::test]
+    async fn test_undecodable_prologue_still_reaches_the_requester() {
+        let options = ServerOptions::builder().port(0).build().unwrap();
+        let server = TcpStreamServer::new_with_resolver(options, FailingIpResolver)
+            .await
+            .unwrap();
+        let context = Context::new(());
+        let stream_options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(false)
+            .enable_response_stream(true)
+            .build()
+            .unwrap();
+        let pending_connection = server.register(stream_options).await;
+        let (connection_info, stream_provider) =
+            pending_connection.recv_stream.unwrap().into_parts();
+        let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
+
+        let stream = TcpStream::connect(&tcp_info.address).await.unwrap();
+        let (_read_half, write_half) = tokio::io::split(stream);
+        let mut framed_writer = FramedWrite::new(write_half, TwoPartCodec::default());
+
+        let handshake = CallHomeHandshake {
+            subject: tcp_info.subject,
+            stream_type: StreamType::Response,
+        };
+        framed_writer
+            .send(TwoPartMessage::from_header(
+                serde_json::to_vec(&handshake).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+
+        // Correctly framed HeaderOnly, but the typed error names a variant this
+        // build does not know, so the whole prologue fails to deserialize.
+        framed_writer
+            .send(TwoPartMessage::from_header(Bytes::from_static(
+                br#"{"error":"Generate Error: boom","typed_error":{"error_type":"VariantFromTheFuture","message":"boom"}}"#,
+            )))
+            .await
+            .unwrap();
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), stream_provider)
+            .await
+            .expect("stream provider should resolve quickly")
+            .expect("the oneshot must be notified, not dropped");
+
+        // `StreamReceiver` is not `Debug`, so match instead of `expect_err`.
+        match outcome {
+            Err(err) => assert!(
+                err.contains("malformed prologue"),
+                "expected malformed-prologue error, got: {err}"
+            ),
+            Ok(_) => panic!("an undecodable prologue must not yield a usable stream"),
         }
     }
 
