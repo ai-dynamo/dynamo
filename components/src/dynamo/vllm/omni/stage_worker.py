@@ -639,8 +639,13 @@ def _load_processor(func_path: str | None) -> Any:
     return getattr(importlib.import_module(module_path), func_name)
 
 
-def _ensure_stage_connectors(stage_configs_path: str, stage_configs: list[Any]) -> str:
+def _ensure_stage_connectors(
+    stage_configs_path: str | None, stage_configs: list[Any]
+) -> str:
     """Add default SHM connector edges for stage configs that omit them."""
+    if stage_configs_path is None:
+        raise ValueError("vLLM-Omni did not resolve a stage configuration path")
+
     try:
         with open(stage_configs_path) as f:
             deploy_config = yaml.safe_load(f) or {}
