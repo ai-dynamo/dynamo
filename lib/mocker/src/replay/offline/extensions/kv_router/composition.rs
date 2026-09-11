@@ -203,10 +203,7 @@ impl ReplayComposition for KvReplayComposition {
         let router_config = self.router_config.take();
         let prefill = KvRouterPlacement::new(
             prefill_args,
-            Some(derive_prefill_router_config(
-                prefill_args,
-                router_config.clone(),
-            )),
+            Some(derive_prefill_router_config(router_config.clone())),
             self.prefill_load_estimator.take(),
             prefill_topology.len(),
             self.determinism.selector_seed(),
@@ -214,7 +211,7 @@ impl ReplayComposition for KvReplayComposition {
         .context("constructing prefill KV Router placement")?;
         let decode = KvRouterPlacement::new(
             decode_args,
-            Some(derive_decode_router_config(decode_args, router_config)),
+            Some(derive_decode_router_config(router_config)),
             None,
             decode_topology.len(),
             self.determinism.selector_seed(),
@@ -323,31 +320,27 @@ fn validate_runtime_topology(
     Ok(())
 }
 
-fn base_router_config(
-    args: &MockEngineArgs,
+/// Applies only the prefill/decode-specific deltas. `router_queue_policy`
+/// (the one field `replay_router_config` sets from `args`) is deliberately
+/// left untouched here: every caller feeds this output straight into
+/// `KvRouterPlacement::new` -> `OfflineReplayRouter::new_with_selector_seed`,
+/// which already calls `replay_router_config` unconditionally with the same
+/// per-role `args`. Applying it here too would be a second, redundant
+/// application of the same base config -- harmless today only because that
+/// rule happens to be an idempotent overwrite; duplicating the call site
+/// would silently diverge the moment a non-idempotent rule is added there.
+pub(in crate::replay) fn derive_prefill_router_config(
     router_config: Option<KvRouterConfig>,
 ) -> KvRouterConfig {
     let mut config = router_config.unwrap_or_default();
-    if let Some(policy) = args.router_queue_policy {
-        config.router_queue_policy = policy;
-    }
-    config
-}
-
-pub(in crate::replay) fn derive_prefill_router_config(
-    args: &MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
-) -> KvRouterConfig {
-    let mut config = base_router_config(args, router_config);
     config.router_track_active_blocks = false;
     config
 }
 
 pub(in crate::replay) fn derive_decode_router_config(
-    args: &MockEngineArgs,
     router_config: Option<KvRouterConfig>,
 ) -> KvRouterConfig {
-    let mut config = base_router_config(args, router_config);
+    let mut config = router_config.unwrap_or_default();
     config.overlap_score_credit = 0.0;
     config.router_assume_kv_reuse = false;
     config.router_track_prefill_tokens = false;
