@@ -88,3 +88,28 @@ def test_nested_pool_context_rejects_mismatched_tag(monkeypatch):
                 pass
 
     assert fake_cuda.calls == [(mem_pool, 0)]
+
+
+def test_semantic_persistent_tag_plan_must_be_fully_consumed():
+    _register_tag("kv_pool")
+    allocator.set_persistent_allocator_tag_plan("kv_pool", ["layer-0", "layer-1"])
+    allocator._tag_states["kv_pool"].persistent_alloc_seq = 1
+
+    with pytest.raises(RuntimeError, match="under-consumed.*consumed 1/2"):
+        allocator.validate_persistent_allocator_tag_plan_consumed("kv_pool")
+
+
+def test_semantic_persistent_tag_plan_accepts_exact_consumption():
+    _register_tag("kv_pool")
+    allocator.set_persistent_allocator_tag_plan("kv_pool", ["layer-0", "layer-1"])
+    allocator._tag_states["kv_pool"].persistent_alloc_seq = 2
+
+    allocator.validate_persistent_allocator_tag_plan_consumed("kv_pool")
+
+
+def test_semantic_persistent_tag_plan_rejects_empty_plan():
+    _register_tag("kv_pool")
+    allocator.set_persistent_allocator_tag_plan("kv_pool", [])
+
+    with pytest.raises(RuntimeError, match="empty semantic tag plan"):
+        allocator.validate_persistent_allocator_tag_plan_consumed("kv_pool")
