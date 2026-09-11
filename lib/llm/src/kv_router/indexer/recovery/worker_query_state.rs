@@ -13,7 +13,6 @@ use dynamo_kv_router::{
 pub(super) type RecoveryKey = (WorkerId, DpRank);
 
 const RECOVERY_PENDING_LIVE_EVENT_LIMIT: usize = 1024;
-const RECOVERY_PENDING_FAST_PRUNE_MARGIN: usize = 10;
 
 pub(super) enum LiveEventAction {
     Ignore,
@@ -28,17 +27,10 @@ pub(super) enum LiveEventAction {
     Recover {
         start_event_id: Option<u64>,
         end_event_id: Option<u64>,
-        reset: bool,
     },
     ResetDegraded {
         event: RouterEvent,
     },
-}
-
-pub(super) struct PendingDrainPlan {
-    pub(super) events: Vec<RouterEvent>,
-    pub(super) cursor: CursorState,
-    pub(super) next_recovery_start: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -107,16 +99,20 @@ impl RankState {
                 LiveEventAction::Recover {
                     start_event_id: None,
                     end_event_id: None,
-                    reset: false,
                 }
             }
-            CursorObservation::Gap { .. } if recoverable => {
+            CursorObservation::Gap { expected, .. } if recoverable => {
+                // NOTE: KV RECOVERY CONTRACT: Ordinary gaps request the next expected ID
+                // and preserve the existing index/cursor. Only the server can decide whether
+                // its retained history supports Events or requires TreeDump; never pre-clear
+                // the rank or request a snapshot here. Initial recovery and source replacement
+                // are separate lifecycle cases. See retained_gap_replays_without_reset and
+                // expired_gap_uses_server_selected_snapshot in worker_query.rs.
                 self.observe_and_buffer(event);
                 self.recovery_inflight = true;
                 LiveEventAction::Recover {
-                    start_event_id: None,
+                    start_event_id: Some(expected),
                     end_event_id: None,
-                    reset: true,
                 }
             }
             CursorObservation::Gap { .. } => LiveEventAction::ResetDegraded { event },
@@ -134,82 +130,14 @@ impl RankState {
         self.clear_max_seen_if_caught_up(event_id);
     }
 
-    pub(super) fn begin_successful_recovery_drain(&mut self, cursor: CursorState) {
-        self.cursor = cursor;
-        self.recovery_inflight = true;
+    pub(super) fn pending_live_watermark(&self) -> Option<u64> {
+        self.max_seen_live_id
     }
 
     pub(super) fn discard_recovery_before_clear(&mut self) {
         self.recovery_inflight = false;
         self.pending_live_events.clear();
         self.max_seen_live_id = None;
-    }
-
-    pub(super) fn plan_pending_drain(&mut self) -> PendingDrainPlan {
-        let mut last_admitted_id = self.last_admitted_id().unwrap_or(0);
-        let mut cursor = self.cursor;
-        self.pending_live_events
-            .make_contiguous()
-            .sort_unstable_by_key(|event| event.event.event_id);
-        self.fast_prune_stale_pending_prefix(last_admitted_id);
-        let mut events = Vec::new();
-
-        loop {
-            let Some(front_event_id) = self
-                .pending_live_events
-                .front()
-                .map(|event| event.event.event_id)
-            else {
-                self.clear_max_seen_if_caught_up(last_admitted_id);
-                if self
-                    .max_seen_live_id
-                    .is_some_and(|max_seen| max_seen > last_admitted_id)
-                {
-                    return PendingDrainPlan {
-                        events,
-                        cursor,
-                        next_recovery_start: Some(last_admitted_id.saturating_add(1)),
-                    };
-                }
-                return PendingDrainPlan {
-                    events,
-                    cursor,
-                    next_recovery_start: None,
-                };
-            };
-
-            if front_event_id <= last_admitted_id {
-                self.pending_live_events.pop_front();
-                continue;
-            }
-
-            let expected = last_admitted_id.saturating_add(1);
-            if front_event_id != expected {
-                return PendingDrainPlan {
-                    events,
-                    cursor,
-                    next_recovery_start: Some(expected),
-                };
-            }
-
-            let event = self
-                .pending_live_events
-                .pop_front()
-                .expect("front event exists while draining pending live events");
-            last_admitted_id = front_event_id;
-            cursor = cursor.advance_to(front_event_id);
-            events.push(event);
-        }
-    }
-
-    pub(super) fn commit_pending_drain(
-        &mut self,
-        cursor: CursorState,
-        next_recovery_start: Option<u64>,
-    ) {
-        self.cursor = cursor;
-        self.clear_max_seen_if_caught_up(self.last_admitted_id().unwrap_or(0));
-        self.recovery_inflight = next_recovery_start.is_some();
     }
 
     pub(super) fn finish_failed_recovery(&mut self) {
@@ -235,10 +163,11 @@ impl RankState {
         self.observe_and_buffer(event);
     }
 
-    /// Drain the buffered suffix after an advisory source snapshot.
+    /// Drain the buffered suffix after an advisory recovery response.
     ///
-    /// Unlike worker gap recovery, this preserves the state-agent stream's
-    /// accepted warn-and-continue behavior across missing event IDs.
+    /// Missing IDs do not block the suffix. Worker-query recovery calls this on a
+    /// clone and commits it only after queue admission; state-agent recovery owns
+    /// its own admission and fencing policy.
     pub(super) fn drain_advisory_tail_after(&mut self, recovered_through: u64) -> Vec<RouterEvent> {
         self.cursor = CursorState::Initial.advance_to(recovered_through);
         let events = self.take_failed_recovery_degraded();
@@ -279,20 +208,6 @@ impl RankState {
             .is_some_and(|max_seen| max_seen <= last_admitted_id)
         {
             self.max_seen_live_id = None;
-        }
-    }
-
-    fn fast_prune_stale_pending_prefix(&mut self, last_admitted_id: u64) {
-        if self.pending_live_events.len() <= RECOVERY_PENDING_FAST_PRUNE_MARGIN {
-            return;
-        }
-        let split_at = self.pending_live_events.len() - RECOVERY_PENDING_FAST_PRUNE_MARGIN;
-        if self
-            .pending_live_events
-            .get(split_at)
-            .is_some_and(|event| event.event.event_id <= last_admitted_id)
-        {
-            self.pending_live_events.drain(..split_at);
         }
     }
 }
@@ -342,7 +257,6 @@ mod tests {
             LiveEventAction::Recover {
                 start_event_id: None,
                 end_event_id: None,
-                reset: false,
             }
         ));
         assert!(state.recovery_inflight);
@@ -360,9 +274,8 @@ mod tests {
         assert!(matches!(
             state.observe_live_event(store(4), true),
             LiveEventAction::Recover {
-                start_event_id: None,
+                start_event_id: Some(2),
                 end_event_id: None,
-                reset: true,
             }
         ));
         assert!(matches!(
@@ -371,19 +284,13 @@ mod tests {
         ));
         assert_eq!(state.last_admitted_id(), Some(1));
 
-        state.begin_successful_recovery_drain(CursorState::Initial.advance_to(2));
-        let plan = state.plan_pending_drain();
+        let tail = state.drain_advisory_tail_after(2);
         assert_eq!(
-            plan.events
-                .iter()
+            tail.iter()
                 .map(|event| event.event.event_id)
                 .collect::<Vec<_>>(),
             vec![3, 4]
         );
-        assert_eq!(plan.cursor.last_applied_id(), Some(4));
-        assert_eq!(plan.next_recovery_start, None);
-        assert_eq!(state.last_admitted_id(), Some(2));
-        state.commit_pending_drain(plan.cursor, plan.next_recovery_start);
         assert_eq!(state.last_admitted_id(), Some(4));
         assert!(!state.recovery_inflight);
     }
@@ -417,7 +324,10 @@ mod tests {
         state.commit_live_admission(1);
         assert!(matches!(
             state.observe_live_event(store(4), true),
-            LiveEventAction::Recover { reset: true, .. }
+            LiveEventAction::Recover {
+                start_event_id: Some(2),
+                ..
+            }
         ));
 
         let mut worker_clear = store(5);

@@ -165,6 +165,12 @@ func ConvertFromDynamoComponentDeploymentSharedSpec(src *DynamoComponentDeployme
 		dst.Multinode = &v1beta1.MultinodeSpec{}
 		ConvertFromMultinodeSpec(src.Multinode, dst.Multinode)
 	}
+	if src.Roles != nil {
+		dst.Roles = make([]v1beta1.ComponentRoleSpec, len(src.Roles))
+		for i := range src.Roles {
+			ConvertFromComponentRoleSpec(&src.Roles[i], &dst.Roles[i])
+		}
+	}
 
 	if src.ModelRef != nil {
 		dst.ModelRef = &v1beta1.ModelReference{}
@@ -541,6 +547,12 @@ func ConvertToDynamoComponentDeploymentSharedSpec(src *v1beta1.DynamoComponentDe
 		dst.Multinode = &MultinodeSpec{}
 		ConvertToMultinodeSpec(src.Multinode, dst.Multinode)
 	}
+	if src.Roles != nil {
+		dst.Roles = make([]ComponentRoleSpec, len(src.Roles))
+		for i := range src.Roles {
+			ConvertToComponentRoleSpec(&src.Roles[i], &dst.Roles[i])
+		}
+	}
 	if src.ModelRef != nil {
 		dst.ModelRef = &ModelReference{}
 		ConvertToModelReference(src.ModelRef, dst.ModelRef)
@@ -851,38 +863,25 @@ func ConvertToProviderOverride(src *v1beta1.ProviderOverride, dst *ProviderOverr
 // v1beta1. src and dst must not be nil.
 func ConvertFromMultinodeSpec(src *MultinodeSpec, dst *v1beta1.MultinodeSpec) {
 	*dst = v1beta1.MultinodeSpec{NodeCount: src.NodeCount}
-
-	// Convert each explicit role independently to preserve its provider context.
-	if src.Leader != nil {
-		dst.Leader = &v1beta1.MultinodeRoleSpec{}
-		ConvertFromMultinodeRoleSpec(src.Leader, dst.Leader)
-	}
-	if src.Worker != nil {
-		dst.Worker = &v1beta1.MultinodeRoleSpec{}
-		ConvertFromMultinodeRoleSpec(src.Worker, dst.Worker)
-	}
 }
 
 // ConvertToMultinodeSpec converts multinode settings from v1beta1 to
 // v1alpha1. src and dst must not be nil.
 func ConvertToMultinodeSpec(src *v1beta1.MultinodeSpec, dst *MultinodeSpec) {
 	*dst = MultinodeSpec{NodeCount: src.NodeCount}
-
-	// Convert each explicit role independently to preserve its provider context.
-	if src.Leader != nil {
-		dst.Leader = &MultinodeRoleSpec{}
-		ConvertToMultinodeRoleSpec(src.Leader, dst.Leader)
-	}
-	if src.Worker != nil {
-		dst.Worker = &MultinodeRoleSpec{}
-		ConvertToMultinodeRoleSpec(src.Worker, dst.Worker)
-	}
 }
 
-// ConvertFromMultinodeRoleSpec converts one explicit multinode role. src and
-// dst must not be nil.
-func ConvertFromMultinodeRoleSpec(src *MultinodeRoleSpec, dst *v1beta1.MultinodeRoleSpec) {
-	*dst = v1beta1.MultinodeRoleSpec{}
+// ConvertFromComponentRoleSpec converts one explicit component role from
+// v1alpha1 to v1beta1. src and dst must not be nil.
+func ConvertFromComponentRoleSpec(src *ComponentRoleSpec, dst *v1beta1.ComponentRoleSpec) {
+	*dst = v1beta1.ComponentRoleSpec{Name: src.Name}
+	if src.Replicas != nil {
+		replicas := *src.Replicas
+		dst.Replicas = &replicas
+	}
+	if src.PodTemplate != nil {
+		dst.PodTemplate = src.PodTemplate.DeepCopy()
+	}
 
 	// Preserve the role-level provider schema and sparse value verbatim.
 	if src.ProviderOverride != nil {
@@ -891,10 +890,17 @@ func ConvertFromMultinodeRoleSpec(src *MultinodeRoleSpec, dst *v1beta1.Multinode
 	}
 }
 
-// ConvertToMultinodeRoleSpec converts one explicit multinode role. src and dst
-// must not be nil.
-func ConvertToMultinodeRoleSpec(src *v1beta1.MultinodeRoleSpec, dst *MultinodeRoleSpec) {
-	*dst = MultinodeRoleSpec{}
+// ConvertToComponentRoleSpec converts one explicit component role from
+// v1beta1 to v1alpha1. src and dst must not be nil.
+func ConvertToComponentRoleSpec(src *v1beta1.ComponentRoleSpec, dst *ComponentRoleSpec) {
+	*dst = ComponentRoleSpec{Name: src.Name}
+	if src.Replicas != nil {
+		replicas := *src.Replicas
+		dst.Replicas = &replicas
+	}
+	if src.PodTemplate != nil {
+		dst.PodTemplate = src.PodTemplate.DeepCopy()
+	}
 
 	// Preserve the role-level provider schema and sparse value verbatim.
 	if src.ProviderOverride != nil {
@@ -1754,6 +1760,7 @@ func restoreSharedPodTemplateHubOnlyFields(preserved *v1beta1.DynamoComponentDep
 	restoreSharedPodTemplateContainerOrder(out, preserved.PodTemplate)
 	restoreSharedHubOnlyPodTemplateMetadata(&out.ObjectMeta, preserved.PodTemplate.ObjectMeta)
 	restoreSharedHubOnlyFlatVolumeMountFields(out, preserved.PodTemplate, src)
+	restoreSharedHubOnlyVolumeMountOrder(out, preserved.PodTemplate, compilationCache, src)
 	if podTemplateIsZero(preserved.PodTemplate) && podTemplateIsZero(out) {
 		return out, nil
 	}
@@ -1967,6 +1974,72 @@ func restoreSharedHubOnlyFlatVolumeMountFields(dst, preserved *corev1.PodTemplat
 		}
 		return
 	}
+}
+
+func restoreSharedHubOnlyVolumeMountOrder(dst, preserved *corev1.PodTemplateSpec, compilationCache *v1beta1.CompilationCacheConfig, src *DynamoComponentDeploymentSharedSpec) {
+	if dst == nil || preserved == nil || src == nil {
+		return
+	}
+	preservedMain, ok := findContainerByName(preserved.Spec.Containers, mainContainerName)
+	if !ok {
+		return
+	}
+
+	// Restore hub ordering only while the live alpha fields still equal the
+	// lossy cache-first projection produced by conversion from this hub payload.
+	projected := projectedAlphaVolumeMountsFromHub(preservedMain.VolumeMounts, compilationCache)
+	if !volumeMountsEqual(src.VolumeMounts, projected) {
+		return
+	}
+	for i := range dst.Spec.Containers {
+		if dst.Spec.Containers[i].Name != mainContainerName {
+			continue
+		}
+		reordered, ok := reorderNativeVolumeMounts(dst.Spec.Containers[i].VolumeMounts, preservedMain.VolumeMounts)
+		if ok {
+			dst.Spec.Containers[i].VolumeMounts = reordered
+		}
+		return
+	}
+}
+
+func projectedAlphaVolumeMountsFromHub(mounts []corev1.VolumeMount, compilationCache *v1beta1.CompilationCacheConfig) []VolumeMount {
+	projected := make([]VolumeMount, 0, len(mounts)+1)
+	if compilationCache != nil {
+		projected = append(projected, VolumeMount{
+			Name:                  compilationCache.PVCName,
+			MountPoint:            compilationCache.MountPath,
+			UseAsCompilationCache: true,
+		})
+	}
+	return appendMissingVolumeMounts(projected, volumeMountsFromNative(mounts))
+}
+
+func reorderNativeVolumeMounts(current, preserved []corev1.VolumeMount) ([]corev1.VolumeMount, bool) {
+	if len(current) != len(preserved) {
+		return current, false
+	}
+	if len(current) == 0 {
+		return current, true
+	}
+	reordered := make([]corev1.VolumeMount, 0, len(current))
+	used := make([]bool, len(current))
+	for _, preservedMount := range preserved {
+		found := false
+		for i := range current {
+			if used[i] || current[i].Name != preservedMount.Name || current[i].MountPath != preservedMount.MountPath {
+				continue
+			}
+			reordered = append(reordered, *current[i].DeepCopy())
+			used[i] = true
+			found = true
+			break
+		}
+		if !found {
+			return current, false
+		}
+	}
+	return reordered, true
 }
 
 func sourceFlatVolumeMountMatches(mounts []VolumeMount, mount corev1.VolumeMount) bool {

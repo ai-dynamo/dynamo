@@ -941,9 +941,13 @@ impl ExtProcError {
                 status_code: StatusCode::ServiceUnavailable,
                 message: msg,
             },
-            PickError::TokenizationFailed(msg) => Self {
+            PickError::InvalidRequest(msg) => Self {
                 status_code: StatusCode::BadRequest,
                 message: msg,
+            },
+            PickError::MetadataHeadersTooLarge(err) => Self {
+                status_code: StatusCode::RequestHeaderFieldsTooLarge,
+                message: err.to_string(),
             },
             // Upstream tokenizer failures are not client errors: preserve their
             // semantics so clients retry appropriately. `e.to_string()` is the
@@ -1587,5 +1591,13 @@ mod tests {
     fn overloaded_pick_error_maps_to_503() {
         let err = ExtProcError::from_pick_error(PickError::Overloaded);
         assert_eq!(err.status_code, StatusCode::ServiceUnavailable);
+    }
+
+    #[test]
+    fn metadata_headers_too_large_maps_to_431() {
+        let err = ExtProcError::from_pick_error(PickError::MetadataHeadersTooLarge(
+            dynamo_llm::http::service::metadata::MetadataHeaderError::TooManyEntries { limit: 64 },
+        ));
+        assert_eq!(err.status_code, StatusCode::RequestHeaderFieldsTooLarge);
     }
 }
