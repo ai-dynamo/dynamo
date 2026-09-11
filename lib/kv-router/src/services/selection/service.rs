@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
@@ -41,7 +42,7 @@ pub struct SelectionServiceBuilder {
     worker_selection_policy_registry: WorkerSelectionPolicyRegistry,
     host: SelectionHost,
     worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
-    session_affinity_ttl: Option<std::time::Duration>,
+    session_affinity_ttl: Option<Duration>,
 }
 
 /// Warn when a host does not construct workers for explicitly configured policy roles.
@@ -120,7 +121,7 @@ impl SelectionServiceBuilder {
 
     /// Pin each session id to the worker that served it for `ttl` after its
     /// last request. Bindings replicate over the replica mesh when enabled.
-    pub fn session_affinity(mut self, ttl: std::time::Duration) -> Self {
+    pub fn session_affinity(mut self, ttl: Duration) -> Self {
         self.session_affinity_ttl = Some(ttl);
         self
     }

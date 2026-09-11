@@ -177,6 +177,11 @@ pub struct EppStandaloneConfig {
     /// Pin each `x-dynamo-session-id` to the worker that served it for this
     /// long after its last request (`DYN_EPP_SESSION_AFFINITY_TTL_SECS`).
     /// `None` disables session affinity.
+    #[validate(range(
+        min = 1.0,
+        max = 31536000.0,
+        message = "DYN_EPP_SESSION_AFFINITY_TTL_SECS must be between 1 and 31536000 seconds"
+    ))]
     pub session_affinity_ttl_secs: Option<f64>,
 }
 

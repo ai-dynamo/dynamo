@@ -8,6 +8,9 @@ use super::hint::transfer_hint_for_selection;
 use super::reservations::{Reservation, missing_booking};
 use super::*;
 
+/// Action id of the single `kv.fetch` action a selection's KV hint carries.
+const KV_HINT_FETCH_ACTION_ID: &str = "a1";
+
 pub(super) struct PreparedSelectionInputs {
     pub(super) block_hashes: Vec<LocalBlockHash>,
     pub(super) sequence_hashes: Vec<SequenceHash>,
@@ -443,7 +446,7 @@ impl SelectionCore {
             .map(|payload| {
                 KvHint::new(
                     admission.request_id().unwrap_or_default(),
-                    vec![KvHintAction::fetch("a1", payload)],
+                    vec![KvHintAction::fetch(KV_HINT_FETCH_ACTION_ID, payload)],
                 )
             })
         } else {
@@ -542,7 +545,7 @@ impl SelectionCore {
                     tracing::debug!(
                         session_id,
                         worker_id = target.worker_id,
-                        "session affinity target is not schedulable; re-initializing"
+                        "Session affinity target is not schedulable; re-initializing"
                     );
                     lease.invalidate();
                 }
@@ -550,7 +553,7 @@ impl SelectionCore {
                 Err(AffinityError::ResourceExhausted(_)) => {
                     tracing::debug!(
                         session_id,
-                        "affinity table full; routing without session affinity"
+                        "Affinity table full; routing without session affinity"
                     );
                     return Ok(None);
                 }
@@ -657,8 +660,8 @@ impl SelectionCore {
             } else {
                 entry
                     .indexer
-                    .find_tiered_matches_with_options(
-                        normalized.block_hashes.clone(),
+                    .find_tiered_matches_ref_with_options(
+                        &normalized.block_hashes,
                         LowerTierQueryOptions {
                             retain_kv_transfer_chain,
                         },

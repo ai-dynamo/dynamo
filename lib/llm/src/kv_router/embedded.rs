@@ -9,7 +9,9 @@
 //! frontend retains transport, stream leases, and request-expiry ownership.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::ops::Range;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use dynamo_kv_router::WorkerType;
@@ -26,10 +28,11 @@ use dynamo_kv_router::scheduling::{
 };
 use dynamo_kv_router::sequences::{SequenceError, SequenceRequest};
 use dynamo_kv_router::services::selection::{
-    CatalogObserver, CatalogReconciler, HostCache, HostEligibility, HostLoad, HostReplication,
-    HostTelemetry, KvEventIngress, KvIndexSource, SelectionHost, SelectionOperation,
-    SelectionOutcome, SelectionPartition, SelectionRun, SelectionService, SelectionServiceBuilder,
-    WorkerCatalogRecord, WorkerCatalogSource, WorkerRequest, WorkerSelectionPolicyRegistry,
+    CatalogObserver, CatalogReconciler, DEFAULT_MODEL_NAME, HostCache, HostEligibility, HostLoad,
+    HostReplication, HostTelemetry, KvEventIngress, KvIndexSource, SelectionHost,
+    SelectionOperation, SelectionOutcome, SelectionPartition, SelectionRun, SelectionService,
+    SelectionServiceBuilder, WorkerCatalogRecord, WorkerCatalogSource, WorkerRequest,
+    WorkerSelectionPolicyRegistry,
 };
 use dynamo_kv_router::{DEFAULT_ROUTING_GROUP, PrefillLoadEstimator, WorkerSelectionPolicyFactory};
 use dynamo_tokens::SequenceHash;
@@ -118,7 +121,7 @@ fn spawn_queue_metrics_updater(
 ) {
     let mut queue_updates = partition.scheduler().subscribe_queue_updates();
     tokio::spawn(async move {
-        let period = std::time::Duration::from_secs(60);
+        let period = Duration::from_secs(60);
         let mut recheck = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
         loop {
             update_queue_metrics(&handles, |index| {
@@ -158,16 +161,13 @@ fn non_max_overlap_observer(worker_type: &'static str) -> NonMaxOverlapSelection
     })
 }
 
-/// Partition model name when the router has none.
-pub(crate) const DEFAULT_MODEL_NAME: &str = "default";
-
 /// One `SelectionService` partition driven directly by the router.
 pub(crate) struct EmbeddedSelection {
     /// Keeps the service (listeners, sweep, replica sync) alive for as long as
     /// the router holds the partition.
     service: Arc<SelectionService>,
     partition: SelectionPartition,
-    affinity: std::sync::OnceLock<crate::session_affinity::AffinityCoordinator>,
+    affinity: OnceLock<crate::session_affinity::AffinityCoordinator>,
     worker_type: &'static str,
     /// Queue gauges and rejection counters per policy class, index-aligned with
     /// the scheduler's `class_queue_stats`.
@@ -193,8 +193,7 @@ impl PendingReplicaIngress {
     }
 }
 
-static INSTALLED_POLICY_REGISTRY: std::sync::OnceLock<WorkerSelectionPolicyRegistry> =
-    std::sync::OnceLock::new();
+static INSTALLED_POLICY_REGISTRY: OnceLock<WorkerSelectionPolicyRegistry> = OnceLock::new();
 
 /// Install the process-wide worker-selection policy registry (linked custom
 /// policies) that embedded selection partitions resolve `KvRouterConfig`
@@ -268,10 +267,12 @@ impl EmbeddedSelection {
                 slot.lock().ok().and_then(|mut s| s.take())
             }));
 
+        // The registry is only consulted when no factory is set; `policy_factory`
+        // always is, so the builder never reads it.
         let service = SelectionServiceBuilder::new(
             args.kv_router_config.clone(),
             worker_type,
-            worker_selection_policy_registry(),
+            WorkerSelectionPolicyRegistry::default(),
         )
         .worker_selection_policy_factory(args.policy_factory)
         .indexer_threads(1)
@@ -371,7 +372,7 @@ impl EmbeddedSelection {
             Self {
                 service,
                 partition,
-                affinity: std::sync::OnceLock::new(),
+                affinity: OnceLock::new(),
                 worker_type: args.metric_worker_type,
                 queue_metrics,
                 queue_metric_indices,
@@ -394,7 +395,7 @@ impl EmbeddedSelection {
 
     pub(crate) fn affinity_coordinator(
         &self,
-        ttl: std::time::Duration,
+        ttl: Duration,
         mode: crate::session_affinity::SessionAffinityMode,
     ) -> Result<crate::session_affinity::AffinityCoordinator> {
         let table = self.partition.session_affinity(
@@ -552,9 +553,9 @@ struct RegisteredGauge {
     worker_label: &'static str,
 }
 
-fn dp_ranks(record: &WorkerCatalogRecord) -> std::ops::Range<u32> {
+fn dp_ranks(record: &WorkerCatalogRecord) -> Range<u32> {
     let start = record.data_parallel_start_rank.unwrap_or(0);
-    start..start.saturating_add(record.data_parallel_size.unwrap_or(1).max(1))
+    start..start.saturating_add(record.data_parallel_size.unwrap_or(1))
 }
 
 impl CatalogObserver for RegisteredGauge {
@@ -600,6 +601,9 @@ pub(crate) fn worker_request_from_runtime_config(
         model_name: key.model_name.clone(),
         routing_group: key.routing_group.clone(),
         endpoint: Some(format!("dyn://{worker_id}")),
+        kv_events_endpoint: None,
+        kv_events_endpoints: HashMap::new(),
+        replay_endpoint: None,
         block_size: Some(block_size),
         data_parallel_start_rank: Some(dp_start),
         data_parallel_size: Some(dp_size),
@@ -621,7 +625,6 @@ pub(crate) fn worker_request_from_runtime_config(
         router_hint_worker_type,
         router_hint_source_control_endpoints,
         kv_event_source_mode: config.kv_event_source_mode.clone(),
-        ..WorkerRequest::default()
     }
 }
 

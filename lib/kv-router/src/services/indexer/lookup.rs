@@ -33,7 +33,7 @@ impl<'a> HashInput<'a> {
         self.as_slice().to_vec()
     }
 
-    fn into_owned_at_boundary(self) -> Vec<LocalBlockHash> {
+    pub(super) fn into_owned_at_boundary(self) -> Vec<LocalBlockHash> {
         match self {
             Self::Borrowed(hashes) => hashes.to_vec(),
             Self::Owned(hashes) => hashes,
@@ -362,6 +362,13 @@ impl<'a> PrimaryLookup<'a> {
 /// lockstep (side-only workers gain a score with no paired hash), so it must
 /// not seed `query_lower_tiers`; callers run the lower-tier query against the
 /// primary-only details first.
+///
+/// NOTE: when this merged `MatchDetails` is combined with lower-tier hits
+/// seeded from the primary-only anchor (e.g. in `find_matches_by_tier`), the
+/// total cached-token signal can overcount: the device score is raised by the
+/// side indexer but the lower-tier walk used the lower primary depth. Accepted
+/// since side scores are short-TTL approximations and the overcount is bounded
+/// and rare in practice.
 fn merge_overlap_scores(mut primary: MatchDetails, side: OverlapScores) -> MatchDetails {
     for (worker, side_score) in side.scores {
         primary
@@ -818,7 +825,7 @@ mod tests {
         let local_hashes = vec![LocalBlockHash(91), LocalBlockHash(92)];
         let sequence_hashes = compute_seq_hash_for_block(&local_hashes);
         indexer
-            .record_routing_decision_hashes(
+            .record_routing_decision(
                 worker,
                 RoutingDecisionHashes {
                     local_hashes: local_hashes.clone(),
@@ -1037,7 +1044,7 @@ mod tests {
 
         let side_hashes = vec![LocalBlockHash(11), LocalBlockHash(12), LocalBlockHash(13)];
         indexer
-            .record_routing_decision_hashes(
+            .record_routing_decision(
                 side_worker,
                 RoutingDecisionHashes {
                     local_hashes: side_hashes.clone(),

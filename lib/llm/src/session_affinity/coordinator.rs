@@ -58,14 +58,6 @@ struct Inner {
     replica: tokio::sync::OnceCell<ReplicaSyncRuntime>,
 }
 
-impl Drop for Inner {
-    fn drop(&mut self) {
-        if let Some(replica) = self.replica.get_mut() {
-            replica.shutdown_now();
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct AffinityCoordinator {
     inner: Arc<Inner>,
@@ -103,7 +95,7 @@ impl AffinityCoordinator {
                     .enable_replication(router_id, replica.sink())
                 {
                     return Err(anyhow::anyhow!(
-                        "session affinity replica sync already enabled"
+                        "session affinity table already has a replica sink installed"
                     ));
                 }
                 Ok(replica)

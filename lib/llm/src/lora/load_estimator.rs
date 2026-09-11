@@ -595,48 +595,6 @@ impl LoadEstimator {
         }
     }
 
-    /// Update active counts from a snapshot; arrivals are approximated as the
-    /// positive delta since the previous snapshot.
-    #[cfg(test)]
-    fn update_from_counts(&self, lora_counts: HashMap<String, usize>) {
-        let now = Instant::now();
-        let cfg = self.config.read();
-        let num_buckets = cfg.num_buckets();
-        let bucket_duration = cfg.bucket_duration();
-        drop(cfg);
-
-        for (lora_name, count) in &lora_counts {
-            self.data
-                .entry(lora_name.clone())
-                .and_modify(|data| {
-                    let prev = data.active_count.load(Ordering::Relaxed);
-                    data.active_count.store(*count, Ordering::Relaxed);
-                    // Record only the delta (new arrivals since the last poll) to
-                    // avoid double-counting sustained requests.  A request active
-                    // for N ticks should contribute 1 arrival, not N.
-                    let arrivals = count.saturating_sub(prev) as u64;
-                    if arrivals > 0 {
-                        data.rate_counter.record_count(arrivals, now);
-                    }
-                })
-                .or_insert_with(|| {
-                    let counter = BucketedRateCounter::new(num_buckets, bucket_duration, now);
-                    // First observation: the entire count represents new arrivals.
-                    counter.record_count(*count as u64, now);
-                    LoraLoadData {
-                        active_count: AtomicUsize::new(*count),
-                        rate_counter: counter,
-                    }
-                });
-        }
-
-        for entry in self.data.iter() {
-            if !lora_counts.contains_key(entry.key()) {
-                entry.value().active_count.store(0, Ordering::Relaxed);
-            }
-        }
-    }
-
     /// Get current load using arrival count in the sliding window.
     pub fn get_current_load(&self) -> HashMap<String, usize> {
         self.get_current_load_at(Instant::now())
@@ -754,6 +712,49 @@ mod tests {
     use dynamo_runtime::{DistributedRuntime, Runtime};
 
     use crate::kv_router::ACTIVE_SEQUENCES_SUBJECT;
+
+    impl LoadEstimator {
+        /// Update active counts from a snapshot; arrivals are approximated as the
+        /// positive delta since the previous snapshot.
+        fn update_from_counts(&self, lora_counts: HashMap<String, usize>) {
+            let now = Instant::now();
+            let cfg = self.config.read();
+            let num_buckets = cfg.num_buckets();
+            let bucket_duration = cfg.bucket_duration();
+            drop(cfg);
+
+            for (lora_name, count) in &lora_counts {
+                self.data
+                    .entry(lora_name.clone())
+                    .and_modify(|data| {
+                        let prev = data.active_count.load(Ordering::Relaxed);
+                        data.active_count.store(*count, Ordering::Relaxed);
+                        // Record only the delta (new arrivals since the last poll) to
+                        // avoid double-counting sustained requests.  A request active
+                        // for N ticks should contribute 1 arrival, not N.
+                        let arrivals = count.saturating_sub(prev) as u64;
+                        if arrivals > 0 {
+                            data.rate_counter.record_count(arrivals, now);
+                        }
+                    })
+                    .or_insert_with(|| {
+                        let counter = BucketedRateCounter::new(num_buckets, bucket_duration, now);
+                        // First observation: the entire count represents new arrivals.
+                        counter.record_count(*count as u64, now);
+                        LoraLoadData {
+                            active_count: AtomicUsize::new(*count),
+                            rate_counter: counter,
+                        }
+                    });
+            }
+
+            for entry in self.data.iter() {
+                if !lora_counts.contains_key(entry.key()) {
+                    entry.value().active_count.store(0, Ordering::Relaxed);
+                }
+            }
+        }
+    }
 
     fn lora_event(
         request_id: &str,

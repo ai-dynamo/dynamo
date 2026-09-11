@@ -26,9 +26,16 @@ and active-sequence accounting. Keep these implementation invariants explicit:
   runtime event plane in the frontend) or `Remote` (a standalone indexer
   serves it). The `Indexer` type itself is shared with the frontend
   (`services::indexer::backend`).
-- Each partition owns its `SessionAffinity` table, including versioned bindings, idle TTL, and lease lifecycle. A reservation owns its affinity lease, so every reservation removal releases both. Frontend routing hosts share the partition table and one coordinator for stream leases and runtime replication.
-- Valid worker metadata updates preserve live bookings on surviving ranks and KV state from unchanged event sources. Catalog commits and ingress changes are serialized; partition policy factories can initialize independently.
-- The frontend request lease manager owns expiry for embedded partitions. Standalone partitions use periodic request expiry.
+- Each partition owns its `SessionAffinity` table, including versioned
+  bindings, idle TTL, and lease lifecycle. A reservation owns its affinity
+  lease, so every reservation removal releases both. Frontend routing hosts
+  share the partition table and one coordinator for stream leases and runtime
+  replication.
+- Valid worker metadata updates preserve live bookings on surviving ranks and
+  KV state from unchanged event sources. Catalog commits and ingress changes
+  are serialized; partition policy factories can initialize independently.
+- The frontend request lease manager owns expiry for embedded partitions.
+  Standalone partitions use periodic request expiry.
 - Selector replicas synchronize admission, prefill-complete, and free events.
 - **NOTE:** Output-block updates remain local. They are deliberately excluded
   from replica sync because their frequency would consume disproportionate

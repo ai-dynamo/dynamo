@@ -88,10 +88,10 @@ impl RuntimeIngress {
             tracing::info!(
                 requirement = %args.kv_event_source_requirement,
                 cache_required = args.cache_required,
-                "Skipping KV event subscription (use_kv_events={}, overlap_score_credit={}, use_remote_indexer={})",
-                args.kv_router_config.use_kv_events,
-                args.kv_router_config.overlap_score_credit,
-                args.kv_router_config.use_remote_indexer,
+                use_kv_events = args.kv_router_config.use_kv_events,
+                overlap_score_credit = args.kv_router_config.overlap_score_credit,
+                use_remote_indexer = args.kv_router_config.use_remote_indexer,
+                "Skipping KV event subscription"
             );
             None
         };

@@ -285,9 +285,7 @@ impl ModelWatcher {
             SelectionPolicySource::Registry,
         )
     }
-}
 
-impl ModelWatcher {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_with_selection_policy(
         runtime: DistributedRuntime,

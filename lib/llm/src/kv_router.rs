@@ -137,7 +137,7 @@ pub(crate) fn policy_worker_inputs(
     model_name: Option<&str>,
 ) -> WorkerInputs {
     let partition = RoutingPartitionRef::new(
-        model_name.unwrap_or(embedded::DEFAULT_MODEL_NAME),
+        model_name.unwrap_or(dynamo_kv_router::services::selection::DEFAULT_MODEL_NAME),
         DEFAULT_ROUTING_GROUP,
     );
     dynamo_kv_router::selector::WorkerSelector::<ModelRuntimeConfig>::required_worker_inputs(
@@ -1087,9 +1087,7 @@ impl KvRouter {
         hashes: RoutingDecisionHashes,
         worker: WorkerWithDpRank,
     ) -> Result<(), KvRouterError> {
-        self.indexer
-            .record_routing_decision_hashes(worker, hashes)
-            .await
+        self.indexer.record_routing_decision(worker, hashes).await
     }
 
     /// Give these tokens, find the worker with the best weighted cache hit.
@@ -1594,7 +1592,6 @@ impl KvRouter {
         self.scheduler.free(request_id).await
     }
 
-    #[doc(hidden)]
     pub(crate) fn affinity_coordinator(
         &self,
         ttl: std::time::Duration,
@@ -2047,6 +2044,13 @@ mod tests {
             .expect("filtered workers should produce a DynamoError");
 
         assert_eq!(dynamo_error.error_type(), ErrorType::Unavailable);
+
+        let error = map_scheduler_error(KvSchedulerError::AllEligibleWorkersOverloaded);
+        let dynamo_error = error
+            .downcast_ref::<DynamoError>()
+            .expect("overloaded workers should produce a DynamoError");
+
+        assert_eq!(dynamo_error.error_type(), ErrorType::ResourceExhausted);
     }
 
     #[test]

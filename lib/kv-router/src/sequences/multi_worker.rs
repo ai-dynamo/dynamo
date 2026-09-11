@@ -824,7 +824,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         Ok(attempt_id)
     }
 
-    pub(crate) fn request_worker(&self, request_id: &RequestId) -> Option<WorkerWithDpRank> {
+    pub(crate) fn request_worker(&self, request_id: &str) -> Option<WorkerWithDpRank> {
         self.request_index.worker_for(request_id)
     }
 
@@ -2491,10 +2491,7 @@ mod tests {
         );
         assert_eq!(active_request_count(&sequences, worker_a), 1);
         assert_eq!(active_request_count(&sequences, worker_b), 0);
-        assert_eq!(
-            sequences.request_worker(&"req-1".to_string()),
-            Some(worker_a)
-        );
+        assert_eq!(sequences.request_worker("req-1"), Some(worker_a));
     }
 
     #[tokio::test]
@@ -2523,10 +2520,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(active_request_count(&sequences, booked_worker), 1);
-        assert_eq!(
-            sequences.request_worker(&"req-1".to_string()),
-            Some(booked_worker)
-        );
+        assert_eq!(sequences.request_worker("req-1"), Some(booked_worker));
     }
 
     #[test]
@@ -3078,14 +3072,8 @@ mod tests {
         assert_eq!(batches[0][0].active_prefill_tokens, 0);
         assert_eq!(sequences.remote_state_update_count(), 1);
         assert_eq!(sequences.prompt_registry.cleanup_attempts(), 1);
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-2".to_string()),
-            Some(worker)
-        );
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-1".to_string()),
-            None
-        );
+        assert_eq!(sequences.request_index.worker_for("req-2"), Some(worker));
+        assert_eq!(sequences.request_index.worker_for("req-1"), None);
         assert_eq!(
             sequences.active_request_counts().get(&worker).copied(),
             Some(1)
@@ -3112,14 +3100,8 @@ mod tests {
         assert_eq!(batches[0][0].active_prefill_tokens, 0);
         assert_eq!(sequences.remote_state_update_count(), 1);
         assert_eq!(sequences.prompt_registry.cleanup_attempts(), 1);
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-2".to_string()),
-            Some(worker)
-        );
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-1".to_string()),
-            None
-        );
+        assert_eq!(sequences.request_index.worker_for("req-2"), Some(worker));
+        assert_eq!(sequences.request_index.worker_for("req-1"), None);
     }
 
     #[test]
@@ -3182,11 +3164,11 @@ mod tests {
             "source B should apply while source A remains blocked"
         );
         assert_eq!(
-            sequences.request_index.worker_for(&"source-a".to_string()),
+            sequences.request_index.worker_for("source-a"),
             Some(worker_a)
         );
         assert_eq!(
-            sequences.request_index.worker_for(&"source-b".to_string()),
+            sequences.request_index.worker_for("source-b"),
             Some(worker_b)
         );
     }
@@ -3239,10 +3221,7 @@ mod tests {
 
         sequences.apply_replica_batch(vec![replica_add("req-1", worker_b, vec![4, 5, 6])]);
 
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-1".to_string()),
-            Some(worker_a)
-        );
+        assert_eq!(sequences.request_index.worker_for("req-1"), Some(worker_a));
         assert_eq!(sequences.active_blocks()[&worker_a], 3);
         assert!(!sequences.active_blocks().contains_key(&worker_b));
         assert_eq!(sequences.num_workers(), 1);
@@ -3293,10 +3272,7 @@ mod tests {
             sequences.prompt_registry.cleanup_attempts(),
             cleanup_count + 1
         );
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-1".to_string()),
-            None
-        );
+        assert_eq!(sequences.request_index.worker_for("req-1"), None);
     }
 
     #[tokio::test(start_paused = true)]
@@ -3332,10 +3308,7 @@ mod tests {
                 .copied(),
             Some(0)
         );
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-1".to_string()),
-            Some(worker)
-        );
+        assert_eq!(sequences.request_index.worker_for("req-1"), Some(worker));
     }
 
     #[tokio::test(start_paused = true)]
@@ -3414,10 +3387,7 @@ mod tests {
         let batches = publisher.load_batches();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].len(), 1);
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-1".to_string()),
-            Some(worker)
-        );
+        assert_eq!(sequences.request_index.worker_for("req-1"), Some(worker));
     }
 
     #[tokio::test(start_paused = true)]
@@ -3439,10 +3409,7 @@ mod tests {
         let batches = publisher.load_batches();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].len(), 1);
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-1".to_string()),
-            Some(worker)
-        );
+        assert_eq!(sequences.request_index.worker_for("req-1"), Some(worker));
     }
 
     #[tokio::test]
@@ -3703,10 +3670,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(sequences.num_workers(), 1);
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-1".to_string()),
-            Some(worker)
-        );
+        assert_eq!(sequences.request_index.worker_for("req-1"), Some(worker));
         assert!(!sequences.prompt_registry.is_block_index_empty());
         assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(3));
     }
@@ -3735,10 +3699,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(sequences.num_workers(), 0);
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-1".to_string()),
-            None
-        );
+        assert_eq!(sequences.request_index.worker_for("req-1"), None);
         assert!(sequences.prompt_registry.is_block_index_empty());
     }
 
@@ -3767,10 +3728,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(sequences.num_workers(), 0);
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-1".to_string()),
-            None
-        );
+        assert_eq!(sequences.request_index.worker_for("req-1"), None);
     }
 
     #[test]

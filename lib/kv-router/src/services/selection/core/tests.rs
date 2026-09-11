@@ -2508,13 +2508,13 @@ async fn metadata_update_preserves_live_booking() {
         result = core.upsert_worker(updated) => { result.unwrap(); },
         _ = ingress.0.notified() => {
             // A capacity update must not temporarily withdraw this worker.
-            assert!(entry.scheduler.has_request("live"));
             panic!("capacity update detached the worker");
         }
     }
     assert!(entry.scheduler.has_request("live"));
     core.free_reservation("live").await.unwrap();
 }
+
 #[tokio::test(start_paused = true)]
 async fn host_lease_manager_owns_expiry() {
     use crate::scheduling::queue::SchedulerBookingDescriptor;

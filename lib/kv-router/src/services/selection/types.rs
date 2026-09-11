@@ -18,7 +18,7 @@ use crate::services::overlap::MooncakeOverlapSummary;
 
 use super::input::PromptRequest;
 
-const DEFAULT_MODEL_NAME: &str = "default";
+pub const DEFAULT_MODEL_NAME: &str = "default";
 pub(super) const REQUEST_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 
 fn default_model_name() -> String {
@@ -441,9 +441,11 @@ pub struct SelectRequest {
     ///
     /// The response then carries the chosen worker's `worker_load` snapshot
     /// and `prefill_busy` evaluation. The request never waits in the router
-    /// queue; when the queue would have rejected it the call fails the same
-    /// way an admitted selection does. Ignored on `select_and_reserve`, which
-    /// always books.
+    /// queue and is not subject to its admission checks, so an advisory
+    /// selection can succeed where an admitted one would have been rejected.
+    /// A `selection_id` still caches the booking inputs for a follow-up
+    /// `create_reservation`. Ignored on `select_and_reserve`, which always
+    /// books.
     #[serde(default)]
     pub advisory: bool,
 }

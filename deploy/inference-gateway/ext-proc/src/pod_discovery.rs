@@ -404,8 +404,6 @@ fn rebuild_index(
     }
 }
 
-/// Build a [`RawWorker`] from a pod, or `None` if it is not `Ready`, not
-/// pool-selected, or lacks an IP/name. Pure function — unit-testable.
 /// Per-pod KV-event port layout: rank `r` publishes on `base + r * stride`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct KvEventPorts {
@@ -427,6 +425,8 @@ impl KvEventPorts {
     }
 }
 
+/// Build a [`RawWorker`] from a pod, or `None` if it is not `Ready`, not
+/// pool-selected, or lacks an IP/name. Pure function — unit-testable.
 fn raw_worker_from_pod(
     pod: &Pod,
     pool: &PoolState,

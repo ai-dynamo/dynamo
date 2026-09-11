@@ -14,7 +14,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::identity::{RoutingPartitionId, RoutingPartitionRef};
 use crate::protocols::{ActiveSequenceEvent, WorkerWithDpRank};
-use crate::sequences::{SequencePublishQueueError, SequencePublisher, SequenceSubscriber};
+use crate::sequences::{
+    SchedulerLoadSnapshot, SequencePublishQueueError, SequencePublisher, SequenceSubscriber,
+};
 use crate::services::common::zmq::{
     create_bound_pub_socket, create_sub_socket_topics, validate_endpoint,
 };
@@ -202,14 +204,14 @@ pub(crate) struct ScopedReplicaSync {
 /// tokens). An embedding host uses it to drive overload detection from the
 /// same numbers the scheduler books against.
 pub trait SchedulerLoadSink: Send + Sync {
-    fn publish(&self, snapshot: crate::sequences::SchedulerLoadSnapshot);
+    fn publish(&self, snapshot: SchedulerLoadSnapshot);
 
     /// Per-worker load after any local mutation, including output blocks,
     /// which are never published as shared scheduler load. The sink owns the
     /// metric label so it matches the host's cleanup path.
     fn observe_local_load(&self, _worker: &WorkerWithDpRank, _blocks: usize, _tokens: usize) {}
 
-    fn publish_batch(&self, snapshots: Vec<crate::sequences::SchedulerLoadSnapshot>) {
+    fn publish_batch(&self, snapshots: Vec<SchedulerLoadSnapshot>) {
         for snapshot in snapshots {
             self.publish(snapshot);
         }
@@ -343,13 +345,13 @@ impl SequencePublisher for ScopedSequencePublisher {
         }
     }
 
-    fn publish_scheduler_load(&self, load: crate::sequences::SchedulerLoadSnapshot) {
+    fn publish_scheduler_load(&self, load: SchedulerLoadSnapshot) {
         if let Some(sink) = &self.load_sink {
             sink.publish(load);
         }
     }
 
-    fn publish_scheduler_load_batch(&self, loads: Vec<crate::sequences::SchedulerLoadSnapshot>) {
+    fn publish_scheduler_load_batch(&self, loads: Vec<SchedulerLoadSnapshot>) {
         if let Some(sink) = &self.load_sink {
             sink.publish_batch(loads);
         }
@@ -493,7 +495,7 @@ pub(crate) fn start_replica_publisher(
 
     let task = tokio::spawn(async move {
         loop {
-            let frames = tokio::select! {
+            let (frames, label) = tokio::select! {
                 _ = cancel_token.cancelled() => break,
                 event = rx.recv() => {
                     let Some(event) = event else {
@@ -501,7 +503,10 @@ pub(crate) fn start_replica_publisher(
                     };
                     let partition = event.partition_ref();
                     match rmp_serde::to_vec_named(&event) {
-                        Ok(payload) => vec![REPLICA_TOPIC.to_vec(), payload],
+                        Ok(payload) => (
+                            vec![REPLICA_TOPIC.to_vec(), payload],
+                            format!("{partition} request_id={}", event.event.request_id),
+                        ),
                         Err(error) => {
                             tracing::error!(
                                 model_name = %partition.model_name,
@@ -518,7 +523,10 @@ pub(crate) fn start_replica_publisher(
                         break;
                     };
                     match rmp_serde::to_vec_named(&binding) {
-                        Ok(payload) => vec![AFFINITY_TOPIC.to_vec(), payload],
+                        Ok(payload) => (
+                            vec![AFFINITY_TOPIC.to_vec(), payload],
+                            format!("session_id={}", binding.session_id),
+                        ),
                         Err(error) => {
                             tracing::error!(
                                 session_id = %binding.session_id,
@@ -530,7 +538,7 @@ pub(crate) fn start_replica_publisher(
                 }
             };
             if let Err(error) = socket.send_multipart(frames).await {
-                tracing::error!("Failed to publish replica event: {error}");
+                tracing::error!(event = %label, "Failed to publish replica event: {error}");
             }
         }
     });

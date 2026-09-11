@@ -52,7 +52,9 @@ type RsManagedKvRouter = llm_rs::kv_router::ManagedKvRouter;
 use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
 use llm_rs::protocols::common::timing::RequestTracker;
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
-use llm_rs::session_affinity::SessionAffinityMode as RsSessionAffinityMode;
+use llm_rs::session_affinity::{
+    MAX_SESSION_AFFINITY_TTL_SECS, SessionAffinityMode as RsSessionAffinityMode,
+};
 
 use super::aic_callback::create_aic_prefill_load_estimator;
 use super::entrypoint::AicPerfConfig;
@@ -640,8 +642,6 @@ impl SelectionCacheConfig {
 
 #[cfg(feature = "select-service")]
 fn session_affinity_ttl_from_secs(ttl: f64) -> Result<Duration, String> {
-    use selection::affinity::MAX_SESSION_AFFINITY_TTL_SECS;
-
     if !(1.0..=MAX_SESSION_AFFINITY_TTL_SECS as f64).contains(&ttl) {
         return Err(format!(
             "session_affinity_ttl_secs must be between 1 and {MAX_SESSION_AFFINITY_TTL_SECS}"
@@ -2230,10 +2230,12 @@ impl KvRouter {
         load_threshold_config: Option<&LoadThresholdConfig>,
         session_affinity_mode: &str,
     ) -> PyResult<Self> {
-        if session_affinity_ttl_secs.is_some_and(|ttl| !(1..=31_536_000).contains(&ttl)) {
-            return Err(PyValueError::new_err(
-                "session_affinity_ttl_secs must be between 1 and 31536000",
-            ));
+        if session_affinity_ttl_secs
+            .is_some_and(|ttl| !(1..=MAX_SESSION_AFFINITY_TTL_SECS).contains(&ttl))
+        {
+            return Err(PyValueError::new_err(format!(
+                "session_affinity_ttl_secs must be between 1 and {MAX_SESSION_AFFINITY_TTL_SECS}"
+            )));
         }
         let session_affinity_mode = session_affinity_mode
             .parse::<RsSessionAffinityMode>()

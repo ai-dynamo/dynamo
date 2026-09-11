@@ -85,7 +85,7 @@ impl RemoteIndexer {
         })
     }
 
-    pub(super) async fn find_matches_by_tier(
+    pub(super) async fn fetch_matches_by_tier(
         &self,
         block_hashes: Vec<LocalBlockHash>,
         device_only: bool,
@@ -207,7 +207,7 @@ impl dynamo_kv_router::services::indexer::backend::RemotePrimary for RemoteIndex
         block_hashes: Vec<LocalBlockHash>,
         device_only: bool,
     ) -> Result<TieredMatchDetails> {
-        RemoteIndexer::find_matches_by_tier(self, block_hashes, device_only).await
+        self.fetch_matches_by_tier(block_hashes, device_only).await
     }
 
     async fn record_routing_decision(

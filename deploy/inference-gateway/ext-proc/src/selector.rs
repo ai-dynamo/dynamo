@@ -167,7 +167,7 @@ impl Selector {
     }
 
     /// The selection core whose catalog the topology adapter feeds.
-    pub fn core(&self) -> &Arc<SelectionCore> {
+    pub(crate) fn core(&self) -> &Arc<SelectionCore> {
         self.service.core()
     }
 
@@ -906,11 +906,13 @@ worker_selection:
         for ttl in [-1.0, 0.0, 0.5, f64::NAN, f64::INFINITY] {
             let mut cfg = test_config();
             cfg.session_affinity_ttl_secs = Some(ttl);
+            let error = Selector::new(&cfg, WorkerSelectionPolicyRegistry::default())
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("TTL={ttl} must be rejected"));
             assert!(
-                Selector::new(&cfg, WorkerSelectionPolicyRegistry::default())
-                    .await
-                    .is_err(),
-                "TTL={ttl}"
+                format!("{error:#}").contains("session affinity TTL"),
+                "TTL={ttl}: {error:#}"
             );
         }
     }

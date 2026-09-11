@@ -58,7 +58,7 @@ impl WorkerCatalogSource for PodReflectorSource {
             return None;
         }
         if self.primed && self.changes.changed().await.is_err() {
-            tracing::warn!("reflector change channel closed; clearing selector topology");
+            tracing::warn!("Reflector change channel closed; clearing selector topology");
             self.closed = true;
             return Some(Vec::new());
         }

@@ -249,11 +249,11 @@ impl SessionAffinity {
             waiter_observed: Notify::new(),
         });
         Self::spawn_reaper(&inner);
-        tracing::info!(
+        tracing::debug!(
             ttl_secs = config.ttl.as_secs(),
             mode = ?config.mode,
             max_entries = config.max_entries,
-            "session affinity enabled"
+            "Session affinity enabled"
         );
         Ok(Self { inner })
     }
@@ -333,7 +333,7 @@ impl SessionAffinity {
                 self.reserve_entry()?;
                 tracing::debug!(
                     session_id,
-                    "session affinity miss: new session, pinning after worker selection"
+                    "Session affinity miss: new session, pinning after worker selection"
                 );
                 let revision = self.inner.next_revision.fetch_add(1, Ordering::Relaxed);
                 let notify = Arc::new(Notify::new());
@@ -369,7 +369,7 @@ impl SessionAffinity {
                 } if *active_leases == 0 && *idle_deadline <= now => {
                     tracing::debug!(
                         session_id,
-                        "session affinity miss: pin expired (idle past TTL), re-selecting worker"
+                        "Session affinity miss: pin expired (idle past TTL), re-selecting worker"
                     );
                     let revision = self.inner.next_revision.fetch_add(1, Ordering::Relaxed);
                     let notify = Arc::new(Notify::new());
@@ -401,7 +401,7 @@ impl SessionAffinity {
                         worker_id = target.worker_id,
                         dp_rank = ?target.dp_rank,
                         active_leases = *active_leases + 1,
-                        "session affinity hit: reusing pinned worker"
+                        "Session affinity hit: reusing pinned worker"
                     );
                     *active_leases += 1;
                     Ok(AcquireStep::Held(Hold::Bound {
@@ -496,7 +496,7 @@ impl SessionAffinity {
             session_id,
             worker_id = target.worker_id,
             dp_rank = ?target.dp_rank,
-            "session affinity hit: reusing pinned worker"
+            "Session affinity hit: reusing pinned worker"
         );
         Ok(Some(*target))
     }

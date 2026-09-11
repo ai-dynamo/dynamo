@@ -385,10 +385,6 @@ impl WorkerRegistry {
         *self.indexer_policy.lock() = policy;
     }
 
-    pub fn indexer_policy(&self) -> IndexerPolicy {
-        self.indexer_policy.lock().clone()
-    }
-
     pub fn signal_ready(&self) {
         let _ = self.ready_tx.send(true);
     }
@@ -451,6 +447,7 @@ impl WorkerRegistry {
             }
         }
 
+        let indexer_policy = self.indexer_policy.lock().clone();
         let indexer_entry = self.indexers.entry(key.clone()).or_insert_with(|| {
             tracing::info!(
                 model_name = %key.model_name,
@@ -464,7 +461,7 @@ impl WorkerRegistry {
                     block_size,
                     self.num_threads,
                     self.indexer_metrics.clone(),
-                    &self.indexer_policy.lock(),
+                    &indexer_policy,
                 ),
                 block_size,
             }
@@ -785,6 +782,7 @@ impl WorkerRegistry {
     }
 
     pub fn get_or_create_indexer(&self, key: RoutingPartitionId, block_size: u32) -> Indexer {
+        let indexer_policy = self.indexer_policy.lock().clone();
         let entry = self.indexers.entry(key.clone()).or_insert_with(|| {
             tracing::info!(
                 model_name = %key.model_name,
@@ -798,7 +796,7 @@ impl WorkerRegistry {
                     block_size,
                     self.num_threads,
                     self.indexer_metrics.clone(),
-                    &self.indexer_policy.lock(),
+                    &indexer_policy,
                 ),
                 block_size,
             }

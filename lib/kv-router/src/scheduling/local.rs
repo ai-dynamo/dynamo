@@ -602,7 +602,7 @@ where
 
     /// Whether `request_id` currently holds a booking on any worker.
     pub fn has_request(&self, request_id: &str) -> bool {
-        self.slots.request_worker(&request_id.to_string()).is_some()
+        self.slots.request_worker(request_id).is_some()
     }
 
     #[doc(hidden)]

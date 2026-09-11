@@ -210,6 +210,7 @@ def test_radix_tree_thread_safety(
 @pytest.mark.parametrize(
     "ttl", [-1, 0, 0.5, float("nan"), float("inf"), 31536001, 1e300]
 )
+@pytest.mark.timeout(5)
 def test_selection_service_rejects_invalid_affinity_ttl(ttl):
     with pytest.raises(ValueError, match="session_affinity_ttl_secs must be between"):
         SelectionService(session_affinity_ttl_secs=ttl)
@@ -243,6 +244,7 @@ def test_selection_service_cli_rejects_invalid_affinity_ttl(ttl):
     reason="SelectionService requires the select-service Cargo feature",
 )
 @pytest.mark.parametrize("ttl", [1.0, 1.5, 31536000.0])
+@pytest.mark.timeout(5)
 def test_selection_service_accepts_valid_affinity_ttl(ttl):
     service = SelectionService(indexer_threads=1, session_affinity_ttl_secs=ttl)
     service.shutdown()

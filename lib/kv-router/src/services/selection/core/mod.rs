@@ -501,9 +501,17 @@ impl SelectionCore {
     /// Apply a session binding a replica published.
     pub(crate) fn dispatch_affinity_event(&self, event: AffinityBindingEvent) {
         let Some(entry) = self.entry(&event.partition) else {
+            tracing::trace!(
+                key = %event.partition,
+                "Dropping session affinity replica update for unknown selector entry"
+            );
             return;
         };
         let Some(table) = entry.affinity.get() else {
+            tracing::trace!(
+                key = %event.partition,
+                "Dropping session affinity replica update: no affinity table"
+            );
             return;
         };
         if self
@@ -519,6 +527,11 @@ impl SelectionCore {
             .get(event.worker_id)
             .is_none_or(|record| record.key() != event.partition)
         {
+            tracing::trace!(
+                key = %event.partition,
+                worker_id = event.worker_id,
+                "Dropping session affinity replica update: worker not in partition"
+            );
             return;
         }
         let (target, version, worker_id) = (event.target(), event.version(), event.worker_id);
@@ -526,7 +539,7 @@ impl SelectionCore {
         tracing::trace!(
             worker_id,
             ?outcome,
-            "applied session affinity replica update"
+            "Applied session affinity replica update"
         );
     }
 

@@ -32,6 +32,7 @@ use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_llm::mocker::make_mocker_engine;
 use dynamo_llm::model_card::ModelDeploymentCard as RsModelDeploymentCard;
 use dynamo_llm::reasoning_field::ReasoningField;
+use dynamo_llm::session_affinity::MAX_SESSION_AFFINITY_TTL_SECS;
 use dynamo_llm::session_affinity::SessionAffinityMode as RsSessionAffinityMode;
 use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
 use dynamo_mocker::common::perf_model::PerfModel;
@@ -507,10 +508,12 @@ impl RouterConfig {
                 );
             });
         }
-        if session_affinity_ttl_secs.is_some_and(|ttl| !(1..=31_536_000).contains(&ttl)) {
-            return Err(PyValueError::new_err(
-                "session_affinity_ttl_secs must be between 1 and 31536000",
-            ));
+        if session_affinity_ttl_secs
+            .is_some_and(|ttl| !(1..=MAX_SESSION_AFFINITY_TTL_SECS).contains(&ttl))
+        {
+            return Err(PyValueError::new_err(format!(
+                "session_affinity_ttl_secs must be between 1 and {MAX_SESSION_AFFINITY_TTL_SECS}"
+            )));
         }
         RsLoadThresholdConfig {
             active_decode_blocks_threshold,

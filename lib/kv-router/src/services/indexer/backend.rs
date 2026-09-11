@@ -13,7 +13,7 @@ use crate::ConcurrentRadixTreeCompressed;
 use crate::ThreadPoolIndexer;
 use crate::approx::PruneConfig;
 use crate::config::{ApproximateCachePolicyKind, KvRouterConfig};
-use crate::identity::RoutingPartitionId;
+use crate::identity::{RoutingPartitionId, default_routing_group};
 use crate::indexer::{
     ApproximateLruIncarnation, ApproximateLruStats, ApproximateRetentionConfig, KvIndexer,
     KvIndexerInterface, KvIndexerMetrics, KvRouterError, LowerTierIndexers, LowerTierQueryOptions,
@@ -89,6 +89,7 @@ impl RemoteIndexerTransport {
 pub struct TieredQueryByHashRequest {
     pub block_hashes: Vec<i64>,
     pub model_name: String,
+    #[serde(default = "default_routing_group")]
     pub routing_group: String,
 }
 
@@ -291,7 +292,11 @@ impl SideIndexer {
         sequence: HashInput<'_>,
     ) -> std::result::Result<OverlapScores, KvRouterError> {
         match self {
-            Self::Single(indexer) => indexer.find_matches(sequence.as_slice().to_vec()).await,
+            Self::Single(indexer) => {
+                indexer
+                    .find_matches(sequence.into_owned_at_boundary())
+                    .await
+            }
             Self::Concurrent(indexer) => {
                 Ok(indexer.backend().find_matches(sequence.as_slice(), false))
             }
@@ -669,7 +674,9 @@ impl Indexer {
                         .enqueue_event(event)?;
                 }
             }
-            Self::Remote { .. } | Self::None => {}
+            Self::Remote { .. } | Self::None => {
+                tracing::trace!("Dropping KV event: no local primary indexer");
+            }
         }
         Ok(())
     }
@@ -795,21 +802,10 @@ impl Indexer {
     /// Device-tier overlap scores, including side-indexer credit. Tier-aware
     /// callers should use [`Self::find_tiered_matches`].
     pub async fn find_matches(&self, hashes: Vec<LocalBlockHash>) -> Result<OverlapScores> {
-        let primary = match self {
-            Indexer::Single { primary, .. } => primary.find_matches(hashes.clone()).await?,
-            Indexer::Concurrent { primary, .. } => primary.find_matches(hashes.clone()).await?,
-            Indexer::Remote { primary, .. } => {
-                primary
-                    .find_matches_by_tier(hashes.clone(), true)
-                    .await?
-                    .device
-                    .overlap_scores
-            }
-            Indexer::None => return Ok(OverlapScores::default()),
-        };
         let Some(side) = self.approx() else {
-            return Ok(primary);
+            return self.find_primary_matches(hashes).await;
         };
+        let primary = self.find_primary_matches(hashes.clone()).await?;
         let mut merged = MatchDetails::new();
         merged.overlap_scores = primary;
         Ok(
@@ -817,6 +813,22 @@ impl Indexer {
                 .await
                 .overlap_scores,
         )
+    }
+
+    /// Device-tier overlap scores from the primary only (no side-indexer credit).
+    async fn find_primary_matches(&self, hashes: Vec<LocalBlockHash>) -> Result<OverlapScores> {
+        Ok(match self {
+            Indexer::Single { primary, .. } => primary.find_matches(hashes).await?,
+            Indexer::Concurrent { primary, .. } => primary.find_matches(hashes).await?,
+            Indexer::Remote { primary, .. } => {
+                primary
+                    .find_matches_by_tier(hashes, true)
+                    .await?
+                    .device
+                    .overlap_scores
+            }
+            Indexer::None => OverlapScores::default(),
+        })
     }
 
     /// Device match details + per-tier hits, suitable for building the
@@ -842,6 +854,20 @@ impl Indexer {
                 && self.supports_kv_transfer_chain_retention(),
         };
         self.find_matches_by_tier_with_options(sequence, options)
+            .await
+    }
+
+    /// Borrowed variant of [`Self::find_tiered_matches_with_options`].
+    pub async fn find_tiered_matches_ref_with_options(
+        &self,
+        sequence: &[LocalBlockHash],
+        options: LowerTierQueryOptions,
+    ) -> std::result::Result<TieredMatchDetails, KvRouterError> {
+        let options = LowerTierQueryOptions {
+            retain_kv_transfer_chain: options.retain_kv_transfer_chain
+                && self.supports_kv_transfer_chain_retention(),
+        };
+        self.find_matches_by_tier_ref_with_options(sequence, options)
             .await
     }
 
@@ -924,7 +950,8 @@ impl TieredMatchProvider for Indexer {
         &self,
         sequence: &[LocalBlockHash],
     ) -> std::result::Result<TieredMatchDetails, KvRouterError> {
-        self.find_tiered_matches(sequence.to_vec()).await
+        self.find_tiered_matches_ref_with_options(sequence, LowerTierQueryOptions::default())
+            .await
     }
 
     async fn find_tiered_matches_with_options(
@@ -932,7 +959,7 @@ impl TieredMatchProvider for Indexer {
         sequence: &[LocalBlockHash],
         options: LowerTierQueryOptions,
     ) -> std::result::Result<TieredMatchDetails, KvRouterError> {
-        self.find_tiered_matches_with_options(sequence.to_vec(), options)
+        self.find_tiered_matches_ref_with_options(sequence, options)
             .await
     }
 }

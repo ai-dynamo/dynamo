@@ -174,16 +174,6 @@ impl Indexer {
             .await
     }
 
-    /// Same as [`Self::record_routing_decision`]; kept for callers that name
-    /// the hashes explicitly.
-    pub async fn record_routing_decision_hashes(
-        &self,
-        worker: WorkerWithDpRank,
-        hashes: RoutingDecisionHashes,
-    ) -> Result<(), KvRouterError> {
-        self.record_routing_decision(worker, hashes).await
-    }
-
     pub async fn record_hashed_routing_decision(
         &self,
         worker: WorkerWithDpRank,

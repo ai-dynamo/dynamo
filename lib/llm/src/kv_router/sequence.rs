@@ -198,19 +198,6 @@ impl ActiveSequenceEventPublisher {
     }
 }
 
-#[cfg(test)]
-fn active_sequence_event_channel(
-    enabled: bool,
-    capacity: usize,
-    cancellation_token: &CancellationToken,
-) -> Option<(
-    ActiveSequenceEventPublisher,
-    mpsc::Receiver<ActiveSequenceEvent>,
-)> {
-    enabled
-        .then(|| ActiveSequenceEventPublisher::channel(capacity, cancellation_token.child_token()))
-}
-
 /// One event per message, for transports that carry singletons.
 trait SingletonEventPublisher: Send + Sync {
     fn publish_event(
@@ -656,11 +643,6 @@ mod tests {
         assert!(error.contains("capacity=1"));
         assert_eq!(event_rx.len(), 1);
         assert_eq!(event_rx.try_recv().unwrap().request_id, "accepted");
-    }
-
-    #[test]
-    fn active_sequence_publish_channel_is_absent_when_replica_sync_disabled() {
-        assert!(active_sequence_event_channel(false, 1, &CancellationToken::new()).is_none());
     }
 
     #[test]

@@ -75,7 +75,7 @@ axum = { version = "=0.8.4", default-features = false, features = [
   "tracing",
 ], optional = true }
 chrono = { workspace = true, optional = true }
-reqwest = { version = "0.12.24", default-features = false, features = ["json"], optional = true }
+reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"], optional = true }
 tracing-appender = { version = "0.2", optional = true }
 
 [dev-dependencies]
