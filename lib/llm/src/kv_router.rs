@@ -1614,8 +1614,9 @@ impl KvRouter {
     pub(crate) fn affinity_coordinator(
         &self,
         ttl: std::time::Duration,
+        mode: crate::session_affinity::SessionAffinityMode,
     ) -> anyhow::Result<crate::session_affinity::AffinityCoordinator> {
-        self.scheduler.affinity_coordinator(ttl)
+        self.scheduler.affinity_coordinator(ttl, mode)
     }
 
     pub(crate) fn booking_cleanup(&self) -> scheduler::SchedulerBookingCleanup {

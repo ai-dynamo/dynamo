@@ -191,6 +191,14 @@ impl Hold {
             Self::Bound { target, .. } => Some(*target),
         }
     }
+
+    /// `AffinityLease::invalidate` for a bound session; an initializing hold
+    /// just releases.
+    pub fn invalidate(self) {
+        if let Self::Bound { mut lease, .. } = self {
+            lease.invalidate();
+        }
+    }
 }
 
 /// One step of acquiring a session.

@@ -87,7 +87,7 @@ impl RoutingHost {
         phase: RequestPhase,
         is_query_only: bool,
         budget: &CleanupBudget,
-    ) -> Result<(WorkerSelection, Option<AffinityAcquire>), Error> {
+    ) -> Result<(WorkerSelection, Option<Hold>), Error> {
         self.select_with_session_affinity(request, phase, is_query_only, budget, |target| {
             self.select_request(request, phase, is_query_only, target, budget)
         })
@@ -246,12 +246,7 @@ impl RoutingHost {
                 return Err(error);
             }
         };
-        match affinity {
-            Some(affinity) => {
-                affinity.into_stream(selected_target, stream, self.session_affinity_mode)
-            }
-            None => Ok(stream),
-        }
+        self.bind_affinity(affinity, selected_target, stream)
     }
 
     pub(crate) async fn prefill_worker_busy(
@@ -600,12 +595,9 @@ impl RoutingHost {
                 return Err(error);
             }
         };
-        let Some(operation) = operation else {
-            return Ok((metadata, stream));
-        };
         Ok((
             metadata,
-            operation.into_stream(selected_target, stream, self.session_affinity_mode)?,
+            self.bind_affinity(operation, selected_target, stream)?,
         ))
     }
 }

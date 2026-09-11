@@ -365,8 +365,12 @@ impl PrefillRouter {
                 )
                 .await?;
 
-            let affinity =
-                create_affinity_coordinator(prefill_session_affinity_ttl, client.clone()).await?;
+            let affinity = create_affinity_coordinator(
+                prefill_session_affinity_ttl,
+                context.session_affinity_mode,
+                client.clone(),
+            )
+            .await?;
 
             // Build the PushRouter for prefill with KV mode using the shared client
             let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
@@ -381,11 +385,14 @@ impl PrefillRouter {
                 kv_chooser,
                 load_context.clone(),
                 affinity,
-                context.session_affinity_mode,
             ))
         } else {
-            let affinity =
-                create_affinity_coordinator(prefill_session_affinity_ttl, client.clone()).await?;
+            let affinity = create_affinity_coordinator(
+                prefill_session_affinity_ttl,
+                context.session_affinity_mode,
+                client.clone(),
+            )
+            .await?;
 
             // Create the transport and discovery layer for the builtin policy.
             // Note: Per-worker metrics (active_prefill_tokens, active_decode_blocks) are only
@@ -401,7 +408,6 @@ impl PrefillRouter {
                 push_router,
                 load_context.clone(),
                 affinity,
-                context.session_affinity_mode,
             )?)
         };
 

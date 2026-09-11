@@ -346,7 +346,11 @@ mod tests {
 
     #[tokio::test]
     async fn rejected_worker_update_still_advances_replica_clock() {
-        let coordinator = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
+        let coordinator = AffinityCoordinator::new(
+            Duration::from_secs(10),
+            crate::session_affinity::SessionAffinityMode::Hard,
+        )
+        .unwrap();
         let baseline = coordinator.next_version_for_test();
         let sequence = baseline.sequence.saturating_add(10);
         let (_tx, discovered_instances) = watch::channel(Vec::new());
@@ -393,7 +397,11 @@ mod tests {
         ));
         let client = endpoint.client().await.unwrap();
 
-        let original = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
+        let original = AffinityCoordinator::new(
+            Duration::from_secs(10),
+            crate::session_affinity::SessionAffinityMode::Hard,
+        )
+        .unwrap();
         let shared = original.clone();
         let (first, second) = tokio::join!(
             original.enable_replica_sync(client.clone()),
@@ -409,7 +417,11 @@ mod tests {
         drop(shared);
         wait_for_registration_count(&drt, &query, 0).await;
 
-        let replacement = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
+        let replacement = AffinityCoordinator::new(
+            Duration::from_secs(10),
+            crate::session_affinity::SessionAffinityMode::Hard,
+        )
+        .unwrap();
         replacement.enable_replica_sync(client).await.unwrap();
         wait_for_registration_count(&drt, &query, 1).await;
 

@@ -15,8 +15,7 @@ use std::{
 };
 
 use dynamo_kv_router::services::selection::affinity::{
-    AcquireStep, AffinityError, AffinityInitialization, AffinityLease, Hold, SessionAffinity,
-    validate_dispatch_target,
+    AcquireStep, AffinityError, AffinityLease, Hold, SessionAffinity, SessionAffinityConfig,
 };
 use dynamo_runtime::{
     engine::{AsyncEngineContext, AsyncEngineContextProvider},
@@ -50,7 +49,7 @@ pub(crate) fn to_table(target: AffinityTarget) -> TableTarget {
     TableTarget::new(target.worker_id, target.dp_rank)
 }
 
-fn from_table(target: TableTarget) -> AffinityTarget {
+pub(crate) fn from_table(target: TableTarget) -> AffinityTarget {
     AffinityTarget::new(target.worker_id, target.dp_rank)
 }
 
@@ -73,9 +72,10 @@ pub struct AffinityCoordinator {
 }
 
 impl AffinityCoordinator {
-    pub fn new(ttl: Duration) -> Result<Self, Error> {
+    pub fn new(ttl: Duration, mode: SessionAffinityMode) -> Result<Self, Error> {
         Ok(Self::wrap(
-            SessionAffinity::new(ttl).map_err(affinity_error)?,
+            SessionAffinity::with_config(SessionAffinityConfig::new(ttl).with_mode(mode))
+                .map_err(affinity_error)?,
         ))
     }
 
@@ -123,7 +123,7 @@ impl AffinityCoordinator {
         &self,
         session_id: &SessionAffinityId,
         requested_target: Option<AffinityTarget>,
-    ) -> Result<AffinityAcquire, Error> {
+    ) -> Result<Hold, Error> {
         self.acquire_inner(session_id, requested_target, None).await
     }
 
@@ -132,7 +132,7 @@ impl AffinityCoordinator {
         session_id: &SessionAffinityId,
         requested_target: Option<AffinityTarget>,
         request_context: &dyn AsyncEngineContext,
-    ) -> Result<AffinityAcquire, Error> {
+    ) -> Result<Hold, Error> {
         self.acquire_inner(session_id, requested_target, Some(request_context))
             .await
     }
@@ -142,7 +142,7 @@ impl AffinityCoordinator {
         session_id: &SessionAffinityId,
         requested_target: Option<AffinityTarget>,
         request_context: Option<&dyn AsyncEngineContext>,
-    ) -> Result<AffinityAcquire, Error> {
+    ) -> Result<Hold, Error> {
         let requested = requested_target.map(to_table);
         loop {
             match self
@@ -151,15 +151,7 @@ impl AffinityCoordinator {
                 .try_acquire(session_id.as_str(), requested)
                 .map_err(affinity_error)?
             {
-                AcquireStep::Held(Hold::Initialize(initialization)) => {
-                    return Ok(AffinityAcquire::Initialize(initialization));
-                }
-                AcquireStep::Held(Hold::Bound { target, lease }) => {
-                    return Ok(AffinityAcquire::Bound {
-                        target: from_table(target),
-                        lease,
-                    });
-                }
+                AcquireStep::Held(hold) => return Ok(hold),
                 AcquireStep::Wait(notified) => match request_context {
                     Some(context) => {
                         tokio::select! {
@@ -185,6 +177,26 @@ impl AffinityCoordinator {
             .query_target(session_id.as_str(), requested_target.map(to_table))
             .map(|target| target.map(from_table))
             .map_err(affinity_error)
+    }
+
+    /// The mode the table binds sessions with.
+    pub(crate) fn mode(&self) -> SessionAffinityMode {
+        self.inner.table.mode()
+    }
+
+    /// `SessionAffinity::commit`, holding the lease until `stream` ends.
+    pub(crate) fn commit_to_stream(
+        &self,
+        hold: Hold,
+        dispatched_target: AffinityTarget,
+        stream: ManyOut<LlmResponse>,
+    ) -> Result<ManyOut<LlmResponse>, Error> {
+        let lease = self
+            .inner
+            .table
+            .commit(hold, to_table(dispatched_target))
+            .map_err(affinity_error)?;
+        Ok(tracked_stream(lease, stream))
     }
 
     #[cfg(test)]
@@ -284,65 +296,6 @@ impl AffinityCoordinator {
                 writer_id,
             },
         )
-    }
-}
-
-pub(crate) enum AffinityAcquire {
-    Initialize(AffinityInitialization),
-    Bound {
-        target: AffinityTarget,
-        lease: AffinityLease,
-    },
-}
-
-impl AffinityAcquire {
-    pub(crate) fn target(&self) -> Option<AffinityTarget> {
-        match self {
-            Self::Initialize(_) => None,
-            Self::Bound { target, .. } => Some(*target),
-        }
-    }
-
-    /// Bind (or confirm) the session to where the request was dispatched and
-    /// hold the lease until `stream` ends.
-    pub(crate) fn into_stream(
-        self,
-        dispatched_target: AffinityTarget,
-        stream: ManyOut<LlmResponse>,
-        mode: SessionAffinityMode,
-    ) -> Result<ManyOut<LlmResponse>, Error> {
-        let dispatched = to_table(dispatched_target);
-        match self {
-            Self::Initialize(initialization) => {
-                let lease = initialization.commit(dispatched).map_err(affinity_error)?;
-                lease.publish(dispatched);
-                Ok(tracked_stream(lease, stream))
-            }
-            Self::Bound { target, mut lease } => {
-                let bound = to_table(target);
-                if mode == SessionAffinityMode::Soft {
-                    let rebound = AffinityLease::rebound_target(bound, dispatched);
-                    if bound == rebound {
-                        lease.publish(bound);
-                    } else if lease.rebind(bound, rebound) {
-                        lease.publish(rebound);
-                    }
-                    return Ok(tracked_stream(lease, stream));
-                }
-                if let Err(error) = validate_dispatch_target("session", bound, dispatched) {
-                    lease.invalidate();
-                    return Err(affinity_error(error));
-                }
-                lease.publish(bound);
-                Ok(tracked_stream(lease, stream))
-            }
-        }
-    }
-
-    pub(crate) fn invalidate(self) {
-        if let Self::Bound { mut lease, .. } = self {
-            lease.invalidate();
-        }
     }
 }
 

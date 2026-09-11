@@ -150,10 +150,14 @@ impl SelectionEntry {
                 }
                 Ok(table)
             })?;
-        if table.ttl() != config.ttl {
+        if table.ttl() != config.ttl || table.mode() != config.mode {
             return Err(SelectionError::Conflict(format!(
-                "session affinity TTL mismatch for {}",
-                self.key
+                "session affinity config mismatch for {}: existing=({:?}, {:?}) requested=({:?}, {:?})",
+                self.key,
+                table.ttl(),
+                table.mode(),
+                config.ttl,
+                config.mode
             )));
         }
         Ok(table)
@@ -4970,7 +4974,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn affinity_configuration_rejects_invalid_or_conflicting_ttl() {
+    async fn affinity_configuration_rejects_invalid_or_conflicting_config() {
         use super::super::service::SelectionServiceBuilder;
         for ttl in [
             Duration::ZERO,
@@ -4993,6 +4997,13 @@ mod tests {
             .unwrap();
         assert!(matches!(
             partition.session_affinity(SessionAffinityConfig::new(Duration::from_secs(20))),
+            Err(SelectionError::Conflict(_))
+        ));
+        assert!(matches!(
+            partition.session_affinity(
+                SessionAffinityConfig::new(Duration::from_secs(10))
+                    .with_mode(SessionAffinityMode::Soft)
+            ),
             Err(SelectionError::Conflict(_))
         ));
     }

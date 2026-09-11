@@ -38,8 +38,8 @@ use crate::{
         timing::{RequestPhase, RoutingData, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL},
     },
     session_affinity::{
-        AffinityAcquire, AffinityCoordinator, AffinityTarget, SessionAffinityMode, affinity_id,
-        explicit_target, invalid_argument,
+        AffinityCoordinator, AffinityTarget, Hold, SessionAffinityMode, affinity_id,
+        explicit_target, from_table, invalid_argument,
     },
 };
 
@@ -248,7 +248,7 @@ pub(crate) struct RoutePlan {
     signals: RoutePlanSignals,
     selection: WorkerSelection,
     cleanup: KvRequestCleanup,
-    affinity: Option<AffinityAcquire>,
+    affinity: Option<Hold>,
     /// Carried forward from the [`RoutePreview`] this plan was admitted from, so
     /// preview, admission and dispatch draw on one budget instead of three.
     budget: CleanupBudget,
@@ -314,6 +314,12 @@ impl RoutePlan {
 /// removed only in a 2.0.0 (or later) breaking release.
 pub type KvPushRouter = RoutingHost;
 
+/// The host steers and retries by the same mode its table commits with; a
+/// host without session affinity never reads it.
+fn affinity_mode(affinity: Option<&AffinityCoordinator>) -> SessionAffinityMode {
+    affinity.map(AffinityCoordinator::mode).unwrap_or_default()
+}
+
 impl RoutingHost {
     pub fn new(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
@@ -321,15 +327,10 @@ impl RoutingHost {
         session_affinity_ttl: Option<Duration>,
     ) -> Result<Self, Error> {
         let affinity = session_affinity_ttl
-            .map(|ttl| kv_router.affinity_coordinator(ttl))
+            .map(|ttl| kv_router.affinity_coordinator(ttl, SessionAffinityMode::Hard))
             .transpose()?;
 
-        Ok(Self::new_with_coordinator(
-            inner,
-            kv_router,
-            affinity,
-            SessionAffinityMode::Hard,
-        ))
+        Ok(Self::new_with_coordinator(inner, kv_router, affinity))
     }
 
     pub fn new_with_load_context(
@@ -340,7 +341,7 @@ impl RoutingHost {
         session_affinity_mode: SessionAffinityMode,
     ) -> Result<Self, Error> {
         let affinity = session_affinity_ttl
-            .map(|ttl| kv_router.affinity_coordinator(ttl))
+            .map(|ttl| kv_router.affinity_coordinator(ttl, session_affinity_mode))
             .transpose()?;
 
         Ok(Self::new_with_load_context_and_coordinator(
@@ -348,7 +349,6 @@ impl RoutingHost {
             kv_router,
             load_context,
             affinity,
-            session_affinity_mode,
         ))
     }
 
@@ -356,15 +356,8 @@ impl RoutingHost {
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         kv_router: Arc<KvRouter>,
         affinity: Option<AffinityCoordinator>,
-        session_affinity_mode: SessionAffinityMode,
     ) -> Self {
-        Self::new_with_optional_load_context_and_coordinator(
-            inner,
-            kv_router,
-            None,
-            affinity,
-            session_affinity_mode,
-        )
+        Self::new_with_optional_load_context_and_coordinator(inner, kv_router, None, affinity)
     }
 
     pub(crate) fn new_with_load_context_and_coordinator(
@@ -372,14 +365,12 @@ impl RoutingHost {
         kv_router: Arc<KvRouter>,
         load_context: Arc<crate::kv_router::RoutingLoadContext>,
         affinity: Option<AffinityCoordinator>,
-        session_affinity_mode: SessionAffinityMode,
     ) -> Self {
         Self::new_with_optional_load_context_and_coordinator(
             inner,
             kv_router,
             Some(load_context),
             affinity,
-            session_affinity_mode,
         )
     }
 
@@ -388,7 +379,6 @@ impl RoutingHost {
         kv_router: Arc<KvRouter>,
         load_context: Option<Arc<crate::kv_router::RoutingLoadContext>>,
         affinity: Option<AffinityCoordinator>,
-        session_affinity_mode: SessionAffinityMode,
     ) -> Self {
         // Eagerly register router request metrics (as zeros) so they are
         // scrapeable before any requests arrive. Both the frontend pipeline
@@ -400,8 +390,8 @@ impl RoutingHost {
             inner,
             policy: RoutingPolicy::Kv(kv_router),
             request_metrics,
+            session_affinity_mode: affinity_mode(affinity.as_ref()),
             affinity,
-            session_affinity_mode,
             hosted_occupancy: None,
             lora: None,
             routing_context: load_context,
@@ -413,35 +403,21 @@ impl RoutingHost {
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         load_context: Arc<crate::kv_router::RoutingLoadContext>,
     ) -> Result<Self, Error> {
-        Self::new_builtin_with_capabilities(
-            inner,
-            load_context,
-            None,
-            SessionAffinityMode::Hard,
-            None,
-        )
+        Self::new_builtin_with_capabilities(inner, load_context, None, None)
     }
 
     pub(crate) fn new_builtin_with_coordinator(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         load_context: Arc<crate::kv_router::RoutingLoadContext>,
         affinity: Option<AffinityCoordinator>,
-        session_affinity_mode: SessionAffinityMode,
     ) -> Result<Self, Error> {
-        Self::new_builtin_with_capabilities(
-            inner,
-            load_context,
-            affinity,
-            session_affinity_mode,
-            None,
-        )
+        Self::new_builtin_with_capabilities(inner, load_context, affinity, None)
     }
 
     pub(crate) fn new_builtin_with_capabilities(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         load_context: Arc<crate::kv_router::RoutingLoadContext>,
         affinity: Option<AffinityCoordinator>,
-        session_affinity_mode: SessionAffinityMode,
         lora: Option<(Arc<LoraFilter>, Arc<LoadEstimator>)>,
     ) -> Result<Self, Error> {
         if affinity.is_some() && lora.is_some() {
@@ -488,8 +464,8 @@ impl RoutingHost {
             inner,
             policy,
             request_metrics,
+            session_affinity_mode: affinity_mode(affinity.as_ref()),
             affinity,
-            session_affinity_mode,
             hosted_occupancy,
             lora: lora
                 .zip(lora_selector)
@@ -551,6 +527,20 @@ impl RoutingHost {
         }
     }
 
+    /// Commit a held session to the dispatched worker; a request without a
+    /// session passes its stream through.
+    fn bind_affinity(
+        &self,
+        hold: Option<Hold>,
+        dispatched_target: AffinityTarget,
+        stream: ManyOut<Annotated<LLMEngineOutput>>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        let (Some(hold), Some(affinity)) = (hold, self.affinity.as_ref()) else {
+            return Ok(stream);
+        };
+        affinity.commit_to_stream(hold, dispatched_target, stream)
+    }
+
     fn affinity_target_is_valid(&self, target: AffinityTarget) -> bool {
         if !self.inner.client.is_instance_discovered(target.worker_id) {
             return false;
@@ -589,7 +579,7 @@ impl RoutingHost {
         phase: RequestPhase,
         staged_kv: StagedKv,
         budget: &CleanupBudget,
-    ) -> Result<AffinityAcquire, Error> {
+    ) -> Result<Hold, Error> {
         match DispatchCancellation::for_request(phase, staged_kv) {
             DispatchCancellation::CancelWhenStopped => {
                 affinity
@@ -616,7 +606,7 @@ impl RoutingHost {
         is_query_only: bool,
         budget: &CleanupBudget,
         mut select: Select,
-    ) -> Result<(T, Option<AffinityAcquire>), Error>
+    ) -> Result<(T, Option<Hold>), Error>
     where
         Select: FnMut(Option<AffinityTarget>) -> SelectionFuture,
         SelectionFuture: Future<Output = Result<T, Error>>,
@@ -646,7 +636,7 @@ impl RoutingHost {
                 budget,
             )
             .await?;
-        let target = operation.target();
+        let target = operation.target().map(from_table);
         match select(target).await {
             Ok(selection) => Ok((selection, Some(operation))),
             Err(error) if is_cancelled(&error) => Err(error),
@@ -667,7 +657,7 @@ impl RoutingHost {
                         budget,
                     )
                     .await?;
-                let selection = select(retry.target()).await?;
+                let selection = select(retry.target().map(from_table)).await?;
                 Ok((selection, Some(retry)))
             }
             Err(error) => Err(error),
@@ -819,12 +809,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 return Err(error);
             }
         };
-        match operation {
-            Some(operation) => {
-                operation.into_stream(selected_target, stream, self.session_affinity_mode)
-            }
-            None => Ok(stream),
-        }
+        self.bind_affinity(operation, selected_target, stream)
     }
 }
 

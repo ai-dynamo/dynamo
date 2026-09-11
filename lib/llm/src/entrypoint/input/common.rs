@@ -150,7 +150,6 @@ fn validate_router_mode_for_lora(
     }
 }
 
-#[expect(clippy::too_many_arguments)]
 fn preprocessed_backend_engine(
     router: LlmPushRouter,
     router_mode: RouterMode,
@@ -158,7 +157,6 @@ fn preprocessed_backend_engine(
     model_manager: &Arc<crate::discovery::ModelManager>,
     endpoint_id: &dynamo_runtime::protocols::EndpointId,
     affinity: Option<AffinityCoordinator>,
-    session_affinity_mode: SessionAffinityMode,
     load_context: Arc<RoutingLoadContext>,
 ) -> anyhow::Result<Arc<RoutingHost>> {
     // Reject LoRA + unsupported-mode combinations up front (single source of truth, shared with
@@ -180,7 +178,6 @@ fn preprocessed_backend_engine(
                 chooser,
                 load_context,
                 affinity,
-                session_affinity_mode,
             ))
         }
         _ => {
@@ -191,7 +188,6 @@ fn preprocessed_backend_engine(
                 router,
                 load_context,
                 affinity,
-                session_affinity_mode,
                 lora,
             )?)
         }
@@ -257,11 +253,11 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
     let ttl = session_affinity_ttl_secs.map(Duration::from_secs);
     let affinity = match (ttl, chooser.as_ref()) {
         (Some(ttl), Some(chooser)) => {
-            let affinity = chooser.affinity_coordinator(ttl)?;
+            let affinity = chooser.affinity_coordinator(ttl, session_affinity_mode)?;
             affinity.enable_replica_sync(router_client.clone()).await?;
             Some(affinity)
         }
-        _ => create_affinity_coordinator(ttl, router_client.clone()).await?,
+        _ => create_affinity_coordinator(ttl, session_affinity_mode, router_client.clone()).await?,
     };
 
     let embedding_cache_indexer = if enable_multimodal_cache_indexer
@@ -306,7 +302,6 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
         &model_manager,
         &endpoint_id,
         affinity,
-        session_affinity_mode,
         load_context,
     )?;
     if router_mode.is_kv_routing() && prefill_router.conditional_disagg_enabled() {

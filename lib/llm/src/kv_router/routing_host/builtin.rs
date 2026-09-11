@@ -343,7 +343,7 @@ impl RoutingHost {
             device_aware_telemetry,
         } = selection;
         let soft_affinity_target = if self.session_affinity_mode == SessionAffinityMode::Soft {
-            operation.as_ref().and_then(AffinityAcquire::target)
+            operation.as_ref().and_then(Hold::target).map(from_table)
         } else {
             None
         };
@@ -518,13 +518,7 @@ impl RoutingHost {
         }
         guard.mark_dispatched();
         let stream = into_monitored_response(response_stream, guard);
-        match operation {
-            Some(operation) => Ok((
-                metadata,
-                operation.into_stream(target, stream, self.session_affinity_mode)?,
-            )),
-            None => Ok((metadata, stream)),
-        }
+        Ok((metadata, self.bind_affinity(operation, target, stream)?))
     }
 }
 
