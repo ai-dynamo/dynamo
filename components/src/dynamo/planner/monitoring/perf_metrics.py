@@ -81,7 +81,7 @@ async def fetch_pre_deployment_metrics(
                 return fpms
         except ImportError as e:
             logger.error(
-                "aic_interpolation is set but aiconfigurator-core is not installed "
+                "aic_interpolation is set but aisimulate is not installed "
                 "in the planner image: %s",
                 e,
             )

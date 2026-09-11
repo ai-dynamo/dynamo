@@ -107,5 +107,5 @@ Request migration fundamentally changes how the system handles failures, moving 
 
 - [Request Migration](../../../../kubernetes/fault-tolerance/request-migration.md) - How to enable, tune, and reason about migration (use-case guide)
 - [Request Cancellation Architecture](request-cancellation-architecture.md) - Canceling in-flight requests
-- [Distributed Runtime](../system-architecture/distributed-runtime.md) - Service discovery architecture that underpins failure detection
+- [Distributed Runtime](../system-architecture/architecture.md#distributed-runtime) - Service discovery architecture that underpins failure detection
 - [Metrics Catalog](../../../../reference/observability/metrics-catalog.mdx#migration) - Migration metrics

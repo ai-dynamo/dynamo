@@ -9,6 +9,7 @@ use dynamo_sidecar_common::{
 };
 use tokio::time::{Instant, sleep_until, timeout_at};
 use tonic::metadata::MetadataValue;
+use tonic::transport::Channel;
 use tonic_health::pb::health_check_response::ServingStatus;
 use tonic_health::pb::{HealthCheckRequest, health_client::HealthClient};
 
@@ -45,6 +46,12 @@ impl VllmClient {
 
     pub(crate) fn connection_count(&self) -> usize {
         self.pool.len()
+    }
+
+    pub(crate) fn control_client(&self) -> pb::control_client::ControlClient<Channel> {
+        pb::control_client::ControlClient::new(self.pool.next_channel())
+            .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
+            .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
     }
 
     pub(crate) async fn wait_for_services(
@@ -115,10 +122,7 @@ impl VllmClient {
         &self,
         startup_deadline: Instant,
     ) -> Result<(pb::ModelInfo, pb::ServerInfo), DynamoError> {
-        let channel = self.pool.next_channel();
-        let mut client = pb::control_client::ControlClient::new(channel)
-            .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
-            .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE);
+        let mut client = self.control_client();
         let model = timeout_at(
             startup_deadline,
             client.get_model_info(pb::GetModelInfoRequest {}),

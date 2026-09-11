@@ -137,7 +137,7 @@ Add `NIXL_TELEMETRY_ENABLE` to each worker that should expose transfer metrics:
 ```yaml
 spec:
   services:
-    VllmDecodeWorker:
+    decode:
       componentType: worker
       extraPodSpec:
         mainContainer:
@@ -299,7 +299,7 @@ spec:
     - create: false
       name: fpm-traces
   services:
-    VllmWorker:
+    worker:
       volumeMounts:
         - name: fpm-traces
           mountPoint: /var/log/dynamo
@@ -312,7 +312,7 @@ spec:
               value: /var/log/dynamo/fpm
 ```
 
-Replace `VllmWorker` with every worker service that should write scheduler telemetry.
+Replace `worker` with every worker service that should write scheduler telemetry.
 
 </Step>
 <Step title="Collect the trace files" id="collect-fpm-trace-files">
@@ -358,12 +358,13 @@ defaults to `9090`:
 
 | Probe | Path | Period | Timeout | Failure threshold |
 | --- | --- | --- | --- | --- |
-| Liveness | `/live` | 5 seconds | 30 seconds | 1 |
+| Liveness | `/live` | 5 seconds | 4 seconds | 1 for unknown or pre-1.5.0 runtimes; 3 for runtime 1.5.0 and later |
 | Readiness | `/health` | 10 seconds | 30 seconds | 60 |
 | Startup | `/live` | 10 seconds | 5 seconds | 720 |
 
-The worker startup probe allows approximately two hours for model download and engine warm-up.
-User-specified probes take precedence over these defaults. See the
+The worker startup probe allows approximately two hours for model download and engine warm-up. The
+operator keeps the single-failure liveness behavior for custom images whose runtime version cannot
+be resolved. User-specified probes take precedence over these defaults. See the
 [API Reference](../../reference/kubernetes-api/full-api-reference.mdx) for defaults that vary by component type.
 
 </Step>
@@ -377,7 +378,7 @@ kubectl logs -n dynamo-system <pod-name> --all-containers=true
 ```
 
 If startup is delayed by downloading model weights, prefer
-[Model Caching](../model-deployment/model-loading/model-caching.mdx) over extending the probe indefinitely.
+[shared model storage](../installation/model-storage/overview.md) over extending the probe indefinitely.
 
 </Step>
 <Step title="Override the probes" id="override-health-probes">
@@ -392,7 +393,7 @@ metadata:
   name: my-deployment
 spec:
   components:
-  - name: VllmWorker
+  - name: worker
     type: worker
     podTemplate:
       spec:
@@ -422,7 +423,7 @@ For a startup budget, calculate `failureThreshold` as the expected startup time 
 `periodSeconds`. Change paths or ports only when a custom engine exposes health differently.
 
 Multinode deployments adjust probes by backend and node role. Review
-[Multinode Deployments](../model-deployment/multinode-deployments.md) before overriding probes on a
+[Multinode Orchestration](../installation/multinode-orchestration.md) before overriding probes on a
 multinode worker.
 
 See [Health Checks](../../reference/observability/health-checks.mdx) for endpoint paths, responses,

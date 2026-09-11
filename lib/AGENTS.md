@@ -87,11 +87,10 @@ cargo test  -p dynamo-kv-router
 cargo clippy -p dynamo-llm
 ```
 
-Format only the files your change touched rather than running `cargo fmt --all`, which
-rewrites the whole tree and makes a diff unreviewable:
+Format changes to the runtime crate with:
 
 ```bash
-rustfmt lib/runtime/src/distributed.rs
+cargo fmt -p dynamo-runtime
 ```
 
 After changing Rust that the Python layer calls, rebuild the extension module — the
