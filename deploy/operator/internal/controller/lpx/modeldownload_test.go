@@ -220,6 +220,26 @@ func TestRunningLPXModelDownloadRefresh(t *testing.T) {
 	}
 }
 
+func TestInitialLPXModelDownloadChecksHaveDeadline(t *testing.T) {
+	for _, forceCheck := range []bool{false, true} {
+		t.Run(fmt.Sprintf("forceCheck=%t", forceCheck), func(t *testing.T) {
+			dgd := newModelDownloadDGD(modelDownloadTestBuildID)
+			child := newLPXTestDeployment(t, dgd)
+			registry := newModelDownloadRegistry(t, map[string]bool{modelDownloadTestBuildID: true}, nil)
+			lifecycle := &graphReconciler{modelRegistry: registry}
+			started := time.Now()
+
+			ready, err := lifecycle.reconcileModelDownloads(t.Context(), child, dgd, forceCheck)
+
+			require.NoError(t, err)
+			require.True(t, ready)
+			require.Len(t, registry.deadlines, 1)
+			require.False(t, registry.deadlines[0].IsZero())
+			require.WithinDuration(t, started.Add(modelDownloadCheckTimeout), registry.deadlines[0], time.Second)
+		})
+	}
+}
+
 func TestModelDownloadSpecChangeRemainsFailClosed(t *testing.T) {
 	t.Log("Keep the source's download status independent of the unobserved child")
 	source := newModelDownloadDGD(modelDownloadTestBuildID)

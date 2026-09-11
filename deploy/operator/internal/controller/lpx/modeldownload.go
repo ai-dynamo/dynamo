@@ -29,7 +29,7 @@ const (
 	modelDownloadPendingMessage string = "Waiting for model downloads to complete"
 
 	modelDownloadRefreshInterval = 24 * time.Hour
-	modelDownloadRefreshTimeout  = 30 * time.Second
+	modelDownloadCheckTimeout    = 30 * time.Second
 )
 
 type lpxModelRegistry interface {
@@ -75,13 +75,10 @@ func (r *graphReconciler) reconcileModelDownloads(
 		return true, nil
 	}
 	running := !forceCheck && current && meta.IsStatusConditionTrue(deployment.Status.Conditions, "Ready")
-	if running {
-		refreshCtx, cancel := context.WithTimeout(ctx, modelDownloadRefreshTimeout)
-		defer cancel()
-		ctx = refreshCtx
-	}
+	checkCtx, cancel := context.WithTimeout(ctx, modelDownloadCheckTimeout)
+	defer cancel()
 
-	downloaded, ready, err := ensureModelsDownloaded(ctx, dgd, r.modelRegistry)
+	downloaded, ready, err := ensureModelsDownloaded(checkCtx, dgd, r.modelRegistry)
 	checkSucceeded := ready && err == nil
 	// Retain the running child's last observation when refresh is incomplete.
 	if !running || checkSucceeded {
