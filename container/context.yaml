@@ -79,7 +79,9 @@ vllm:
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
     # DeepSeek V4.1 Flash requires vLLM's model-preview runtime. Keep the
     # Dynamo wheel-builder on the standard CUDA 13.0 development image above.
-    runtime_image_tag: deepseekv41-flash-0909@sha256:4f3c8bcf6328305b8cb6f61146dbfa125b0b04ae98eef3d091019ec30f564a9b
+    # Pin the OCI index, rather than one architecture's child manifest, so
+    # Buildx selects the matching vendor image for each target platform.
+    runtime_image_tag: deepseekv41-flash-0909@sha256:00d577a6a63281e15336029d5bcee4e9a2cf182214a4f20ba6111b1c8e79893d
     # This day-0 model image serves the language-model-only recipe. vLLM-Omni
     # is not on that request path, and its 0.28.0rc1 dependency constraints
     # conflict with the preview image's tokenizers 0.23.2.
@@ -132,7 +134,9 @@ sglang:
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
     # DeepSeek V4.1 Flash has not shipped in a numbered SGLang release yet;
     # use the CUDA 13 multi-arch preview published for this model.
-    runtime_image_tag: dev-dsv41@sha256:cdea1bdb35fe69f98e6b4164cd330f6a5870aff08733c8ab68c846f3fbb4adf2
+    # Pin the OCI index, rather than one architecture's child manifest, so
+    # Buildx selects the matching vendor image for each target platform.
+    runtime_image_tag: dev-dsv41@sha256:e56358a68b06427362283c8c8a9d7d706448082ae53098ea1131b5d51aa1fd62
     # Baseline is the TRUE base of the third-party lmsysorg/sglang image,
     # nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04 (Docker Hub; CUDA_VERSION=13.0.3,
     # ubuntu24.04), NOT a self-baseline of lmsysorg/sglang.
