@@ -20,18 +20,17 @@ package controller
 import (
 	"context"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-	dynamolpx "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
@@ -104,27 +103,16 @@ func (s *groveWatchSetup) mapPodCliqueToRequests(
 	obj client.Object,
 ) []ctrl.Request {
 	podClique, ok := obj.(*grovev1alpha1.PodClique)
-	// LPX owns its role observations; the DGD watches the aggregate child status.
-	if !ok || podClique == nil || dynamolpx.OwnsPodClique(ctx, s.reader, podClique) {
+	if !ok {
 		return nil
 	}
 
-	dgdName := podClique.GetLabels()[consts.KubeLabelDynamoGraphDeploymentName]
-	if dgdName == "" {
-		log.FromContext(ctx).V(1).Info(
-			"PodClique missing DGD label",
-			"podClique", podClique.Name,
-			"namespace", podClique.Namespace,
-		)
+	pcs, found := s.resolveOwningPodCliqueSet(ctx, podClique)
+	if !found {
 		return nil
 	}
 
-	return []ctrl.Request{{
-		NamespacedName: types.NamespacedName{
-			Name:      dgdName,
-			Namespace: podClique.Namespace,
-		},
-	}}
+	return mapPodCliqueSetToDGDRequest(pcs)
 }
 
 // mapPodCliqueScalingGroupToRequests walks PCSG -> PCS -> DGD because the PCS
@@ -138,46 +126,88 @@ func (s *groveWatchSetup) mapPodCliqueScalingGroupToRequests(
 		return nil
 	}
 
-	controllerRef := metav1.GetControllerOf(pcsg)
-	if controllerRef == nil ||
-		controllerRef.Kind != "PodCliqueSet" ||
-		controllerRef.APIVersion != grovev1alpha1.SchemeGroupVersion.String() {
-		log.FromContext(ctx).V(1).Info(
-			"PodCliqueScalingGroup missing PodCliqueSet controller ownerReference",
-			"podCliqueScalingGroup", pcsg.Name,
-			"namespace", pcsg.Namespace,
-		)
+	pcs, found := s.resolvePodCliqueSetOwner(ctx, pcsg)
+	if !found {
 		return nil
 	}
+	return mapPodCliqueSetToDGDRequest(pcs)
+}
 
+func (s *groveWatchSetup) resolveOwningPodCliqueSet(
+	ctx context.Context,
+	podClique *grovev1alpha1.PodClique,
+) (*grovev1alpha1.PodCliqueSet, bool) {
+	controllerRef := metav1.GetControllerOf(podClique)
+	if controllerRef == nil || controllerRef.APIVersion != grovev1alpha1.SchemeGroupVersion.String() {
+		return nil, false
+	}
+
+	switch controllerRef.Kind {
+	case "PodCliqueSet":
+		return s.getPodCliqueSet(ctx, podClique.Namespace, controllerRef)
+	case "PodCliqueScalingGroup":
+		pcsg := &grovev1alpha1.PodCliqueScalingGroup{}
+		if err := s.reader.Get(ctx, types.NamespacedName{
+			Name:      controllerRef.Name,
+			Namespace: podClique.Namespace,
+		}, pcsg); err != nil || pcsg.UID != controllerRef.UID {
+			return nil, false
+		}
+		return s.resolvePodCliqueSetOwner(ctx, pcsg)
+	default:
+		return nil, false
+	}
+}
+
+func (s *groveWatchSetup) resolvePodCliqueSetOwner(
+	ctx context.Context,
+	pcsg *grovev1alpha1.PodCliqueScalingGroup,
+) (*grovev1alpha1.PodCliqueSet, bool) {
+	controllerRef := metav1.GetControllerOf(pcsg)
+	if controllerRef == nil ||
+		controllerRef.APIVersion != grovev1alpha1.SchemeGroupVersion.String() ||
+		controllerRef.Kind != "PodCliqueSet" {
+		return nil, false
+	}
+	return s.getPodCliqueSet(ctx, pcsg.Namespace, controllerRef)
+}
+
+func (s *groveWatchSetup) getPodCliqueSet(
+	ctx context.Context,
+	namespace string,
+	controllerRef *metav1.OwnerReference,
+) (*grovev1alpha1.PodCliqueSet, bool) {
 	pcs := &grovev1alpha1.PodCliqueSet{}
 	if err := s.reader.Get(ctx, types.NamespacedName{
 		Name:      controllerRef.Name,
-		Namespace: pcsg.Namespace,
+		Namespace: namespace,
 	}, pcs); err != nil {
-		log.FromContext(ctx).V(1).Info(
-			"failed to look up PodCliqueSet for PCSG",
-			"podCliqueScalingGroup", pcsg.Name,
-			"pcsName", controllerRef.Name,
-			"error", err,
-		)
+		return nil, false
+	}
+	return pcs, pcs.UID == controllerRef.UID
+}
+
+func mapPodCliqueSetToDGDRequest(pcs *grovev1alpha1.PodCliqueSet) []ctrl.Request {
+	pcsOwnerRef := metav1.GetControllerOf(pcs)
+	if pcsOwnerRef == nil ||
+		pcsOwnerRef.Name == "" ||
+		pcsOwnerRef.UID == "" {
 		return nil
 	}
 
-	pcsOwnerRef := metav1.GetControllerOf(pcs)
-	if pcsOwnerRef == nil || pcsOwnerRef.Kind != consts.ResourceTypeDynamoGraphDeployment {
-		log.FromContext(ctx).V(1).Info(
-			"PodCliqueSet missing DynamoGraphDeployment controller ownerReference",
-			"pcsName", pcs.Name,
-			"namespace", pcs.Namespace,
-		)
+	// Accept any served DGD version from Dynamo's API group.
+	groupVersion, err := schema.ParseGroupVersion(pcsOwnerRef.APIVersion)
+	if err != nil ||
+		groupVersion.Group != nvidiacomv1beta1.GroupVersion.Group ||
+		groupVersion.Version == "" ||
+		pcsOwnerRef.Kind != nvidiacomv1beta1.DynamoGraphDeploymentGVK.Kind {
 		return nil
 	}
 
 	return []ctrl.Request{{
 		NamespacedName: types.NamespacedName{
 			Name:      pcsOwnerRef.Name,
-			Namespace: pcsg.Namespace,
+			Namespace: pcs.Namespace,
 		},
 	}}
 }

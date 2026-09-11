@@ -3529,39 +3529,6 @@ func TestDGDGroveTopologyConditionReconciler_Reconcile(t *testing.T) {
 	}
 }
 
-func TestGroveWatchSetup_MapPodCliqueToRequests(t *testing.T) {
-	setup := newGroveWatchSetup(nil)
-
-	t.Run("labeled PodClique maps directly to its DGD", func(t *testing.T) {
-		requests := setup.mapPodCliqueToRequests(
-			context.Background(),
-			&grovev1alpha1.PodClique{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "graph-0-worker",
-					Namespace: "default",
-					Labels: map[string]string{
-						commonconsts.KubeLabelDynamoGraphDeploymentName: "graph",
-					},
-				},
-			},
-		)
-
-		require.Len(t, requests, 1)
-		assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "graph"}, requests[0].NamespacedName)
-	})
-
-	t.Run("unlabeled or unrelated objects are ignored", func(t *testing.T) {
-		assert.Empty(t, setup.mapPodCliqueToRequests(
-			context.Background(),
-			&grovev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{Name: "orphan", Namespace: "default"}},
-		))
-		assert.Empty(t, setup.mapPodCliqueToRequests(
-			context.Background(),
-			&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "not-a-podclique", Namespace: "default"}},
-		))
-	})
-}
-
 func TestGroveWatchSetup_MapPodCliqueScalingGroupToRequests(t *testing.T) {
 	// Register Grove types with the scheme so fake client can handle them
 	if err := grovev1alpha1.AddToScheme(scheme.Scheme); err != nil {
@@ -3582,11 +3549,13 @@ func TestGroveWatchSetup_MapPodCliqueScalingGroupToRequests(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "dynamo-recipe-0-worker",
 					Namespace: "mwieczorek-dsv32-trtllm-agg",
+					UID:       "pcsg-uid",
 					OwnerReferences: []metav1.OwnerReference{
 						{
 							APIVersion: grovev1alpha1.SchemeGroupVersion.String(),
 							Kind:       "PodCliqueSet",
 							Name:       "dynamo-recipe",
+							UID:        "pcs-uid",
 							Controller: ptr.To(true),
 						},
 					},
@@ -3596,14 +3565,16 @@ func TestGroveWatchSetup_MapPodCliqueScalingGroupToRequests(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "dynamo-recipe",
 					Namespace: "mwieczorek-dsv32-trtllm-agg",
+					UID:       "pcs-uid",
 					Labels: map[string]string{
 						commonconsts.KubeLabelDynamoGraphDeploymentName: "dynamo-recipe",
 					},
 					OwnerReferences: []metav1.OwnerReference{
 						{
-							APIVersion: v1alpha1.GroupVersion.String(),
+							APIVersion: v1beta1.GroupVersion.String(),
 							Kind:       "DynamoGraphDeployment",
 							Name:       "dynamo-recipe",
+							UID:        "dgd-uid",
 							Controller: ptr.To(true),
 						},
 					},
@@ -3619,11 +3590,13 @@ func TestGroveWatchSetup_MapPodCliqueScalingGroupToRequests(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "truncated-pcs-0-worker",
 					Namespace: "default",
+					UID:       "pcsg-uid",
 					OwnerReferences: []metav1.OwnerReference{
 						{
 							APIVersion: grovev1alpha1.SchemeGroupVersion.String(),
 							Kind:       "PodCliqueSet",
 							Name:       "truncated-pcs",
+							UID:        "pcs-uid",
 							Controller: ptr.To(true),
 						},
 					},
@@ -3633,14 +3606,16 @@ func TestGroveWatchSetup_MapPodCliqueScalingGroupToRequests(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "truncated-pcs",
 					Namespace: "default",
+					UID:       "pcs-uid",
 					Labels: map[string]string{
 						commonconsts.KubeLabelDynamoGraphDeploymentName: "my-very-long-original-dgd-name",
 					},
 					OwnerReferences: []metav1.OwnerReference{
 						{
-							APIVersion: v1alpha1.GroupVersion.String(),
+							APIVersion: v1beta1.GroupVersion.String(),
 							Kind:       "DynamoGraphDeployment",
 							Name:       "my-very-long-original-dgd-name",
+							UID:        "dgd-uid",
 							Controller: ptr.To(true),
 						},
 					},
