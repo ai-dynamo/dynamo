@@ -183,6 +183,69 @@ def reset_logged_no_sender():
 
 
 # ===========================================================================
+# 0. Call-time validation
+# ===========================================================================
+
+
+class TestCallTimeValidation:
+    """`validate_request` must run before the generator is created.
+
+    A capability refusal raised inside the generator body only surfaces once
+    the stream is open, which for a streaming client is after the frontend has
+    committed HTTP 200 — the client then gets 200 plus an error frame instead
+    of a status. Raising at call time makes it a pre-stream failure, which the
+    response prologue carries and the frontend turns into a 4xx.
+    """
+
+    class _Handler:
+        def __init__(self, boom=None):
+            self.boom = boom
+            self.body_ran = False
+
+        def validate_request(self, request):
+            if self.boom is not None:
+                raise self.boom
+
+        @push_egress_capable
+        async def generate(self, request, context=None):
+            self.body_ran = True
+            yield {"token_ids": [1]}
+
+    def test_refusal_raises_at_call_time_not_from_the_stream(self):
+        handler = self._Handler(boom=ValueError("no multimodal support"))
+
+        with pytest.raises(ValueError, match="no multimodal support"):
+            handler.generate({"messages": []})
+
+        assert not handler.body_ran, (
+            "the generator body ran; the refusal would surface mid-stream and "
+            "a streaming client would see 200 before it"
+        )
+
+    @staticmethod
+    def _drain(stream):
+        async def collect():
+            return [item async for item in stream]
+
+        return run(collect())
+
+    def test_valid_request_still_reaches_the_generator(self):
+        handler = self._Handler()
+        assert self._drain(handler.generate({"messages": []})) == [{"token_ids": [1]}]
+        assert handler.body_ran
+
+    def test_handler_without_a_validator_is_unaffected(self):
+        """The hook is optional; a handler that defines no validator still runs."""
+
+        class Bare:
+            @push_egress_capable
+            async def generate(self, request, context=None):
+                yield {"token_ids": [2]}
+
+        assert self._drain(Bare().generate({})) == [{"token_ids": [2]}]
+
+
+# ===========================================================================
 # 1. Signature claim
 # ===========================================================================
 

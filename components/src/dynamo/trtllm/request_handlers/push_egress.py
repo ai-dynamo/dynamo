@@ -108,6 +108,16 @@ def push_egress_capable(func):
     def dispatch(self, request, context=None, response_sender=None, **kwargs):
         global _logged_no_sender
 
+        # Capability checks run here, not inside the generator body. Creating
+        # an async generator runs none of its body, so a refusal raised in there
+        # only surfaces once the stream is already open -- after the frontend
+        # has committed HTTP 200 for a streaming client. Raising at call time
+        # makes it a pre-stream failure, which the response prologue carries and
+        # the frontend can still turn into a status.
+        validate_request = getattr(self, "validate_request", None)
+        if validate_request is not None:
+            validate_request(request)
+
         # Lazy either way: creating an async generator runs none of its body.
         stream = func(self, request, context, **kwargs)
 
