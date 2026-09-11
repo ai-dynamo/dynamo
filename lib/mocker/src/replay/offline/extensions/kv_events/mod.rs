@@ -67,8 +67,7 @@ impl ReplayEngineObservation for RouterEventObservation {
         if matches!(stage, WorkerStage::Decode) {
             return RouterEventBatch::default();
         }
-        let worker_id = u64::try_from(worker_id)
-            .expect("logical replay worker id must fit the Dynamo Router wire type");
+        let worker_id = worker_id as u64;
         RouterEventBatch(
             events
                 .into_iter()

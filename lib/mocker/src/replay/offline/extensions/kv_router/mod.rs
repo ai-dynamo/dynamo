@@ -402,6 +402,12 @@ trait PlacementRequestView {
     fn prompt_tokens_for_placement(&self) -> Result<Cow<'_, [u32]>>;
 }
 
+fn placement_safety_error() -> anyhow::Error {
+    anyhow!(
+        "Dynamo KV Router placement requires authored prompt token IDs or replay hashes; length-only execution tokens are not valid KV identities"
+    )
+}
+
 impl PlacementRequestView for DirectRequest {
     fn metadata(&self) -> &DirectRequest {
         self
@@ -413,9 +419,7 @@ impl PlacementRequestView for DirectRequest {
 
     fn prompt_tokens_for_placement(&self) -> Result<Cow<'_, [u32]>> {
         if !self.prompt_tokens_are_placement_safe() {
-            return Err(anyhow!(
-                "Dynamo KV Router placement requires authored prompt token IDs or replay hashes; length-only execution tokens are not valid KV identities"
-            ));
+            return Err(placement_safety_error());
         }
         Ok(Cow::Borrowed(&self.tokens))
     }
@@ -432,9 +436,7 @@ impl PlacementRequestView for ReplayRequestPayload {
 
     fn prompt_tokens_for_placement(&self) -> Result<Cow<'_, [u32]>> {
         if !self.metadata().prompt_tokens_are_placement_safe() {
-            return Err(anyhow!(
-                "Dynamo KV Router placement requires authored prompt token IDs or replay hashes; length-only execution tokens are not valid KV identities"
-            ));
+            return Err(placement_safety_error());
         }
         match self.materialized_tokens() {
             Some(tokens) => Ok(Cow::Borrowed(tokens)),
@@ -516,7 +518,7 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
     }
 
     fn worker_draining(&mut self, worker: WorkerTopology, _now_ms: f64) -> Result<Vec<Placement>> {
-        self.router.remove_worker(worker.worker_id)?;
+        self.router.remove_worker(worker.worker_id);
         Ok(Vec::new())
     }
 
@@ -761,10 +763,9 @@ impl OfflineReplayRouter {
     /// reference existing blocks without "parent block not found" errors.
     /// Stale slot and indexer state is harmless — the selector and
     /// `all_workers_busy` both skip workers absent from `workers_with_configs`.
-    pub(crate) fn remove_worker(&mut self, worker_id: usize) -> Result<()> {
+    pub(crate) fn remove_worker(&mut self, worker_id: usize) {
         let wid = worker_id as WorkerId;
         self.workers_with_configs.remove(&wid);
-        Ok(())
     }
 
     /// Drop the retained topology/cache state after the engine confirms that
@@ -1539,7 +1540,7 @@ mod tests {
                 StorageTier::Device,
             )])
             .unwrap();
-        router.remove_worker(1).unwrap();
+        router.remove_worker(1);
 
         let admission = router
             .on_request_arrival(&target, Some(hashes), 0.0)
@@ -1713,7 +1714,7 @@ models:
         );
         assert_eq!(router.pending_count(), 2);
 
-        router.remove_worker(1).unwrap();
+        router.remove_worker(1);
         let mut rejected_after_shrink = request(6, 3);
         rejected_after_shrink.policy_class = Some("latency".to_string());
         let error = router
@@ -1771,7 +1772,7 @@ policy_classes:
                 StorageTier::Device,
             )])
             .unwrap();
-        router.remove_worker(1).unwrap();
+        router.remove_worker(1);
 
         router
             .on_request_arrival(&request(1, 1), None, 0.0)
@@ -1892,7 +1893,7 @@ policy_classes:
         let mut scaled =
             OfflineReplayRouter::new(&queueing_args(), Some(queueing_router_config()), None, 2)
                 .unwrap();
-        scaled.remove_worker(1).unwrap();
+        scaled.remove_worker(1);
         scaled
             .on_request_arrival(&request(1, 7), None, 0.0)
             .unwrap();
@@ -1923,7 +1924,7 @@ policy_classes:
             OfflineReplayRouter::new(&queueing_args(), Some(queueing_router_config()), None, 1)
                 .unwrap();
 
-        router.remove_worker(0).unwrap();
+        router.remove_worker(0);
         router.add_worker(3).unwrap();
 
         let effects = router
@@ -1958,7 +1959,7 @@ policy_classes:
             .unwrap();
         assert_eq!(router.debug_snapshot(0.0).indexer.total_cached_blocks, 1);
 
-        router.remove_worker(0).unwrap();
+        router.remove_worker(0);
         router.finalize_worker_removal(0).unwrap();
         let snapshot = router.debug_snapshot(0.0);
         assert!(snapshot.active_blocks_by_worker.is_empty());
@@ -1983,7 +1984,7 @@ policy_classes:
             vec![(0, 64), (1, 64)]
         );
 
-        router.remove_worker(1).unwrap();
+        router.remove_worker(1);
         router.add_worker(2).unwrap();
 
         assert_eq!(
@@ -2001,7 +2002,7 @@ policy_classes:
         router
             .on_request_arrival(&request(1, 7), None, 0.0)
             .unwrap();
-        router.remove_worker(0).unwrap();
+        router.remove_worker(0);
         router.add_worker(0).unwrap();
 
         assert_eq!(
@@ -2058,7 +2059,7 @@ policy_classes:
             .unwrap();
         assert_eq!(router.pending_count(), 1);
 
-        router.remove_worker(0).unwrap();
+        router.remove_worker(0);
         let effects = router
             .on_request_completed(Uuid::from_u128(1), 0.0)
             .unwrap();
