@@ -106,7 +106,7 @@ func TestRenderSelectedLPXRoleSecurityContext(t *testing.T) {
 	}
 }
 
-func TestLPXPCSNameUsesStableSourceIdentity(t *testing.T) {
+func TestLPXPCSNameUsesStableMaterializationIdentity(t *testing.T) {
 	source := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "chat", Namespace: "workloads", UID: "chat-uid"},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
@@ -114,7 +114,8 @@ func TestLPXPCSNameUsesStableSourceIdentity(t *testing.T) {
 				Roles: []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleLPXConductor}, {Name: v1beta1.ComponentRoleLPXAgent}}},
 		}},
 	}
-	name := PCSNameForLPX(source)
+	deployment := &v1alpha1.LPXGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "chat", Namespace: "workloads", UID: "materialization-uid"}}
+	name := PCSNameForLPX(deployment, source)
 	t.Log("An ordinary DGD named chat-lpx must not collide with the LPX PCS of chat")
 	ordinary := &v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "chat-lpx"}}
 	require.NotEqual(t, PCSNameForDGD(ordinary.Name, ordinary.Spec.Components), name)
@@ -122,43 +123,44 @@ func TestLPXPCSNameUsesStableSourceIdentity(t *testing.T) {
 
 	for _, test := range []struct {
 		name   string
-		mutate func(*v1beta1.DynamoGraphDeployment)
+		mutate func(*v1alpha1.LPXGraphDeployment)
 	}{
-		{"replacement source", func(d *v1beta1.DynamoGraphDeployment) { d.UID = "replacement-chat-uid" }},
-		{"different namespace", func(d *v1beta1.DynamoGraphDeployment) { d.Namespace = "another-namespace" }},
+		{"replacement materialization", func(d *v1alpha1.LPXGraphDeployment) { d.UID = "replacement-materialization-uid" }},
+		{"different namespace", func(d *v1alpha1.LPXGraphDeployment) { d.Namespace = "another-namespace" }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			changed := source.DeepCopy()
+			changed := deployment.DeepCopy()
 			test.mutate(changed)
-			require.NotEqual(t, name, PCSNameForLPX(changed))
+			require.NotEqual(t, name, PCSNameForLPX(changed, source))
 		})
 	}
-	t.Log("Replica, generation, and revision bookkeeping must not rename the workload")
-	source.Generation++
-	source.ResourceVersion = "2"
+	t.Log("Source replacement, graph edits, and materialization bookkeeping must not rename the workload")
+	source.UID = "replacement-source"
 	source.Spec.Components[0].Replicas = ptr.To(int32(3))
-	require.Equal(t, name, PCSNameForLPX(source))
+	deployment.Generation++
+	deployment.Spec.InputRevision = "sha256:changed"
+	require.Equal(t, name, PCSNameForLPX(deployment, source))
 	t.Log("A draft name cannot change the target-owned resource name budget")
 	source.Spec.Components = append(source.Spec.Components, v1beta1.DynamoComponentDeploymentSharedSpec{
 		ComponentName: strings.Repeat("d", 30), ComponentType: v1beta1.ComponentTypeLPX,
 		Roles: []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleLPXAgent}},
 	})
-	require.Equal(t, name, PCSNameForLPX(source))
+	require.Equal(t, name, PCSNameForLPX(deployment, source))
 
-	source.Name = "chat.example"
-	dotted := PCSNameForLPX(source)
-	source.Name = "chat-example"
-	require.NotEqual(t, dotted, PCSNameForLPX(source), "normalizing dots must not erase source identity")
+	deployment.Name = "chat.example"
+	dotted := PCSNameForLPX(deployment, source)
+	deployment.Name = "chat-example"
+	require.NotEqual(t, dotted, PCSNameForLPX(deployment, source), "normalizing dots must not erase materialization identity")
 
 	t.Log("Both readable and compact names fit the complete Grove name budget")
 	for componentLength := 1; componentLength <= 13; componentLength++ {
 		source.Spec.Components[0].ComponentName = strings.Repeat("e", componentLength)
-		for _, sourceName := range []string{"c", "chat.example", strings.Repeat("long.", 40) + "chat"} {
-			source.Name = sourceName
-			got := PCSNameForLPX(source)
+		for _, materializationName := range []string{"c", "chat.example", strings.Repeat("long.", 40) + "chat"} {
+			deployment.Name = materializationName
+			got := PCSNameForLPX(deployment, source)
 			require.Empty(t, validation.IsDNS1123Label(got), got)
 			require.LessOrEqual(t, len(got)+max(componentLength, 8)+componentLength+len("-engine-gpu"), commonconsts.MaxCombinedGroveResourceNameLength)
-			require.Equal(t, got, PCSNameForLPX(source))
+			require.Equal(t, got, PCSNameForLPX(deployment, source))
 		}
 	}
 }
@@ -177,10 +179,11 @@ func TestLPXInputRevision(t *testing.T) {
 				}},
 		}},
 	}
+	deployment := &v1alpha1.LPXGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: source.Name, Namespace: source.Namespace, UID: "materialization"}}
 	want, err := LPXInputRevision(source, "")
 	require.NoError(t, err)
 	require.Regexp(t, `^sha256:[a-f0-9]{64}$`, want)
-	pcsName := PCSNameForLPX(source)
+	pcsName := PCSNameForLPX(deployment, source)
 	require.NotEqual(t, PCSNameForDGD(source.Name, source.Spec.Components), pcsName)
 
 	t.Log("Prefill-only edits and DGD bookkeeping do not alter the LPX revision or PCS name")
@@ -194,7 +197,7 @@ func TestLPXInputRevision(t *testing.T) {
 	got, err := LPXInputRevision(source, "")
 	require.NoError(t, err)
 	require.Equal(t, want, got)
-	require.Equal(t, pcsName, PCSNameForLPX(source))
+	require.Equal(t, pcsName, PCSNameForLPX(deployment, source))
 
 	t.Log("Each LPX component or shared-input change invalidates the revision; ordinary edits do not")
 	source.Spec.Scheduling = &v1beta1.SchedulingSpec{}

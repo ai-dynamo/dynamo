@@ -665,9 +665,10 @@ func TestLPXAuthoritativeLifecycleListConsumesContinuePages(t *testing.T) {
 }
 
 func TestLPXPodCliqueSetMetadataSyncUsesSuppliedObservation(t *testing.T) {
-	t.Log("Prepare the current LPX attempt")
+	t.Log("Prepare the current LPX attempt with an independently named materialization")
 	ctx := t.Context()
 	dgd, source, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+	dgd.Name = "metadata-materialization"
 	prepare, selected := newPreparedLPXTestReconciler(t, registry, ctx, dgd, source)
 	desired := renderLPXTestPodCliqueSet(t, ctx, prepare, dgd, source, selected)
 
@@ -740,6 +741,41 @@ func TestLPXPodCliqueSetMetadataSyncUsesSuppliedObservation(t *testing.T) {
 	require.Zero(t, updates)
 	require.Zero(t, fenceLists)
 	require.Equal(t, cached.UID, synced.UID)
+
+	for _, name := range []string{"", "other-materialization"} {
+		t.Log("Drift only the materialization name while preserving the current workload and source metadata", name)
+		cached = synced.DeepCopy()
+		if name == "" {
+			delete(cached.Annotations, lpx.DeploymentNameAnnotation)
+		} else {
+			cached.Annotations[lpx.DeploymentNameAnnotation] = name
+		}
+		require.NoError(t, base.Update(ctx, cached))
+		before := cached.DeepCopy()
+		updates = 0
+
+		t.Log("Restore the name with one metadata-only update and leave the observation untouched")
+		synced, modified, err = reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, cached, desired, selected)
+		require.NoError(t, err)
+		require.True(t, modified)
+		require.Equal(t, 1, updates)
+		require.Zero(t, gets)
+		require.Zero(t, fenceLists)
+		require.Equal(t, before, cached)
+		want := before.DeepCopy()
+		want.Annotations[lpx.DeploymentNameAnnotation] = dgd.Name
+		want.ResourceVersion = synced.ResourceVersion
+		require.Equal(t, want, synced)
+
+		t.Log("A repaired materialization name is stable on the next reconciliation")
+		updates = 0
+		synced, modified, err = reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, synced, desired, selected)
+		require.NoError(t, err)
+		require.False(t, modified)
+		require.Zero(t, updates)
+		require.Zero(t, fenceLists)
+		require.Equal(t, want, synced)
+	}
 
 	t.Log("A spec edit after observation conflicts instead of being overwritten by metadata repair")
 	synced.Annotations[lpx.DGDGenerationAnnotation] = "0"
@@ -1547,7 +1583,7 @@ func TestLPXDisabledPreservesPublishedWorkloadUntilDeletion(t *testing.T) {
 			request := getLPXRequest(t, ctx, r.Client, child.Namespace, selected.requests[0].requestName)
 			require.False(t, request.DeletionTimestamp.IsZero())
 			pcs := &grovev1alpha1.PodCliqueSet{}
-			require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: child.Namespace, Name: dynamo.PCSNameForLPX(source)}, pcs))
+			require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: child.Namespace, Name: dynamo.PCSNameForLPX(child, source)}, pcs))
 			require.Zero(t, pcs.Spec.Replicas)
 			_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
 			require.ErrorContains(t, err, "waiting for LPX request")
@@ -1817,7 +1853,7 @@ func TestLPXSchedulerScopedGangAndStartupWitnessesAreDisjoint(t *testing.T) {
 			gang := findLPXTestPodGang(t, objects, lpx.SchedulerName)
 			switch test.name {
 			case "LPX gang unavailable":
-				gang.Labels[consts.KubeLabelDynamoGraphDeploymentName] = lpxTestOtherName
+				gang.Labels[grovecommon.LabelPartOfKey] = lpxTestOtherName
 			case "LPX gang is stale":
 				gang.Annotations[lpxDeploymentGenerationAnnotation] = "0"
 			case "LPX gang has incomplete references":
@@ -2292,6 +2328,7 @@ func newLPXTestReconciler(
 	seed := append([]client.Object{dgd.DeepCopy(), source.DeepCopy()}, objects...)
 	base := fake.NewClientBuilder().
 		WithScheme(scheme).
+		WithIndex(&nvidiacomv1alpha1.LPXGraphDeployment{}, lpxSourceOwnerIndex, lpxSourceOwnerReferences).
 		WithIndex(&nvidiacomv1beta1.DynamoGraphDeployment{}, lpxTopologyBindingRefIndex, lpxTopologyBindingReferences).
 		WithIndex(&nvidiacomv1beta1.DynamoGraphDeployment{}, lpxResourceClaimRefIndex, lpxDRAClaimReferences(false)).
 		WithIndex(&nvidiacomv1beta1.DynamoGraphDeployment{}, lpxResourceClaimTemplateRefIndex, lpxDRAClaimReferences(true)).
@@ -2358,7 +2395,7 @@ func lpxMaterializedObjects(
 		TypeMeta: metav1.TypeMeta{APIVersion: grovev1alpha1.SchemeGroupVersion.String(), Kind: "PodCliqueScalingGroup"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name: desired.plan.LPXScalingGroup, Namespace: pcs.Namespace, UID: "lpu-group-uid",
-			Generation: 1, Labels: maps.Clone(pcs.Labels), Annotations: groupTemplate.Annotations,
+			Generation: 1, Labels: grovecommon.GetDefaultLabelsForPodCliqueSetManagedResources(pcs.Name), Annotations: groupTemplate.Annotations,
 			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(pcs, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueSet"))},
 		},
 		Spec: grovev1alpha1.PodCliqueScalingGroupSpec{

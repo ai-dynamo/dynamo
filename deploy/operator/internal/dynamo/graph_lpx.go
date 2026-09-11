@@ -70,7 +70,7 @@ func RenderLPXBasePodCliqueSet(
 		discoveryContext:            NewDiscoveryContext(operatorConfig.Discovery.Backend, dynamoDeployment.Annotations),
 		validatedQueueName:          queue,
 		groveClusterTopologyDomains: topologyDomains,
-	}, selectedWorkload)
+	}, selectedWorkload, pcsName)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -116,7 +116,7 @@ func LPXRestartToken(source *v1beta1.DynamoGraphDeployment, previous string) str
 // Both objects must be non-nil.
 func ValidateLPXSource(deployment *v1alpha1.LPXGraphDeployment, source *v1beta1.DynamoGraphDeployment) error {
 	owner := metav1.GetControllerOf(deployment)
-	if deployment.Namespace != source.Namespace || deployment.Name != source.Name ||
+	if deployment.Namespace != source.Namespace ||
 		owner == nil || owner.APIVersion != v1beta1.GroupVersion.String() || owner.Kind != "DynamoGraphDeployment" ||
 		owner.Name != source.Name || owner.UID != source.UID {
 		return fmt.Errorf("LPXGraphDeployment requires its exact source DGD and controller owner")
@@ -253,9 +253,9 @@ func lpxSchedulingMetadata(metadata map[string]string) map[string]string {
 	return selected
 }
 
-// PCSNameForLPX hashes the source identity within the Grove name budget,
+// PCSNameForLPX hashes the materialization identity within the Grove name budget,
 // independently of ordinary components. The LPX planner checks materialized names.
-func PCSNameForLPX(dgd *v1beta1.DynamoGraphDeployment) string {
+func PCSNameForLPX(deployment *v1alpha1.LPXGraphDeployment, dgd *v1beta1.DynamoGraphDeployment) string {
 	// The serving component owns all generated LPX names, including draft cliques.
 	groupBudget, cliqueBudget := 8, 0
 	if component := dynamolpx.ServingComponent(dgd); component != nil {
@@ -264,8 +264,8 @@ func PCSNameForLPX(dgd *v1beta1.DynamoGraphDeployment) string {
 	}
 	budget := commonconsts.MaxCombinedGroveResourceNameLength - groupBudget - cliqueBudget
 	budget = max(budget, 8)
-	name := strings.ReplaceAll(dgd.Name, ".", "-")
-	digest := sha256.Sum256([]byte(dgd.Namespace + "/" + dgd.Name + "/" + string(dgd.UID)))
+	name := strings.ReplaceAll(deployment.Name, ".", "-")
+	digest := sha256.Sum256([]byte(deployment.Namespace + "/" + deployment.Name + "/" + string(deployment.UID)))
 	if budget <= 13 {
 		return fmt.Sprintf("%x", digest[:4])
 	}
@@ -287,13 +287,13 @@ func LPXComponentNameBudget(componentName string) int {
 // authored role. The full source DGD supplies discovery and shared defaults;
 // LPX component's roles are returned to the same PCS renderer.
 // Preflight has validated the runtime shape and every Agent template.
-func renderLPXComponents(p cliqueParams, workload *dynamolpx.SelectedWorkload) (*dynamolpx.RenderInput, []*grovev1alpha1.PodCliqueTemplateSpec, error) {
+func renderLPXComponents(p cliqueParams, workload *dynamolpx.SelectedWorkload, materializationName string) (*dynamolpx.RenderInput, []*grovev1alpha1.PodCliqueTemplateSpec, error) {
 	// Pass naming and runtime inputs; deployment identity is stamped only on final resources.
 	input := &dynamolpx.RenderInput{
-		DGDName:       p.dynamoDeployment.Name,
-		MinAvailable:  p.component.MinAvailable,
-		Stages:        make(map[string]corev1.PodTemplateSpec),
-		SSHSecretName: p.operatorConfig.MPI.SSHSecretName,
+		MaterializationName: materializationName,
+		MinAvailable:        p.component.MinAvailable,
+		Stages:              make(map[string]corev1.PodTemplateSpec),
+		SSHSecretName:       p.operatorConfig.MPI.SSHSecretName,
 	}
 
 	// Resolve preserved alpha metadata once for all independently rendered roles.
@@ -351,7 +351,7 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.SelectedWorkload) (
 		defaults := ComponentDefaultsFactory(string(v1beta1.ComponentTypeDecode))
 		if workload.BuildFamily() == dynamolpx.BuildFamilyXT {
 			defaults = &selectedCyborgComponentDefaults{
-				ComponentDefaults: defaults, workload: workload, dgdName: p.dynamoDeployment.Name,
+				ComponentDefaults: defaults, workload: workload, dgdName: materializationName,
 				replicas: *role.Replicas, lpxPodSpec: lpuTemplate.Spec,
 			}
 		} else {

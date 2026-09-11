@@ -24,9 +24,10 @@ import (
 func TestGroveWatchSkipsOnlyVerifiedLPXOwners(t *testing.T) {
 	t.Log("Distinguish LPX-owned Grove roles from ordinary DGD readiness events")
 	const wrongAPIVersion = "unrelated/v1"
+	const sourceName = "source-graph"
 	scheme := runtime.NewScheme()
 	require.NoError(t, grovev1alpha1.AddToScheme(scheme))
-	child := &nvidiacomv1alpha1.LPXGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "graph", UID: "child-uid"}}
+	child := &nvidiacomv1alpha1.LPXGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "independent-materialization", UID: "child-uid"}}
 	pcs := &grovev1alpha1.PodCliqueSet{ObjectMeta: metav1.ObjectMeta{
 		Name: "engine-pcs", Namespace: "workloads", UID: "pcs-uid",
 		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(child, nvidiacomv1alpha1.LPXGraphDeploymentGVK)},
@@ -37,8 +38,9 @@ func TestGroveWatchSkipsOnlyVerifiedLPXOwners(t *testing.T) {
 	}}
 	clique := &grovev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{
 		Name: "role", Namespace: "workloads",
-		Labels: map[string]string{consts.KubeLabelDynamoGraphDeploymentName: child.Name},
+		Labels: map[string]string{consts.KubeLabelDynamoGraphDeploymentName: sourceName},
 		Annotations: map[string]string{
+			dynamolpx.DeploymentNameAnnotation: child.Name,
 			lpxv1alpha1.PodRoleAnnotation:      lpxv1alpha1.PodRoleConductor,
 			dynamolpx.WorkloadDigestAnnotation: "sha256:workload",
 			dynamo.LPXDeploymentUIDAnnotation:  string(child.UID),
@@ -100,13 +102,16 @@ func TestGroveWatchSkipsOnlyVerifiedLPXOwners(t *testing.T) {
 		{"stale child stamp", func(c *grovev1alpha1.PodClique, _ *grovev1alpha1.PodCliqueScalingGroup, _ *grovev1alpha1.PodCliqueSet) {
 			c.Annotations[dynamo.LPXDeploymentUIDAnnotation] = "old-child-uid"
 		}},
+		{"missing child name stamp", func(c *grovev1alpha1.PodClique, _ *grovev1alpha1.PodCliqueScalingGroup, _ *grovev1alpha1.PodCliqueSet) {
+			delete(c.Annotations, dynamolpx.DeploymentNameAnnotation)
+		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			currentPCS, currentGroup := pcs.DeepCopy(), group.DeepCopy()
 			observed := ready.DeepCopy()
 			test.mutate(observed, currentGroup, currentPCS)
 			reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(currentPCS, currentGroup).Build()
-			require.Equal(t, []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: observed.Namespace, Name: child.Name}}}, newGroveWatchSetup(reader).mapPodCliqueToRequests(t.Context(), observed))
+			require.Equal(t, []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: observed.Namespace, Name: sourceName}}}, newGroveWatchSetup(reader).mapPodCliqueToRequests(t.Context(), observed))
 		})
 	}
 }

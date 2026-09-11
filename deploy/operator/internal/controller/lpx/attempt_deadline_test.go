@@ -284,7 +284,7 @@ func deadlineTestRequest(dgd *nvidiacomv1alpha1.LPXGraphDeployment, name string,
 func deadlineTestPCS(dgd *nvidiacomv1alpha1.LPXGraphDeployment, source *nvidiacomv1beta1.DynamoGraphDeployment, uid types.UID) *grovev1alpha1.PodCliqueSet {
 	return &grovev1alpha1.PodCliqueSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: dynamo.PCSNameForLPX(source), Namespace: dgd.Namespace, UID: uid, ResourceVersion: "1",
+			Name: dynamo.PCSNameForLPX(dgd, source), Namespace: dgd.Namespace, UID: uid, ResourceVersion: "1",
 			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dgd, nvidiacomv1alpha1.LPXGraphDeploymentGVK)},
 		},
 		Spec: grovev1alpha1.PodCliqueSetSpec{Replicas: 1},

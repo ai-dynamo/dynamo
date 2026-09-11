@@ -18,6 +18,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -32,6 +33,32 @@ import (
 )
 
 const lpxGraphDeploymentFinalizer = "nvidia.com/lpx-graph-deployment"
+
+func lpxSourceKey(deployment *v1alpha1.LPXGraphDeployment) (client.ObjectKey, error) {
+	owner := metav1.GetControllerOf(deployment)
+	if owner == nil || owner.APIVersion != v1beta1.GroupVersion.String() || owner.Kind != "DynamoGraphDeployment" || owner.Name == "" {
+		return client.ObjectKey{}, fmt.Errorf("LPXGraphDeployment requires a DynamoGraphDeployment controller owner")
+	}
+	return client.ObjectKey{Namespace: deployment.Namespace, Name: owner.Name}, nil
+}
+
+func (r *graphReconciler) resolveLPXSource(ctx context.Context, deployment *v1alpha1.LPXGraphDeployment) (*v1beta1.DynamoGraphDeployment, *lpxRejected, error) {
+	sourceKey, err := lpxSourceKey(deployment)
+	if err != nil {
+		return nil, &lpxRejected{reason: err.Error()}, nil
+	}
+	source := &v1beta1.DynamoGraphDeployment{}
+	if err := r.Get(ctx, sourceKey, source); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, &lpxRejected{reason: "The exact source DGD no longer exists"}, nil
+		}
+		return nil, nil, err
+	}
+	if err := dynamo.ValidateLPXSource(deployment, source); err != nil {
+		return nil, &lpxRejected{reason: err.Error()}, nil
+	}
+	return source, nil, nil
+}
 
 // graphReconciler owns the complete compiled engine lifecycle.
 // The source DGD supplies intent, never an alternate status or owner identity.
@@ -155,17 +182,13 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		return ctrl.Result{}, nil
 	}
 
-	source := &v1beta1.DynamoGraphDeployment{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: deployment.Namespace, Name: deployment.Name}, source); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, err
-		}
-		state = lpxResult(&lpxRejected{reason: "The exact source DGD no longer exists"})
-		return r.retireInvalidWorkload(ctx, deployment, state.Message)
+	source, rejected, sourceErr := r.resolveLPXSource(ctx, deployment)
+	if sourceErr != nil {
+		return ctrl.Result{}, sourceErr
 	}
-	if sourceErr := dynamo.ValidateLPXSource(deployment, source); sourceErr != nil {
-		state = lpxResult(&lpxRejected{reason: sourceErr.Error()})
-		return r.retireInvalidWorkload(ctx, deployment, sourceErr.Error())
+	if rejected != nil {
+		state = lpxResult(rejected)
+		return r.retireInvalidWorkload(ctx, deployment, rejected.reason)
 	}
 	if !controllerutil.ContainsFinalizer(deployment, lpxGraphDeploymentFinalizer) {
 		controllerutil.AddFinalizer(deployment, lpxGraphDeploymentFinalizer)
@@ -335,7 +358,11 @@ func (r *graphReconciler) validateLPXPublicationSource(ctx context.Context, depl
 		return err
 	}
 	source := &v1beta1.DynamoGraphDeployment{}
-	if err := r.apiReader.Get(ctx, client.ObjectKey{Namespace: deployment.Namespace, Name: deployment.Name}, source); err != nil {
+	sourceKey, err := lpxSourceKey(deployment)
+	if err != nil {
+		return err
+	}
+	if err := r.apiReader.Get(ctx, sourceKey, source); err != nil {
 		return err
 	}
 	return dynamo.ValidateLPXSource(deployment, source)
@@ -397,10 +424,13 @@ func (r *graphReconciler) syncLPXResource(ctx context.Context, deployment *v1alp
 }
 
 func (r *graphReconciler) reconcileEndpoint(ctx context.Context, deployment *v1alpha1.LPXGraphDeployment, source *v1beta1.DynamoGraphDeployment) error {
+	// Use the same normalized identity for endpoint creation and retirement.
 	component := lpx.ServingComponent(source)
+	serviceName := dynamo.NormalizeKubeResourceName(dynamo.PCSNameForLPX(deployment, source) + "-" + component.ComponentName)
+
 	if !commoncontroller.IsK8sDiscoveryEnabled(r.Config.Discovery.Backend, source.Annotations) {
 		service := &corev1.Service{}
-		key := client.ObjectKey{Namespace: source.Namespace, Name: dynamo.NormalizeKubeResourceName(dynamo.GetDCDResourceName(source, component.ComponentName, ""))}
+		key := client.ObjectKey{Namespace: deployment.Namespace, Name: serviceName}
 		if err := r.Get(ctx, key, service); err != nil {
 			return client.IgnoreNotFound(err)
 		}
@@ -410,7 +440,7 @@ func (r *graphReconciler) reconcileEndpoint(ctx context.Context, deployment *v1a
 		return client.IgnoreNotFound(r.Delete(ctx, service, &client.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &service.UID, ResourceVersion: &service.ResourceVersion}}))
 	}
 	service, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
-		ServiceName: dynamo.GetDCDResourceName(source, component.ComponentName, ""), Namespace: source.Namespace,
+		ServiceName: serviceName, Namespace: deployment.Namespace,
 		ComponentType: string(component.ComponentType), ComponentName: component.ComponentName,
 		DynamoNamespace: source.GetDynamoNamespaceForComponent(component), IsK8sDiscovery: true,
 		Labels:      dynamo.GetDGDComponentResourceLabels(source, component.ComponentName, component),
@@ -419,6 +449,8 @@ func (r *graphReconciler) reconcileEndpoint(ctx context.Context, deployment *v1a
 	if err != nil {
 		return err
 	}
+	// Keep the endpoint on this materialization even when another child shares the source.
 	service.Spec.Selector[dynamo.LPXServingLabel] = consts.KubeLabelValueTrue
+	service.Spec.Selector[grovecommon.LabelPartOfKey] = dynamo.PCSNameForLPX(deployment, source)
 	return r.syncLPXResource(ctx, deployment, service)
 }

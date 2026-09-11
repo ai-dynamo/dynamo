@@ -39,11 +39,12 @@ data:
 metadata:
   annotations:
     lpx.nvidia.com/deployment-generation: "1"
+    lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
     lpx.nvidia.com/deployment-uid: lpx-render-uid
     lpx.nvidia.com/input-revision: sha256:7daf91bc2a789a171c747e9d93c3fed8cbd748b60888dc98cdcd795ee463a61b
     scheduling.lpu.nvidia.com/dgd-generation: "1"
     scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
-  name: dgd-lpx-v2-vllm-decode
+  name: dgd-lpx-v2-94cdbc7c-lpx-decode
   namespace: inference-engine
 ---
 data:
@@ -198,16 +199,18 @@ data:
 metadata:
   annotations:
     lpx.nvidia.com/deployment-generation: "1"
+    lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
     lpx.nvidia.com/deployment-uid: lpx-render-uid
     lpx.nvidia.com/input-revision: sha256:7daf91bc2a789a171c747e9d93c3fed8cbd748b60888dc98cdcd795ee463a61b
     scheduling.lpu.nvidia.com/dgd-generation: "1"
     scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
-  name: dgd-lpx-v2-vllm-lpu
+  name: dgd-lpx-v2-94cdbc7c-lpx-lpu
   namespace: inference-engine
 ---
 metadata:
   annotations:
     lpx.nvidia.com/deployment-generation: "1"
+    lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
     lpx.nvidia.com/deployment-uid: lpx-render-uid
     lpx.nvidia.com/input-revision: sha256:7daf91bc2a789a171c747e9d93c3fed8cbd748b60888dc98cdcd795ee463a61b
     scheduling.lpu.nvidia.com/dgd-generation: "1"
@@ -215,7 +218,7 @@ metadata:
     scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:12f2d0ae40fa84798f025eafc6bf5ecbe38cdc7adb797e3e41726b4c8c916114
   labels:
     nvidia.com/dynamo-graph-deployment-name: dgd-lpx-v2-vllm
-  name: dgd-lpx-v2-2c5c68ef-lpx
+  name: dgd-lpx-v2-94cdbc7c-lpx
   namespace: inference-engine
 spec:
   replicas: 1
@@ -224,6 +227,7 @@ spec:
     cliques:
     - annotations:
         lpx.nvidia.com/deployment-generation: "1"
+        lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
         lpx.nvidia.com/deployment-uid: lpx-render-uid
         lpx.nvidia.com/input-revision: sha256:7daf91bc2a789a171c747e9d93c3fed8cbd748b60888dc98cdcd795ee463a61b
         nvidia.com/extra-resources-hash: a9c40c6452f37713460176f888205de0185c5478ab3a4aa2a06936caa86ff0c4
@@ -336,7 +340,7 @@ spec:
               valueFrom:
                 configMapKeyRef:
                   key: tokenizer_dir
-                  name: dgd-lpx-v2-vllm-decode
+                  name: dgd-lpx-v2-94cdbc7c-lpx-decode
             - name: TOTAL_REPLICAS
               value: "1"
             image: us-docker.pkg.dev/nv-hwlpu-20260103060253/cyborg/cyborg:build-862
@@ -406,7 +410,7 @@ spec:
               type: Directory
             name: infiniband
           - configMap:
-              name: dgd-lpx-v2-vllm-decode
+              name: dgd-lpx-v2-94cdbc7c-lpx-decode
             name: config
           - emptyDir:
               medium: Memory
@@ -418,6 +422,7 @@ spec:
         - lpu-wkr-m-0
     - annotations:
         lpx.nvidia.com/deployment-generation: "1"
+        lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
         lpx.nvidia.com/deployment-uid: lpx-render-uid
         lpx.nvidia.com/input-revision: sha256:7daf91bc2a789a171c747e9d93c3fed8cbd748b60888dc98cdcd795ee463a61b
         nvidia.com/extra-resources-hash: d782ea49a4ae530a65fb915ae77c6d4b603d6bee3f5b336a52d026439b8f2d41
@@ -511,7 +516,7 @@ spec:
               valueFrom:
                 configMapKeyRef:
                   key: gas_dir
-                  name: dgd-lpx-v2-vllm-lpu
+                  name: dgd-lpx-v2-94cdbc7c-lpx-lpu
             - name: GLUE_RDMA_PATH_MTU
               value: "1024"
             - name: LPU_MODEL_NAME
@@ -545,7 +550,7 @@ spec:
               valueFrom:
                 configMapKeyRef:
                   key: topologies
-                  name: dgd-lpx-v2-vllm-lpu
+                  name: dgd-lpx-v2-94cdbc7c-lpx-lpu
             - name: UCX_TLS
               value: tcp
             image: us-docker.pkg.dev/nv-hwlpu-20260103060253/lpu-monorepo/agent-hybrid-v2:steved-1node.dfefd5a16f
@@ -624,7 +629,7 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: dgd-lpx-v2-vllm-lpu
+              name: dgd-lpx-v2-94cdbc7c-lpx-lpu
             name: config
           - emptyDir: {}
             name: tmp
@@ -650,6 +655,7 @@ spec:
     podCliqueScalingGroups:
     - annotations:
         lpx.nvidia.com/deployment-generation: "1"
+        lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
         lpx.nvidia.com/deployment-uid: lpx-render-uid
         lpx.nvidia.com/input-revision: sha256:7daf91bc2a789a171c747e9d93c3fed8cbd748b60888dc98cdcd795ee463a61b
         scheduling.lpu.nvidia.com/dgd-generation: "1"

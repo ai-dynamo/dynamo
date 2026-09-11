@@ -17,6 +17,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/thirdparty/lpxscheduler/v1alpha1"
+	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -167,12 +168,12 @@ func TestLPXTerminalFailureRetiresUnpublishedWorkload(t *testing.T) {
 			_, err := r.Reconcile(t.Context(), request)
 			require.NoError(t, err)
 			pcs := &grovev1alpha1.PodCliqueSet{}
-			pcsKey := client.ObjectKey{Namespace: child.Namespace, Name: dynamo.PCSNameForLPX(source)}
+			pcsKey := client.ObjectKey{Namespace: child.Namespace, Name: dynamo.PCSNameForLPX(child, source)}
 			require.NoError(t, r.Get(t.Context(), pcsKey, pcs))
 			pcs.UID = "staged-pcs"
 			require.NoError(t, r.Update(t.Context(), pcs))
 			endpoint := &corev1.Service{}
-			endpointKey := client.ObjectKey{Namespace: child.Namespace, Name: dynamo.GetDCDResourceName(source, "lpx", "")}
+			endpointKey := client.ObjectKey{Namespace: child.Namespace, Name: pcsKey.Name + "-lpx"}
 			require.NoError(t, r.Get(t.Context(), endpointKey, endpoint))
 			endpoint.UID = "staged-endpoint"
 			require.NoError(t, r.Update(t.Context(), endpoint))
@@ -270,8 +271,8 @@ func TestLPXTerminalCleanupPreservesForeignObjectsAndNewerAuthority(t *testing.T
 			}}
 			foreignPCS, foreignEndpoint := pcs.DeepCopy(), endpoint.DeepCopy()
 			foreignPCS.UID, foreignEndpoint.UID = "foreign-pcs", "foreign-endpoint"
-			foreignPCS.Name = dynamo.PCSNameForLPX(source)
-			foreignEndpoint.Name = dynamo.GetDCDResourceName(source, "lpx", "")
+			foreignPCS.Name = dynamo.PCSNameForLPX(child, source)
+			foreignEndpoint.Name = foreignPCS.Name + "-lpx"
 			foreignPCS.OwnerReferences, foreignEndpoint.OwnerReferences = ordinary.OwnerReferences, ordinary.OwnerReferences
 			if scenario == "pending finalizer" {
 				pcs.Finalizers = []string{"example.com/staged-cleanup"}
@@ -359,13 +360,16 @@ func TestLPXTerminalCleanupPreservesForeignObjectsAndNewerAuthority(t *testing.T
 }
 
 func TestLPXEndpointLifecycle(t *testing.T) {
-	t.Log("Configure an LPX serving component using Kubernetes discovery")
+	const uppercaseComponentName = "LPX"
+	t.Log("Configure an uppercase LPX component and independently named materialization using Kubernetes discovery")
 	source := newLPXTestSource(lpx.PipelineSingle, "test-build")
+	source.Spec.Components[0].ComponentName = uppercaseComponentName
 	source.Annotations[consts.KubeAnnotationDynamoDiscoveryBackend] = string(configv1alpha1.DiscoveryBackendKubernetes)
 	source.Spec.Components[0].ModelRef = &v1beta1.ModelReference{Name: "test/model"}
 	source.Spec.Annotations = map[string]string{"example.com/model-discovery": "enabled"}
 	source.Spec.Labels = map[string]string{"example.com/policy": "enabled"}
 	child := newLPXTestDeployment(t, source)
+	child.Name = "independent-materialization"
 	r := newLPXTestReconciler(t, nil, child, source)
 
 	t.Log("Keep the ordinary model Service under the source DGD's ownership")
@@ -386,10 +390,11 @@ func TestLPXEndpointLifecycle(t *testing.T) {
 	t.Log("Publish the LPX-owned endpoint with its serving-role selector")
 	require.NoError(t, r.reconcileEndpoint(t.Context(), child, source))
 	service := &corev1.Service{}
-	key := client.ObjectKey{Namespace: source.Namespace, Name: dynamo.GetDCDResourceName(source, "lpx", "")}
+	key := client.ObjectKey{Namespace: source.Namespace, Name: dynamo.PCSNameForLPX(child, source) + "-lpx"}
 	require.NoError(t, r.Get(t.Context(), key, service))
 	require.True(t, metav1.IsControlledBy(service, child))
 	require.Equal(t, consts.KubeLabelValueTrue, service.Spec.Selector[dynamo.LPXServingLabel])
+	require.Equal(t, dynamo.PCSNameForLPX(child, source), service.Spec.Selector[grovecommon.LabelPartOfKey])
 
 	t.Log("Converge propagated endpoint metadata without losing identity, content or sync bookkeeping")
 	for _, value := range []string{"changed", ""} {
@@ -427,6 +432,53 @@ func TestLPXEndpointLifecycle(t *testing.T) {
 	require.True(t, apierrors.IsNotFound(r.Get(t.Context(), key, service)))
 	require.NoError(t, r.Get(t.Context(), modelKey, modelService))
 	require.Equal(t, beforeModelService, modelService, "LPX cleanup must leave the DGD-owned model Service unchanged")
+}
+
+func TestLPXMaterializationUsesOwnerSourceAndChildIdentity(t *testing.T) {
+	t.Log("Render a materialization with a different name from its source DGD")
+	_, source, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+	source.Annotations[consts.KubeAnnotationDynamoDiscoveryBackend] = string(configv1alpha1.DiscoveryBackendKubernetes)
+	child := newLPXTestDeployment(t, source)
+	child.Name = "independent-materialization"
+	child.UID = "independent-materialization-uid"
+	r, selected := newPreparedLPXTestReconciler(t, registry, t.Context(), child, source)
+	objects := lpxMaterializedObjects(t, r, child, source, selected)
+	createLPXTestObjects(t, t.Context(), r.Client, objects...)
+
+	t.Log("Route Grove objects to the materialization while retaining the source provenance")
+	pcs := objects[0].(*grovev1alpha1.PodCliqueSet)
+	require.Equal(t, source.Name, pcs.Labels[consts.KubeLabelDynamoGraphDeploymentName])
+	for _, object := range objects[1:] {
+		require.Equal(t, []ctrl.Request{{NamespacedName: client.ObjectKeyFromObject(child)}}, mapLPXChildToRequests(t.Context(), object))
+	}
+	gangs, err := r.listLPXPublicationPodGangs(t.Context(), child, pcs)
+	require.NoError(t, err)
+	require.NotEmpty(t, gangs)
+	for _, gang := range gangs {
+		require.Equal(t, source.Name, gang.Labels[consts.KubeLabelDynamoGraphDeploymentName])
+	}
+
+	t.Log("Publish the runtime configuration and endpoint under the exact LGD owner")
+	_, err = r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)})
+	require.NoError(t, err)
+
+	root := dynamo.PCSNameForLPX(child, source)
+	for _, object := range []client.Object{
+		&grovev1alpha1.PodCliqueSet{ObjectMeta: metav1.ObjectMeta{Name: root, Namespace: child.Namespace}},
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: root + "-lpu", Namespace: child.Namespace}},
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: root + "-" + lpx.ServingComponent(source).ComponentName, Namespace: child.Namespace}},
+	} {
+		require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(object), object))
+		require.True(t, metav1.IsControlledBy(object, child))
+	}
+
+	t.Log("Keep scheduler-request provenance rooted in the source DGD, not the independently named child")
+	requests, err := r.listOwnedLPXRequests(t.Context(), child)
+	require.NoError(t, err)
+	require.NotEmpty(t, requests)
+	for _, request := range requests {
+		require.Equal(t, source.Name, request.Labels[consts.KubeLabelDynamoGraphDeploymentName])
+	}
 }
 
 func TestLPXResourceSyncConvergesContentAndMetadataWithoutAdoption(t *testing.T) {

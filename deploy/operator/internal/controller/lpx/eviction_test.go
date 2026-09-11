@@ -34,6 +34,7 @@ import (
 const (
 	lpuEvictionTestNamespace = "test-ns"
 	lpuEvictionTestDGD       = "test-dgd"
+	lpuEvictionTestPCS       = "materialization-12345678"
 	lpuEvictionTestComponent = "lpx-worker"
 	lpuEvictionTestPCSG      = "lpx-worker"
 	lpuEvictionTestModel     = "test-model"
@@ -57,7 +58,7 @@ func newLPUEvictionReconciler(objs ...client.Object) (*lpuEvictionReconciler, cl
 
 func newLPUEvictionConfigMap() *corev1.ConfigMap {
 	return &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: lpuEvictionTestDGD + "-lpu", Namespace: lpuEvictionTestNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: dynamolpx.LPUConfigMapName(lpuEvictionTestPCS), Namespace: lpuEvictionTestNamespace},
 		Data: map[string]string{
 			"nodes_per_partition":    "2\n1",
 			"partition_node_offsets": "0\n2",
@@ -72,6 +73,7 @@ func newLPUEvictionPod(name string, replicaIdx string, podIndex string, deleting
 			Namespace: lpuEvictionTestNamespace,
 			UID:       types.UID(name + "-uid"),
 			Labels: map[string]string{
+				grovecommon.LabelPartOfKey:                         lpuEvictionTestPCS,
 				commonconsts.KubeLabelDynamoGraphDeploymentName:    lpuEvictionTestDGD,
 				commonconsts.KubeLabelDynamoComponent:              lpuEvictionTestComponent,
 				commonconsts.KubeLabelDynamoComponentType:          commonconsts.ComponentTypeLPX,
@@ -203,14 +205,14 @@ func TestLPUEviction_PodsForTrigger(t *testing.T) {
 }
 
 func TestLPUEviction_RuntimePartitionTableUsesBoundedGeneratedName(t *testing.T) {
-	t.Log("Create the generated runtime table for a maximum-length DGD name")
-	dgdName := strings.Repeat("a", validation.DNS1123SubdomainMaxLength)
+	t.Log("Create the generated runtime table for a bounded materialization name unrelated to the source DGD")
+	pcsName := strings.Repeat("a", validation.DNS1123SubdomainMaxLength)
 	config := newLPUEvictionConfigMap()
-	config.Name = dynamolpx.LPUConfigMapName(dgdName)
+	config.Name = dynamolpx.LPUConfigMapName(pcsName)
 
 	t.Log("Override the Agent config volume without replacing its generated partition table")
 	trigger := newLPUEvictionPod("agent-0", "0", "0", false, "")
-	trigger.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dgdName
+	trigger.Labels[grovecommon.LabelPartOfKey] = pcsName
 	trigger.Annotations[dynamolpx.WorkloadModeAnnotation] = string(lpxv1alpha1.WorkloadModeV2StrictHybrid)
 	trigger.Annotations[commonconsts.AnnotationExtraResourcesHash] = dynamolpx.LPUConfigMapHash(config)
 	trigger.Spec.Volumes = []corev1.Volume{{
@@ -222,6 +224,11 @@ func TestLPUEviction_RuntimePartitionTableUsesBoundedGeneratedName(t *testing.T)
 	partitions, err := r.runtimePartitionByPodIndex(t.Context(), trigger)
 	require.NoError(t, err)
 	require.Equal(t, map[string]int{"0": 0, "1": 0, "2": 1}, partitions)
+
+	t.Log("Reject a missing materialization identity instead of falling back to the source DGD name")
+	delete(trigger.Labels, grovecommon.LabelPartOfKey)
+	_, err = r.runtimePartitionByPodIndex(t.Context(), trigger)
+	require.ErrorContains(t, err, "has no PodCliqueSet identity")
 }
 
 func TestLPUEviction_LPUOnlyDeletesSamePCSGReplica(t *testing.T) {

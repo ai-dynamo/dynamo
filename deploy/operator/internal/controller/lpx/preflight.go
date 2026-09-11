@@ -55,7 +55,7 @@ func (r *graphReconciler) reconcileLPXSafetyPreflight(
 		if component != serving {
 			continue
 		}
-		combinedLength := len(dynamo.PCSNameForLPX(source)) + dynamo.LPXComponentNameBudget(component.ComponentName)
+		combinedLength := len(dynamo.PCSNameForLPX(deployment, source)) + dynamo.LPXComponentNameBudget(component.ComponentName)
 		if combinedLength > consts.MaxCombinedGroveResourceNameLength {
 			err := field.Invalid(field.NewPath("spec", "components").Index(index).Child("name"), component.ComponentName,
 				fmt.Sprintf("combined Grove resource name length %d exceeds the %d-character limit; shorten the deployment or component name",
@@ -103,7 +103,7 @@ func (r *graphReconciler) reconcileSelectedLPXSafetyPreflight(
 			return nil, nil, fmt.Errorf("failed to list LPX requests after workload resolution: %w", listErr)
 		}
 		if len(requests) > 0 {
-			retiring, retireErr := r.retireLPXRequest(ctx, deployment, dynamo.PCSNameForLPX(source), &requests[0], rejected.reason)
+			retiring, retireErr := r.retireLPXRequest(ctx, deployment, dynamo.PCSNameForLPX(deployment, source), &requests[0], rejected.reason)
 			if retireErr != nil {
 				return nil, nil, fmt.Errorf("failed to retire LPX attempt after workload resolution: %w", retireErr)
 			}

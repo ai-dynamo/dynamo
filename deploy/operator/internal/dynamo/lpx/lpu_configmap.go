@@ -54,7 +54,7 @@ func LPUConfigMapName(root string) string {
 
 func renderLPUConfigMap(
 	namespace string,
-	dgdName string,
+	materializationName string,
 	modelStoragePath string,
 	projections []*ModelProjection,
 	agents []ExpectedAgent,
@@ -98,7 +98,7 @@ func renderLPUConfigMap(
 	data["datacenter.toml"] = datacenterTOML.String()
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      LPUConfigMapName(dgdName),
+			Name:      LPUConfigMapName(materializationName),
 			Namespace: namespace,
 		},
 		Data: data,

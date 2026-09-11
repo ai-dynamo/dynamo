@@ -56,8 +56,8 @@ func TestRenderHybridProjectsManifestRuntimeIO(t *testing.T) {
 		corev1.EnvVar{Name: CyborgBatchSizeEnv, Value: "3"},
 	)
 	input := RenderInput{
-		DGDName: "dgd",
-		Stages:  map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}}, SSHSecretName: "ssh-secret",
+		MaterializationName: "dgd",
+		Stages:              map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}}, SSHSecretName: "ssh-secret",
 	}
 	rendered, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, input)
 	require.NoError(t, err)
@@ -122,8 +122,8 @@ func TestRenderHybridProjectsManifestRuntimeIO(t *testing.T) {
 			cyborg.Spec.MinAvailable = ptr.To(test.replicas)
 			cyborg.Spec.PodSpec.Containers[0].Command = []string{"/usr/local/bin/dynamo_main"}
 			_, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, RenderInput{
-				DGDName: "dgd",
-				Stages:  map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}}, SSHSecretName: "ssh-secret",
+				MaterializationName: "dgd",
+				Stages:              map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}}, SSHSecretName: "ssh-secret",
 			})
 			require.ErrorContains(t, err, test.wantError)
 		})

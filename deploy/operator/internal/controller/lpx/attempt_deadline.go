@@ -104,7 +104,7 @@ func (r *graphReconciler) reconcileLPXAttemptDeadline(
 	if attempt == nil {
 		return nil, time.Time{}, nil, nil
 	}
-	pcsName := dynamo.PCSNameForLPX(source)
+	pcsName := dynamo.PCSNameForLPX(deployment, source)
 	deadlineAt := time.Time{}
 	if attempt.DeadlineAt != nil {
 		deadlineAt = attempt.DeadlineAt.Time

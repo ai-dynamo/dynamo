@@ -337,7 +337,7 @@ func (r *graphReconciler) prepareLPXMaterializing(
 		return nil, &lpxRejected{reason: err.Error()}, nil
 	}
 	projections := workload.ModelProjections()
-	plan, err := workload.PlanNodeLocalMaterialization(dynamo.PCSNameForLPX(source))
+	plan, err := workload.PlanNodeLocalMaterialization(dynamo.PCSNameForLPX(deployment, source))
 	if err != nil {
 		return nil, &lpxRejected{reason: err.Error()}, nil
 	}
@@ -1092,7 +1092,7 @@ func (r *graphReconciler) createPublishedLPXRequest(
 			Name:      materializing.requestName,
 			Namespace: deployment.Namespace,
 			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: deployment.Name,
+				consts.KubeLabelDynamoGraphDeploymentName: metav1.GetControllerOf(deployment).Name,
 			},
 			Annotations: lpxRequestAnnotations(deployment, materializing, grove),
 		},
@@ -1283,8 +1283,7 @@ func (r *graphReconciler) listLPXPublicationPodGangs(
 		},
 		client.InNamespace(deployment.Namespace),
 		client.MatchingLabels{
-			grovecommon.LabelPartOfKey:                pcs.Name,
-			consts.KubeLabelDynamoGraphDeploymentName: deployment.Name,
+			grovecommon.LabelPartOfKey: pcs.Name,
 		},
 	); err != nil {
 		return nil, err

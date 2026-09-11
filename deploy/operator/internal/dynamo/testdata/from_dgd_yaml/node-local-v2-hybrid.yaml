@@ -4,11 +4,12 @@ data:
 metadata:
   annotations:
     lpx.nvidia.com/deployment-generation: "1"
+    lpx.nvidia.com/deployment-name: node-local-v2-hybrid
     lpx.nvidia.com/deployment-uid: lpx-render-uid
     lpx.nvidia.com/input-revision: sha256:9d3faab86f714a9c410f67e9b8b85dbfb120b41332690be3f32826897497a89d
     scheduling.lpu.nvidia.com/dgd-generation: "1"
     scheduling.lpu.nvidia.com/dgd-uid: 22222222-2222-4222-8222-222222222222
-  name: node-local-v2-hybrid-decode
+  name: node-local-9d06c48a-lpx-decode
   namespace: test
 ---
 data:
@@ -44,16 +45,18 @@ data:
 metadata:
   annotations:
     lpx.nvidia.com/deployment-generation: "1"
+    lpx.nvidia.com/deployment-name: node-local-v2-hybrid
     lpx.nvidia.com/deployment-uid: lpx-render-uid
     lpx.nvidia.com/input-revision: sha256:9d3faab86f714a9c410f67e9b8b85dbfb120b41332690be3f32826897497a89d
     scheduling.lpu.nvidia.com/dgd-generation: "1"
     scheduling.lpu.nvidia.com/dgd-uid: 22222222-2222-4222-8222-222222222222
-  name: node-local-v2-hybrid-lpu
+  name: node-local-9d06c48a-lpx-lpu
   namespace: test
 ---
 metadata:
   annotations:
     lpx.nvidia.com/deployment-generation: "1"
+    lpx.nvidia.com/deployment-name: node-local-v2-hybrid
     lpx.nvidia.com/deployment-uid: lpx-render-uid
     lpx.nvidia.com/input-revision: sha256:9d3faab86f714a9c410f67e9b8b85dbfb120b41332690be3f32826897497a89d
     scheduling.lpu.nvidia.com/dgd-generation: "1"
@@ -61,7 +64,7 @@ metadata:
     scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:15dd04d9f3ce9e1a58d776d35892e4fad5c91109b1bf86c386fb00b010273db8
   labels:
     nvidia.com/dynamo-graph-deployment-name: node-local-v2-hybrid
-  name: node-local-9a49489a-lpx
+  name: node-local-9d06c48a-lpx
   namespace: test
 spec:
   replicas: 1
@@ -70,6 +73,7 @@ spec:
     cliques:
     - annotations:
         lpx.nvidia.com/deployment-generation: "1"
+        lpx.nvidia.com/deployment-name: node-local-v2-hybrid
         lpx.nvidia.com/deployment-uid: lpx-render-uid
         lpx.nvidia.com/input-revision: sha256:9d3faab86f714a9c410f67e9b8b85dbfb120b41332690be3f32826897497a89d
         nvidia.com/extra-resources-hash: d410b2a3efc122a1a232c8d3d209b74eda592811c79dad628c5d46d8fac52264
@@ -161,7 +165,7 @@ spec:
               valueFrom:
                 configMapKeyRef:
                   key: tokenizer_dir
-                  name: node-local-v2-hybrid-decode
+                  name: node-local-9d06c48a-lpx-decode
             - name: TOTAL_REPLICAS
               value: "1"
             image: example.invalid/gpu-runtime:test
@@ -217,7 +221,7 @@ spec:
           terminationGracePeriodSeconds: 60
           volumes:
           - configMap:
-              name: node-local-v2-hybrid-decode
+              name: node-local-9d06c48a-lpx-decode
             name: config
           - hostPath:
               path: /dev/infiniband
@@ -236,6 +240,7 @@ spec:
         - lpu-wkr-m-0
     - annotations:
         lpx.nvidia.com/deployment-generation: "1"
+        lpx.nvidia.com/deployment-name: node-local-v2-hybrid
         lpx.nvidia.com/deployment-uid: lpx-render-uid
         lpx.nvidia.com/input-revision: sha256:9d3faab86f714a9c410f67e9b8b85dbfb120b41332690be3f32826897497a89d
         nvidia.com/extra-resources-hash: 24aefcdb8d31a8d6357564441af523737eca563784d5fbe2d770e94f5c2b9c05
@@ -280,7 +285,7 @@ spec:
               valueFrom:
                 configMapKeyRef:
                   key: gas_dir
-                  name: node-local-v2-hybrid-lpu
+                  name: node-local-9d06c48a-lpx-lpu
             - name: GLUE_RDMA_PATH_MTU
               value: "1024"
             - name: LPU_MODEL_NAME
@@ -314,7 +319,7 @@ spec:
               valueFrom:
                 configMapKeyRef:
                   key: topologies
-                  name: node-local-v2-hybrid-lpu
+                  name: node-local-9d06c48a-lpx-lpu
             - name: UCX_TLS
               value: tcp
             image: example.invalid/lpu-runtime:test
@@ -393,7 +398,7 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v2-hybrid-lpu
+              name: node-local-9d06c48a-lpx-lpu
             name: config
           - emptyDir: {}
             name: tmp
@@ -419,6 +424,7 @@ spec:
     podCliqueScalingGroups:
     - annotations:
         lpx.nvidia.com/deployment-generation: "1"
+        lpx.nvidia.com/deployment-name: node-local-v2-hybrid
         lpx.nvidia.com/deployment-uid: lpx-render-uid
         lpx.nvidia.com/input-revision: sha256:9d3faab86f714a9c410f67e9b8b85dbfb120b41332690be3f32826897497a89d
         scheduling.lpu.nvidia.com/dgd-generation: "1"

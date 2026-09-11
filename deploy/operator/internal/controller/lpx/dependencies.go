@@ -114,12 +114,12 @@ func (r *graphReconciler) indexedLPXDependencyRequests(ctx context.Context, depe
 		return nil
 	}
 
-	// Cluster-scoped events still respect each source's configured namespace filter.
+	// Respect each source's namespace filter and enqueue its exact owned materializations.
 	requests := make([]ctrl.Request, 0, len(sources.Items))
 	for i := range sources.Items {
 		source := &sources.Items[i]
 		if commoncontroller.NamespaceAllowed(r.Config, r.runtimeConfig, source, source.Namespace) {
-			requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(source)})
+			requests = append(requests, r.mapLPXSourceToRequests(ctx, source)...)
 		}
 	}
 	return requests

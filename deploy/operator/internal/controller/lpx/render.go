@@ -90,11 +90,12 @@ func stampLPXIdentity(deployment *v1alpha1.LPXGraphDeployment, pcs *grovev1alpha
 	// Preflight validates the exact source controller owner before rendering resources.
 	sourceOwner := metav1.GetControllerOf(deployment)
 	identity := map[string]string{
-		lpxDeploymentUIDAnnotation:        string(deployment.UID),
-		lpxDeploymentGenerationAnnotation: strconv.FormatInt(deployment.Generation, 10),
-		dynamo.LPXInputRevisionAnnotation: deployment.Spec.InputRevision,
-		dynamolpx.DGDUIDAnnotation:        string(sourceOwner.UID),
-		dynamolpx.DGDGenerationAnnotation: deployment.Annotations[dynamolpx.DGDGenerationAnnotation],
+		dynamolpx.DeploymentNameAnnotation: deployment.Name,
+		lpxDeploymentUIDAnnotation:         string(deployment.UID),
+		lpxDeploymentGenerationAnnotation:  strconv.FormatInt(deployment.Generation, 10),
+		dynamo.LPXInputRevisionAnnotation:  deployment.Spec.InputRevision,
+		dynamolpx.DGDUIDAnnotation:         string(sourceOwner.UID),
+		dynamolpx.DGDGenerationAnnotation:  deployment.Annotations[dynamolpx.DGDGenerationAnnotation],
 	}
 	stamp := func(annotations *map[string]string) {
 		if *annotations == nil {

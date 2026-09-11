@@ -129,7 +129,11 @@ func (r *lpuEvictionReconciler) runtimePartitionByPodIndex(ctx context.Context, 
 	}
 
 	// Read the generated runtime partition table independently of authored volume overrides.
-	configName := dynamolpx.LPUConfigMapName(trigger.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
+	pcsName := trigger.Labels[grovecommon.LabelPartOfKey]
+	if pcsName == "" {
+		return nil, fmt.Errorf("LPU-GPU eviction trigger pod %s/%s has no PodCliqueSet identity", trigger.Namespace, trigger.Name)
+	}
+	configName := dynamolpx.LPUConfigMapName(pcsName)
 	var config corev1.ConfigMap
 	if err := r.Get(ctx, client.ObjectKey{Namespace: trigger.Namespace, Name: configName}, &config); err != nil {
 		return nil, fmt.Errorf("get LPU runtime ConfigMap %s/%s: %w", trigger.Namespace, configName, err)

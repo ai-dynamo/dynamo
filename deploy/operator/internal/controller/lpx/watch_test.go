@@ -56,9 +56,29 @@ func TestLPXDeploymentPrimaryPredicateTracksOwnerIdentity(t *testing.T) {
 	require.True(t, filter.Update(event.UpdateEvent{ObjectOld: deployment, ObjectNew: ownerChanged}))
 }
 
+func TestLPXSourceWatchMapsControllerOwnedMaterializations(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, nvidiacomv1alpha1.AddToScheme(scheme))
+	require.NoError(t, nvidiacomv1beta1.AddToScheme(scheme))
+	source := &nvidiacomv1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "source", Namespace: "workloads", UID: "source-uid"}}
+	owned := &nvidiacomv1alpha1.LPXGraphDeployment{ObjectMeta: metav1.ObjectMeta{
+		Name: "materialization", Namespace: source.Namespace,
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(source, nvidiacomv1beta1.DynamoGraphDeploymentGVK)},
+	}}
+	unrelated := owned.DeepCopy()
+	unrelated.Name = "unrelated"
+	unrelated.OwnerReferences[0].UID = "other-source-uid"
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(owned, unrelated).
+		WithIndex(&nvidiacomv1alpha1.LPXGraphDeployment{}, lpxSourceOwnerIndex, lpxSourceOwnerReferences).Build()
+	reconciler := &graphReconciler{Client: kube}
+
+	require.Equal(t, []ctrl.Request{{NamespacedName: client.ObjectKeyFromObject(owned)}}, reconciler.mapLPXSourceToRequests(t.Context(), source))
+}
+
 func TestLPXTopologyBindingWatchMapsMatchingPoliciesWithinScope(t *testing.T) {
 	t.Log("Build matching, unrelated, and out-of-scope graph policies")
 	scheme := runtime.NewScheme()
+	require.NoError(t, nvidiacomv1alpha1.AddToScheme(scheme))
 	require.NoError(t, nvidiacomv1beta1.AddToScheme(scheme))
 	matching := topologyPolicyDGD("matching", "workloads", "fabric")
 	unrelated := topologyPolicyDGD("unrelated", "workloads", "other-fabric")
@@ -67,8 +87,27 @@ func TestLPXTopologyBindingWatchMapsMatchingPoliciesWithinScope(t *testing.T) {
 	for _, source := range []*nvidiacomv1beta1.DynamoGraphDeployment{matching, unrelated, foreign} {
 		source.Spec.Components = []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "lpx", ComponentType: nvidiacomv1beta1.ComponentTypeLPX}}
 	}
-	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(matching, unrelated, foreign, ordinary).
+
+	t.Log("Give each source a differently named materialization and retain a stale same-name child")
+	objects := []client.Object{matching, unrelated, foreign, ordinary}
+	for _, source := range []*nvidiacomv1beta1.DynamoGraphDeployment{matching, unrelated, foreign, ordinary} {
+		source.UID = types.UID(source.Name + "-uid")
+		objects = append(objects, &nvidiacomv1alpha1.LPXGraphDeployment{ObjectMeta: metav1.ObjectMeta{
+			Name: "materialization-" + source.Name, Namespace: source.Namespace,
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(source, nvidiacomv1beta1.DynamoGraphDeploymentGVK)},
+		}})
+	}
+	stale := matching.DeepCopy()
+	stale.UID = "previous-source-uid"
+	objects = append(objects, &nvidiacomv1alpha1.LPXGraphDeployment{ObjectMeta: metav1.ObjectMeta{
+		Name: matching.Name, Namespace: matching.Namespace,
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(stale, nvidiacomv1beta1.DynamoGraphDeploymentGVK)},
+	}})
+
+	t.Log("Index dependency references and exact controller ownership without scanning")
+	kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).
 		WithIndex(&nvidiacomv1beta1.DynamoGraphDeployment{}, lpxTopologyBindingRefIndex, lpxTopologyBindingReferences).
+		WithIndex(&nvidiacomv1alpha1.LPXGraphDeployment{}, lpxSourceOwnerIndex, lpxSourceOwnerReferences).
 		WithInterceptorFuncs(interceptor.Funcs{List: func(ctx context.Context, delegated client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 			options := (&client.ListOptions{}).ApplyOptions(opts)
 			require.NotNil(t, options.FieldSelector, "topology events must use an index, not scan DGDs")
@@ -97,9 +136,9 @@ func TestLPXTopologyBindingWatchMapsMatchingPoliciesWithinScope(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "foreign-cluster-object"},
 	}}))
 
-	t.Log("Requeue only the allowed graph that references the changed binding")
+	t.Log("Requeue only the allowed materialization owned by the current matching source UID")
 	requests := reconciler.indexedLPXDependencyRequests(context.Background(), binding, lpxTopologyBindingRefIndex)
-	require.Equal(t, []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: "workloads", Name: "matching"}}}, requests)
+	require.Equal(t, []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: "workloads", Name: "materialization-matching"}}}, requests)
 
 	t.Log("Ignore bindings no graph consumes")
 	require.Empty(t, reconciler.indexedLPXDependencyRequests(context.Background(), &grovev1alpha1.ClusterTopologyBinding{
@@ -131,6 +170,7 @@ func TestLPXPodGangPredicateTracksOnlyMaterializationIdentity(t *testing.T) {
 	gang := &groveschedulerv1alpha1.PodGang{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "agents", Namespace: "workloads", UID: "uid", Generation: 1,
+			Annotations: map[string]string{dynamolpx.DeploymentNameAnnotation: "materialization"},
 			Labels: map[string]string{
 				grovecommon.LabelSchedulerName:            dynamolpx.SchedulerName,
 				consts.KubeLabelDynamoGraphDeploymentName: "graph",
@@ -139,7 +179,7 @@ func TestLPXPodGangPredicateTracksOnlyMaterializationIdentity(t *testing.T) {
 	}
 	require.True(t, predicate.Create(event.CreateEvent{Object: gang}))
 	require.True(t, predicate.Delete(event.DeleteEvent{Object: gang}))
-	require.Equal(t, []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: "workloads", Name: "graph"}}},
+	require.Equal(t, []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: "workloads", Name: "materialization"}}},
 		mapLPXChildToRequests(t.Context(), gang))
 
 	t.Log("Ignore status-only scheduler updates")
@@ -160,7 +200,7 @@ func TestLPXPodGangPredicateTracksOnlyMaterializationIdentity(t *testing.T) {
 	ordinary.Labels[grovecommon.LabelSchedulerName] = corev1.DefaultSchedulerName
 	require.True(t, predicate.Create(event.CreateEvent{Object: ordinary}))
 	unrelated := ordinary.DeepCopy()
-	delete(unrelated.Labels, consts.KubeLabelDynamoGraphDeploymentName)
+	delete(unrelated.Annotations, dynamolpx.DeploymentNameAnnotation)
 	require.False(t, predicate.Create(event.CreateEvent{Object: unrelated}))
 	require.Empty(t, mapLPXChildToRequests(t.Context(), unrelated))
 }
@@ -180,13 +220,18 @@ func TestLPXWorkloadEventPredicates(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Observe creation, deletion and all metadata used to fence materialization")
 			old := test.object
+			old.SetName("grove-child")
+			old.SetNamespace("workloads")
 			old.SetAnnotations(map[string]string{
+				dynamolpx.DeploymentNameAnnotation: "materialization",
 				dynamolpx.WorkloadDigestAnnotation: "sha256:workload",
 				lpxv1alpha1.PodRoleAnnotation:      lpxv1alpha1.PodRoleAgent,
 			})
 			require.True(t, test.predicate.Create(event.CreateEvent{Object: old}))
 			require.True(t, test.predicate.Delete(event.DeleteEvent{Object: old}))
 			require.False(t, test.predicate.Generic(event.GenericEvent{Object: old}))
+			require.Equal(t, []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: "workloads", Name: "materialization"}}},
+				mapLPXChildToRequests(t.Context(), old), "Grove children need no source DGD label for routing")
 
 			t.Log("Ordinary readiness traffic does not wake the LPX controller")
 			unrelated := old.DeepCopyObject().(client.Object)
@@ -309,6 +354,7 @@ func TestLPXDRAWatchMapsIndexedConsumers(t *testing.T) {
 	t.Log("Index consumed regular and init-container references, deduplicating shared aliases")
 	source := newLPXTestSource(dynamolpx.PipelineLPX, "build-v2")
 	child := newLPXTestDeployment(t, source)
+	child.Name = "materialization"
 	pod := &dynamolpx.ServingComponent(source).ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor).PodTemplate.Spec
 	pod.Containers[0].Resources.Claims = []corev1.ResourceClaim{{Name: "direct"}, {Name: "template"}}
 	pod.Containers = append(pod.Containers, corev1.Container{Name: "sidecar", Resources: corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: "direct"}}}})
@@ -329,8 +375,10 @@ func TestLPXDRAWatchMapsIndexedConsumers(t *testing.T) {
 	t.Log("Reference same-named claims and templates from two namespaces, excluding unused aliases")
 	foreign := source.DeepCopy()
 	foreign.Name, foreign.Namespace = "foreign", "other-namespace"
+	foreign.UID = "foreign-source-uid"
 	unused := source.DeepCopy()
 	unused.Name = "unused"
+	unused.UID = "unused-source-uid"
 	unusedPod := &dynamolpx.ServingComponent(unused).ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor).PodTemplate.Spec
 	unusedPod.Containers = unusedPod.Containers[:1]
 	unusedPod.Containers[0].Resources.Claims, unusedPod.InitContainers = nil, nil
@@ -348,51 +396,60 @@ func TestLPXDRAWatchMapsIndexedConsumers(t *testing.T) {
 	}
 	foreignTemplate := claimTemplate.DeepCopy()
 	foreignTemplate.Namespace = foreign.Namespace
-	r := newLPXTestReconciler(t, nil, child, source, foreign, unused, claim, claimTemplate, foreignTemplate)
+
+	t.Log("Route dependencies to current materializations, not same-name children from old source UIDs")
+	foreignChild := newLPXTestDeployment(t, foreign)
+	foreignChild.Name = "foreign-materialization"
+	unusedChild := newLPXTestDeployment(t, unused)
+	unusedChild.Name = "unused-materialization"
+	staleChild := child.DeepCopy()
+	staleChild.Name, staleChild.UID = source.Name, "stale-materialization-uid"
+	staleChild.OwnerReferences[0].UID = "previous-source-uid"
+	r := newLPXTestReconciler(t, nil, child, source, foreign, unused, foreignChild, unusedChild, staleChild, claim, claimTemplate, foreignTemplate)
 	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{List: func(ctx context.Context, delegated client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 		options := (&client.ListOptions{}).ApplyOptions(opts)
 		require.NotNil(t, options.FieldSelector, "DRA events must use indexes at both hops")
 		require.False(t, options.FieldSelector.Empty())
 		return delegated.List(ctx, list, opts...)
 	}})
-	sourceRequest := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(source)}
-	foreignRequest := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(foreign)}
+	childRequest := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
+	foreignRequest := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(foreignChild)}
 
 	t.Log("Claim events remain namespace-local and unused aliases never enqueue a graph")
-	require.Equal(t, []ctrl.Request{sourceRequest}, r.mapLPXDRADependencyToRequests(t.Context(), claim))
-	require.Equal(t, []ctrl.Request{sourceRequest}, r.mapLPXDRADependencyToRequests(t.Context(), claimTemplate))
+	require.Equal(t, []ctrl.Request{childRequest}, r.mapLPXDRADependencyToRequests(t.Context(), claim))
+	require.Equal(t, []ctrl.Request{childRequest}, r.mapLPXDRADependencyToRequests(t.Context(), claimTemplate))
 	require.Equal(t, []ctrl.Request{foreignRequest}, r.mapLPXDRADependencyToRequests(t.Context(), foreignTemplate))
 	require.Empty(t, r.mapLPXDRADependencyToRequests(t.Context(), &resourcev1.ResourceClaimTemplate{ObjectMeta: metav1.ObjectMeta{Namespace: source.Namespace, Name: "unrelated"}}))
 	require.Empty(t, r.mapLPXDRADependencyToRequests(t.Context(), &resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: "unrelated"}}))
 
 	t.Log("Class events join exact and alternative references and enqueue each graph once")
 	for _, class := range []string{"gpu", "alternative-gpu"} {
-		require.ElementsMatch(t, []ctrl.Request{sourceRequest, foreignRequest}, r.mapLPXDRADependencyToRequests(t.Context(), &resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: class}}))
+		require.ElementsMatch(t, []ctrl.Request{childRequest, foreignRequest}, r.mapLPXDRADependencyToRequests(t.Context(), &resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: class}}))
 	}
 	r.Config.Namespace.Restricted = "unwatched-namespace"
 	require.Empty(t, r.mapLPXDRADependencyToRequests(t.Context(), &resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: "gpu"}}))
 	r.Config.Namespace.Restricted = source.Namespace
-	require.Equal(t, []ctrl.Request{sourceRequest}, r.mapLPXDRADependencyToRequests(t.Context(), &resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: "gpu"}}))
+	require.Equal(t, []ctrl.Request{childRequest}, r.mapLPXDRADependencyToRequests(t.Context(), &resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: "gpu"}}))
 
 	t.Log("Editing only a direct claim updates its DeviceClass dependency")
 	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(claim), claim))
 	claim.Spec.Devices.Requests[0].Exactly.DeviceClassName = "replacement-claim-gpu"
 	require.NoError(t, r.Update(t.Context(), claim))
-	require.Equal(t, []ctrl.Request{sourceRequest}, r.mapLPXDRADependencyToRequests(t.Context(), &resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: "replacement-claim-gpu"}}))
-	require.Equal(t, []ctrl.Request{sourceRequest}, r.mapLPXDRADependencyToRequests(t.Context(), &resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: "gpu"}}))
+	require.Equal(t, []ctrl.Request{childRequest}, r.mapLPXDRADependencyToRequests(t.Context(), &resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: "replacement-claim-gpu"}}))
+	require.Equal(t, []ctrl.Request{childRequest}, r.mapLPXDRADependencyToRequests(t.Context(), &resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: "gpu"}}))
 
 	t.Log("A template-only edit removes its old class references without a DGD edit")
 	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(claimTemplate), claimTemplate))
 	claimTemplate.Spec.Spec.Devices.Requests[0].FirstAvailable = []resourcev1.DeviceSubRequest{{Name: "replacement", DeviceClassName: "replacement-template-gpu"}}
 	require.NoError(t, r.Update(t.Context(), claimTemplate))
-	require.Equal(t, []ctrl.Request{sourceRequest}, r.mapLPXDRADependencyToRequests(t.Context(), &resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: "replacement-template-gpu"}}))
+	require.Equal(t, []ctrl.Request{childRequest}, r.mapLPXDRADependencyToRequests(t.Context(), &resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: "replacement-template-gpu"}}))
 	for _, class := range []string{"gpu", "alternative-gpu"} {
 		require.Empty(t, r.mapLPXDRADependencyToRequests(t.Context(), &resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: class}}))
 	}
 
 	t.Log("Missing templates remain indexed, but no longer contribute a DeviceClass dependency")
 	require.NoError(t, r.Delete(t.Context(), claimTemplate))
-	require.Equal(t, []ctrl.Request{sourceRequest}, r.mapLPXDRADependencyToRequests(t.Context(), claimTemplate))
+	require.Equal(t, []ctrl.Request{childRequest}, r.mapLPXDRADependencyToRequests(t.Context(), claimTemplate))
 	require.Empty(t, r.mapLPXDRADependencyToRequests(t.Context(), &resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: "replacement-template-gpu"}}))
 
 	t.Log("Dependency events never mutate the source or its revision; ordinary components are not indexed")

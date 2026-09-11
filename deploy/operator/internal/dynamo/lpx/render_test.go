@@ -101,9 +101,9 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 
 			t.Log("Render into the fresh PCS without retaining stale runtime identity")
 			rendered, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, RenderInput{
-				DGDName:       "test-dgd",
-				Stages:        map[string]corev1.PodTemplateSpec{testRenderComponentName: template},
-				SSHSecretName: "ssh-secret",
+				MaterializationName: "test-dgd",
+				Stages:              map[string]corev1.PodTemplateSpec{testRenderComponentName: template},
+				SSHSecretName:       "ssh-secret",
 			})
 			require.NoError(t, err)
 			require.Same(t, pcs, rendered)
@@ -180,9 +180,9 @@ func TestRenderMaterializesAgentModelFromBasePodSpec(t *testing.T) {
 
 	t.Log("Render conductor and Agent roles from the base PodSpec")
 	rendered, err := renderSelectedForTest(renderTestPCS(false), []*ModelProjection{projection}, RenderInput{
-		DGDName:       "test-dgd",
-		Stages:        map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: conductorPodSpec}},
-		SSHSecretName: "ssh-secret",
+		MaterializationName: "test-dgd",
+		Stages:              map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: conductorPodSpec}},
+		SSHSecretName:       "ssh-secret",
 	})
 	require.NoError(t, err)
 
@@ -251,7 +251,7 @@ func TestRenderSpecDecodeRoleOwnershipAndSharedSettings(t *testing.T) {
 	plan, err := selected.PlanNodeLocalMaterialization(pcs.Name)
 	require.NoError(t, err)
 	extraResources, err := RenderSelectedNodeLocal(pcs, selected, plan, RenderInput{
-		DGDName: source.Name, Stages: stages, SSHSecretName: "ssh-secret",
+		MaterializationName: source.Name, Stages: stages, SSHSecretName: "ssh-secret",
 	})
 	require.NoError(t, err)
 

@@ -250,9 +250,9 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 
 	t.Log("Release quota and observe alpha LGD ownership of the published PCS and runtime resources without waiting for scheduling")
 	require.NoError(t, env.Client().Delete(t.Context(), quota))
-	pcs := &grovev1alpha1.PodCliqueSet{ObjectMeta: metav1.ObjectMeta{Name: dynamo.PCSNameForLPX(source), Namespace: source.Namespace}}
-	configMap := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: source.Name + "-lpu", Namespace: source.Namespace}}
-	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: dynamo.GetDCDResourceName(source, "lpx", ""), Namespace: source.Namespace}}
+	pcs := &grovev1alpha1.PodCliqueSet{ObjectMeta: metav1.ObjectMeta{Name: dynamo.PCSNameForLPX(child, source), Namespace: source.Namespace}}
+	configMap := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: pcs.Name + "-lpu", Namespace: source.Namespace}}
+	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: pcs.Name + "-lpx", Namespace: source.Namespace}}
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		for _, resource := range []client.Object{pcs, configMap, service} {
 			if assert.NoError(c, env.Client().Get(t.Context(), client.ObjectKeyFromObject(resource), resource)) {

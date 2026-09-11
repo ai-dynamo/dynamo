@@ -30,10 +30,10 @@ const (
 	ExecutionRoleLabel = "lpx.nvidia.com/execution-role"
 )
 
-// RenderInput contains the source name and fresh stage templates consumed by rendering.
+// RenderInput contains the materialization name and fresh stage templates consumed by rendering.
 type RenderInput struct {
-	// DGDName is the source DynamoGraphDeployment name.
-	DGDName string
+	// MaterializationName is the owning LPXGraphDeployment's bounded identity root.
+	MaterializationName string
 	// MinAvailable is the minimum number of complete engine replicas in the gang.
 	MinAvailable *int32
 	// Stages contains an independently merged LPU template for every projected stage.
@@ -86,7 +86,7 @@ func RenderSelectedNodeLocal(
 	}
 	modelStorage.volume = *modelStorage.volume.DeepCopy()
 	modelStorage.mount = *modelStorage.mount.DeepCopy()
-	configMap, err := renderLPUConfigMap(namespace, input.DGDName, modelStorage.mount.MountPath, projections, plan.Agents)
+	configMap, err := renderLPUConfigMap(namespace, input.MaterializationName, modelStorage.mount.MountPath, projections, plan.Agents)
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +99,7 @@ func RenderSelectedNodeLocal(
 		extraResources  []client.Object
 	)
 	if v2HybridRuntime {
-		cyborgConfigMap, err = renderSelectedCyborgConfigMap(namespace, input.DGDName, plan, modelStorage.mount.MountPath, &projections[0].configuredBuild)
+		cyborgConfigMap, err = renderSelectedCyborgConfigMap(namespace, input.MaterializationName, plan, modelStorage.mount.MountPath, &projections[0].configuredBuild)
 		if err != nil {
 			return nil, err
 		}

@@ -19,6 +19,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -28,20 +29,23 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	dynamolpx "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 )
 
+const lpxSourceOwnerIndex = "lpx.sourceController"
+
 func (r *graphReconciler) setupWithManager(mgr ctrl.Manager) error {
+	// Source events address exact controller owners, not source-named materializations.
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &nvidiacomv1alpha1.LPXGraphDeployment{}, lpxSourceOwnerIndex, lpxSourceOwnerReferences); err != nil {
+		return fmt.Errorf("register LPX source owner index: %w", err)
+	}
 	ctrlBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&nvidiacomv1alpha1.LPXGraphDeployment{}, builder.WithPredicates(lpxDeploymentPrimaryPredicate())).
 		Named("lpxgraphdeployment").
-		Watches(&nvidiacomv1beta1.DynamoGraphDeployment{}, handler.EnqueueRequestsFromMapFunc(func(_ context.Context, obj client.Object) []ctrl.Request {
-			return []ctrl.Request{{NamespacedName: client.ObjectKeyFromObject(obj)}}
-		}), builder.WithPredicates(lpxSourcePredicate())).
+		Watches(&nvidiacomv1beta1.DynamoGraphDeployment{}, handler.EnqueueRequestsFromMapFunc(r.mapLPXSourceToRequests), builder.WithPredicates(lpxSourcePredicate())).
 		WithEventFilter(r.lpxControllerEventFilter())
 	// Primary/source events and finalizer retries are sufficient while disabled.
 	if r.unavailableReason() != "" {
@@ -79,6 +83,27 @@ func (r *graphReconciler) setupWithManager(mgr ctrl.Manager) error {
 		}
 	}
 	return ctrlBuilder.Complete(r)
+}
+
+func lpxSourceOwnerReferences(obj client.Object) []string {
+	owner := metav1.GetControllerOf(obj)
+	if owner == nil || owner.APIVersion != nvidiacomv1beta1.GroupVersion.String() || owner.Kind != "DynamoGraphDeployment" {
+		return nil
+	}
+	return []string{owner.Name + "/" + string(owner.UID)}
+}
+
+func (r *graphReconciler) mapLPXSourceToRequests(ctx context.Context, obj client.Object) []ctrl.Request {
+	deployments := &nvidiacomv1alpha1.LPXGraphDeploymentList{}
+	ownerKey := obj.GetName() + "/" + string(obj.GetUID())
+	if err := r.List(ctx, deployments, client.InNamespace(obj.GetNamespace()), client.MatchingFields{lpxSourceOwnerIndex: ownerKey}); err != nil {
+		return nil
+	}
+	requests := make([]ctrl.Request, 0, len(deployments.Items))
+	for index := range deployments.Items {
+		requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(&deployments.Items[index])})
+	}
+	return requests
 }
 
 // lpxDeploymentPrimaryPredicate observes every field that grants publication authority.
@@ -139,17 +164,17 @@ func (r *graphReconciler) mapLPXDRADependencyToRequests(ctx context.Context, obj
 
 // mapLPXChildToRequests receives non-nil, namespaced Grove informer objects.
 func mapLPXChildToRequests(_ context.Context, obj client.Object) []ctrl.Request {
-	dgdName := obj.GetLabels()[consts.KubeLabelDynamoGraphDeploymentName]
-	if dgdName == "" {
+	deploymentName := obj.GetAnnotations()[dynamolpx.DeploymentNameAnnotation]
+	if deploymentName == "" {
 		return nil
 	}
-	return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: dgdName}}}
+	return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: deploymentName}}}
 }
 
 // lpxPodGangPredicate receives non-nil PodGangs from the registered informer.
 func lpxPodGangPredicate() predicate.Predicate {
 	isSchedulerWitness := func(obj client.Object) bool {
-		if obj.GetLabels()[consts.KubeLabelDynamoGraphDeploymentName] == "" {
+		if obj.GetAnnotations()[dynamolpx.DeploymentNameAnnotation] == "" {
 			return false
 		}
 		schedulerName := obj.GetLabels()[grovecommon.LabelSchedulerName]

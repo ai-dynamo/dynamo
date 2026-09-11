@@ -71,6 +71,7 @@ func (r *graphReconciler) reconcileGrovePodCliqueSetForLPX(
 	}
 	for _, key := range [...]string{
 		dynamolpx.WorkloadDigestAnnotation,
+		dynamolpx.DeploymentNameAnnotation,
 		lpxDeploymentUIDAnnotation,
 		lpxDeploymentGenerationAnnotation,
 		dynamo.LPXInputRevisionAnnotation,

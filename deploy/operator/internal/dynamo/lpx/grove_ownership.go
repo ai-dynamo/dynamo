@@ -7,7 +7,6 @@ import (
 	"context"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/thirdparty/lpxscheduler/v1alpha1"
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -15,8 +14,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// DeploymentUIDAnnotation records the owning LPXGraphDeployment UID on rendered objects.
-const DeploymentUIDAnnotation = "lpx.nvidia.com/deployment-uid"
+const (
+	// DeploymentNameAnnotation routes rendered-object events to their LPXGraphDeployment.
+	DeploymentNameAnnotation = "lpx.nvidia.com/deployment-name"
+	// DeploymentUIDAnnotation records the owning LPXGraphDeployment UID on rendered objects.
+	DeploymentUIDAnnotation = "lpx.nvidia.com/deployment-uid"
+)
 
 // OwnsPodClique verifies the LPX owner chain before ordinary DGD watches
 // suppress a role-readiness event. Authorable annotations alone are not proof.
@@ -43,7 +46,7 @@ func OwnsPodClique(ctx context.Context, reader client.Reader, clique *grovev1alp
 	owner = metav1.GetControllerOf(pcs)
 	return owner != nil && owner.Kind == nvidiacomv1alpha1.LPXGraphDeploymentGVK.Kind &&
 		owner.APIVersion == nvidiacomv1alpha1.GroupVersion.String() && owner.UID != "" &&
-		owner.Name == clique.Labels[consts.KubeLabelDynamoGraphDeploymentName] &&
+		owner.Name == clique.Annotations[DeploymentNameAnnotation] &&
 		string(owner.UID) == clique.Annotations[DeploymentUIDAnnotation]
 }
 
