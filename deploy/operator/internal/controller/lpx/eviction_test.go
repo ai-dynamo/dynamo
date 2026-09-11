@@ -310,7 +310,7 @@ func TestLPUEviction_ResourceVersionFencesDeletion(t *testing.T) {
 		Delete: func(ctx context.Context, delegated client.WithWatch, object client.Object, opts ...client.DeleteOption) error {
 			current := &corev1.Pod{}
 			require.NoError(t, delegated.Get(ctx, client.ObjectKeyFromObject(object), current))
-			current.Labels["changed"] = "true"
+			current.OwnerReferences[0].Kind = "ForeignPodClique"
 			require.NoError(t, delegated.Update(ctx, current))
 			return delegated.Delete(ctx, object, opts...)
 		},
