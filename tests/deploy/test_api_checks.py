@@ -49,11 +49,14 @@ def response(content="hello", finish="stop", tokens=1):
 
 @pytest.mark.parametrize("content", [None, ""])
 def test_stop_accepts_suppressed_content_and_rejects_visible_text(content):
-    validate_chat_response(response(content), "model", 0, max_tokens=30, stop="hello")
+    validate_chat_response(response(content), "model", max_tokens=30, stop="hello")
     with pytest.raises(AssertionError):
-        validate_chat_response(
-            response("hello"), "model", 0, max_tokens=30, stop="hello"
-        )
+        validate_chat_response(response("hello"), "model", max_tokens=30, stop="hello")
+
+
+def test_chat_keeps_default_minimum_length_without_stop():
+    with pytest.raises(AssertionError, match="Response content too short"):
+        validate_chat_response(response("hello"), "model", max_tokens=30)
 
 
 def test_token_limit_and_finish_reason():
@@ -69,6 +72,8 @@ def test_stream_requires_one_finish_and_done():
     finish = 'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}'
     validate_stream([content, finish, "data: [DONE]"])
     for lines in (
+        ["event:error", content, finish, "data: [DONE]"],
+        ["event: error", content, finish, "data: [DONE]"],
         [content, finish],
         [content, finish, finish, "data: [DONE]"],
         [content, finish, content, "data: [DONE]"],
@@ -89,13 +94,14 @@ def test_embedding_contract_rejects_wire_base64_and_nonfinite_vectors():
             validate_embedding(body, 1, 2)
 
 
+@pytest.mark.parametrize("endpoint", [None, "/custom/chat/completions"])
 def test_api_cases_use_shared_client_and_preserve_invalid_response(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, endpoint
 ):
     calls = []
 
     def send(url, payload, **kwargs):
-        calls.append(payload)
+        calls.append((url, payload))
         if payload.get("stream"):
             result = response()
             result._content = b'data: {"choices":[{"index":0,"delta":{"content":"hello"}}]}\n\ndata: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n'
@@ -105,9 +111,14 @@ def test_api_cases_use_shared_client_and_preserve_invalid_response(
         return response("hello " * 20)
 
     monkeypatch.setattr(api_checks, "send_request", send)
-    api_checks.check_deployment_api("http://test", "model", "chat", tmp_path)
+    api_checks.check_deployment_api(
+        "http://test", "model", "chat", tmp_path, endpoint=endpoint
+    )
     assert len(calls) == 4
-    assert calls[-1]["stop"] == "hell"
+    assert all(
+        url == "http://test" + (endpoint or "/v1/chat/completions") for url, _ in calls
+    )
+    assert calls[-1][1]["stop"] == "hell"
     assert (
         json.loads((tmp_path / "stop.json").read_text())["response"]
         == response(None).text
@@ -116,8 +127,38 @@ def test_api_cases_use_shared_client_and_preserve_invalid_response(
         api_checks, "send_request", lambda *a, **k: response(tokens=100)
     )
     with pytest.raises(AssertionError):
-        api_checks.check_deployment_api("http://test", "model", "chat", tmp_path)
+        api_checks.check_deployment_api(
+            "http://test", "model", "chat", tmp_path, endpoint=endpoint
+        )
     assert "100" in json.loads((tmp_path / "unary.json").read_text())["response"]
+
+
+def test_embedding_api_uses_default_endpoint(monkeypatch, tmp_path):
+    calls = []
+
+    def send(url, payload, **kwargs):
+        calls.append((url, payload))
+        count = len(payload["input"]) if isinstance(payload["input"], list) else 1
+        result = response()
+        result._content = json.dumps(
+            {
+                "model": "model",
+                "object": "list",
+                "data": [
+                    {"index": i, "object": "embedding", "embedding": [0.1] * 1024}
+                    for i in range(count)
+                ],
+            }
+        ).encode()
+        return result
+
+    monkeypatch.setattr(api_checks, "send_request", send)
+    api_checks.check_deployment_api("http://test", "model", "embedding", tmp_path)
+    assert len(calls) == 3
+    assert all(url == "http://test/v1/embeddings" for url, _ in calls)
+    assert "encoding_format" not in calls[0][1]
+    assert calls[1][1]["encoding_format"] == "float"
+    assert calls[2][1]["input"] == ["Hello", "World"]
 
 
 def test_embedding_readiness_uses_embedding_payload(monkeypatch):

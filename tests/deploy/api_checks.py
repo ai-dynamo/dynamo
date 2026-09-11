@@ -21,10 +21,20 @@ logger = logging.getLogger(__name__)
 
 
 def check_deployment_api(
-    base_url: str, model: str, scenario: str, output: Path
+    base_url: str,
+    model: str,
+    scenario: str,
+    output: Path,
+    *,
+    endpoint: str | None = None,
 ) -> None:
     """Run shared API cases and retain raw responses even if a contract fails."""
     output.mkdir(parents=True, exist_ok=True)
+    if endpoint is None:
+        endpoint = (
+            "/v1/embeddings" if scenario == "embedding" else "/v1/chat/completions"
+        )
+    url = base_url + endpoint
     if scenario == "embedding":
         for name, inputs, encoding in (
             ("default", "Hello", None),
@@ -34,9 +44,7 @@ def check_deployment_api(
             payload = {"model": model, "input": inputs}
             if encoding:
                 payload["encoding_format"] = encoding
-            data = _request(
-                base_url + "/v1/embeddings", payload, output / f"{name}.json"
-            )
+            data = _request(url, payload, output / f"{name}.json")
             assert data["model"] == model, data
             # The example uses Qwen3-Embedding-0.6B's native 1024 dimensions.
             validate_embedding(data, 2 if name == "batch" else 1, 1024)
@@ -51,7 +59,6 @@ def check_deployment_api(
         "stream": False,
         "chat_template_kwargs": {"enable_thinking": False},
     }
-    url = base_url + "/v1/chat/completions"
     unary = _request(
         url,
         payload,

@@ -225,6 +225,7 @@ async def test_deployment(
             model,
             scenario,
             Path(resolve_test_output_path(request.node.name)) / "responses",
+            endpoint=endpoint,
         )
 
         if validate_agg_logging:

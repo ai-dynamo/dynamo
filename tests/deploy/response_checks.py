@@ -54,7 +54,8 @@ def validate_stream(lines):
         if not line or line.startswith(":"):
             continue
         if line.startswith("event:"):
-            assert line.strip() != "event: error", line
+            event = line.partition(":")[2].removeprefix(" ")
+            assert event != "error", line
             continue
         assert line.startswith("data:"), f"Unexpected SSE line: {line}"
         assert not done, "Data after [DONE]"

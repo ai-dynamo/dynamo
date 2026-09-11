@@ -104,10 +104,11 @@ def validate_chat_response(
     if stop is not None and content is None:
         content = ""
     assert isinstance(content, str), f"Expected text content: {message}"
-    assert len(content) >= min_content_length, (
-        f"Response content too short: {len(content)} chars (min: {min_content_length}). "
-        f"Content: {content[:200]}"
-    )
+    if stop is None:
+        assert len(content) >= min_content_length, (
+            f"Response content too short: {len(content)} chars (min: {min_content_length}). "
+            f"Content: {content[:200]}"
+        )
 
     assert "model" in data, f"Response missing 'model' field: {data}"
     assert (
