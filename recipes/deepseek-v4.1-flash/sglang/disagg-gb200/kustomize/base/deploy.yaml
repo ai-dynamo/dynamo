@@ -152,6 +152,18 @@ spec:
                 # Thinking is off by default. Then reasoning_content is empty.
                 - name: SGLANG_DEFAULT_THINKING
                   value: "true"
+                # Force Mooncake onto TCP for KV. Removing MC_FORCE_MNNVL is
+                # not enough. When the cluster attaches no RDMA device Mooncake
+                # logs
+                #   Topology discovery complete. Found 0 HCAs.
+                #   Using NVLink transport (forced or no HCA detected)
+                # and takes the fabric anyway. The fabric needs both workers in
+                # one NVLink clique, so a split placement still answers HTTP 200
+                # with content null. Measured on GB200 across cliques: TCP
+                # 0.707 GB/s. NVLink inside one clique: 1.7 to 2.2 GB/s. The
+                # gke-rdma target removes this and uses RDMA.
+                - name: MC_FORCE_TCP
+                  value: "1"
                 # NCCL collectives only. These do not move KV.
                 - name: NCCL_MNNVL_ENABLE
                   value: "1"

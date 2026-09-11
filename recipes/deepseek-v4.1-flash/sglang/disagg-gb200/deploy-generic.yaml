@@ -151,6 +151,8 @@ spec:
             value: "1"
           - name: SGLANG_DEFAULT_THINKING
             value: "true"
+          - name: MC_FORCE_TCP
+            value: "1"
           - name: NCCL_MNNVL_ENABLE
             value: "1"
           - name: NCCL_NVLS_ENABLE
@@ -241,6 +243,8 @@ spec:
             value: "1"
           - name: SGLANG_DEFAULT_THINKING
             value: "true"
+          - name: MC_FORCE_TCP
+            value: "1"
           - name: NCCL_MNNVL_ENABLE
             value: "1"
           - name: NCCL_NVLS_ENABLE

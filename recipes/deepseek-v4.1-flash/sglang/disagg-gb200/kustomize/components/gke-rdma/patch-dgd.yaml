@@ -19,6 +19,11 @@ spec:
           containers:
             - name: main
               env: &gkeEnv
+                # This target attaches RDMA devices, so Mooncake finds HCAs and
+                # uses RDMA. Drop the base's TCP pin, which exists only for the
+                # generic target, which has no RDMA device.
+                - name: MC_FORCE_TCP
+                  $patch: delete
                 # eth0 is the GKE default pod interface. NCCL and Gloo must not
                 # pick an RDMA interface for their control plane.
                 - name: NCCL_SOCKET_IFNAME
