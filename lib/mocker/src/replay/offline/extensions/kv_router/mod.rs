@@ -736,17 +736,24 @@ impl OfflineReplayRouter {
             .slots
             .mark_prefill_completed(&uuid.to_string(), decay_now)
             .map_err(anyhow::Error::from)?;
-        // `NoChange` means the router never admitted this request id -- either
-        // a duplicate completion signal, or the engine and router have
-        // already desynchronized. Either way there is no capacity to free and
-        // draining the pending queue against phantom capacity would silently
-        // admit a queued request the router has no evidence there is room
-        // for. Fail loudly instead of proceeding as if nothing were wrong.
-        anyhow::ensure!(
-            outcome == LifecycleMutationOutcome::Applied,
-            "on_prefill_completed({uuid}): router has no record of this request \
-             (duplicate signal or engine/router desync)"
-        );
+        // `NoChange` means the router has no record of this request id.
+        // This was hard-failed here as evidence of desync (round-12 H1),
+        // but that broke real replay: agg.rs's process_output_signal calls
+        // the equivalent request_terminal path for a REJECTED request too
+        // (signal.rejected), and a request the mocker engine rejects before
+        // it was ever admitted to this router's queue legitimately never
+        // appears in the router's bookkeeping. This function's signature
+        // carries no "was this rejected" flag to distinguish that legitimate
+        // case from a genuine engine/router desync, so hard-failing here is
+        // unsound without a broader change to the PlacementPolicy contract.
+        // Surface it for diagnosis instead of silently proceeding.
+        if outcome == LifecycleMutationOutcome::NoChange {
+            tracing::debug!(
+                %uuid,
+                "on_prefill_completed: router has no record of this request \
+                 (rejected before admission, duplicate signal, or desync)"
+            );
+        }
         Ok(RouterEffects {
             admissions: self.drain_pending(decay_now)?,
         })
@@ -762,14 +769,16 @@ impl OfflineReplayRouter {
             .slots
             .free(&uuid.to_string(), decay_now)
             .map_err(anyhow::Error::from)?;
-        // See on_prefill_completed: NoChange means this request was never
-        // admitted, so nothing was actually freed. Draining the pending
-        // queue here would admit against capacity that was never released.
-        anyhow::ensure!(
-            outcome == LifecycleMutationOutcome::Applied,
-            "on_request_completed({uuid}): router has no record of this request \
-             (duplicate signal or engine/router desync)"
-        );
+        // See on_prefill_completed: NoChange can legitimately mean this
+        // request was rejected before ever reaching the router, not just
+        // desync -- do not hard-fail on it.
+        if outcome == LifecycleMutationOutcome::NoChange {
+            tracing::debug!(
+                %uuid,
+                "on_request_completed: router has no record of this request \
+                 (rejected before admission, duplicate signal, or desync)"
+            );
+        }
         Ok(RouterEffects {
             admissions: self.drain_pending(decay_now)?,
         })
@@ -1303,34 +1312,30 @@ mod tests {
         }
     }
 
-    /// A completion signal for a request the router never admitted (a
-    /// duplicate signal, or an engine/router desync) must fail loudly
-    /// instead of silently draining the pending queue against capacity
-    /// that was never actually freed.
+    /// A completion signal for a request the router never admitted (e.g. a
+    /// request the mocker engine rejected before it ever reached this
+    /// router's queue) must NOT be treated as a hard error: agg.rs's
+    /// process_output_signal routes rejected requests through the same
+    /// request_terminal path as admitted ones, so this is a real, legitimate
+    /// case, not just desync. (Round-12 H1 originally hard-failed this and
+    /// broke `kv_router_engine.rs`'s native-oracle parity tests over exactly
+    /// this path.)
     #[test]
-    fn on_request_completed_refuses_an_unknown_request_id() {
+    fn on_request_completed_tolerates_an_unknown_request_id() {
         let mut router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
-        let error = match router.on_request_completed(Uuid::from_u128(404), 0.0) {
-            Ok(_) => panic!("an unadmitted request id must be refused"),
-            Err(error) => error,
-        };
-        assert!(
-            error.to_string().contains("no record of this request"),
-            "{error}"
-        );
+        let effects = router
+            .on_request_completed(Uuid::from_u128(404), 0.0)
+            .unwrap();
+        assert!(effects.admissions.is_empty());
     }
 
     #[test]
-    fn on_prefill_completed_refuses_an_unknown_request_id() {
+    fn on_prefill_completed_tolerates_an_unknown_request_id() {
         let mut router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
-        let error = match router.on_prefill_completed(Uuid::from_u128(404), 0.0) {
-            Ok(_) => panic!("an unadmitted request id must be refused"),
-            Err(error) => error,
-        };
-        assert!(
-            error.to_string().contains("no record of this request"),
-            "{error}"
-        );
+        let effects = router
+            .on_prefill_completed(Uuid::from_u128(404), 0.0)
+            .unwrap();
+        assert!(effects.admissions.is_empty());
     }
 
     /// `now_ms` arrives as a bare `f64` through the public `PlacementPolicy`
