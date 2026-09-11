@@ -855,14 +855,6 @@ fn runtime_has_vllm_generate_capability(
 }
 
 #[cfg(feature = "mm-routing")]
-fn image_routing_processor_supported_by_runtime(
-    processor: &mm_routing::image::ImageRoutingProcessor,
-    runtime_config: &crate::local_model::runtime_config::ModelRuntimeConfig,
-) -> bool {
-    !processor.requires_vllm_runtime() || runtime_has_vllm_generate_capability(runtime_config)
-}
-
-#[cfg(feature = "mm-routing")]
 fn routing_image_dimension_policy(
     runtime_config: &crate::local_model::runtime_config::ModelRuntimeConfig,
     frontend_decoding: bool,
@@ -886,18 +878,6 @@ fn encode_routing_segment(
 ) -> Result<Vec<TokenIdType>> {
     let segment = crate::tokenizers::EncodeSegment::new(text, allow_special);
     Ok(tokenizer.encode_segments(&[segment])?.token_ids().to_vec())
-}
-
-#[cfg(feature = "mm-routing")]
-fn nemotron_prompt_without_images(formatted_prompt: &str, image_count: usize) -> Result<String> {
-    let placeholder_count = formatted_prompt
-        .match_indices(mm_routing::nemotron::IMAGE_CONTEXT)
-        .count();
-    anyhow::ensure!(
-        placeholder_count == image_count,
-        "Nemotron rendered prompt contains {placeholder_count} image placeholders for {image_count} images"
-    );
-    Ok(formatted_prompt.replace(mm_routing::nemotron::IMAGE_CONTEXT, ""))
 }
 
 #[cfg(feature = "mm-routing")]
@@ -2415,20 +2395,17 @@ impl OpenAIPreprocessor {
                 let (counter, counter_err): (
                     Option<mm_routing::image::ImageRoutingProcessor>,
                     Option<String>,
-                ) = match mm_routing::image::ImageRoutingProcessor::try_new(
+                ) = match mm_routing::image::ImageRoutingProcessor::try_new_for_runtime(
                     model_id,
                     Some(model_type),
                     model_dir,
+                    if runtime_has_vllm_generate_capability(&runtime_config) {
+                        mm_routing::image::ImageRoutingRuntime::VllmNativeGenerate
+                    } else {
+                        mm_routing::image::ImageRoutingRuntime::BackendNeutral
+                    },
                 ) {
-                    Ok(c) if image_routing_processor_supported_by_runtime(&c, &runtime_config) => {
-                        (Some(c), None)
-                    }
-                    Ok(_) => (
-                        None,
-                        Some(
-                            "model processor requires the vLLM native Generate runtime".to_string(),
-                        ),
-                    ),
+                    Ok(c) => (Some(c), None),
                     Err(e) => (None, Some(e.to_string())),
                 };
                 let (img_tok, prompt_layout, bos_tok_string) = if fastokens_active {
@@ -3676,21 +3653,29 @@ impl OpenAIPreprocessor {
                     has_processor_override,
                 );
             #[cfg(feature = "mm-routing")]
-            let image_text_prompt_len = if exact_mm_routing_ready
-                && self.image_token_counter.as_ref().is_some_and(
-                    mm_routing::image::ImageRoutingProcessor::uses_request_context_budget,
-                ) {
-                self.nemotron_text_prompt_len(formatted_prompt, resolved_image_count)
-                    .await
+            let request_budgeted_image_counter = self
+                .image_token_counter
+                .as_ref()
+                .filter(|counter| counter.uses_request_context_budget());
+            #[cfg(feature = "mm-routing")]
+            let image_text_prompt_len = if exact_mm_routing_ready {
+                match request_budgeted_image_counter {
+                    Some(counter) => {
+                        counter
+                            .context_budget_text_len(
+                                self.tokenizer.clone(),
+                                formatted_prompt,
+                                resolved_image_count,
+                            )
+                            .await
+                    }
+                    None => None,
+                }
             } else {
                 None
             };
             #[cfg(feature = "mm-routing")]
-            if let Some(counter) = self
-                .image_token_counter
-                .as_ref()
-                .filter(|counter| counter.uses_request_context_budget())
-            {
+            if let Some(counter) = request_budgeted_image_counter {
                 image_tokens = image_text_prompt_len.and_then(|text_prompt_len| {
                     let dimensions: Vec<_> = mm_routing_entries
                         .iter()
@@ -3807,57 +3792,6 @@ impl OpenAIPreprocessor {
             builder.mm_routing_info(Some(info));
         }
         Ok(())
-    }
-
-    /// Match vLLM's Nemotron image budget input without blocking the async
-    /// frontend runtime on a second BPE pass.
-    #[cfg(feature = "mm-routing")]
-    async fn nemotron_text_prompt_len(
-        &self,
-        formatted_prompt: Option<&str>,
-        image_count: usize,
-    ) -> Option<usize> {
-        let prompt = match formatted_prompt {
-            Some(prompt) => prompt,
-            None => {
-                tracing::debug!(
-                    target: "mm_routing",
-                    "rendered prompt unavailable for Nemotron image budgeting; skipping MM routing info"
-                );
-                return None;
-            }
-        };
-        let sans_images = match nemotron_prompt_without_images(prompt, image_count) {
-            Ok(sans_images) => sans_images,
-            Err(error) => {
-                tracing::warn!(
-                    target: "mm_routing",
-                    %error,
-                    "Nemotron prompt does not match its image batch; skipping MM routing info"
-                );
-                return None;
-            }
-        };
-        let tokenizer = self.tokenizer.clone();
-        match tokio::task::spawn_blocking(move || tokenizer.encode(&sans_images)).await {
-            Ok(Ok(encoding)) => Some(encoding.token_ids().len()),
-            Ok(Err(error)) => {
-                tracing::warn!(
-                    target: "mm_routing",
-                    %error,
-                    "failed to tokenize Nemotron prompt without image placeholders; skipping MM routing info"
-                );
-                None
-            }
-            Err(error) => {
-                tracing::warn!(
-                    target: "mm_routing",
-                    %error,
-                    "Nemotron image-budget tokenizer task failed; skipping MM routing info"
-                );
-                None
-            }
-        }
     }
 
     #[cfg(feature = "mm-routing")]
@@ -8404,16 +8338,6 @@ mod tests {
 
     #[cfg(feature = "mm-routing")]
     #[test]
-    fn nemotron_budget_text_removes_all_image_placeholders() {
-        assert_eq!(
-            nemotron_prompt_without_images("before<image>middle<image>after", 2).unwrap(),
-            "beforemiddleafter"
-        );
-        assert!(nemotron_prompt_without_images("before<image>after", 2).is_err());
-    }
-
-    #[cfg(feature = "mm-routing")]
-    #[test]
     fn kimi_k3_layout_resolution_rejects_non_atomic_control_tokens() {
         let tokenizer = RoutingTestTokenizer {
             atomic_controls: false,
@@ -8622,10 +8546,6 @@ mod tests {
             model_dir.path(),
         )
         .unwrap();
-        assert!(image_routing_processor_supported_by_runtime(
-            &counter,
-            &crate::local_model::runtime_config::ModelRuntimeConfig::default(),
-        ));
         let mdc = ModelDeploymentCard::load_from_disk(
             "tests/data/sample-models/mock-llama-3.1-8b-instruct",
             None,
@@ -8661,7 +8581,7 @@ mod tests {
 
     #[cfg(feature = "mm-routing")]
     #[test]
-    fn nemotron_exact_routing_requires_vllm_and_uses_request_wide_image_budget() {
+    fn nemotron_exact_routing_uses_request_wide_image_budget() {
         let model_dir = tempfile::tempdir().unwrap();
         std::fs::write(
             model_dir.path().join("config.json"),
@@ -8702,30 +8622,6 @@ mod tests {
             model_dir.path(),
         )
         .unwrap();
-        use crate::local_model::runtime_config::{
-            ModelRuntimeConfig, SGLANG_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
-        };
-        let runtime_config = ModelRuntimeConfig::default();
-        assert!(!image_routing_processor_supported_by_runtime(
-            &counter,
-            &runtime_config,
-        ));
-        let mut sglang_config = ModelRuntimeConfig::default();
-        sglang_config
-            .set_engine_specific(SGLANG_GENERATE_CAPABILITY, true)
-            .unwrap();
-        assert!(!image_routing_processor_supported_by_runtime(
-            &counter,
-            &sglang_config,
-        ));
-        let mut vllm_config = ModelRuntimeConfig::default();
-        vllm_config
-            .set_engine_specific(VLLM_INFERENCE_V1_GENERATE_CAPABILITY, true)
-            .unwrap();
-        assert!(image_routing_processor_supported_by_runtime(
-            &counter,
-            &vllm_config,
-        ));
         let mdc = ModelDeploymentCard::load_from_disk(
             "tests/data/sample-models/mock-llama-3.1-8b-instruct",
             None,

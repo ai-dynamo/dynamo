@@ -6,6 +6,8 @@
 use anyhow::{Result, anyhow, bail, ensure};
 use llm_multimodal::vision::PreProcessorConfig;
 
+use super::image::{ImagePromptKind, ImageRoutingBackend, ImageRoutingRuntime};
+
 pub(in crate::preprocessor) const MODEL_TYPE: &str = "NemotronH_Nano_Omni_Reasoning_V3";
 pub(in crate::preprocessor) const IMAGE_START: &str = "<img>";
 pub(in crate::preprocessor) const IMAGE_END: &str = "</img>";
@@ -217,6 +219,55 @@ impl NemotronImageTokenCounter {
     }
 }
 
+impl ImageRoutingBackend for NemotronImageTokenCounter {
+    fn count_tokens(&self, width: u32, height: u32) -> usize {
+        NemotronImageTokenCounter::count_tokens(self, width, height)
+    }
+
+    fn count_tokens_for_images(
+        &self,
+        dimensions: &[(u32, u32)],
+        max_model_len: usize,
+        text_prompt_len: usize,
+    ) -> Result<Vec<usize>> {
+        NemotronImageTokenCounter::count_tokens_for_images(
+            self,
+            dimensions,
+            max_model_len,
+            text_prompt_len,
+        )
+    }
+
+    fn uses_request_context_budget(&self) -> bool {
+        true
+    }
+
+    fn validate_runtime(&self, runtime: ImageRoutingRuntime) -> Result<()> {
+        ensure!(
+            runtime == ImageRoutingRuntime::VllmNativeGenerate,
+            "Nemotron image routing requires the vLLM native Generate runtime"
+        );
+        Ok(())
+    }
+
+    fn routing_prompt_kind(&self) -> Option<ImagePromptKind> {
+        Some(ImagePromptKind::Nemotron)
+    }
+
+    fn context_budget_prompt(&self, formatted_prompt: &str, image_count: usize) -> Result<String> {
+        prompt_without_images(formatted_prompt, image_count)
+    }
+}
+
+fn prompt_without_images(formatted_prompt: &str, image_count: usize) -> Result<String> {
+    let placeholder_count = formatted_prompt.match_indices(IMAGE_CONTEXT).count();
+    ensure!(
+        placeholder_count == image_count,
+        "Nemotron rendered prompt contains {placeholder_count} image placeholders for {image_count} images"
+    );
+    Ok(formatted_prompt.replace(IMAGE_CONTEXT, ""))
+}
+
 pub(in crate::preprocessor) fn supports_model_type(model_type: Option<&str>) -> bool {
     model_type.is_some_and(|value| value.eq_ignore_ascii_case(MODEL_TYPE))
 }
@@ -365,5 +416,14 @@ mod tests {
         let mut config = model_config();
         config["img_end_token"] = serde_json::json!("<different>");
         assert!(image_context_token_id(&config).is_err());
+    }
+
+    #[test]
+    fn budget_prompt_removes_all_image_placeholders() {
+        assert_eq!(
+            prompt_without_images("before<image>middle<image>after", 2).unwrap(),
+            "beforemiddleafter"
+        );
+        assert!(prompt_without_images("before<image>after", 2).is_err());
     }
 }
