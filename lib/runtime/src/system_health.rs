@@ -26,6 +26,43 @@ use crate::component;
 use crate::config::HealthStatus;
 use crate::metrics::{MetricsHierarchy, prometheus_names::distributed_runtime};
 
+/// Withholds readiness for one endpoint until dropped, so the endpoint's owner
+/// decides when it is serviceable rather than its transport registration.
+///
+/// Two effects, matching [`SystemHealth::hold_endpoint_readiness`]: transport
+/// registration no longer marks the named endpoint ready, and while any hold is
+/// outstanding [`SystemHealth::get_health_status`] reports not-ready for the
+/// whole process.
+///
+/// Take the hold *before* the endpoint registers with its transport — that is
+/// what makes it race-free on both request planes, since the NATS path publishes
+/// readiness from a spawned task.
+///
+/// Never let one drop while the `SystemHealth` mutex is held: `Drop` takes that
+/// lock and it is not reentrant.
+pub struct ReadinessHold {
+    system_health: Arc<parking_lot::Mutex<SystemHealth>>,
+    endpoint: String,
+}
+
+impl ReadinessHold {
+    pub fn take(system_health: Arc<parking_lot::Mutex<SystemHealth>>, endpoint: &str) -> Self {
+        system_health.lock().hold_endpoint_readiness(endpoint);
+        Self {
+            system_health,
+            endpoint: endpoint.to_string(),
+        }
+    }
+}
+
+impl Drop for ReadinessHold {
+    fn drop(&mut self) {
+        self.system_health
+            .lock()
+            .release_endpoint_readiness(&self.endpoint);
+    }
+}
+
 /// Health check target containing instance info and payload
 #[derive(Clone, Debug)]
 pub struct HealthCheckTarget {
@@ -131,7 +168,8 @@ impl SystemHealth {
     ///
     /// Take the hold *before* the endpoint registers with its transport — that is
     /// what makes this race-free on both request planes, since the NATS path
-    /// publishes readiness from a spawned task.
+    /// publishes readiness from a spawned task. Prefer [`ReadinessHold`], which
+    /// pairs this with its release.
     ///
     /// [`get_health_status`]: SystemHealth::get_health_status
     ///
@@ -474,9 +512,11 @@ mod tests {
         assert!(health.get_health_status().0);
     }
 
-    /// The hold gates only the endpoint it names.
+    /// A hold suppresses the *whole process's* readiness, but the per-endpoint
+    /// suppression inside `set_endpoint_registered` stays scoped to the endpoint
+    /// it names — a sibling still records its own transport registration.
     #[test]
-    fn a_hold_does_not_leak_to_other_endpoints() {
+    fn a_hold_does_not_suppress_a_siblings_endpoint_flag() {
         let health = system_health(false);
         health.hold_endpoint_readiness(ENDPOINT);
         health.set_endpoint_registered("other");

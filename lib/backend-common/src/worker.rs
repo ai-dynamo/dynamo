@@ -26,6 +26,7 @@ use dynamo_runtime::config::HealthStatus;
 use dynamo_runtime::engine_routes::EngineRouteCallback;
 use dynamo_runtime::pipeline::network::Ingress;
 use dynamo_runtime::protocols::EndpointId;
+use dynamo_runtime::system_health::ReadinessHold;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 use tokio_util::sync::CancellationToken;
@@ -1098,7 +1099,7 @@ impl Worker {
         // mandatory endpoint is registered and the engine routes are open. The
         // hold suppresses the whole process's readiness, so covering the primary
         // endpoint also covers the RL endpoint registered further down.
-        let readiness_hold = ReadinessHold::take(&endpoint, endpoint.name());
+        let readiness_hold = ReadinessHold::take(endpoint.drt().system_health(), endpoint.name());
 
         let start_fut = builder.start_with_registration();
         tokio::pin!(start_fut);
@@ -1328,40 +1329,6 @@ impl Worker {
             }
             tokio::time::sleep(Duration::from_secs_f64(DRAIN_POLL_INTERVAL_S)).await;
         }
-    }
-}
-
-/// Withholds the runtime's transport-registration readiness signal for one
-/// endpoint until dropped, so the worker's own gate decides when that endpoint
-/// counts as ready.
-///
-/// Taking the hold *before* the endpoint registers is what makes this race-free
-/// on both request planes: the NATS path publishes readiness from a spawned
-/// task, so a write issued after registration returns would race it.
-///
-/// Never let one drop while the `SystemHealth` mutex is held — `Drop` takes that
-/// lock and it is not reentrant.
-struct ReadinessHold {
-    system_health: Arc<parking_lot::Mutex<dynamo_runtime::SystemHealth>>,
-    endpoint: String,
-}
-
-impl ReadinessHold {
-    fn take(endpoint: &dynamo_runtime::component::Endpoint, name: &str) -> Self {
-        let system_health = endpoint.drt().system_health();
-        system_health.lock().hold_endpoint_readiness(name);
-        Self {
-            system_health,
-            endpoint: name.to_string(),
-        }
-    }
-}
-
-impl Drop for ReadinessHold {
-    fn drop(&mut self) {
-        self.system_health
-            .lock()
-            .release_endpoint_readiness(&self.endpoint);
     }
 }
 
