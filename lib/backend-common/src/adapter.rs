@@ -216,6 +216,31 @@ impl AsyncEngine<SingleIn<serde_json::Value>, ManyOut<Annotated<serde_json::Valu
     }
 }
 
+/// The stop-admission rejection as a stream's single terminal item, rather than
+/// an error returned before the stream exists.
+///
+/// A pre-stream `Err` travels in the wire prologue, which carries only an opaque
+/// string, so `addressed_router` relabels it `CannotConnect`. The request still
+/// migrates and the worker is still inhibited — `CannotConnect` is in both
+/// lists — but the frontend answers 500 instead of 503 once migration is
+/// exhausted, and the route span reads as a connectivity fault during what is
+/// really a routine drain.
+///
+/// An `Annotated` item carries the whole `DynamoError`, and the router
+/// evaluates migration and worker-inhibit per stream item, so moving the
+/// rejection into the stream preserves `WorkerDraining` end to end without
+/// changing retry behaviour. Nothing was generated, so there are no side
+/// effects for a retry to duplicate.
+fn draining_response<T>(ctx: Arc<dyn AsyncEngineContext>) -> ManyOut<Annotated<T>>
+where
+    T: dynamo_runtime::pipeline::Data + for<'de> serde::Deserialize<'de>,
+{
+    let item = Annotated::from_err(crate::lifecycle::draining_error(
+        crate::lifecycle::DRAINING_MESSAGE,
+    ));
+    ResponseStream::new(Box::pin(futures::stream::once(async move { item })), ctx)
+}
+
 #[async_trait]
 impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
     for EngineAdapter
@@ -224,9 +249,12 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         &self,
         input: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
-        let request_guard = self.request_tracker.try_acquire()?;
         let (request, handle) = input.into_parts();
         let ctx: Arc<dyn AsyncEngineContext> = handle.context();
+        let request_guard = match self.request_tracker.try_acquire() {
+            Ok(guard) => guard,
+            Err(_) => return Ok(draining_response(ctx)),
+        };
 
         // Per-request worker-side span. Nests under `handle_payload` (set up
         // by the runtime's NATS ingress) so the trace tree has a contiguous
@@ -554,9 +582,12 @@ impl AsyncEngine<SingleIn<serde_json::Value>, ManyOut<Annotated<serde_json::Valu
         &self,
         input: SingleIn<serde_json::Value>,
     ) -> Result<ManyOut<Annotated<serde_json::Value>>, Error> {
-        let request_guard = self.request_tracker.try_acquire()?;
         let (request, handle) = input.into_parts();
         let ctx: Arc<dyn AsyncEngineContext> = handle.context();
+        let request_guard = match self.request_tracker.try_acquire() {
+            Ok(guard) => guard,
+            Err(_) => return Ok(draining_response(ctx)),
+        };
 
         // Per-request span (nests under the runtime's `handle_payload`). No
         // token-level attributes here — just the request id.
@@ -759,6 +790,40 @@ mod tests {
         );
     }
 
+    /// Regression: the rejection used to be returned before the stream existed,
+    /// so it travelled in the wire prologue — which carries only an opaque
+    /// string. `addressed_router` then relabelled it `CannotConnect`, and the
+    /// frontend answered 500 rather than 503 once migration was exhausted.
+    /// As a stream item the whole `DynamoError` survives.
+    #[tokio::test]
+    async fn draining_rejection_keeps_its_type_as_a_stream_item() {
+        let (engine, _) = MockEngine::new(vec![chunk::token(11)]);
+        let tracker = RequestTracker::new();
+        let adapter = EngineAdapter::with_request_tracker(
+            engine,
+            DisaggregationMode::Aggregated,
+            Arc::clone(&tracker),
+        );
+        tracker.stop_accepting();
+
+        let stream = adapter
+            .generate(Context::new(make_request(vec![1, 2, 3])))
+            .await
+            .expect("a closed gate must answer with a stream, not a pre-stream error");
+        let collected: Vec<_> = stream.collect().await;
+
+        assert_eq!(collected.len(), 1, "one terminal item and nothing else");
+        let error = collected[0]
+            .err()
+            .expect("the single item must carry the rejection");
+        assert_eq!(
+            error.error_type(),
+            ErrorType::WorkerDraining,
+            "the type must survive for the router to classify it as a drain"
+        );
+        assert!(collected[0].data.is_none(), "no tokens may be emitted");
+    }
+
     #[tokio::test]
     async fn adapter_tracks_request_until_response_stream_is_dropped() {
         let (engine, _) = MockEngine::new(vec![chunk::token(11)]);
@@ -774,8 +839,15 @@ mod tests {
         assert_eq!(tracker.inflight(), 1);
 
         tracker.stop_accepting();
-        let rejected = adapter.generate(Context::new(make_request(vec![2]))).await;
-        assert!(rejected.is_err());
+        // The rejection now arrives as the stream's single item rather than a
+        // pre-stream `Err`, so the `WorkerDraining` type survives the wire.
+        // What this test guards is unchanged: a refused request takes no slot.
+        let rejected = adapter
+            .generate(Context::new(make_request(vec![2])))
+            .await
+            .expect("a closed gate answers with a stream");
+        let rejected: Vec<_> = rejected.collect().await;
+        assert!(rejected.len() == 1 && rejected[0].err().is_some());
         assert_eq!(tracker.inflight(), 1);
 
         drop(stream);

@@ -101,9 +101,7 @@ impl RequestTracker {
         let mut current = self.state.load(Ordering::Acquire);
         loop {
             if current & ACCEPTING_BIT == 0 {
-                return Err(worker_draining_error(
-                    "worker is not accepting new requests",
-                ));
+                return Err(worker_draining_error(DRAINING_MESSAGE));
             }
             assert!(
                 current & INFLIGHT_MASK < INFLIGHT_MASK,
@@ -145,12 +143,24 @@ impl RequestTracker {
 }
 
 fn worker_draining_error(message: &'static str) -> anyhow::Error {
+    draining_error(message).into()
+}
+
+/// The stop-admission rejection, typed.
+///
+/// Exposed separately from [`worker_draining_error`] because the adapter needs
+/// the concrete `DynamoError` to put in an `Annotated` item: `anyhow::Error`
+/// does not implement `std::error::Error`, and flattening to a string is the
+/// very thing that loses `WorkerDraining` on the wire.
+pub fn draining_error(message: &'static str) -> DynamoError {
     DynamoError::builder()
         .error_type(ErrorType::WorkerDraining)
         .message(message)
         .build()
-        .into()
 }
+
+/// The message both admission-rejection paths report.
+pub const DRAINING_MESSAGE: &str = "worker is not accepting new requests";
 
 pub struct RequestGuard {
     tracker: Arc<RequestTracker>,

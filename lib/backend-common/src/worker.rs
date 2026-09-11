@@ -596,6 +596,7 @@ impl Worker {
                     // still owed its floor after that. Firing at the end of the
                     // stage budget killed the process mid-cleanup.
                     let deadline = force_exit_deadline(&shutdown_config);
+                    Self::arm_hard_watchdog(deadline);
                     tracing::debug!(
                         "graceful shutdown started; deadline {}s",
                         deadline.as_secs(),
@@ -980,6 +981,37 @@ impl Worker {
         if let Some(gauges) = self.lifecycle.as_ref() {
             gauges.observe_shutdown_stage(outcome);
         }
+    }
+
+    /// Force-exit backstop on a plain OS thread.
+    ///
+    /// The `tokio::time::timeout` below is the orderly watchdog: it unwinds, logs
+    /// through `tracing`, and lets the caller finish. It cannot fire if the runtime
+    /// itself is wedged — and a Python `cleanup()` that blocks the event loop
+    /// instead of awaiting does exactly that, because the coroutine occupies the
+    /// same single-threaded runtime the timer lives on. Measured: a blocking
+    /// cleanup never force-exits at all, and the pod has to be SIGKILLed.
+    ///
+    /// `thread::sleep` on its own OS thread cannot be starved by a blocked runtime,
+    /// and the thread never touches Python so the GIL is irrelevant. It needs no
+    /// cancellation: a clean shutdown returns from `main` and the process exits
+    /// first, taking this thread with it.
+    ///
+    /// `eprintln!`, not `tracing!` — the subscriber may be behind the same blocked
+    /// thread this exists to escape. `process::exit` runs no destructors, which is
+    /// the point of a last resort.
+    fn arm_hard_watchdog(deadline: Duration) {
+        std::thread::spawn(move || {
+            std::thread::sleep(deadline);
+            eprintln!(
+                "ERROR: graceful shutdown exceeded {}s and the runtime did not force-exit \
+             (an engine cleanup that blocks rather than awaits will do this); \
+             force-exiting with code {}. Engine resources may not have been released.",
+                deadline.as_secs(),
+                EXIT_CODE_SHUTDOWN_TIMEOUT,
+            );
+            std::process::exit(EXIT_CODE_SHUTDOWN_TIMEOUT);
+        });
     }
 
     /// Arm the total shutdown budget, or return the one already armed.
