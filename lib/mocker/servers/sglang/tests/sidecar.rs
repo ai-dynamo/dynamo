@@ -268,3 +268,54 @@ async fn sidecar_abort_releases_mocker_work() {
     .expect("Abort should release scheduler work promptly");
     consumer.abort();
 }
+
+#[tokio::test]
+async fn request_cancellation_is_isolated_and_shutdown_reaches_grpc_streams() {
+    let server = RunningServer::start(ServerMode::Aggregated, fast_engine_args()).await;
+    let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
+    engine.start(0).await.unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let first_context = dynamo_backend_common::testing::mock_context();
+        let mut streams = Vec::new();
+        for context in [
+            first_context.clone(),
+            dynamo_backend_common::testing::mock_context(),
+            dynamo_backend_common::testing::mock_context(),
+        ] {
+            let mut stream = engine
+                .generate(request(64), GenerateContext::new(context, None))
+                .await
+                .unwrap();
+            let first = stream.next().await.unwrap().unwrap();
+            assert!(!first.token_ids.is_empty());
+            assert!(first.finish_reason.is_none());
+            streams.push(stream);
+        }
+
+        first_context.stop_generating();
+        assert_eq!(
+            streams[0].next().await.unwrap().unwrap().finish_reason,
+            Some(FinishReason::Cancelled)
+        );
+        assert!(streams[0].next().await.is_none());
+        for stream in &mut streams[1..] {
+            let next = stream.next().await.unwrap().unwrap();
+            assert!(next.finish_reason.is_none());
+        }
+
+        engine.cleanup().await.unwrap();
+        for stream in &mut streams[1..] {
+            assert_eq!(
+                stream.next().await.unwrap().unwrap().finish_reason,
+                Some(FinishReason::Cancelled)
+            );
+            assert!(stream.next().await.is_none());
+        }
+        let late = collect(&engine, request(1)).await;
+        assert_eq!(late.len(), 1);
+        assert_eq!(late[0].finish_reason, Some(FinishReason::Cancelled));
+    })
+    .await
+    .expect("request cancellation and engine shutdown must finish promptly");
+}
