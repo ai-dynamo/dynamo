@@ -937,11 +937,23 @@ impl Placement {
 pub struct PlacementEvent {
     pub placement: Placement,
     pub event: KvCacheEvent,
+    /// Session that triggered this store or reuse report, if provided by the engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 impl PlacementEvent {
     pub fn new(placement: Placement, event: KvCacheEvent) -> Self {
-        Self { placement, event }
+        Self {
+            placement,
+            event,
+            session_id: None,
+        }
+    }
+
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
     }
 
     pub fn local_gpu(worker_id: WorkerId, event: KvCacheEvent) -> Self {
@@ -952,12 +964,14 @@ impl PlacementEvent {
         let PlacementOwner::LocalWorker(worker) = self.placement.owner else {
             return None;
         };
-        Some(RouterEvent::with_residency_domain(
+        let mut event = RouterEvent::with_residency_domain(
             worker.worker_id,
             self.event,
             self.placement.tier,
             self.placement.residency_domain,
-        ))
+        );
+        event.session_id = self.session_id;
+        Some(event)
     }
 }
 
@@ -1452,6 +1466,9 @@ pub enum KvCacheEventError {
     UnsupportedResidencyDomain,
 }
 
+/// Reserved session key for events that predate session attribution.
+pub const UNATTRIBUTED_SESSION_ID: &str = "__dynamo_unattributed__";
+
 /// A [`KvCacheEvent`] on a specific LLM worker denoted by [`WorkerId`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RouterEvent {
@@ -1470,10 +1487,13 @@ pub struct RouterEvent {
     ///
     /// This is absent on the legacy Worker-only wire. CacheOwner events are
     /// valid only on a versioned, residency-aware source where this field is
-    /// present; they must never be sent to legacy consumers. Keep this field
-    /// last so legacy positional MessagePack remains prefix-compatible.
+    /// present; they must never be sent to legacy consumers. MessagePack
+    /// compatibility relies on `to_vec_named`; positional encoding is unsupported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_source: Option<CacheOwnerId>,
+    /// Session that triggered this store or reuse report, if provided by the engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 impl RouterEvent {
@@ -1510,6 +1530,7 @@ impl RouterEvent {
         Self {
             worker_id,
             state_source: None,
+            session_id: None,
             storage_tier,
             residency_domain: WireResidencyDomain::explicit(residency_domain),
             event,
@@ -1531,6 +1552,18 @@ impl RouterEvent {
     pub fn with_state_source(mut self, state_source: CacheOwnerId) -> Self {
         self.state_source = Some(state_source);
         self
+    }
+
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
+
+    /// Return the reported session or the shared fallback for unattributed events.
+    pub fn session_id_or_unattributed(&self) -> &str {
+        self.session_id
+            .as_deref()
+            .unwrap_or(UNATTRIBUTED_SESSION_ID)
     }
 
     /// Resolve a storage mutation to its canonical logical domain.
@@ -1896,6 +1929,7 @@ mod tests {
             ];
             let decoded: Vec<RouterEvent> =
                 rmp_serde::from_slice(&rmp_serde::to_vec_named(&legacy).unwrap()).unwrap();
+            assert_eq!(decoded[0].session_id, None);
             assert_eq!(
                 decoded[0].resolved_residency_domain(),
                 Ok(ResidencyDomain::Worker)
@@ -1907,11 +1941,16 @@ mod tests {
                 stored(3),
                 StorageTier::Disk,
                 ResidencyDomain::Worker,
-            );
+            )
+            .with_session_id("session-1");
             let old_reader: LegacyRouterEvent =
                 rmp_serde::from_slice(&rmp_serde::to_vec_named(&explicit_worker).unwrap()).unwrap();
             assert_eq!(old_reader.event.event_id, 3);
             assert_eq!(old_reader.storage_tier, StorageTier::Disk);
+
+            let round_trip: RouterEvent =
+                rmp_serde::from_slice(&rmp_serde::to_vec_named(&explicit_worker).unwrap()).unwrap();
+            assert_eq!(round_trip.session_id.as_deref(), Some("session-1"));
 
             let mixed = vec![
                 ExplicitDomainEvent {
