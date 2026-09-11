@@ -111,6 +111,45 @@ func dgdTestSnapshotCompatibilityHash(
 	return hash
 }
 
+func TestSnapshotGMSCompatibilityResolvesDeviceClass(t *testing.T) {
+	tests := []struct {
+		name            string
+		spec            *v1alpha1.GPUMemoryServiceSpec
+		wantMode        string
+		wantDeviceClass string
+	}{
+		{
+			name:     "disabled",
+			wantMode: commonconsts.SnapshotGMSModeDisabled,
+		},
+		{
+			name:            "enabled with default device class",
+			spec:            &v1alpha1.GPUMemoryServiceSpec{Enabled: true, Mode: v1alpha1.GMSModeIntraPod},
+			wantMode:        string(v1alpha1.GMSModeIntraPod),
+			wantDeviceClass: dra.DefaultDeviceClassName,
+		},
+		{
+			name: "enabled with custom device class",
+			spec: &v1alpha1.GPUMemoryServiceSpec{
+				Enabled:         true,
+				Mode:            v1alpha1.GMSModeIntraPod,
+				DeviceClassName: "gpu.nvidia.com/h100",
+			},
+			wantMode:        string(v1alpha1.GMSModeIntraPod),
+			wantDeviceClass: "gpu.nvidia.com/h100",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			mode, deviceClass, err := snapshotGMSCompatibility(test.spec)
+			require.NoError(t, err)
+			assert.Equal(t, test.wantMode, mode)
+			assert.Equal(t, test.wantDeviceClass, deviceClass)
+		})
+	}
+}
+
 func reconcileAutomaticSnapshotJobForTest(
 	t *testing.T,
 	reconciler *DynamoGraphDeploymentReconciler,

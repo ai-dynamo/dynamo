@@ -224,7 +224,9 @@ func (r *dgdCheckpointsReconciler) snapshotCompatibilityHashForComponent(
 	if checkpointConfig := dynamo.GetCheckpoint(component); checkpointConfig != nil && checkpointConfig.TargetContainerName != "" {
 		targetContainerName = checkpointConfig.TargetContainerName
 	}
-	gmsMode, err := automaticSnapshotGMSMode(gms.ToAlphaSpec(dynamo.GetGPUMemoryService(component)))
+	gmsMode, gmsDeviceClassName, err := snapshotGMSCompatibility(
+		gms.ToAlphaSpec(dynamo.GetGPUMemoryService(component)),
+	)
 	if err != nil {
 		return "", err
 	}
@@ -233,6 +235,7 @@ func (r *dgdCheckpointsReconciler) snapshotCompatibilityHashForComponent(
 		targetContainerName,
 		string(backendFramework),
 		gmsMode,
+		gmsDeviceClassName,
 	)
 }
 
@@ -307,7 +310,7 @@ func (r *dgdCheckpointsReconciler) reconcileAutomaticSnapshotJob(
 			gmsSpec.ExtraClientContainers = append([]string(nil), checkpointConfig.Job.GMSClientContainers...)
 		}
 	}
-	gmsMode, err := automaticSnapshotGMSMode(gmsSpec)
+	gmsMode, gmsDeviceClassName, err := snapshotGMSCompatibility(gmsSpec)
 	if err != nil {
 		return nil, err
 	}
@@ -316,6 +319,7 @@ func (r *dgdCheckpointsReconciler) reconcileAutomaticSnapshotJob(
 		targetContainerName,
 		string(backendFramework),
 		gmsMode,
+		gmsDeviceClassName,
 	)
 	if err != nil {
 		return nil, err
@@ -327,16 +331,12 @@ func (r *dgdCheckpointsReconciler) reconcileAutomaticSnapshotJob(
 		if err != nil {
 			return nil, fmt.Errorf("invalid GPU resource requirements for GMS checkpoint %s/%s: %w", dynamoDeployment.Name, componentName, err)
 		}
-		checkpointGMSDeviceClassName := gmsSpec.DeviceClassName
-		if checkpointGMSDeviceClassName == "" {
-			checkpointGMSDeviceClassName = dra.DefaultDeviceClassName
-		}
 		if err := r.syncCheckpointGMSResourceClaimTemplate(
 			ctx,
 			dynamoDeployment,
 			checkpointGMSClaimTemplateName,
 			checkpointGMSGPUCount,
-			checkpointGMSDeviceClassName,
+			gmsDeviceClassName,
 		); err != nil {
 			return nil, err
 		}
@@ -660,15 +660,21 @@ func (r *dgdCheckpointsReconciler) resolveAutomaticSnapshotJob(
 	return resolved, nil
 }
 
-func automaticSnapshotGMSMode(spec *nvidiacomv1alpha1.GPUMemoryServiceSpec) (string, error) {
+func snapshotGMSCompatibility(
+	spec *nvidiacomv1alpha1.GPUMemoryServiceSpec,
+) (string, string, error) {
 	if spec == nil || !spec.Enabled {
-		return consts.SnapshotGMSModeDisabled, nil
+		return consts.SnapshotGMSModeDisabled, "", nil
+	}
+	deviceClassName := spec.DeviceClassName
+	if deviceClassName == "" {
+		deviceClassName = dra.DefaultDeviceClassName
 	}
 	switch spec.Mode {
 	case "", nvidiacomv1alpha1.GMSModeIntraPod:
-		return string(nvidiacomv1alpha1.GMSModeIntraPod), nil
+		return string(nvidiacomv1alpha1.GMSModeIntraPod), deviceClassName, nil
 	default:
-		return "", fmt.Errorf("automatic SnapshotJob has unsupported gpuMemoryService mode %q", spec.Mode)
+		return "", "", fmt.Errorf("snapshot has unsupported gpuMemoryService mode %q", spec.Mode)
 	}
 }
 

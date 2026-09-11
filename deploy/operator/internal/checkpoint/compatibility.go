@@ -88,6 +88,7 @@ type snapshotCompatibilityContract struct {
 	Version               string                     `json:"version"`
 	BackendFramework      string                     `json:"backendFramework"`
 	GMSMode               string                     `json:"gmsMode"`
+	GMSDeviceClassName    string                     `json:"gmsDeviceClassName,omitempty"`
 	TargetContainer       corev1.Container           `json:"targetContainer"`
 	InitContainers        []corev1.Container         `json:"initContainers,omitempty"`
 	Volumes               []corev1.Volume            `json:"volumes,omitempty"`
@@ -113,6 +114,7 @@ func ComputeSnapshotCompatibilityHash(
 	targetContainerName string,
 	backendFramework string,
 	gmsMode string,
+	gmsDeviceClassName string,
 ) (string, error) {
 	if podTemplate == nil {
 		return "", fmt.Errorf("snapshot compatibility pod template is required")
@@ -136,6 +138,7 @@ func ComputeSnapshotCompatibilityHash(
 		Version:               consts.SnapshotCompatibilityVersion,
 		BackendFramework:      backendFramework,
 		GMSMode:               gmsMode,
+		GMSDeviceClassName:    gmsDeviceClassName,
 		TargetContainer:       canonicalSnapshotContainer(*target, false),
 		HostNetwork:           podTemplate.Spec.HostNetwork,
 		HostPID:               podTemplate.Spec.HostPID,
