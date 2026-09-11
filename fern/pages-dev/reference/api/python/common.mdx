@@ -1402,7 +1402,7 @@ thread (e.g., an asyncio event loop). All access must be from the same
 thread to avoid race conditions. This is intentional to keep the
 implementation simple and avoid locking overhead.
 
-[`components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py#L43`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py#L43)
+[`components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py#L48`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py#L48)
 
 **Public methods**
 
@@ -1420,7 +1420,7 @@ Initialize the encoder cache.
 Maximum cache capacity in bytes.
 </ParamField>
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py#L57)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py#L62)
 
 <h4 id="api-dynamo-common-memory-multimodal-embedding-cache-manager-multimodalembeddingcachemanager-get">get</h4>
 
@@ -1442,7 +1442,7 @@ Cache key (typically content hash).
 
 - `Optional[CachedEmbedding]` — The cached embedding, or None if not found.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py#L95)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py#L100)
 
 <h4 id="api-dynamo-common-memory-multimodal-embedding-cache-manager-multimodalembeddingcachemanager-keys">keys</h4>
 
@@ -1452,7 +1452,52 @@ keys() -> list[str]
 
 Return the current cache keys in LRU order.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py#L116)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py#L121)
+
+<h4 id="api-dynamo-common-memory-multimodal-embedding-cache-manager-multimodalembeddingcachemanager-make-room-for">make_room_for</h4>
+
+```python
+make_room_for(key: str, size_bytes: int) -> CacheReservation
+```
+
+Decide admission for an entry of ``size_bytes`` and evict to fit it.
+
+Takes a byte count rather than a tensor so a caller that has to
+allocate the tensor itself — a device copy, say — can learn that the
+entry will be rejected, and can have the room for it freed, before it
+pays for the allocation. Nothing is reserved: ``_current_bytes`` is
+only reduced by what this evicts, so a caller whose allocation then
+fails leaks no capacity, and the subsequent ``set()`` still does its
+own accounting and finds its eviction loop with nothing left to do.
+
+An entry already stored under ``key`` is dropped here rather than
+counted as a refund against ``set_with_delta()``, which would replace
+it later. Merely deducting its bytes would keep its storage alive
+across the caller's allocation, so a full cache would still peak at its
+capacity plus the new entry — the one thing this method exists to
+prevent. It is not counted as an eviction, because nothing was
+displaced for want of capacity; the entry is on its way out either way.
+A caller that then abandons the store leaves that key uncached, which
+costs a later miss and no memory. Because the key is gone by the time
+``set_with_delta()`` runs, it reports the store as an addition rather
+than a replacement.
+
+**Parameters**
+
+<ParamField path="key" type="str">
+Cache key the caller intends to store under.
+</ParamField>
+<ParamField path="size_bytes" type="int">
+Size in bytes of the entry the caller intends to store.
+</ParamField>
+
+**Returns**
+
+- `CacheReservation` — CacheReservation reporting whether the entry can be stored at all,
+- `CacheReservation` — plus the keys evicted to make room for it. A dropped entry under
+- `CacheReservation` — ``key`` is not among them.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py#L125)
 
 <h4 id="api-dynamo-common-memory-multimodal-embedding-cache-manager-multimodalembeddingcachemanager-set">set</h4>
 
@@ -1462,7 +1507,7 @@ set(key: str, entry: CachedEmbedding) -> bool
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py#L120)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py#L184)
 
 <h4 id="api-dynamo-common-memory-multimodal-embedding-cache-manager-multimodalembeddingcachemanager-set-with-delta">set_with_delta</h4>
 
@@ -1490,7 +1535,7 @@ CachedEmbedding to cache.
 - `CacheMutation` — CacheMutation describing whether the entry was stored plus the
 - `CacheMutation` — authoritative add/remove delta caused by this mutation.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py#L123)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py#L187)
 </Accordion>
 
 <Accordion id="api-dynamo-common-multimodal-embedding-transfer-nixlreadembeddingreceiver" title="NixlReadEmbeddingReceiver (class)">
