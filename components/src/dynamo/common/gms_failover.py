@@ -59,37 +59,14 @@ def _post_lock_fence_ms(backend_name: str) -> int:
     # CUDA work can keep writing the shared VMM KV pages for a short window. This
     # quiescence gap between acquiring the lock and the new owner writing shared
     # KV mitigates (does not eliminate) that dual-writer overlap; hard
-    # elimination needs daemon-side mapping revocation (out of scope here).
+    # elimination needs daemon-side mapping revocation. The cohort lock proves
+    # userspace writers closed their guards; the delay covers outstanding asynchronous
+    # CUDA work.
     default_ms = 250
     backend_env = _backend_env_name(backend_name, "GMS_FAILOVER_POST_LOCK_FENCE_MS")
     if backend_env in os.environ:
         return max(0, _int_env(backend_env, default_ms))
     return max(0, _int_env("DYN_GMS_FAILOVER_POST_LOCK_FENCE_MS", default_ms))
-
-
-class _PromotionWarmupContext:
-    def __init__(self) -> None:
-        self._id = f"gms-failover-promotion-warmup-{uuid.uuid4()}"
-        self.trace_id = uuid.uuid4().hex
-        self.span_id = uuid.uuid4().hex[:16]
-
-    def id(self) -> str:
-        return self._id
-
-    def is_stopped(self) -> bool:
-        return False
-
-    def is_killed(self) -> bool:
-        return False
-
-    def trace_headers(self) -> dict[str, str]:
-        return {}
-
-    def notify_first_token(self) -> None:
-        """Satisfy the request-context protocol used by token generation."""
-
-    def async_killed_or_stopped(self) -> asyncio.Future[Any]:
-        return asyncio.get_running_loop().create_future()
 
 
 def _warmup_chunk_error(chunk: Any) -> str | None:
@@ -125,7 +102,12 @@ async def run_gms_failover_promotion_warmup(
     last_error: Exception | None = None
 
     async def _run_once(attempt: int) -> None:
-        context = _PromotionWarmupContext()
+        # Engine handlers accept Dynamo's native Context, not merely a Python
+        # object with similarly named methods. SGLang forwards this through a
+        # compiled boundary that enforces the concrete type.
+        from dynamo._core import Context
+
+        context = Context(f"gms-failover-promotion-warmup-{uuid.uuid4()}")
         started = time.monotonic()
         stream = generate(dict(payload), context)
         saw_chunk = False
@@ -422,6 +404,13 @@ async def run_gms_failover_post_lock_fence(
     reclaim preserves them for adoption instead of freeing them and degrading
     failover to a full recompute.
     """
+
+    if backend_name == "sglang":
+        from gpu_memory_service.integrations.sglang.writer_lifecycle import (
+            fence_predecessor_writers,
+        )
+
+        await fence_predecessor_writers()
 
     fence_ms = _post_lock_fence_ms(backend_name)
     if fence_ms > 0:

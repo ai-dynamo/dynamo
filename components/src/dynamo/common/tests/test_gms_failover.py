@@ -391,7 +391,7 @@ async def test_gms_failover_promotion_warmup_drains_non_error_stream(monkeypatch
 
     assert seen[0][0]["token_ids"] == [1]
     assert seen[0][1].startswith("gms-failover-promotion-warmup-")
-    assert seen[0][2] == {}
+    assert seen[0][2] is None
     assert seen[1:] == ["after-first-chunk", "stream-drained"]
 
 
@@ -865,3 +865,12 @@ def test_release_attached_gms_failover_lock_nowait_releases_and_detaches():
     assert release_attached_gms_failover_lock_nowait(handler, backend_name="test")
     assert lock.released == 1
     assert handler._gms_failover_lock is None
+
+
+def test_writer_cohort_keeps_cuda_quiescence_fence(monkeypatch):
+    from dynamo.common.gms_failover import _post_lock_fence_ms
+
+    monkeypatch.delenv("DYN_GMS_FAILOVER_POST_LOCK_FENCE_MS", raising=False)
+    monkeypatch.delenv("DYN_SGLANG_GMS_FAILOVER_POST_LOCK_FENCE_MS", raising=False)
+
+    assert _post_lock_fence_ms("sglang") == 250
