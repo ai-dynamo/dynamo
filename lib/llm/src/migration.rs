@@ -675,8 +675,8 @@ where
         if let Some(min_tokens) = self.request.stop_conditions.min_tokens {
             self.request.stop_conditions.min_tokens = Some(min_tokens.saturating_sub(output_len));
         }
-        for token_id in token_ids.iter() {
-            self.request.token_ids.push(*token_id);
+        if !token_ids.is_empty() {
+            Arc::make_mut(&mut self.request.token_ids).extend(token_ids.iter().copied());
         }
     }
 
@@ -2316,6 +2316,7 @@ mod tests {
         }
 
         let request = create_mock_request(3);
+        let original_request = request.clone();
         let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
             Arc::new(LlmEngineMock(context_id.clone()));
 
@@ -2335,15 +2336,27 @@ mod tests {
         .await
         .expect("Failed to build RetryManager");
 
+        // Metadata-only chunks must not copy the shared prompt.
+        retry_manager.track_response(&Annotated::from_data(LLMEngineOutput::default()));
+        assert!(Arc::ptr_eq(
+            &original_request.token_ids,
+            &retry_manager.request.token_ids
+        ));
+
         let mut responses = Vec::new();
         while let Some(r) = retry_manager.next().await {
             responses.push(r);
         }
         assert_eq!(responses.len(), 3);
         assert_eq!(
-            retry_manager.request.token_ids,
-            vec![1, 2, 3, 200, 201, 202]
+            retry_manager.request.token_ids.as_slice(),
+            &[1, 2, 3, 200, 201, 202]
         );
+        assert_eq!(original_request.token_ids.as_slice(), &[1, 2, 3]);
+        assert!(!Arc::ptr_eq(
+            &original_request.token_ids,
+            &retry_manager.request.token_ids
+        ));
     }
 
     /// Regression test for the migration-discards-withheld-text bug: a chunk delivered

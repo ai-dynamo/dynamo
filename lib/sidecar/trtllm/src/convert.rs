@@ -36,7 +36,7 @@ pub(crate) fn build_generate_request(
         request_id: request_id.to_string(),
         tokenized: Some(pb::TokenizedInput {
             original_text: String::new(),
-            input_token_ids: request.token_ids.clone(),
+            input_token_ids: request.token_ids.as_ref().clone(),
             query_token_ids: Vec::new(),
         }),
         sampling_config: Some(pb::SamplingConfig {
