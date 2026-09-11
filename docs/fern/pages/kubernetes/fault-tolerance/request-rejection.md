@@ -120,7 +120,7 @@ Optional. A worker can independently cap concurrent engine work and queue only a
 `--engine-request-limit N` (or `DYN_ENGINE_REQUEST_LIMIT`) on the **worker** component:
 
 ```yaml
-- name: VllmWorker
+- name: worker
   type: worker
   podTemplate:
     spec:
@@ -185,11 +185,15 @@ If decode-block load does not produce HTTP 529 responses:
    ```
 
    Inspect the entries for the affected model, target endpoint, and worker type. A worker with
-   `state="excluded"` has no exposed load sample; inspect its `reason`, such as `config_conflict`,
-   before troubleshooting the load feed. A `pending` worker is still initializing. Workers removed
-   from discovery have no per-worker state sample, while previously observed empty groups retain
-   `dynamo_frontend_router_workers{state="available"}` with value `0`. Missing inventory series do
-   not imply zero workers; verify scrape health and discovery. See
+   `state="excluded"` has no exposed load sample; inspect its `reason`, such as
+   `checksum_mismatch`, before troubleshooting the load feed. This reason applies only to the
+   rejected worker ID; first-wins admission leaves the incumbent `pending` during initialization or
+   `available` after it succeeds. With one healthy incumbent and one incompatible newcomer, expect
+   `discovered=2`, `available=1`, `pending=0`, and `excluded=1`; rejection does not remove the
+   incumbent. Workers removed from discovery have no per-worker state sample, while previously observed
+   empty groups retain `dynamo_frontend_router_workers{state="available"}` with value `0`. Missing
+   inventory series do not imply zero workers; verify scrape health and discovery. Inspect each
+   Frontend independently rather than aggregating readiness across Frontends. See
    [Router Worker Inventory](../../reference/observability/metrics-catalog.mdx#router-worker-inventory)
    for the full metric semantics.
 

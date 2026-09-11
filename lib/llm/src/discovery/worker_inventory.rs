@@ -11,7 +11,6 @@ use crate::local_model::runtime_config::ModelRuntimeConfig;
 pub(crate) enum WorkerGroupState {
     Ready,
     Pending,
-    ConfigConflict,
     MaterializationFailed,
     CommitBlocked,
     Removed,
@@ -24,6 +23,7 @@ pub(crate) struct WorkerGroupObservation {
     pub(crate) worker_type: &'static str,
     pub(crate) workers: HashMap<u64, ModelRuntimeConfig>,
     pub(crate) committed: HashSet<u64>,
+    pub(crate) checksum_mismatches: HashSet<u64>,
     pub(crate) state: WorkerGroupState,
 }
 
@@ -49,6 +49,7 @@ impl WorkerInventory {
                     worker_type: previous.worker_type,
                     workers: HashMap::new(),
                     committed: HashSet::new(),
+                    checksum_mismatches: HashSet::new(),
                     state: WorkerGroupState::Removed,
                 }
             }

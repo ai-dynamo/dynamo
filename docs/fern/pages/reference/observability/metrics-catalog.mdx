@@ -175,13 +175,15 @@ At each HTTP scrape, these five gauges include only workers in the current commi
 
 ### Router Worker Inventory
 
-These frontend-only metrics describe the frontend's view of normalized base model-card discovery and router admission. They do not report Kubernetes Pod existence, and LoRA overlays do not count as additional workers. Both metrics carry `model`, `target_namespace`, `target_component`, `target_endpoint`, and `worker_type` labels. The target labels identify the discovered serving endpoint.
+These frontend-only metrics describe each Frontend's independent view of normalized base model-card discovery and router admission. They do not report Kubernetes Pod existence, and LoRA overlays do not count as additional workers. Both metrics carry `model`, `target_namespace`, `target_component`, `target_endpoint`, and `worker_type` labels. The target labels identify the discovered serving endpoint.
+
+Admission uses first-wins semantics within each Frontend's model and target group. The first observed checksum cohort remains the incumbent; later incompatible worker IDs are excluded individually and do not remove or replace it. If the incumbent cohort disappears, the next remaining cohort can become its successor after initialization.
 
 <ParamField path="dynamo_frontend_router_workers" type="gauge">
   Number of unique physical worker IDs in a model and target group, labeled by `state`. DP ranks do not increase the count. The `available`, `pending`, and `excluded` states are disjoint; `discovered` is their sum. `available` requires successfully committed worker-set membership and current hard availability; `pending` means discovery has observed the worker but initialization has not completed; `excluded` means discovered but currently unavailable for routing.
 </ParamField>
 
-Each previously observed group emits all four counts, including explicit zeros after its last worker disappears, for the lifetime of the frontend's model manager. Groups never observed by that frontend have no series. There are no retained per-worker samples for removed IDs.
+Each previously observed group emits all four counts, including explicit zeros after its last worker disappears, for the lifetime of the frontend's model manager. Groups never observed by that frontend have no series. There are no retained per-worker samples for removed IDs. Do not aggregate these counts across Frontends as worker-global readiness; separate Frontends can choose different incumbents from the same discovered workers.
 
 <ParamField path="dynamo_frontend_router_worker_state" type="gauge">
   One sample with value `1` for each discovered worker, additionally labeled by `router_worker_id`, `state`, and `reason`. The state is `available`, `pending`, or `excluded`. The sample changes with the worker's current state and disappears when discovery removes the ID.
@@ -193,13 +195,13 @@ The bounded `reason` values describe the current admission or availability condi
 |--------|---------|
 | `none` | Available for routing |
 | `initializing` | Waiting for initialization |
-| `config_conflict` | Model Deployment Card fingerprints conflict |
+| `checksum_mismatch` | The individual worker's Model Deployment Card checksum differs from the incumbent; emitted only for rejected worker IDs |
 | `materialization_failed` | Creating the serving configuration failed |
 | `commit_blocked` | The serving configuration could not be committed |
 | `invalid_config` | The discovered configuration is invalid |
 | `unavailable` | Absent from the current availability view; includes local inhibition and other availability changes without identifying their exact cause |
 
-For example, if a conflicting Model Deployment Card (MCD) causes a group of two discovered workers to be rejected, its counts are `discovered=2`, `available=0`, `pending=0`, and `excluded=2`. The per-worker samples show `state="excluded",reason="config_conflict"`.
+When an incumbent is still initializing and an incompatible newcomer is discovered, counts are `discovered=2`, `available=0`, `pending=1`, and `excluded=1`. The incumbent carries `state="pending",reason="initializing"`; only the newcomer carries `state="excluded",reason="checksum_mismatch"`. Once the incumbent is healthy, the same group reports `discovered=2`, `available=1`, `pending=0`, and `excluded=1`. Rejection of the newcomer never makes the incumbent pending or excluded.
 
 Use explicit counts to find observed groups with no available workers:
 
@@ -213,7 +215,7 @@ Inspect workers still discovered but excluded from routing:
 dynamo_frontend_router_worker_state{state="excluded"} == 1
 ```
 
-Scope these queries to the target frontend and deployment. Evaluate each frontend separately because their discovery and admission views can differ. A missing series does not mean zero workers; check Prometheus `up` separately for scrape health. These metrics reflect updates after the frontend processes discovery and routing state changes, not at the instant a worker process terminates.
+Scope these queries to the target frontend and deployment. Evaluate each Frontend separately because discovery order and first-wins admission can produce different incumbents. A missing series does not mean zero workers; check Prometheus `up` separately for scrape health. These metrics reflect updates after the frontend processes discovery and routing state changes, not at the instant a worker process terminates.
 
 ### Model metrics
 

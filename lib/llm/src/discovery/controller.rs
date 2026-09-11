@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     panic::AssertUnwindSafe,
     sync::Arc,
     time::Duration,
@@ -47,7 +47,7 @@ pub(crate) struct DesiredInstance {
     pub(crate) endpoint_id: EndpointId,
     pub(crate) card: ModelDeploymentCard,
     pub(crate) group_key: GroupKey,
-    pub(crate) fingerprint: String,
+    pub(crate) mdc_checksum: String,
     pub(crate) projection_fingerprint: String,
 }
 
@@ -60,7 +60,7 @@ impl DesiredInstance {
 #[derive(Clone, Debug)]
 pub(crate) struct GroupSpec {
     pub(crate) key: GroupKey,
-    pub(crate) fingerprint: String,
+    pub(crate) mdc_checksum: String,
     pub(crate) generation: u64,
     pub(crate) representative: DesiredInstance,
 }
@@ -115,37 +115,37 @@ pub(crate) trait ControllerHost: Send + Sync + 'static {
 enum GroupStatus {
     Idle,
     Queued {
-        fingerprint: String,
+        mdc_checksum: String,
     },
     Building {
-        fingerprint: String,
+        mdc_checksum: String,
         generation: u64,
         cancellation: CancellationToken,
     },
     Ready {
-        fingerprint: String,
+        mdc_checksum: String,
         committed_members: BTreeSet<String>,
     },
     Retrying {
-        fingerprint: String,
+        mdc_checksum: String,
         deadline: Instant,
     },
-    Conflict,
     Blocked {
-        fingerprint: String,
+        mdc_checksum: String,
         deadline: Instant,
     },
     BlockedReady {
-        fingerprint: String,
+        mdc_checksum: String,
         committed_members: BTreeSet<String>,
         deadline: Instant,
     },
 }
 
 struct DesiredGroup {
-    generation: u64,
     retry_attempt: u32,
     cohorts: HashMap<String, BTreeSet<String>>,
+    cohort_order: VecDeque<String>,
+    reported_rejections: HashSet<String>,
     admission_tx: watch::Sender<Vec<u64>>,
     status: GroupStatus,
 }
@@ -154,28 +154,58 @@ impl DesiredGroup {
     fn new() -> Self {
         let (admission_tx, _) = watch::channel(Vec::new());
         Self {
-            generation: 0,
             retry_attempt: 0,
             cohorts: HashMap::new(),
+            cohort_order: VecDeque::new(),
+            reported_rejections: HashSet::new(),
             admission_tx,
             status: GroupStatus::Idle,
         }
     }
 
     fn insert(&mut self, instance: &DesiredInstance) {
+        if !self.cohorts.contains_key(&instance.mdc_checksum) {
+            self.cohort_order.push_back(instance.mdc_checksum.clone());
+        }
         self.cohorts
-            .entry(instance.fingerprint.clone())
+            .entry(instance.mdc_checksum.clone())
             .or_default()
             .insert(instance.key.clone());
     }
 
     fn remove(&mut self, instance: &DesiredInstance) {
-        let Some(cohort) = self.cohorts.get_mut(&instance.fingerprint) else {
+        let Some(cohort) = self.cohorts.get_mut(&instance.mdc_checksum) else {
             return;
         };
         cohort.remove(&instance.key);
         if cohort.is_empty() {
-            self.cohorts.remove(&instance.fingerprint);
+            self.cohorts.remove(&instance.mdc_checksum);
+            self.cohort_order
+                .retain(|checksum| checksum != &instance.mdc_checksum);
+            self.reported_rejections.remove(&instance.mdc_checksum);
+        }
+    }
+
+    fn selected_checksum(&self) -> Option<&str> {
+        self.cohort_order.front().map(String::as_str)
+    }
+
+    fn report_rejections(&mut self, key: &GroupKey) {
+        let Some(incumbent) = self.cohort_order.front() else {
+            return;
+        };
+        for checksum in self.cohort_order.iter().skip(1) {
+            if !self.reported_rejections.insert(checksum.clone()) {
+                continue;
+            }
+            tracing::error!(
+                model = %key.model_name,
+                worker_set = %key.worker_set_key,
+                incumbent_checksum = %incumbent,
+                rejected_checksum = %checksum,
+                instance = ?self.cohorts.get(checksum).and_then(|members| members.first()),
+                "Rejected incompatible workers; the first accepted configuration retains the WorkerSet"
+            );
         }
     }
 }
@@ -317,14 +347,16 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
 
     fn apply_added(&mut self, instance: DesiredInstance) -> bool {
         if let Some(existing) = self.desired.get(&instance.key) {
-            if existing.fingerprint == instance.fingerprint
+            if existing.mdc_checksum == instance.mdc_checksum
                 && existing.projection_fingerprint == instance.projection_fingerprint
             {
+                // A repeated registration still confirms liveness after an older snapshot.
+                self.record_mutation(instance.key.clone());
                 return false;
             }
             if existing.materializes_worker_set()
                 && (existing.group_key != instance.group_key
-                    || existing.fingerprint != instance.fingerprint)
+                    || existing.mdc_checksum != instance.mdc_checksum)
             {
                 tracing::error!(
                     instance = instance.key,
@@ -332,6 +364,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     candidate_group = %instance.group_key.id(),
                     "Rejected an in-place materialization change; worker instance paths identify immutable incarnations"
                 );
+                self.record_mutation(instance.key.clone());
                 return false;
             }
         }
@@ -341,17 +374,25 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         let instance_id = instance.mcid.instance_id;
         let instance_key = instance.key.clone();
         let materializes_worker_set = instance.materializes_worker_set();
+        let mut affects_selected = false;
         if materializes_worker_set {
-            self.groups
+            let group = self
+                .groups
                 .entry(group_key.clone())
-                .or_insert_with(DesiredGroup::new)
-                .insert(&instance);
+                .or_insert_with(DesiredGroup::new);
+            group.insert(&instance);
+            affects_selected = group.selected_checksum() == Some(instance.mdc_checksum.as_str());
+            group.report_rejections(&group_key);
         }
         self.desired.insert(instance.key.clone(), instance);
         self.record_mutation(instance_key);
 
         if materializes_worker_set {
-            self.reconcile_group(&group_key, true);
+            if affects_selected {
+                self.reconcile_group(&group_key, true);
+            } else {
+                self.publish_group_observation(&group_key);
+            }
         } else {
             for key in self.materialization_groups_for(&endpoint_id, instance_id) {
                 self.reconcile_group(&key, true);
@@ -367,7 +408,11 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             return false;
         };
         let affected_groups = if instance.materializes_worker_set() {
-            vec![instance.group_key.clone()]
+            self.groups
+                .get(&instance.group_key)
+                .filter(|group| group.selected_checksum() == Some(instance.mdc_checksum.as_str()))
+                .map(|_| vec![instance.group_key.clone()])
+                .unwrap_or_default()
         } else {
             self.materialization_groups_for(&instance.endpoint_id, instance.mcid.instance_id)
         };
@@ -376,8 +421,11 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         {
             group.remove(&instance);
         }
-        for key in affected_groups {
-            self.reconcile_group(&key, true);
+        for key in &affected_groups {
+            self.reconcile_group(key, true);
+        }
+        if instance.materializes_worker_set() && !affected_groups.contains(&instance.group_key) {
+            self.publish_group_observation(&instance.group_key);
         }
         true
     }
@@ -390,7 +438,15 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 .flatten()
                 .filter_map(|key| self.desired.get(key))
                 .collect::<Vec<_>>();
-            let representative = members.first()?;
+            let selected_checksum = group.selected_checksum()?;
+            let representative = members
+                .iter()
+                .find(|member| member.mdc_checksum == selected_checksum)?;
+            let checksum_mismatches = members
+                .iter()
+                .filter(|member| member.mdc_checksum != selected_checksum)
+                .map(|member| member.mcid.instance_id)
+                .collect();
             let committed_keys = match &group.status {
                 GroupStatus::Ready {
                     committed_members, ..
@@ -422,9 +478,9 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     .map(|member| (member.mcid.instance_id, member.card.runtime_config.clone()))
                     .collect(),
                 committed,
+                checksum_mismatches,
                 state: match &group.status {
                     GroupStatus::Ready { .. } => WorkerGroupState::Ready,
-                    GroupStatus::Conflict => WorkerGroupState::ConfigConflict,
                     GroupStatus::Retrying { .. } => WorkerGroupState::MaterializationFailed,
                     GroupStatus::Blocked { .. } | GroupStatus::BlockedReady { .. } => {
                         WorkerGroupState::CommitBlocked
@@ -456,27 +512,24 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             return;
         }
 
-        if group.cohorts.len() > 1 {
+        let mdc_checksum = group
+            .selected_checksum()
+            .expect("non-empty group has a cohort")
+            .to_string();
+        if status_checksum(&old_status).is_some_and(|previous| previous != mdc_checksum) {
             group.admission_tx.send_replace(Vec::new());
             cancel_build(&old_status);
             if status_has_commit(&old_status) {
                 self.host.remove_group(key);
             }
-            if !matches!(old_status, GroupStatus::Conflict) {
-                group.generation = group.generation.wrapping_add(1);
-                group.retry_attempt = 0;
-            }
-            group.status = GroupStatus::Conflict;
-            self.groups.insert(key.clone(), group);
-            return;
+            // Retained pipeline clients must never observe the successor's IDs.
+            let (admission_tx, _) = watch::channel(Vec::new());
+            group.admission_tx = admission_tx;
+            group.reported_rejections.clear();
+            group.retry_attempt = 0;
         }
-
-        let (fingerprint, member_keys) = group
-            .cohorts
-            .iter()
-            .next()
-            .map(|(fingerprint, members)| (fingerprint.clone(), members.clone()))
-            .expect("non-empty group has one cohort");
+        group.report_rejections(key);
+        let member_keys = group.cohorts[&mdc_checksum].clone();
         let members = self.members(&member_keys);
         let admitted = admitted_ids(&members);
         if !matches!(
@@ -488,14 +541,14 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
 
         group.status = match old_status {
             GroupStatus::Ready {
-                fingerprint: ready_fingerprint,
+                mdc_checksum: ready_checksum,
                 committed_members,
             }
             | GroupStatus::BlockedReady {
-                fingerprint: ready_fingerprint,
+                mdc_checksum: ready_checksum,
                 committed_members,
                 ..
-            } if ready_fingerprint == fingerprint => {
+            } if ready_checksum == mdc_checksum => {
                 let current_members = member_keys;
                 let old_admitted = group.admission_tx.borrow().clone();
                 let new_admitted = admitted_ids(&members);
@@ -513,7 +566,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                         group.admission_tx.send_replace(new_admitted);
                         group.retry_attempt = 0;
                         GroupStatus::Ready {
-                            fingerprint,
+                            mdc_checksum,
                             committed_members: current_members,
                         }
                     }
@@ -528,7 +581,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                             "Discovery-group replacement blocked; retaining the last safe commit"
                         );
                         GroupStatus::BlockedReady {
-                            fingerprint,
+                            mdc_checksum,
                             committed_members,
                             deadline: Instant::now() + delay,
                         }
@@ -536,7 +589,6 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     Err(error) => {
                         group.admission_tx.send_replace(Vec::new());
                         self.host.remove_group(key);
-                        group.generation = group.generation.wrapping_add(1);
                         group.retry_attempt = group.retry_attempt.saturating_add(1);
                         tracing::warn!(
                             group = %key.id(),
@@ -544,48 +596,43 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                             "Discovery-group membership replacement failed; withdrawing stale commit"
                         );
                         GroupStatus::Blocked {
-                            fingerprint,
+                            mdc_checksum,
                             deadline: Instant::now() + retry_delay(group.retry_attempt),
                         }
                     }
                 }
             }
             GroupStatus::Building {
-                fingerprint: building_fingerprint,
+                mdc_checksum: building_checksum,
                 generation,
                 cancellation,
-            } if building_fingerprint == fingerprint => GroupStatus::Building {
-                fingerprint,
+            } if building_checksum == mdc_checksum => GroupStatus::Building {
+                mdc_checksum,
                 generation,
                 cancellation,
             },
             GroupStatus::Queued {
-                fingerprint: queued_fingerprint,
-            } if queued_fingerprint == fingerprint => GroupStatus::Queued { fingerprint },
+                mdc_checksum: queued_checksum,
+            } if queued_checksum == mdc_checksum => GroupStatus::Queued { mdc_checksum },
             GroupStatus::Retrying {
-                fingerprint: retry_fingerprint,
+                mdc_checksum: retry_checksum,
                 deadline,
-            } if retry_fingerprint == fingerprint && !desired_changed => GroupStatus::Retrying {
-                fingerprint,
+            } if retry_checksum == mdc_checksum && !desired_changed => GroupStatus::Retrying {
+                mdc_checksum,
                 deadline,
             },
             GroupStatus::Blocked {
-                fingerprint: blocked_fingerprint,
+                mdc_checksum: blocked_checksum,
                 deadline,
-            } if blocked_fingerprint == fingerprint && !desired_changed => GroupStatus::Blocked {
-                fingerprint,
+            } if blocked_checksum == mdc_checksum && !desired_changed => GroupStatus::Blocked {
+                mdc_checksum,
                 deadline,
             },
             previous => {
                 cancel_build(&previous);
-                if status_has_commit(&previous) {
-                    group.admission_tx.send_replace(Vec::new());
-                    self.host.remove_group(key);
-                    group.admission_tx.send_replace(admitted_ids(&members));
-                }
-                group.generation = group.generation.wrapping_add(1);
+                group.admission_tx.send_replace(admitted_ids(&members));
                 group.retry_attempt = 0;
-                GroupStatus::Queued { fingerprint }
+                GroupStatus::Queued { mdc_checksum }
             }
         };
         self.groups.insert(key.clone(), group);
@@ -629,6 +676,9 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 instance.materializes_worker_set()
                     && &instance.endpoint_id == endpoint_id
                     && instance.mcid.instance_id == instance_id
+                    && self.groups.get(&instance.group_key).is_some_and(|group| {
+                        group.selected_checksum() == Some(instance.mdc_checksum.as_str())
+                    })
             })
             .map(|instance| instance.group_key.clone())
             .collect::<HashSet<_>>()
@@ -661,13 +711,13 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             let Some(group) = self.groups.get_mut(&key) else {
                 continue;
             };
-            let GroupStatus::Queued { fingerprint } = &group.status else {
+            let GroupStatus::Queued { mdc_checksum } = &group.status else {
                 continue;
             };
-            let fingerprint = fingerprint.clone();
+            let mdc_checksum = mdc_checksum.clone();
             let Some(member_key) = group
                 .cohorts
-                .get(&fingerprint)
+                .get(&mdc_checksum)
                 .and_then(|members| members.first())
             else {
                 continue;
@@ -681,12 +731,12 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             self.next_build_generation = self.next_build_generation.wrapping_add(1).max(1);
             let spec = GroupSpec {
                 key: key.clone(),
-                fingerprint: fingerprint.clone(),
+                mdc_checksum: mdc_checksum.clone(),
                 generation,
                 representative,
             };
             group.status = GroupStatus::Building {
-                fingerprint,
+                mdc_checksum,
                 generation,
                 cancellation: cancellation.clone(),
             };
@@ -739,12 +789,12 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         let is_current = matches!(
             &group.status,
             GroupStatus::Building {
-                fingerprint,
+                mdc_checksum,
                 generation,
                 ..
-            } if fingerprint == &result.spec.fingerprint && *generation == result.spec.generation
-        ) && group.cohorts.len() == 1
-            && group.cohorts.contains_key(&result.spec.fingerprint);
+            } if mdc_checksum == &result.spec.mdc_checksum && *generation == result.spec.generation
+        ) && group.selected_checksum() == Some(result.spec.mdc_checksum.as_str())
+            && group.cohorts.contains_key(&result.spec.mdc_checksum);
         if !is_current {
             if let BuildOutcome::Prepared(prepared) = result.outcome {
                 self.host.discard_prepared(prepared);
@@ -757,7 +807,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             BuildOutcome::Prepared(prepared) => {
                 let member_keys = group
                     .cohorts
-                    .get(&result.spec.fingerprint)
+                    .get(&result.spec.mdc_checksum)
                     .cloned()
                     .unwrap_or_default();
                 let members = self.members(&member_keys);
@@ -770,7 +820,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     Ok(()) => {
                         group.retry_attempt = 0;
                         group.status = GroupStatus::Ready {
-                            fingerprint: result.spec.fingerprint,
+                            mdc_checksum: result.spec.mdc_checksum,
                             committed_members: member_keys,
                         };
                     }
@@ -783,7 +833,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                         );
                         group.retry_attempt = group.retry_attempt.saturating_add(1);
                         group.status = GroupStatus::Blocked {
-                            fingerprint: result.spec.fingerprint,
+                            mdc_checksum: result.spec.mdc_checksum,
                             deadline: Instant::now() + retry_delay(group.retry_attempt),
                         };
                     }
@@ -800,13 +850,13 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     "Model materialization failed; scheduling retry"
                 );
                 group.status = GroupStatus::Retrying {
-                    fingerprint: result.spec.fingerprint,
+                    mdc_checksum: result.spec.mdc_checksum,
                     deadline: Instant::now() + delay,
                 };
             }
             BuildOutcome::Cancelled => {
                 group.status = GroupStatus::Queued {
-                    fingerprint: result.spec.fingerprint,
+                    mdc_checksum: result.spec.mdc_checksum,
                 };
             }
         }
@@ -830,22 +880,22 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         let mut retained_retries = Vec::new();
         let mut queued_retries = Vec::new();
         for (key, group) in &mut self.groups {
-            let (fingerprint, deadline) = match &group.status {
+            let (mdc_checksum, deadline) = match &group.status {
                 GroupStatus::Retrying {
-                    fingerprint,
+                    mdc_checksum,
                     deadline,
                 }
                 | GroupStatus::Blocked {
-                    fingerprint,
+                    mdc_checksum,
                     deadline,
-                } => (fingerprint, deadline),
+                } => (mdc_checksum, deadline),
                 GroupStatus::BlockedReady {
-                    fingerprint,
+                    mdc_checksum,
                     committed_members,
                     deadline,
                 } if *deadline <= now => {
                     group.status = GroupStatus::Ready {
-                        fingerprint: fingerprint.clone(),
+                        mdc_checksum: mdc_checksum.clone(),
                         committed_members: committed_members.clone(),
                     };
                     retained_retries.push(key.clone());
@@ -855,7 +905,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             };
             if *deadline <= now {
                 group.status = GroupStatus::Queued {
-                    fingerprint: fingerprint.clone(),
+                    mdc_checksum: mdc_checksum.clone(),
                 };
                 queued_retries.push(key.clone());
             }
@@ -971,6 +1021,18 @@ fn cancel_build(status: &GroupStatus) {
     }
 }
 
+fn status_checksum(status: &GroupStatus) -> Option<&str> {
+    match status {
+        GroupStatus::Idle => None,
+        GroupStatus::Queued { mdc_checksum }
+        | GroupStatus::Building { mdc_checksum, .. }
+        | GroupStatus::Ready { mdc_checksum, .. }
+        | GroupStatus::Retrying { mdc_checksum, .. }
+        | GroupStatus::Blocked { mdc_checksum, .. }
+        | GroupStatus::BlockedReady { mdc_checksum, .. } => Some(mdc_checksum),
+    }
+}
+
 fn status_has_commit(status: &GroupStatus) -> bool {
     matches!(
         status,
@@ -1018,6 +1080,7 @@ mod tests {
         committed: Mutex<HashMap<String, BTreeSet<String>>>,
         adapters: Mutex<HashMap<String, BTreeSet<String>>>,
         adapter_projections: Mutex<HashMap<String, HashMap<String, String>>>,
+        admissions: Mutex<Vec<watch::Receiver<Vec<u64>>>>,
         removed_groups: AtomicUsize,
         discarded: AtomicUsize,
         inventory: super::super::worker_inventory::WorkerInventory,
@@ -1037,6 +1100,7 @@ mod tests {
                     committed: Mutex::new(HashMap::new()),
                     adapters: Mutex::new(HashMap::new()),
                     adapter_projections: Mutex::new(HashMap::new()),
+                    admissions: Mutex::new(Vec::new()),
                     removed_groups: AtomicUsize::new(0),
                     discarded: AtomicUsize::new(0),
                     inventory: Default::default(),
@@ -1127,19 +1191,20 @@ mod tests {
                     name: endpoint,
                 },
                 group_key: group_key(),
+                mdc_checksum: card.mdcsum().to_string(),
+                projection_fingerprint: card.source_path.clone().unwrap(),
                 card,
-                fingerprint: "spec".to_string(),
-                projection_fingerprint: "projection".to_string(),
             }))
         }
 
         async fn prepare(
             &self,
             spec: GroupSpec,
-            _admitted_ids: watch::Receiver<Vec<u64>>,
+            admitted_ids: watch::Receiver<Vec<u64>>,
             _cancellation: CancellationToken,
         ) -> anyhow::Result<Self::Prepared> {
             let build = self.starts.fetch_add(1, Ordering::SeqCst) as u64;
+            self.admissions.lock().unwrap().push(admitted_ids);
             self.start_tx.send(spec).unwrap();
             self.release.acquire().await.unwrap().forget();
             if self
@@ -1234,7 +1299,9 @@ mod tests {
         }
     }
 
-    fn instance(id: u64, fingerprint: &str) -> DesiredInstance {
+    fn instance(id: u64, mdc_checksum: &str) -> DesiredInstance {
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        card.source_path = Some(mdc_checksum.to_string());
         let mcid = ModelCardInstanceId {
             namespace: "namespace".to_string(),
             component: "worker".to_string(),
@@ -1250,10 +1317,10 @@ mod tests {
                 component: "worker".to_string(),
                 name: "generate".to_string(),
             },
-            card: ModelDeploymentCard::with_name_only("model"),
             group_key: group_key(),
-            fingerprint: fingerprint.to_string(),
-            projection_fingerprint: fingerprint.to_string(),
+            mdc_checksum: card.mdcsum().to_string(),
+            card,
+            projection_fingerprint: mdc_checksum.to_string(),
         }
     }
 
@@ -1327,7 +1394,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conflict_fails_ready_group_closed_and_recovers_after_clear() {
+    async fn competing_cohorts_preserve_serving_until_complete_incumbent_drain() {
         let (host, mut starts) = FakeHost::new();
         let mut controller = ModelDiscoveryController::new(host.clone());
         let compatible = instance(1, "first-spec");
@@ -1340,34 +1407,44 @@ mod tests {
 
         let conflicting = instance(2, "second-spec");
         controller.apply_added(conflicting.clone());
-        assert!(host.members(&group_key()).is_empty());
-        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 1);
+        controller.apply_added(instance(3, "second-spec"));
+        controller.apply_added(instance(4, "third-spec"));
+        let old_admissions = host.admissions.lock().unwrap()[0].clone();
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([compatible.key.clone()])
+        );
+        assert_eq!(*old_admissions.borrow(), vec![1]);
 
-        controller.apply_removed(&conflicting.key);
+        controller.apply_removed(&compatible.key);
+        assert!(host.members(&group_key()).is_empty());
+        assert!(old_admissions.borrow().is_empty());
+        assert!(old_admissions.has_changed().is_err());
         controller.start_queued_builds();
         starts.recv().await.unwrap();
         host.release.add_permits(1);
         finish_build(&mut controller).await;
-        assert_eq!(host.members(&group_key()), BTreeSet::from([compatible.key]));
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([conflicting.key, instance(3, "second-spec").key])
+        );
+        assert_eq!(*host.admissions.lock().unwrap()[1].borrow(), vec![2, 3]);
+        assert!(old_admissions.borrow().is_empty());
     }
 
     #[tokio::test]
-    async fn conflict_during_build_cancels_without_publishing_either_cohort() {
+    async fn first_cohort_reserves_queued_and_active_construction() {
         let (host, mut starts) = FakeHost::new();
         let mut controller = ModelDiscoveryController::new(host.clone());
         let first = instance(1, "first-spec");
         let conflicting = instance(2, "second-spec");
         controller.apply_added(first.clone());
-        controller.start_queued_builds();
-        starts.recv().await.unwrap();
-
         controller.apply_added(conflicting.clone());
-        finish_build(&mut controller).await;
-        assert!(host.members(&group_key()).is_empty());
-
-        controller.apply_removed(&conflicting.key);
         controller.start_queued_builds();
         starts.recv().await.unwrap();
+
+        controller.apply_added(instance(3, "second-spec"));
+        controller.apply_added(instance(4, "third-spec"));
         host.release.add_permits(1);
         finish_build(&mut controller).await;
         assert_eq!(host.members(&group_key()), BTreeSet::from([first.key]));
@@ -1534,69 +1611,135 @@ mod tests {
         assert_eq!(host.starts.load(Ordering::SeqCst), 2);
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn failed_build_remains_unpublished_until_its_retry_succeeds() {
+    #[tokio::test]
+    async fn snapshots_preserve_priority_and_recreated_cohorts_join_the_end() {
         let (host, mut starts) = FakeHost::new();
-        host.failures.store(1, Ordering::SeqCst);
         let mut controller = ModelDiscoveryController::new(host.clone());
-        let desired = instance(1, "spec");
-        controller.apply_added(desired.clone());
-        controller.start_queued_builds();
-        starts.recv().await.unwrap();
-        host.release.add_permits(1);
-        finish_build(&mut controller).await;
+        let first = instance(1, "first");
+        let second = instance(2, "second");
+        let third = instance(3, "third");
+        for member in [&first, &second, &third] {
+            controller.apply_added(member.clone());
+        }
+        controller.apply_removed(&second.key);
+        controller.apply_added(second.clone());
+        controller.apply_reconciliation(
+            ReconciliationResult {
+                revision: controller.revision,
+                instances: Ok([&second, &third, &first].map(discovery_instance).to_vec()),
+            },
+            &NamespaceFilter::Global,
+        );
+
+        // Snapshot order cannot promote a newcomer; disappearance resets priority.
+        for incumbent in [&first, &third, &second] {
+            controller.start_queued_builds();
+            starts.recv().await.unwrap();
+            host.release.add_permits(1);
+            finish_build(&mut controller).await;
+            assert_eq!(
+                host.members(&group_key()),
+                BTreeSet::from([incumbent.key.clone()])
+            );
+            controller.apply_removed(&incumbent.key);
+        }
         assert!(host.members(&group_key()).is_empty());
-
-        tokio::time::advance(Duration::from_millis(999)).await;
-        controller.release_due_retries();
-        controller.start_queued_builds();
-        assert!(starts.try_recv().is_err());
-
-        tokio::time::advance(Duration::from_millis(1)).await;
-        controller.release_due_retries();
-        controller.start_queued_builds();
-        starts.recv().await.unwrap();
-        host.release.add_permits(1);
-        finish_build(&mut controller).await;
-        assert_eq!(host.members(&group_key()), BTreeSet::from([desired.key]));
     }
 
     #[tokio::test(start_paused = true)]
-    async fn blocked_group_retries_on_its_deadline_not_unrelated_churn() {
-        let (host, mut starts) = FakeHost::new();
-        host.commit_failures.store(1, Ordering::SeqCst);
-        let mut controller = ModelDiscoveryController::new(host.clone());
-        let desired = instance(1, "spec");
-        controller.apply_added(desired.clone());
-        controller.start_queued_builds();
-        starts.recv().await.unwrap();
-        host.release.add_permits(1);
-        finish_build(&mut controller).await;
+    async fn rejected_workers_and_adapters_cannot_reset_retry_or_change_publication() {
+        for fail_at_commit in [false, true] {
+            let (host, mut starts) = FakeHost::new();
+            if fail_at_commit {
+                host.commit_failures.store(1, Ordering::SeqCst);
+            } else {
+                host.failures.store(1, Ordering::SeqCst);
+            }
+            let mut controller = ModelDiscoveryController::new(host.clone());
+            let incumbent = instance(1, "incumbent");
+            let rejected = instance(2, "rejected");
+            let mut adapter = instance(2, "adapter");
+            adapter.mcid.model_suffix = Some("adapter".to_string());
+            adapter.key = adapter.mcid.to_path();
+            controller.apply_added(incumbent.clone());
+            controller.start_queued_builds();
+            starts.recv().await.unwrap();
+            host.release.add_permits(1);
+            finish_build(&mut controller).await;
+            assert!(host.members(&group_key()).is_empty());
 
-        let mut unrelated_adapter = instance(99, "spec");
-        unrelated_adapter.mcid.model_suffix = Some("unrelated-adapter".to_string());
-        unrelated_adapter.key = unrelated_adapter.mcid.to_path();
-        controller.apply_added(unrelated_adapter);
-        controller.start_queued_builds();
-        assert!(starts.try_recv().is_err());
+            tokio::time::advance(Duration::from_millis(500)).await;
+            controller.apply_added(rejected.clone());
+            controller.apply_added(adapter.clone());
+            controller.apply_removed(&rejected.key);
+            controller.apply_added(rejected);
+            adapter.projection_fingerprint = "updated".to_string();
+            controller.apply_added(adapter.clone());
+            let mut unrelated_adapter = instance(99, "adapter");
+            unrelated_adapter.mcid.model_suffix = Some("unrelated-adapter".to_string());
+            unrelated_adapter.key = unrelated_adapter.mcid.to_path();
+            controller.apply_added(unrelated_adapter);
+            controller.start_queued_builds();
+            assert!(starts.try_recv().is_err());
 
-        tokio::time::advance(Duration::from_secs(1)).await;
-        controller.release_due_retries();
-        controller.start_queued_builds();
-        starts.recv().await.unwrap();
-        host.release.add_permits(1);
-        finish_build(&mut controller).await;
-        assert_eq!(host.members(&group_key()), BTreeSet::from([desired.key]));
+            tokio::time::advance(Duration::from_millis(499)).await;
+            controller.release_due_retries();
+            controller.start_queued_builds();
+            assert!(starts.try_recv().is_err());
+            assert!(host.members(&group_key()).is_empty());
+
+            tokio::time::advance(Duration::from_millis(1)).await;
+            controller.release_due_retries();
+            controller.start_queued_builds();
+            starts.recv().await.unwrap();
+            host.release.add_permits(1);
+            finish_build(&mut controller).await;
+            assert_eq!(
+                host.members(&group_key()),
+                BTreeSet::from([incumbent.key.clone()])
+            );
+            assert!(host.adapters(&group_key()).is_empty());
+
+            let mut admissions = host.admissions.lock().unwrap().last().unwrap().clone();
+            admissions.borrow_and_update();
+            // A publication attempt here would fail and withdraw the safe membership.
+            host.replace_failures.store(1, Ordering::SeqCst);
+            controller.apply_removed(&adapter.key);
+            controller.apply_added(adapter);
+            controller.apply_added(instance(3, "another-rejected"));
+            controller.apply_removed(&instance(3, "another-rejected").key);
+            assert_eq!(host.members(&group_key()), BTreeSet::from([incumbent.key]));
+            assert!(!admissions.has_changed().unwrap());
+            assert!(host.adapters(&group_key()).is_empty());
+        }
     }
 
     #[tokio::test]
     async fn reconciliation_repairs_missed_state_without_undoing_newer_events() {
-        let (host, _starts) = FakeHost::new();
-        let mut controller = ModelDiscoveryController::new(host);
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
         let first = instance(1, "spec");
         let second = instance(2, "spec");
 
         controller.apply_added(first.clone());
+        let duplicate_revision = controller.revision;
+        controller.apply_added(first.clone());
+        controller.apply_reconciliation(
+            ReconciliationResult {
+                revision: duplicate_revision,
+                instances: Ok(Vec::new()),
+            },
+            &NamespaceFilter::Global,
+        );
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([first.key.clone()])
+        );
+
         let snapshot_revision = controller.revision;
         controller.apply_removed(&first.key);
         controller.apply_added(second.clone());
@@ -1608,8 +1751,14 @@ mod tests {
             &NamespaceFilter::Global,
         );
 
-        assert!(!controller.desired.contains_key(&first.key));
-        assert!(controller.desired.contains_key(&second.key));
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([second.key.clone()])
+        );
 
         let repair_revision = controller.revision;
         controller.apply_reconciliation(
@@ -1619,59 +1768,97 @@ mod tests {
             },
             &NamespaceFilter::Global,
         );
-        assert!(controller.desired.contains_key(&first.key));
-        assert!(!controller.desired.contains_key(&second.key));
+        assert_eq!(host.members(&group_key()), BTreeSet::from([first.key]));
     }
 
     #[tokio::test]
-    async fn inventory_tracks_conflict_recovery_and_retains_empty_group_without_worker_ghosts() {
+    async fn inventory_tracks_rejected_newcomers_succession_and_final_removal() {
         let (host, mut starts) = FakeHost::new();
         let mut controller = ModelDiscoveryController::new(host.clone());
-        let first = instance(1, "first");
-        controller.apply_added(first.clone());
-        let observation = host.inventory.snapshot().pop().unwrap().1;
-        assert_eq!(observation.state, WorkerGroupState::Pending);
-        assert_eq!(observation.workers.len(), 1);
-        assert!(observation.committed.is_empty());
+        let incumbent = instance(1, "first");
+        let newcomer = instance(2, "second");
+        controller.apply_added(incumbent.clone());
         controller.start_queued_builds();
         starts.recv().await.unwrap();
         host.release.add_permits(1);
         finish_build(&mut controller).await;
-        assert_eq!(host.inventory.snapshot()[0].1.committed, HashSet::from([1]));
 
-        let conflicting = instance(2, "second");
-        controller.apply_added(conflicting.clone());
-        let observation = host.inventory.snapshot().pop().unwrap().1;
-        assert_eq!(observation.state, WorkerGroupState::ConfigConflict);
-        assert_eq!(observation.workers.len(), 2);
-        assert!(observation.committed.is_empty());
-
-        controller.apply_removed(&conflicting.key);
-        controller.start_queued_builds();
-        starts.recv().await.unwrap();
-        host.release.add_permits(1);
-        finish_build(&mut controller).await;
+        controller.apply_added(newcomer.clone());
         let observation = host.inventory.snapshot().pop().unwrap().1;
         assert_eq!(observation.state, WorkerGroupState::Ready);
+        assert_eq!(observation.workers.len(), 2);
         assert_eq!(observation.committed, HashSet::from([1]));
-        assert!(!observation.workers.contains_key(&2));
+        assert_eq!(observation.checksum_mismatches, HashSet::from([2]));
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([incumbent.key.clone()])
+        );
+        assert_eq!(host.starts.load(Ordering::SeqCst), 1);
 
-        controller.apply_removed(&first.key);
+        controller.apply_removed(&newcomer.key);
+        let observation = host.inventory.snapshot().pop().unwrap().1;
+        assert_eq!(observation.workers.len(), 1);
+        assert_eq!(observation.committed, HashSet::from([1]));
+        assert!(observation.checksum_mismatches.is_empty());
+        controller.apply_added(newcomer.clone());
+        controller.apply_removed(&incumbent.key);
+        let observation = host.inventory.snapshot().pop().unwrap().1;
+        assert_eq!(observation.state, WorkerGroupState::Pending);
+        assert_eq!(
+            observation.workers.keys().copied().collect::<HashSet<_>>(),
+            HashSet::from([2])
+        );
+        assert!(observation.committed.is_empty());
+        assert!(observation.checksum_mismatches.is_empty());
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(host.inventory.snapshot()[0].1.committed, HashSet::from([2]));
+
+        controller.apply_removed(&newcomer.key);
         let observation = host.inventory.snapshot().pop().unwrap().1;
         assert_eq!(observation.state, WorkerGroupState::Removed);
         assert!(observation.workers.is_empty());
         assert!(observation.committed.is_empty());
-        controller.publish_group_observation(&group_key());
-        assert!(host.inventory.snapshot()[0].1.workers.is_empty());
+        assert!(observation.checksum_mismatches.is_empty());
     }
 
     #[tokio::test]
-    async fn inventory_does_not_admit_build_failures() {
+    async fn inventory_reflects_each_frontends_first_observed_cohort() {
+        for (first_id, rejected_id) in [(1, 2), (2, 1)] {
+            let (host, mut starts) = FakeHost::new();
+            let mut controller = ModelDiscoveryController::new(host.clone());
+            controller.apply_added(instance(first_id, &format!("spec-{first_id}")));
+            controller.apply_added(instance(rejected_id, &format!("spec-{rejected_id}")));
+            let observation = host.inventory.snapshot().pop().unwrap().1;
+            assert_eq!(observation.state, WorkerGroupState::Pending);
+            assert!(observation.committed.is_empty());
+            assert_eq!(
+                observation.checksum_mismatches,
+                HashSet::from([rejected_id])
+            );
+            controller.start_queued_builds();
+            starts.recv().await.unwrap();
+            host.release.add_permits(1);
+            finish_build(&mut controller).await;
+            let observation = host.inventory.snapshot().pop().unwrap().1;
+            assert_eq!(observation.state, WorkerGroupState::Ready);
+            assert_eq!(observation.committed, HashSet::from([first_id]));
+            assert_eq!(
+                observation.checksum_mismatches,
+                HashSet::from([rejected_id])
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn inventory_keeps_checksum_rejection_separate_from_build_failure() {
         let (host, mut starts) = FakeHost::new();
         host.failures.store(1, Ordering::SeqCst);
         let mut controller = ModelDiscoveryController::new(host.clone());
-        let first = instance(1, "first");
-        controller.apply_added(first.clone());
+        controller.apply_added(instance(1, "first"));
+        controller.apply_added(instance(2, "second"));
         controller.start_queued_builds();
         starts.recv().await.unwrap();
         host.release.add_permits(1);
@@ -1679,13 +1866,6 @@ mod tests {
         let observation = host.inventory.snapshot().pop().unwrap().1;
         assert_eq!(observation.state, WorkerGroupState::MaterializationFailed);
         assert!(observation.committed.is_empty());
-        controller.apply_removed(&first.key);
-        assert!(host.inventory.snapshot()[0].1.workers.is_empty());
-    }
-
-    #[test]
-    fn retry_delay_follows_the_capped_schedule() {
-        let delays = (1..=7).map(retry_delay).collect::<Vec<_>>();
-        assert_eq!(delays, [1, 2, 4, 8, 16, 30, 30].map(Duration::from_secs));
+        assert_eq!(observation.checksum_mismatches, HashSet::from([2]));
     }
 }

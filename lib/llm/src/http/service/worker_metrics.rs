@@ -107,6 +107,12 @@ impl WorkerMetricsCollector {
         available: &HashSet<u64>,
         id: u64,
     ) -> WorkerState {
+        if group.checksum_mismatches.contains(&id) {
+            return WorkerState {
+                state: "excluded",
+                reason: "checksum_mismatch",
+            };
+        }
         if group.workers[&id].data_parallel_rank_range().is_err() {
             return WorkerState {
                 state: "excluded",
@@ -130,10 +136,6 @@ impl WorkerMetricsCollector {
             WorkerGroupState::Pending => WorkerState {
                 state: "pending",
                 reason: "initializing",
-            },
-            WorkerGroupState::ConfigConflict => WorkerState {
-                state: "excluded",
-                reason: "config_conflict",
             },
             WorkerGroupState::MaterializationFailed => WorkerState {
                 state: "excluded",
@@ -358,6 +360,16 @@ mod tests {
         }
 
         fn observe(&self, ids: &[u64], committed: &[u64], state: WorkerGroupState) {
+            self.observe_with_rejections(ids, committed, &[], state);
+        }
+
+        fn observe_with_rejections(
+            &self,
+            ids: &[u64],
+            committed: &[u64],
+            checksum_mismatches: &[u64],
+            state: WorkerGroupState,
+        ) {
             self.inventory.publish(
                 "group".into(),
                 Some(WorkerGroupObservation {
@@ -381,6 +393,7 @@ mod tests {
                         })
                         .collect(),
                     committed: committed.iter().copied().collect(),
+                    checksum_mismatches: checksum_mismatches.iter().copied().collect(),
                     state,
                 }),
             );
@@ -457,39 +470,80 @@ mod tests {
     }
 
     #[test]
-    fn conflict_and_final_removal_export_zero_without_worker_tombstones() {
-        let f = Fixture::new();
-        f.observe(&[1], &[1], WorkerGroupState::Ready);
-        *f.available.lock() = HashSet::from([1]);
-        f.values[0].with_label_values(&["1", "0", "decode"]).set(7);
-        f.observe(&[1, 2], &[], WorkerGroupState::ConfigConflict);
-        assert_eq!(f.count("discovered"), Some(2.0));
-        assert_eq!(f.count("available"), Some(0.0));
-        assert_eq!(f.count("excluded"), Some(2.0));
-        assert_eq!(
-            f.sample("dynamo_frontend_worker_active_decode_blocks", &[]),
-            None
-        );
-        for id in ["1", "2"] {
+    fn first_wins_metrics_preserve_local_incumbent_and_track_succession() {
+        for (incumbent, rejected) in [(1, 2), (2, 1)] {
+            let f = Fixture::new();
+            let incumbent_id = incumbent.to_string();
+            let rejected_id = rejected.to_string();
+            *f.available.lock() = HashSet::from([1, 2]);
+            f.observe_with_rejections(&[1, 2], &[], &[rejected], WorkerGroupState::Pending);
+            assert_eq!(f.count("discovered"), Some(2.0));
+            assert_eq!(f.count("available"), Some(0.0));
+            assert_eq!(f.count("pending"), Some(1.0));
+            assert_eq!(f.count("excluded"), Some(1.0));
+            f.observe_with_rejections(&[1, 2], &[incumbent], &[rejected], WorkerGroupState::Ready);
+            for gauge in &f.values {
+                for id in [&incumbent_id, &rejected_id] {
+                    gauge.with_label_values(&[id, "0", "decode"]).set(7);
+                }
+            }
+            assert_eq!(f.count("discovered"), Some(2.0));
+            assert_eq!(f.count("available"), Some(1.0));
+            assert_eq!(f.count("pending"), Some(0.0));
+            assert_eq!(f.count("excluded"), Some(1.0));
             assert_eq!(
                 f.sample(
                     "dynamo_frontend_router_worker_state",
                     &[
-                        ("router_worker_id", id),
-                        ("state", "excluded"),
-                        ("reason", "config_conflict")
+                        ("router_worker_id", &incumbent_id),
+                        ("state", "available"),
+                        ("reason", "none")
                     ]
                 ),
                 Some(1.0)
             );
+            assert_eq!(
+                f.sample(
+                    "dynamo_frontend_router_worker_state",
+                    &[
+                        ("router_worker_id", &rejected_id),
+                        ("state", "excluded"),
+                        ("reason", "checksum_mismatch")
+                    ]
+                ),
+                Some(1.0)
+            );
+            for gauge in &f.values {
+                let name = &gauge.desc()[0].fq_name;
+                assert_eq!(f.sample(name, &[("worker_id", &incumbent_id)]), Some(7.0));
+                assert_eq!(f.sample(name, &[("worker_id", &rejected_id)]), None);
+            }
+
+            f.observe(&[rejected], &[], WorkerGroupState::Pending);
+            assert_eq!(f.count("pending"), Some(1.0));
+            assert_eq!(f.count("excluded"), Some(0.0));
+            assert_eq!(
+                f.sample(
+                    "dynamo_frontend_router_worker_state",
+                    &[("reason", "checksum_mismatch")]
+                ),
+                None
+            );
+            assert_eq!(
+                f.sample(
+                    "dynamo_frontend_router_worker_state",
+                    &[("router_worker_id", &incumbent_id)]
+                ),
+                None
+            );
+            f.observe(&[rejected], &[rejected], WorkerGroupState::Ready);
+            assert_eq!(f.count("available"), Some(1.0));
+            f.inventory.publish("group".into(), None);
+            for state in COUNT_STATES {
+                assert_eq!(f.count(state), Some(0.0));
+            }
+            assert_eq!(f.sample("dynamo_frontend_router_worker_state", &[]), None);
         }
-        f.observe(&[1], &[1], WorkerGroupState::Ready);
-        assert_eq!(f.count("available"), Some(1.0));
-        f.inventory.publish("group".into(), None);
-        for state in COUNT_STATES {
-            assert_eq!(f.count(state), Some(0.0));
-        }
-        assert_eq!(f.sample("dynamo_frontend_router_worker_state", &[]), None);
     }
 
     #[test]
