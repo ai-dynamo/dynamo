@@ -18,6 +18,10 @@ on:
         description: 'Runtime image tag'
         type: string
         required: true
+      frontend_tag:
+        description: 'Standalone frontend image tag'
+        type: string
+        default: ''
       namespace:
         description: 'Host namespace where the vCluster lives'
         type: string
@@ -85,7 +89,9 @@ jobs:
           profile: ${{ matrix.profile }}
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ inputs.image_tag }}
           platform_arch: amd64
-          extra_pytest_args: -m framework_only
+          extra_pytest_args: >-
+            -m framework_only
+            ${{ inputs.frontend_tag != '' && format('--frontend-image={0}/{1}:{2}', secrets.AZURE_ACR_HOSTNAME, vars.ACR_REPOSITORY, inputs.frontend_tag) || '' }}
           # Mount the shared model cache only when both endpoint vars are set
           # (matches the PV/PVC creation gate); otherwise workers download from HF.
           model_cache_pvc: ${{ vars.AZURE_MODEL_CACHE_SERVER != '' && vars.AZURE_MODEL_CACHE_PATH != '' && 'model-cache' || '' }}
