@@ -876,12 +876,19 @@ impl OfflineReplayRouter {
     /// would fail `add_request_if_registered` and abort the whole simulation.
     /// Enforce the invariant here instead of assuming it upstream; it is a
     /// no-op on the expected path.
+    /// The one fallible step runs first, so this is all-or-nothing like
+    /// `add_worker`, which rolls its map insert back when `upsert_worker` fails.
+    /// Removing from `workers_with_configs` before `unregister_worker` left the
+    /// worker routing-ineligible but still holding its radix-tree blocks on the
+    /// `?`, so `snapshot_for` and `best_available_overlap_blocks` would go on
+    /// scoring a cache that no longer had an owner. Doing the fallible call first
+    /// means a failure leaves the worker fully intact instead of half torn down.
     pub(crate) fn finalize_worker_removal(&mut self, worker_id: usize) -> Result<()> {
         let wid = worker_id as WorkerId;
-        self.workers_with_configs.remove(&wid);
         self.slots
             .unregister_worker(wid)
             .map_err(anyhow::Error::from)?;
+        self.workers_with_configs.remove(&wid);
         self.indexer.tree.remove_worker(wid);
         Ok(())
     }
