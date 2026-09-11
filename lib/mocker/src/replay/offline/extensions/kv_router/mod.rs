@@ -692,7 +692,7 @@ impl OfflineReplayRouter {
                         .len()
                         .saturating_mul(self.dp_size as usize),
                     snapshot,
-                    now_ms.max(0.0) / 1000.0,
+                    Self::now_secs(now_ms),
                     priority_jump,
                     strict_priority,
                     WorkerPlacement::Any,
@@ -907,17 +907,23 @@ impl OfflineReplayRouter {
         }
     }
 
-    fn decay_now(&self, now_ms: f64) -> Instant {
-        // `now_ms` arrives as a bare `f64` through the public `PlacementPolicy`
-        // trait, so it must be treated as unvalidated input: `Duration::from_secs_f64`
-        // panics on a non-finite argument, and `self.decay_time_epoch + duration`
-        // separately panics if the resulting `Instant` overflows. `.max(0.0)`
-        // already neutralizes NaN (`f64::max` returns the non-NaN operand), but
-        // +infinity survives it unchanged. Clamp to a cap far beyond any replay
-        // this crate runs (100 years) rather than `Duration::MAX`, which would
-        // still overflow the `Instant` addition below.
+    /// Clamp a bare `now_ms` (unvalidated input arriving through the public
+    /// `PlacementPolicy` trait) to finite, non-negative seconds bounded by
+    /// `MAX_DECAY_SECS`. `.max(0.0)` neutralizes NaN (`f64::max` returns the
+    /// non-NaN operand); `.min(MAX_DECAY_SECS)` catches +infinity, which
+    /// survives `.max(0.0)` unchanged. Shared by `decay_now` (which needs the
+    /// bound so `Duration`/`Instant` construction below cannot panic or
+    /// overflow) and the enqueue path (round-12 L4: that call site used to
+    /// apply only the floor, not this same upper bound, so the same
+    /// malformed `now_ms` produced two different clamped views within one
+    /// admission call).
+    fn now_secs(now_ms: f64) -> f64 {
         const MAX_DECAY_SECS: f64 = 100.0 * 365.25 * 24.0 * 3600.0;
-        let secs = (now_ms.max(0.0) / 1000.0).min(MAX_DECAY_SECS);
+        (now_ms.max(0.0) / 1000.0).min(MAX_DECAY_SECS)
+    }
+
+    fn decay_now(&self, now_ms: f64) -> Instant {
+        let secs = Self::now_secs(now_ms);
         // secs is provably finite, non-negative, and <= MAX_DECAY_SECS here,
         // so try_from_secs_f64 cannot fail; expect instead of a dead
         // unwrap_or fallback that would otherwise be built on every call.
