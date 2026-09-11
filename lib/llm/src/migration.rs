@@ -741,6 +741,49 @@ mod tests {
         );
     }
 
+    // No other worker can serve a request this one refused outright, so the
+    // refusal must not be retried across the pool. A worker that died before
+    // the stream is a different thing and must still migrate.
+    #[test]
+    fn a_pre_stream_refusal_does_not_migrate_but_a_dead_worker_does() {
+        use dynamo_runtime::pipeline::network::StreamPrologueError;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+
+        let refusal = pre_stream_failure_error(&StreamPrologueError::new(
+            "Generate Error: multimodal requests are not supported",
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                .message("multimodal requests are not supported")
+                .build(),
+        ));
+        assert!(
+            !is_migratable(&refusal),
+            "a request the backend can never serve must not be retried elsewhere"
+        );
+
+        let shutdown = pre_stream_failure_error(&StreamPrologueError::new(
+            "Generate Error: engine shut down",
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+                .message("engine shut down")
+                .build(),
+        ));
+        assert!(
+            is_migratable(&shutdown),
+            "a worker that died before the stream must still migrate"
+        );
+
+        // An untyped prologue keeps the transport framing, so failover is
+        // unchanged for workers too old to send a type.
+        let untyped = pre_stream_failure_error(&StreamPrologueError::from_message(
+            "Generate Error: could not reach worker",
+        ));
+        assert!(
+            is_migratable(&untyped),
+            "an untyped pre-stream failure must keep migrating"
+        );
+    }
+
     // is_migratable short-circuits on any chain member, so an attached cause
     // decides. pre_stream_failure_error withholds these types, so this migrates.
     #[test]

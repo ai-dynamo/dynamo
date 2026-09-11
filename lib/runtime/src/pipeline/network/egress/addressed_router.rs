@@ -12,7 +12,7 @@ use crate::component::Instance;
 use crate::discovery::EndpointInstanceId;
 use crate::dynamo_nvtx_range;
 use crate::engine::{AsyncEngine, AsyncEngineContextProvider, Data, EngineContextGuard};
-use crate::error::{DynamoError, ErrorType, match_error_chain};
+use crate::error::{BackendError, DynamoError, ErrorType, match_error_chain};
 use crate::logging::inject_trace_headers_into_map;
 use crate::metrics::frontend_perf::STAGE_DURATION_SECONDS;
 use crate::metrics::request_plane::{
@@ -48,8 +48,9 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_stream::{StreamExt, StreamNotifyClose, wrappers::ReceiverStream};
 use tracing::Instrument;
 
-/// Error types that must never be attached as the cause of a pre-stream
-/// failure, because migration classification walks the whole cause chain.
+/// Error types a pre-stream failure must never publish -- neither as its own
+/// type nor as an attached cause -- because migration classification walks the
+/// whole cause chain, so either position changes the outcome.
 ///
 /// Must hold the same set as `NON_MIGRATABLE` in `lib/llm/src/migration.rs`,
 /// which cannot be reused directly because `dynamo-llm` depends on
@@ -69,18 +70,51 @@ fn chain_is_migration_sensitive(err: &DynamoError) -> bool {
     match_error_chain(err, MIGRATION_SENSITIVE_ERROR_TYPES, &[])
 }
 
+/// Whether the worker rejected this specific request rather than failing to
+/// serve it.
+///
+/// Deliberately only `InvalidArgument`: it is the one classification where no
+/// other worker can do better, so it is the one safe to lift out of
+/// [`ErrorType::CannotConnect`]. Everything else -- including the
+/// [`ErrorType::Unknown`] that an untyped failure converts to -- keeps the
+/// transport framing, because both migration and fault detection key off it.
+fn is_request_refusal(err: &DynamoError) -> bool {
+    matches!(
+        err.error_type(),
+        ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument)
+    )
+}
+
 /// Build the error returned when the worker fails before any response bytes.
 ///
-/// The outer type stays [`ErrorType::CannotConnect`], so retry classification
-/// of the outer error is unchanged. A typed error from the worker's prologue is
-/// attached as the cause, which consumers reach with
-/// [`crate::error::match_error_chain`].
+/// A request the worker refuses outright keeps its own type, so it is neither
+/// migrated onto workers that will refuse it identically nor counted as a fault
+/// against the worker that answered correctly. `is_inhibited` in
+/// `egress/push_router.rs` quarantines on [`ErrorType::CannotConnect`], so
+/// framing a refusal that way takes a healthy worker out of rotation.
 ///
-/// Because that walk covers the whole chain, an attached cause is as visible as
-/// the outer type, so causes typed one of [`MIGRATION_SENSITIVE_ERROR_TYPES`]
-/// are withheld rather than attached. The worker's text stays in the message
-/// either way; only the machine-readable type is withheld.
+/// Every other failure keeps [`ErrorType::CannotConnect`] and carries the
+/// worker's type as the cause, which consumers reach with
+/// [`crate::error::match_error_chain`]. Because that walk covers the whole
+/// chain, an attached cause is as visible as the outer type, so causes typed
+/// one of [`MIGRATION_SENSITIVE_ERROR_TYPES`] are withheld rather than
+/// attached. The worker's text stays in the message either way; only the
+/// machine-readable type is withheld.
 pub(crate) fn pre_stream_failure_error(error: &StreamPrologueError) -> DynamoError {
+    // Returned as-is rather than rewrapped: the client-visible message comes
+    // from this error, so the worker's own wording must survive.
+    //
+    // A refusal whose own chain carries a migration-sensitive type is left
+    // alone. Promoting it would publish that type, which both stops migration
+    // and makes `request_was_rejected` in the HTTP layer answer 529 instead of
+    // the 400 the refusal earns.
+    if let Some(typed) = &error.typed_error
+        && is_request_refusal(typed)
+        && !chain_is_migration_sensitive(typed)
+    {
+        return typed.clone();
+    }
+
     let builder = DynamoError::builder()
         .error_type(ErrorType::CannotConnect)
         .message(format!(
