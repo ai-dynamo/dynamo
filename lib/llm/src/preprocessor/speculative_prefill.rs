@@ -9,7 +9,7 @@
 //! and send a `max_tokens=1` request through the pipeline to warm the KV cache.
 
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -21,6 +21,7 @@ use futures::Stream;
 use futures::stream::StreamExt;
 use minijinja::value::Value;
 use parking_lot::Mutex;
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -36,20 +37,30 @@ use crate::protocols::openai::chat_completions::{
 use crate::tokenizers::traits::Tokenizer;
 use dynamo_renderer::{OAIChatLikeRequest, OAIPromptFormatter};
 
-/// Maximum lifetime of one dispatched speculative-prefill warmup.
+/// Maximum asynchronous warmup lifetime after the client turn completes.
+/// Started synchronous preprocessing may outlive this deadline.
 const PREFILL_TASK_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Maximum downstream cleanup time after a warmup is stopped.
 const PREFILL_WIND_DOWN_GRACE: Duration = Duration::from_secs(5);
 
+/// Speculation must not fill the blocking pool when preprocessing stalls.
+/// Share admission across models and replacement WorkerSets, without a wait queue.
+const MAX_BLOCKING_PREFILLS: usize = 4;
+static BLOCKING_PREFILL_ADMISSION: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(MAX_BLOCKING_PREFILLS)));
+
 /// Makes the downstream context reachable from timeout and cancellation paths.
 type PrefillContextSlot = Mutex<Option<Arc<dyn AsyncEngineContext>>>;
 
 /// Owns a preprocessor's warmups, including tasks waiting for a client turn.
-/// Dropping the preprocessor requests cooperative, bounded cleanup of every task.
+/// Dropping the preprocessor cancels warmups and bounds downstream cleanup.
+/// Started blocking work remains tracked and holds admission until it returns;
+/// synchronous formatter/tokenizer calls cannot be forcibly cancelled.
 pub(super) struct PrefillTasks {
     cancel: CancellationToken,
     tracker: TaskTracker,
+    preprocessing_admission: Arc<Semaphore>,
 }
 
 impl PrefillTasks {
@@ -59,8 +70,29 @@ impl PrefillTasks {
                 .map(CancellationToken::child_token)
                 .unwrap_or_default(),
             tracker: TaskTracker::new(),
+            preprocessing_admission: BLOCKING_PREFILL_ADMISSION.clone(),
         }
     }
+
+    fn preprocessing(
+        &self,
+        formatter: Arc<dyn OAIPromptFormatter>,
+        tokenizer: Arc<dyn Tokenizer>,
+    ) -> PrefillPreprocessing {
+        PrefillPreprocessing {
+            formatter,
+            tokenizer,
+            admission: self.preprocessing_admission.clone(),
+            tracker: self.tracker.clone(),
+        }
+    }
+}
+
+struct PrefillPreprocessing {
+    formatter: Arc<dyn OAIPromptFormatter>,
+    tokenizer: Arc<dyn Tokenizer>,
+    admission: Arc<Semaphore>,
+    tracker: TaskTracker,
 }
 
 impl Drop for PrefillTasks {
@@ -109,7 +141,9 @@ impl OAIChatLikeRequest for SpeculativePrefillRequest {
 /// a background task that renders the next-turn prefix and fires a
 /// `max_tokens=1` request through the pipeline to warm the KV cache.
 ///
-/// Warmups stop on timeout or cancellation and allow bounded downstream cleanup.
+/// Timeout or cancellation prevents late dispatch and bounds downstream cleanup.
+/// Blocking preprocessing retains its admission slot and tracking until it returns.
+/// If preprocessing admission is full, the optional warmup is skipped.
 ///
 /// When the flag is not set, returns the stream unmodified with zero overhead.
 pub(super) fn maybe_wrap_stream(
@@ -137,8 +171,7 @@ pub(super) fn maybe_wrap_stream(
     let (tx, rx) = tokio::sync::oneshot::channel::<String>();
 
     let next = next.clone();
-    let formatter = formatter.clone();
-    let tokenizer = tokenizer.clone();
+    let preprocessing = tasks.preprocessing(formatter.clone(), tokenizer.clone());
     let messages = request.inner.messages.clone();
     let cancel = tasks.cancel.clone();
     let request_id = request_id.to_string();
@@ -171,8 +204,7 @@ pub(super) fn maybe_wrap_stream(
         // Keep the warmup alive for bounded cleanup after cancellation or timeout.
         let mut warmup = std::pin::pin!(prefill_task(
             next,
-            formatter,
-            tokenizer,
+            preprocessing,
             messages,
             response_text,
             &context_slot,
@@ -280,13 +312,25 @@ async fn prefill_task(
     next: Arc<
         dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
     >,
-    formatter: Arc<dyn OAIPromptFormatter>,
-    tokenizer: Arc<dyn Tokenizer>,
+    preprocessing: PrefillPreprocessing,
     original_messages: Vec<ChatCompletionRequestMessage>,
     response_text: String,
     context_slot: &PrefillContextSlot,
     cancel: &CancellationToken,
 ) -> Result<()> {
+    if cancel.is_cancelled() {
+        return Ok(());
+    }
+    let PrefillPreprocessing {
+        formatter,
+        tokenizer,
+        admission,
+        tracker,
+    } = preprocessing;
+    let Ok(permit) = admission.try_acquire_owned() else {
+        tracing::debug!("Skipping speculative prefill: preprocessing admission is full");
+        return Ok(());
+    };
     let assistant_msg =
         ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
             content: Some(ChatCompletionRequestAssistantMessageContent::Text(
@@ -300,20 +344,22 @@ async fn prefill_task(
 
     let prefill_request = SpeculativePrefillRequest::new(messages);
     let preprocessing_cancel = cancel.clone();
-    // Rendering and tokenization are synchronous and may be expensive. A running
-    // blocking operation cannot be interrupted, but it must never dispatch work.
-    let token_ids = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u32>>> {
-        if preprocessing_cancel.is_cancelled() {
-            return Ok(None);
-        }
-        let formatted_prompt = formatter.render(&prefill_request)?;
-        if preprocessing_cancel.is_cancelled() {
-            return Ok(None);
-        }
-        let encoding = tokenizer.encode(&formatted_prompt)?;
-        Ok(Some(encoding.token_ids().to_vec()))
-    })
-    .await??;
+    // The tracker token and permit belong to the closure, not its JoinHandle.
+    // Cancelling the async warmup cannot free admission while this work continues.
+    let token_ids = tracker
+        .spawn_blocking(move || -> Result<Option<Vec<u32>>> {
+            let _permit = permit;
+            if preprocessing_cancel.is_cancelled() {
+                return Ok(None);
+            }
+            let formatted_prompt = formatter.render(&prefill_request)?;
+            if preprocessing_cancel.is_cancelled() {
+                return Ok(None);
+            }
+            let encoding = tokenizer.encode(&formatted_prompt)?;
+            Ok(Some(encoding.token_ids().to_vec()))
+        })
+        .await??;
     let Some(token_ids) = token_ids else {
         return Ok(());
     };
@@ -652,6 +698,183 @@ mod tests {
         }
     }
 
+    fn test_tasks(parent: Option<&CancellationToken>) -> PrefillTasks {
+        let mut tasks = PrefillTasks::new(parent);
+        tasks.preprocessing_admission = Arc::new(Semaphore::new(1));
+        tasks
+    }
+
+    async fn wait_for_tracked_tasks(tracker: &TaskTracker, expected: usize) {
+        // Blocking-pool completion uses wall time, not the paused Tokio clock.
+        let started = std::time::Instant::now();
+        while tracker.len() != expected {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "expected {expected} tracked tasks, found {}",
+                tracker.len()
+            );
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[test]
+    fn replacement_owners_share_process_preprocessing_admission() {
+        let first = PrefillTasks::new(None);
+        let second = PrefillTasks::new(None);
+        assert!(Arc::ptr_eq(
+            &first.preprocessing_admission,
+            &second.preprocessing_admission
+        ));
+        let admission = first.preprocessing_admission.clone();
+        drop(first);
+        drop(second);
+        let replacement = PrefillTasks::new(None);
+        assert!(Arc::ptr_eq(&admission, &replacement.preprocessing_admission));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn blocked_preprocessing_retains_tracking_and_admission_after_warmup_ends() {
+        use futures::FutureExt;
+
+        struct GatedFormatter {
+            inner: Arc<dyn OAIPromptFormatter>,
+            entered: Arc<tokio::sync::Notify>,
+            calls: Arc<AtomicUsize>,
+            release: Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+
+        impl OAIPromptFormatter for GatedFormatter {
+            fn supports_add_generation_prompt(&self) -> bool {
+                self.inner.supports_add_generation_prompt()
+            }
+
+            fn render(&self, request: &dyn OAIChatLikeRequest) -> Result<String> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.entered.notify_one();
+                self.release.lock().recv_timeout(Duration::from_secs(10))?;
+                self.inner.render(request)
+            }
+        }
+
+        #[derive(Clone, Copy)]
+        enum Termination {
+            OwnerDrop,
+            ParentCancellation,
+            Timeout,
+        }
+
+        for termination in [
+            Termination::OwnerDrop,
+            Termination::ParentCancellation,
+            Termination::Timeout,
+        ] {
+            let (normal_formatter, tokenizer) = sample_model_parts();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let calls = Arc::new(AtomicUsize::new(0));
+            let formatter: Arc<dyn OAIPromptFormatter> = Arc::new(GatedFormatter {
+                inner: normal_formatter.clone(),
+                entered: entered.clone(),
+                calls: calls.clone(),
+                release: Mutex::new(release_rx),
+            });
+            let retained_formatter = Arc::downgrade(&formatter);
+            let parent = CancellationToken::new();
+            let tasks = test_tasks(Some(&parent));
+            let admission = tasks.preprocessing_admission.clone();
+            let tracker = tasks.tracker.clone();
+            let backend = Arc::new(StallingBackend::default());
+            let engine: Arc<BackendEngine> = backend.clone();
+            let request = chat_request(true);
+            let wrapped = maybe_wrap_stream(
+                upstream(),
+                &request,
+                "req-blocked-preprocessing",
+                &engine,
+                &formatter,
+                &tokenizer,
+                &tasks,
+            );
+            assert_eq!(wrapped.collect::<Vec<_>>().await.len(), 2);
+            wait_for_dispatch(&entered).await;
+            assert_eq!(tracker.len(), 2, "track the async task and blocking closure");
+            assert_eq!(admission.available_permits(), 0);
+
+            match termination {
+                Termination::OwnerDrop => drop(tasks),
+                Termination::ParentCancellation => {
+                    parent.cancel();
+                    wait_for_tracked_tasks(&tracker, 1).await;
+                    drop(tasks);
+                }
+                Termination::Timeout => {
+                    tokio::time::advance(PREFILL_TASK_TIMEOUT).await;
+                    wait_for_tracked_tasks(&tracker, 1).await;
+                    drop(tasks);
+                }
+            }
+            wait_for_tracked_tasks(&tracker, 1).await;
+            assert!(tracker.is_closed());
+            assert!(tracker.wait().now_or_never().is_none());
+            assert_eq!(admission.available_permits(), 0);
+            assert_eq!(backend.generate_calls(), 0);
+
+            // Replacement owners cannot bypass the permit held by the old closure.
+            // Each saturated warmup must finish without queueing blocking work.
+            for _ in 0..3 {
+                let mut replacement = test_tasks(None);
+                replacement.preprocessing_admission = admission.clone();
+                let wrapped = maybe_wrap_stream(
+                    upstream(),
+                    &request,
+                    "req-saturated-preprocessing",
+                    &engine,
+                    &formatter,
+                    &tokenizer,
+                    &replacement,
+                );
+                assert_eq!(wrapped.collect::<Vec<_>>().await.len(), 2);
+                replacement.tracker.close();
+                wait_for_tracked_tasks(&replacement.tracker, 0).await;
+                assert!(replacement.tracker.wait().now_or_never().is_some());
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                assert_eq!(backend.generate_calls(), 0);
+            }
+
+            drop(formatter);
+            assert_eq!(retained_formatter.strong_count(), 1);
+            release_tx.send(()).unwrap();
+            wait_for_tracked_tasks(&tracker, 0).await;
+            assert!(tracker.wait().now_or_never().is_some());
+            assert_eq!(retained_formatter.strong_count(), 0);
+            assert_eq!(admission.available_permits(), 1);
+            assert_eq!(backend.generate_calls(), 0, "cancelled work must not dispatch");
+
+            // Once the old closure returns, a new owner can use the recovered slot.
+            let mut replacement = test_tasks(None);
+            replacement.preprocessing_admission = admission.clone();
+            let replacement_tracker = replacement.tracker.clone();
+            let backend = Arc::new(WindDownBackend::default());
+            let engine: Arc<BackendEngine> = backend.clone();
+            let wrapped = maybe_wrap_stream(
+                upstream(),
+                &request,
+                "req-recovered-preprocessing",
+                &engine,
+                &normal_formatter,
+                &tokenizer,
+                &replacement,
+            );
+            assert_eq!(wrapped.collect::<Vec<_>>().await.len(), 2);
+            wait_for_dispatch(&backend.dispatched).await;
+            assert_eq!(backend.generate_calls.load(Ordering::SeqCst), 1);
+            drop(replacement);
+            wait_for_tracked_tasks(&replacement_tracker, 0).await;
+            assert!(backend.cleanup_ran());
+            assert_eq!(admission.available_permits(), 1);
+        }
+    }
+
     async fn wait_for_dispatch(dispatched: &tokio::sync::Notify) {
         // Keep paused time from advancing while the blocking pool preprocesses.
         // Wait for an actual dispatch rather than assuming a fixed yield count.
@@ -708,6 +931,7 @@ mod tests {
         };
         let backend = Arc::new(StallingBackend::default());
         let context_slot = PrefillContextSlot::new(None);
+        let tasks = test_tasks(None);
         // Call the warmup directly so the outer select cannot mask a missing
         // post-preprocessing cancellation check. The current-thread runtime also
         // requires rendering to yield the executor for the cancelling task.
@@ -715,8 +939,7 @@ mod tests {
             Duration::from_secs(5),
             prefill_task(
                 backend.clone(),
-                formatter,
-                tokenizer,
+                tasks.preprocessing(formatter, tokenizer),
                 chat_request(true).inner.messages,
                 "8849 m tall.".to_string(),
                 &context_slot,
@@ -790,14 +1013,14 @@ mod tests {
         };
         let backend = Arc::new(StallingBackend::default());
         let context_slot = PrefillContextSlot::new(None);
+        let tasks = test_tasks(None);
         // Cancellation occurs after the formatter check. Call directly so only
         // the final pre-dispatch check can prevent the downstream request.
         tokio::time::timeout(
             Duration::from_secs(5),
             prefill_task(
                 backend.clone(),
-                formatter,
-                tokenizer,
+                tasks.preprocessing(formatter, tokenizer),
                 chat_request(true).inner.messages,
                 "8849 m tall.".to_string(),
                 &context_slot,
@@ -821,7 +1044,7 @@ mod tests {
         let (formatter, tokenizer) = sample_model_parts();
         let backend = Arc::new(StallingBackend::default());
         let engine: Arc<BackendEngine> = backend.clone();
-        let tasks = PrefillTasks::new(None);
+        let tasks = test_tasks(None);
         let tracker = tasks.tracker.clone();
         let request = chat_request(true);
         let wrapped = maybe_wrap_stream(
@@ -860,7 +1083,7 @@ mod tests {
         let (formatter, tokenizer) = sample_model_parts();
         let backend = Arc::new(StallingBackend::default());
         let engine: Arc<BackendEngine> = backend.clone();
-        let tasks = PrefillTasks::new(None);
+        let tasks = test_tasks(None);
         let tracker = tasks.tracker.clone();
         let request = chat_request(true);
         let wrapped = maybe_wrap_stream(
@@ -890,7 +1113,7 @@ mod tests {
         let engine: Arc<BackendEngine> = backend.clone();
 
         let request = chat_request(true);
-        let tasks = PrefillTasks::new(None);
+        let tasks = test_tasks(None);
         let wrapped = maybe_wrap_stream(
             upstream(),
             &request,
@@ -944,7 +1167,7 @@ mod tests {
         let engine: Arc<BackendEngine> = backend.clone();
 
         let request = chat_request(true);
-        let tasks = PrefillTasks::new(None);
+        let tasks = test_tasks(None);
         let wrapped = maybe_wrap_stream(
             slow_upstream(PREFILL_TASK_TIMEOUT * 2),
             &request,
@@ -998,7 +1221,7 @@ mod tests {
         let cancel = CancellationToken::new();
 
         let request = chat_request(true);
-        let tasks = PrefillTasks::new(Some(&cancel));
+        let tasks = test_tasks(Some(&cancel));
         let wrapped = maybe_wrap_stream(
             upstream(),
             &request,
@@ -1045,7 +1268,7 @@ mod tests {
         let cancel = CancellationToken::new();
 
         let request = chat_request(true);
-        let tasks = PrefillTasks::new(Some(&cancel));
+        let tasks = test_tasks(Some(&cancel));
         let wrapped = maybe_wrap_stream(
             upstream(),
             &request,
@@ -1094,7 +1317,7 @@ mod tests {
         cancel.cancel();
 
         let request = chat_request(true);
-        let tasks = PrefillTasks::new(Some(&cancel));
+        let tasks = test_tasks(Some(&cancel));
         let wrapped = maybe_wrap_stream(
             upstream(),
             &request,
@@ -1137,7 +1360,7 @@ mod tests {
 
         let cancel = CancellationToken::new();
         let request = chat_request(true);
-        let tasks = PrefillTasks::new(Some(&cancel));
+        let tasks = test_tasks(Some(&cancel));
         let wrapped = maybe_wrap_stream(
             upstream(),
             &request,
@@ -1182,7 +1405,7 @@ mod tests {
         let engine: Arc<BackendEngine> = backend.clone();
 
         let request = chat_request(false);
-        let tasks = PrefillTasks::new(None);
+        let tasks = test_tasks(None);
         let wrapped = maybe_wrap_stream(
             upstream(),
             &request,
