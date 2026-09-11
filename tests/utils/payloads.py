@@ -29,6 +29,8 @@ import requests
 
 from dynamo import prometheus_names  # type: ignore[attr-defined]
 from tests.utils.constants import DefaultPort
+from tests.utils.http_checks import check_health_generate as check_health_generate
+from tests.utils.http_checks import check_models_api as check_models_api
 from tests.utils.prometheus import find_metric_samples, sum_metric_samples
 from tests.utils.router_nvext import RouterNvextExpectation, validate_router_nvext
 
@@ -42,6 +44,7 @@ class BasePayload:
     body: Dict[str, Any]
     expected_response: List[Any]  # Can be List[str] or List[List[str]] for alternatives
     expected_log: List[str]
+    expected_status_code: int = field(default=200, kw_only=True)
     # Number of times to send this exact request in sequence. Each call must
     # pass validation independently. Use >1 for cache/repeatability tests
     # (e.g., CachedTokensChatPayload asserts a cache hit on the 2nd+ call).
@@ -127,6 +130,16 @@ class BasePayload:
         content = self.response_handler(response)
         self.validate(response, content)
         return content
+
+
+@dataclass
+class HttpErrorPayload(BasePayload):
+    """Payload that validates an expected HTTP error response."""
+
+    expected_status_code: int = field(default=400, kw_only=True)
+
+    def response_handler(self, response: Any) -> str:
+        return response.text
 
 
 @dataclass
@@ -789,40 +802,6 @@ class LoraTestChatPayload(ChatPayload):
         """Load LoRA before first request, then return URL"""
         self._ensure_lora_loaded()
         return super().url()
-
-
-def lora_chat_payload(
-    lora_name: str,
-    s3_uri: str,
-    system_port: int = DefaultPort.SYSTEM1.value,
-    repeat_count: int = 2,
-    expected_response: Optional[list] = None,
-    expected_log: Optional[list] = None,
-    max_tokens: int = 100,
-    temperature: float = 0.0,
-) -> LoraTestChatPayload:
-    """Create a LoRA-enabled chat payload for testing."""
-    return LoraTestChatPayload(
-        body={
-            "model": lora_name,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": "What is deep learning? Answer in one sentence.",
-                }
-            ],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "stream": False,
-        },
-        lora_name=lora_name,
-        s3_uri=s3_uri,
-        system_port=system_port,
-        repeat_count=repeat_count,
-        expected_response=expected_response
-        or ["learning", "neural", "network", "AI", "model"],
-        expected_log=expected_log or [],
-    )
 
 
 @dataclass
@@ -2322,56 +2301,6 @@ class TRTLLMMetricsPayload(MetricsPayload):
             )
 
         return checks
-
-
-def check_models_api(response):
-    """Check if models API is working and returns models"""
-    try:
-        if response.status_code != 200:
-            return False
-        data = response.json()
-        time.sleep(
-            1
-        )  # temporary to avoid /completions race condition where we get 404 error
-        return data.get("data") and len(data["data"]) > 0
-    except Exception:
-        return False
-
-
-# Additional health check helpers
-def check_health_generate(response):
-    """Validate /health reports a 'generate' endpoint.
-
-    Returns True if either of the following is found:
-      - "endpoints" contains a string mentioning 'generate'
-      - "instances" contains an object with endpoint == 'generate'
-    """
-    try:
-        if response.status_code != 200:
-            return False
-        data = response.json()
-
-        # Check endpoints list for any entry containing 'generate'
-        endpoints = data.get("endpoints", []) or []
-        for ep in endpoints:
-            if isinstance(ep, str) and "generate" in ep:
-                time.sleep(
-                    1
-                )  # temporary to avoid /completions race condition where we get 404 error
-                return True
-
-        # Check instances for an entry with endpoint == 'generate'
-        instances = data.get("instances", []) or []
-        for inst in instances:
-            if isinstance(inst, dict) and inst.get("endpoint") == "generate":
-                time.sleep(
-                    1
-                )  # temporary to avoid /completions race condition where we get 404 error
-                return True
-
-        return False
-    except Exception:
-        return False
 
 
 # backwards compatiability

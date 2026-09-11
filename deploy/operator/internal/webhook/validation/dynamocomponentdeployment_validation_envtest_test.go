@@ -91,6 +91,26 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
+			name: "v1beta1 frontend component cannot be multinode",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			wantWebhookErrs: []string{
+				"spec.multinode: Forbidden: multinode is supported only for worker, prefill, or decode components",
+			},
+		},
+		{
+			name: "v1beta1 planner component cannot be multinode",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypePlanner
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			wantWebhookErrs: []string{
+				"spec.multinode: Forbidden: multinode is supported only for worker, prefill, or decode components",
+			},
+		},
+		{
 			name: "v1beta1 main image is required when pod template is absent on create",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.PodTemplate = nil
@@ -1006,7 +1026,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				},
 			}),
 			wantWebhookErrs: []string{
-				"spec.multinode: Forbidden: EPP component cannot be multinode",
+				"spec.multinode: Forbidden: multinode is supported only for worker, prefill, or decode components",
 			},
 		},
 		{
@@ -1579,6 +1599,45 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					MainContainer: &corev1.Container{Image: frontendImage150},
 				},
 			}),
+		},
+		{
+			name:               "v1beta1 unchanged legacy frontend multinode survives an unrelated update",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+				dcd.Labels = map[string]string{"updated": "true"}
+			}),
+		},
+		{
+			name:               "v1beta1 legacy frontend multinode can be removed",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+			}),
+		},
+		{
+			name:               "v1beta1 legacy frontend multinode cannot change node count",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 3}
+			}),
+			wantWebhookErrs: []string{
+				"spec.multinode: Forbidden: multinode is supported only for worker, prefill, or decode components",
+			},
 		},
 		{
 			name:          "v1beta1 multinode layout change is rejected by the shared update validator",

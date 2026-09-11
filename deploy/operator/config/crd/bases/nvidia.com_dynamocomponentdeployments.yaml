@@ -11210,7 +11210,9 @@ spec:
                     - name
                   type: object
                 multinode:
-                  description: Multinode is the configuration for multinode components.
+                  description: |-
+                    Multinode configures worker, prefill, or decode components that span
+                    multiple Pods.
                   properties:
                     nodeCount:
                       default: 2
@@ -12268,6 +12270,8 @@ spec:
                             deployment. `false` or omitted means automatic selection (multi-node
                             and inter-pod GMS components use a scaling group, other single-node
                             components a standalone PodClique), not "force PodClique".
+                            The pointer preserves field presence on the wire: `nil` and `false` are
+                            semantically identical, and consumers must dereference with `false`.
                             Immutable after creation.
                           type: boolean
                       type: object
@@ -12327,7 +12331,9 @@ spec:
                     - name
                   type: object
                 multinode:
-                  description: multinode configures multinode components.
+                  description: |-
+                    multinode configures worker, prefill, or decode components that span
+                    multiple Pods.
                   properties:
                     nodeCount:
                       default: 2

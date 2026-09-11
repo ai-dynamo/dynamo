@@ -63,6 +63,7 @@ type dynamoComponentDeploymentSharedSpecValidationOptions struct {
 	validateInferencePoolAvailability bool
 	providerOverridesSupported        bool
 	workloadProvider                  string
+	oldComponent                      *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
 }
 
 // validateDynamoComponentDeploymentSharedSpec validates spec. spec and fldPath must not be nil.
@@ -115,14 +116,14 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		))
 	}
 
+	// Ratchet unsupported legacy multinode combinations on update.
+	allErrs = append(allErrs, validateMultinodeComponentType(spec, options.oldComponent, fldPath.Child("multinode"))...)
+
 	if spec.ComponentType == nvidiacomv1beta1.ComponentTypeEPP {
 		if options.validateInferencePoolAvailability {
 			if err := inferencePoolAvailabilityError(v.ctx, v.mgr); err != nil {
 				allErrs = append(allErrs, field.Forbidden(fldPath.Child("type"), fmt.Sprintf("cannot deploy EPP component: %v", err)))
 			}
-		}
-		if spec.IsMultinode() {
-			allErrs = append(allErrs, field.Forbidden(fldPath.Child("multinode"), "EPP component cannot be multinode"))
 		}
 		if spec.Replicas != nil && *spec.Replicas != 1 {
 			allErrs = append(allErrs, field.Invalid(
@@ -189,6 +190,51 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	}
 
 	return allErrs
+}
+
+func supportsMultinodeComponentType(componentType nvidiacomv1beta1.ComponentType) bool {
+	switch componentType {
+	case nvidiacomv1beta1.ComponentTypeWorker,
+		nvidiacomv1beta1.ComponentTypePrefill,
+		nvidiacomv1beta1.ComponentTypeDecode:
+		return true
+	default:
+		return false
+	}
+}
+
+func hasUnsupportedMultinode(spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) bool {
+	return spec != nil && spec.Multinode != nil && !supportsMultinodeComponentType(spec.ComponentType)
+}
+
+// validateMultinodeComponentType rejects unsupported new combinations and
+// ratchets identical legacy violations on update. fldPath points to multinode.
+func validateMultinodeComponentType(
+	newSpec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	oldSpec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	if !hasUnsupportedMultinode(newSpec) {
+		return nil
+	}
+	if oldSpec != nil && oldSpec.ComponentType == newSpec.ComponentType &&
+		hasUnsupportedMultinode(oldSpec) &&
+		apiequality.Semantic.DeepEqual(oldSpec.Multinode, newSpec.Multinode) {
+		return nil
+	}
+	return field.ErrorList{field.Forbidden(
+		fldPath,
+		"multinode is supported only for worker, prefill, or decode components",
+	)}
+}
+
+func removesUnsupportedMultinode(
+	newSpec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	oldSpec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+) bool {
+	return hasUnsupportedMultinode(oldSpec) &&
+		newSpec.Multinode == nil &&
+		newSpec.ComponentType == oldSpec.ComponentType
 }
 
 type providerOverrideValidationOptions struct {
@@ -597,7 +643,7 @@ func (v *sharedValidation) validateGroveSpec(
 	fldPath *field.Path,
 	grovePathway bool,
 ) field.ErrorList {
-	if grove.ForceScalingGroup && !grovePathway {
+	if k8sptr.Deref(grove.ForceScalingGroup, false) && !grovePathway {
 		return field.ErrorList{field.Forbidden(
 			fldPath.Child("forceScalingGroup"),
 			"is currently supported only for Grove-backed DynamoGraphDeployment components",
@@ -669,13 +715,16 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 		)...)
 	}
 
-	// Keep the component's multinode shape stable across updates.
+	// Keep the component's multinode shape stable across updates. Permit
+	// removing a legacy multinode value from an unsupported component type.
 	if newComponent.IsMultinode() != oldComponent.IsMultinode() {
-		allErrs = append(allErrs, field.Invalid(
-			fldPath.Child("multinode"),
-			newComponent.Multinode,
-			"cannot change node topology between single-node and multi-node after creation",
-		))
+		if !removesUnsupportedMultinode(newComponent, oldComponent) {
+			allErrs = append(allErrs, field.Invalid(
+				fldPath.Child("multinode"),
+				newComponent.Multinode,
+				"cannot change node topology between single-node and multi-node after creation",
+			))
+		}
 	} else {
 		allErrs = append(allErrs, validateComponentRolesUpdate(
 			newComponent,
@@ -963,7 +1012,7 @@ func (v *sharedValidation) validateExperimentalSpecUpdate(
 			fldPath.Child("grove"),
 			options.ownerKind,
 		)...)
-	} else if oldGrove != nil && oldGrove.ForceScalingGroup {
+	} else if oldGrove != nil && k8sptr.Deref(oldGrove.ForceScalingGroup, false) {
 		allErrs = append(allErrs, field.Invalid(
 			fldPath.Child("grove", "forceScalingGroup"),
 			nil,
@@ -982,13 +1031,14 @@ func (v *sharedValidation) validateGroveSpecUpdate(
 	fldPath *field.Path,
 	ownerKind schema.GroupKind,
 ) field.ErrorList {
-	oldForced := oldGrove != nil && oldGrove.ForceScalingGroup
-	if newGrove.ForceScalingGroup == oldForced {
+	oldForced := oldGrove != nil && k8sptr.Deref(oldGrove.ForceScalingGroup, false)
+	newForced := k8sptr.Deref(newGrove.ForceScalingGroup, false)
+	if newForced == oldForced {
 		return nil
 	}
 	return field.ErrorList{field.Invalid(
 		fldPath.Child("forceScalingGroup"),
-		newGrove.ForceScalingGroup,
+		newForced,
 		fmt.Sprintf("cannot be toggled after creation; delete and recreate the %s to change it", ownerKind.Kind),
 	)}
 }

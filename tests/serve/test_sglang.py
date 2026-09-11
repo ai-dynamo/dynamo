@@ -43,6 +43,7 @@ from tests.utils.payload_builder import (
     guided_decoding_chat_payload_default,
     image_token_metrics_payload,
     kv_events_metrics_payload,
+    lora_chat_payload,
     metric_payload_default,
     responses_payload_default,
     responses_stream_payload_default,
@@ -50,12 +51,12 @@ from tests.utils.payload_builder import (
 )
 from tests.utils.payloads import (
     ChatPayload,
+    HttpErrorPayload,
     ImageGenerationPayload,
     ResponsesPayload,
     ResponsesStreamPayload,
     SGLangDisaggRouterMetricsPayload,
     VideoGenerationPayload,
-    lora_chat_payload,
 )
 from tests.utils.port_utils import allocate_contiguous_ports, deallocate_ports
 
@@ -272,6 +273,17 @@ sglang_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
+            HttpErrorPayload(
+                body={
+                    "messages": [{"role": "user", "content": "Name one color."}],
+                    "n": 2,
+                    "max_tokens": 1,
+                },
+                expected_response=["supports only n=1"],
+                expected_log=[],
+                endpoint="/v1/chat/completions",
+                timeout=10,
+            ),
             # Disagg workers expose fewer sglang:* metrics (~14 vs ~25 for aggregated)
             # because each only runs half the scheduler pipeline.
             metric_payload_default(

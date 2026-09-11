@@ -455,7 +455,7 @@ MinAvailable maps to Grove PodClique minAvailable for single-node and Grove PodC
 </ParamField>
 
 <ParamField path="multinode" type="MultinodeSpec">
-Multinode is the configuration for multinode components.
+Multinode configures worker, prefill, or decode components that span multiple Pods.
 See [MultinodeSpec](#multinodespec).
 </ParamField>
 
@@ -622,7 +622,7 @@ MinAvailable maps to Grove PodClique minAvailable for single-node and Grove PodC
 </ParamField>
 
 <ParamField path="multinode" type="MultinodeSpec">
-Multinode is the configuration for multinode components.
+Multinode configures worker, prefill, or decode components that span multiple Pods.
 See [MultinodeSpec](#multinodespec).
 </ParamField>
 
@@ -2632,7 +2632,7 @@ minAvailable maps to Grove PodCliqueScalingGroup minAvailable for components ren
 </ParamField>
 
 <ParamField path="multinode" type="MultinodeSpec">
-multinode configures multinode components.
+multinode configures worker, prefill, or decode components that span multiple Pods.
 See [MultinodeSpec](#v1beta1-multinodespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -2741,7 +2741,7 @@ minAvailable maps to Grove PodCliqueScalingGroup minAvailable for components ren
 </ParamField>
 
 <ParamField path="multinode" type="MultinodeSpec">
-multinode configures multinode components.
+multinode configures worker, prefill, or decode components that span multiple Pods.
 See [MultinodeSpec](#v1beta1-multinodespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -3461,7 +3461,7 @@ GroveSpec groups experimental Grove-specific rendering options.
 **Appears in:** [ExperimentalSpec](#experimentalspec)
 
 <ParamField path="forceScalingGroup" type="boolean">
-forceScalingGroup opts a single-node component into rendering as a PodCliqueScalingGroup with one single-pod PodClique per replica. Scaling changes the scaling-group replica count. The first `minAvailable` replicas join the deployment's base PodGang together with its other base workloads; each replica beyond `minAvailable` gets its own PodGang, gang-scheduled separately from the rest of the deployment. `false` or omitted means automatic selection (multi-node and inter-pod GMS components use a scaling group, other single-node components a standalone PodClique), not "force PodClique". Immutable after creation.
+forceScalingGroup opts a single-node component into rendering as a PodCliqueScalingGroup with one single-pod PodClique per replica. Scaling changes the scaling-group replica count. The first `minAvailable` replicas join the deployment's base PodGang together with its other base workloads; each replica beyond `minAvailable` gets its own PodGang, gang-scheduled separately from the rest of the deployment. `false` or omitted means automatic selection (multi-node and inter-pod GMS components use a scaling group, other single-node components a standalone PodClique), not "force PodClique". The pointer preserves field presence on the wire: `nil` and `false` are semantically identical, and consumers must dereference with `false`. Immutable after creation.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -3669,6 +3669,11 @@ OverridesSpec allows customizing the profiling job and the generated DynamoGraph
 <ParamField path="profilingJob" type="JobSpec">
 ProfilingJob allows overriding the profiling Job specification. Fields set here are merged into the controller-generated Job spec.
 See [JobSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#jobspec-v1-batch).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="trustRemoteCode" type="boolean" default="false">
+TrustRemoteCode explicitly permits generated vLLM and SGLang workers to execute custom code from the configured model repository. When enabled, the profiler adds --trust-remote-code to every generated worker component after the deployment topology has been generated. Enable this setting only for model repositories you trust.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
