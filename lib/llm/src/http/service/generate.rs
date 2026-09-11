@@ -2211,7 +2211,7 @@ mod tests {
             "sampling_params": {
                 "temperature": 0.25,
                 "top_p": 0.9,
-                "top_k": 0,
+                "top_k": -1,
                 "min_p": 0.05,
                 "seed": 23,
                 "max_tokens": 8,
@@ -2244,7 +2244,7 @@ mod tests {
 
         assert_eq!(preprocessed.sampling_options.temperature, Some(0.25));
         assert_eq!(preprocessed.sampling_options.top_p, Some(0.9));
-        assert_eq!(preprocessed.sampling_options.top_k, Some(0));
+        assert_eq!(preprocessed.sampling_options.top_k, Some(-1));
         assert_eq!(preprocessed.sampling_options.min_p, Some(0.05));
         assert_eq!(preprocessed.sampling_options.seed, Some(23));
         assert_eq!(preprocessed.sampling_options.presence_penalty, Some(0.1));
@@ -2274,6 +2274,16 @@ mod tests {
                 .and_then(serde_json::Value::as_object)
                 .and_then(|extra| extra.get("kv_transfer_params")),
             Some(&serde_json::json!({"connector_data": {"block_ids": [1, 2]}}))
+        );
+        assert_eq!(
+            preprocessed
+                .extra_args
+                .as_ref()
+                .and_then(serde_json::Value::as_object)
+                .and_then(|extra| extra.get("vllm_tito"))
+                .and_then(|tito| tito.get("sampling_params"))
+                .and_then(|sampling| sampling.get("top_k")),
+            Some(&serde_json::json!(-1))
         );
         assert_eq!(preprocessed.output_options.skip_special_tokens, Some(false));
     }

@@ -103,6 +103,7 @@ impl GenerateRequest {
         validate::validate_temperature(self.sampling_params.temperature)
             .map_err(|error| error.to_string())?;
         validate::validate_top_p(self.sampling_params.top_p).map_err(|error| error.to_string())?;
+        validate::validate_top_k(self.sampling_params.top_k).map_err(|error| error.to_string())?;
         validate::validate_frequency_penalty(self.sampling_params.frequency_penalty)
             .map_err(|error| error.to_string())?;
         validate::validate_presence_penalty(self.sampling_params.presence_penalty)
@@ -182,7 +183,7 @@ pub struct SamplingParams {
     // reads only the controls it needs; `raw` remains authoritative.
     temperature: Option<f32>,
     top_p: Option<f32>,
-    top_k: Option<u32>,
+    top_k: Option<i32>,
     seed: Option<i64>,
     max_tokens: Option<u32>,
     min_tokens: Option<u32>,
@@ -237,14 +238,6 @@ impl SamplingParams {
     }
 
     pub(crate) fn project_sampling_options(&self) -> Result<SamplingOptions, String> {
-        let top_k = self
-            .top_k
-            .map(|value| {
-                i32::try_from(value).map_err(|_| {
-                    format!("sampling_params.top_k exceeds Dynamo's supported range: {value}")
-                })
-            })
-            .transpose()?;
         Ok(SamplingOptions {
             n: Some(1),
             presence_penalty: self.presence_penalty,
@@ -252,7 +245,7 @@ impl SamplingParams {
             repetition_penalty: self.repetition_penalty,
             temperature: self.temperature,
             top_p: self.top_p,
-            top_k,
+            top_k: self.top_k,
             min_p: self.min_p,
             seed: self.seed,
             ..Default::default()
@@ -811,6 +804,25 @@ mod tests {
     }
 
     #[test]
+    fn generate_request_accepts_disabled_top_k_sentinel() {
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "token_ids": [1],
+            "sampling_params": {"top_k": -1}
+        }))
+        .expect("deserialize");
+
+        request.validate().expect("validate");
+        assert_eq!(
+            request
+                .sampling_params
+                .project_sampling_options()
+                .expect("project")
+                .top_k,
+            Some(-1)
+        );
+    }
+
+    #[test]
     fn generate_request_matches_rust_integer_types() {
         for raw in [
             json!({
@@ -824,7 +836,7 @@ mod tests {
             }),
             json!({
                 "token_ids": [1],
-                "sampling_params": {"top_k": -1}
+                "sampling_params": {"top_k": i64::from(i32::MAX) + 1}
             }),
             json!({
                 "token_ids": [1],
@@ -866,6 +878,13 @@ mod tests {
                     "sampling_params": {"prompt_logprobs": -2}
                 }),
                 "prompt_logprobs",
+            ),
+            (
+                json!({
+                    "token_ids": [1],
+                    "sampling_params": {"top_k": -2}
+                }),
+                "Top_k",
             ),
             (
                 json!({

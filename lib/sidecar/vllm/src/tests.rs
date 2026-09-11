@@ -959,13 +959,16 @@ fn canonical_controls_override_compatibility_envelope() {
 #[test]
 fn released_envelope_preserves_native_sampling_semantics() {
     let mut request = request();
-    request.sampling_options = SamplingOptions::default();
+    request.sampling_options = SamplingOptions {
+        top_k: Some(-1),
+        ..Default::default()
+    };
     request.stop_conditions = StopConditions::default();
     request.output_options = OutputOptions::default();
     request.extra_args = Some(json!({
         "skip_reading_prefix_cache": false,
         "vllm_tito": {"sampling_params": {
-            "top_k": 0,
+            "top_k": -1,
             "repetition_penalty": 2.5,
             "logprobs": -1,
             "prompt_logprobs": 0,
@@ -987,6 +990,7 @@ fn released_envelope_preserves_native_sampling_semantics() {
     .expect("convert released envelope");
     let native: serde_json::Value =
         serde_json::from_slice(&wire.native_sampling_params_json).expect("native sampling JSON");
+    assert_eq!(wire.sampling.expect("sampling").top_k, 0);
     assert!(native.get("temperature").is_none());
     assert_eq!(native["top_k"], json!(0));
     assert_eq!(native["repetition_penalty"], json!(2.5));
