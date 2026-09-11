@@ -369,25 +369,33 @@ impl Drop for ActiveInput {
         // each worker leaves its loop and runs the sink's own `shutdown`, so a
         // caller that keeps the runtime alive past the cancellation still gets
         // the backlog written. What cannot be promised is that it finishes
-        // before the process exits, so say so rather than fail quietly.
-        cancel_workers();
-        tracing::warn!(
-            "request trace sinks were cancelled without a bounded drain because the last input \
-             ended early; records still queued may be lost if the process exits immediately"
-        );
+        // before the process exits, so say so rather than fail quietly. There
+        // is nothing to say when no workers were running, which is every run
+        // with request tracing switched off.
+        if cancel_workers() {
+            tracing::warn!(
+                "request trace sinks were cancelled without a bounded drain because the last \
+                 input ended early; records still queued may be lost if the process exits \
+                 immediately"
+            );
+        }
     }
 }
 
 /// Cancel the retained workers without waiting for them, so they begin their
-/// own teardown. Unlike [`shutdown_workers`] this does not take the workers out
-/// of the static: a later bounded drain, if one happens, can still join them.
-fn cancel_workers() {
-    if let Some(workers) = WORKERS
+/// own teardown, and report whether there were any. Unlike [`shutdown_workers`]
+/// this does not take the workers out of the static: a later bounded drain, if
+/// one happens, can still join them.
+fn cancel_workers() -> bool {
+    let slot = WORKERS
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .as_ref()
-    {
-        workers.token.cancel();
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match slot.as_ref() {
+        Some(workers) => {
+            workers.token.cancel();
+            true
+        }
+        None => false,
     }
 }
 

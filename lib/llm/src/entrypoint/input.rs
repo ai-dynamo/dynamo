@@ -117,11 +117,14 @@ pub async fn run_input_with_frontend_route_extensions(
     if !matches!(&in_opt, Input::Http) && !frontend_route_extensions.is_empty() {
         anyhow::bail!("frontend route extensions are only supported by HTTP input");
     }
+    // Registered before initialization, not after: `spawn_workers` reads the
+    // registration count to decide whether the process-wide sinks follow the
+    // caller's token, and this input owns their teardown.
+    let active_input = crate::request_trace::ActiveInput::register();
+
     if !matches!(&in_opt, Input::Http) {
         initialize_input(&drt, &engine_config).await;
     }
-
-    let active_input = crate::request_trace::ActiveInput::register();
 
     let result = match in_opt {
         Input::Http => {

@@ -82,13 +82,16 @@ impl HttpFrontend {
             anyhow::bail!("custom worker-selection policies require a dynamic engine");
         }
 
-        super::initialize_input(&distributed_runtime, &engine_config).await;
-
         // Callers that reach the frontend without going through `run_input`
         // still have to drain the trace sinks before the process exits. The
         // registration is reference counted, so arriving through `run_input`
-        // simply nests inside its guard and drains once, at the outer one.
+        // simply nests inside its guard and drains once, at the outer one. It
+        // is taken before initialization because `spawn_workers` reads the
+        // registration count to decide whether the process-wide sinks follow
+        // this runtime's token.
         let active_input = crate::request_trace::ActiveInput::register();
+
+        super::initialize_input(&distributed_runtime, &engine_config).await;
 
         let result = match self.worker_selection_policy_factory {
             Some(factory) => {

@@ -435,8 +435,6 @@ impl JsonlBatch {
         self.raw.len() as u64
     }
 
-    /// Records accumulated so far, i.e. how many are lost if this batch cannot
-    /// be finalized or uploaded.
     fn records(&self) -> u64 {
         self.lines
     }
@@ -693,7 +691,6 @@ mod tests {
 
         let dropped = sink.dropped.load(Ordering::Relaxed);
         assert_eq!(dropped, (total - capacity) as u64);
-        // The shutdown report reads the same counter the worker adds to.
         assert_eq!(sink.dropped_records(), dropped);
     }
 
