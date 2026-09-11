@@ -261,12 +261,8 @@ class _BenchmarkStageVerdict:
 
     ``start_step`` is the stage-relative engine step (``schedule()`` calls
     since the stage build began) at which every rank leaves the exchange and
-    starts the rung's first point: two steps after the one in which rank 0
-    sent the decision. Ranks poll the decision from their idle steps and see
-    it in rank 0's lockstep iteration or up to two iterations later; a rank
-    that entered the point's blocking READY barrier while a peer still ran
-    that iteration's dummy forward (a group collective) left it waiting
-    there, and rank 0's READY tolerance aborted the sweep.
+    starts the rung's first point; ``_coordinate_stage`` chooses it and
+    ``_kvwarm_step_busy`` explains why the ranks must agree on it.
     """
 
     ok: bool
@@ -1133,7 +1129,8 @@ class _BenchmarkSynchronizer:
         if (
             reply.get("batch") != stage.batch
             or not isinstance(ok, bool)
-            or not isinstance(start_step, int)
+            or type(start_step) is not int
+            or start_step < 1
         ):
             raise RuntimeError(f"invalid attention-DP warm-up stage decision: {reply}")
         return _BenchmarkStageVerdict(ok, start_step)

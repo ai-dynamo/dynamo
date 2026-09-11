@@ -1051,6 +1051,33 @@ def test_benchmark_synchronizer_stage_exchange_rejects_a_rung_mismatch():
         rank0.close()
 
 
+@pytest.mark.parametrize("start_step", [True, 0, -1, "3", None])
+def test_benchmark_synchronizer_follower_rejects_an_invalid_start_step(start_step):
+    """A start step that is not a positive integer would make the gate treat
+    the start as already reached and re-open the one-iteration split; the
+    follower rejects such a decision like any other malformed message."""
+    rank0, rank1 = _stage_pair()
+    try:
+        rank1.stage_report(8, True)
+        end = time.monotonic() + 2.0
+        while not rank0._socket.poll(0, instrumented_scheduler_module.zmq.POLLIN):
+            assert time.monotonic() < end, "follower report did not arrive"
+            time.sleep(0.005)
+        identity, report = rank0._read_router(0)
+        assert report["type"] == "stage_status"
+        decision = {"type": "stage_decision", "benchmark_id": 0, "batch": 8, "ok": True}
+        if start_step is not None:
+            decision["start_step"] = start_step
+        rank0._send_to_all({1: identity}, decision)
+        with pytest.raises(
+            RuntimeError, match="invalid attention-DP warm-up stage decision"
+        ):
+            _stage_verdict(rank1)
+    finally:
+        rank1.close()
+        rank0.close()
+
+
 def test_benchmark_synchronizer_stage_decision_carries_rank0_next_step():
     """Every rank starts the rung's first point two steps after the one in
     which rank 0 sent the decision, whatever step the follower's own poll is
