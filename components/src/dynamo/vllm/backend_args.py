@@ -52,14 +52,7 @@ def _configured_fixed_port(env_name: str, *, default: int | None = None) -> int 
 
 
 def _nixl_prometheus_port() -> int | None:
-    """Return the NIXL Prometheus listener port when it is enabled.
-
-    Only return a port when NIXL will actually bind one, and only the port NIXL
-    will bind. NIXL does not default the exporter to Prometheus, so an unset
-    exporter means no listener. With the exporter selected, an unset port falls
-    back to the exporter's own default rather than Dynamo's 19090, while a value
-    NIXL cannot parse as a port leaves it exporting nothing at all.
-    """
+    """Return the port used by NIXL's active Prometheus exporter."""
     enabled = os.environ.get("NIXL_TELEMETRY_ENABLE", "").lower()
     exporter = os.environ.get("NIXL_TELEMETRY_EXPORTER", "")
     if enabled not in NIXL_TELEMETRY_ENABLED_VALUES or exporter != "prometheus":

@@ -128,31 +128,16 @@ class TestNixlPrometheusBasePort:
         assert nixl_prometheus_base_port(env) is None
 
     @pytest.mark.parametrize(
-        ("enabled_value", "exporter_value"),
-        [
-            (" y", "prometheus"),
-            ("y ", "prometheus"),
-            ("y", "PROMETHEUS"),
-            ("y", "prometheus "),
-        ],
-    )
-    def test_invalid_telemetry_tokens_are_not_recognized(
-        self, enabled_value, exporter_value
-    ):
-        env = {
-            **OPERATOR_ENV,
-            "NIXL_TELEMETRY_ENABLE": enabled_value,
-            "NIXL_TELEMETRY_EXPORTER": exporter_value,
-        }
-        assert nixl_prometheus_base_port(env) is None
-
-    @pytest.mark.parametrize(
         "override",
         [
             {"NIXL_TELEMETRY_ENABLE": "n"},
             {"NIXL_TELEMETRY_ENABLE": ""},
+            {"NIXL_TELEMETRY_ENABLE": " y"},
+            {"NIXL_TELEMETRY_ENABLE": "y "},
             {"NIXL_TELEMETRY_EXPORTER": "file"},
+            {"NIXL_TELEMETRY_EXPORTER": "PROMETHEUS"},
+            {"NIXL_TELEMETRY_EXPORTER": "prometheus "},
         ],
     )
-    def test_disabled_telemetry_has_no_base_port(self, override):
+    def test_inactive_configuration_has_no_base_port(self, override):
         assert nixl_prometheus_base_port({**OPERATOR_ENV, **override}) is None

@@ -70,7 +70,7 @@ def configured_nixl_uint16(
     default: int | None = None,
     env: Mapping[str, str] | None = None,
 ) -> int | None:
-    """Parse a value exactly as NIXL parses an unsigned 16-bit integer."""
+    """Parse an environment value like NIXL's unsigned 16-bit parser."""
     environ = os.environ if env is None else env
     raw = environ.get(env_name)
     if raw is None:
@@ -85,9 +85,7 @@ def configured_nixl_uint16(
         base = 10
         valid_digits = _ASCII_DECIMAL_DIGITS
 
-    # NIXL uses std::from_chars: signs, whitespace, separators, and partial
-    # parses are rejected, while the 0x/0X prefix is accepted for unsigned
-    # values. Python's int() accepts several of those invalid spellings.
+    # Unlike int(), NIXL rejects signs, whitespace, separators, and partial parses.
     if not digits or any(character not in valid_digits for character in digits):
         return None
 
