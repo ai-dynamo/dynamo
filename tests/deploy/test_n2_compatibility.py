@@ -120,5 +120,10 @@ async def test_n2_compatibility(mixed_deployment, scenario):
         payload=payload,
     ), f"Model {model} did not become available"
     await asyncio.to_thread(
-        check_deployment_api, base, model, scenario, output / "responses"
+        check_deployment_api,
+        base,
+        model,
+        scenario,
+        output / "responses",
+        endpoint=endpoint,
     )
