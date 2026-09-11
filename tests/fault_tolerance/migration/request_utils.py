@@ -215,10 +215,26 @@ def validate_response(
         )
 
     output = "".join(response_parts)
-    if expected_output_prefix is not None:
-        assert output.startswith(expected_output_prefix), (
-            "Migrated output diverged from the deterministic fault-free prefix: "
-            f"expected={expected_output_prefix[:100]!r}, actual={output[:100]!r}"
+    if expected_output_prefix is not None and not output.startswith(
+        expected_output_prefix
+    ):
+        mismatch_index = next(
+            (
+                index
+                for index, (expected, actual) in enumerate(
+                    zip(expected_output_prefix, output)
+                )
+                if expected != actual
+            ),
+            min(len(expected_output_prefix), len(output)),
+        )
+        context_start = max(0, mismatch_index - 40)
+        context_end = mismatch_index + 80
+        pytest.fail(
+            "Migrated output diverged from the deterministic fault-free prefix "
+            f"at character {mismatch_index}: "
+            f"expected={expected_output_prefix[context_start:context_end]!r}, "
+            f"actual={output[context_start:context_end]!r}"
         )
     logger.info("Received %s response(s): %s...", len(response_parts), output[:100])
     return output
