@@ -75,10 +75,7 @@ pub struct VllmMockerService {
 }
 
 impl VllmMockerService {
-    pub async fn new(
-        config: MockerServerConfig,
-        engine_args: MockEngineArgs,
-    ) -> anyhow::Result<Self> {
+    pub fn new(config: MockerServerConfig, engine_args: MockEngineArgs) -> anyhow::Result<Self> {
         anyhow::ensure!(
             engine_args.engine_type == EngineType::Vllm,
             "Mocker engine_type must be vllm"
@@ -150,9 +147,7 @@ impl VllmMockerService {
                 engine_args.zmq_replay_port,
                 DP_RANK,
                 server_info.kv_block_size,
-            )
-            .await
-            {
+            ) {
                 Ok(sink) => Some(sink),
                 Err(error) => {
                     tracing::error!(dp_rank = DP_RANK, %error, "Failed to create ZMQ KV event sink");

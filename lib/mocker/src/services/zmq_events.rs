@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use bytes::Bytes;
 use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, StorageTier};
 use futures::{Sink, SinkExt, StreamExt};
@@ -67,23 +67,25 @@ impl ZmqKvEventSink {
         dp_rank: u32,
         block_size: u32,
     ) -> Result<Self> {
-        Self::bind(Some(port), replay_port, dp_rank, block_size).await
+        Self::bind(Some(port), replay_port, dp_rank, block_size)
     }
 
     /// Bind the publisher, using an OS-assigned port when `port` is absent.
-    pub async fn bind(
+    /// Requires an active Tokio runtime for the background publisher task.
+    pub fn bind(
         port: Option<u16>,
         replay_port: Option<u16>,
         dp_rank: u32,
         block_size: u32,
     ) -> Result<Self> {
+        let runtime = tokio::runtime::Handle::try_current()
+            .context("ZmqKvEventSink::bind requires an active Tokio runtime")?;
         let (tx, mut rx) = mpsc::unbounded_channel::<Vec<RawKvEvent>>();
 
         // Reserve the explicit replay port before choosing an automatic PUB port.
         let (mut router_socket, replay_endpoint) = if let Some(rp) = replay_port {
             let replay_ep = format!("tcp://0.0.0.0:{rp}");
             let sock = bind_router_socket(&replay_ep)
-                .await
                 .map_err(|e| anyhow::anyhow!("ZMQ ROUTER bind to {replay_ep} failed: {e}"))?;
             let replay_ep = sock
                 .get_socket()
@@ -102,17 +104,15 @@ impl ZmqKvEventSink {
             port.map_or("*".to_string(), |p| p.to_string())
         );
         let pub_socket = bind_pub_socket(&endpoint)
-            .await
             .map_err(|e| anyhow::anyhow!("ZMQ PUB bind to {endpoint} failed: {e}"))?;
         let endpoint = pub_socket
-            .lock()
-            .await
             .get_socket()
             .get_last_endpoint()?
             .map_err(|_| anyhow::anyhow!("ZMQ PUB endpoint is not UTF-8"))?;
         tracing::info!("ZmqKvEventSink bound to {endpoint} for dp_rank {dp_rank}");
 
-        tokio::spawn(async move {
+        let pub_socket: SharedPubSocket = Arc::new(Mutex::new(pub_socket));
+        runtime.spawn(async move {
             let mut seq_num: u64 = 0;
             let mut ring_buffer: VecDeque<(u64, Bytes)> = VecDeque::new();
 
@@ -386,13 +386,13 @@ where
     configure_receive_builder(builder).set_sndtimeo(ZMQ_SNDTIMEOUT_MS)
 }
 
-async fn bind_pub_socket(endpoint: &str) -> Result<SharedPubSocket> {
+fn bind_pub_socket(endpoint: &str) -> Result<Publish> {
     let ctx = Context::new();
     let socket = configure_send_builder(publish(&ctx)).bind(endpoint)?;
-    Ok(Arc::new(Mutex::new(socket)))
+    Ok(socket)
 }
 
-async fn bind_router_socket(endpoint: &str) -> Result<Router> {
+fn bind_router_socket(endpoint: &str) -> Result<Router> {
     let ctx = Context::new();
     let socket = configure_bidirectional_builder(router(&ctx)).bind(endpoint)?;
     Ok(socket)
@@ -443,12 +443,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn bind_requires_an_active_runtime() {
+        let error = ZmqKvEventSink::bind(None, None, 0, 4)
+            .err()
+            .expect("binding without a runtime must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("requires an active Tokio runtime")
+        );
+    }
+
     #[tokio::test]
     async fn automatic_ports_are_distinct_and_released_on_drop() {
         use std::time::Duration;
 
-        let first = ZmqKvEventSink::bind(None, None, 0, 4).await.unwrap();
-        let second = ZmqKvEventSink::bind(None, None, 0, 4).await.unwrap();
+        let first = ZmqKvEventSink::bind(None, None, 0, 4).unwrap();
+        let second = ZmqKvEventSink::bind(None, None, 0, 4).unwrap();
         let port: u16 = first
             .endpoint()
             .rsplit_once(':')
@@ -479,15 +491,11 @@ mod tests {
         use std::time::Duration;
         use tmq::dealer::dealer;
 
-        let sink = ZmqKvEventSink::bind(None, Some(0), 0, 4).await.unwrap();
+        let sink = ZmqKvEventSink::bind(None, Some(0), 0, 4).unwrap();
         let replay_endpoint = sink.replay_endpoint().unwrap();
         let replay_port: u16 = replay_endpoint.rsplit_once(':').unwrap().1.parse().unwrap();
         assert_ne!(replay_port, 0);
-        assert!(
-            ZmqKvEventSink::bind(None, Some(replay_port), 0, 4)
-                .await
-                .is_err()
-        );
+        assert!(ZmqKvEventSink::bind(None, Some(replay_port), 0, 4).is_err());
         sink.publish(RawKvEvent {
             event: stored_event(),
             block_token_ids: Some(vec![vec![1, 2, 3, 4]]),

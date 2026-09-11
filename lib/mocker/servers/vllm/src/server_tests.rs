@@ -166,7 +166,6 @@ async fn service_rejects_non_vllm_or_multi_rank_engines() {
     sglang.num_gpu_blocks = 0;
     assert!(
         VllmMockerService::new(MockerServerConfig::default(), sglang)
-            .await
             .err()
             .unwrap()
             .to_string()
@@ -177,7 +176,6 @@ async fn service_rejects_non_vllm_or_multi_rank_engines() {
     multi_rank.num_gpu_blocks = 0;
     assert!(
         VllmMockerService::new(MockerServerConfig::default(), multi_rank)
-            .await
             .err()
             .unwrap()
             .to_string()
@@ -191,7 +189,6 @@ async fn service_rejects_non_vllm_or_multi_rank_engines() {
     disaggregated.num_gpu_blocks = 0;
     assert!(
         VllmMockerService::new(MockerServerConfig::default(), disaggregated)
-            .await
             .err()
             .unwrap()
             .to_string()
@@ -204,7 +201,6 @@ async fn service_rejects_non_vllm_or_multi_rank_engines() {
     };
     assert!(
         VllmMockerService::new(disabled, MockEngineArgs::default())
-            .await
             .err()
             .unwrap()
             .to_string()
@@ -215,7 +211,6 @@ async fn service_rejects_non_vllm_or_multi_rank_engines() {
     invalid.num_gpu_blocks = 0;
     assert!(
         VllmMockerService::new(MockerServerConfig::default(), invalid)
-            .await
             .err()
             .unwrap()
             .to_string()
@@ -228,9 +223,7 @@ async fn service_rejects_non_vllm_or_multi_rank_engines() {
 /// capability absence; this test catches it at the Control RPC boundary.
 #[tokio::test]
 async fn unsupported_rl_control_reports_unimplemented() {
-    let service = VllmMockerService::new(MockerServerConfig::default(), admitting_args())
-        .await
-        .unwrap();
+    let service = VllmMockerService::new(MockerServerConfig::default(), admitting_args()).unwrap();
     let server_info = pb::control_server::Control::get_server_info(
         &service,
         Request::new(pb::GetServerInfoRequest {}),
@@ -263,9 +256,7 @@ async fn unary_generate_maps_capacity_rejection_to_resource_exhausted() {
         .speedup_ratio(0.0)
         .build()
         .unwrap();
-    let service = VllmMockerService::new(MockerServerConfig::default(), args)
-        .await
-        .unwrap();
+    let service = VllmMockerService::new(MockerServerConfig::default(), args).unwrap();
     let mut oversized = request("oversized");
     oversized.prompt = Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
         ids: vec![1, 2, 3, 4, 5],
@@ -294,7 +285,6 @@ async fn concurrent_request_limit_rejects_a_stalled_stream() {
         },
         args,
     )
-    .await
     .unwrap();
     let mut first_request = request("stalled");
     first_request.stopping.as_mut().unwrap().max_new_tokens = 100;
@@ -363,9 +353,7 @@ fn decode_rejects_a_handoff_missing_the_opacity_sentinel() {
 
 #[tokio::test]
 async fn unary_generate_accumulates_output_and_terminal_metadata() {
-    let service = VllmMockerService::new(MockerServerConfig::default(), admitting_args())
-        .await
-        .unwrap();
+    let service = VllmMockerService::new(MockerServerConfig::default(), admitting_args()).unwrap();
 
     let mut routed_request = Request::new(request("unary"));
     routed_request.metadata_mut().insert(
@@ -419,9 +407,7 @@ async fn streaming_generate_maps_capacity_rejection_to_resource_exhausted() {
         .speedup_ratio(0.0)
         .build()
         .unwrap();
-    let service = VllmMockerService::new(MockerServerConfig::default(), args)
-        .await
-        .unwrap();
+    let service = VllmMockerService::new(MockerServerConfig::default(), args).unwrap();
     let mut oversized = request("oversized-stream");
     oversized.prompt = Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
         ids: vec![1, 2, 3, 4, 5],
@@ -453,9 +439,7 @@ async fn streaming_survives_a_producer_that_outruns_a_stalled_consumer() {
     // The producer runs instantly while the consumer stalls, so the request
     // races far past LiveEngine's fixed per-request buffer. The server's pump
     // must absorb the burst instead of shedding the stream into an INTERNAL.
-    let service = VllmMockerService::new(MockerServerConfig::default(), admitting_args())
-        .await
-        .unwrap();
+    let service = VllmMockerService::new(MockerServerConfig::default(), admitting_args()).unwrap();
     let mut bursty = request("bursty");
     bursty.stopping.as_mut().unwrap().max_new_tokens = 50;
 
@@ -510,7 +494,6 @@ async fn kv_event_discovery_follows_regular_mocker_rules() {
             },
             args,
         )
-        .await
         .unwrap();
         assert_eq!(
             pb::control_server::Control::get_kv_event_sources(
@@ -533,9 +516,7 @@ async fn failed_kv_publisher_is_not_advertised() {
     let mut args = admitting_args();
     args.enable_prefix_caching = true;
     args.zmq_kv_events_port = Some(occupied.local_addr().unwrap().port());
-    let service = VllmMockerService::new(MockerServerConfig::default(), args)
-        .await
-        .unwrap();
+    let service = VllmMockerService::new(MockerServerConfig::default(), args).unwrap();
     assert_eq!(
         pb::control_server::Control::get_kv_event_sources(
             &service,
