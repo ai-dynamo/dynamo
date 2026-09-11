@@ -75,6 +75,7 @@ DynamoComponentDeploymentSpec.roles.name
 DynamoComponentDeploymentSpec.roles.providerOverride.apiVersion
 DynamoComponentDeploymentSpec.roles.providerOverride.target
 DynamoComponentDeploymentSpec.roles.providerOverride.value
+DynamoComponentDeploymentSpec.roles.replicas
 DynamoComponentDeploymentSpec.runtimeVersionOverride
 DynamoComponentDeploymentSpec.scalingAdapter
 DynamoComponentDeploymentSpec.sharedMemorySize
@@ -144,6 +145,7 @@ DynamoGraphDeploymentSpec.components.roles.name
 DynamoGraphDeploymentSpec.components.roles.providerOverride.apiVersion
 DynamoGraphDeploymentSpec.components.roles.providerOverride.target
 DynamoGraphDeploymentSpec.components.roles.providerOverride.value
+DynamoGraphDeploymentSpec.components.roles.replicas
 DynamoGraphDeploymentSpec.components.runtimeVersionOverride
 DynamoGraphDeploymentSpec.components.scalingAdapter
 DynamoGraphDeploymentSpec.components.sharedMemorySize

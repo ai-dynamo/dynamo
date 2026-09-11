@@ -104,8 +104,8 @@ runs:
         HF_XET_HIGH_PERFORMANCE: 1
         PYTEST_DD_FLAKY_RETRY_ENABLED: ${{ inputs.dd_flaky_retry_enabled }}
       run: |
-        # Sanitize test_type for the filenames below. Keep it shell-local: a
-        # $GITHUB_ENV copy is job-scoped, so stages would share one stale value.
+        # Sanitize test_type for the JUnit and coverage filenames this step
+        # writes: remove commas and spaces.
         STR_TEST_TYPE=$(echo "${TEST_TYPE}" | tr ', ' '_')
 
         if [[ "${GPU_TESTS}" == "true" ]]; then
@@ -297,6 +297,10 @@ runs:
     # pipeline consumes them by name. `always()` because the step above exits
     # with the pytest status. The JUnit upload happens once per job in
     # shared-test.yml.
+    # `test_type` is the only part of these names that distinguishes the stages
+    # a single job runs, and upload-artifact rejects a duplicate name with a
+    # non-retryable 409. Callers must pass a filename-safe value that is unique
+    # per stage; GitHub expressions have no `replace()` to sanitize it here.
     - name: Upload Coverage Data
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
       if: always() && inputs.enable_coverage == 'true'
