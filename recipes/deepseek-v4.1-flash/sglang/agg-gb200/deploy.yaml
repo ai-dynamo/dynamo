@@ -88,9 +88,6 @@ spec:
                 - --dyn-tool-call-parser
                 - deepseek_v41
                 - --dyn-enable-structural-tag
-                # DSpark verify graphs run out of memory at batch 256.
-                # A deprecated alias shares this flag's destination, so the
-                # SGLang config parser rejects it in worker.yaml.
                 - --cuda-graph-max-bs-decode
                 - "64"
               env:
