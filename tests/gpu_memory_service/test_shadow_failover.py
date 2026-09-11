@@ -29,7 +29,7 @@ from tests.gpu_memory_service.flow_assertions import (
     wait_for_weights_state,
 )
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.managed_process import ManagedProcess, terminate_process_tree
 
 pytestmark = [pytest.mark.nightly, pytest.mark.fault_tolerance]
 
@@ -72,11 +72,11 @@ def _wait_for_directory_writer(directory, manifest, expected, timeout=10.0):
         time.sleep(0.01)
 
 
-def _wait_for_hbm_inventory(directory, writer, epoch, timeout=10.0):
+def _wait_for_hbm_inventory(directory, writer, epoch, timeout=10.0, *, scope="vllm"):
     deadline = time.monotonic() + timeout
     while True:
         protected, rejected = directory.directory_hbm_inventory(
-            writer, epoch, scope="vllm"
+            writer, epoch, scope=scope
         )
         if rejected or protected or time.monotonic() >= deadline:
             return protected, rejected
@@ -108,16 +108,19 @@ def _kill_process_group(process: ManagedProcess) -> None:
         logger.warning("kill process group: no PID available")
         return
 
-    try:
-        os.killpg(os.getpgid(pid), signal.SIGKILL)
-    except ProcessLookupError:
-        logger.warning("kill process group: process %d already dead", pid)
-        return
+    # SGLang and vLLM may place GPU workers in child process groups. Killing
+    # only the launcher's group can leave those workers and the stale backend
+    # alive, which is unlike a pod/container crash and can route requests to a
+    # dead cohort after the shadow is ready. Snapshot and SIGKILL the complete
+    # descendant tree to emulate that containment boundary locally.
+    terminate_process_tree(pid, logger, immediate_kill=True, timeout=2)
 
-    try:
-        os.waitpid(pid, 0)
-    except ChildProcessError:
-        pass
+
+def _kill_launcher_only(process: ManagedProcess) -> None:
+    """Crash only the engine parent, leaving child cleanup to the runtime."""
+    pid = process.get_pid()
+    assert pid is not None, "engine launcher has no PID"
+    os.kill(pid, signal.SIGKILL)
 
 
 def _start_primary(
@@ -431,6 +434,94 @@ def test_gms_shadow_engine_failover_sglang(
     request, runtime_services_dynamic_ports, predownload_models
 ):
     _run_shadow_failover_test(request, SGLangWithGMSProcess)
+
+
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.profiled_vram_gib(8.0)
+@pytest.mark.requested_sglang_kv_tokens(4096)
+@pytest.mark.timeout(600)
+@pytest.mark.sglang
+def test_gms_authoritative_hbm_failover_sglang(
+    request, runtime_services_dynamic_ports, predownload_models, monkeypatch
+):
+    """Kill the active parent and prove the shadow fences children before adoption."""
+    from gms_kv_ring.daemon.client import DaemonClient
+
+    monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "1")
+    monkeypatch.setenv("DYN_SGLANG_GMS_LOCK_BEFORE_INIT", "0")
+    monkeypatch.setenv("DYN_GMS_FAILOVER_PRIMARY_ENGINE_ID", "0")
+    monkeypatch.setenv("SGLANG_GMS_MEM_FRACTION_STATIC", "0.22")
+    monkeypatch.setenv("DYN_HTTP_MODEL_FAILOVER_WAIT_MS", "15000")
+    monkeypatch.setenv("DYN_MIGRATION_FAILOVER_WAIT_MS", "15000")
+    monkeypatch.setenv("DYN_MIGRATION_FAILOVER_POLL_MS", "10")
+    monkeypatch.setenv("DYN_MIGRATION_FIRST_CHUNK_TIMEOUT_MS", "500")
+
+    with GMSProcessManager(
+        request,
+        SGLangWithGMSProcess,
+        kv_directory=True,
+        migration_limit=8,
+    ) as manager:
+        assert manager.frontend_port is not None
+        assert manager.kv_cache_gms is not None
+        assert manager.kv_directory_socket is not None
+        assert manager.kv_directory_manifest is not None
+
+        primary = manager.start_engine("0")
+        primary_output = assert_completion_ok(
+            manager.frontend_port,
+            _HBM_RECOVERY_PROMPT,
+            failure_message="Primary SGLang HBM warmup failed",
+            success_message="Primary SGLang HBM warmup OK",
+            body_overrides={"temperature": 0},
+        )
+        with DaemonClient(manager.kv_directory_socket) as directory:
+            _entries, epoch, writer = _wait_for_directory_writer(
+                directory, manager.kv_directory_manifest, "engine-0"
+            )
+            assert writer == "engine-0"
+            protected, rejected = _wait_for_hbm_inventory(
+                directory, writer, epoch, scope="sglang"
+            )
+            assert not rejected
+            assert sum(map(len, protected.values())) > 0
+
+        allocation_count = manager.kv_cache_gms.get_runtime_state().allocation_count
+        shadow = manager.start_engine(
+            "1", read_only_weights=True, wait_until_ready=False
+        )
+        _wait_for_log(shadow, "sglang shadow waiting for active lock")
+
+        # This is deliberately stricter than a pod-style process-group crash.
+        # The successor must not promote the directory until the old scheduler
+        # children have observed parent death and released their writer guards.
+        _kill_launcher_only(primary)
+        with DaemonClient(manager.kv_directory_socket) as directory:
+            _entries, _epoch, writer = _wait_for_directory_writer(
+                directory, manager.kv_directory_manifest, "engine-1", timeout=30.0
+            )
+            assert writer == "engine-1", _directory_diagnostics(primary, shadow)
+
+        _wait_for_log(shadow, "sglang shadow resumed; registering with discovery")
+        shadow.wait_until_ready(timeout=30.0)
+        shadow_output = assert_completion_ok(
+            manager.frontend_port,
+            _HBM_RECOVERY_PROMPT,
+            failure_message="Shadow SGLang HBM recovery failed",
+            success_message="Shadow SGLang HBM recovery OK",
+            retry_timeout=30.0,
+            body_overrides={"temperature": 0},
+        )
+        assert shadow_output == primary_output
+        assert (
+            manager.kv_cache_gms.get_runtime_state().allocation_count
+            == allocation_count
+        )
+        logs = _wait_for_log(shadow, "adopted_hbm_pages=")
+        values = [int(value) for value in re.findall(r"adopted_hbm_pages=(\d+)", logs)]
+        assert values and max(values) > 0, _directory_diagnostics(primary, shadow)
 
 
 # ---------------------------------------------------------------------------
