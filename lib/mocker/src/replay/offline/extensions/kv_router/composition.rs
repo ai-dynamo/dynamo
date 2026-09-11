@@ -186,15 +186,21 @@ impl ReplayComposition for KvReplayComposition {
             bail!("disaggregated Router composition used for aggregated replay");
         };
         validate_runtime_topology("aggregated", args, *num_workers, dp_size, &topology)?;
-        let placement = KvRouterPlacement::new(
+        let router_config = self.router_config.take();
+        let prefill_load_estimator = self.prefill_load_estimator.take();
+        // Set before constructing, not after: the `.take()`s above have already
+        // consumed the one-shot config, so a construction failure must still make
+        // this composition refuse a second call rather than silently rebuild on
+        // defaults.
+        self.placement_created = true;
+        KvRouterPlacement::new(
             args,
-            self.router_config.take(),
-            self.prefill_load_estimator.take(),
+            router_config,
+            prefill_load_estimator,
             topology.len(),
             self.determinism.selector_seed(),
-        );
-        self.placement_created = true;
-        placement
+        )
+        .context("constructing aggregated KV Router placement")
     }
 
     fn create_disaggregated_placements(
@@ -235,10 +241,16 @@ impl ReplayComposition for KvReplayComposition {
             &decode_topology,
         )?;
         let router_config = self.router_config.take();
+        let prefill_load_estimator = self.prefill_load_estimator.take();
+        // Set before constructing, not after the two `?`s below: the `.take()`s
+        // above have already consumed the one-shot config, so a prefill- or
+        // decode-side construction failure must still make this composition
+        // refuse a second call rather than silently rebuild on defaults.
+        self.placement_created = true;
         let prefill = KvRouterPlacement::new(
             prefill_args,
             Some(derive_prefill_router_config(router_config.clone())),
-            self.prefill_load_estimator.take(),
+            prefill_load_estimator,
             prefill_topology.len(),
             self.determinism.selector_seed(),
         )
@@ -251,7 +263,6 @@ impl ReplayComposition for KvReplayComposition {
             self.determinism.selector_seed(),
         )
         .context("constructing decode KV Router placement")?;
-        self.placement_created = true;
         Ok((prefill, decode))
     }
 
@@ -537,6 +548,79 @@ mod tests {
 
         let error = match composition.create_aggregated_placement(1, single_worker_topology()) {
             Ok(_) => panic!("a second call must be refused"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("called more than once"),
+            "{error}"
+        );
+    }
+
+    /// A router config that makes `KvRouterPlacement::new` fail after the
+    /// composition has already `.take()`n it.
+    fn unbuildable_router_config() -> KvRouterConfig {
+        KvRouterConfig {
+            router_policy_config: Some("/definitely/missing/router-policy.yaml".to_string()),
+            ..KvRouterConfig::default()
+        }
+    }
+
+    /// The one-shot config is consumed by `.take()` *before* placement
+    /// construction can fail, so a failed first call leaves the composition just
+    /// as empty as a successful one. If the call-once flag were only set on the
+    /// success path, a retry would silently rebuild on `KvRouterConfig::default()`
+    /// -- a different router than the caller asked for, with no error.
+    #[test]
+    fn a_failed_first_placement_call_still_consumes_the_composition() {
+        let mut aggregated = KvReplayComposition::aggregated(
+            MockEngineArgs::default(),
+            1,
+            Some(unbuildable_router_config()),
+            None,
+            None,
+        );
+        assert!(
+            aggregated
+                .create_aggregated_placement(1, single_worker_topology())
+                .is_err(),
+            "a missing policy-config file must fail placement construction"
+        );
+        let error = match aggregated.create_aggregated_placement(1, single_worker_topology()) {
+            Ok(_) => panic!("a retry after a failed first call must be refused"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("called more than once"),
+            "{error}"
+        );
+
+        let mut disaggregated = KvReplayComposition::disaggregated(
+            MockEngineArgs::default(),
+            MockEngineArgs::default(),
+            1,
+            1,
+            Some(unbuildable_router_config()),
+            None,
+            None,
+        );
+        assert!(
+            disaggregated
+                .create_disaggregated_placements(
+                    1,
+                    single_worker_topology(),
+                    1,
+                    single_worker_topology(),
+                )
+                .is_err(),
+            "a missing policy-config file must fail placement construction"
+        );
+        let error = match disaggregated.create_disaggregated_placements(
+            1,
+            single_worker_topology(),
+            1,
+            single_worker_topology(),
+        ) {
+            Ok(_) => panic!("a retry after a failed first call must be refused"),
             Err(error) => error,
         };
         assert!(
