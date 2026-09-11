@@ -72,7 +72,19 @@ pub trait RequestPlaneServer: Send + Sync {
         system_health: Arc<Mutex<SystemHealth>>,
     ) -> Result<()>;
 
-    /// Unregister one endpoint instance from the server.
+    /// Unregister an endpoint from the server
+    ///
+    /// # Arguments
+    ///
+    /// * `endpoint_name` - Name of the endpoint to unregister
+    /// * `instance_id` - Instance identifier the endpoint was registered with. Several
+    ///   instances in one process can register the same `endpoint_name` on a shared server,
+    ///   so the pair identifies exactly one registration.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if unregistration succeeds or endpoint doesn't exist.
+    /// Errors are only returned for transport-specific failures.
     async fn unregister_endpoint(&self, endpoint_name: &str, instance_id: u64) -> Result<()>;
 
     /// Get server bind address or identifier

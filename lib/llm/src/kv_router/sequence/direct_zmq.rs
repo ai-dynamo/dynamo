@@ -118,6 +118,7 @@ pub(super) async fn start<P: SequencePublisher + 'static>(
         move |observation: crate::direct_zmq_fan_in::FanInObservation| match observation.event {
             FanInEvent::SourceStarted => metrics.source_started(),
             FanInEvent::SourceStopped => metrics.source_stopped(),
+            FanInEvent::Disconnected | FanInEvent::DiscoveryReset => {}
             FanInEvent::Reconnect => metrics.record_reconnect(),
             FanInEvent::Replacement => metrics.record_replacement(),
             FanInEvent::EnvelopeDecodeError => metrics.record_envelope_decode_error(),

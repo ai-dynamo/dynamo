@@ -7,6 +7,9 @@ use dynamo_runtime::config::{
     env_is_truthy, environment_names::llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
 };
 
+use super::common_ext::{CommonExtProvider, extract_guided_decoding_options};
+use super::tools::{ToolChoiceError, validate_openai_tool_choice};
+
 //
 // Hyperparameter Contraints
 //
@@ -22,8 +25,6 @@ pub const TEMPERATURE_RANGE: (f32, f32) = (MIN_TEMPERATURE, MAX_TEMPERATURE);
 pub const MIN_TOP_P: f32 = 0.0;
 /// Maximum allowed value for OpenAI's `top_p` sampling option
 pub const MAX_TOP_P: f32 = 1.0;
-/// Allowed range of values for OpenAI's `top_p` sampling option
-pub const TOP_P_RANGE: (f32, f32) = (MIN_TOP_P, MAX_TOP_P);
 
 /// Minimum allowed value for `min_p`
 pub const MIN_MIN_P: f32 = 0.0;
@@ -203,6 +204,21 @@ pub fn validate_response_format(
                     "`response_format.json_schema.schema` is required when `response_format.type` is `json_schema`"
                 );
             }
+
+            // Schema must be a JSON object — numbers, strings, arrays, and
+            // booleans are not valid JSON Schema documents.
+            if !json_schema.schema.is_object() {
+                anyhow::bail!(
+                    "`response_format.json_schema.schema` must be a JSON object, got {}",
+                    match &json_schema.schema {
+                        serde_json::Value::Array(_) => "array",
+                        serde_json::Value::String(_) => "string",
+                        serde_json::Value::Number(_) => "number",
+                        serde_json::Value::Bool(_) => "boolean",
+                        _ => "non-object",
+                    }
+                );
+            }
             Ok(())
         }
     }
@@ -226,7 +242,7 @@ pub fn validate_temperature(temperature: Option<f32>) -> Result<(), anyhow::Erro
 /// Validates the top_p parameter
 pub fn validate_top_p(top_p: Option<f32>) -> Result<(), anyhow::Error> {
     if let Some(p) = top_p
-        && !(MIN_TOP_P..=MAX_TOP_P).contains(&p)
+        && !(p.is_finite() && p > MIN_TOP_P && p <= MAX_TOP_P)
     {
         anyhow::bail!(
             "Top_p must be between {} and {}, got {}",
@@ -577,25 +593,26 @@ pub fn validate_tool_choice(
 ) -> Result<(), anyhow::Error> {
     use dynamo_protocols::types::ChatCompletionToolChoiceOption;
 
-    let tools_empty = tools.is_none_or(|tools| tools.is_empty());
-
-    match tool_choice {
-        Some(ChatCompletionToolChoiceOption::Required) if tools_empty => {
-            anyhow::bail!("tool_choice is \"required\" but tools is empty");
+    match validate_openai_tool_choice(tool_choice.as_ref(), tools) {
+        Ok(()) => Ok(()),
+        Err(ToolChoiceError::EmptyTools) => {
+            anyhow::bail!("tool_choice is \"required\" but tools is empty")
         }
-        Some(ChatCompletionToolChoiceOption::Named(named)) => {
-            let tools = tools.unwrap_or(&[]);
-            if !tools.iter().any(|t| t.function.name == named.function.name) {
-                anyhow::bail!(
-                    "tool named \"{}\" in tool_choice is not present in tools",
-                    named.function.name
-                );
+        Err(ToolChoiceError::MissingTools) => match tool_choice {
+            Some(ChatCompletionToolChoiceOption::Required) => {
+                anyhow::bail!("tool_choice is \"required\" but tools is empty")
             }
+            Some(ChatCompletionToolChoiceOption::Named(named)) => anyhow::bail!(
+                "tool named \"{}\" in tool_choice is not present in tools",
+                named.function.name
+            ),
+            _ => Err(ToolChoiceError::MissingTools.into()),
+        },
+        Err(ToolChoiceError::ToolNotFound(name)) => {
+            anyhow::bail!("tool named \"{name}\" in tool_choice is not present in tools")
         }
-        _ => {}
+        Err(error) => Err(error.into()),
     }
-
-    Ok(())
 }
 
 /// Validates reasoning effort parameter
@@ -853,6 +870,57 @@ pub fn validate_chat_template_args(
     Ok(())
 }
 
+/// Rejects a request with conflicting guided-decoding options.
+///
+/// The conflict rule itself lives in [`crate::protocols::common::GuidedDecodingOptions::validate`],
+/// reached here through `from_optional`, so this function adds no second copy of it. What it adds is
+/// the call at the request-validation boundary: every other field is checked here, where
+/// a failure becomes a 400 naming the problem, while guided decoding was checked only
+/// later inside `extract_sampling_options`. By that point the error is an untyped
+/// `anyhow` with nothing for the HTTP layer to branch on, so a malformed request was
+/// reported to the caller as `500 Internal Server Error`.
+///
+/// `structural_tag` has no `CommonExtProvider` getter, matching `extract_sampling_options`,
+/// which also passes `None` for it.
+pub fn validate_guided_decoding(request: &impl CommonExtProvider) -> Result<(), anyhow::Error> {
+    extract_guided_decoding_options(request)?;
+    Ok(())
+}
+
+/// vLLM `ChatCompletionRequest` (`mode="before"`): both flags true on the raw
+/// payload is an error. Omitted `add_generation_prompt` finalizes to true (vLLM
+/// 0.27.1 and the Python frontend), so `continue_final_message=true` requires
+/// an explicit `add_generation_prompt=false`. Generic HuggingFace continuation
+/// is not assistant-only; last-message role is checked at truncation time.
+pub fn validate_continue_final_message(
+    add_generation_prompt: Option<bool>,
+    continue_final_message: Option<bool>,
+) -> Result<(), anyhow::Error> {
+    if continue_final_message != Some(true) {
+        return Ok(());
+    }
+    if add_generation_prompt.unwrap_or(true) {
+        anyhow::bail!(
+            "Cannot set both `continue_final_message` and `add_generation_prompt` to True."
+        );
+    }
+    Ok(())
+}
+
+/// Chat-template generation controls are meaningless on `/v1/completions`.
+/// Reject them so they are not silently ignored after landing on `CommonExt`.
+pub fn validate_chat_only_generation_flags(
+    add_generation_prompt: Option<bool>,
+    continue_final_message: Option<bool>,
+) -> Result<(), anyhow::Error> {
+    if add_generation_prompt.is_some() || continue_final_message.is_some() {
+        anyhow::bail!(
+            "`add_generation_prompt` and `continue_final_message` are only supported on /v1/chat/completions"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -933,5 +1001,42 @@ mod tests {
         let err =
             validate_no_unsupported_fields_with_ignore(&unsupported_fields, true).unwrap_err();
         assert!(err.to_string().contains("stop_token_ids"));
+    }
+
+    #[test]
+    fn validate_top_p_rejects_zero() {
+        let err = validate_top_p(Some(0.0)).unwrap_err();
+        assert!(err.to_string().contains("Top_p"));
+    }
+
+    #[test]
+    fn validate_top_p_accepts_valid_values() {
+        validate_top_p(Some(0.1)).unwrap();
+        validate_top_p(Some(1.0)).unwrap();
+        validate_top_p(None).unwrap();
+    }
+
+    #[test]
+    fn validate_response_format_rejects_non_object_schema() {
+        let fmt = serde_json::from_value(json!({
+            "type": "json_schema",
+            "json_schema": { "name": "test", "schema": 42 }
+        }))
+        .unwrap();
+        let err = validate_response_format(&Some(fmt)).unwrap_err();
+        assert!(err.to_string().contains("must be a JSON object"));
+    }
+
+    #[test]
+    fn validate_response_format_accepts_valid_object_schema() {
+        let fmt = serde_json::from_value(json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "test",
+                "schema": { "type": "object", "properties": {} }
+            }
+        }))
+        .unwrap();
+        validate_response_format(&Some(fmt)).unwrap();
     }
 }

@@ -7,12 +7,16 @@ use anyhow::Result;
 use dynamo_kv_router::{
     ConcurrentRadixTreeCompressed,
     approx::PruneConfig,
-    config::KvRouterConfig,
+    config::{ApproximateCachePolicyKind, KvRouterConfig},
     indexer::{
-        KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError, LowerTierIndexers,
-        ThreadPoolIndexer, record_unsupported_residency_event,
+        ApproximateLruIncarnation, ApproximateLruStats, ApproximateRetentionConfig, KvIndexer,
+        KvIndexerInterface, KvIndexerMetrics, KvRouterError, LowerTierIndexers, ThreadPoolIndexer,
+        record_unsupported_residency_event,
     },
-    protocols::{DpRank, KvCacheEventData, ResidencyProjection, RouterEvent, WorkerId},
+    protocols::{
+        DpRank, KvCacheEventData, ResidencyProjection, ResidencyRoutingSnapshot, RouterEvent,
+        WorkerId,
+    },
 };
 
 // Re-export tiered-match types so internal callers (`indexer::TieredMatchDetails`)
@@ -37,6 +41,7 @@ pub(crate) static ZMQ_TEST_ISOLATION: tokio::sync::Mutex<()> = tokio::sync::Mute
 pub use self::embedding_cache::{
     EmbeddingCacheIndexer, preprocessed_multimodal_cache_keys, try_build_cache_indexer,
 };
+pub(crate) use self::recording::ApproximateRequestLease;
 use self::remote::RemoteIndexer;
 pub use self::remote::{ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use self::side::SideIndexer;
@@ -83,6 +88,38 @@ pub enum Indexer {
     None,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResolvedApproximatePrimaryPolicy {
+    Disabled,
+    Ttl,
+    Lru,
+    TtlRemoteFallback,
+}
+
+fn resolve_approximate_primary_policy(
+    config: &KvRouterConfig,
+) -> Result<ResolvedApproximatePrimaryPolicy> {
+    if config.use_kv_events
+        && config.router_approximate_cache_policy == ApproximateCachePolicyKind::Lru
+    {
+        anyhow::bail!(
+            "router_approximate_cache_policy=lru requires use_kv_events=false; the local side indexer is TTL-only"
+        );
+    }
+    if config.overlap_score_credit <= 0.0 {
+        return Ok(ResolvedApproximatePrimaryPolicy::Disabled);
+    }
+    if config.use_kv_events
+        || config.router_approximate_cache_policy == ApproximateCachePolicyKind::Ttl
+    {
+        return Ok(ResolvedApproximatePrimaryPolicy::Ttl);
+    }
+    if config.use_remote_indexer || config.serve_indexer {
+        return Ok(ResolvedApproximatePrimaryPolicy::TtlRemoteFallback);
+    }
+    Ok(ResolvedApproximatePrimaryPolicy::Lru)
+}
+
 async fn dump_local_events(
     mut events: Vec<RouterEvent>,
     lower_tiers: &LowerTierIndexers,
@@ -110,11 +147,20 @@ impl Indexer {
         }
     }
 
+    pub fn set_residency_routing_snapshot(&self, snapshot: ResidencyRoutingSnapshot) {
+        match self {
+            Self::KvIndexer { lower_tier, .. } | Self::Concurrent { lower_tier, .. } => {
+                lower_tier.set_residency_routing_snapshot(snapshot)
+            }
+            Self::Remote { .. } | Self::None => {}
+        }
+    }
+
     pub(crate) fn supports_overlap_refresh(&self) -> bool {
         matches!(self, Self::KvIndexer { .. } | Self::Concurrent { .. })
     }
 
-    pub(crate) fn supports_router_hint_chain_retention(&self) -> bool {
+    pub(crate) fn supports_kv_transfer_chain_retention(&self) -> bool {
         matches!(
             self,
             Self::KvIndexer {
@@ -136,8 +182,17 @@ impl Indexer {
         model_name: Option<&str>,
         cancellation_token: CancellationToken,
     ) -> Result<Self> {
-        if kv_router_config.overlap_score_credit == 0.0 {
+        let approximate_policy = resolve_approximate_primary_policy(kv_router_config)?;
+        if approximate_policy == ResolvedApproximatePrimaryPolicy::Disabled {
             return Ok(Self::None);
+        }
+
+        if approximate_policy == ResolvedApproximatePrimaryPolicy::TtlRemoteFallback {
+            tracing::warn!(
+                use_remote_indexer = kv_router_config.use_remote_indexer,
+                serve_indexer = kv_router_config.serve_indexer,
+                "Approximate LRU requires a router-local primary indexer; falling back to TTL"
+            );
         }
 
         if kv_router_config.router_predicted_ttl_secs.is_some() && !kv_router_config.use_kv_events {
@@ -175,18 +230,30 @@ impl Indexer {
 
         if !kv_router_config.use_kv_events {
             let kv_indexer_metrics = KvIndexerMetrics::from_component(component);
-            let prune_config = Some(PruneConfig {
+            let prune_config = PruneConfig {
                 ttl: Duration::from_secs_f64(kv_router_config.router_ttl_secs),
-            });
+            };
+            let retention = if approximate_policy == ResolvedApproximatePrimaryPolicy::Lru {
+                tracing::info!(
+                    "Starting local primary approximate indexer with capacity-bounded LRU retention"
+                );
+                ApproximateRetentionConfig::Lru {
+                    fallback_ttl: prune_config,
+                }
+            } else {
+                ApproximateRetentionConfig::Ttl(prune_config)
+            };
             if kv_router_config.router_event_threads > 1 {
                 return Ok(Self::Concurrent {
-                    primary: Arc::new(ThreadPoolIndexer::new_with_metrics_and_pruning(
-                        ConcurrentRadixTreeCompressed::new(),
-                        kv_router_config.router_event_threads as usize,
-                        block_size,
-                        Some(kv_indexer_metrics.clone()),
-                        prune_config,
-                    )),
+                    primary: Arc::new(
+                        ThreadPoolIndexer::new_with_metrics_and_approximate_retention(
+                            ConcurrentRadixTreeCompressed::new(),
+                            kv_router_config.router_event_threads as usize,
+                            block_size,
+                            Some(kv_indexer_metrics.clone()),
+                            Some(retention),
+                        ),
+                    ),
                     lower_tier: LowerTierIndexers::new_with_metrics(
                         kv_router_config.router_event_threads as usize,
                         block_size,
@@ -198,11 +265,11 @@ impl Indexer {
             }
 
             return Ok(Self::KvIndexer {
-                primary: KvIndexer::new_with_pruning(
+                primary: KvIndexer::new_with_approximate_retention(
                     cancellation_token.child_token(),
                     block_size,
                     kv_indexer_metrics.clone(),
-                    prune_config,
+                    Some(retention),
                 ),
                 lower_tier: LowerTierIndexers::new_with_metrics(
                     1,
@@ -271,11 +338,9 @@ impl Indexer {
                 ..
             } => dump_local_events(primary.dump_events().await?, lower_tier).await,
             Self::Remote { .. } => Ok(Vec::new()),
-            Self::None => {
-                panic!(
-                    "Cannot dump events: indexer does not exist (is overlap_score_credit set to 0?)"
-                );
-            }
+            Self::None => Err(KvRouterError::Unsupported(
+                "event dumping requires a KV indexer".to_string(),
+            )),
         }
     }
 
@@ -417,6 +482,39 @@ impl Indexer {
         }
         Ok(())
     }
+
+    pub(crate) fn uses_approximate_lru(&self) -> bool {
+        match self {
+            Self::KvIndexer { primary, .. } => primary.approximate_lru_enabled(),
+            Self::Concurrent { primary, .. } => primary.approximate_lru_enabled(),
+            Self::Remote { .. } | Self::None => false,
+        }
+    }
+
+    pub(crate) fn set_approximate_lru_capacity_now(
+        &self,
+        worker: dynamo_kv_router::protocols::WorkerWithDpRank,
+        incarnation: ApproximateLruIncarnation,
+        capacity: Option<usize>,
+    ) -> Result<(), KvRouterError> {
+        match self {
+            Self::KvIndexer { primary, .. } => {
+                primary.set_approximate_lru_capacity_now(worker, incarnation, capacity)
+            }
+            Self::Concurrent { primary, .. } => {
+                primary.set_approximate_lru_capacity_now(worker, incarnation, capacity)
+            }
+            Self::Remote { .. } | Self::None => Ok(()),
+        }
+    }
+
+    pub(crate) async fn approximate_lru_stats(&self) -> Result<ApproximateLruStats, KvRouterError> {
+        match self {
+            Self::KvIndexer { primary, .. } => primary.approximate_lru_stats().await,
+            Self::Concurrent { primary, .. } => primary.approximate_lru_stats().await,
+            Self::Remote { .. } | Self::None => Ok(ApproximateLruStats::default()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -545,11 +643,11 @@ mod tests {
     }
 
     #[test]
-    fn router_hint_chain_retention_requires_event_driven_primary() {
-        assert!(make_test_indexer().supports_router_hint_chain_retention());
-        assert!(make_test_concurrent_indexer().supports_router_hint_chain_retention());
-        assert!(!make_test_concurrent_approx_indexer().supports_router_hint_chain_retention());
-        assert!(!Indexer::None.supports_router_hint_chain_retention());
+    fn kv_transfer_chain_retention_requires_event_driven_primary() {
+        assert!(make_test_indexer().supports_kv_transfer_chain_retention());
+        assert!(make_test_concurrent_indexer().supports_kv_transfer_chain_retention());
+        assert!(!make_test_concurrent_approx_indexer().supports_kv_transfer_chain_retention());
+        assert!(!Indexer::None.supports_kv_transfer_chain_retention());
     }
 
     async fn flush_indexer(indexer: &Indexer) {
