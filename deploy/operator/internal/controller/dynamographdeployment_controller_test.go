@@ -57,6 +57,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 func newDynamoGraphDeploymentControllerTestScheme(t testing.TB) *runtime.Scheme {
@@ -147,6 +148,43 @@ func TestDynamoGraphDeploymentReconcileLocksProviderBeforeRejectingStoredCheckpo
 		ready.Message,
 	)
 	require.Zero(t, stored.Status.ObservedGeneration)
+}
+
+func TestDynamoGraphDeploymentReconcilePersistsComponentProgramLPXRejection(t *testing.T) {
+	t.Log("Create a finalized DGD durably assigned to the component provider with an LPX component")
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-dgd",
+			Namespace:  "default",
+			Generation: 4,
+			Annotations: map[string]string{
+				commonconsts.KubeAnnotationWorkloadProvider: commonconsts.WorkloadProviderComponent,
+			},
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "serving",
+				ComponentType: v1beta1.ComponentTypeLPX,
+			}},
+		},
+	}
+	controller_common.AddFinalizer(dgd)
+	reconciler := createTestDGDReconcilerWithStatus(dgd)
+
+	t.Log("Reconcile through the outer controller")
+	_, err := reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(dgd)})
+	require.ErrorIs(t, err, reconcile.TerminalError(nil))
+
+	t.Log("Verify the outer controller persisted the complete program-owned failure status")
+	stored := &v1beta1.DynamoGraphDeployment{}
+	require.NoError(t, reconciler.Client.Get(t.Context(), client.ObjectKeyFromObject(dgd), stored))
+	require.Equal(t, commonconsts.WorkloadProviderComponent, stored.Annotations[commonconsts.KubeAnnotationWorkloadProvider])
+	require.Equal(t, v1beta1.DGDStateFailed, stored.Status.State)
+	ready := meta.FindStatusCondition(stored.Status.Conditions, "Ready")
+	require.NotNil(t, ready)
+	require.Equal(t, metav1.ConditionFalse, ready.Status)
+	require.Equal(t, "LPXRejected", ready.Reason)
+	require.Equal(t, `component "serving" of type "lpx" requires the Grove workload provider`, ready.Message)
 }
 
 func TestDynamoGraphDeploymentReconcileFinalizesDeletingStoredCheckpointIncompatibility(t *testing.T) {

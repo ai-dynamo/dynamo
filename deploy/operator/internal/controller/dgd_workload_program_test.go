@@ -117,6 +117,30 @@ func TestSelectedGroveProgramDoesNotFallbackWhenUnavailable(t *testing.T) {
 	assert.Contains(t, ready.Message, "Grove is disabled")
 }
 
+func TestComponentProgramRejectsExternallyManagedComponents(t *testing.T) {
+	t.Log("Create a component-provider DGD containing an externally managed component")
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Generation: 4},
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "serving",
+				ComponentType: nvidiacomv1beta1.ComponentTypeLPX,
+			}},
+		},
+	}
+
+	t.Log("Reconcile the component program")
+	result, err := (&componentProgram{}).Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
+	require.ErrorIs(t, err, reconcile.TerminalError(nil))
+
+	t.Log("Verify the program returns the public LPX rejection without a terminal-error prefix")
+	ready := meta.FindStatusCondition(result.Status.Conditions, "Ready")
+	require.NotNil(t, ready)
+	assert.Equal(t, metav1.ConditionFalse, ready.Status)
+	assert.Equal(t, "LPXRejected", ready.Reason)
+	assert.Equal(t, `component "serving" of type "lpx" requires the Grove workload provider`, ready.Message)
+}
+
 func TestNewWorkloadProgramResultCopiesStatus(t *testing.T) {
 	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
 		Status: nvidiacomv1beta1.DynamoGraphDeploymentStatus{

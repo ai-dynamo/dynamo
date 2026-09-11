@@ -184,13 +184,6 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 
-	// LPX workloads have their own Grove owner; component-provider rendering cannot realize them.
-	if dynamoDeployment.HasLPXComponent() && provider != workloadProviderGrove {
-		programResult := newWorkloadProgramResult(dynamoDeployment)
-		programResult.Fail(dynamoDeployment.Generation, "LPXRejected", fmt.Errorf("LPX requires the Grove workload provider"))
-		return ctrl.Result{}, r.persistWorkloadProgramResult(ctx, dynamoDeployment, programResult)
-	}
-
 	program, err := r.selectWorkloadProgram(provider)
 	if err != nil {
 		return ctrl.Result{}, err
