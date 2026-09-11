@@ -616,6 +616,15 @@ def make_chat_health_check(port: int, model: str):
             method=payload.method,
             log_level=10,
         )
+        # response.raise_for_status() (called inside response_handler) only
+        # puts the status line in the exception, not the body -- and the
+        # body is where the frontend actually says *why* (no instances
+        # registered, model not found, ...). Surface it here before that.
+        if not resp.ok:
+            raise RuntimeError(
+                f"chat health check got HTTP {resp.status_code} from {resp.url}: "
+                f"{resp.text[:500]!r}"
+            )
         # Validate structure only; expected_response is empty
         payload.response_handler(resp)
         return True
@@ -642,6 +651,13 @@ def make_completions_health_check(port: int, model: str):
             method=payload.method,
             log_level=10,
         )
+        # See make_chat_health_check: surface the response body, since
+        # raise_for_status() alone only reports the status line.
+        if not resp.ok:
+            raise RuntimeError(
+                f"completions health check got HTTP {resp.status_code} from "
+                f"{resp.url}: {resp.text[:500]!r}"
+            )
         out = payload.response_handler(resp)
         if not out:
             raise ValueError(f"completions health check got empty response: {out!r}")
