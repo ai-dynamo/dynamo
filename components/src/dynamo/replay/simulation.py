@@ -60,12 +60,13 @@ class DynamoReplayRunnerFactory:
 
     def estimate_host_resources(self, workload, *, concurrency=None):
         """Qualify lazy allocation only when the loaded native binding supports it."""
-        from dynamo import _core
         from aisimulate.resources import (
+            WORKER_BASELINE_BYTES,
             ResourceEstimate,
             estimate_workload,
-            WORKER_BASELINE_BYTES,
         )
+
+        from dynamo import _core
 
         fallback = estimate_workload(workload, stack="dynamo", concurrency=concurrency)
         active = concurrency or workload.get("concurrency")
