@@ -93,8 +93,12 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 	if !prometheusOn {
 		sourced = append(sourced, "NIXL_TELEMETRY_ENABLE")
 	}
-	if prometheusOn && !strings.EqualFold(strings.TrimSpace(enabled.Value), "y") {
-		return nil
+	if prometheusOn {
+		switch strings.ToLower(enabled.Value) {
+		case "y", "1", "yes", "on", "true", "enable":
+		default:
+			return nil
+		}
 	}
 
 	// Only the Prometheus exporter binds a port per rank, so activate on the
