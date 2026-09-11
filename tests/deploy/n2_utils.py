@@ -78,4 +78,25 @@ def compatibility_spec(
         spec.set_service_env_var(service, "HF_HUB_OFFLINE", "1")
         spec.set_service_env_var(service, "TRANSFORMERS_OFFLINE", "1")
         spec.set_service_env_var(service, "DYN_REQUEST_PLANE", "tcp")
+    # Check the mounted snapshot before starting the worker. Reading a byte also
+    # catches missing blob targets behind Hugging Face snapshot symlinks.
+    worker = next(c for c in spec.spec()["spec"]["components"] if c["name"] == "decode")
+    worker["podTemplate"]["spec"].setdefault("initContainers", []).append(
+        {
+            "name": "check-model-snapshot",
+            "image": pair.worker,
+            "command": ["python3", "-c"],
+            "args": [
+                "import pathlib, sys\n"
+                "p = pathlib.Path(sys.argv[1])\n"
+                "for name in ('config.json', 'tokenizer.json', 'model.safetensors'):\n"
+                "    print(f'Checking {p / name}', flush=True)\n"
+                "    with (p / name).open('rb') as f:\n"
+                "        if not f.read(1):\n"
+                "            raise RuntimeError(f'Empty model file: {p / name}')\n",
+                snapshot,
+            ],
+            "volumeMounts": [{"name": pvc, "mountPath": mount, "readOnly": True}],
+        }
+    )
     return spec

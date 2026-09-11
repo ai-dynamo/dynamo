@@ -291,7 +291,20 @@ class ServiceSpec:
         self._spec["envs"] = value
 
     def add_pvc_mount(self, pvc_name: str, mount_point: str) -> None:
-        """Add a service-level volumeMount for a PVC declared in ``spec.pvcs``. Idempotent."""
+        """Mount an existing PVC using the service's CRD schema. Idempotent."""
+        if self._schema == SCHEMA_V1BETA1:
+            pod = self._spec.setdefault("podTemplate", {}).setdefault("spec", {})
+            volumes = pod.setdefault("volumes", [])
+            if not any(v.get("name") == pvc_name for v in volumes):
+                volumes.append(
+                    {"name": pvc_name, "persistentVolumeClaim": {"claimName": pvc_name}}
+                )
+            container = self._main_container(create=True)
+            assert container is not None
+            mounts = container.setdefault("volumeMounts", [])
+            if not any(m.get("name") == pvc_name for m in mounts):
+                mounts.append({"name": pvc_name, "mountPath": mount_point})
+            return
         mounts = self._spec.setdefault("volumeMounts", [])
         if not any(m.get("name") == pvc_name for m in mounts):
             mounts.append({"name": pvc_name, "mountPoint": mount_point})
@@ -605,6 +618,13 @@ class DeploymentSpec:
         service, with ``HF_HOME`` pointed at it so models come from the shared cache
         instead of HuggingFace. Idempotent; used by CI via --model-cache-pvc.
         """
+        if self._schema == SCHEMA_V1BETA1:
+            for service in self.services:
+                service.add_pvc_mount(pvc_name, mount_point)
+                envs = service.envs
+                if not any(e.get("name") == "HF_HOME" for e in envs):
+                    service.envs = [*envs, {"name": "HF_HOME", "value": mount_point}]
+            return
         spec = self._deployment_spec["spec"]
         pvcs = spec.setdefault("pvcs", [])
         if not any(p.get("name") == pvc_name for p in pvcs):

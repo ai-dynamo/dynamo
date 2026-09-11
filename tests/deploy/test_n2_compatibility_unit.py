@@ -4,6 +4,8 @@
 import ast
 import json
 import logging
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -69,10 +71,99 @@ def test_example_patching_preserves_command_and_sets_component_versions(scenario
         assert "--embedding-worker" in worker["args"]
         assert "--use-sglang-tokenizer" in worker["args"]
     assert MODELS[scenario][1] in spec["decode"].model
-    assert spec.spec()["spec"]["pvcs"] == [{"name": "shared", "create": False}]
+    assert "pvcs" not in spec.spec()["spec"]
+    for component in components:
+        pod = component["podTemplate"]["spec"]
+        assert {
+            "name": "shared",
+            "persistentVolumeClaim": {"claimName": "shared"},
+        } in pod["volumes"]
+        main = next(c for c in pod["containers"] if c["name"] == "main")
+        assert {"name": "shared", "mountPath": "/models"} in main["volumeMounts"]
+        assert {"name": "HF_HOME", "value": "/models"} in main["env"]
     assert runtime_version("registry:5000/fe:1.5.0.dev20260911-ci") == "1.5.0"
     with pytest.raises(ValueError):
         compatibility_spec(ROOT, pair, scenario, "test", "", "/models")
+
+
+@pytest.mark.parametrize("schema", ["v1alpha1", "v1beta1"])
+def test_model_cache_mount_preserves_schema_and_is_idempotent(tmp_path, schema):
+    container = {"name": "main", "env": [{"name": "KEEP", "value": "yes"}]}
+    if schema == "v1beta1":
+        body = {
+            "components": [
+                {"name": "decode", "podTemplate": {"spec": {"containers": [container]}}}
+            ]
+        }
+    else:
+        body = {"services": {"decode": {"envs": [{"name": "KEEP", "value": "yes"}]}}}
+    path = tmp_path / "dgd.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "apiVersion": f"nvidia.com/{schema}",
+                "kind": "DynamoGraphDeployment",
+                "metadata": {"name": "test"},
+                "spec": body,
+            }
+        )
+    )
+    spec = DeploymentSpec(str(path))
+    spec.mount_model_cache_pvc("cache", "/cache")
+    first = json.dumps(spec.spec(), sort_keys=True)
+    spec.mount_model_cache_pvc("cache", "/cache")
+    assert json.dumps(spec.spec(), sort_keys=True) == first
+    result = spec.spec()["spec"]
+    if schema == "v1beta1":
+        assert "pvcs" not in result and "envs" not in result
+        component = result["components"][0]
+        assert "volumeMounts" not in component
+        pod = component["podTemplate"]["spec"]
+        assert pod["volumes"] == [
+            {"name": "cache", "persistentVolumeClaim": {"claimName": "cache"}}
+        ]
+        assert pod["containers"][0]["volumeMounts"] == [
+            {"name": "cache", "mountPath": "/cache"}
+        ]
+        assert pod["containers"][0]["env"] == [
+            {"name": "KEEP", "value": "yes"},
+            {"name": "HF_HOME", "value": "/cache"},
+        ]
+    else:
+        assert result["pvcs"] == [{"name": "cache", "create": False}]
+        assert result["envs"] == [{"name": "HF_HOME", "value": "/cache"}]
+        assert result["services"]["decode"]["volumeMounts"] == [
+            {"name": "cache", "mountPoint": "/cache"}
+        ]
+        assert result["services"]["decode"]["envs"] == [
+            {"name": "KEEP", "value": "yes"}
+        ]
+
+
+def test_snapshot_preflight_reads_files_and_rejects_missing_blob(tmp_path):
+    pair = version_matrix(
+        {
+            "1.4": {"frontend": "fe:1.4.2", "worker": "wk:1.4.2"},
+            "1.3": {"frontend": "fe:1.3.2", "worker": "wk:1.3.2"},
+        },
+        "1.5",
+        "fe:1.5.0",
+        "wk:1.5.0",
+    )[0]
+    spec = compatibility_spec(ROOT, pair, "chat", "test", "cache", "/models")
+    init = spec.spec()["spec"]["components"][1]["podTemplate"]["spec"][
+        "initContainers"
+    ][0]
+    assert init["volumeMounts"] == [
+        {"name": "cache", "mountPath": "/models", "readOnly": True}
+    ]
+    for name in ["config.json", "tokenizer.json", "model.safetensors"]:
+        (tmp_path / name).write_bytes(b"test")
+    command = [sys.executable, "-c", init["args"][0], str(tmp_path)]
+    assert subprocess.run(command, capture_output=True).returncode == 0
+    (tmp_path / "model.safetensors").unlink()
+    (tmp_path / "model.safetensors").symlink_to(tmp_path / "missing-blob")
+    assert subprocess.run(command, capture_output=True).returncode != 0
 
 
 def test_preparation_job_downloads_the_exact_snapshots_without_a_gpu():
