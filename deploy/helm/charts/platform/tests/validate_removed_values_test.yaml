@@ -59,6 +59,35 @@ tests:
     asserts:
       - notFailedTemplate: {}
 
+  - it: should reject bundled KAI with bundled Grove without the stale PodGroup override
+    set:
+      global.kai-scheduler.install: true
+      global.grove.install: true
+    asserts:
+      - failedTemplate:
+          errorPattern: "bundled KAI Scheduler must disable stale PodGroup eviction"
+
+  - it: should allow bundled KAI with bundled Grove and the stale PodGroup override
+    set:
+      global.kai-scheduler.install: true
+      global.grove.install: true
+      kai-scheduler.scheduler.args.default-staleness-grace-period: "-1"
+    asserts:
+      - notFailedTemplate: {}
+
+  - it: should allow bundled KAI with externally managed Grove without the override
+    set:
+      global.kai-scheduler.install: true
+      global.grove.enabled: true
+    asserts:
+      - notFailedTemplate: {}
+
+  - it: should allow bundled KAI without Grove and preserve KAI cleanup
+    set:
+      global.kai-scheduler.install: true
+    asserts:
+      - notFailedTemplate: {}
+
   # --- Default values should render cleanly ---
 
   - it: should render successfully with default values
