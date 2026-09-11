@@ -69,7 +69,7 @@ func EvaluateLPXGroveReadiness(ctx context.Context, reader client.Reader, source
 	for _, member := range lpx.Components(source) {
 		if member.ComponentName != component.ComponentName {
 			statuses[member.ComponentName] = v1beta1.ComponentReplicaStatus{
-				ComponentKind: v1beta1.ComponentKindPodClique, RuntimeNamespace: status.RuntimeNamespace,
+				ComponentKind: v1beta1.ComponentKindPodClique, RuntimeNamespace: source.GetDynamoNamespaceForComponent(member),
 			}
 		}
 	}
