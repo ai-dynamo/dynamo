@@ -2599,7 +2599,12 @@ pub(super) fn log_pre_commit_error(request_id: &str, error_response: &ErrorRespo
             "Client disconnected before the first backend event"
         );
     } else {
-        tracing::error!(request_id, "Backend error detected: {:?}", error_response);
+        tracing::error!(
+            request_id,
+            status = %error_response.0,
+            error = ?error_response.1.0,
+            "Backend error detected"
+        );
     }
 }
 
