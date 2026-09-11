@@ -77,7 +77,9 @@ vllm:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.28.0-ubuntu2404
+    # vLLM-Omni 0.29 uses the vLLM 0.29 KV-cache layout API (including
+    # compute_layout_strides), so the runtime base must move in lockstep.
+    runtime_image_tag: v0.29.0-ubuntu2404
     # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
     # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
     # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM

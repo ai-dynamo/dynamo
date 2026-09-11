@@ -7,9 +7,9 @@
       "baseline_sbom": "cuda@2ab6381d-amd64.cdx.json",
       "baseline_tag": "13.0.2-base-ubuntu24.04",
       "capture_note": "ubuntu rootfs drift only (CUDA layers identical); delta-validation skipped, validated at runtime in CI",
-      "from_digest": "sha256:6a278041c910af1a6db0f3555aac30dbdf93d7acb01008656d99007cf7781a3a",
+      "from_digest": "sha256:563b8929d66e0891adf9cf1062d1d31d7003b1a5b0cb87a51ba4e92055b5fdb1",
       "from_image": "vllm/vllm-openai",
-      "from_tag": "v0.27.1-ubuntu2404",
+      "from_tag": "v0.29.0-ubuntu2404",
       "layer_prefix_check_skipped": true,
       "platform": "linux/amd64"
     },
@@ -19,9 +19,9 @@
       "baseline_sbom": "cuda@2ab6381d-arm64.cdx.json",
       "baseline_tag": "13.0.2-base-ubuntu24.04",
       "capture_note": "ubuntu rootfs drift only (CUDA layers identical); delta-validation skipped, validated at runtime in CI",
-      "from_digest": "sha256:6a278041c910af1a6db0f3555aac30dbdf93d7acb01008656d99007cf7781a3a",
+      "from_digest": "sha256:563b8929d66e0891adf9cf1062d1d31d7003b1a5b0cb87a51ba4e92055b5fdb1",
       "from_image": "vllm/vllm-openai",
-      "from_tag": "v0.27.1-ubuntu2404",
+      "from_tag": "v0.29.0-ubuntu2404",
       "layer_prefix_check_skipped": true,
       "platform": "linux/arm64"
     },
