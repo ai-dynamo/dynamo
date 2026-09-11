@@ -88,16 +88,6 @@ impl EngineRoutePolicy {
         policy
     }
 
-    /// Whether `route` (the full route string after `/engine/`) is permitted by this policy.
-    pub fn is_allowed(&self, route: &str) -> bool {
-        match self {
-            EngineRoutePolicy::AllowAll => true,
-            EngineRoutePolicy::DisableAll => false,
-            EngineRoutePolicy::Allowlist(set) => set.contains(route),
-            EngineRoutePolicy::Denylist(set) => !set.contains(route),
-        }
-    }
-
     /// The operator's *explicit* decision for `route`, or `None` if the operator
     /// set no rule that names it (so the route's [`RouteDefault`] governs).
     ///
@@ -143,7 +133,7 @@ impl RouteDefault {
         matches!(self, RouteDefault::Enabled | RouteDefault::Gated(true))
     }
 
-    /// Non-`Enabled` routes ship restricted; overriding them on warrants a warning.
+    /// Non-`Enabled` routes ship restricted; overriding them warrants a warning.
     fn is_sensitive(self) -> bool {
         !matches!(self, RouteDefault::Enabled)
     }
@@ -205,11 +195,6 @@ impl EngineRouteRegistry {
     /// The resolved policy governing which routes are served.
     pub fn policy(&self) -> &EngineRoutePolicy {
         &self.policy
-    }
-
-    /// Whether `route` is permitted by the resolved policy.
-    pub fn is_allowed(&self, route: &str) -> bool {
-        self.policy.is_allowed(route)
     }
 
     /// Register a callback for a route (e.g., "control/start_profile" for /engine/control/start_profile)
@@ -280,20 +265,30 @@ mod tests {
         items.iter().map(|s| s.to_string()).collect()
     }
 
-    // ---- Policy: is_allowed truth table for each variant ----
+    // ---- Policy: explicit_decision truth table for each variant ----
 
     #[test]
-    fn test_policy_is_allowed() {
-        assert!(EngineRoutePolicy::AllowAll.is_allowed("anything"));
-        assert!(!EngineRoutePolicy::DisableAll.is_allowed("control/start_profile"));
+    fn test_policy_explicit_decision() {
+        // None = no explicit rule, so the route's RouteDefault governs.
+        assert_eq!(EngineRoutePolicy::AllowAll.explicit_decision("anything"), None);
+        assert_eq!(
+            EngineRoutePolicy::DisableAll.explicit_decision("control/start_profile"),
+            Some(false)
+        );
 
         let allow = EngineRoutePolicy::Allowlist(set(&["control/start_profile"]));
-        assert!(allow.is_allowed("control/start_profile"));
-        assert!(!allow.is_allowed("control/update_weights_from_disk"));
+        assert_eq!(allow.explicit_decision("control/start_profile"), Some(true));
+        assert_eq!(
+            allow.explicit_decision("control/update_weights_from_disk"),
+            Some(false)
+        );
 
         let deny = EngineRoutePolicy::Denylist(set(&["control/update_weights_from_disk"]));
-        assert!(!deny.is_allowed("control/update_weights_from_disk"));
-        assert!(deny.is_allowed("control/start_profile"));
+        assert_eq!(
+            deny.explicit_decision("control/update_weights_from_disk"),
+            Some(false)
+        );
+        assert_eq!(deny.explicit_decision("control/start_profile"), None);
     }
 
     // ---- Policy: from_env resolution & precedence ----
