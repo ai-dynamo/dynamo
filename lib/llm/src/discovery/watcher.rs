@@ -1449,15 +1449,14 @@ mod tests {
             worker_set.set_lifecycle_cancellation(cancellation.clone());
             worker_set.chat_engine = Some(engine);
             let retained_engine = worker_set.chat_engine.clone().unwrap();
-            let request = serde_json::from_value::<NvCreateChatCompletionRequest>(
-                serde_json::json!({
+            let request =
+                serde_json::from_value::<NvCreateChatCompletionRequest>(serde_json::json!({
                     "model": "mock-llama",
                     "messages": [{"role": "user", "content": "What is the answer?"}],
                     "stream": true,
                     "nvext": {"agent_hints": {"speculative_prefill": true}}
-                }),
-            )
-            .unwrap();
+                }))
+                .unwrap();
             let mut response = retained_engine
                 .generate(SingleIn::new(request))
                 .await
