@@ -218,6 +218,10 @@ spec:
           - --dyn-tool-call-parser
           - deepseek_v41
           - --dyn-enable-structural-tag
+          # SGLang balances its own prefill bootstrap peers with this.
+          # It is not frontend routing, which DYN_ROUTER_MODE owns.
+          # A deprecated alias shares this flag's destination, so the
+          # SGLang config parser rejects it in decode.yaml.
           - --prefill-round-robin-balance
           command:
           - python3
