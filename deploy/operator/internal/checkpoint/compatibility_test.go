@@ -218,6 +218,9 @@ func TestSnapshotRestoreEnvironmentNamesMatchPythonRuntime(t *testing.T) {
 		"../../../../components/src/dynamo/common/snapshot/constants.py",
 	)
 	contents, err := os.ReadFile(constantsPath)
+	if os.IsNotExist(err) && os.Getenv("DYNAMO_REQUIRE_SNAPSHOT_ENV_PARITY") == "" {
+		t.Skip("Python snapshot constants are not present in the operator-only build context")
+	}
 	require.NoError(t, err)
 
 	pythonNames := map[string]struct{}{}
