@@ -6,9 +6,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use clap::ValueEnum;
-use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs, OutputSignal, WorkerType};
-use dynamo_mocker::live::{LiveEngine, LiveRequest, stable_request_uuid};
+use dynamo_mocker::common::protocols::{
+    EngineType, KvEventPublishers, MockEngineArgs, OutputSignal, WorkerType,
+};
+use dynamo_mocker::live::{LiveEngine, LiveEngineConfig, LiveRequest, stable_request_uuid};
 use dynamo_mocker::scheduler::MockerMetrics;
+use dynamo_mocker::services::zmq_events::ZmqKvEventSink;
 use dynamo_vllm_sidecar::proto as pb;
 use futures::Stream;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -67,11 +70,16 @@ pub struct VllmMockerService {
     model_info: Arc<pb::ModelInfo>,
     server_info: Arc<pb::ServerInfo>,
     engine: LiveEngine,
+    kv_event_sources: Arc<Vec<pb::KvEventSource>>,
     request_permits: Arc<Semaphore>,
 }
 
 impl VllmMockerService {
-    pub fn new(config: MockerServerConfig, engine_args: MockEngineArgs) -> anyhow::Result<Self> {
+    pub async fn new(
+        config: MockerServerConfig,
+        engine_args: MockEngineArgs,
+    ) -> anyhow::Result<Self> {
+        let engine_args = engine_args.normalized()?;
         anyhow::ensure!(
             engine_args.engine_type == EngineType::Vllm,
             "Mocker engine_type must be vllm"
@@ -134,11 +142,57 @@ impl VllmMockerService {
                 .unwrap_or_default(),
             rl_capabilities: None,
         };
+        // The wire role is separate from the aggregated scheduler used to
+        // emulate disaggregated requests.
+        let sink = if engine_args.needs_kv_publisher() && config.mode != ServerMode::Decode {
+            match ZmqKvEventSink::bind(
+                engine_args.zmq_kv_events_port,
+                engine_args.zmq_replay_port,
+                DP_RANK,
+                u32::try_from(engine_args.block_size)?,
+            )
+            .await
+            {
+                Ok(sink) => Some(sink),
+                Err(error) => {
+                    tracing::error!(dp_rank = DP_RANK, %error, "Failed to create ZMQ KV event sink");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let kv_event_sources = sink
+            .as_ref()
+            .map(|sink| pb::KvEventSource {
+                transport: "zmq".to_string(),
+                endpoint: sink.endpoint().to_string(),
+                topic: String::new(),
+                data_parallel_rank: Some(DP_RANK),
+                replay_endpoint: sink.replay_endpoint().unwrap_or_default().to_string(),
+                encoding: "msgpack".to_string(),
+                schema_version: 1,
+                ..Default::default()
+            })
+            .into_iter()
+            .collect();
+        let engine = LiveEngine::start_with_config(
+            engine_args,
+            DP_RANK,
+            LiveEngineConfig {
+                kv_event_publishers: KvEventPublishers::new(
+                    None,
+                    sink.map(|sink| Arc::new(sink) as _),
+                ),
+                ..Default::default()
+            },
+        )?;
         Ok(Self {
             config: Arc::new(config),
             model_info: Arc::new(model_info),
             server_info: Arc::new(server_info),
-            engine: LiveEngine::start(engine_args, DP_RANK)?,
+            engine,
+            kv_event_sources: Arc::new(kv_event_sources),
             request_permits: Arc::new(Semaphore::new(max_concurrent_requests)),
         })
     }
@@ -319,7 +373,7 @@ impl pb::control_server::Control for VllmMockerService {
         _request: Request<pb::GetKvEventSourcesRequest>,
     ) -> Result<Response<pb::GetKvEventSourcesResponse>, Status> {
         Ok(Response::new(pb::GetKvEventSourcesResponse {
-            sources: Vec::new(),
+            sources: (*self.kv_event_sources).clone(),
         }))
     }
 

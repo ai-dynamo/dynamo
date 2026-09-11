@@ -32,6 +32,7 @@ impl RunningServer {
             },
             engine_args,
         )
+        .await
         .unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -245,4 +246,17 @@ async fn dropping_sidecar_stream_cancels_mocker_work() {
     })
     .await
     .expect("dropping the gRPC stream should cancel scheduler work promptly");
+}
+
+mod common;
+
+#[tokio::test]
+async fn sidecar_relays_stored_and_evicted_blocks() {
+    let mut args = fast_engine_args();
+    args.num_gpu_blocks = 8;
+    args.max_num_seqs = Some(1);
+    let server = RunningServer::start(ServerMode::Aggregated, args).await;
+    let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
+    engine.start(0).await.unwrap();
+    common::check_kv_events(&engine).await;
 }

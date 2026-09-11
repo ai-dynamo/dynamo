@@ -73,7 +73,8 @@ async fn main() -> anyhow::Result<()> {
             max_concurrent_requests: args.max_concurrent_requests,
         },
         engine_args,
-    )?;
+    )
+    .await?;
 
     tracing::info!(
         listen = %args.listen,

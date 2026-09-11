@@ -38,6 +38,29 @@ Synthetic output plans are limited to 32,768 tokens. LiveEngine uses a small,
 fixed response buffer for each request and cancels slow consumers rather than
 turning declared output length into a second admission-control policy.
 
+## KV events
+
+Like regular mock workers, the server publishes KV cache events when prefix
+caching is enabled, except in decode mode. It uses the existing Mocker ZMQ
+publisher and reports the endpoint through native engine discovery. The
+sidecar forwards these events to Dynamo's router.
+
+The event publisher binds a free port by default. For a fixed port and an
+optional replay port, add these settings to the server command above:
+
+```bash
+--extra-engine-args '{"block_size":4,"zmq_kv_events_port":5557,"zmq_replay_port":5558}'
+```
+
+Run the sidecar as shown above and use a frontend with `--router-mode kv`.
+Sidecar discovers the event endpoint without an additional setting. When
+running across containers or hosts, expose the event port; a fixed port can
+make this easier.
+
+Set `"enable_prefix_caching":false` to disable both prefix caching and KV
+events. Decode servers do not publish events. As with regular mock workers,
+publisher setup failures are logged and serving continues without KV events.
+
 ## Disaggregated wire-flow
 
 Run separate endpoints for the two emulated vLLM roles:
