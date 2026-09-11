@@ -19,7 +19,6 @@ import (
 const (
 	runtimeTemporaryStorageVolumeName = "tmp"
 	runtimeTemporaryStorageMountPath  = "/tmp"
-	runtimeSSHVolumeName              = "agent-v2-ssh"
 	lp30InitContainerName             = "prepare-lp30"
 	lp30InitPath                      = "/bin/lp30-agent-v2-init"
 )
@@ -141,7 +140,7 @@ func configureDirectHybridAgentRuntime(
 	)
 
 	addLPUHostDeviceVolumeMounts(agent)
-	agent.VolumeMounts = setVolumeMount(agent.VolumeMounts, sshVolumeMount(sshSecretName))
+	agent.VolumeMounts = setVolumeMount(agent.VolumeMounts, sshVolumeMount())
 	retargetMainContainerReferences(agentPodSpec, agent)
 
 	agent.Env = append(agent.Env,
@@ -167,7 +166,9 @@ func configureDirectHybridAgentRuntime(
 		RunAsUser:  ptr.To(int64(0)),
 		RunAsGroup: ptr.To(int64(0)),
 	}
-	addSSHVolumeWithDefaultMode(agentPodSpec, sshSecretName, sshSecretName, 0644)
+	if err := addSSHVolume(agentPodSpec, sshSecretName, 0644); err != nil {
+		return err
+	}
 	applyLPUHostDeviceVolumes(agentPodSpec, false)
 	agentPodSpec.Volumes = appendVolumeIfMissing(agentPodSpec.Volumes, corev1.Volume{
 		Name: "hugepages",
@@ -207,12 +208,7 @@ func configureNodeLocalConductorRuntime(
 		conductor.Args = append(conductor.Args, nodeLocalHXAgentEnvironmentArgs...)
 	}
 	retargetMainContainerReferences(conductorPodSpec, conductor)
-	sshVolumeName := runtimeSSHVolumeName
-	if isXT {
-		sshVolumeName = sshSecretName
-	}
-	addConductorSSHKey(conductorPodSpec, conductor, sshSecretName, sshVolumeName)
-	return nil
+	return addConductorSSHKey(conductorPodSpec, conductor, sshSecretName)
 }
 
 // configureNodeLocalAgentRuntime consumes a nonnil Agent PodSpec.
@@ -239,11 +235,6 @@ func configureNodeLocalAgentRuntime(
 		return fmt.Errorf("node-local LPU runtime requires an image-only main container without command")
 	}
 	preserveAgentEntrypoint := isXT && (len(agent.Command) != 0 || len(agent.Args) != 0)
-	sshVolumeName := runtimeSSHVolumeName
-	if isXT {
-		sshVolumeName = sshSecretName
-	}
-
 	// Materialize the LPU role as the privileged SSH target that Nova launches.
 	setNodeLocalPodIPEnv(agent, isXT)
 	agent.Name = lpuAgentContainerName
@@ -253,11 +244,13 @@ func configureNodeLocalAgentRuntime(
 	agentPodSpec.HostUsers = nil
 	updateWorkerPodSpec(agentPodSpec)
 	applyLPUHostDeviceVolumes(agentPodSpec, !isXT)
-	addSSHVolumeWithDefaultMode(agentPodSpec, sshSecretName, sshVolumeName, 0644)
+	if err := addSSHVolume(agentPodSpec, sshSecretName, 0644); err != nil {
+		return err
+	}
 
 	// Expose node-local devices and hugetlbfs through host /dev without an unaccounted HugePages volume.
 	addLPUHostDeviceVolumeMounts(agent)
-	agent.VolumeMounts = setVolumeMount(agent.VolumeMounts, sshVolumeMount(sshVolumeName))
+	agent.VolumeMounts = setVolumeMount(agent.VolumeMounts, sshVolumeMount())
 	if isXT {
 		applyLPUWorkerContainerBase(agent, preserveAgentEntrypoint)
 		agent.SecurityContext.RunAsGroup = ptr.To(int64(0))

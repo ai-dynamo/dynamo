@@ -319,7 +319,7 @@ spec:
             - mountPath: /tmp/dynamo-lpu-ssh
               name: single-v2-ssh-key
             - mountPath: /ssh-pk
-              name: agent-v2-ssh
+              name: ssh-secret
               readOnly: true
           restartPolicy: Always
           schedulerName: default-scheduler
@@ -340,7 +340,7 @@ spec:
             name: config
           - emptyDir: {}
             name: tmp
-          - name: agent-v2-ssh
+          - name: ssh-secret
             secret:
               defaultMode: 384
               secretName: ssh-secret
@@ -519,7 +519,7 @@ spec:
             - mountPath: /dev
               name: host-dev
             - mountPath: /ssh-pk
-              name: agent-v2-ssh
+              name: ssh-secret
               readOnly: true
           dnsPolicy: ClusterFirstWithHostNet
           hostIPC: true
@@ -579,7 +579,7 @@ spec:
               path: /sys
               type: Directory
             name: host-sys
-          - name: agent-v2-ssh
+          - name: ssh-secret
             secret:
               defaultMode: 420
               secretName: ssh-secret
@@ -752,7 +752,7 @@ spec:
             - mountPath: /dev
               name: host-dev
             - mountPath: /ssh-pk
-              name: agent-v2-ssh
+              name: ssh-secret
               readOnly: true
           dnsPolicy: ClusterFirstWithHostNet
           hostIPC: true
@@ -812,7 +812,7 @@ spec:
               path: /sys
               type: Directory
             name: host-sys
-          - name: agent-v2-ssh
+          - name: ssh-secret
             secret:
               defaultMode: 420
               secretName: ssh-secret
@@ -985,7 +985,7 @@ spec:
             - mountPath: /dev
               name: host-dev
             - mountPath: /ssh-pk
-              name: agent-v2-ssh
+              name: ssh-secret
               readOnly: true
           dnsPolicy: ClusterFirstWithHostNet
           hostIPC: true
@@ -1045,7 +1045,7 @@ spec:
               path: /sys
               type: Directory
             name: host-sys
-          - name: agent-v2-ssh
+          - name: ssh-secret
             secret:
               defaultMode: 420
               secretName: ssh-secret

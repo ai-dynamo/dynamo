@@ -366,6 +366,36 @@ func TestConfigureNodeLocalXTConductorSSHInitUsesMainImage(t *testing.T) {
 	require.Equal(t, corev1.PullIfNotPresent, podSpec.InitContainers[0].ImagePullPolicy)
 }
 
+func TestXTSSHSecretNameIsNotUsedAsVolumeName(t *testing.T) {
+	const sshSecretName = "mpi.ssh"
+
+	t.Log("Configure each XT runtime role with a valid dotted SSH Secret name")
+	base := corev1.PodSpec{Containers: []corev1.Container{{Name: commonconsts.MainContainerName, Image: "lpu-runtime"}}}
+	configureAgentScheduling(&base, BuildFamilyXT)
+	direct, agent, conductor := base.DeepCopy(), base.DeepCopy(), base.DeepCopy()
+	require.NoError(t, configureDirectHybridAgentRuntime(direct, "graph-lpu", sshSecretName))
+	require.NoError(t, configureNodeLocalAgentRuntime(agent, BuildFamilyXT, false, sshSecretName))
+	require.NoError(t, configureNodeLocalConductorRuntime(conductor, BuildFamilyXT, "lpu-wkr-m-0", sshSecretName))
+
+	for _, test := range []struct {
+		name   string
+		pod    *corev1.PodSpec
+		mounts []corev1.VolumeMount
+	}{
+		{"direct hybrid agent", direct, direct.Containers[0].VolumeMounts},
+		{"node-local agent", agent, agent.Containers[0].VolumeMounts},
+		{"node-local conductor", conductor, conductor.InitContainers[0].VolumeMounts},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Keep the configured Secret separate from the fixed volume and mount name")
+			sshVolume := testVolumeByName(t, test.pod.Volumes, "ssh-secret")
+			require.Equal(t, sshSecretName, sshVolume.Secret.SecretName)
+			require.NotContains(t, testVolumeNames(test.pod.Volumes), sshSecretName)
+			require.Contains(t, test.mounts, corev1.VolumeMount{Name: "ssh-secret", MountPath: "/ssh-pk", ReadOnly: true})
+		})
+	}
+}
+
 func TestConfigureDirectHybridAgentRuntimePreservesCustomEntrypoint(t *testing.T) {
 	t.Log("Define custom entrypoint and probe preservation cases")
 	customStartup := testExecProbe("custom-startup")
