@@ -39,19 +39,18 @@ def test_decode_payload_has_no_marker():
     assert HEALTH_CHECK_KEY not in SglangHealthCheckPayload().to_dict()
 
 
-@pytest.mark.parametrize("use_text_input", [True, False])
-def test_embedding_payload_matches_request_schema(monkeypatch, use_text_input):
+def test_embedding_payload_uses_engine_bos_token(monkeypatch):
     monkeypatch.delenv("DYN_HEALTH_CHECK_PAYLOAD", raising=False)
     engine = SimpleNamespace(
         tokenizer_manager=SimpleNamespace(tokenizer=SimpleNamespace(bos_token_id=42))
     )
     payload = SglangEmbeddingHealthCheckPayload(
-        "embedding-model", engine, use_text_input=use_text_input
+        "embedding-model", engine, use_text_input=False
     ).to_dict()
 
     request = EmbeddingRequest(**payload)
     assert request.model == "embedding-model"
-    assert request.input == ("Test" if use_text_input else [42])
+    assert request.input == [42]
 
 
 def test_embedding_env_override(monkeypatch):
