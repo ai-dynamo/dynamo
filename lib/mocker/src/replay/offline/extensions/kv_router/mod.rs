@@ -1588,6 +1588,12 @@ mod tests {
 
         // No cache overlap exists for request 2's tokens yet -- confirm the
         // premise before making it stop being true.
+        assert_eq!(
+            router.debug_snapshot(0.0).pending[0].overlap_blocks_by_worker,
+            Vec::<(usize, u32)>::new(),
+            "request 2 must have zero overlap at arrival for the KV event below to be the \
+             only source of its later overlap"
+        );
         let hashes = ReplayRequestHashes::from_tokens(&second_request.tokens, router.block_size);
         router
             .on_kv_events(vec![store_event(
