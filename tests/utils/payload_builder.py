@@ -603,19 +603,22 @@ def make_chat_health_check(port: int, model: str):
             stream=False,
         ).with_model(model)
         payload.port = port
-        try:
-            resp = send_request(
-                payload.url(),
-                payload.body,
-                timeout=min(max(1.0, remaining_timeout), 5.0),
-                method=payload.method,
-                log_level=10,
-            )
-            # Validate structure only; expected_response is empty
-            _ = payload.response_handler(resp)
-            return True
-        except Exception:
-            return False
+        # No try/except here: ManagedProcess._check_func already catches
+        # exceptions from this callable and logs `failure_reason` every
+        # log_interval seconds. Swallowing the exception here and returning
+        # bare False collapses that into an uninformative "returned False",
+        # hiding what actually failed (connection refused, malformed
+        # response, HTTP error, ...) for the entire retry window.
+        resp = send_request(
+            payload.url(),
+            payload.body,
+            timeout=min(max(1.0, remaining_timeout), 5.0),
+            method=payload.method,
+            log_level=10,
+        )
+        # Validate structure only; expected_response is empty
+        payload.response_handler(resp)
+        return True
 
     return _check_chat_endpoint
 
@@ -630,20 +633,19 @@ def make_completions_health_check(port: int, model: str):
             stream=False,
         ).with_model(model)
         payload.port = port
-        try:
-            resp = send_request(
-                payload.url(),
-                payload.body,
-                timeout=min(max(1.0, remaining_timeout), 5.0),
-                method=payload.method,
-                log_level=10,
-            )
-            out = payload.response_handler(resp)
-            if not out:
-                raise ValueError("")
-            return True
-        except Exception:
-            return False
+        # See make_chat_health_check: no try/except, so ManagedProcess._check_func's
+        # own exception logging can surface the real failure reason.
+        resp = send_request(
+            payload.url(),
+            payload.body,
+            timeout=min(max(1.0, remaining_timeout), 5.0),
+            method=payload.method,
+            log_level=10,
+        )
+        out = payload.response_handler(resp)
+        if not out:
+            raise ValueError(f"completions health check got empty response: {out!r}")
+        return True
 
     return _check_completions_endpoint
 

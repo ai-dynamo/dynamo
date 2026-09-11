@@ -39,7 +39,15 @@ sidecar_configs = {
         marks=[
             pytest.mark.vllm,
             pytest.mark.gpu_1,
-            pytest.mark.timeout(610),
+            # EngineConfig.timeout defaults to 600s for the internal
+            # health-check loop (tests/utils/engine_process.py); that loop's
+            # own timeout path logs a clean, detailed failure (attempt count,
+            # last failure reason, log tail). A pytest.mark.timeout with too
+            # little margin over 600s + setup overhead (etcd/nats/process
+            # launch, observed ~70s here) lets pytest-timeout's blunt global
+            # signal fire first mid-loop, discarding that diagnostic path —
+            # exactly what happened at 610s in run 34552442779/103122249777.
+            pytest.mark.timeout(780),
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -58,14 +66,11 @@ sidecar_configs = {
         marks=[
             pytest.mark.sglang,
             pytest.mark.gpu_1,
-            # First observed CI run: 3 retries each hit this wall with zero
-            # visible output (see PYTHONUNBUFFERED below) and no process exit,
-            # while the trtllm_aggregated case above passed in ~173s the same
-            # run. Doubled from the mainline dynamo.sglang aggregated test's
-            # budget (360s) rather than left unchanged, pending a second CI
-            # run with visible logs to tell a genuine hang from cold-start
-            # slowness unique to this launch path.
-            pytest.mark.timeout(720),
+            # See vllm_aggregated above: needs margin over EngineConfig's
+            # 600s internal health-check timeout, not just over historically
+            # observed run time, so a real timeout logs its own diagnostics
+            # instead of being cut off by pytest-timeout first.
+            pytest.mark.timeout(780),
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
@@ -81,8 +86,9 @@ sidecar_configs = {
         marks=[
             pytest.mark.trtllm,
             pytest.mark.gpu_1,
-            # Observed ~173s in CI; 650s leaves ample margin.
-            pytest.mark.timeout(650),
+            # See vllm_aggregated above re: margin over EngineConfig's 600s
+            # internal timeout. Observed ~173s in CI in practice.
+            pytest.mark.timeout(780),
             pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
