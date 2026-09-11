@@ -17,6 +17,7 @@ from dynamo.common.gms_failover import (
     run_gms_failover_promotion_warmup,
 )
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
+from dynamo.common.utils.env import env_bool
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
@@ -39,11 +40,17 @@ from dynamo.sglang.request_handlers import DecodeWorkerHandler, PrefillWorkerHan
 from dynamo.sglang.request_handlers.handler_base import SGLangEnginePauseController
 
 
+def _shadow_mode_enabled() -> bool:
+    """Use the same whitespace-tolerant parser as failover lock ownership."""
+
+    return env_bool("DYN_GMS_FAILOVER_SHADOW_MODE")
+
+
 def _enable_gms_nccl_prewarm(server_args) -> None:
     """Pay lazy TP communicator setup at startup, before standby quiesce."""
 
-    shadow = os.environ.get("DYN_GMS_FAILOVER_SHADOW_MODE", "").lower()
-    if shadow not in {"1", "true", "yes", "on"}:
+    shadow = _shadow_mode_enabled()
+    if not shadow:
         return
     if int(getattr(server_args, "nnodes", 1) or 1) <= 1:
         return
@@ -206,7 +213,16 @@ async def init_decode(
     else:
         set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
         start_time = time.time()
-        engine = sgl.Engine(server_args=server_args)
+        if _shadow_mode_enabled():
+            from gpu_memory_service.integrations.sglang.writer_lifecycle import (
+                create_guarded_engine,
+            )
+            from sglang.srt.entrypoints.engine import Engine
+
+            # sgl.Engine is a LazyImport proxy, not a subclassable class.
+            engine = create_guarded_engine(Engine, server_args=server_args)
+        else:
+            engine = sgl.Engine(server_args=server_args)
         load_time = time.time() - start_time
 
     server_args = config.use_resolved_server_args(engine.server_args)

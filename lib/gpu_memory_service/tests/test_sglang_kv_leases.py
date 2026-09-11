@@ -93,3 +93,28 @@ def test_release_deduplicates_pages_and_skips_retained_pages():
         assert leases == {2: KVLease(2, 9)}
     finally:
         _cleanup(allocator)
+
+
+def test_allocator_arms_parent_death_fence_before_opening_lease_client(monkeypatch):
+    events = []
+    allocator = SimpleNamespace(size=8, page_size=2)
+    client = SimpleNamespace(namespace="test", owner_id=7)
+
+    monkeypatch.setattr(
+        adapter,
+        "arm_parent_death_signal",
+        lambda: events.append("fenced"),
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_make_client",
+        lambda _allocator, pages: events.append(("client", pages)) or client,
+    )
+    try:
+        adapter._initialize_allocator(allocator)
+        assert events == ["fenced", ("client", 4)]
+        assert allocator._gms_kv_lease_client is client
+        assert allocator._gms_kv_leases_by_page == {}
+        assert allocator._gms_retained_pages == set()
+    finally:
+        _cleanup(allocator)

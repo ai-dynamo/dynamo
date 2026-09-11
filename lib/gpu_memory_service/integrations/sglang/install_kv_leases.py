@@ -16,6 +16,9 @@ from gpu_memory_service.integrations.common.kv_lease_client import (
     log_lease_pressure,
     resolve_lease_device,
 )
+from gpu_memory_service.integrations.common.process_lifecycle import (
+    arm_parent_death_signal,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -468,6 +471,7 @@ def _release_indices(self, free_index) -> None:
 
 
 def _initialize_allocator(self) -> None:
+    arm_parent_death_signal()
     total_pages = int(self.size // self.page_size)
     client = _make_client(self, total_pages)
     lease_map: dict[int, KVLease] = {}
