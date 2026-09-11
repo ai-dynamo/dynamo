@@ -99,7 +99,7 @@ spec:
             valueFrom:
               fieldRef:
                 fieldPath: metadata.uid
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-30282ab72cc420f8bd7d0d509cb04a1637b80754-vllm-runtime
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-cb301ba93943e0165deda36f65a8fd291b89beb2-vllm-runtime
           imagePullPolicy: IfNotPresent
           name: main
           ports:
@@ -207,7 +207,7 @@ spec:
             value: "1024"
           - name: UCX_TLS
             value: rc_x,rc,cuda_copy,cuda_ipc
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-30282ab72cc420f8bd7d0d509cb04a1637b80754-vllm-runtime
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-cb301ba93943e0165deda36f65a8fd291b89beb2-vllm-runtime
           imagePullPolicy: IfNotPresent
           name: main
           resources:
@@ -335,7 +335,7 @@ spec:
             value: "1024"
           - name: UCX_TLS
             value: rc_x,rc,cuda_copy,cuda_ipc
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-30282ab72cc420f8bd7d0d509cb04a1637b80754-vllm-runtime
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-cb301ba93943e0165deda36f65a8fd291b89beb2-vllm-runtime
           imagePullPolicy: IfNotPresent
           name: main
           resources:

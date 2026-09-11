@@ -81,7 +81,7 @@ spec:
           schedulerName: default-scheduler
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-30282ab72cc420f8bd7d0d509cb04a1637b80754-vllm-runtime
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-cb301ba93943e0165deda36f65a8fd291b89beb2-vllm-runtime
               imagePullPolicy: IfNotPresent
               workingDir: /workspace
               command:
@@ -154,7 +154,7 @@ spec:
                     topologyKey: kubernetes.io/hostname
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-30282ab72cc420f8bd7d0d509cb04a1637b80754-vllm-runtime
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-cb301ba93943e0165deda36f65a8fd291b89beb2-vllm-runtime
               imagePullPolicy: IfNotPresent
               workingDir: /workspace
               command:
@@ -288,7 +288,7 @@ spec:
                     topologyKey: kubernetes.io/hostname
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-30282ab72cc420f8bd7d0d509cb04a1637b80754-vllm-runtime
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-cb301ba93943e0165deda36f65a8fd291b89beb2-vllm-runtime
               imagePullPolicy: IfNotPresent
               workingDir: /workspace
               command:
