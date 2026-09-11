@@ -10,6 +10,7 @@ so these run in an image where the engine is not installed or not importable
 makes over their results is what is exercised here.
 """
 
+import builtins
 import importlib.util
 import sys
 
@@ -254,17 +255,34 @@ def test_probes_only_the_module_the_installed_engine_imports(
     assert elastic_ep_preflight._required_process_group_modules() == expected
 
 
-def test_unreadable_engine_sources_probe_both_module_names(monkeypatch):
-    """An engine that cannot be located is not evidence for either name.
+def test_unreadable_engine_sources_probe_both_module_names(monkeypatch, tmp_path):
+    """Sources that are present but unreadable are not evidence for either name.
 
-    Narrowing on a guess would refuse workers over an upstream file move, so
-    the resolver widens back to both names instead.
+    This is the case the resolver is actually written for: an editable install
+    whose engine tree the worker's uid cannot read, which is the same condition
+    the repository ``conftest.py`` reports at collection time. Narrowing on a
+    guess would refuse workers over a permissions problem, so the resolver
+    widens back to both names instead.
     """
-    monkeypatch.setattr(
-        elastic_ep_preflight.importlib.util, "find_spec", lambda name: None
+    _install_fake_sglang_sources(
+        monkeypatch, tmp_path, "from mooncake.pg import MooncakeBackendOptions\n"
     )
+
+    probed = []
+    real_open = builtins.open
+
+    def _refuse_engine_sources(file, *args, **kwargs):
+        if str(file).endswith(".py") and "sglang" in str(file):
+            probed.append(str(file))
+            raise PermissionError(13, "Permission denied", str(file))
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", _refuse_engine_sources)
 
     assert elastic_ep_preflight._required_process_group_modules() == (
         "mooncake.pg",
         "mooncake.ep",
     )
+    # The fallback must come from the read failing, not from the resolver
+    # skipping the sources it was pointed at.
+    assert probed

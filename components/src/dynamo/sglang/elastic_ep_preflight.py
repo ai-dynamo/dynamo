@@ -61,9 +61,14 @@ def _required_process_group_modules() -> Tuple[str, ...]:
     sources cannot be read, since refusing a worker over an upstream file move
     would be worse than the late failure this check replaces.
     """
+    # find_spec raises ImportError when a parent package fails to import and
+    # ValueError when the module is already in sys.modules without a spec.
+    # Both mean "cannot tell", which is what the widened fallback answers. Any
+    # other error is not something this fallback was reasoned about, so it
+    # propagates rather than silently widening the check.
     try:
         spec = importlib.util.find_spec("sglang")
-    except Exception:  # noqa: BLE001 - a broken engine must not mask the real error
+    except (ImportError, ValueError):
         return _PROCESS_GROUP_MODULES
     if spec is None or not spec.submodule_search_locations:
         return _PROCESS_GROUP_MODULES
@@ -94,7 +99,18 @@ def _import_process_group_extension() -> Optional[str]:
         try:
             importlib.import_module(module_name)
             return None
-        except Exception as exc:  # noqa: BLE001 - any failure means "unusable"
+        # Deliberately broad. This is the one place that runs the compiled
+        # ProcessGroup extension's own module initialization, and the question
+        # being asked is "does SGLang's import of this succeed", not "does it
+        # fail in a way we predicted". A mismatched build surfaces as
+        # ImportError, but the same import also runs C++ static initializers
+        # and dlopens CUDA, which report as OSError, RuntimeError, or a
+        # torch-defined exception depending on the wheel. Narrowing here would
+        # let the unlisted ones escape as a raw traceback from argument parsing
+        # instead of the diagnostic below, which is the failure mode this whole
+        # module exists to remove. The exception type is kept verbatim in the
+        # message so nothing about the real cause is lost.
+        except Exception as exc:  # noqa: BLE001
             failures.append(f"{module_name}: {type(exc).__name__}: {exc}")
     return "; ".join(failures) if failures else "no attempt was made"
 
@@ -118,7 +134,9 @@ def _available_extension_modules() -> List[str]:
     """
     try:
         spec = importlib.util.find_spec("mooncake")
-    except Exception:  # noqa: BLE001 - a broken package must not mask the real error
+    except (ImportError, ValueError):
+        # Same two failure modes as the SGLang resolver above. Either way the
+        # wheel's layout cannot be listed, which this reports as "none found".
         return []
     if spec is None or not spec.submodule_search_locations:
         return []
@@ -145,21 +163,38 @@ def _registered_torch_backends() -> Optional[Dict[str, Tuple[str, ...]]]:
     transport, which is more fatal than the failure being guarded against.
     ``None`` keeps the two apart so the caller can skip only this assertion.
     """
+    # ImportError covers a torch that is absent or does not import;
+    # AttributeError covers the rename this docstring is about. Both are
+    # "unreadable". torch types the mapping's values as lists, so copy them
+    # into tuples rather than asserting the annotation over torch's.
     try:
         import torch.distributed as torch_distributed
 
-        return dict(torch_distributed.Backend.backend_capability)
-    except Exception:  # noqa: BLE001 - unreadable, not "nothing registered"
+        return {
+            name: tuple(devices)
+            for name, devices in torch_distributed.Backend.backend_capability.items()
+        }
+    except (ImportError, AttributeError):
         return None
 
 
 def _torch_version() -> str:
+    """The running torch version, or why it could not be determined.
+
+    Only a genuinely absent distribution may be reported as "not installed": a
+    torch that is present but fails to load is a different problem, and an
+    operator reading this diagnostic needs to see which one they have.
+    """
     try:
         import torch
 
         return str(torch.__version__)
-    except Exception:  # noqa: BLE001
+    except ModuleNotFoundError:
         return "not installed"
+    # A torch that is installed but unusable raises from its own loader, most
+    # often ImportError or OSError for a missing CUDA runtime library.
+    except (ImportError, OSError) as exc:
+        return f"installed but not importable: {type(exc).__name__}: {exc}"
 
 
 def _format_versions(versions: Dict[str, str]) -> str:

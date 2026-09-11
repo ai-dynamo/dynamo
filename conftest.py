@@ -45,14 +45,15 @@ for _name in ("vllm", "sglang"):
     # that did start importing, and swallowing it here would run the suite
     # against a half-initialized engine, so it propagates.
     except (ImportError, OSError) as _exc:
-        # A simply-absent engine is normal and stays quiet; anything else
-        # means the install is broken, and one line here names the cause.
-        if not (isinstance(_exc, ModuleNotFoundError) and _exc.name == _name):
-            print(
-                f"conftest: {_name} is installed but could not be imported, so "
-                f"tests that import it will fail: {type(_exc).__name__}: {_exc}",
-                file=sys.stderr,
-            )
+        if isinstance(_exc, ModuleNotFoundError) and _exc.name == _name:
+            continue  # the engine is simply not installed; nothing to report
+        # Anything else means the install is broken, and one line here names
+        # the cause rather than leaving a bare collection error downstream.
+        print(
+            f"conftest: {_name} is installed but could not be imported, so "
+            f"tests that import it will fail: {type(_exc).__name__}: {_exc}",
+            file=sys.stderr,
+        )
 
 # Suppress ImportPathMismatchError when pytest later loads dynamo.vllm
 # under the bare name "vllm".
