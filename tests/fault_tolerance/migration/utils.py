@@ -534,7 +534,7 @@ def run_migration_test(
     before_worker_fault: Callable[[], None] | None = None,
     force_max_output_tokens: bool = False,
     expected_output_prefix: str | None = None,
-) -> ManagedProcess:
+) -> tuple[ManagedProcess, str | None]:
     """
     Run the common migration test flow after frontend and workers are started.
 
@@ -567,12 +567,12 @@ def run_migration_test(
         force_max_output_tokens: Disable EOS and require the request's full
             max_tokens budget so state-based fault synchronization cannot race
             an early EOS.
-        expected_output_prefix: Deterministic fault-free output that must prefix
-            the migrated response.
+        expected_output_prefix: Stable fault-free output prefix used to prove
+            the content oracle extends beyond the fault boundary.
 
     Returns:
-        The surviving worker selected as the replacement target. Successful
-            migration cases retry the request on this worker.
+        The surviving replacement worker and the completed response output.
+            Failed migration cases return None for the output.
     """
     # Ignore requests already present in the worker logs so the receiving-worker
     # lookup only considers the request started below.
@@ -667,13 +667,12 @@ def run_migration_test(
                     receiving_pattern,
                     request_id,
                 )
-            validate_response(
+            completed_output = validate_response(
                 request_thread,
                 response,
                 expected_completion_tokens=(
                     max_tokens if force_max_output_tokens else None
                 ),
-                expected_output_prefix=expected_output_prefix,
             )
             if verify_replacement_worker:
                 worker_system_port = getattr(replacement_worker, "system_port", None)
@@ -690,6 +689,7 @@ def run_migration_test(
             # HTTP non-200 responses.
             with pytest.raises(APIError):
                 validate_response(request_thread, response)
+            completed_output = None
 
     # Step 6: Verify that migration behaved as expected via the frontend's
     # Prometheus metrics (a stable structured surface) instead of asserting on
@@ -709,4 +709,4 @@ def run_migration_test(
         exact_counts=exact_metric_counts,
     )
 
-    return replacement_worker
+    return replacement_worker, completed_output

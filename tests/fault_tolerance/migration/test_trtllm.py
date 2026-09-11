@@ -19,7 +19,7 @@ from tests.utils.port_utils import allocate_port, deallocate_ports
 from tests.utils.prometheus import sum_metric_samples
 
 # Customized utils for migration tests
-from .request_utils import request_to_completion
+from .request_utils import assert_output_prefix, request_to_completion
 from .utils import (
     DynamoFrontendProcess,
     managed_processes_concurrently,
@@ -513,7 +513,7 @@ def test_request_migration_trtllm_kv_transfer(
                 for worker in (decode1, decode2)
             }
 
-            replacement_worker = run_migration_test(
+            replacement_worker, migrated_output = run_migration_test(
                 frontend,
                 decode1,
                 decode2,
@@ -536,6 +536,8 @@ def test_request_migration_trtllm_kv_transfer(
                 replacement_worker.system_port,
                 *transfer_baselines[replacement_worker.system_port],
             )
+            assert migrated_output is not None
+            assert_output_prefix(migrated_output, stable_output_prefix)
 
 
 @pytest.mark.timeout(350)  # 3x average

@@ -176,7 +176,6 @@ def validate_response(
     request_thread: threading.Thread,
     response: MigrationResponse,
     expected_completion_tokens: int | None = None,
-    expected_output_prefix: str | None = None,
 ) -> str:
     """Wait for a terminal response and validate its client-visible contract."""
     request_thread.join(timeout=240)
@@ -215,29 +214,31 @@ def validate_response(
         )
 
     output = "".join(response_parts)
-    if expected_output_prefix is not None and not output.startswith(
-        expected_output_prefix
-    ):
-        mismatch_index = next(
-            (
-                index
-                for index, (expected, actual) in enumerate(
-                    zip(expected_output_prefix, output)
-                )
-                if expected != actual
-            ),
-            min(len(expected_output_prefix), len(output)),
-        )
-        context_start = max(0, mismatch_index - 40)
-        context_end = mismatch_index + 80
-        pytest.fail(
-            "Migrated output diverged from the deterministic fault-free prefix "
-            f"at character {mismatch_index}: "
-            f"expected={expected_output_prefix[context_start:context_end]!r}, "
-            f"actual={output[context_start:context_end]!r}"
-        )
     logger.info("Received %s response(s): %s...", len(response_parts), output[:100])
     return output
+
+
+def assert_output_prefix(output: str, expected_prefix: str) -> None:
+    """Require output to preserve a fault-free prefix with useful diagnostics."""
+    if output.startswith(expected_prefix):
+        return
+
+    mismatch_index = next(
+        (
+            index
+            for index, (expected, actual) in enumerate(zip(expected_prefix, output))
+            if expected != actual
+        ),
+        min(len(expected_prefix), len(output)),
+    )
+    context_start = max(0, mismatch_index - 40)
+    context_end = mismatch_index + 80
+    pytest.fail(
+        "Migrated output diverged from the stable fault-free prefix "
+        f"at character {mismatch_index}: "
+        f"expected={expected_prefix[context_start:context_end]!r}, "
+        f"actual={output[context_start:context_end]!r}"
+    )
 
 
 def request_to_completion(frontend_port: int, **request_options) -> str:
