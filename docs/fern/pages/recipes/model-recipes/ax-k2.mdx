@@ -84,7 +84,7 @@ kubectl --context "${CONTEXT}" -n "${NAMESPACE}" wait --for=condition=Complete \
 
 Both profiles and the download job mount `model-cache`. To use an existing
 populated PVC, set `claimName` in the job and selected deployment source to
-that PVC and skip creating a new claim. Regenerate the disaggregated manifest
+that PVC and skip creating a new claim. Regenerate the selected manifest
 after editing its Kustomize source.
 
 <div data-variant="agg">
@@ -94,7 +94,16 @@ Deploy two aggregate workers:
 ```bash
 export DGD=axk2-agg-b200-chat
 kubectl --context "${CONTEXT}" -n "${NAMESPACE}" apply \
-  -f recipes/ax-k2/vllm/agg-b200-chat/deploy.yaml
+  -f recipes/ax-k2/vllm/agg-b200-chat/deploy-generic.yaml
+```
+
+The manifest is generated from
+[Kustomize sources](https://github.com/ai-dynamo/dynamo/tree/main/recipes/ax-k2/vllm/agg-b200-chat/kustomize).
+To change a setting, edit `kustomize/base/deploy.yaml` and regenerate:
+
+```bash
+python3 scripts/kustomize-matrix.py unfold recipes/ax-k2/vllm/agg-b200-chat/.kustomize-matrix.yaml
+python3 scripts/kustomize-matrix.py render recipes/ax-k2/vllm/agg-b200-chat/.kustomize-matrix.yaml
 ```
 
 </div>
@@ -205,5 +214,5 @@ reports the short trace at C=16.
 ## Source
 
 - [Recipe and configuration table](https://github.com/ai-dynamo/dynamo/tree/main/recipes/ax-k2)
-- [Aggregated manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/ax-k2/vllm/agg-b200-chat/deploy.yaml)
+- [Aggregated manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/ax-k2/vllm/agg-b200-chat/deploy-generic.yaml)
 - [Disaggregated manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/ax-k2/vllm/disagg-b200-chat/deploy-generic.yaml)

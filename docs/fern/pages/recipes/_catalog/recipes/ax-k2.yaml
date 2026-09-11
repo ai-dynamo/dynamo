@@ -29,7 +29,7 @@ targets:
     count: 8
   runtime:
     framework: vllm
-    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-30282ab72cc420f8bd7d0d509cb04a1637b80754-vllm-runtime
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-cb301ba93943e0165deda36f65a8fd291b89beb2-vllm-runtime
   topology: aggregated
   techniques:
   - nvfp4
@@ -40,7 +40,7 @@ targets:
     type: chat
     traffic: 8K/1K Mooncake chat, 15% trace subset, 70% KV reuse, concurrency 16
   deploy:
-    asset: recipes/ax-k2/vllm/agg-b200-chat/deploy.yaml
+    asset: recipes/ax-k2/vllm/agg-b200-chat/deploy-generic.yaml
   expected_performance:
     available: true
     summary: 'C=16, chat 15%: 76.49 output toks/sec/GPU, 55.83 mean toks/sec/user, 0.525 s p50 TTFT. Historical
@@ -56,7 +56,7 @@ targets:
     count: 12
   runtime:
     framework: vllm
-    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-30282ab72cc420f8bd7d0d509cb04a1637b80754-vllm-runtime
+    image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.1-ci-cb301ba93943e0165deda36f65a8fd291b89beb2-vllm-runtime
   topology: disaggregated
   techniques:
   - nvfp4
