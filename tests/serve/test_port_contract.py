@@ -80,17 +80,18 @@ def test_prepared_environment_exports_complete_worker_port_vectors(
 def test_dyn_port_accepts_managed_ephemeral_system_port() -> None:
     """Allow zero for a managed system port so the runtime can bind ephemerally."""
     launch_utils = Path(__file__).parents[2] / "examples/common/launch_utils.sh"
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            f"source {launch_utils}; dyn_port DYN_SYSTEM_PORT 1 8081",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        env={"DYN_MANAGED_PORTS": "1", "DYN_SYSTEM_PORT1": "0"},
-    )
+    with reserved_ports(1, DynamoPortRange.SERVE.value) as allocated:
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"source {launch_utils}; dyn_port DYN_SYSTEM_PORT 1 {allocated[0]}",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={"DYN_MANAGED_PORTS": "1", "DYN_SYSTEM_PORT1": "0"},
+        )
 
     assert result.returncode == 0
     assert result.stdout.strip() == "0"
@@ -142,36 +143,38 @@ def test_dyn_port_keeps_standalone_fallback() -> None:
 def test_dyn_port_keeps_explicit_standalone_system_port() -> None:
     """Preserve an explicit system-port override for standalone launches."""
     launch_utils = Path(__file__).parents[2] / "examples/common/launch_utils.sh"
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            f"source {launch_utils}; dyn_port DYN_SYSTEM_PORT 1 8081",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        env={"DYN_SYSTEM_PORT1": "24001"},
-    )
+    with reserved_ports(1, DynamoPortRange.SERVE.value) as allocated:
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"source {launch_utils}; dyn_port DYN_SYSTEM_PORT 1 {allocated[0]}",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={"DYN_SYSTEM_PORT1": str(allocated[0])},
+        )
 
     assert result.returncode == 0
-    assert result.stdout.strip() == "24001"
+    assert result.stdout.strip() == str(allocated[0])
 
 
 def test_dyn_port_rejects_invalid_explicit_value() -> None:
     """Reject malformed standalone port overrides."""
     launch_utils = Path(__file__).parents[2] / "examples/common/launch_utils.sh"
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            f"source {launch_utils}; dyn_port DYN_SYSTEM_PORT 1 8081",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        env={"DYN_SYSTEM_PORT1": "not-a-port"},
-    )
+    with reserved_ports(1, DynamoPortRange.SERVE.value) as allocated:
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"source {launch_utils}; dyn_port DYN_SYSTEM_PORT 1 {allocated[0]}",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={"DYN_SYSTEM_PORT1": "not-a-port"},
+        )
 
     assert result.returncode != 0
     assert "DYN_SYSTEM_PORT1" in result.stderr
@@ -180,17 +183,18 @@ def test_dyn_port_rejects_invalid_explicit_value() -> None:
 def test_dyn_port_rejects_invalid_managed_value() -> None:
     """Reject malformed managed port overrides."""
     launch_utils = Path(__file__).parents[2] / "examples/common/launch_utils.sh"
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            f"source {launch_utils}; dyn_port DYN_SYSTEM_PORT 1 8081",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        env={"DYN_MANAGED_PORTS": "1", "DYN_SYSTEM_PORT1": "not-a-port"},
-    )
+    with reserved_ports(1, DynamoPortRange.SERVE.value) as allocated:
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"source {launch_utils}; dyn_port DYN_SYSTEM_PORT 1 {allocated[0]}",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={"DYN_MANAGED_PORTS": "1", "DYN_SYSTEM_PORT1": "not-a-port"},
+        )
 
     assert result.returncode != 0
     assert "DYN_SYSTEM_PORT1" in result.stderr
@@ -199,17 +203,18 @@ def test_dyn_port_rejects_invalid_managed_value() -> None:
 def test_dyn_port_rejects_out_of_range_value() -> None:
     """Reject numeric port overrides outside the runtime range."""
     launch_utils = Path(__file__).parents[2] / "examples/common/launch_utils.sh"
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            f"source {launch_utils}; dyn_port DYN_SYSTEM_PORT 1 8081",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        env={"DYN_SYSTEM_PORT1": "65536"},
-    )
+    with reserved_ports(1, DynamoPortRange.SERVE.value) as allocated:
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"source {launch_utils}; dyn_port DYN_SYSTEM_PORT 1 {allocated[0]}",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={"DYN_SYSTEM_PORT1": "65536"},
+        )
 
     assert result.returncode != 0
     assert "DYN_SYSTEM_PORT1" in result.stderr
