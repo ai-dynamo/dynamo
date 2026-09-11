@@ -65,6 +65,9 @@ def test_example_patching_preserves_command_and_sets_component_versions(scenario
     assert components[1]["runtimeVersionOverride"] == "1.5.0"
     worker = components[1]["podTemplate"]["spec"]["containers"][0]
     assert worker["command"] == ["python3", "-m", "dynamo.sglang"]
+    if scenario == "embedding":
+        assert "--embedding-worker" in worker["args"]
+        assert "--use-sglang-tokenizer" in worker["args"]
     assert MODELS[scenario][1] in spec["decode"].model
     assert spec.spec()["spec"]["pvcs"] == [{"name": "shared", "create": False}]
     assert runtime_version("registry:5000/fe:1.5.0.dev20260911-ci") == "1.5.0"
