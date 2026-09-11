@@ -26,7 +26,6 @@ use dynamo_llm::{
     },
     model_card::ModelDeploymentCard,
 };
-use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::metrics::prometheus_names::{frontend_service, name_prefix};
 use dynamo_runtime::{
     CancellationToken,
@@ -1780,34 +1779,19 @@ async fn test_nvext_disabled_strips_request_and_response() {
 /// the peek-before-200 helper with chat_completions, so an `InvalidArgument`
 /// frame at t=0 must land as HTTP 400, not HTTP 200 + generic 500 SSE.
 ///
-/// The pre-commit peek is opt-in via `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS`
-/// (default: unset → peek disabled). Enable it here so the assertion
-/// exercises the fix path. `#[serial]` prevents the env var from bleeding
-/// into other tests that may run in parallel.
+/// The pre-commit peek is off by default, so the bounded window that
+/// `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS` would configure is set through the
+/// builder here instead.
 #[tokio::test]
-#[serial_test::serial]
 async fn test_streaming_responses_returns_4xx_on_backend_invalid_argument() {
-    // SAFETY: single-threaded via `#[serial]`; no other test reads or writes
-    // this env var concurrently.
-    unsafe {
-        std::env::set_var(env_llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS, "500");
-    }
-    // Guard to unset on any exit path from this test.
-    struct EnvGuard;
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            unsafe {
-                std::env::remove_var(env_llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS);
-            }
-        }
-    }
-    let _guard = EnvGuard;
-
     let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
         .port(port)
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
+        .streaming_backend_error_check(BackendErrorCheck::Bounded(
+            std::time::Duration::from_millis(500),
+        ))
         .build()
         .unwrap();
     let state = service.state_clone();
@@ -1871,7 +1855,12 @@ const DELAYED_ERROR_MODEL: &str = "delayed-error-model";
 /// Delay before `InvalidArgumentEngine` emits its error frame in the tests
 /// below: longer than any bounded peek window they configure, shorter than
 /// the request timeouts.
-const BACKEND_ERROR_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
+///
+/// The margin over the 20 ms window is deliberately wide. `check_for_backend_error`
+/// selects on the window and the stream without bias, so a scheduler stall
+/// longer than the gap would leave both arms ready at once and let the error
+/// win a window that should already have elapsed.
+const BACKEND_ERROR_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Start a service whose streaming handlers apply `check`, register an
 /// `InvalidArgumentEngine` that fails after `BACKEND_ERROR_DELAY` for both

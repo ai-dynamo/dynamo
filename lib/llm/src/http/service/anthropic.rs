@@ -690,6 +690,22 @@ async fn anthropic_messages(
     > = Box::pin(engine_stream);
 
     if streaming {
+        // Same pre-commit check as the OpenAI streaming handlers, so one
+        // service-wide policy covers every streaming route: a backend error
+        // before the first event maps to its HTTP status instead of arriving
+        // as an SSE error frame behind an HTTP 200.
+        let engine_stream = super::openai::until_client_disconnects(
+            super::openai::check_for_backend_error(
+                engine_stream,
+                state.streaming_backend_error_check(),
+            ),
+            &ctx,
+        )
+        .await
+        .map_err(|(status, _json_err)| {
+            anthropic_backend_error(status).into_marked_response(&mut inflight_guard)
+        })?;
+
         stream_handle.arm();
 
         let mut converter = match anthropic_ctx {
@@ -800,35 +816,7 @@ async fn anthropic_messages(
         let stream_with_check = super::openai::check_for_backend_error(engine_stream, check)
             .await
             .map_err(|(status, _json_err)| {
-                // check_for_backend_error has already sanitized the body and
-                // logged the backend detail; preserve its status when
-                // re-wrapping in Anthropic format. Status classification is
-                // classified from the preserved status so OpenAI and Anthropic
-                // backend-error metrics stay aligned.
-                let details = format!("backend error event (status {})", status.as_u16());
-                let metric_error_type = classify_backend_status_for_metrics(status);
-                match SanitizedError::for_backend_status(status) {
-                    Some(variant) => {
-                        AnthropicHandlerError::sanitized(variant, details, metric_error_type)
-                            .into_marked_response(&mut inflight_guard)
-                    }
-                    // 4xx (non-499): preserve the client-error status; the
-                    // message is the canonical reason so we don't smuggle
-                    // backend text through. The "invalid_request_error"
-                    // argument is a fallback — anthropic_error remaps
-                    // 401/403/404/429 to their spec-correct types from the
-                    // status code itself.
-                    None => {
-                        tracing::error!(%status, "Anthropic backend error event");
-                        AnthropicHandlerError::new(
-                            status,
-                            "invalid_request_error",
-                            status.canonical_reason().unwrap_or("Client error"),
-                            metric_error_type,
-                        )
-                        .into_marked_response(&mut inflight_guard)
-                    }
-                }
+                anthropic_backend_error(status).into_marked_response(&mut inflight_guard)
             })?;
 
         let mut http_queue_guard = Some(http_queue_guard);
@@ -1171,6 +1159,36 @@ fn apply_anthropic_nvext_policy(
     } else {
         nvext
     };
+}
+
+/// Re-wrap a backend-error status from
+/// [`super::openai::check_for_backend_error`] in Anthropic's error format.
+///
+/// The helper has already sanitized the body and logged the backend detail, so
+/// only the status carries over. Classification is delegated to
+/// [`SanitizedError::for_backend_status`] so the OpenAI and Anthropic surfaces
+/// answer the same backend failure the same way, whether the request streams or
+/// not.
+fn anthropic_backend_error(status: StatusCode) -> AnthropicHandlerError {
+    let details = format!("backend error event (status {})", status.as_u16());
+    let metric_error_type = classify_backend_status_for_metrics(status);
+    match SanitizedError::for_backend_status(status) {
+        Some(variant) => AnthropicHandlerError::sanitized(variant, details, metric_error_type),
+        // 4xx (non-499): preserve the client-error status; the message is the
+        // canonical reason so we don't smuggle backend text through. The
+        // "invalid_request_error" argument is a fallback — anthropic_error
+        // remaps 401/403/404/429 to their spec-correct types from the status
+        // code itself.
+        None => {
+            tracing::error!(%status, "Anthropic backend error event");
+            AnthropicHandlerError::new(
+                status,
+                "invalid_request_error",
+                status.canonical_reason().unwrap_or("Client error"),
+                metric_error_type,
+            )
+        }
+    }
 }
 
 /// Build an Anthropic-formatted error response from a canonical
