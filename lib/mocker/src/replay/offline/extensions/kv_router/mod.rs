@@ -1056,6 +1056,12 @@ impl OfflineReplayRouter {
             request.track_prefill_tokens,
         );
 
+        // Both are diagnostic/reporting fields on WorkerAdmission/Placement.cache_sample,
+        // not control-flow inputs: saturating on an ISL so large it needs more
+        // than u32::MAX blocks (round-12 Low) is a defensible degrade-gracefully
+        // default for a report field, not a silent correctness issue -- aborting
+        // the whole replay over one pathological metrics value would be a worse
+        // trade. Left as-is rather than converted to a hard failure.
         let isl_blocks = u32::try_from(request.isl_tokens.div_ceil(self.block_size as usize))
             .unwrap_or(u32::MAX);
         let overlap_blocks = selection.effective_overlap_blocks.floor() as u32;
