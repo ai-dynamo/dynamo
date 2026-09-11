@@ -30,6 +30,8 @@ use http_harness::{
 
 const ENV: [(&str, Option<&str>); 1] = [(DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("0"))];
 
+/// Unsupported tool definitions return HTTP 400 before backend dispatch for both
+/// unary and streaming requests, including mixed tools and namespace members.
 #[tokio::test]
 #[serial]
 async fn unsupported_hosted_tools_fail_before_dispatch_or_streaming() {
@@ -68,6 +70,8 @@ async fn unsupported_hosted_tools_fail_before_dispatch_or_streaming() {
     .await;
 }
 
+/// Unsupported choices return HTTP 400 without dispatch for unary and streaming
+/// requests even when the supplied function tool definitions are valid.
 #[tokio::test]
 #[serial]
 async fn unsupported_tool_choices_fail_before_dispatch_or_streaming() {
