@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 -->
 
@@ -56,7 +56,7 @@ burst, then starts the measured replay from the beginning. Results and
 frontend metric snapshots are written under:
 
 ```text
-/model-cache/perf/ax-k2-nvfp4/kv/<UTC-run-id>/
+/model-cache/perf/ax-k2/kv/<UTC-run-id>/
 ```
 
 ## Round-robin baseline
